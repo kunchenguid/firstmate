@@ -666,7 +666,7 @@ test_lane_capacity_gate_is_opt_in() {
 
 test_lane_capacity_gate_defers_without_leaving_anything_behind() {
   local case_dir home out rc=0 before worktrees
-  case_dir=$(make_case lane-defer task-c task-d)
+  case_dir=$(make_case lane-defer task-c)
   home="$case_dir/home"
   printf '1\nadmit-spawns\n' > "$home/config/lane-capacity"
   write_live "$home" live-a "$case_dir/project"
@@ -681,12 +681,10 @@ test_lane_capacity_gate_defers_without_leaving_anything_behind() {
   assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
   assert_absent "$home/state/.lane-admission.lock" "a deferred spawn left the lane admission lock held"
   rc=0
-  out=$(FM_SPAWN_IGNORE_LANE_CAPACITY=1 spawn_ship "$case_dir" task-d) || rc=$?
-  expect_code 0 "$rc" "the one-spawn override did not launch: $out"
-  assert_contains "$out" "notice: FM_SPAWN_IGNORE_LANE_CAPACITY=1 - launching task-d without asking this home's lane capacity" \
-    "the override did not announce itself"
-  assert_absent "$home/state/.lane-admission.lock" "an admitted spawn left the lane admission lock held"
-  pass "admit-spawns defers a spawn the lane verdict refuses, leaves nothing behind, and one spawn can override it"
+  out=$(FM_SPAWN_IGNORE_LANE_CAPACITY=1 spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "an environment variable bypassed the lane capacity verdict: $out"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  pass "admit-spawns defers a spawn the lane verdict refuses, leaves nothing behind, and nothing in the environment bypasses it"
 }
 
 test_lane_capacity_gate_refuses_an_unreadable_opt_in() {

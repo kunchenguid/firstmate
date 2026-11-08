@@ -250,7 +250,6 @@
 #   it) and keeps holding it through metadata publication; a verdict that does
 #   not admit prints `deferred:` and exits 75 with the task exactly as queued,
 #   and an unreadable declaration refuses with exit 1.
-#   FM_SPAWN_IGNORE_LANE_CAPACITY=1 skips that check for one spawn, with a notice.
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   either capacity.
@@ -4272,34 +4271,30 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -e "$CONFIG/lane-capacity" ] &&
   FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
     "$SCRIPT_DIR/fm-capacity.sh" --spawn-gate-enabled </dev/null 2>/dev/null; then
-  if [ "${FM_SPAWN_IGNORE_LANE_CAPACITY:-0}" = 1 ]; then
-    echo "notice: FM_SPAWN_IGNORE_LANE_CAPACITY=1 - launching $ID without asking this home's lane capacity" >&2
-  else
-    SPAWN_LANE_ROOT=$(fm_firstmate_root_home "$FM_HOME") || {
-      echo "error: could not resolve the root Firstmate home that holds the lane admission lock for $FM_HOME" >&2
-      exit 1
-    }
-    SPAWN_LANE_ADMISSION_LOCK="$SPAWN_LANE_ROOT/state/.lane-admission.lock"
-    if ! fm_lock_acquire_wait_max "$SPAWN_LANE_ADMISSION_LOCK" 120; then
-      echo "deferred: another spawn on this machine held the lane admission lock for 120 s; task $ID was not launched and its backlog item stays queued - dispatch it again" >&2
-      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
-    fi
-    SPAWN_LANE_ADMISSION_LOCK_HELD=1
-    SPAWN_LANE_RC=0
-    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
-      "$SCRIPT_DIR/fm-capacity.sh" --spawn-gate </dev/null || SPAWN_LANE_RC=$?
-    case "$SPAWN_LANE_RC" in
-      0) ;;
-      75)
-        echo "deferred: task $ID was not launched and its backlog item stays queued - dispatch it again once this machine's lane capacity admits another lane" >&2
-        exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
-        ;;
-      *)
-        echo "error: spawn refused: this home's lane capacity cannot be read (bin/fm-capacity.sh --spawn-gate exited $SPAWN_LANE_RC); fix config/lane-capacity so the captain's limits are known (docs/configuration.md \"Lane capacity\")" >&2
-        exit 1
-        ;;
-    esac
+  SPAWN_LANE_ROOT=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "error: could not resolve the root Firstmate home that holds the lane admission lock for $FM_HOME" >&2
+    exit 1
+  }
+  SPAWN_LANE_ADMISSION_LOCK="$SPAWN_LANE_ROOT/state/.lane-admission.lock"
+  if ! fm_lock_acquire_wait_max "$SPAWN_LANE_ADMISSION_LOCK" 120; then
+    echo "deferred: another spawn on this machine held the lane admission lock for 120 s; task $ID was not launched and its backlog item stays queued - dispatch it again" >&2
+    exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
+  SPAWN_LANE_ADMISSION_LOCK_HELD=1
+  SPAWN_LANE_RC=0
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-capacity.sh" --spawn-gate </dev/null || SPAWN_LANE_RC=$?
+  case "$SPAWN_LANE_RC" in
+    0) ;;
+    75)
+      echo "deferred: task $ID was not launched and its backlog item stays queued - dispatch it again once this machine's lane capacity admits another lane" >&2
+      exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+      ;;
+    *)
+      echo "error: spawn refused: this home's lane capacity cannot be read (bin/fm-capacity.sh --spawn-gate exited $SPAWN_LANE_RC); fix config/lane-capacity so the captain's limits are known (docs/configuration.md \"Lane capacity\")" >&2
+      exit 1
+      ;;
+  esac
 fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2

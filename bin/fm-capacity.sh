@@ -121,11 +121,10 @@
 #
 # Auto mode. A first line of `auto` replaces the fixed cap with a lane budget
 # measured on every call; an integer first line keeps everything above exactly.
-# Auto-only keys: max-lanes N (an optional ceiling, published as cap.target),
-# lane-footprint-gb X and lane-disk-gb X (pin the per-lane costs, at least
-# 0.1), host-min-avail-gb X (WSL), min-gpu-free-gb X (count the GPU). Keys for
-# both modes: allow-battery (never close for battery) and admit-spawns (the
-# spawn gate). Auto mode needs jq; without it nothing is admitted.
+# Auto-only keys: max-lanes N (the one optional ceiling, published as
+# cap.target) and min-gpu-free-gb X (count the GPU). admit-spawns (the spawn
+# gate) applies to both modes. Auto mode needs jq; without it nothing is
+# admitted.
 #   Lanes: this home's records, plus the records of every other local home on
 #   this machine (fm_local_firstmate_state_dirs) for young lanes and the
 #   ceiling; an unreadable walk counts this home only and says so in notes.
@@ -137,7 +136,10 @@
 #   state/lane-footprint.json (fm-lane-footprint.v1: per-lane samples, and the
 #   last 30 lanes that left state/). The per-lane cost is the p90 of those 30
 #   lanes' peak memory, mean CPU cores, and disk, once 5 are recorded, never
-#   under 0.5 GB, 0.25 core, 0.5 GB; before that 2 GB, 1 core, 3 GB.
+#   under 0.5 GB, 0.25 core, 0.5 GB; before that 2 GB, 1 core, 3 GB. A lane
+#   that never had an attributed process while it lived is unmeasured: it
+#   never enters the history, so it cannot teach a 0 GB footprint, and notes
+#   say when more than half of this home's lanes have no attributed process.
 #   When no process working directory can be read at all (lsof timed out on a
 #   loaded host), every lane keeps its last sample and notes say so, so an
 #   unreadable table never looks like lanes with no agent.
@@ -150,9 +152,16 @@
 #             floor((free - kept - young x F_disk) / F_disk), kept min-disk-gb
 #             else 10 GB
 #     ceiling max-lanes minus this machine's lanes
-#   never below 0. With neither a memory nor a cpu probe the budget is the
-#   ceiling alone, or 0 without one. Free lanes grow by at most 2 over the
-#   previously published verdict.
+#   never below 0. Memory is the one probe the budget cannot do without: with
+#   no memory reading it never admits on cpu alone, the budget is the static
+#   max-lanes ceiling alone (or 0 without one), and the verdict's reasons say
+#   so. On native Windows (Git Bash/MSYS, uname MINGW*/MSYS*/CYGWIN*) the
+#   Windows host view below is the memory, cores, load, and power probe, since
+#   the Cygwin /proc carries none of them.
+#   Free lanes grow by at most 2 per publish over the previously published
+#   verdict, less the lanes started on this machine since that publish; between
+#   publishes --admit, --spawn-gate, --json, and the report allow no growth at
+#   all, so a burst of spawns can never exceed the published damped budget.
 #   Gates close admission at once and reopen only after their reopen test holds
 #   on 3 consecutive publishes; an unmeasurable gate is unknown and not judged:
 #     cpu             load1/cores >= 1; reopens < 0.8 with load5/cores < 0.85
@@ -162,11 +171,11 @@
 #                     pressure level >= 2, reopens at 1
 #     swap            swap-in >= 100 pages/s since the last publish; reopens < 10
 #     io              Linux PSI io full avg10 >= 20; reopens avg60 < 10
-#     host-memory     WSL: Windows available < host-min-avail-gb (default the
-#                     larger of 10% of host RAM and 2 GB) or commit >= 95%;
-#                     reopens 1 GB above it and under 90%
+#     host-memory     WSL: Windows available under the larger of 10% of host
+#                     RAM and 2 GB, or commit >= 95%; reopens 1 GB above it
+#                     and under 90%
 #     thermal         macOS CPU speed limit under 100 or a recorded warning
-#     battery         on battery (unless allow-battery)
+#     battery         on battery (unknown power is never judged)
 #     gpu             with min-gpu-free-gb: the least free GPU memory under it
 #   In auto mode these gates replace the fixed-mode cpu, load, and battery
 #   constraints and the budget replaces the memory and disk constraints, so
@@ -180,10 +189,11 @@
 #   The document adds cap.mode "auto", budget {lanes, open, raw,
 #   machine_lanes, by {memory, cpu, disk, ceiling}, binding, young, damped,
 #   notes[]}, footprint {mem_gb, cpu_cores, disk_gb, source
-#   default|learned|pinned, samples}, vitals {load5, psi {cpu_some10,
+#   default|learned, samples}, vitals {load5, psi {cpu_some10,
 #   mem_some10, mem_some60, mem_full10, io_full10, io_full60}, swapin_total,
-#   swap_in_pps, vm_pressure_level, thermal, battery_pct, on_ac, wsl
-#   {avail_gb, total_gb, commit_pct, cpu_pct, age_s} | null, gpu [{name,
+#   swap_in_pps, vm_pressure_level, thermal, battery_pct, on_ac, wsl, windows,
+#   host {avail_gb, total_gb, commit_pct, cpu_pct, cores, on_ac, age_s} | null
+#   (the Windows host view, inside WSL and on native Windows), gpu [{name,
 #   util_pct, mem_used_gb, mem_total_gb}]}, gates [{name, state
 #   open|closed|unknown, since_epoch, clear_count}], and reclaim [{id, class,
 #   idle_s, mem_gb, cpu_pct, evidence[], next cleanup|recover|retire-pane|
@@ -194,7 +204,10 @@
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
 # FM_PROJECTS_OVERRIDE resolve the home exactly as the other bin/ scripts do.
 # FM_PROC_ROOT_OVERRIDE replaces /proc for every Linux read (tests), and
-# FM_LANE_VITALS_HOST_MAX_AGE (default 120 s) bounds the cached Windows host view.
+# FM_LANE_VITALS_HOST_MAX_AGE (default 120 s) bounds the cached Windows host
+# view that --admit, --spawn-gate, --json, and the report use; --publish always
+# queries the host live and rewrites the cache, so the host-memory gate's
+# reopen count never reads one sample three times.
 #
 # Exit status: 0 on a report, 1 on an invalid config/lane-capacity (report,
 # --json, --admit), 2 on a usage error or --json without jq, 75 on an --admit
@@ -296,11 +309,7 @@ min_avail_gb=
 min_disk_gb=
 max_load1=
 max_lanes=
-lane_footprint_gb=
-lane_disk_gb=
-host_min_avail_gb=
 min_gpu_free_gb=
-allow_battery=0
 admit_spawns=0
 captain_idle=
 quota_provider=
@@ -341,8 +350,8 @@ parse_lane_config() {
     value=${rest%% *}
     case "$key" in
       min-avail-gb|min-disk-gb|max-load1|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
-      allow-battery|admit-spawns) ;;
-      max-lanes|lane-footprint-gb|lane-disk-gb|host-min-avail-gb|min-gpu-free-gb)
+      admit-spawns) ;;
+      max-lanes|min-gpu-free-gb)
         [ "$cap_mode" = auto ] || { config_error "$lineno" "$key needs auto on the first line"; return 1; }
         ;;
       *) config_error "$lineno" "unknown key" "'$key'"; return 1 ;;
@@ -353,30 +362,19 @@ parse_lane_config() {
         case " $seen " in *" $key "*) config_error "$lineno" "$key appears more than once"; return 1 ;; esac
         seen="$seen $key"
         case "$key" in
-          allow-battery|admit-spawns) [ -z "$rest" ] || { config_error "$lineno" "$key takes no value"; return 1; } ;;
+          admit-spawns) [ -z "$rest" ] || { config_error "$lineno" "$key takes no value"; return 1; } ;;
           *) [ "$value" = "$rest" ] || { config_error "$lineno" "$key takes one value"; return 1 ;} ;;
         esac
         ;;
     esac
     case "$key" in
-      min-avail-gb|min-disk-gb|max-load1|host-min-avail-gb|min-gpu-free-gb)
+      min-avail-gb|min-disk-gb|max-load1|min-gpu-free-gb)
         is_num "$value" || { config_error "$lineno" "$key needs a non-negative number"; return 1; }
         case "$key" in
           min-avail-gb) min_avail_gb=$value ;;
           min-disk-gb) min_disk_gb=$value ;;
           max-load1) max_load1=$value ;;
-          host-min-avail-gb) host_min_avail_gb=$value ;;
           min-gpu-free-gb) min_gpu_free_gb=$value ;;
-        esac
-        ;;
-      lane-footprint-gb|lane-disk-gb)
-        if ! is_num "$value" || num_lt "$value" 0.1; then
-          config_error "$lineno" "$key needs a number of at least 0.1"
-          return 1
-        fi
-        case "$key" in
-          lane-footprint-gb) lane_footprint_gb=$value ;;
-          lane-disk-gb) lane_disk_gb=$value ;;
         esac
         ;;
       max-lanes)
@@ -384,7 +382,6 @@ parse_lane_config() {
         max_lanes=$((10#$value))
         target=$max_lanes
         ;;
-      allow-battery) allow_battery=1 ;;
       admit-spawns) admit_spawns=1 ;;
       captain-idle)
         is_uint "$value" && [ "${#value}" -le 9 ] && [ "$((10#$value))" -gt 0 ] || { config_error "$lineno" "captain-idle needs a positive number of seconds"; return 1; }
@@ -417,7 +414,7 @@ if [ -e "$LANE_CONFIG" ]; then
     target_reason="config/lane-capacity: $target_reason"
     target=invalid
     min_avail_gb='' min_disk_gb='' max_load1='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
-    cap_mode=fixed max_lanes='' lane_footprint_gb='' lane_disk_gb='' host_min_avail_gb='' min_gpu_free_gb='' allow_battery=0
+    cap_mode=fixed max_lanes='' min_gpu_free_gb=''
   fi
 fi
 # --spawn-gate is --admit for bin/fm-spawn.sh, and only when the file opts in;
@@ -439,6 +436,8 @@ fi
 
 # --- host probes ------------------------------------------------------------
 os=$(uname -s 2>/dev/null) || os=unknown
+windows=0
+case "$os" in MINGW*|MSYS*|CYGWIN*) windows=1 ;; esac
 
 load1=unknown
 if [ "$os" = Darwin ]; then
@@ -667,18 +666,20 @@ auto_lane_rows() {
   done
 }
 
-# auto_host_view: print "avail total commit cpu age" for the Windows host, from
-# the cache when fresh, else one live query (cached only by --publish).
+# auto_host_view: print "avail total commit cpu cores power age" for the
+# Windows host. --publish always queries live and rewrites the cache; every
+# other mode reads the cache while it is fresh, else queries live once.
 auto_host_view() {
-  local line epoch rest age
-  if [ -f "$HOST_CACHE" ] && IFS= read -r line < "$HOST_CACHE" 2>/dev/null; then
+  local line epoch rest
+  if [ "$mode" != publish ] && [ -f "$HOST_CACHE" ] && IFS= read -r line < "$HOST_CACHE" 2>/dev/null; then
     epoch=${line%% *} rest=${line#* }
-    if is_uint "$epoch" && [ "$epoch" -le "$now" ] && [ $((now - epoch)) -le "$HOST_CACHE_MAX_AGE" ]; then
+    if is_uint "$epoch" && [ "$epoch" -le "$now" ] && [ $((now - epoch)) -le "$HOST_CACHE_MAX_AGE" ] &&
+      [ "$(printf '%s\n' "$rest" | awk '{print NF}')" = 6 ]; then
       printf '%s %s\n' "$rest" $((now - epoch))
       return 0
     fi
   fi
-  line=$(fm_lane_vitals_wsl_host) || return 1
+  line=$(fm_lane_vitals_windows_host) || return 1
   if [ "$mode" = publish ] && [ -d "$STATE" ]; then
     if ! { printf '%s %s\n' "$now" "$line" > "$HOST_CACHE.$$" && mv -f "$HOST_CACHE.$$" "$HOST_CACHE"; } 2>/dev/null; then
       rm -f "$HOST_CACHE.$$"
@@ -703,8 +704,9 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 | ($disks_tsv | rows | map({label: .[0], free_gb: (.[1] | num)}) | map(select(.free_gb != null))) as $disks
 | ($gpu_tsv | rows | map({name: .[0], util_pct: (.[1] | num), mem_used_gb: (.[2] | num), mem_total_gb: (.[3] | num)})) as $gpu
 | ($host_tsv | split(" ") | map(select(. != ""))) as $hv
-| (if ($hv | length) == 5 then {avail_gb: ($hv[0] | num | n2), total_gb: ($hv[1] | num | n2), commit_pct: ($hv[2] | num | n2),
-    cpu_pct: ($hv[3] | num | n2), age_s: ($hv[4] | num | n2)} else null end) as $h
+| (if ($hv | length) == 7 then {avail_gb: ($hv[0] | num | n2), total_gb: ($hv[1] | num | n2), commit_pct: ($hv[2] | num | n2),
+    cpu_pct: ($hv[3] | num | n2), cores: ($hv[4] | num), on_ac: (if $hv[5] == "ac" then true elif $hv[5] == "battery" then false else null end),
+    age_s: ($hv[6] | num | n2)} else null end) as $h
 | (if ($prev_ledger | type) == "object" and $prev_ledger.schema == "fm-lane-footprint.v1" then $prev_ledger
    else {lanes: {}, history: []} end) as $pl
 | (if ($prev_doc | type) == "object" and (($prev_doc.cap.mode // "") == "auto")
@@ -721,12 +723,13 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
        else null end) as $cpu
     | if ($attr_ok | not) then {key: $l.id, value: (($p // {first_seen: $now, last_seen: null, samples: 0, procs: null,
         mem_gb: null, peak_mem_gb: 0, mem_sum_gb: 0, cpu_cores: null, peak_cpu_cores: 0, cpu_sum: 0, cpu_n: 0,
-        quiet_since: null, noagent_since: null, disk_gb: null, disk_epoch: null, pids: {}})
+        peak_procs: 0, quiet_since: null, noagent_since: null, disk_gb: null, disk_epoch: null, pids: {}})
         + {harness: $l.harness, kind: $l.kind}
         + (if $disk_sample.id == $l.id then {disk_gb: $disk_sample.gb, disk_epoch: $now} else {} end))}
       else {key: $l.id, value: {harness: $l.harness, kind: $l.kind,
         first_seen: ($p.first_seen // $now), last_seen: $now, samples: (($p.samples // 0) + 1),
-        procs: ($procs | length), mem_gb: ($mem | r2), peak_mem_gb: ([$mem, ($p.peak_mem_gb // 0)] | max | r2),
+        procs: ($procs | length), peak_procs: ([($procs | length), ($p.peak_procs // 0)] | max),
+        mem_gb: ($mem | r2), peak_mem_gb: ([$mem, ($p.peak_mem_gb // 0)] | max | r2),
         mem_sum_gb: ((($p.mem_sum_gb // 0) + $mem) | r2),
         cpu_cores: (if $cpu == null then null else ($cpu | r2) end),
         peak_cpu_cores: ([($cpu // 0), ($p.peak_cpu_cores // 0)] | max | r2),
@@ -737,7 +740,8 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
         disk_gb: (if $disk_sample.id == $l.id then $disk_sample.gb else ($p.disk_gb // null) end),
         disk_epoch: (if $disk_sample.id == $l.id then $now else ($p.disk_epoch // null) end),
         pids: ($procs | map({key: .pid, value: .cpu_s}) | from_entries)}} end) | from_entries) as $ll
-| [ ($pl.lanes // {}) | to_entries[] | select(.key as $k | $ll | has($k) | not) | .value | select((.samples // 0) >= 2)
+| [ ($pl.lanes // {}) | to_entries[] | select(.key as $k | $ll | has($k) | not) | .value
+    | select((.samples // 0) >= 2 and (.peak_procs // 0) > 0)
     | {harness, kind, peak_mem_gb, mean_mem_gb: ((.mem_sum_gb // 0) / .samples | r2),
        mean_cpu_cores: (if (.cpu_n // 0) > 0 then (.cpu_sum / .cpu_n | r2) else null end), disk_gb,
        lifetime_s: ((.last_seen // $now) - (.first_seen // $now)), ended_epoch: $now} ] as $ended
@@ -745,14 +749,14 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 | ($history | map(.peak_mem_gb) | nn) as $hm
 | ($history | map(.mean_cpu_cores) | nn) as $hc
 | ($history | map(.disk_gb) | nn) as $hd
-| {mem_gb: (if $cfg.lane_fp != null then $cfg.lane_fp elif ($hm | length) >= 5 then ([($hm | p90), 0.5] | max) else 2 end),
+| {mem_gb: (if ($hm | length) >= 5 then ([($hm | p90), 0.5] | max) else 2 end),
    cpu_cores: (if ($hc | length) >= 5 then ([($hc | p90), 0.25] | max) else 1 end),
-   disk_gb: (if $cfg.lane_disk != null then $cfg.lane_disk elif ($hd | length) >= 5 then ([($hd | p90), 0.5] | max) else 3 end),
-   source: (if $cfg.lane_fp != null then "pinned" elif ($hm | length) >= 5 then "learned" else "default" end),
+   disk_gb: (if ($hd | length) >= 5 then ([($hd | p90), 0.5] | max) else 3 end),
+   source: (if ($hm | length) >= 5 then "learned" else "default" end),
    samples: ($hm | length)} as $fp
 | ($lanes | length) as $mlanes
 | ([ $lanes[] | select(.spawn != null and ($now - .spawn) >= 0 and ($now - .spawn) < $young_s) ] | length) as $young
-| ($avail != null or ($load1 != null and $cores != null)) as $measurable
+| ($avail != null) as $measurable
 | (if $cfg.min_avail != null then $cfg.min_avail elif $total != null then ([$total * 0.10, 2] | max) else 2 end) as $min_avail
 | (if $avail == null then null else (($avail - $min_avail - $young * $fp.mem_gb) / $fp.mem_gb | floor) end) as $mem_open
 | ([$load1, $vit.load5] | nn | max) as $loadavg
@@ -769,7 +773,8 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
    elif $ceil_open != null then {key: "ceiling", value: $ceil_open} else null end) as $bind
 | (if $bind == null then 0 else ([$bind.value, 0] | max) end) as $raw
 | ($pd.verdict.free_lanes // null) as $prev_free
-| (if $prev_free != null and $raw > ($prev_free + 2) then $prev_free + 2 else $raw end) as $open
+| (if $pd == null then 0 else ([ $lanes[] | select(.spawn != null and .spawn >= $pd.generated_epoch) ] | length) end) as $since_publish
+| (if $prev_free != null and $raw > ($prev_free + $grow - $since_publish) then ([$prev_free + $grow - $since_publish, 0] | max) else $raw end) as $open
 | (if $pd != null and $vit.swapin != null and $pd.vitals.swapin_total != null and $vit.swapin >= $pd.vitals.swapin_total
      and ($now - $pd.generated_epoch) > 0
    then (($vit.swapin - $pd.vitals.swapin_total) / ($now - $pd.generated_epoch) | r2) else null end) as $swap_rate
@@ -800,12 +805,12 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
     (if $vit.psi_io10 == null then empty else
       gate("io"; $vit.psi_io10 >= 20; (($vit.psi_io60 // $vit.psi_io10) < 10); "io stall \($vit.psi_io10)%") end),
     (if $vit.wsl | not then empty elif $h == null or $h.avail_gb == null then gate("host-memory"; null; false; "Windows host unreadable")
-     else (if $cfg.host_min != null then $cfg.host_min else ([(($h.total_gb // 0) * 0.10), 2] | max | r2) end) as $hmin
+     else ([(($h.total_gb // 0) * 0.10), 2] | max | r2) as $hmin
       | gate("host-memory"; ($h.avail_gb < $hmin or ($h.commit_pct // 0) >= 95);
           ($h.avail_gb >= $hmin + 1 and ($h.commit_pct // 0) < 90);
           "Windows host \($h.avail_gb | n2) GB available of \($h.total_gb | n2), \($h.commit_pct)% committed, \($hmin) GB kept") end),
     (if $vit.thermal == null then empty else gate("thermal"; $vit.thermal == "limited"; $vit.thermal == "ok"; "thermal \($vit.thermal)") end),
-    (if $cfg.allow_battery or $on_ac == null then empty else
+    (if $on_ac == null then empty else
       gate("battery"; $on_ac == false; $on_ac == true;
         (if $on_ac then "on AC" else "on battery" + (if $vit.battery_pct != null then " at \($vit.battery_pct)%" else "" end) end)) end),
     (if $cfg.gpu_min == null then empty else
@@ -815,13 +820,15 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
   ] as $gates
 | [ $gates[] | select(.state == "closed") ] as $closed
 | ($closed | map("\(.name): \(.what)" + (if .clear_count > 0 then " (clearing \(.clear_count) of \($reopen))" else "" end))) as $gate_reasons
-| (if ($closed | length) > 0 or $open > 0 then []
-   elif $bind == null then ["vitals unmeasurable: no memory or cpu probe and no max-lanes ceiling"]
-   else [ (if $measurable then "" else "vitals unmeasurable, ceiling only: " end) +
-     (if $bind.key == "memory" then "memory: \($avail | n2) GB available, \($min_avail | r2) GB kept, \($young) starting, a lane needs \($fp.mem_gb) GB"
+| (if $measurable or ($closed | length) > 0 then [] elif $bind == null then ["memory unmeasurable: no memory probe, and no max-lanes ceiling to fall back on"]
+   else ["memory unmeasurable: admitting up to the static max-lanes ceiling only"] end) as $unmeasured_reasons
+| (if ($closed | length) > 0 or $open > 0 or ($measurable | not) then []
+   else [ (if $bind.key == "memory" then "memory: \($avail | n2) GB available, \($min_avail | r2) GB kept, \($young) starting, a lane needs \($fp.mem_gb) GB"
       elif $bind.key == "cpu" then "cpu: load \($cpu_load | n2) of \($cores * 0.85 | r2) usable on \($cores) cores, \($young) starting, a lane needs \($fp.cpu_cores) core"
       elif $bind.key == "disk" then "disk: \($dbind.label) \($dbind.free_gb | n2) GB free, \($min_disk) GB kept, \($young) starting, a lane needs \($fp.disk_gb) GB"
       else "ceiling: \($mlanes) of \($cfg.max_lanes) lanes on this machine (max-lanes)" end) ] end) as $budget_reasons
+| ($unmeasured_reasons + (if $measurable or ($closed | length) > 0 or $open > 0 or $bind == null then []
+   else ["ceiling: \($mlanes) of \($cfg.max_lanes) lanes on this machine (max-lanes)"] end)) as $unmeasured_reasons
 | (if ($closed | length) > 0 then ($closed | map(.name)) elif $open > 0 then ["ok"]
    elif $bind == null then ["unmeasurable"] else [$bind.key] end) as $names
 | ($own | map(. as $l | $ll[$l.id] as $e
@@ -847,16 +854,19 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 | {ledger: {schema: "fm-lane-footprint.v1", generated_epoch: $now, lanes: $ll, history: $history},
    admit: (($closed | length) == 0 and $open > 0),
    free_lanes: (if ($closed | length) == 0 then $open else 0 end),
-   names: $names, reasons: ($gate_reasons + $budget_reasons),
+   names: $names, reasons: ($gate_reasons + $unmeasured_reasons + $budget_reasons),
    doc: {budget: {lanes: ($mlanes + $open), open: $open, raw: $raw, machine_lanes: $mlanes, by: $by,
            binding: (if ($closed | length) > 0 then "gate" elif $bind == null then "unmeasurable" else $bind.key end),
-           young: $young, damped: ($open < $raw), notes: ($notes | split("\n") | map(select(. != "")))},
+           young: $young, damped: ($open < $raw),
+           notes: (($notes | split("\n") | map(select(. != "")))
+             + (if $attr_ok and ($own | length) > 0 and ([ $own[] | select($ll[.id].procs == 0) ] | length) * 2 > ($own | length)
+                then ["\([ $own[] | select($ll[.id].procs == 0) ] | length) of \($own | length) lanes have no attributed process"] else [] end))},
          footprint: $fp,
          vitals: {load5: $vit.load5, psi: {cpu_some10: $vit.psi_cpu10, mem_some10: $vit.psi_mem10, mem_some60: $vit.psi_mem60,
              mem_full10: $vit.psi_memfull10, io_full10: $vit.psi_io10, io_full60: $vit.psi_io60},
            swapin_total: $vit.swapin, swap_in_pps: $swap_rate, vm_pressure_level: $vit.vmpress, thermal: $vit.thermal,
-           battery_pct: $vit.battery_pct, on_ac: $on_ac,
-           wsl: (if $vit.wsl then ($h // {avail_gb: null, total_gb: null, commit_pct: null, cpu_pct: null, age_s: null}) else null end),
+           battery_pct: $vit.battery_pct, on_ac: $on_ac, wsl: $vit.wsl, windows: $vit.windows,
+           host: (if $vit.wsl or $vit.windows then ($h // {avail_gb: null, total_gb: null, commit_pct: null, cpu_pct: null, cores: null, on_ac: null, age_s: null}) else null end),
            gpu: $gpu},
          gates: ($gates | map(del(.what))),
          reclaim: $reclaim}}'
@@ -950,9 +960,22 @@ auto_budget() {
   done < "$tmp/lanes"
 
   host=
-  if [ "$LV_WSL" = 1 ]; then
+  if [ "$LV_WSL" = 1 ] || [ "$windows" = 1 ]; then
     host=$(auto_host_view) || { host=; auto_notes="${auto_notes}Windows host view unavailable
 "; }
+  fi
+  if [ "$windows" = 1 ] && [ -n "$host" ]; then
+    # Native Windows: the host view is the memory, cores, load, and power probe.
+    # shellcheck disable=SC2086
+    set -- $host
+    [ -n "$lim_avail" ] || lim_avail=$1
+    [ -n "$probe_total_gb" ] || probe_total_gb=$2
+    if [ "$cores" = unknown ] && is_uint "$5" && [ "$5" -gt 0 ]; then cores=$5; fi
+    if [ "$cores" != unknown ]; then
+      v=$(awk -v p="$4" -v c="$cores" -v l="$load1" 'BEGIN { x = p / 100 * c; if (l != "unknown" && l + 0 > x) x = l; printf "%.2f", x }')
+      load1=$v
+    fi
+    case "$6" in ac) LV_ON_AC=true ;; battery) LV_ON_AC=false ;; esac
   fi
 
   prev_ledger=null
@@ -974,25 +997,25 @@ auto_budget() {
   fi
 
   cfg=$(jq -cn --arg max_lanes "$max_lanes" --arg min_avail "$min_avail_gb" --arg min_disk "$min_disk_gb" \
-    --arg max_load1 "$max_load1" --arg lane_fp "$lane_footprint_gb" --arg lane_disk "$lane_disk_gb" \
-    --arg host_min "$host_min_avail_gb" --arg gpu_min "$min_gpu_free_gb" --arg allow_battery "$allow_battery" '
+    --arg max_load1 "$max_load1" --arg gpu_min "$min_gpu_free_gb" '
     def num: if . == "" then null else tonumber end;
     {max_lanes: ($max_lanes | num), min_avail: ($min_avail | num), min_disk: ($min_disk | num), max_load1: ($max_load1 | num),
-     lane_fp: ($lane_fp | num), lane_disk: ($lane_disk | num), host_min: ($host_min | num), gpu_min: ($gpu_min | num),
-     allow_battery: ($allow_battery == "1")}')
+     gpu_min: ($gpu_min | num)}')
   vit=$(jq -cn --arg load5 "$LV_LOAD5" --arg c10 "$LV_PSI_CPU10" --arg m10 "$LV_PSI_MEM10" --arg m60 "$LV_PSI_MEM60" \
     --arg mf10 "$LV_PSI_MEMFULL10" --arg io10 "$LV_PSI_IO10" --arg io60 "$LV_PSI_IO60" --arg swapin "$LV_SWAPIN" \
-    --arg vmpress "$LV_VMPRESS" --arg ac "$LV_ON_AC" --arg batt "$LV_BATT_PCT" --arg thermal "$LV_THERMAL" --arg wsl "$LV_WSL" '
+    --arg vmpress "$LV_VMPRESS" --arg ac "$LV_ON_AC" --arg batt "$LV_BATT_PCT" --arg thermal "$LV_THERMAL" --arg wsl "$LV_WSL" \
+    --arg windows "$windows" '
     def num: if . == "" then null else (tonumber * 100 + 0.5 | floor) / 100 end;
     {load5: ($load5 | num), psi_cpu10: ($c10 | num), psi_mem10: ($m10 | num), psi_mem60: ($m60 | num),
      psi_memfull10: ($mf10 | num), psi_io10: ($io10 | num), psi_io60: ($io60 | num), swapin: ($swapin | num),
      vmpress: ($vmpress | num), on_ac: (if $ac == "" then null else $ac == "true" end), battery_pct: ($batt | num),
-     thermal: (if $thermal == "" then null else $thermal end), wsl: ($wsl == "1")}')
+     thermal: (if $thermal == "" then null else $thermal end), wsl: ($wsl == "1"), windows: ($windows == "1")}')
 
   out=$(jq -cn --argjson now "$now" --rawfile lanes_tsv "$tmp/lanes" --rawfile attr_tsv "$tmp/attr" \
     --rawfile disks_tsv "$tmp/disks" --arg gpu_tsv "$LV_GPU" --arg host_tsv "$host" \
     --argjson prev_ledger "$prev_ledger" --argjson prev_doc "$prev_doc" --argjson disk_sample "$disk_sample" \
     --argjson cfg "$cfg" --argjson vit "$vit" --argjson young_s "$YOUNG_S" --argjson reopen "$GATE_REOPEN_SAMPLES" \
+    --argjson grow "$( [ "$mode" = publish ] && echo 2 || echo 0)" \
     --argjson cores "$( [ "$cores" = unknown ] && echo null || echo "$cores")" \
     --argjson load1 "$( [ "$load1" = unknown ] && echo null || echo "$load1")" \
     --argjson avail "${lim_avail:-null}" --argjson total "${total_gb:-${probe_total_gb:-null}}" \
@@ -1071,7 +1094,7 @@ if [ "$cap_mode" != auto ] && [ -n "$max_load1" ] && [ -n "$lim_load1" ] && ! nu
   add_constraint load "load: $lim_load1 over its max-load1 $max_load1"
 fi
 [ "$reserve_flag" != present ] || add_constraint reserve "captain reserve: $reserve_label"
-[ "$on_battery" != true ] || [ "$allow_battery" -eq 1 ] || [ "$cap_mode" = auto ] || add_constraint battery "on battery"
+[ "$on_battery" != true ] || [ "$cap_mode" = auto ] || add_constraint battery "on battery"
 
 free_lanes=unknown
 admit=false
@@ -1127,7 +1150,7 @@ if [ "$mode" = report ]; then
     printf '%s' "$auto_doc" | jq -r --arg lanes "$lanes" '
       def gb: tostring + " GB";
       "Lanes: \($lanes) running here, \(.budget.machine_lanes) on this machine; auto budget \(.budget.lanes) (\(.budget.open) open, bound by \(.budget.binding)\(if .budget.damped then ", growth damped" else "" end)).",
-      "Per lane: \(.footprint.mem_gb | gb), \(.footprint.cpu_cores) core, \(.footprint.disk_gb | gb) disk (\(if .footprint.source == "learned" then "learned from \(.footprint.samples) lanes" elif .footprint.source == "pinned" then "pinned" else "default until 5 lanes are measured" end)).",
+      "Per lane: \(.footprint.mem_gb | gb), \(.footprint.cpu_cores) core, \(.footprint.disk_gb | gb) disk (\(if .footprint.source == "learned" then "learned from \(.footprint.samples) lanes" else "default until 5 lanes are measured" end)).",
       (.gates | map(select(.state == "closed") | .name) | if length > 0 then "Gates closed: \(join(", "))." else empty end),
       (.reclaim | if length > 0 then
         "Reclaim: \(length) (\(group_by(.class) | map("\(.[0].class) \(length)") | join(", "))), \(map(.mem_gb // 0) | add * 100 | floor / 100) GB held." else empty end)'

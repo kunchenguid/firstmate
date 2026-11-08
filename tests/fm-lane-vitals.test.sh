@@ -4,7 +4,7 @@
 # (load5, pressure stall, swap-in, power supply, WSL detection), macOS vitals
 # from fake sysctl, vm_stat, pmset, and ioreg, the GPU probe from a fake
 # nvidia-smi, the Windows host view from a fake powershell.exe (ok, failing,
-# and malformed), per-process tables on both platforms, lane attribution
+# and malformed; native Windows detection from uname), per-process tables on both platforms, lane attribution
 # (own cwd, nearest ancestor, longest worktree, and a shared ancestor that is
 # never attributed or inherited through), the Linux Pss refinement, and disk.
 # shellcheck disable=SC2016 # each snippet is expanded by the child bash that sources the library.
@@ -139,18 +139,24 @@ SH
 #!/usr/bin/env bash
 # Prove stdin is closed: a probe that let powershell.exe read it would hang here.
 if read -r -t 1 _; then echo "stdin was open" >&2; exit 9; fi
-printf '2135 32614400 88 51\r\n'
+printf '2135 32614400 88 51 16 battery\r\n'
 SH
   chmod +x "$fakebin"/*
-  out=$(printf 'caller input\n' | lv "$fakebin" "$TMP_ROOT/gpu/proc" /nonexistent 'fm_lane_vitals_probe Linux; printf "%s\n" "$LV_GPU"; fm_lane_vitals_wsl_host')
+  out=$(printf 'caller input\n' | lv "$fakebin" "$TMP_ROOT/gpu/proc" /nonexistent 'fm_lane_vitals_probe Linux; printf "%s\n" "$LV_GPU"; fm_lane_vitals_windows_host')
   assert_equals "NVIDIA GeForce RTX 5070 Ti	7	1.70	15.92
-2.08 31.10 88 51" "$out" "the GPU line and the Windows host view must parse"
+2.08 31.10 88 51 16 battery" "$out" "the GPU line and the Windows host view must parse"
+  out=$(lv "$fakebin" "$TMP_ROOT/gpu/proc" /nonexistent 'fm_lane_vitals_probe MINGW64_NT-10.0-26100; printf "%s|%s\n" "$LV_WINDOWS" "$LV_WSL"; fm_lane_vitals_probe Linux; printf "%s\n" "$LV_WINDOWS"')
+  assert_equals "1|0
+0" "$out" "a MINGW uname must read native Windows, and Linux must not"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/powershell.exe"
-  out=$(lv "$fakebin" /nonexistent /nonexistent 'fm_lane_vitals_wsl_host && echo ok || echo unavailable')
+  out=$(lv "$fakebin" /nonexistent /nonexistent 'fm_lane_vitals_windows_host && echo ok || echo unavailable')
   assert_equals unavailable "$out" "a failing host query must report unavailable"
   printf '#!/usr/bin/env bash\necho "Get-CimInstance : Invalid query"\n' > "$fakebin/powershell.exe"
-  out=$(lv "$fakebin" /nonexistent /nonexistent 'fm_lane_vitals_wsl_host && echo ok || echo unavailable')
+  out=$(lv "$fakebin" /nonexistent /nonexistent 'fm_lane_vitals_windows_host && echo ok || echo unavailable')
   assert_equals unavailable "$out" "a malformed host answer must report unavailable"
+  printf '#!/usr/bin/env bash\nprintf "2135 32614400 88 51\\r\\n"\n' > "$fakebin/powershell.exe"
+  out=$(lv "$fakebin" /nonexistent /nonexistent 'fm_lane_vitals_windows_host && echo ok || echo unavailable')
+  assert_equals unavailable "$out" "a host answer without cores and power must report unavailable"
   pass "the GPU probe and the Windows host view parse, close stdin, and degrade"
 }
 

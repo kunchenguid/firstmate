@@ -4,10 +4,12 @@
 # mode left byte-for-byte alone, the budget bound by the scarcest of memory,
 # cpu, disk, and the optional max-lanes ceiling, young lanes reserving a full
 # per-lane cost, gates that close at once and reopen only after three clean
-# publishes with damped growth, pressure, thermal, and battery gates, the
-# unmeasurable fallback, learned and pinned footprints, the published ledger
-# and its history, the ranked reclaim list, the WSL Windows host view and its
-# cache, the opt-in spawn gate, config validation, and a real-host smoke.
+# publishes with damped growth that admission honours between publishes,
+# pressure, thermal, and battery gates, the memory-unmeasurable fallback to the
+# static ceiling, the learned footprint and the unmeasured lanes it ignores,
+# the published ledger and its history, the ranked reclaim list, the Windows
+# host view inside WSL (cached for every mode but --publish) and on native
+# Windows, the opt-in spawn gate, config validation, and a real-host smoke.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -235,31 +237,44 @@ test_pressure_thermal_and_battery_gates() {
   set_v "$p" power 'Battery Power'
   out=$(run_cap "$home" "$fakebin")
   assert_contains "$out" 'reason=battery ' "running on battery must close admission"
-  printf 'auto\nallow-battery\n' > "$home/config/lane-capacity"
+  rm -f "$p/v/power"
   out=$(run_cap "$home" "$fakebin")
-  assert_contains "$out" 'free_lanes=3 reason=ok ' "allow-battery must admit on battery"
-  assert_equals 'false' "$(json "$home" "$fakebin" '[.gates[].name] | index("battery") != null')" "allow-battery must drop the battery gate"
-  pass "memory-pressure, thermal, and battery gates close admission, and allow-battery opts out"
+  assert_contains "$out" 'free_lanes=3 reason=ok ' "unknown power must not be judged"
+  assert_equals 'false' "$(json "$home" "$fakebin" '[.gates[].name] | index("battery") != null')" "unknown power must emit no battery gate"
+  pass "memory-pressure, thermal, and battery gates close admission, and unknown power is never judged"
 }
 
-test_unmeasurable_vitals() {
+test_unmeasurable_memory_never_admits_on_cpu_alone() {
   local home fakebin p out
   home=$(make_home unmeasurable)
   p="$TMP_ROOT/p-unmeasurable"
   fakebin=$(make_probes "$p")
-  rm -f "$p/v/load1" "$p/v/memlevel" "$p/v/cores" "$p/v/vmpress" "$p/v/power"
+  rm -f "$p/v/memlevel" "$p/v/vmpress" "$p/v/power"
   printf 'auto\n' > "$home/config/lane-capacity"
   out=$(run_cap "$home" "$fakebin")
-  assert_contains "$out" 'free_lanes=0 reason=unmeasurable ' "auto mode must not guess without memory or cpu"
+  assert_contains "$out" 'free_lanes=0 reason=unmeasurable ' "auto mode must not admit on cpu alone"
+  assert_equals '[5,"unmeasurable",["memory unmeasurable: no memory probe, and no max-lanes ceiling to fall back on"]]' \
+    "$(json "$home" "$fakebin" '[.budget.by.cpu, .budget.binding, .verdict.reasons]')" "the verdict must say memory was never measured"
   printf 'auto\nmax-lanes 3\n' > "$home/config/lane-capacity"
   out=$(run_cap "$home" "$fakebin")
-  assert_contains "$out" 'free_lanes=3 reason=ok ' "an unmeasurable host must fall back to the ceiling"
-  assert_equals '"ceiling"' "$(json "$home" "$fakebin" '.budget.binding')" "the fallback must be bound by the ceiling"
-  pass "unmeasurable vitals admit only up to max-lanes, and nothing without it"
+  assert_contains "$out" 'free_lanes=3 reason=ok ' "an unmeasurable host must fall back to the static ceiling"
+  assert_equals '["ceiling",true,["memory unmeasurable: admitting up to the static max-lanes ceiling only"]]' \
+    "$(json "$home" "$fakebin" '[.budget.binding, .verdict.admit, .verdict.reasons]')" "the fallback must be bound by the ceiling and say so"
+  write_lane "$home" a "$home/none"
+  write_lane "$home" b "$home/none"
+  write_lane "$home" c "$home/none"
+  out=$(run_cap "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=ceiling ' "the static ceiling must still fill"
+  assert_equals '["memory unmeasurable: admitting up to the static max-lanes ceiling only","ceiling: 3 of 3 lanes on this machine (max-lanes)"]' \
+    "$(json "$home" "$fakebin" '.verdict.reasons')" "a full fallback ceiling must explain both"
+  rm -f "$p/v/load1" "$p/v/cores"
+  out=$(run_cap "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=ceiling ' "no probe at all must still fall back to the ceiling"
+  pass "unmeasurable memory never admits on cpu alone: the budget is the static max-lanes ceiling, or nothing, and the verdict says so"
 }
 
-test_learned_and_pinned_footprint() {
-  local home fakebin out
+test_learned_footprint() {
+  local home fakebin
   home=$(make_home learned)
   fakebin=$(make_probes "$TMP_ROOT/p-learned")
   printf 'auto\n' > "$home/config/lane-capacity"
@@ -269,10 +284,7 @@ test_learned_and_pinned_footprint() {
   assert_equals '[6,0.4,2,"learned",5,1]' \
     "$(json "$home" "$fakebin" '[.footprint.mem_gb, .footprint.cpu_cores, .footprint.disk_gb, .footprint.source, .footprint.samples, .budget.by.memory]')" \
     "five recorded lanes must give the p90 footprint"
-  printf 'auto\nlane-footprint-gb 1.5\nlane-disk-gb 9\n' > "$home/config/lane-capacity"
-  out=$(json "$home" "$fakebin" '[.footprint.mem_gb, .footprint.disk_gb, .footprint.source, .budget.by.memory, .budget.by.disk]')
-  assert_equals '[1.5,9,"pinned",4,10]' "$out" "pinned costs must override the learned ones"
-  pass "the per-lane footprint is learned at p90 after five lanes, and pins override it"
+  pass "the per-lane footprint is learned at p90 after five lanes"
 }
 
 test_publish_writes_ledger_and_history() {
@@ -308,7 +320,22 @@ test_publish_writes_ledger_and_history() {
   run_cap "$home" "$fakebin" --publish >/dev/null
   assert_equals '[{},1,2,2]' "$(jq -c '[.lanes, (.history | length), .history[0].peak_mem_gb, .history[0].disk_gb]' "$home/state/lane-footprint.json")" \
     "a lane that left state/ must move into the history"
-  pass "auto --publish keeps a 0600 footprint ledger and moves finished lanes into its history"
+  # Two lanes whose agents never run under their worktrees: attributed to nothing, measured as nothing.
+  mkdir -p "$home/wt-b" "$home/wt-c" "$home/elsewhere"
+  write_lane "$home" lane-b "$home/wt-b"
+  write_lane "$home" lane-c "$home/wt-c"
+  printf 'p500\nfcwd\nn%s\n' "$home/elsewhere" > "$p/v/lsof"
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  assert_equals '[2,0,0,0]' "$(jq -c '.lanes["lane-b"] | [.samples, .procs, .peak_procs, .mem_gb]' "$home/state/lane-footprint.json")" \
+    "a lane with no attributed process must still be sampled for reclaim"
+  assert_contains "$(jq -r '.budget.notes[]' "$home/state/lane-capacity.json")" '2 of 2 lanes have no attributed process' \
+    "the budget must note when most lanes have no attributed process"
+  rm -f "$home/state/lane-b.meta" "$home/state/lane-c.meta"
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  assert_equals '[{},1,2]' "$(jq -c '[.lanes, (.history | length), .history[0].peak_mem_gb]' "$home/state/lane-footprint.json")" \
+    "a lane that never had an attributed process must leave no 0 GB history entry"
+  pass "auto --publish keeps a 0600 footprint ledger, moves measured lanes into its history, and never learns from unmeasured ones"
 }
 
 test_reclaim_ranks_idle_lanes() {
@@ -367,25 +394,98 @@ SH
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/sdc 999999999 1 104857600 1% /"
 SH
-  printf '#!/usr/bin/env bash\nprintf "2135 32614400 88 51\\r\\n"\n' > "$fakebin/powershell.exe"
+  printf '#!/usr/bin/env bash\nprintf "2135 32614400 88 51 16 -\\r\\n"\n' > "$fakebin/powershell.exe"
   chmod +x "$fakebin"/*
   printf 'auto\n' > "$home/config/lane-capacity"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" 2>&1)
   assert_contains "$out" 'free_lanes=0 reason=host-memory ' "a starved Windows host must close admission while WSL has room"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
-    jq -c '[.vitals.wsl.avail_gb, .vitals.wsl.commit_pct, .budget.by.memory, .budget.by.cpu]')
-  assert_equals '[2.08,88,6,5]' "$out" "WSL memory must decide the budget, with the Windows CPU share in the load"
-  printf '#!/usr/bin/env bash\nprintf "20480 32614400 60 10\\r\\n"\n' > "$fakebin/powershell.exe"
+    jq -c '[.vitals.wsl, .vitals.windows, .vitals.host.avail_gb, .vitals.host.commit_pct, .budget.by.memory, .budget.by.cpu]')
+  assert_equals '[true,false,2.08,88,6,5]' "$out" "WSL memory must decide the budget, with the Windows CPU share in the load"
+  printf '#!/usr/bin/env bash\nprintf "20480 32614400 60 10 16 -\\r\\n"\n' > "$fakebin/powershell.exe"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish >/dev/null 2>&1
   assert_present "$home/state/.lane-vitals-host" "--publish must cache the Windows host view"
+  printf '#!/usr/bin/env bash\nprintf "2135 32614400 88 51 16 -\\r\\n"\n' > "$fakebin/powershell.exe"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish >/dev/null 2>&1
+  assert_equals '[2.08,0,"closed"]' "$(jq -c '[.vitals.host.avail_gb, .vitals.host.age_s, (.gates[] | select(.name == "host-memory") | .state)]' "$home/state/lane-capacity.json")" \
+    "--publish must query the host live rather than reuse the cached view"
   printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/powershell.exe"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null | jq -c '[.vitals.wsl.avail_gb, .verdict.admit]')
-  assert_equals '[20,true]' "$out" "a fresh cached host view must stand in for a failed query"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null | jq -c '[.vitals.host.avail_gb, (.gates[] | select(.name == "host-memory") | .state)]')
+  assert_equals '[2.08,"closed"]' "$out" "a fresh cached host view must stand in for a failed query outside --publish"
   rm -f "$home/state/.lane-vitals-host" "$home/state/lane-capacity.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
     jq -c '[(.gates[] | select(.name == "host-memory") | .state), .budget.notes, .verdict.admit]')
   assert_equals '["unknown",["Windows host view unavailable"],true]' "$out" "an unreadable host must be unknown, noted, and not judged"
-  pass "inside WSL the Windows host view can only close admission, and it is cached and degrades"
+  pass "inside WSL the Windows host view can only close admission, --publish reads it live, and the cache serves the other modes"
+}
+
+test_native_windows_reads_the_host_view() {
+  local home fakebin proc out
+  home=$(make_home mingw)
+  fakebin=$(fm_fakebin "$TMP_ROOT/p-mingw")
+  proc="$TMP_ROOT/p-mingw/proc"
+  mkdir -p "$proc"
+  # The Cygwin /proc: a load average, no MemAvailable, no pressure, no power supply.
+  printf '0.50 0.60 0.70 1/100 9\n' > "$proc/loadavg"
+  printf 'MemTotal: 33554432 kB\nMemFree: 8388608 kB\n' > "$proc/meminfo"
+  printf 'MSYS_NT-10.0-26100 version 3.5.4\n' > "$proc/version"
+  printf '#!/usr/bin/env bash\necho MINGW64_NT-10.0-26100\n' > "$fakebin/uname"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/getconf"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/sysctl"
+  cat > "$fakebin/df" <<'SH'
+#!/usr/bin/env bash
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "C: 999999999 1 104857600 1% /c"
+SH
+  printf '#!/usr/bin/env bash\nprintf "8192 33554432 40 25 16 ac\\r\\n"\n' > "$fakebin/powershell.exe"
+  chmod +x "$fakebin"/*
+  printf 'auto\n' > "$home/config/lane-capacity"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" 2>&1)
+  assert_contains "$(printf '%s\n' "$out" | head -1)" 'free_lanes=2 reason=ok lanes=0 target=none secondmates=0 load1=4.00 cores=16 ' \
+    "native Windows must take memory, cores, and the load proxy from the host view"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
+    jq -c '[.vitals.windows, .vitals.wsl, .vitals.host.cores, .vitals.on_ac, .budget.by.memory, .budget.by.cpu, .budget.binding, ([.gates[].name] | index("host-memory"))]')
+  assert_equals '[true,false,16,true,2,9,"memory",null]' "$out" "the host view must be the budget's probe, with no WSL host-memory gate"
+  printf '#!/usr/bin/env bash\nprintf "8192 33554432 40 25 16 battery\\r\\n"\n' > "$fakebin/powershell.exe"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" 2>&1)
+  assert_contains "$out" 'free_lanes=0 reason=battery ' "the host view's power must drive the battery gate"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/powershell.exe"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" 2>&1)
+  assert_contains "$out" 'free_lanes=0 reason=unmeasurable ' "without the host view native Windows must not admit on its load average alone"
+  printf 'auto\nmax-lanes 4\n' > "$home/config/lane-capacity"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
+    jq -c '[.verdict.free_lanes, .budget.binding, .verdict.reasons, .budget.notes]')
+  assert_equals '[4,"ceiling",["memory unmeasurable: admitting up to the static max-lanes ceiling only"],["Windows host view unavailable"]]' "$out" \
+    "without the host view native Windows must fall back to the static ceiling and say so"
+  pass "a native Windows home reads memory, cores, load, and power from the PowerShell host view, and falls back to the ceiling without it"
+}
+
+test_admission_honours_the_damped_budget() {
+  local home fakebin p now rc out
+  home=$(make_home damped)
+  p="$TMP_ROOT/p-damped"
+  fakebin=$(make_probes "$p")
+  printf 'auto\n' > "$home/config/lane-capacity"
+  set_v "$p" memsize $((64 * GIB))
+  set_v "$p" load1 9.00
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  set_v "$p" load1 1.00
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  assert_equals '[2,5]' "$(jq -c '[.verdict.free_lanes, .budget.raw]' "$home/state/lane-capacity.json")" "the reopened budget must be damped to 2 of 5"
+  now=$(date +%s)
+  fm_write_meta "$home/state/burst-a.meta" "kind=ship" "harness=codex" "spawn_gen=s$now.1.1"
+  fm_write_meta "$home/state/burst-b.meta" "kind=ship" "harness=codex" "spawn_gen=s$now.2.2"
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --admit 2>&1) || rc=$?
+  expect_code 75 "$rc" "a third spawn after a damped budget of 2 must be deferred: $out"
+  assert_equals '[0,3,2,true]' "$(json "$home" "$fakebin" '[.budget.open, .budget.raw, .budget.young, .budget.damped]')" \
+    "two lanes started since the publish must use up the damped budget although the raw budget has room"
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  assert_equals '[2,3]' "$(jq -c '[.verdict.free_lanes, .budget.raw]' "$home/state/lane-capacity.json")" \
+    "the next publish must grow by 2 net of the lanes started since the previous one"
+  pass "admission counts lanes started since the last publish against the damped budget, so a burst cannot exceed it"
 }
 
 test_spawn_gate_is_opt_in() {
@@ -431,20 +531,21 @@ test_auto_config_validation() {
   local home fakebin out rc body
   home=$(make_home config)
   fakebin=$(make_probes "$TMP_ROOT/p-config")
-  for body in '5\nmax-lanes 3\n' '5\nlane-footprint-gb 2\n' 'auto\nallow-battery yes\n' 'auto\nlane-footprint-gb 0.05\n' \
-    'auto\nmax-lanes 2\nmax-lanes 3\n' 'auto\nmax-lanes two\n' 'auto\nhost-min-avail-gb\n'; do
+  for body in '5\nmax-lanes 3\n' '5\nmin-gpu-free-gb 2\n' 'auto\nadmit-spawns yes\n' 'auto\nallow-battery\n' \
+    'auto\nlane-footprint-gb 2\n' 'auto\nlane-disk-gb 4\n' 'auto\nhost-min-avail-gb 3\n' \
+    'auto\nmax-lanes 2\nmax-lanes 3\n' 'auto\nmax-lanes two\n' 'auto\nmin-gpu-free-gb\n'; do
     printf '%b' "$body" > "$home/config/lane-capacity"
     rc=0
     out=$(run_cap "$home" "$fakebin") || rc=$?
     expect_code 1 "$rc" "config '$body' must be invalid"
     assert_contains "$out" 'reason=invalid-target lanes=0 target=invalid' "config '$body' must report invalid"
   done
-  printf 'auto # measured\nmax-lanes 6 # ceiling\nallow-battery\nadmit-spawns\nlane-disk-gb 4\nhost-min-avail-gb 3\nmin-gpu-free-gb 2\n' > "$home/config/lane-capacity"
+  printf 'auto # measured\nmax-lanes 6 # ceiling\nadmit-spawns\nmin-gpu-free-gb 2\nmin-avail-gb 2\n' > "$home/config/lane-capacity"
   rc=0
   out=$(run_cap "$home" "$fakebin") || rc=$?
   expect_code 0 "$rc" "a full valid auto config: $out"
   assert_contains "$out" 'target=6 ' "max-lanes must be the published target"
-  pass "auto-only keys need auto, flags take no value, and malformed values are refused"
+  pass "auto-only keys need auto, flags take no value, removed keys are unknown, and malformed values are refused"
 }
 
 test_real_host_auto_smoke() {
@@ -462,11 +563,13 @@ test_budget_binds_the_scarcest_resource
 test_ceiling_and_young_lanes
 test_gates_reopen_after_three_publishes
 test_pressure_thermal_and_battery_gates
-test_unmeasurable_vitals
-test_learned_and_pinned_footprint
+test_unmeasurable_memory_never_admits_on_cpu_alone
+test_learned_footprint
 test_publish_writes_ledger_and_history
 test_reclaim_ranks_idle_lanes
 test_wsl_host_view_closes_admission
+test_native_windows_reads_the_host_view
+test_admission_honours_the_damped_budget
 test_spawn_gate_is_opt_in
 test_auto_config_validation
 test_real_host_auto_smoke

@@ -11,7 +11,8 @@
 # Test seams: FM_PROC_ROOT_OVERRIDE replaces /proc and FM_SYS_ROOT_OVERRIDE
 # replaces /sys for every Linux read; every other source is a command found on
 # PATH (uname, sysctl, vm_stat, pmset, ioreg, ps, lsof, df, du, nvidia-smi,
-# powershell.exe), so a fake bin directory drives the macOS and WSL paths.
+# powershell.exe), so a fake bin directory drives the macOS, WSL, and native
+# Windows (Git Bash/MSYS, where uname -s is MINGW*/MSYS*/CYGWIN*) paths.
 #
 # fm_lane_vitals_probe <os>
 #   Sets LV_LOAD5, LV_PSI_CPU10, LV_PSI_MEM10, LV_PSI_MEM60, LV_PSI_MEMFULL10,
@@ -19,22 +20,28 @@
 #   LV_SWAPIN (cumulative pages swapped in), LV_VMPRESS (macOS
 #   kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical),
 #   LV_ON_AC (true|false), LV_BATT_PCT, LV_THERMAL (ok|limited), LV_WSL (1 inside
-#   WSL, else 0), and LV_GPU (one "name<TAB>util_pct<TAB>used_gb<TAB>total_gb"
+#   WSL, else 0), LV_WINDOWS (1 on native Windows, else 0), and LV_GPU (one "name<TAB>util_pct<TAB>used_gb<TAB>total_gb"
 #   line per GPU; macOS unified memory leaves the two memory fields empty).
 #   Linux reads /proc/loadavg, /proc/pressure/{cpu,memory,io}, /proc/vmstat
 #   pswpin, /sys/class/power_supply/*/{type,online,capacity,status}, and
 #   /proc/version for WSL; macOS reads sysctl vm.loadavg and
 #   kern.memorystatus_vm_pressure_level, vm_stat Swapins, pmset -g batt and
 #   -g therm (a CPU_Speed_Limit under 100 or a recorded warning is limited), and
-#   ioreg -c IOAccelerator. The GPU probe tries nvidia-smi on PATH, then
-#   inside WSL /usr/lib/wsl/lib/nvidia-smi, then nvidia-smi.exe, bounded to 3 s.
+#   ioreg -c IOAccelerator. Native Windows reads the same Cygwin /proc files
+#   where they exist (loadavg, vmstat) and nothing else; the host view below
+#   supplies its memory, cores, load, and power. The GPU probe tries nvidia-smi
+#   on PATH, then inside WSL /usr/lib/wsl/lib/nvidia-smi, then nvidia-smi.exe,
+#   bounded to 3 s.
 #
-# fm_lane_vitals_wsl_host
-#   Prints "avail_gb total_gb commit_pct cpu_pct" for the Windows host from one
+# fm_lane_vitals_windows_host
+#   Prints "avail_gb total_gb commit_pct cpu_pct cores power" for the Windows
+#   host (power is ac, battery, or - when the host has no battery) from one
 #   powershell.exe CIM query (Win32_PerfFormattedData_PerfOS_Memory,
-#   Win32_OperatingSystem, Win32_Processor), bounded to 5 s, with stdin closed
-#   because powershell.exe otherwise consumes its caller's input. Returns 1
-#   when interop or the query is unavailable.
+#   Win32_OperatingSystem, Win32_Processor, Win32_ComputerSystem,
+#   Win32_Battery), bounded to 5 s, with stdin closed because powershell.exe
+#   otherwise consumes its caller's input. It serves WSL2 through interop and
+#   native Git Bash/MSYS directly. Returns 1 when powershell.exe or the query
+#   is unavailable.
 #
 # fm_lane_vitals_processes <os> <out-file>
 #   Writes one "pid<TAB>ppid<TAB>mem_kb<TAB>cpu_s<TAB>cwd" line per readable
@@ -83,7 +90,8 @@ fm_lane_vitals_probe() {  # <os>
   local os=$1 v line dir type online status any_mains=0 mains_on=0
   LV_LOAD5='' LV_PSI_CPU10='' LV_PSI_MEM10='' LV_PSI_MEM60='' LV_PSI_MEMFULL10=''
   LV_PSI_IO10='' LV_PSI_IO60='' LV_SWAPIN='' LV_VMPRESS='' LV_ON_AC='' LV_BATT_PCT=''
-  LV_THERMAL='' LV_WSL=0 LV_GPU=''
+  LV_THERMAL='' LV_WSL=0 LV_WINDOWS=0 LV_GPU=''
+  case "$os" in MINGW*|MSYS*|CYGWIN*) LV_WINDOWS=1 ;; esac
   if [ "$os" = Darwin ]; then
     v=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $2}')
     _fm_lv_num "$v" && LV_LOAD5=$v
@@ -176,22 +184,26 @@ _fm_lv_nvidia() {
       gsub(/\t/, " ", $1); printf "%s\t%s\t%.2f\t%.2f\n", $1, $2, $3 / 1024, $4 / 1024 }'
 }
 
-fm_lane_vitals_wsl_host() {
+fm_lane_vitals_windows_host() {
   local ps out
   if command -v powershell.exe >/dev/null 2>&1; then
     ps=$(command -v powershell.exe)
   elif [ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]; then
     ps=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+  elif [ -x /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]; then
+    ps=/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
   else
     return 1
   fi
-  # One line: AvailableMBytes TotalVisibleMemorySize(KB) PercentCommittedBytesInUse LoadPercentage.
+  # One line: AvailableMBytes TotalVisibleMemorySize(KB) PercentCommittedBytesInUse
+  # LoadPercentage NumberOfLogicalProcessors power (ac|battery|-).
+  # Win32_Battery.BatteryStatus 1, 4, 5 discharge; 2, 3, 6-9, 11 run on AC.
   # shellcheck disable=SC2016 # a PowerShell program: its $names are PowerShell variables.
   out=$(fm_run_timed 5 "$ps" -NoProfile -NonInteractive -Command \
-    '$m=Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory; $o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; "{0} {1} {2} {3}" -f $m.AvailableMBytes,$o.TotalVisibleMemorySize,$m.PercentCommittedBytesInUse,[int]$c' \
+    '$m=Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory; $o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $n=(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors; $b=Get-CimInstance Win32_Battery | Select-Object -First 1; $p="-"; if ($b) { if (@(1,4,5) -contains $b.BatteryStatus) { $p="battery" } elseif (@(2,3,6,7,8,9,11) -contains $b.BatteryStatus) { $p="ac" } }; "{0} {1} {2} {3} {4} {5}" -f $m.AvailableMBytes,$o.TotalVisibleMemorySize,$m.PercentCommittedBytesInUse,[int]$c,[int]$n,$p' \
     </dev/null 2>/dev/null | tr -d '\r' | tail -1) || return 1
-  printf '%s\n' "$out" | awk 'NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
-    printf "%.2f %.2f %d %d\n", $1 / 1024, $2 / 1048576, $3, $4; ok = 1 } END { exit !ok }'
+  printf '%s\n' "$out" | awk 'NF == 6 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^(ac|battery|-)$/ {
+    printf "%.2f %.2f %d %d %d %s\n", $1 / 1024, $2 / 1048576, $3, $4, $5, $6; ok = 1 } END { exit !ok }'
 }
 
 fm_lane_vitals_processes() {  # <os> <out-file>
