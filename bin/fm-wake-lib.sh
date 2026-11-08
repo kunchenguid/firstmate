@@ -794,7 +794,7 @@ fm_lock_link_windows() {  # <ownerdir> <lockdir> <owner-win> <lock-win>
   case "$owner_win$lock_win" in
     ''|*[\"%\&\|\<\>^]*) ;;
     *)
-      MSYS2_ARG_CONV_EXCL='*' cmd /c mklink /J "$lock_win" "$owner_win" >/dev/null 2>&1 \
+      MSYS2_ARG_CONV_EXCL='*' cmd /d /c mklink /J "$lock_win" "$owner_win" >/dev/null 2>&1 \
         && return 0
       ;;
   esac

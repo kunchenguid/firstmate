@@ -2436,7 +2436,7 @@ test_msys_pid_identity_uses_proc() {
 
 # Write stand-ins for the Windows tools the lock link uses into <fakebin>, so a
 # non-Windows host drives the Windows branch: uname names MSYS, cygpath maps
-# /x to C:\x, and `cmd /c mklink /J` makes the link with the host's own symlink.
+# /x to C:\x, and `cmd /d /c mklink /J` makes the link with the host's own symlink.
 # Every call is logged to FM_FAKE_WIN_LOG; FM_FAKE_MKLINK_FAIL=1 makes mklink
 # fail, and the ln stand-in records the MSYS setting it was run with.
 write_fake_windows_link_tools() {  # <fakebin>
@@ -2453,15 +2453,15 @@ SH
 p=$3
 printf 'C:%s\n' "${p//\//\\}"
 SH
-  cat > "$fakebin/cmd" <<'SH'
+  cat > "$fakebin/cmd" <<SH
 #!/usr/bin/env bash
-printf 'cmd %s\n' "$*" >> "$FM_FAKE_WIN_LOG"
-[ "$1 $2 $3" = "/c mklink /J" ] || exit 2
-[ -z "${FM_FAKE_MKLINK_FAIL:-}" ] || exit 1
-link=${4#C:}; link=${link//\\//}
-target=${5#C:}; target=${target//\\//}
-if [ -e "$link" ] || [ -L "$link" ]; then exit 1; fi
-exec ln -s "$target" "$link"
+printf 'cmd %s\n' "\$*" >> "\$FM_FAKE_WIN_LOG"
+[ "\$1 \$2 \$3 \$4" = "/d /c mklink /J" ] || exit 2
+[ -z "\${FM_FAKE_MKLINK_FAIL:-}" ] || exit 1
+link=\${5#C:}; link=\${link//\\\\//}
+target=\${6#C:}; target=\${target//\\\\//}
+if [ -e "\$link" ] || [ -L "\$link" ]; then exit 1; fi
+exec "$real_ln" -s "\$target" "\$link"
 SH
   cat > "$fakebin/ln" <<SH
 #!/usr/bin/env bash
@@ -2530,7 +2530,7 @@ test_lock_windows_link_is_junction_not_copy() {
     || fail "emulated Windows acquire failed: $out $(cat "$log" 2>/dev/null)"
   assert_lock_link_cycle "emulated Windows" "$out"
   case "$(cat "$log")" in
-    *'cmd /c mklink /J C:'*'\.contend.lock C:'*'\.contend.lock.owner.'*) ;;
+    *'cmd /d /c mklink /J C:'*'\.contend.lock C:'*'\.contend.lock.owner.'*) ;;
     *) fail "Windows lock link was not created as a junction: $(cat "$log")" ;;
   esac
   case "$(cat "$log")" in *'ln MSYS='*) fail "junction success still ran ln: $(cat "$log")" ;; esac
