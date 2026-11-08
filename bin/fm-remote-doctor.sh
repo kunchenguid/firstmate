@@ -1107,17 +1107,22 @@ record_herdr_owner() {
 }
 
 # Only the operator's --fix authorizes the launch-agent guard to take a running
-# session over, by naming its own live pid in this one-shot marker; every other
+# session over, by naming its pid and process-start identity in this one-shot marker; every other
 # start of the guard leaves a running server alone.
 herdr_takeover_marker() {
   printf '%s/remote-herdr-takeover-%s\n' "$HERDR_OWNER_DIR" "$HERDR_SESSION_NAME"
 }
 
 authorize_guard_takeover() {
-  local marker
+  local marker start
   [ "$AUTOMATIC" -eq 0 ] || return 0
+  start=$(fm_remote_job_process_start "$$") || return 1
+  trap revoke_guard_takeover EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   marker=$(herdr_takeover_marker)
-  if ! printf '%s\n' "$$" > "$marker.tmp.$$" 2>/dev/null || ! mv -f -- "$marker.tmp.$$" "$marker" 2>/dev/null; then
+  if ! printf '%s\n%s\n' "$$" "$start" > "$marker.tmp.$$" 2>/dev/null || ! mv -f -- "$marker.tmp.$$" "$marker" 2>/dev/null; then
     rm -f -- "$marker.tmp.$$"
   fi
 }

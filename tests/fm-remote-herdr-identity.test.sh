@@ -129,4 +129,35 @@ for bad in default fm-remote- "fm-remote-${ROOT_ID:0:15}" "fm-remote-${ROOT_ID}0
 done
 pass "D the parent accepts only the primary or a code-root-derived session"
 
+# --- E) legacy shell quoting preserves exact ownership -----------------------
+# The legacy plist command is serialized public configuration. Use Python's
+# standard shell decoder as an independent oracle, then exercise the shared
+# resolver used by doctor and control. Losing an apostrophe would move the
+# owning root's existing mates to an isolated session.
+LEGACY_ACCOUNT="$TMP_ROOT/legacy-account"
+mkdir -p "$LEGACY_ACCOUNT/Library/LaunchAgents"
+for legacy_root in "$TMP_ROOT/plain root" "$TMP_ROOT/owner's root" "$TMP_ROOT/two''apostrophes/with \\ slash"; do
+  python3 - "$LEGACY_ACCOUNT" "$legacy_root" <<'PY'
+import pathlib, shlex, sys
+account, root = sys.argv[1:]
+args = [root + '/bin/fm-remote-herdr-guard.sh', '/bin/herdr', 'fm-remote']
+command = 'exec ' + ' '.join("'" + arg.replace("'", "'\\''") + "'" for arg in args)
+assert shlex.split(command) == ['exec'] + args
+account_path = pathlib.Path(account) / 'Library/LaunchAgents/dev.firstmate.herdr.fm-remote.plist'
+account_path.write_text(
+    '<plist><dict><key>ProgramArguments</key><array>\n<string>/bin/sh</string>\n'
+    '<string>-l</string>\n<string>-c</string>\n<string>' + command + '</string>\n</array></dict></plist>\n')
+PY
+  HOME="$LEGACY_ACCOUNT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Darwin bash -c '
+    . "$1/bin/fm-remote-herdr-identity-lib.sh"
+    fm_remote_herdr_identity "$2" || exit 1
+    [ "$FM_REMOTE_HERDR_OWNER_ROOT" = "$2" ] &&
+      [ "$FM_REMOTE_HERDR_SESSION" = fm-remote ] &&
+      [ "$FM_REMOTE_HERDR_LABEL" = dev.firstmate.herdr.fm-remote ] || exit 1
+    fm_remote_herdr_identity "$2/other" || exit 1
+    [ "$FM_REMOTE_HERDR_SESSION" != fm-remote ]
+  ' _ "$ROOT" "$legacy_root" || fail "legacy ownership lost the decoded root: $legacy_root"
+done
+pass "E legacy ownership decodes spaces, apostrophes, and backslashes without changing service identity"
+
 echo "ALL TESTS PASSED"

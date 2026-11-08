@@ -53,6 +53,30 @@ fm_remote_herdr_root_id() { # <fm-root>
   printf '%s\n' "${digest:0:16}"
 }
 
+# Decode the first shell-quoted argument of the stored `exec` command without
+# evaluating it. The renderer uses single quotes, with '\'' for apostrophes.
+fm_remote_herdr_legacy_guard() { # <plist>
+  local command rest part guard=
+  command=$(sed -n 's/^[[:space:]]*<string>exec //p' "$1")
+  rest=$command
+  while [[ "$rest" == "'"* ]]; do
+    rest=${rest#\'}
+    [[ "$rest" == *"'"* ]] || return 1
+    part=${rest%%\'*}
+    guard=$guard$part
+    rest=${rest#*\'}
+    if [[ "$rest" == "\\'"* ]]; then
+      guard="$guard'"
+      rest=${rest#??}
+    else
+      [[ "$rest" == ' '* ]] || return 1
+      case "$guard" in */bin/fm-remote-herdr-guard.sh) printf '%s' "$guard"; return 0 ;; esac
+      return 1
+    fi
+  done
+  return 1
+}
+
 # Consumed by the sourcing caller, so its assignments read as unused here.
 # shellcheck disable=SC2034
 fm_remote_herdr_identity() { # <fm-root>
@@ -66,7 +90,7 @@ fm_remote_herdr_identity() { # <fm-root>
   if [ -z "$owner" ] && [ -f "$plist" ] && [ ! -L "$plist" ]; then
     case "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-$(uname -s 2>/dev/null || true)}" in
       Darwin|darwin)
-        guard=$(grep -oE "[^']+/bin/fm-remote-herdr-guard.sh" "$plist" 2>/dev/null | head -1 || true)
+        guard=$(fm_remote_herdr_legacy_guard "$plist" 2>/dev/null || true)
         owner=${guard%/bin/fm-remote-herdr-guard.sh}
         ;;
     esac

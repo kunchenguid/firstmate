@@ -37,7 +37,7 @@
 #   any other start (RunAtLoad at login, a KeepAlive restart, or an automatic
 #   readiness repair) over a foreign server -> exit 0, leave it alone
 # A takeover closes every pane in that session, so it happens only on the
-# operator's explicit request: that --fix writes its own live pid to
+# operator's explicit request: that --fix writes its pid and process-start identity to
 # ~/.firstmate/remote-herdr-takeover-<s>, and this guard consumes that one-shot
 # marker and honors it only while the authorizing doctor is still running.
 # bin/fm-remote-herdr-owner-lib.sh owns the owner discovery and the birth
@@ -52,6 +52,8 @@ SCRIPT_DIR=${SCRIPT_SELF%/*}
 SCRIPT_DIR=$(CDPATH='' cd -- "$SCRIPT_DIR" && pwd -P)
 # shellcheck source=bin/fm-remote-herdr-owner-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-owner-lib.sh"
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$SCRIPT_DIR/fm-remote-job-lib.sh"
 
 usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ "$#" -eq 2 ] || usage
@@ -101,13 +103,15 @@ if fm_remote_herdr_birth_is_aqua "$BIRTH"; then
 fi
 
 takeover_authorized() {
-  local marker="${HOME:-}/.firstmate/remote-herdr-takeover-$SESSION" claimed pid=
+  local marker="${HOME:-}/.firstmate/remote-herdr-takeover-$SESSION" claimed pid='' start='' actual
   claimed="$marker.claimed.$$"
   mv -- "$marker" "$claimed" 2>/dev/null || return 1
-  IFS= read -r pid < "$claimed" || true
+  { IFS= read -r pid; IFS= read -r start; } < "$claimed" || true
   rm -f -- "$claimed"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null
+  [ -n "$start" ] && kill -0 "$pid" 2>/dev/null || return 1
+  actual=$(fm_remote_job_process_start "$pid") || return 1
+  [ "$actual" = "$start" ]
 }
 
 if ! takeover_authorized; then

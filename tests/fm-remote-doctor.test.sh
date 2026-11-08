@@ -194,6 +194,13 @@ EOF
     exit 0
     ;;
   kickstart)
+    if [ -f "$FM_FAKE_STATE/interrupt-takeover" ]; then
+      marker="$FM_FAKE_HOME/.firstmate/remote-herdr-takeover-fm-remote"
+      { IFS= read -r doctor_pid; IFS= read -r doctor_start; } < "$marker" || exit 7
+      [ -n "$doctor_start" ] || exit 7
+      kill -"$(cat "$FM_FAKE_STATE/interrupt-takeover")" "$doctor_pid"
+      exit 0
+    fi
     [ ! -f "$FM_FAKE_STATE/kickstart-fail" ] || { printf 'Kickstart failed: service unavailable\n' >&2; exit 6; }
     forced=0
     if [ "$domain" = -k ]; then
@@ -952,6 +959,17 @@ assert_contains "$DOCTOR_OUT" 'fix herdr-server=failed: launchctl kickstart' "th
 assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $SSH_HOLDER_PID" \
   "a still-foreign server was reported ready after a failed takeover"
 rm -f "$CASE_STATE/kickstart-fail"
+
+# Handled doctor exits must revoke permission even if launchctl interrupts the
+# repair before the ordinary revoke call. The fixture signals the PID from
+# the emitted authorization record, not an inferred process-tree location.
+for interruption in 'HUP 129' 'INT 130' 'TERM 143'; do
+  printf '%s\n' "${interruption%% *}" > "$CASE_STATE/interrupt-takeover"
+  doctor --fix
+  expect_code "${interruption#* }" "$DOCTOR_RC" "the doctor did not handle ${interruption%% *} during takeover"
+  assert_absent "$CASE_HOME/.firstmate/remote-herdr-takeover-fm-remote" "handled ${interruption%% *} left takeover permission behind"
+done
+rm -f "$CASE_STATE/interrupt-takeover"
 
 : > "$CASE_STATE/socket-owner"
 doctor

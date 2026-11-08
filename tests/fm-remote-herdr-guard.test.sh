@@ -171,11 +171,14 @@ guard() { # [extra env assignments...]
 
 herdr_calls() { cat "$CASE_LOG"; }
 TAKEOVER_MARKER="$TMP_ROOT/.firstmate/remote-herdr-takeover-$SESSION"
-# authorize [pid]: the operator's --fix authorizing this one start, naming its
-# own live process (this test shell) by default.
+# authorize [pid]: construct the doctor/guard two-line authorization protocol.
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
 authorize() {
+  local pid=${1:-$$} start
   mkdir -p "${TAKEOVER_MARKER%/*}"
-  printf '%s\n' "${1:-$$}" > "$TAKEOVER_MARKER"
+  start=$(fm_remote_job_process_start "$pid") || start=finished-process
+  printf '%s\n%s\n' "$pid" "$start" > "$TAKEOVER_MARKER"
 }
 assert_started() { # <msg>
   [ -f "$CASE_STATE/started" ] || fail "$1"
@@ -303,6 +306,22 @@ assert_not_contains "$(herdr_calls)" 'server stop' "an unauthorized start stoppe
 assert_not_started "an unauthorized start started a second server"
 assert_contains "$GUARD_OUT" "pid $SSH_PID born outside the Aqua login session (ssh); leaving it alone" \
   "the guard did not report leaving the foreign server alone"
+
+# A reused PID is modeled deterministically by pairing a live PID with a
+# different start identity. The authorization contract requires both to match;
+# PID-only acceptance would stop this foreign server.
+for start in stale-process-start ''; do
+  new_case running
+  printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
+  mkdir -p "${TAKEOVER_MARKER%/*}"
+  printf '%s\n%s\n' "$$" "$start" > "$TAKEOVER_MARKER"
+  guard
+  expect_code 0 "$GUARD_RC" "a mismatched process identity made the guard fail"
+  assert_not_contains "$(herdr_calls)" 'server stop' "a live PID revived stale takeover permission"
+  assert_not_started "stale takeover permission started a replacement server"
+  assert_absent "$TAKEOVER_MARKER" "stale takeover permission was not consumed"
+done
+pass "a live PID cannot revive a missing or mismatched process-start identity"
 
 new_case running
 printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
