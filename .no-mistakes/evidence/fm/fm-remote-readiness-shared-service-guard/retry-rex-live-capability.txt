@@ -1,0 +1,12 @@
+Private Rex readiness live-check capability
+Host: Darwin arm64
+command -v rex: NOT FOUND on PATH
+REX_BIN_DIR: not provided; no repository-local Rex binary path provided.
+
+Official macOS acquisition page: https://www.superlogical.com/rex/docs/installation
+ Installation At the current stage of beta testing, the macOS application and the Linux and FreeBSD server are available to all testers. We already have Rex servers running on Windows, and we have Rex clients for iOS, Linux, and Windows at varying stages of readiness. We hope to expand the scope of public testing quickly, but they aren’t part of testing yet. macOS Rex for macOS Invites are going out to our mailing list a]:block @max-md:[&amp;>a]:py-2 @max-md:[&amp;>a]:text-center"> Get an invite Already testing? Log in with Discord to download. The macOS client is fully self-contained with a local server that lets you get up and running quickly. We plan on adding support for more platforms for the client in the future. Linux Server only See Installing on Linux for the details. Log in with Discord to see the install commands. FreeBSD Server only See Installing on FreeBSD for the details. Log in with Discord to see the install commands. 
+
+No Discord login, credential access, package installation, host search, or shared server connection attempted.
+Live scenarios NOT EXECUTED: doctor --fix starts a missing private persistent Rex server; doctor --fix preserves an answering private exit-empty Rex server and its process/session identity.
+Workspace acquisition cannot proceed from the official macOS page without Discord-authenticated beta download access. Linux/FreeBSD binaries cannot run natively on this Darwin host.
+To enable live verification: provide an executable macOS arm64 Rex CLI path inside this worktree (API revision >=5), or an authorized downloadable macOS archive. Tests will use only a disposable private socket, state directory, and configuration.
