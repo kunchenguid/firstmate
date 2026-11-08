@@ -359,7 +359,7 @@ stopfailure_pace() {
   wait "$!" 2>/dev/null || true
   if [ -e "$STATE/.afk" ]; then
     autoarm_record afk
-  elif ! need_supervision; then
+  elif { [ "${HOST_MODE:-0}" -eq 0 ] || [ "${ACTIONABLE:-0}" -eq 0 ]; } && ! need_supervision; then
     autoarm_record clean
   else
     return 0

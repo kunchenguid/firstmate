@@ -2226,18 +2226,52 @@ test_host_stand_down_is_silent() {
 # The branch's own turn tore down the only task, so the fleet is empty by the
 # time the host hands back the captain outcome it recorded.
 test_host_outcome_after_fleet_emptied_rewakes() {
-  local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/host-outcome-empties-fleet")
-  mkdir -p "$dir/config"
+  local dir out status event t0 elapsed
+  for event in Stop StopFailure; do
+    dir=$(make_primary_dir "$TMP_ROOT/host-outcome-empties-fleet-$event")
+    mkdir -p "$dir/config"
+    rm -f "$dir/config/supervision-host-off"
+    : > "$dir/state/task.meta"
+    write_host_fixture "$dir" outcome-empties-fleet
+    : > "$dir/state/.claude-autoarm-stopfailure-rewake"
+    t0=$(date +%s)
+    out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=5 run_autoarm "$dir" "{\"session_id\":\"sess-autoarm\",\"hook_event_name\":\"$event\"}" 2>/dev/null); status=$?
+    elapsed=$(( $(date +%s) - t0 ))
+    [ ! -e "$dir/state/task.meta" ] || fail "fixture: the host turn did not empty the fleet"
+    expect_code 2 "$status" "$event: a captain outcome the host hands back must rewake main even after the fleet emptied"
+    assert_contains "$out" "supervision-host: branch-outcome: fixture" "the rewake must carry the branch-outcome line"
+    [ "$(epoch_outcome "$dir")" = rewake ] || fail "a handed-back outcome must record outcome=rewake, got: $(epoch_outcome "$dir")"
+    if [ "$event" = StopFailure ]; then
+      [ "$elapsed" -ge 4 ] || fail "the host outcome bypassed the StopFailure cooldown: ${elapsed}s"
+    fi
+  done
+  pass "auto-arm: a host branch outcome rewakes main even when its turn emptied the fleet"
+}
+
+test_host_paced_outcome_honors_afk_after_wait() {
+  local dir status rcfile hook_pid
+  dir=$(make_primary_dir "$TMP_ROOT/host-outcome-paced-afk")
   rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
   write_host_fixture "$dir" outcome-empties-fleet
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  [ ! -e "$dir/state/task.meta" ] || fail "fixture: the host turn did not empty the fleet"
-  expect_code 2 "$status" "a captain outcome the host hands back must rewake main even after the fleet emptied"
-  assert_contains "$out" "supervision-host: branch-outcome: fixture" "the rewake must carry the branch-outcome line"
-  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a handed-back outcome must record outcome=rewake, got: $(epoch_outcome "$dir")"
-  pass "auto-arm: a host branch outcome rewakes main even when its turn emptied the fleet"
+  : > "$dir/state/.claude-autoarm-stopfailure-rewake"
+  rcfile="$dir/hook-rc"
+  ( FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=5 run_autoarm "$dir" '{"session_id":"sess-autoarm","hook_event_name":"StopFailure"}' >/dev/null 2>&1; echo "$?" > "$rcfile" ) &
+  hook_pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$dir/state/.last-watcher-beat" ] && break
+    sleep 0.05
+  done
+  [ -e "$dir/state/.last-watcher-beat" ] || fail "the host never handed back its outcome"
+  [ ! -e "$dir/state/task.meta" ] || fail "the host did not empty the fleet"
+  sleep 0.5
+  [ ! -e "$rcfile" ] || fail "the host outcome did not wait for the cooldown"
+  : > "$dir/state/.afk"
+  wait "$hook_pid"
+  status=$(cat "$rcfile")
+  expect_code 0 "$status" "AFK during pacing must suppress the host outcome even after the fleet emptied"
+  [ "$(epoch_outcome "$dir")" = afk ] || fail "AFK during host outcome pacing must record outcome=afk"
+  pass "auto-arm: a paced host outcome still honors AFK after waiting"
 }
 
 # Main already drained and acknowledged the wake, so the rewake is refused on a
@@ -2425,6 +2459,7 @@ test_plain_arm_banner_keeps_its_wake_line_cap
 test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_outcome_after_fleet_emptied_rewakes
+test_host_paced_outcome_honors_afk_after_wait
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
