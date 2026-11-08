@@ -21,6 +21,8 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 export FAKE_CLAUDE
+FM_AUTOARM_TEST_PID=$$
+export FM_AUTOARM_TEST_PID
 
 # Copy the hook and its sourced dependencies into a fixture checkout.
 install_autoarm_scripts() {
@@ -118,9 +120,11 @@ if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
     exit 1
   fi
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  # Bound parking so a failed assertion cannot leave a fixture process behind.
-  for _ in $(seq 1 200); do
-    [ -e "$FM_HOME/state/successor-park" ] || break
+  # The test releases this gate after observing the live successor. Do not
+  # expire it on a wall-clock deadline: loaded runners may take longer to
+  # reach that assertion. Stop if the test exits before releasing the gate.
+  while [ -e "$FM_HOME/state/successor-park" ] \
+    && kill -0 "$FM_AUTOARM_TEST_PID" 2>/dev/null; do
     sleep 0.05
   done
   exit 0
