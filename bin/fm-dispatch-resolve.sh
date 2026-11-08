@@ -121,8 +121,9 @@
 #   error after the request) appends one JSON line to $FM_HOME/state/
 #   dispatch-resolve.jsonl: ts, task (the <id> of data/<id>/brief.md, else
 #   null), project, status, rule, rule_when (first 60 characters), confidence,
-#   probabilities, fallback_rule when taken, profile_source (the rule or "default" that supplied the profile), and profile (harness, model,
-#   effort) when clear. It never holds brief text or the key. The off path and
+#   probabilities, fallback_rule when taken, and, when clear, profile_source
+#   (the rule or "default" that supplied the profile) and profile (harness,
+#   model, effort). It never holds brief text or the key. The off path and
 #   usage errors write nothing, and a failed write only prints one stderr
 #   warning; stdout and the exit code are unchanged.
 #
