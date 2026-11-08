@@ -61,7 +61,8 @@ case "${1-}" in
     exit 0
     ;;
   '')
-    if [ -e "$state/end-before-next-list" ]; then
+    # The race is between an establish call and the listing that follows it.
+    if [ -e "$state/end-before-next-list" ] && [ -e "$state/open-calls" ]; then
       : > "$state/open"
       rm -f "$state/end-before-next-list"
     fi
@@ -555,7 +556,7 @@ test_build_reopens_a_session_the_captain_ended() {
   pass "a board build reopens a session the captain ended instead of arming a dead one"
 }
 
-test_rebuild_of_a_live_session_never_opens_another_tab() {
+test_first_build_opens_and_rebuild_never_opens_another_tab() {
   local home data board
   home=$(make_home no-new-tab)
   data="$home/payload.json"
@@ -565,11 +566,13 @@ test_rebuild_of_a_live_session_never_opens_another_tab() {
   run_board "$home" build "$data" >/dev/null || fail "the rebuild failed"
   [ "$(wc -l < "$home/lavish-state/open-calls")" -eq 2 ] \
     || fail "expected one establish call per build: $(cat "$home/lavish-state/open-calls")"
-  ! grep -qv -e '--no-open' "$home/lavish-state/open-calls" \
+  [ "$(sed -n 1p "$home/lavish-state/open-calls")" != "--no-open" ] \
+    || fail "the first build suppressed the automatic open: $(cat "$home/lavish-state/open-calls")"
+  [ "$(sed -n 2p "$home/lavish-state/open-calls")" = "--no-open" ] \
     || fail "a rebuild establish call could open a new browser tab: $(cat "$home/lavish-state/open-calls")"
   ! grep -q -e '--reopen' "$home/lavish-state/open-calls" \
     || fail "a live session was reopened"
-  pass "a board rebuild of a live session passes --no-open so no new tab opens"
+  pass "the first build opens the board and a rebuild of a live session passes --no-open"
 }
 
 test_build_reopens_when_an_opened_session_ends_before_listing() {
@@ -796,7 +799,7 @@ test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended
-test_rebuild_of_a_live_session_never_opens_another_tab
+test_first_build_opens_and_rebuild_never_opens_another_tab
 test_build_reopens_when_an_opened_session_ends_before_listing
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
