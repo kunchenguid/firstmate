@@ -594,6 +594,7 @@ test_ledger_report_without_scan_opt_in_keeps_recorded_pr() {
 test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   local id prose_key ready_key stamped_key placeholder_key scout_key
   make_world pr-provenance; bind_secondmate local
+  : > "$MATE/config/pr-register-scan"
   write_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
   write_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
   write_child "$MATE" stamped 'done [at=1788576000]: PR https://example.test/owner/repo/pull/66 checks green'
