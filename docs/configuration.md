@@ -1381,6 +1381,10 @@ Pi-family secondmates can start unattended in Firstmate-seeded homes without acc
 
 For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<id>.omp-ext.ts` busy extension with `-e`: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch also carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
+Claude ship and scout workers launch with the default output style, including on T3 Code, so they do not inherit orchestration instructions from the captain's custom style.
+This override does not change user settings or a persistent secondmate's configured output style.
+[`fm-spawn.sh`](../bin/fm-spawn.sh)'s `launch_template()` owns the settings mechanics.
+
 For a Claude secondmate, `fm-spawn.sh` writes the busy hooks into the parent home's `state/<id>.claude-settings.json` and passes that file as Claude Code's one `--settings` value.
 The same file carries `feedbackDrafts` and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
 Claude Code applies `--settings` for that session and does not write the file into the mate home.
