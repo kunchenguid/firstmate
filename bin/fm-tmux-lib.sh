@@ -43,7 +43,6 @@
 # capture, the #{cursor_y} cursor read, the pi foreground-process identity
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
-
 # The sibling directory is derived without forking dirname, because a backend
 # probe can re-source this adapter inside a subshell on every watcher cycle.
 _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
@@ -53,7 +52,6 @@ _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_TMUX_LIB_DIR
-
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -72,7 +70,6 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # family, and verdict decision lives in the shared owner
 # (bin/fm-composer-lib.sh, fm_composer_classify_screen), so a new harness
 # shape is taught there once and never here.
-
 # fm_tmux_composer_capture: the visible pane WITH ANSI styling. The styled
 # capture is consumed internally by the classifier and is NEVER surfaced
 # (fm-peek and every human/LLM-facing path stay plain).
@@ -195,10 +192,13 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # `unknown`. Reclassify that pane the way every cursorless backend already
   # classifies it, letting the bottom-most shape win, which is the same rule
   # herdr, zellij, cmux, orca, and tern use for every harness including this one.
-  # Gated on Cursor's own structural process identity, never on the verdict
-  # alone, so the strict blank-row posture that owns `unknown` for every other
-  # harness is untouched.
-  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
+  # Droid also parks its cursor below the input box after a completed turn.
+  # Gate that read on its exact foreground process, so shells and other
+  # harnesses retain the strict cursor guard. Both reads still require the
+  # shared classifier to prove the composer empty before allowing input.
+  if [ "$verdict" = unknown ] \
+     && { fm_tmux_pane_is_cursor "$target" \
+          || fm_tmux_pane_is_droid "$target"; }; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
   # Cortex Code parks its terminal cursor in the first column of the blank row
@@ -239,6 +239,24 @@ fm_tmux_pane_is_cortex() {  # <target>
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
   return 1
+}
+
+# Fish can remain tmux's pane_current_command while its foreground group also
+# contains Droid. Require the exact live executable in that group, so a
+# background Droid or a stale screen after exit cannot authorize input.
+fm_tmux_pane_is_droid() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" != droid ] || return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
+
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains

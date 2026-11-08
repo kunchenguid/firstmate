@@ -282,6 +282,7 @@ The registrations in detail:
   When the guard returns 2, it returns `{ continue: true, additionalContext }`, so the continuation is compelled rather than requested.
   The continuation's stop carries `stop_hook_active: true`, which bounds it to one per turn, and omp's own cap of eight consecutive continuations is the second backstop.
   `session_stop` never fires for an interrupted turn or a task session, so those boundaries are deliberately unguarded.
+- Droid registers a `Stop` hook in `.factory/settings.json`, anchors through `DROID_PROJECT_DIR`, and passes the native payload to the shared guard.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment.
@@ -312,8 +313,8 @@ The registrations in detail:
 
 ### Claude and Codex blocking
 
-Claude and Codex can block a Stop directly with exit status 2 and stderr.
-Both payloads carry `stop_hook_active`.
+Claude, Droid, and Codex can block a Stop directly with exit status 2 and stderr.
+All three payloads carry `stop_hook_active`.
 In the default foreground-checkpoint Codex mode, a true value lets the second stop finish after one forced continuation.
 The tracked Codex Stop hook runs this guard through `bin/fm-codex-stop-park.sh --guard`, which adds behavior only for a native park session on a home that [opts in](configuration.md#codex-native-stop-park-configcodex-stop-park): while supervision is needed it accepts a live session-bound park or an immediate queued-wake handoff, blocks the Stop and latches the session to foreground fallback when no park owner appears within the startup grace, blocks a latched session's Stop while supervision is still needed, and otherwise runs this guard.
 [The Codex protocol](supervision-protocols/codex.md) owns that mode and its failure behavior.
@@ -575,6 +576,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - A valid secondmate home is in scope.
   An idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
+- Droid primary hooks load from tracked project-level `.factory/settings.json` on a normal interactive `droid` invocation; the headless surface is unverified.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
@@ -650,3 +652,4 @@ The opt-in live tests are:
 - `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` is the opt-in isolated omp path.
 
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the current Claude `asyncRewake` revalidation.
+[`verification/droid-primary.md`](verification/droid-primary.md) records Droid's blocking Stop and loop-guard evidence.

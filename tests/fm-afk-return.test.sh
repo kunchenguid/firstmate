@@ -253,13 +253,26 @@ window=synthetic:fm-decision-task
 backend=tmux
 kind=ship
 EOF
-  printf 'needs-decision [key=api-shape]: captain must choose the synthetic API shape\n' > "$dir/home/state/decision-task.status"
+  cat > "$dir/home/state/decision-task.status" <<'EOF'
+needs-decision [key=api-shape]: captain must choose the synthetic API shape
+needs-decision [key=retention]: captain must choose the synthetic retention policy
+working: independent evidence collection continued while both approvals waited
+EOF
   date +%s > "$dir/home/state/.afk"
-  printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' > "$dir/home/state/.fake-drain"
+  cat > "$dir/home/state/.fake-drain" <<'EOF'
+1784074271	1	signal	decision-task.status	signal: synthetic decision
+OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):
+decision-task [key=api-shape] needs-decision: captain must choose the synthetic API shape
+decision-task [key=retention] needs-decision: captain must choose the synthetic retention policy
+EOF
   out=$(run_return "$dir" begin) || fail "approval decision should not be treated as a firstmate blocker: $out"
   assert_contains "$out" 'catch-up wake:' "approval decision notification was not surfaced in catch-up"
+  assert_contains "$out" 'decision-task [key=api-shape] needs-decision:' "return catch-up lost the first outstanding question"
+  assert_contains "$out" 'decision-task [key=retention] needs-decision:' "return catch-up lost the second outstanding question"
+  assert_contains "$(cat "$dir/home/state/decision-task.status")" 'working: independent evidence collection continued' "return catch-up lost unrelated authorized progress"
+  assert_not_contains "$(cat "$dir/home/state/decision-task.status")" 'resolved [key=' "return catch-up automatically approved an outstanding question"
   [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "approval decision incorrectly opened a firstmate blocker gate"
-  pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
+  pass "return catch-up presents every outstanding approval without resolving it or masking independent progress"
 }
 
 test_evidence_publication_failure_preserves_wake_for_redrain() {
@@ -1282,8 +1295,6 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
   [ ! -e "$dir/home/state/.afk" ] || fail "the legacy flag survived the return"
   pass "a return with only the legacy away flag still renders the brief and measures the window from the flag"
 }
-
-
 
 test_unreadable_superseded_archive_keeps_return_gated() {
   local dir out rc epoch archive backup

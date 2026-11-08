@@ -322,14 +322,18 @@ release_task_control_lock() {
   CAPTAIN_CONTROL_LOCK=
 }
 
-sha256_text() {  # <text>
+sha256_stdin() {
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | awk '{print $1}'
+    sha256sum | awk '{print $1}'
   else
     fail "shasum or sha256sum is required"
   fi
+}
+
+sha256_text() {  # <text>
+  printf '%s' "$1" | sha256_stdin
 }
 
 # The legacy derived identity older installs minted for a captain call.
@@ -914,7 +918,6 @@ refuse_self_inventory() {
 # absent once retention ran. Only the completion gate consults the archive: an
 # archived row is closed, so it can satisfy the gate solely through a recorded
 # resolution, and every mutating path keeps seeing it as absent.
-
 # The [markdown] archive key tasks-axi would honour, resolved with tasks-axi's
 # own source precedence: the backlog root's .tasks.toml first, then the
 # user-level $HOME/.tasks-axi/config.toml. Empty when neither sets it; a relative
@@ -1521,7 +1524,7 @@ sanitize_reconcile_provenance() {
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
-  local resolve_rc
+  local resolve_rc valid
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -1543,20 +1546,27 @@ command_answers() {
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision.XXXXXX") || fail "cannot stage the captain decision"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision-err.XXXXXX") \
     || { rm -f -- "$tmp"; fail "cannot stage the captain decision diagnostics"; }
-  while IFS= read -r row; do
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    valid=1
     key=${row%%"$tab"*}
     rest=''
-    case "$row" in *"$tab"*) rest=${row#*"$tab"} ;; esac
+    case "$row" in *"$tab"*) rest=${row#*"$tab"} ;; *) valid=0 ;; esac
     answer=${rest%%"$tab"*}
-    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
+    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest=''; valid=0 ;; esac
     label=${rest%%"$tab"*}
     case "$rest" in *"$tab"*) mode=${rest#*"$tab"} ;; *) mode='' ;; esac
-    [ -n "${key:-}" ] || continue
-    case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
-    [ "${#key}" -le 128 ] || continue
+    case "$mode" in *"$tab"*) valid=0 ;; esac
+    case "$key" in ''|*[!A-Za-z0-9._-]*) valid=0 ;; esac
+    [ "${#key}" -le 128 ] || valid=0
     answer=$(sanitize_field "${answer:-}")
-    [ -n "$answer" ] || continue
+    [ -n "$answer" ] || valid=0
     label=$(sanitize_field "${label:-}")
+    if [ "$valid" -ne 1 ]; then
+      printf 'skipped: invalid keyed-answer record (expected task-id, answer, label, and optional close mode TSV fields)\n'
+      skipped=$((skipped + 1))
+      continue
+    fi
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
       printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
       skipped=$((skipped + 1))
@@ -2103,7 +2113,6 @@ EOF
 #
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
 # status-log then key order; nothing when the two records agree.
-
 # Every still-open task id in this home's backlog, one per line. Only the first
 # two comma-separated listing fields are read - both are slugs that precede any
 # quoted title - so a title containing commas or quotes cannot shift them.

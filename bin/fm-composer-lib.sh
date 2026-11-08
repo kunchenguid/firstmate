@@ -179,7 +179,6 @@
 #
 # Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
-
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
 # composer box border or bare prompt glyph is still visible; content extraction
@@ -439,7 +438,6 @@ fm_composer_strip_ghost() {
   '
 }
 
-
 # --- Delivery-only rendered busy footers (backend-agnostic) -------------------
 #
 # These live here, in the ONE shared composer/delivery owner, rather than in any
@@ -525,6 +523,10 @@ FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # every omp busy and furniture read on Linux CI.
 FM_OMP_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
 FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]'
+# Independent Droid activity and interrupt hints survive either being cropped.
+# Alternation keeps multibyte spinner frames intact under LC_ALL=C.
+FM_DROID_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
+FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT='Press ESC to stop|^[[:space:]]*'"$FM_DROID_SPINNER_FRAMES_RE"'[[:space:]]+(Thinking|Streaming|Invoking tools|Executing)\.\.\.'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
@@ -583,6 +585,7 @@ fm_busy_lines_match() {  # [harness]
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
+      droid) regex=$FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       polytoken) regex=$FM_DELIVERY_POLYTOKEN_BUSY_REGEX_DEFAULT ;;
@@ -948,7 +951,6 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
-
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
 # byte-exact in every locale.
@@ -1630,7 +1632,6 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # "/<name>..." token typed
 # so far right that its text starts beyond the region's midpoint
 # (_fm_composer_leftbar_cwd_start).
-
 # _fm_composer_leftbar_cwd_start: the first row of that furniture run inside
 # a leftbar composer region (<first-row>..<last-row>), or -1 when the region
 # carries none. Recognition is structural and position-gated:
@@ -1873,6 +1874,7 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
     "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 0
   fm_composer_leading_agent_glyph_var glyph "$row" || return 1
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
+
 }
 
 # _fm_composer_locate_footer_zone: THE composer footer zone of <plain> (see THE
@@ -2000,6 +2002,13 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 
+# Droid draws this elapsed-time/context status row immediately below its box.
+# It is composer furniture, not a newer interactive surface.
+_fm_composer_droid_status_row() {  # <trimmed-row>
+  local re='^\[⏱ [0-9]+[smh]( [0-9]+[smh])*(, context: (<1|[0-9]+)%)?\] '
+  [[ $1 =~ $re ]]
+}
+
 _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
   local plain=$1 screen=$2 styled=$3 generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
@@ -2119,7 +2128,9 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    if [ -n "$trimmed" ] \
+       && ! fm_composer_row_has_edge "$trimmed" \
+       && ! _fm_composer_droid_status_row "$trimmed"; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi

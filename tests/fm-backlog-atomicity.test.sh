@@ -47,7 +47,6 @@ command -v tasks-axi >/dev/null 2>&1 || {
 }
 
 # --- fixture ----------------------------------------------------------------
-
 # fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls
 # through to the developer's ambient ~/.tasks-axi/config.toml. make_home pins
 # the home itself; a case that relocates its data directory is addressed from
@@ -100,6 +99,7 @@ window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf '%s\n' "${FM_FAKE_PANE_CAPTURE:-}"; exit 0 ;;
   list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
   new-window)
     name=
@@ -127,6 +127,13 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  cat > "$fakebin/droid" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = exec ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Available Models:' '  gpt-5.6-sol  GPT-5.6 Sol'
+fi
+SH
+  chmod +x "$fakebin/droid"
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -344,7 +351,6 @@ SH
 }
 
 # --- fm_tasks_axi's own bound -------------------------------------------------
-
 # A PATH with no timeout variant on it - the stock-macOS shape, where GNU
 # timeout is absent and coreutils does not ship gtimeout. fm_tasks_axi must
 # still bound the call, through its perl watchdog, instead of running it
@@ -1395,6 +1401,28 @@ test_dispatch_reports_an_incomplete_record_rollback() {
   pass "dispatch reports when failed-transition rollback cannot remove its record"
 }
 
+test_droid_settings_survive_incomplete_record_rollback() {
+  local case_dir id meta settings out rc=0
+  id=atomic-droid-remove-failure-b5
+  case_dir=$(make_home droid-remove-failure "$id")
+  add_item "$case_dir" "$id"
+  meta="$(home_of "$case_dir")/state/$id.meta"
+  settings="$(home_of "$case_dir")/state/$id.droid-settings.json"
+  break_verb "$case_dir" start
+  break_meta_removal "$case_dir" "$meta"
+
+  out=$(FM_FAKE_PANE_CAPTURE='Executing... (Press ESC to stop)' run_spawn "$case_dir" "$id" "$case_dir/project" --harness droid \
+    --model gpt-5.6-sol --effort dynamic --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'Droid spawn reported success though transition and rollback failed'
+  assert_contains "$out" 'failed-dispatch cleanup is incomplete' 'Droid spawn did not report incomplete rollback'
+  assert_present "$meta" 'failed Droid rollback removed the preserved record'
+  jq -e '.sessionDefaultSettings.model == "gpt-5.6-sol" and .sessionDefaultSettings.reasoningEffort == "dynamic" and .hooks.Stop[0].hooks[0].type == "command"' \
+    "$settings" >/dev/null || fail 'failed Droid rollback removed finalized runtime settings'
+  assert_present "$(home_of "$case_dir")/state/$id.droid-trust" 'failed Droid rollback lost trust ownership'
+  [ "$(row_state "$case_dir" "$id")" = queued ] || fail 'failed Droid rollback changed the backlog row'
+  pass 'Droid runtime settings survive when failed rollback retains task metadata'
+}
+
 test_dispatch_reports_an_incomplete_busy_rollback() {
   local case_dir id out rc=0
   id=atomic-dispatch-busy-remove-failure-b5
@@ -1435,24 +1463,46 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery() {
 }
 
 test_dispatch_defers_interruption_across_backlog_commit() {
-  local timing case_dir id out rc
-  for timing in before after; do
-    id="atomic-dispatch-interrupted-$timing-b5"
-    case_dir=$(make_home "dispatch-interrupted-$timing" "$id")
-    add_item "$case_dir" "$id"
-    interrupt_spawn_during_start "$case_dir" "$timing"
+  local harness timing case_dir id out rc settings hook physical
+  for harness in claude droid; do
+    for timing in before after; do
+      id="atomic-dispatch-interrupted-$harness-$timing-b5"
+      case_dir=$(make_home "dispatch-interrupted-$harness-$timing" "$id")
+      add_item "$case_dir" "$id"
+      interrupt_spawn_during_start "$case_dir" "$timing"
 
-    rc=0
-    out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
-    [ "$rc" -ne 0 ] || fail "a $timing-commit interruption was reported as success"
-    assert_contains "$out" "verified preserved: its paired task record is present and its backlog item is In flight" \
-      "a $timing-commit interruption did not report its verified atomic outcome"
-    [ "$(row_state "$case_dir" "$id")" = in_flight ] \
-      || fail "a $timing-commit interruption left the backlog row queued"
-    assert_present "$(home_of "$case_dir")/state/$id.meta" \
-      "a $timing-commit interruption removed the paired task record"
+      rc=0
+      if [ "$harness" = droid ]; then
+        out=$(FM_FAKE_PANE_CAPTURE='Executing... (Press ESC to stop)' run_spawn "$case_dir" "$id" "$case_dir/project" --harness droid \
+          --model gpt-5.6-sol --effort dynamic --mode no-mistakes --yolo off) || rc=$?
+      else
+        out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+      fi
+      [ "$rc" -ne 0 ] || fail "a $timing-commit interruption was reported as success"
+      assert_contains "$out" "verified preserved: its paired task record is present and its backlog item is In flight" \
+        "a $timing-commit interruption did not report its verified atomic outcome"
+      [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+        || fail "a $timing-commit interruption left the backlog row queued"
+      assert_present "$(home_of "$case_dir")/state/$id.meta" \
+        "a $timing-commit interruption removed the paired task record"
+      if [ "$harness" = droid ]; then
+        settings="$(home_of "$case_dir")/state/$id.droid-settings.json"
+        jq -e '.sessionDefaultSettings.model == "gpt-5.6-sol" and .sessionDefaultSettings.reasoningEffort == "dynamic"' \
+          "$settings" >/dev/null || fail "a $timing-commit interruption lost finalized Droid settings"
+        hook=$(jq -r '.hooks.Stop[0].hooks[0].command' "$settings")
+        bash -c "$hook" || fail "the preserved Droid Stop hook failed"
+        assert_present "$(home_of "$case_dir")/state/$id.turn-ended" \
+          "the preserved Droid Stop hook did not signal its task"
+        assert_present "$(home_of "$case_dir")/state/$id.droid-trust" \
+          "a $timing-commit interruption lost Droid trust ownership"
+        physical=$(cd "$case_dir/wt" && pwd -P)
+        jq -e --arg path "$physical" '.trustedFolders[$path].trustedAt | type == "string"' \
+          "$case_dir/user-home/.factory/settings.json" >/dev/null \
+          || fail "a $timing-commit interruption revoked preserved Droid trust"
+      fi
+    done
   done
-  pass "dispatch retries interrupted transitions before honoring termination"
+  pass "dispatch preserves paired records and Droid runtime settings across interrupted commits"
 }
 
 test_deferred_signal_reads_back_preserved_state() {
@@ -2930,7 +2980,6 @@ EOF
   pass "spawn refuses an unsafe tasks-axi config before any exemption is derived from it"
 }
 
-
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home() {
   local case_dir home id out rc=0
   id=atomic-external-data-b15
@@ -2950,7 +2999,6 @@ test_spawn_refuses_a_data_directory_symlinked_outside_the_home() {
     "spawn published a task record through a data directory outside the home"
   pass "spawn refuses a data directory symlinked outside the home"
 }
-
 
 test_configured_adapter_refuses_a_data_directory_outside_the_home() {
   local case_dir home id out rc=0
@@ -2972,7 +3020,6 @@ test_configured_adapter_refuses_a_data_directory_outside_the_home() {
     "a configured adapter published a task record outside the home"
   pass "a configured adapter refuses a data directory outside the home"
 }
-
 
 test_dispatch_and_completion_are_structural() {
   local case_dir home id meta out pr
@@ -3138,6 +3185,7 @@ test_dispatch_refuses_a_closed_item
 test_dispatch_refuses_to_commit_without_a_published_record
 test_dispatch_leaves_no_record_when_the_transition_fails
 test_dispatch_reports_an_incomplete_record_rollback
+test_droid_settings_survive_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit

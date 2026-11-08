@@ -3515,6 +3515,13 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+remove_droid_task_trust() {  # <state> <id>
+  local state=$1 id=$2
+  if [ -e "$state/$id.droid-trust" ] || [ -L "$state/$id.droid-trust" ]; then
+    "$SCRIPT_DIR/fm-droid-trust.sh" --retire "$state/$id.droid-trust" "$state" "$id" >/dev/null || return 1
+  fi
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
   sub_state="$home/state"
@@ -3569,7 +3576,9 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    remove_droid_task_trust "$sub_state" "$child_id" || return 1
     teardown_export_records "$sub_state" "$child_id" || return 1
+
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3640,6 +3649,7 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
+      "$sub_state/$child_id.droid-settings.json" "$sub_state/$child_id.meta".droid-model.* \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
@@ -4034,6 +4044,11 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
+
+# Retire stored trust ownership even for a missing or reassigned pooled slot.
+# The helper transfers cleanup when another recorded task still uses that path.
+remove_droid_task_trust "$STATE" "$ID" || exit 1
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -4182,6 +4197,7 @@ fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.droid-settings.json" "$STATE/$ID.meta".droid-model.* \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \

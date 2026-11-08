@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # fm-control.sh relaunch: the transactional replace-the-agent verb.
 #
+#
 # Relaunch is the only control verb that changes durable records, so these
 # tests pin the transaction itself, hermetically (stubbed session provider, no
 # real agent):
@@ -85,6 +86,39 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
           cat "$D/becomes" > "$D/command"
+          if [ "$(cat "$D/becomes")" = droid ]; then
+            for settings in "$FM_HOME/state/"*.droid-settings.json; do
+              [ -f "$settings" ] || continue
+              if [ "${FM_FAKE_DROID_PROGRESS:-PreToolUse}" = before-start ]; then
+                hook=$(jq -er '.hooks.PreToolUse[0].hooks[0].command' "$settings") || exit 1
+                printf '{"hook_event_name":"PreToolUse"}\n' | bash -c "$hook" || exit 1
+              fi
+              case "${FM_FAKE_DROID_START:-current}" in
+                missing) ;;
+                *)
+                  hook=$(jq -er '.hooks.SessionStart[0].hooks[0].command' "$settings") || exit 1
+                  printf '{"hook_event_name":"SessionStart"}\n' | bash -c "$hook" || exit 1
+                  if [ "${FM_FAKE_DROID_START:-current}" = wrong-generation ]; then
+                    meta="${settings%.droid-settings.json}.meta"
+                    gen=$(sed -n 's/^spawn_gen=//p' "$meta")
+                    printf 'retired\n' > "$meta.droid-model.$gen.started"
+                  fi
+                  ;;
+              esac
+              case "${FM_FAKE_DROID_PROGRESS:-PreToolUse}" in
+                PreToolUse|Stop)
+                  event=${FM_FAKE_DROID_PROGRESS:-PreToolUse}
+                  hook=$(jq -er --arg event "$event" '.hooks[$event][0].hooks[-1].command' "$settings") || exit 1
+                  printf '{"hook_event_name":"%s"}\n' "$event" | bash -c "$hook" || exit 1
+                  ;;
+                stale)
+                  meta="${settings%.droid-settings.json}.meta"
+                  gen=$(sed -n 's/^spawn_gen=//p' "$meta")
+                  printf 'retired\n' > "$meta.droid-model.$gen.progress"
+                  ;;
+              esac
+            done
+          fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -119,10 +153,17 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
+    if { [ "${*: -1}" = -0 ] || [ "${*: -1}" = -40 ]; } && [ -f "$D/droid-screen" ]; then
+      cat "$D/droid-screen"
+      exit 0
+    fi
     if [ -s "$D/composer" ]; then
       printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
     else
       printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    if [ "${*: -1}" = -0 ] && [ "$(cat "$D/command")" = droid ]; then
+      printf 'Press ESC to stop\n'
     fi
     exit 0 ;;
   list-windows)
@@ -182,6 +223,15 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/droid" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = exec ] && [ "${2:-}" = --help ]; then
+  [ ! -e "$FM_FAKE_DIR/no-droid-catalog" ] || exit 1
+  printf '%s\n' 'Available Models:' '  pinned-model  Pinned Model' '  gpt-6.1-sol  GPT-6.1 Sol' \
+    'Custom Models:' '  custom:first  First' '  custom:second  Second'
+fi
+SH
+  chmod +x "$fb/droid"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -552,14 +602,17 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
+  # This marker follows the complete relaunch preflight, not just a fork.
+  # Give that startup path headroom on loaded hosts while retaining the cadence.
+  while [ ! -e "$prepare" ] && [ "$i" -lt 3000 ]; do
+
     /bin/sleep 0.01
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
+    fail "relaunch did not reach trace delivery"$'\n'"$(cat "$dir/control.out")"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
@@ -918,6 +971,183 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
+}
+
+test_same_droid_relaunch_preserves_dynamic_effort() {
+  local dir out rc settings mode id
+  for mode in explicit recorded; do
+    id="rl35-$mode"
+    dir=$(new_case "droid-settings-$mode" "$id")
+    add_ship_task "$dir" "$id" droid
+    printf 'droid' > "$dir/fake/command"
+    printf 'droid' > "$dir/fake/becomes"
+    settings="$dir/home/state/$id.droid-settings.json"
+    printf '%s\n' '{"retired":true}' > "$settings"
+
+    if [ "$mode" = explicit ]; then
+      out=$(run_control "$dir" "$id" relaunch --effort dynamic --note "continue with fresh settings"); rc=$?
+    else
+      sed 's/^effort=default$/effort=dynamic/' "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
+      mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+      out=$(run_control "$dir" "$id" relaunch --note "recover with the recorded profile"); rc=$?
+    fi
+    expect_code 0 "$rc" "same-Droid relaunch should preserve $mode dynamic effort"$'\n'"$out"
+    [ "$(meta_field "$dir" "$id" effort)" = dynamic ] \
+      || fail "same-Droid relaunch did not record $mode dynamic effort"
+    jq -e '.retired == null and .sessionDefaultSettings.reasoningEffort == "dynamic" and .hooks.Stop[0].hooks[0].type == "command"' "$settings" >/dev/null \
+      || fail "same-Droid relaunch did not publish $mode dynamic effort in replacement runtime settings"
+    chmod u+w "$dir/home/state/$id.git-hooks" || fail 'could not restore the Droid fixture hook directory for cleanup'
+    pass "fm-control relaunch: Droid preserves $mode dynamic effort"
+  done
+}
+
+test_droid_relaunch_requires_a_current_start_receipt() {
+  local dir out rc mode meta gen receipt signal screen progress start
+  for signal in response busy; do
+    screen='⛬  Previous answer'
+    [ "$signal" != busy ] || screen='Press ESC to stop'
+    for mode in missing wrong-generation current before-start stale PreToolUse Stop; do
+      dir=$(new_case "droid-start-$signal-$mode" rl-droid-start)
+      add_ship_task "$dir" rl-droid-start droid
+      printf droid > "$dir/fake/command"
+      printf droid > "$dir/fake/becomes"
+      printf '%s\n' "$screen" > "$dir/fake/droid-screen"
+      meta="$dir/home/state/rl-droid-start.meta"
+      printf 'spawn_gen=retired\n' >> "$meta"
+      printf 'retired\n' > "$meta.droid-model.retired.started"
+
+      start=current
+      progress=none
+      case "$mode" in
+        missing|wrong-generation) start=$mode ;;
+        before-start|stale|PreToolUse|Stop) progress=$mode ;;
+      esac
+      out=$(FM_FAKE_DROID_START="$start" FM_FAKE_DROID_PROGRESS="$progress" FM_DROID_READY_POLLS=2 FM_DROID_POLL_INTERVAL=0 \
+        run_control "$dir" rl-droid-start relaunch --note 'replace the prior turn'); rc=$?
+      if [ "$mode" = PreToolUse ] || [ "$mode" = Stop ]; then
+        expect_code 0 "$rc" "current-generation receipt and new progress must confirm the replacement"$'\n'"$out"
+        gen=$(meta_field "$dir" rl-droid-start spawn_gen)
+        receipt="$meta.droid-model.$gen.started"
+        assert_equals "$gen" "$(cat "$receipt")" 'the registered hook did not record the new generation'
+        [ ! -e "$meta.droid-model.retired.started" ] || fail 'relaunch retained the retired startup receipt'
+      else
+        expect_code 1 "$rc" "unchanged old $signal and a $mode receipt must not confirm relaunch"$'\n'"$out"
+        if [ "$mode" = current ] || [ "$mode" = before-start ] || [ "$mode" = stale ]; then
+          assert_contains "$out" 'Droid replacement has not shown new launch progress' 'stale output counted as replacement progress'
+        else
+          assert_contains "$out" 'Droid replacement did not confirm its current launch generation' 'relaunch refused before testing the receipt'
+        fi
+        assert_not_contains "$out" 'relaunched rl-droid-start' 'stale output reported a successful replacement'
+      fi
+      assert_equals droid "$(cat "$dir/fake/command")" 'the regression did not reach the replacement launch'
+      assert_equals "$screen" "$(cat "$dir/fake/droid-screen")" 'the identical viewport changed'
+      chmod u+w "$dir/home/state/rl-droid-start.git-hooks"
+    done
+  done
+  pass 'fm-control relaunch: replacement requires a current receipt and new progress'
+}
+
+test_droid_relaunch_follows_requested_selection() {
+  local dir out rc selection expected settings meta
+  for selection in default pinned-model; do
+    dir=$(new_case "droid-selection-$selection" rl-droid-selection)
+    add_ship_task "$dir" rl-droid-selection droid
+    printf droid > "$dir/fake/command"
+    printf droid > "$dir/fake/becomes"
+    meta="$dir/home/state/rl-droid-selection.meta"
+    printf 'model=%s\neffective_model=old-default\n' "$selection" >> "$meta"
+    mkdir -p "$dir/user-home/.factory"
+    printf '%s\n' '{"sessionDefaultSettings":{"model":"new-default"}}' > "$dir/user-home/.factory/settings.json"
+    out=$(run_control "$dir" rl-droid-selection relaunch --note "continue after default change"); rc=$?
+    expect_code 0 "$rc" "Droid selection relaunch failed"$'\n'"$out"
+    expected=unknown-at-spawn
+    [ "$(meta_field "$dir" rl-droid-selection model)" = "$selection" ] || fail 'relaunch changed requested selection'
+    [ "$(meta_field "$dir" rl-droid-selection effective_model)" = "$expected" ] || fail 'relaunch retained stale effective-model accounting'
+    settings="$dir/home/state/rl-droid-selection.droid-settings.json"
+    if [ "$selection" = default ]; then
+      jq -e '(.sessionDefaultSettings // {}) | has("model") | not' "$settings" >/dev/null || fail 'default relaunch pinned a model'
+    else
+      jq -e --arg model "$selection" '.sessionDefaultSettings | .model == $model and (has("reasoningEffort") | not) and .autonomyLevel == "high" and .autonomyMode == "auto-high" and .interactionMode == "auto"' "$settings" >/dev/null || fail 'relaunch lost explicit pin, high autonomy, or added an effort override'
+    fi
+  done
+  printf codex > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-droid-selection relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 0 "$rc" "switching away from Droid failed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl-droid-selection effective_model)" ] || fail 'harness switch preserved retired Droid accounting'
+  pass 'fm-control relaunch: Droid follows new defaults while preserving explicit model pins'
+}
+
+test_droid_relaunch_changes_and_clears_pins() {
+  local dir out rc meta settings selection gen previous_gen expected_effort
+  local -a effort_args
+  dir=$(new_case droid-change rl-droid-change)
+  add_ship_task "$dir" rl-droid-change droid
+  printf droid > "$dir/fake/command"
+  printf droid > "$dir/fake/becomes"
+  meta="$dir/home/state/rl-droid-change.meta"
+  settings="$dir/home/state/rl-droid-change.droid-settings.json"
+  printf 'model=custom:first\neffort=high\neffective_model=custom:first\nspawn_gen=retired\n' >> "$meta"
+  mkdir -p "$dir/user-home/.factory" "$dir/wt/.factory"
+  printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:second","reasoningEffort":"low"},"customModels":[{"id":"custom:first","model":"gpt-6.1-sol"},{"id":"custom:second","model":"gpt-6.1-sol"}]}' \
+    > "$dir/user-home/.factory/settings.json"
+  printf '%s\n' '{"sessionDefaultSettings":{"model":"custom:first","reasoningEffort":"medium"}}' > "$dir/wt/.factory/settings.local.json"
+  printf '.factory/\n' >> "$dir/proj/.git/info/exclude"
+  previous_gen=retired
+  for selection in gpt-6.1-sol custom:second default; do
+    effort_args=()
+    expected_effort=high
+    case "$selection" in
+      gpt-6.1-sol) effort_args=(--effort high) ;;
+      default) effort_args=(--effort default); expected_effort=default ;;
+    esac
+    out=$(run_control "$dir" rl-droid-change relaunch --model "$selection" "${effort_args[@]}" --note 'change selection'); rc=$?
+    expect_code 0 "$rc" "Droid model change failed"$'\n'"$out"
+    [ "$(meta_field "$dir" rl-droid-change model)" = "$selection" ] || fail 'Droid relaunch rewrote requested model'
+    [ "$(meta_field "$dir" rl-droid-change effort)" = "$expected_effort" ] || fail 'Droid relaunch lost effort selection'
+    [ "$(meta_field "$dir" rl-droid-change effective_model)" = unknown-at-spawn ] || fail 'Droid relaunch asserted unobserved execution'
+    gen=$(meta_field "$dir" rl-droid-change spawn_gen)
+    [ -n "$gen" ] && [ "$gen" != "$previous_gen" ] || fail 'Droid relaunch reused a runtime generation'
+    previous_gen=$gen
+    if [ "$selection" = default ]; then
+      jq -e '.sessionDefaultSettings | (has("model") | not) and (has("reasoningEffort") | not) and .autonomyMode == "auto-high"' "$settings" >/dev/null || fail 'Droid relaunch failed to clear model and effort pins while retaining high autonomy'
+    else
+      jq -e --arg model "$selection" '.sessionDefaultSettings | .model == $model and .reasoningEffort == "high" and .autonomyMode == "auto-high"' "$settings" >/dev/null || fail 'Droid relaunch changed exact model identity or high autonomy'
+    fi
+  done
+  pass 'fm-control relaunch: Droid changes exact native/custom pins and clears model/effort with fresh generations'
+}
+
+test_droid_relaunch_refuses_unavailable_selection_before_stop() {
+  local dir out rc scenario
+  for scenario in unsupported backing-shorthand catalog-unavailable; do
+    dir=$(new_case "droid-refuse-$scenario" rl-droid-refuse)
+    add_ship_task "$dir" rl-droid-refuse droid
+    printf droid > "$dir/fake/command"
+    [ "$scenario" != catalog-unavailable ] || touch "$dir/fake/no-droid-catalog"
+    cp "$dir/home/state/rl-droid-refuse.meta" "$dir/prior.meta"
+    out=$(run_control "$dir" rl-droid-refuse relaunch --model "$scenario" --note 'must refuse'); rc=$?
+    expect_code 1 "$rc" 'Droid unavailable selection should refuse'
+    assert_contains "$out" 'Droid model' 'Droid refusal should name the selection failure'
+    [ "$(cat "$dir/fake/command")" = droid ] || fail 'invalid Droid selection stopped the worker'
+    cmp -s "$dir/prior.meta" "$dir/home/state/rl-droid-refuse.meta" || fail 'refused Droid selection changed metadata'
+    [ ! -s "$dir/fake/literal" ] || fail 'refused Droid selection sent lifecycle text'
+  done
+  pass 'fm-control relaunch: unsupported Droid selection and unavailable catalog refuse before stopping the worker'
+}
+
+test_relaunch_refuses_invalid_explicit_effort_before_stop() {
+  local dir out rc
+  dir=$(new_case invalid-explicit-effort rl36)
+  add_ship_task "$dir" rl36 droid
+  printf 'droid' > "$dir/fake/command"
+
+  out=$(run_control "$dir" rl36 relaunch --effort impossible --note "must refuse"); rc=$?
+  expect_code 1 "$rc" "invalid explicit effort should refuse"
+  assert_contains "$out" "--effort must be one of default, low, medium, high, xhigh, max, ultra, dynamic" \
+    "invalid explicit effort should report the centralized vocabulary"
+  [ "$(cat "$dir/fake/command")" = droid ] || fail "invalid explicit effort stopped the running agent"
+  pass "fm-control relaunch: invalid explicit effort refuses before stop"
+
 }
 
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
@@ -1327,6 +1557,47 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
+test_droid_secondmate_relaunch_preserves_dynamic_pin() {
+  local dir home out rc
+  dir=$(new_case droid-smpin sm3)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'droid pinned-model dynamic\n' > "$home/config/secondmate-harness"
+  mkdir -p "$home/data/sm3"
+  printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm3"
+    echo "endpoint_task_id=sm3"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm3.meta"
+  printf '%s\n' "fm-sm3" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'droid' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm3 relaunch); rc=$?
+  expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
+  [ "$(journal_field "$dir" sm3 to_harness)" = droid ] \
+    || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
+  [ "$(journal_field "$dir" sm3 to_model)" = pinned-model ] \
+    || fail "the configured model token should come with the pin"
+  [ "$(journal_field "$dir" sm3 to_effort)" = dynamic ] \
+    || fail "the configured effort token should come with the pin"
+  assert_not_contains "$out" "not a verified harness" "droid is a verified harness"
+  jq -e '.sessionDefaultSettings.reasoningEffort == "dynamic" and .sessionDefaultSettings.autonomyMode == "auto-high" and (.hooks.Stop[0].hooks | length == 1)' "$home/state/sm3.droid-settings.json" >/dev/null || fail "Droid secondmate lost its dynamic profile or installed a worker Stop hook"
+  pass "fm-control relaunch: a Droid secondmate relaunch preserves its durable dynamic effort pin"
+}
+
 # The relaunch half of the opt-in scope: a pin file that declares no
 # "mate <id>:" line is read exactly as it was before that grammar existed, so a
 # second default line and a fourth token must not stop the relaunch. The mate
@@ -1367,6 +1638,7 @@ test_secondmate_relaunch_with_a_legacy_pin_file_uses_the_first_line() {
   [ "$(journal_field "$dir" sml2 to_effort)" = high ] \
     || fail "the relaunch should take the first line's effort token, got '$(journal_field "$dir" sml2 to_effort)'"
   pass "fm-control relaunch: a legacy secondmate pin file still relaunches the mate onto its first line"
+
 }
 
 test_secondmate_claude_relaunch_keeps_local_settings() {
@@ -1984,6 +2256,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
 
 test_prepublication_failure_keeps_concurrent_durable_metadata() {
   local dir control_pid link_out rc i=0
+  local ready_poll_limit=3000 ready_poll_interval=0.01
   dir=$(new_case rollback-race rl30)
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
@@ -1991,14 +2264,16 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
-    /bin/sleep 0.01
+  # The endpoint check follows the full preflight, so allow startup headroom
+  # without changing the concurrent write or rollback assertions.
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt "$ready_poll_limit" ]; do
+    /bin/sleep "$ready_poll_interval"
     i=$((i + 1))
   done
   [ -e "$dir/cwd-race-ready" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach its pre-publication endpoint check"
+    fail "relaunch did not reach its pre-publication endpoint check"$'\n'"$(cat "$dir/control.out")"
   }
   link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     "$X_LINK" rl30 request-30 --carry-count 2 --carry-ts 1700000000 \
@@ -2514,7 +2789,6 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 # prerequisite, so a task whose pane or workspace was destroyed could not be
 # reclaimed by anything, and any no-mistakes approval it was parked on had no
 # seat left to answer it.
-
 # strand_endpoint <case-dir> <id>: make a tmux endpoint read `missing` the way
 # a destroyed window does - a successful session inventory that omits the exact
 # window.
@@ -3092,6 +3366,18 @@ test_away_branch_relaunch_accepts_existing_dispatchable_items() {
   pass "away supervision relaunches existing In-flight and queued items under the saturated fresh-spawn spend cap"
 }
 
+test_droid_spinner_interrupts_before_exit() {
+  local dir out rc=0
+  dir=$(new_case droid-spinner-exit rl-droid-spinner)
+  add_ship_task "$dir" rl-droid-spinner droid
+  printf droid > "$dir/fake/command"
+  printf ' ⠸ Thinking...\n' > "$dir/fake/droid-screen"
+  out=$(run_control "$dir" rl-droid-spinner exit) || rc=$?
+  [ "$rc" -ne 0 ] || [ "$(cat "$dir/fake/command")" != droid ] || fail "exit claimed success while Droid was running: $out"
+  assert_contains "$(cat "$dir/fake/keys")" 'Escape' 'spinner-only Droid exit skipped the interrupt'
+  pass 'spinner-only Droid is interrupted before exit'
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -3141,7 +3427,9 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+test_droid_relaunch_requires_a_current_start_receipt
 test_relaunch_off_opencode_removes_tracked_wiring
+test_droid_spinner_interrupts_before_exit
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
@@ -3163,6 +3451,12 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_same_droid_relaunch_preserves_dynamic_effort
+test_droid_relaunch_follows_requested_selection
+test_droid_relaunch_changes_and_clears_pins
+test_droid_relaunch_refuses_unavailable_selection_before_stop
+test_relaunch_refuses_invalid_explicit_effort_before_stop
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
@@ -3178,6 +3472,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_droid_secondmate_relaunch_preserves_dynamic_pin
 test_secondmate_claude_relaunch_keeps_local_settings
 test_secondmate_relaunch_lands_on_the_per_mate_pin
 test_secondmate_relaunch_uses_the_default_for_an_unpinned_mate

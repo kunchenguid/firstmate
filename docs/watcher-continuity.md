@@ -20,7 +20,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 ## Ownership
 
 On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
-Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
+Codex, Grok, and Droid keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
 | Harness | Re-arm owner |
 | --- | --- |
@@ -234,13 +234,17 @@ The first recovery marks that generation announced, and later empty-queue arms l
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
-A Codex foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
+A foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
 Its ordinary arm check still announces a never-announced generation, including one made pending by a durable queue append during the checkpoint.
 
 ### Generation reuse
 
 An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
 A watcher closing to resurface the recovery it found at its start preserves the existing marker instead, while a handling successor resurfacing a later row publishes downtime like any close.
+
+A planned quiet timeout inside a Droid background cycle only releases the watcher lock when cleanup succeeds, no wake was delivered, and away or quiet mode is inactive.
+That rotation leaves the recovery marker and durable queue untouched, so consecutive quiet passes create no downtime while concurrently appended events still resurface; `tests/fm-watch-checkpoint.test.sh` covers both with real watcher rotations.
+
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
 A downtime republication of a pending episode reuses its generation.
 A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
@@ -572,7 +576,7 @@ The other harnesses rely on these mechanisms:
 - Claude normally depends on the Stop `asyncRewake` rewake.
   The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) adds guarded tmux retries when that continuation is lost.
 - Cursor depends on its awaited stop-hook park.
-- Grok retains native background-completion notifications.
+- Grok and Droid retain native background-completion notifications.
 - Codex retains bounded foreground checkpoints unless the home opts in to its [native Stop park](supervision-protocols/codex.md).
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current cross-harness live evidence, the dated Stop-owned Claude auto-arm results, and exact opt-in commands.

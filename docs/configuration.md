@@ -1246,12 +1246,28 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, omp, and droid are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 
 ### Harness restrictions and credentials
 
 `fm-spawn.sh` refuses kimi on cmux and Orca at preflight, because answering Kimi's folder-trust dialog needs a verified viewport-only capture those backends lack; [its adapter reference](../.agents/skills/harness-adapters/references/harness/kimi.md#readiness-gated-start) owns the trust-dialog handling.
 It also never answers a Kimi folder prompt that announces project MCP servers, pages what trusting would activate, or is collapsed for a short terminal, so no project MCP server starts without a consent decision that covers it; the launch fails with that reason, and the same adapter reference owns the exact rules.
+
+Droid's canonical launch likewise requires viewport capture to answer folder trust and confirm brief processing; [its adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md#launch-settings) owns its launch settings.
+Task metadata `model` records the requested selection: an explicit `--model`, a dispatch-profile or secondmate pin, or `default` for an unset selection that follows the user's current default.
+`fm-control.sh` relaunch and recovery consume only this selection; observing a default never creates a model pin.
+Canonical Droid launches accept only exact native or custom registry IDs listed by the installed Droid CLI's authoritative `droid exec --help` catalog; custom backing-model shorthand is refused.
+Exact IDs pass unchanged, even when a custom entry shares a native ID's backing model or several custom entries share one backing model.
+An unavailable catalog or a selection that does not match exactly one catalog entry refuses launch; relaunch checks this before stopping the current worker.
+Omitted or `default` selections emit no model pin, and omitted/default effort emits no reasoning-effort pin, preserving Droid's user and project precedence through the process-only settings overlay.
+Canonical Droid tasks additionally carry `effective_model`, an accounting and review identifier that starts as `unknown-at-spawn` for every generation until a concrete runtime observation arrives.
+A requested pin or configured default is not proof of execution.
+`fm-droid-model.sh` observes the runtime session settings sidecar through SessionStart, PreToolUse, and Stop hooks and reconciles only `effective_model` under the task lock, bound to `spawn_gen` so retired sessions cannot alter a replacement's record.
+An observation arriving while spawn holds that lock is reconciled after launch; no accounting hook waits for spawn's lock.
+Remote launch and relaunch replies mirror both fields from the launching host; switching away from Droid removes `effective_model` from both host and parent records.
+The fleet ledger receives the observed identifier available at dispatch, including an honest `unknown-at-spawn` if reconciliation has not happened yet.
+Neither runtime settings generation nor relaunch or recovery uses `effective_model` for selection.
+
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
@@ -1292,6 +1308,10 @@ The first-start license dialog requires an operator decision and is never accept
 
 ### Verification and primary supervision
 
+Droid supports primary and secondmate supervision as well as crewmate and scout launches.
+Its [adapter reference](../.agents/skills/harness-adapters/references/harness/droid.md) owns current trust, model, effort, and lifecycle facts, and [runtime verification](verification/runtime-backends.md#droid) records the live guard.
+Template-backed Droid launches require `jq` to construct private per-task settings; bootstrap diagnoses that dependency for static Droid crew selection or an active dispatch profile file, and every template-backed Droid spawn checks it before allocation.
+
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 
@@ -1306,7 +1326,7 @@ Enabled primary-session turn-end guard integrations are tracked as repo-level ho
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 
-Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints unless the home opts in to its [native Stop park](#codex-native-stop-park-configcodex-stop-park), Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok and Droid use background-notify cycles, Codex uses bounded foreground checkpoints unless the home opts in to its [native Stop park](#codex-native-stop-park-configcodex-stop-park), Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 
 ### Choose the worker harness
 
@@ -1845,7 +1865,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "quota_scope": "<optional quota-axi scope>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra|dynamic, optional>", "provider": "<optional quota-axi provider>", "quota_scope": "<optional quota-axi scope>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
