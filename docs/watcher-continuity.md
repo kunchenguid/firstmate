@@ -560,7 +560,7 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 
 - Monotonic failed-epoch progression.
 - The integrated bounded fail-open.
-- Post-alarm continuation suppression.
+- Post-alarm failure-continuation suppression.
 - Positive recovery reset.
 
 [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.

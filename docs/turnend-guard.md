@@ -609,7 +609,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Bounded attended fail-open.
 - Auto-arm-owned exhaustion alarms while the guard steps aside for open claims, including ordinary failures, pending and announced lost host hand-backs, and interruptions.
 - The same bound against a ledger frozen by an inert auto-arm with and without a verified failure episode.
-- Post-alarm continuation suppression.
+- Post-alarm failure-continuation suppression.
 - Positive recovery reset.
 - Generation and legacy claim cases that must block or clear instead of allowing a blind stop.
 - Away-mode daemon ownership between watcher cycles and over a watcher lock left behind by an exited watcher, plus its dead, pid-reused, absent, stale-beacon, and away-mode-off negatives.

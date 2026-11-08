@@ -719,8 +719,8 @@ if [ "$HEALTHY" -eq 1 ]; then
   autoarm_exit_suppressed 'firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused'
 fi
 
-# Exit without a continuation once either alarm writer has consumed the
-# episode's attended fail-open, so no later exit 2 can defeat it.
+# Suppress failure continuations after the episode's attended fail-open;
+# committed actionable rewakes bypass this check as positive recovery.
 autoarm_exit_if_alarmed() {
   [ -e "$FAILURE_ALARM" ] || return 0
   printf 'firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.\n' >&2

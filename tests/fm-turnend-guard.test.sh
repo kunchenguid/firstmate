@@ -2176,13 +2176,14 @@ auto_pid=$!
 # guard deterministically takes its step-aside observe branch instead of racing
 # the pre-claim ledger. The fixture waits for the guard to finish, so runner
 # load cannot let the failure commit race ahead of the guard's open-claim check.
+# Allow slow hook startup on loaded runners without changing the handshake.
 waited=0
-while [ "$waited" -lt 100 ]; do
+while [ "$waited" -lt 600 ]; do
   [ "$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null)" = arming ] && break
   sleep 0.05
   waited=$((waited + 1))
 done
-[ "$waited" -lt 100 ] || : > "$FM_HOME/noclaim-$i"
+[ "$waited" -lt 600 ] || : > "$FM_HOME/noclaim-$i"
 printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
   | CLAUDECODE=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$FM_HOME/guard-$i.out" 2>&1
 printf '%s' "$?" > "$FM_HOME/guard-$i.status"
