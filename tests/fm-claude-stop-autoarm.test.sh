@@ -101,6 +101,16 @@ write_arm_fixture() {
   # fails while state/successor-fail exists.
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+# The chain fixture shares this exclusive slot across foreground and successor
+# arms. Acquire before either branch so overlapping successors are observable.
+if [ -e "$FM_HOME/state/check-watcher-overlap" ]; then
+  if mkdir "$FM_HOME/state/watcher-live" 2>/dev/null; then
+    trap 'rmdir "$FM_HOME/state/watcher-live"; : > "$FM_HOME/state/watcher-exited-$$"' EXIT
+  else
+    : > "$FM_HOME/state/watcher-overlap"
+    exit 1
+  fi
+fi
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   printf 'arm=%s predecessor=%s\n' "$$" "$FM_WATCH_PREDECESSOR_ARM_PID" >> "$FM_HOME/state/successor-ran"
   if [ -e "$FM_HOME/state/successor-fail" ]; then
@@ -108,7 +118,11 @@ if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
     exit 1
   fi
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  while [ -e "$FM_HOME/state/successor-park" ]; do sleep 0.05; done
+  # Bound parking so a failed assertion cannot leave a fixture process behind.
+  for _ in $(seq 1 200); do
+    [ -e "$FM_HOME/state/successor-park" ] || break
+    sleep 0.05
+  done
   exit 0
 fi
 echo "$$" >> "$FM_HOME/state/arm-ran"
@@ -129,15 +143,11 @@ SH
       # beacon, and closes at once with an actionable wake, exactly as
       # bin/fm-watch-arm.sh does when a queued wake is waiting.
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
-if ! (set -C; : > "$FM_HOME/state/watcher-live") 2>/dev/null; then
-  : > "$FM_HOME/state/watcher-overlap"
-fi
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 date +%s >> "$FM_HOME/state/watcher-beats"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: fixture wake\n'
-rm -f "$FM_HOME/state/watcher-live"
 exit 0
 SH
       ;;
@@ -863,20 +873,36 @@ test_post_alarm_uncommitted_actionable_close_stays_suppressed() {
 # events must each deliver one rewake, run one arm, keep one watcher live at a
 # time with an advancing beacon, and end the stale episode on the first event.
 test_stale_alarm_cannot_freeze_the_stop_owned_chain() {
-  local dir out status i arms beats age
+  local dir out status i arms beats age successor attempt
   dir=$(make_primary_dir "$TMP_ROOT/chain-freeze")
   : > "$dir/state/task.meta"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" singleton-actionable
+  : > "$dir/state/check-watcher-overlap"
   for i in 1 2 3 4 5 6 7 8 9 10; do
     # Backdate the beacon before every event, so only a cycle that genuinely
     # ran its watcher can leave a fresh one behind.
     touch -t 202001010000 "$dir/state/.last-watcher-beat"
+    : > "$dir/state/successor-park"
     out=$(run_autoarm "$dir" 2>/dev/null); status=$?
     [ "$status" -eq 2 ] || fail "Stop event $i did not continue the chain (exit $status): $out"
     assert_contains "$out" "signal: task.status done: fixture wake" "Stop event $i lost its wake line: $out"
     [ "$(epoch_outcome "$dir")" = rewake ] || fail "Stop event $i recorded $(epoch_outcome "$dir") instead of rewake"
+    [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq "$i" ] \
+      || fail "Stop event $i did not start exactly one handling successor"
+    successor=$(sed -n 's/^arm=\([0-9]*\) .*$/\1/p' "$dir/state/successor-ran" | tail -n 1)
+    kill -0 "$successor" 2>/dev/null || fail "Stop event $i left no live handling successor"
+    assert_present "$dir/state/watcher-live" "the live successor did not hold the shared watcher slot"
+    assert_absent "$dir/state/watcher-overlap" "Stop event $i overlapped watcher arms"
+    # End this handling turn explicitly, then await the successor's EXIT trap
+    # before the next Stop; no timing assumption substitutes for completion.
+    rm -f "$dir/state/successor-park"
+    for attempt in $(seq 1 200); do
+      [ -e "$dir/state/watcher-exited-$successor" ] && break
+      sleep 0.05
+    done
+    assert_present "$dir/state/watcher-exited-$successor" "the handling successor did not finish"
     age=$(beacon_age "$dir")
     [ "$age" -lt 300 ] || fail "Stop event $i left a stale beacon (${age}s), so its cycle skipped the watcher"
     if [ "$i" -eq 1 ]; then
