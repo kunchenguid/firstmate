@@ -216,20 +216,51 @@ test_unchanged_republish_keeps_backoff() {
   pass "an unchanged republish keeps its backoff while a changed verb or note restarts it"
 }
 
-# A ledger written before rows carried the verb and note still keeps its
-# backoff for the same opened time, and is rewritten in the current form.
-test_legacy_ledger_row_keeps_backoff() {
+# A resolution and a same-text reopen landing between two ticks, while the
+# watcher is down, is a new episode: the persisted row must not carry over.
+test_resolved_same_text_reopen_starts_fresh() {
   reset_case
   touch "$CONFIG/open-decision-reminders"
   printf 'needs-decision [at=1000] [key=api]: choose\n' > "$STATE/worker.status"
-  printf 'worker\tapi\t1000\t1200\t200' > "$STATE/.open-decision-reminders"
-  open_decision_reminder_tick 1399
-  [ "$(count_wakes)" = 0 ] || fail "a legacy ledger row lost its backoff"
-  open_decision_reminder_tick 1400
-  [ "$(count_wakes)" = 1 ] || fail "a legacy ledger row's backoff did not expire"
-  [ "$(cut -f6,7 "$STATE/.open-decision-reminders")" = "needs-decision"$'\t'"choose" ] \
-    || fail "the legacy row was not rewritten with its verb and note: $(cat "$STATE/.open-decision-reminders")"
-  pass "legacy five-column ledger rows keep their backoff and migrate in place"
+  open_decision_reminder_tick 1200
+  open_decision_reminder_tick 1300
+  [ "$(count_wakes)" = 2 ] || fail "the first two reminders did not fire"
+  printf 'resolved [at=1400] [key=api]: answered\n' >> "$STATE/worker.status"
+  printf 'needs-decision [at=5000] [key=api]: choose\n' >> "$STATE/worker.status"
+  restarted_tick() {
+    FM_OPEN_DECISION_OVERDUE_SECS=100 FM_OPEN_DECISION_BACKOFF_MAX_SECS=400 \
+      bash -c '. "$1/bin/fm-watch.sh"; open_decision_reminder_tick "$2"' _ "$ROOT" "$1"
+  }
+  restarted_tick 5001
+  [ "$(count_wakes)" = 2 ] || fail "a reopen after resolution inherited the old episode: $(tail -1 "$FM_WAKE_QUEUE")"
+  restarted_tick 5099
+  [ "$(count_wakes)" = 2 ] || fail "a reopened key reminded before the threshold"
+  restarted_tick 5100
+  [ "$(count_wakes)" = 3 ] || fail "a reopened key did not remind at the threshold"
+  tail -1 "$FM_WAKE_QUEUE" | grep -F 'worker key=api age=100s' >/dev/null \
+    || fail "the reopen's age was not measured from its own time: $(tail -1 "$FM_WAKE_QUEUE")"
+  restarted_tick 5199
+  [ "$(count_wakes)" = 3 ] || fail "the reopened episode repeated before its reset first delay"
+  restarted_tick 5200
+  [ "$(count_wakes)" = 4 ] || fail "the reopened episode did not repeat at its reset first delay"
+  pass "a resolution and same-text reopen between ticks starts a fresh episode across a restart"
+}
+
+# An unchanged republish keeps its opened time, but its deferral date always
+# follows the newest line.
+test_republish_updates_until_date() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  # 1970-01-02T00:00:00Z is epoch 86400; 1970-01-03T00:00:00Z is 172800.
+  printf 'needs-decision [key=captain-hold-api-1] [until=1970-01-03] [at=1000]: captain hold api: choose\n' > "$STATE/mate.status"
+  open_decision_reminder_tick 86400
+  [ "$(count_wakes)" = 0 ] || fail "a dated relayed hold reminded before its date"
+  printf 'needs-decision [key=captain-hold-api-1] [until=1970-01-02] [at=50000]: captain hold api: choose\n' >> "$STATE/mate.status"
+  open_decision_reminder_tick 86400
+  [ "$(count_wakes)" = 1 ] || fail "a republished earlier [until=] date did not re-arm the hold"
+  [ "$OPEN_DECISION_REMINDER" = 'check: open decision overdue: mate key=captain-hold-api-1 age=85400s' ] \
+    || fail "the republish lost its first opened time: $OPEN_DECISION_REMINDER"
+  pass "a republish keeps its opened time and takes the newest deferral date"
 }
 
 test_unknown_times_and_keyless() {
@@ -314,5 +345,6 @@ fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
   test_wait_exemptions test_relayed_captain_hold_is_exempt_by_key \
   test_relayed_captain_hold_until_rearms test_unchanged_republish_keeps_backoff \
-  test_legacy_ledger_row_keeps_backoff test_unknown_times_and_keyless test_timed_fold_is_incremental \
+  test_resolved_same_text_reopen_starts_fresh test_republish_updates_until_date \
+  test_unknown_times_and_keyless test_timed_fold_is_incremental \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop
