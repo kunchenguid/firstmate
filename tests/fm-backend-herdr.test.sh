@@ -154,10 +154,11 @@ case "${1:-}" in
     ;;
   server)
     {
-      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_CREW_STATE_META_OVERRIDE FM_ARBITRARY_LEAK HERDR_FAKE_SENTINEL HERDR_SESSION; do
+      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_CREW_STATE_META_OVERRIDE FM_ARBITRARY_LEAK FM_BACKEND_HERDR_CLIENT_SESSION FM_BACKEND_HERDR_BIN HERDR_FAKE_SENTINEL HERDR_SESSION; do
         eval 'value=${'"$name"'-<unset>}'
         printf '%s=%s\n' "$name" "$value"
       done
+      printf 'bin=%s\n' "$0"
       printf 'args=%s\n' "$*"
     } > "$HERDR_FAKE_SERVER_ENV_LOG"
     : > "$HERDR_FAKE_SERVER_MARKER"
@@ -1430,10 +1431,11 @@ test_container_ensure_starts_server_and_workspace() {
 }
 
 test_server_ensure_scrubs_home_and_harness_identity() {
-  local dir log marker fb output name
-  dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  local dir log marker fb selected output name
+  dir="$TMP_ROOT/server-env"; mkdir -p "$dir/selected"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_env_fakebin "$dir")
-  PATH="$fb:$PATH" HERDR_FAKE_SERVER_ENV_LOG="$log" HERDR_FAKE_SERVER_MARKER="$marker" HERDR_FAKE_SENTINEL=kept FM_CREW_STATE_META_OVERRIDE=/tmp/stale-meta FM_ARBITRARY_LEAK=1 \
+  selected="$dir/selected/herdr"; cp "$fb/herdr" "$selected"
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_CLIENT_SESSION=fmtest FM_BACKEND_HERDR_BIN="$selected" HERDR_FAKE_SERVER_ENV_LOG="$log" HERDR_FAKE_SERVER_MARKER="$marker" HERDR_FAKE_SENTINEL=kept FM_CREW_STATE_META_OVERRIDE=/tmp/stale-meta FM_ARBITRARY_LEAK=1 \
     FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
     FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
@@ -1445,6 +1447,9 @@ test_server_ensure_scrubs_home_and_harness_identity() {
     assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
   done
   assert_contains "$output" "HERDR_FAKE_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
+  assert_contains "$output" "bin=$selected" "server_ensure did not launch the server with the client selected for this session"
+  assert_contains "$output" "FM_BACKEND_HERDR_CLIENT_SESSION=fmtest" "server_ensure dropped the session's client selection"
+  assert_contains "$output" "FM_BACKEND_HERDR_BIN=$selected" "server_ensure dropped the selected client binary"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
   pass "fm_backend_herdr_server_ensure: scrubs every FM_* variable and harness identity without disturbing unrelated environment or session routing"
