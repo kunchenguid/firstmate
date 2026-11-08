@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Provision and operate an isolated Herdr lab session without risking the live
-# default session.
+# fleet session.
 #
 # Usage:
 #   fm-herdr-lab.sh name <label>
@@ -25,8 +25,14 @@
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
-# Provision records the running default session as a fleet-state tripwire and
+# Provision records the running fleet session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
+# The fleet session is "default" unless FM_HERDR_LAB_FLEET_SESSION names the
+# custom session the live fleet runs in; that name must contain only letters,
+# digits, underscores, or dashes and can never be an fm-lab- session.
+# Every Herdr call made here clears HERDR_SOCKET_PATH, HERDR_PANE_ID,
+# HERDR_TAB_ID and HERDR_WORKSPACE_ID, which a worker pane inherits from the
+# live session.
 # The viewer command attaches or detaches one real foreground Herdr client on
 # an owned lab session over a fixed 40-row by 120-column pty;
 # bin/fm-herdr-lab-viewer.py owns the pty mechanics.
@@ -66,31 +72,51 @@ fm_herdr_lab_raw() { # <session> <herdr arguments...>
   local -a args=("$@")
   for ((i = 0; i < ${#args[@]}; i++)); do
     [ "${args[i]}" = -- ] || continue
-    HERDR_SESSION="$name" herdr "${args[@]:0:i}" --session "$name" "${args[@]:i}"
+    env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+      HERDR_SESSION="$name" herdr "${args[@]:0:i}" --session "$name" "${args[@]:i}"
     return
   done
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    HERDR_SESSION="$name" herdr "$@" --session "$name"
 }
 
 fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+fm_herdr_lab_fleet_session() {
+  local fleet=${FM_HERDR_LAB_FLEET_SESSION:-default}
+  if [[ ! "$fleet" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || [[ "$fleet" == fm-lab-* ]]; then
+    fm_herdr_lab_error "FM_HERDR_LAB_FLEET_SESSION must name the live fleet session, never a lab session: $fleet"
+    return 1
+  fi
+  printf '%s' "$fleet"
+}
+
 fm_herdr_lab_fleet_state() { # <session>
-  local name=$1 sessions snapshot
+  local name=$1 fleet sessions snapshot
+  fleet=$(fm_herdr_lab_fleet_session) || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
-  snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
-      then .[0] | {name, default, running, socket_path}
-      else empty
-      end
+  snapshot=$(printf '%s' "$sessions" | jq -c --arg fleet "$fleet" '
+    if $fleet == "default" then
+      [.sessions[]? | select(.default == true)]
+      | if length == 1 and .[0].name == "default" and .[0].running == true
+        then .[0] | {name, default, running, socket_path}
+        else empty
+        end
+    else
+      [.sessions[]? | select(.name == $fleet)]
+      | if length == 1 and .[0].default == false and .[0].running == true
+        then .[0] | {name, default, running, socket_path}
+        else empty
+        end
+    end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one running $fleet session"
     return 1
   }
   printf '%s\n' "$snapshot"
@@ -457,16 +483,17 @@ fm_herdr_lab_provision() { # <session>
 }
 
 fm_herdr_lab_check_tripwire() { # <session>
-  local name=$1 tripwire before after
+  local name=$1 tripwire before after fleet
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified teardown"
     return 1
   }
   before=$(cat "$tripwire")
+  fleet=$(fm_herdr_lab_fleet_session) || return 1
   after=$(fm_herdr_lab_fleet_state "$name") || return 1
   [ "$before" = "$after" ] || {
-    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
+    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: $fleet session changed during lab work"
     fm_herdr_lab_error "before: $before"
     fm_herdr_lab_error "after:  $after"
     return 1
