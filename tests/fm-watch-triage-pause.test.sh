@@ -1538,6 +1538,18 @@ test_declared_wait_surfaces_superseding_state() {
   grep -F 'paused wait superseded: current run R is terminal (done)' "$dir/watch.out" >/dev/null \
     || fail "terminal wake did not identify the superseded wait"
 
+  dir=$(make_superseded_pause_case gate-terminal-pr 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R1 · pr=https://example.test/1' exit \
+    || fail "terminal run with PR did not supersede the declared wait"
+  grep -F 'current run R1 is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "PR suffix obscured the first terminal run id"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first terminal wake"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R2 · pr=https://example.test/2' exit \
+    || fail "second terminal run with PR did not supersede the declared wait"
+  grep -F 'current run R2 is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "different terminal run shared the first run's throttle"
+
   dir=$(make_superseded_pause_case gate-busy-recent 'paused: waiting for validation run R')
   superseded_pause_round "$dir" \
     'state: parked · source: run-step · ask-user: authority decision · run: R' exit recent \

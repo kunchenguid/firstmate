@@ -2425,9 +2425,10 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # recheck cadence for repeats. The shared predicates bind the gate to this run.
 # OFF unless the home creates config/paused-wait-supersession: absent the flag it
 # returns before any read, so the watcher spends no crew-state read here and
-# keeps the unchanged declared-wait cadence and wording.
+# keeps the unchanged declared-wait cadence and wording. This applies to the
+# foreground watcher only; away mode keeps today's declared-wait pause cadence.
 paused_wait_superseded() {  # <window> <task>
-  local win=$1 task=$2 line statusf key last run state reason
+  local win=$1 task=$2 line statusf key last run state reason rest part
   [ -e "$CONFIG/paused-wait-supersession" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
@@ -2441,7 +2442,12 @@ paused_wait_superseded() {  # <window> <task>
     state=${line#state: }; state=${state%% *}
     case "$state" in done|failed) ;; *) return 1 ;; esac
     run=''
-    case "$line" in *' · run: '*) run=${line##* · run: } ;; esac
+    rest="$line · "
+    while [ -n "$rest" ]; do
+      part=${rest%% · *}
+      rest=${rest#* · }
+      case "$part" in "run: "?*) run=${part#run: } ;; esac
+    done
     case "$run" in *[[:space:]]*) run='' ;; esac
     reason="stale: $win (paused wait superseded: current run${run:+ $run} is terminal ($state))"
     state="terminal${run:+:$run}"

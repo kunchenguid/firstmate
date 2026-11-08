@@ -1033,7 +1033,7 @@ With it present, a pane whose worker's newest wait line is a `paused:` declarati
 Each superseding state surfaces once per declaration and run on both the idle and busy paths, and repeats use the same bounded recheck cadence.
 It stays opt-in because it adds a wake reason that fires ahead of that cadence and spends a current-state read on each paused poll, so which lanes pay that read for earlier notice is a home's choice.
 
-With the flag absent the watcher spends no current-state read for it and keeps the unchanged declared-wait cadence and wording.
+With the flag absent the watcher spends no current-state read for it and keeps the unchanged declared-wait cadence and wording. The flag affects the foreground watcher only; away mode keeps today's declared-wait pause cadence.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the declared-wait contract and `bin/fm-watch.sh`'s `paused_wait_superseded` owns the exact derivation, reasons, and throttle.
 
