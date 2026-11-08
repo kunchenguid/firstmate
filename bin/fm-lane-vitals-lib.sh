@@ -14,7 +14,7 @@
 # powershell.exe), so a fake bin directory drives the macOS, WSL, and native
 # Windows (Git Bash/MSYS, where uname -s is MINGW*/MSYS*) paths.
 #
-# fm_lane_vitals_probe <os>
+# fm_lane_vitals_probe <os> [gpu]
 #   Sets LV_LOAD5, LV_PSI_CPU10, LV_PSI_MEM10, LV_PSI_MEM60, LV_PSI_MEMFULL10,
 #   LV_PSI_IO10, LV_PSI_IO60 (Linux pressure-stall averages, percent),
 #   LV_SWAPIN (cumulative pages swapped in), LV_VMPRESS (macOS
@@ -23,7 +23,7 @@
 #   WSL, else 0), LV_WINDOWS (1 on native Windows, else 0), and LV_GPU (one "name<TAB>util_pct<TAB>used_gb<TAB>total_gb"
 #   line per GPU; macOS unified memory leaves the two memory fields empty).
 #   Linux reads /proc/loadavg, /proc/pressure/{cpu,memory,io}, /proc/vmstat
-#   pswpin, /sys/class/power_supply/*/{type,online,capacity,status}, and
+#   pswpin, /sys/class/power_supply/*/{type,scope,online,capacity,status}, and
 #   /proc/version for WSL; macOS reads sysctl vm.loadavg and
 #   kern.memorystatus_vm_pressure_level, vm_stat Swapins, pmset -g batt and
 #   -g therm (a CPU_Speed_Limit under 100 or a recorded warning is limited), and
@@ -31,7 +31,9 @@
 #   where they exist (loadavg, vmstat) and nothing else; the host view below
 #   supplies its memory, cores, load, and power. The GPU probe tries nvidia-smi
 #   on PATH, then inside WSL /usr/lib/wsl/lib/nvidia-smi, then nvidia-smi.exe,
-#   bounded to 3 s.
+#   bounded to 3 s; a gpu argument of 0 skips every GPU probe and leaves LV_GPU
+#   empty. A Linux power_supply whose scope is Device (a wireless mouse,
+#   keyboard, or controller) is never the system battery.
 #
 # fm_lane_vitals_windows_host
 #   Prints "avail_gb total_gb commit_pct cpu_pct cores power" for the Windows
@@ -89,8 +91,8 @@ _fm_lv_psi() {  # <file> <some|full> <avg10|avg60>
 }
 
 # shellcheck disable=SC2034 # LV_* are output globals read by bin/fm-capacity.sh after sourcing.
-fm_lane_vitals_probe() {  # <os>
-  local os=$1 v line dir type online status any_mains=0 mains_on=0
+fm_lane_vitals_probe() {  # <os> [gpu]
+  local os=$1 want_gpu=${2:-1} v line dir type online status scope any_mains=0 mains_on=0
   LV_LOAD5='' LV_PSI_CPU10='' LV_PSI_MEM10='' LV_PSI_MEM60='' LV_PSI_MEMFULL10=''
   LV_PSI_IO10='' LV_PSI_IO60='' LV_SWAPIN='' LV_VMPRESS='' LV_ON_AC='' LV_BATT_PCT=''
   LV_THERMAL='' LV_WSL=0 LV_WINDOWS=0 LV_GPU=''
@@ -122,11 +124,10 @@ fm_lane_vitals_probe() {  # <os>
         LV_THERMAL=limited
       fi
     fi
-    v=$(ioreg -r -d 1 -c IOAccelerator 2>/dev/null | awk '
+    [ "$want_gpu" = 0 ] || LV_GPU=$(ioreg -r -d 1 -c IOAccelerator 2>/dev/null | awk '
       /"model" = / { m = $0; sub(/.*"model" = "/, "", m); sub(/".*/, "", m) }
       /"Device Utilization %"=/ { u = $0; sub(/.*"Device Utilization %"=/, "", u); sub(/[^0-9].*/, "", u) }
       END { if (m != "" || u != "") printf "%s\t%s\t\t\n", (m == "" ? "gpu" : m), u }')
-    LV_GPU=$v
     return 0
   fi
   v=$(awk '{print $2}' "$FM_LANE_VITALS_PROC/loadavg" 2>/dev/null)
@@ -144,19 +145,21 @@ fm_lane_vitals_probe() {  # <os>
   case "$v" in ''|*[!0-9]*) ;; *) LV_SWAPIN=$v ;; esac
   for dir in "$FM_LANE_VITALS_SYS"/class/power_supply/*; do
     [ -d "$dir" ] || continue
-    IFS= read -r type < "$dir/type" 2>/dev/null || type=
+    IFS= read -r type 2>/dev/null < "$dir/type" || type=
     case "$type" in
       Mains|USB*)
-        IFS= read -r online < "$dir/online" 2>/dev/null || online=
+        IFS= read -r online 2>/dev/null < "$dir/online" || online=
         case "$online" in
           1) any_mains=1 mains_on=1 ;;
           0) any_mains=1 ;;
         esac
         ;;
       Battery)
-        IFS= read -r v < "$dir/capacity" 2>/dev/null || v=
+        IFS= read -r scope 2>/dev/null < "$dir/scope" || scope=
+        [ "$scope" != Device ] || continue
+        IFS= read -r v 2>/dev/null < "$dir/capacity" || v=
         case "$v" in ''|*[!0-9]*) ;; *) LV_BATT_PCT=$v ;; esac
-        IFS= read -r status < "$dir/status" 2>/dev/null || status=
+        IFS= read -r status 2>/dev/null < "$dir/status" || status=
         [ "$status" != Discharging ] || [ "$any_mains" -eq 1 ] || LV_ON_AC=false
         ;;
     esac
@@ -167,7 +170,7 @@ fm_lane_vitals_probe() {  # <os>
   if grep -qi microsoft "$FM_LANE_VITALS_PROC/version" 2>/dev/null; then
     LV_WSL=1
   fi
-  LV_GPU=$(_fm_lv_nvidia)
+  [ "$want_gpu" = 0 ] || LV_GPU=$(_fm_lv_nvidia)
 }
 
 _fm_lv_nvidia() {

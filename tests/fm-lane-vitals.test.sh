@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavioral coverage for bin/fm-lane-vitals-lib.sh, the probes behind
 # bin/fm-capacity.sh's auto budget: Linux vitals from a fixture /proc and /sys
-# (load5, pressure stall, swap-in, power supply, WSL detection), macOS vitals
+# (load5, pressure stall, swap-in, power supply with peripheral batteries
+# ignored, WSL detection), macOS vitals
 # from fake sysctl, vm_stat, pmset, and ioreg, the GPU probe from a fake
 # nvidia-smi, the Windows host view from a fake powershell.exe (ok, failing,
 # and malformed; native Windows detection from uname), per-process tables on both platforms, lane attribution
@@ -79,7 +80,24 @@ test_linux_vitals_from_fixtures() {
   out=$(lv "$(fm_fakebin "$TMP_ROOT/linux")" "$proc" "$sys" 'fm_lane_vitals_probe Linux
     echo "$LV_PSI_MEM10|$LV_ON_AC|$LV_WSL"')
   assert_equals '|true|1' "$out" "missing PSI must read unknown, mains online true, and WSL detected"
-  pass "Linux vitals read the fixture /proc and /sys, and missing sources read unknown"
+  rm -rf "$sys/class/power_supply/AC" "$sys/class/power_supply/BAT0"
+  mkdir -p "$sys/class/power_supply/hid-mouse-battery"
+  printf 'Battery\n' > "$sys/class/power_supply/hid-mouse-battery/type"
+  printf 'Device\n' > "$sys/class/power_supply/hid-mouse-battery/scope"
+  printf '63\n' > "$sys/class/power_supply/hid-mouse-battery/capacity"
+  printf 'Discharging\n' > "$sys/class/power_supply/hid-mouse-battery/status"
+  out=$(lv "$(fm_fakebin "$TMP_ROOT/linux")" "$proc" "$sys" 'fm_lane_vitals_probe Linux
+    echo "$LV_ON_AC|$LV_BATT_PCT"')
+  assert_equals '|' "$out" "a Device-scoped peripheral battery on a desktop with no Mains must not read as the system on battery"
+  mkdir -p "$sys/class/power_supply/BAT1"
+  printf 'Battery\n' > "$sys/class/power_supply/BAT1/type"
+  printf 'System\n' > "$sys/class/power_supply/BAT1/scope"
+  printf '37\n' > "$sys/class/power_supply/BAT1/capacity"
+  printf 'Discharging\n' > "$sys/class/power_supply/BAT1/status"
+  out=$(lv "$(fm_fakebin "$TMP_ROOT/linux")" "$proc" "$sys" 'fm_lane_vitals_probe Linux
+    echo "$LV_ON_AC|$LV_BATT_PCT"')
+  assert_equals 'false|37' "$out" "a System-scoped discharging battery beside a peripheral must still read on battery"
+  pass "Linux vitals read the fixture /proc and /sys, missing sources read unknown, and peripheral batteries are ignored"
 }
 
 test_darwin_vitals_from_fakes() {
@@ -145,6 +163,8 @@ SH
   out=$(printf 'caller input\n' | lv "$fakebin" "$TMP_ROOT/gpu/proc" /nonexistent 'fm_lane_vitals_probe Linux; printf "%s\n" "$LV_GPU"; fm_lane_vitals_windows_host')
   assert_equals "NVIDIA GeForce RTX 5070 Ti	7	1.70	15.92
 2.08 31.10 88 51 16 battery" "$out" "the GPU line and the Windows host view must parse"
+  out=$(lv "$fakebin" "$TMP_ROOT/gpu/proc" /nonexistent 'fm_lane_vitals_probe Linux 0; printf "[%s]\n" "$LV_GPU"')
+  assert_equals "[]" "$out" "a gpu argument of 0 must skip the GPU probe"
   out=$(lv "$fakebin" "$TMP_ROOT/gpu/proc" /nonexistent 'fm_lane_vitals_probe MINGW64_NT-10.0-26100; printf "%s|%s\n" "$LV_WINDOWS" "$LV_WSL"; fm_lane_vitals_probe Linux; printf "%s\n" "$LV_WINDOWS"')
   assert_equals "1|0
 0" "$out" "a MINGW uname must read native Windows, and Linux must not"

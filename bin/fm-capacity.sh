@@ -144,7 +144,9 @@
 #   say when more than half of this home's lanes have no attributed process.
 #   When no process working directory can be read at all (lsof timed out on a
 #   loaded host), every lane keeps its last sample and notes say so, so an
-#   unreadable table never looks like lanes with no agent.
+#   unreadable table never looks like lanes with no agent. --admit and
+#   --spawn-gate read no processes, and probe the GPU only with
+#   min-gpu-free-gb, since their verdict reads neither.
 #   Budget: open = the smallest of
 #     memory  floor((available - kept - young x F_mem) / F_mem), where kept is
 #             min-avail-gb, else the larger of 10% of RAM and 2 GB, and
@@ -898,7 +900,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 auto_notes=
 auto_ledger=
 auto_budget() {
-  local attr_ok tmp lstate i n_states have_states=0 v cfg vit prev_ledger prev_doc out disk_sample host lab mount free seen_mounts
+  local attr_ok want_gpu=1 tmp lstate i n_states have_states=0 v cfg vit prev_ledger prev_doc out disk_sample host lab mount free seen_mounts
   if [ "$have_jq" -eq 0 ]; then
     free_lanes=0 reason=auto-needs-jq
     reasons="${reasons}auto: needs jq to read the lane footprint ledger
@@ -913,7 +915,8 @@ auto_budget() {
   . "$SCRIPT_DIR/fm-lane-vitals-lib.sh"
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh"
-  fm_lane_vitals_probe "$os"
+  [ "$mode" != admit ] || [ -n "$min_gpu_free_gb" ] || want_gpu=0
+  fm_lane_vitals_probe "$os" "$want_gpu"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-capacity.XXXXXX") || tmp=
   if [ -z "$tmp" ]; then
     free_lanes=0 reason=auto-unavailable
@@ -953,7 +956,9 @@ auto_budget() {
   # Processes attributed to each lane's worktree.
   attr_ok=true
   : > "$tmp/ps"
-  if ! awk -F'\t' '$2 != "" { found = 1; exit } END { exit !found }' "$tmp/worktrees"; then
+  if [ "$mode" = admit ]; then
+    :
+  elif ! awk -F'\t' '$2 != "" { found = 1; exit } END { exit !found }' "$tmp/worktrees"; then
     :  # no lane has a worktree, so there is nothing to attribute
   elif ! fm_lane_vitals_processes "$os" "$tmp/ps" 2>/dev/null; then
     attr_ok=false

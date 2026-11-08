@@ -9,7 +9,8 @@
 # static ceiling, the learned footprint and the unmeasured lanes it ignores,
 # the published ledger and its history, the ranked reclaim list, the Windows
 # host view inside WSL (cached for every mode but --publish) and on native
-# Windows, a closed gate held while its reading cannot be taken, the opt-in
+# Windows, a closed gate held while its reading cannot be taken, admission that
+# skips the process and GPU probes its verdict does not read, the opt-in
 # spawn gate, config validation, and a real-host smoke.
 set -u
 
@@ -590,6 +591,43 @@ test_admission_honours_the_damped_budget() {
   pass "admission counts lanes started since the last publish against the damped budget, so a burst cannot exceed it"
 }
 
+test_admission_skips_unused_probes() {
+  local home fakebin p tool rc
+  home=$(make_home lean-admit)
+  p="$TMP_ROOT/p-lean-admit"
+  fakebin=$(make_probes "$p")
+  for tool in lsof ioreg; do
+    mv "$fakebin/$tool" "$fakebin/$tool.real"
+    cat > "$fakebin/$tool" <<SH
+#!/usr/bin/env bash
+printf '%s %s\n' $tool "\$*" >> "$p/calls"
+exec "$fakebin/$tool.real" "\$@"
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  mkdir -p "$home/wt-a"
+  write_lane "$home" lane-a "$home/wt-a"
+  printf 'auto\nadmit-spawns\n' > "$home/config/lane-capacity"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --spawn-gate >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "an open auto budget must admit through the spawn gate"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --admit >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "an open auto budget must admit"
+  assert_equals '' "$(grep -E '^lsof |IOAccelerator' "$p/calls" 2>/dev/null)" \
+    "--spawn-gate and --admit must read no process table and probe no GPU without min-gpu-free-gb"
+  printf 'auto\nmin-gpu-free-gb 1\n' > "$home/config/lane-capacity"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --admit >/dev/null 2>&1 || true
+  assert_equals '1|0' "$(grep -c IOAccelerator "$p/calls")|$(grep -c '^lsof ' "$p/calls")" \
+    "--admit with min-gpu-free-gb must probe the GPU its gate reads, and still no process table"
+  : > "$p/calls"
+  printf 'auto\n' > "$home/config/lane-capacity"
+  json "$home" "$fakebin" '.verdict.admit' >/dev/null
+  assert_equals '1|1' "$(grep -c IOAccelerator "$p/calls")|$(grep -c '^lsof ' "$p/calls")" \
+    "--json must still read the process table and the GPU for the ledger, reclaim, and vitals"
+  pass "--admit and --spawn-gate skip process attribution and the GPU probe their verdict does not read"
+}
+
 test_spawn_gate_is_opt_in() {
   local home fakebin rc
   home=$(make_home gate)
@@ -684,6 +722,7 @@ test_wsl_host_view_closes_admission
 test_unknown_reading_holds_a_closed_gate
 test_native_windows_reads_the_host_view
 test_admission_honours_the_damped_budget
+test_admission_skips_unused_probes
 test_spawn_gate_is_opt_in
 test_auto_config_validation
 test_real_host_auto_smoke
