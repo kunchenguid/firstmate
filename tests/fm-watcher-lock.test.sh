@@ -296,7 +296,7 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
 # was never torn down.
 run_legacy_identity_takeover() {  # <case> <successor-first>
   local case_name=$1 successor_first=$2
-  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released real_sleep old_poll
+  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released real_sleep old_poll lock lock_state
   dir=$(make_case "$case_name")
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -372,7 +372,16 @@ SH
     released=$([ -e "$state/.watch.lock/pid" ] && echo no || echo yes)
     # Resume before any assertion can fail, so a failure never strands it stopped.
     kill -CONT "$old" 2>/dev/null || true
-    is_live_non_zombie "$new" && fail "the successor never delivered its recovery wake and exited: $(cat "$new_out")"
+    if is_live_non_zombie "$new"; then
+      # Report what the successor was stuck on: an empty new_out leaves the
+      # lock records as the only evidence of the wait it never returned from.
+      lock_state=
+      for lock in "$state"/.*.lock "$state"/.*.lock.steal; do
+        [ -e "$lock" ] || [ -L "$lock" ] || continue
+        lock_state="$lock_state $(basename "$lock")=$(cat "$lock/pid" 2>/dev/null || printf '?')"
+      done
+      fail "the successor never delivered its recovery wake and exited (new=$new claimed=$claimed locks:$lock_state): $(cat "$new_out")"
+    fi
     wait "$new" || fail "the successor did not exit cleanly after its recovery wake: $(cat "$new_out")"
     # A successor that held the lock delivers a wake; one that stood down prints
     # only a watcher: refusal.
