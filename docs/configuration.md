@@ -1355,6 +1355,12 @@ An explicit harness also bypasses reading the pin file during spawn or control-p
 
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
+Such a spawn also refuses until `bin/fm-dispatch-resolve.sh data/<id>/brief.md` has written that task's record, `data/<id>/dispatch-resolution.json`.
+Both paths are under `FM_DATA_OVERRIDE` instead of `data/` when it is set.
+When the record is `clear`, the spawn must match its harness, and its model and effort where the record sets them, with no raw launch command, unless `--dispatch-override <reason>` records a task override in `state/<id>.meta` as `dispatch_override=<reason>`.
+A model or effort the record leaves empty is not bound, so the documented effort fallback still applies.
+When the record is `ambiguous`, `escalate`, `error`, or `off`, the explicit flags from the manual intake are enough.
+An `fm-spawn.sh --relaunch` skips this check.
 
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
@@ -2084,6 +2090,14 @@ Firstmate still applies those gates before dispatch, including when `preferred_p
 Explicit captain overrides retain precedence over the resolver's suggestion.
 
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
+
+**Task record (data/<id>/dispatch-resolution.json)**
+
+For a brief at `data/<id>/brief.md`, or `<FM_DATA_OVERRIDE>/<id>/brief.md` when that override is set, each run first removes that task's `dispatch-resolution.json`, so a decision never outlives a later run.
+Every outcome that exits 0, including off, then writes one JSON object there: `task` (the `<id>`), `status` (`clear`, `ambiguous`, `escalate`, `error`, or `off`), and `profile`.
+On `clear`, `profile` holds `harness`, `model`, and `effort`, each `null` when the chosen profile leaves it unset; otherwise `profile` is `null`.
+A usage or configuration error (exit 2) writes no record.
+`fm-spawn.sh` reads this record as the task's decision, as "Per-launch overrides and inherited defaults" describes.
 
 **Credential source declaration (config/dispatch-credential-sources.json)**
 
