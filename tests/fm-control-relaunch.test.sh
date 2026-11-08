@@ -3037,6 +3037,7 @@ test_rex_claude_resume_is_off_unless_the_home_opts_in() {
     dir=$(REX_CLAUDE_RESUME_KEY=$key rex_claude_case "rex-optout-$key" "rx4$key" claude "$REX_CLAUDE_SESSION" yes "$REX_CLAUDE_LIVE_SESSION")
     out=$(run_rex_spawn "$dir" "rx4$key" --relaunch --harness claude) || rc=$?
     expect_code 0 "$rc" "a Rex claude relaunch should succeed with the key $key"$'\n'"$out"
+    assert_not_contains "$out" "rex-claude-resume" "with the key $key the opt-in read must print nothing"
     launched=$(cat "$dir/rex/fake/launched")
     assert_contains "$launched" "claude --dangerously-skip-permissions" "the replacement claude must launch"
     assert_not_contains "$launched" "--resume" "with the key $key a recorded conversation must not be reopened"

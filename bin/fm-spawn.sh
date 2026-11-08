@@ -3712,6 +3712,7 @@ relaunch_resume_args() {  # <harness> <backend> <target>
 # on Rex (config/rex-claude-resume holding `on`); absent or any other word is
 # off, so spawn and relaunch behave exactly as without the feature.
 rex_claude_resume_enabled() {
+  [ -f "$CONFIG/rex-claude-resume" ] || return 1
   [ "$(tr -d '[:space:]' <"$CONFIG/rex-claude-resume" 2>/dev/null)" = on ]
 }
 
