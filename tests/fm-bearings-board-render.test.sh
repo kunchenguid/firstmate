@@ -364,6 +364,27 @@ test_dispatch_picks_survive_a_refresh_with_or_without_browser_storage() {
   pass "dispatch picks survive a refresh, in a sandboxed frame too, and drop with departed work"
 }
 
+test_a_departed_tasks_pick_does_not_move_onto_a_surviving_task() {
+  local home out
+  home=$(make_home picks-departed)
+  build_call_board "$home" '["k1"]' "$CHARTED_TWO"
+  NO_STORAGE=1 run_board "$home" "pick:t1" >/dev/null
+  # t1 leaves the chart while t2 stays; Lavish's restore can fall back by position.
+  build_call_board "$home" '["k1"]' '[{"id":"t2","repo":"r","title":"Two","reason":"queued","dispatchable":true}]'
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.picks == [] and .bar.disabled == true' >/dev/null \
+    || fail "a departed task's pick moved onto a surviving task: $out"
+  # The same holds when a new task takes the departed task's place in the list.
+  home=$(make_home picks-replaced)
+  build_call_board "$home" '["k1"]' '[{"id":"t1","repo":"r","title":"One","reason":"queued","dispatchable":true}]'
+  NO_STORAGE=1 run_board "$home" "pick:t1" >/dev/null
+  build_call_board "$home" '["k1"]' '[{"id":"t2","repo":"r","title":"Two","reason":"queued","dispatchable":true}]'
+  out=$(NO_STORAGE=1 run_board "$home" "load")
+  printf '%s' "$out" | jq -e '.picks == [] and .bar.disabled == true' >/dev/null \
+    || fail "a departed task's pick moved onto its replacement: $out"
+  pass "a departed task's pick does not move onto a surviving task"
+}
+
 test_a_queued_answer_shows_as_queued_after_a_refresh_and_is_not_queued_twice() {
   local home out
   home=$(make_home queued-badge)
@@ -444,6 +465,7 @@ test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_a_rebuild_keeps_in_progress_answers_and_drops_only_departed_cards
 test_dispatch_picks_survive_a_refresh_with_or_without_browser_storage
+test_a_departed_tasks_pick_does_not_move_onto_a_surviving_task
 test_a_queued_answer_shows_as_queued_after_a_refresh_and_is_not_queued_twice
 test_an_answer_the_chrome_already_sent_is_not_queued_again
 test_an_unsent_answer_is_queued_again_in_a_new_tab_exactly_once

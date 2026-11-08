@@ -757,8 +757,9 @@ __FM_BEARINGS_BOARD_DATA__
   var anyPickable = false;
   var pickable = {};
   var savedPicks = jsonLoad(PICKS_KEY, true);
-  /* Lavish restores the picks with the page on a same-tab refresh */
-  ch.setAttribute("data-lavish-question", "dispatch.picks");
+  /* Lavish restores the picks with the page on a same-tab refresh. Each pick
+     is its own scope, so a restore that falls back to position can never move
+     a departed task's pick onto another task. */
 
   function pickedIds() {
     return Array.prototype.map.call(ch.querySelectorAll(".bb-pick:checked"), function (c) { return c.value; });
@@ -797,6 +798,7 @@ __FM_BEARINGS_BOARD_DATA__
         savePicks();
         refreshBar();
       });
+      row.setAttribute("data-lavish-question", "dispatch.pick." + t.id);
       row.appendChild(pick);
     } else {
       row.appendChild(el("span", "bb-pick-spacer"));
