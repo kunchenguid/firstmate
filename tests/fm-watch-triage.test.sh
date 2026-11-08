@@ -730,6 +730,17 @@ arm_claimed_run() {  # <dir>
   mkdir -p "$1/config" && : > "$1/config/verify-claimed-run" && printf '%s' "$1/config"
 }
 
+backdate_claim_when_armed() {  # <state> <task> <pid>
+  local i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$1/.claimed-run-$2" ]; do
+    kill -0 "$3" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$1/.claimed-run-$2" ] || return 1
+  printf '%s\n' "$(( $(date +%s) - 200 ))" > "$1/.claimed-run-$2"
+}
+
 # Without config/verify-claimed-run a due claim with no run is never read, armed,
 # looked up, or woken on.
 test_claimed_run_off_without_flag() {
@@ -750,7 +761,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_TEST_NM_CALLS="$dir/nm.calls" FM_CLAIMED_RUN_DELAY=0 \
+  PATH="$fakebin:$PATH" FM_TEST_NM_CALLS="$dir/nm.calls" \
     FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -771,7 +782,7 @@ SH
 }
 
 test_claimed_run_outcomes() {
-  local outcome dir state fakebin out wt task branch pid expected delay age
+  local outcome dir state fakebin out wt task branch pid expected
   for outcome in missing matching; do
     dir=$(make_case "claimed-run-$outcome"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; wt="$dir/worktree"; task=claim
@@ -784,8 +795,6 @@ test_claimed_run_outcomes() {
     else
       printf 'working [at=1234567890] [key=validation]: validation started\nworking: implementing validation setup\nworking: checking progress\n' > "$state/$task.status"
     fi
-    age=200
-    { printf '%s\n' "$(( $(date +%s) - age ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
     printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
       "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
       > "$state/.seen-claim_status"
@@ -809,6 +818,7 @@ SH
       FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
+    backdate_claim_when_armed "$state" "$task" "$pid" || { reap "$pid"; fail "claimed-run $outcome was never armed"; }
     if [ "$expected" = 1 ]; then
       wait_for_exit "$pid" 100 || { reap "$pid"; fail "claimed-run $outcome did not surface"; }
       [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "missing run did not emit exactly one wake: $(cat "$out")"
@@ -840,10 +850,11 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  backdate_claim_when_armed "$state" claim "$pid" || { reap "$pid"; fail "spaced-path claim was never armed"; }
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "spaced-path claimed run did not surface"; }
   [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] \
     || fail "spaced-path claim did not produce exactly one wake: $(cat "$out")"
@@ -868,13 +879,14 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited before its first cycle"; }
   [ -s "$cursor" ] || { reap "$pid"; fail "watcher did not create the byte-offset cursor"; }
   printf 'working [at=1234567890]: validation started\n' >> "$status_file"
+  backdate_claim_when_armed "$state" claim "$pid" || { reap "$pid"; fail "appended claim was never armed"; }
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "appended validation claim was not detected"; }
   [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "appended claim did not produce exactly one wake: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
@@ -1057,7 +1069,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1066,6 +1078,7 @@ SH
   printf 'working: validation pending\nworking: validation started\n' > "$status_file"
   [ "$(size_of "$status_file")" -eq "$old_size" ] || { reap "$pid"; fail "same-size fixture changed the status log size"; }
   touch -r "$cursor" "$status_file"
+  backdate_claim_when_armed "$state" claim "$pid" || { reap "$pid"; fail "rewritten claim was never armed"; }
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "same-size rewritten claim was not detected"; }
   [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "same-size rewritten claim did not produce exactly one wake: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
@@ -1091,7 +1104,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1100,6 +1113,7 @@ SH
   printf 'working [at=1234567890]: validation started\n' > "$status_file"
   [ "$(size_of "$status_file")" -lt "$old_size" ] || { reap "$pid"; fail "shrink fixture did not reduce the status log"; }
   touch -r "$cursor" "$status_file"
+  backdate_claim_when_armed "$state" claim "$pid" || { reap "$pid"; fail "shrunken-log claim was never armed"; }
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "claim after same-tick shrink was not detected"; }
   [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "shrunken log claim did not produce exactly one wake: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
