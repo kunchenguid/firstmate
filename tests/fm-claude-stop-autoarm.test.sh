@@ -217,6 +217,18 @@ SH
 while :; do sleep 1; done
 SH
       ;;
+    supersession-actionable)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+if [ "${FM_TEST_SUPERSEDED_ARM:-0}" = 1 ]; then
+  while [ ! -e "$FM_HOME/state/successor-finished" ]; do sleep 0.02; done
+fi
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'stale: fixture-win actionable\n'
+exit 0
+SH
+      ;;
     blocking-actionable)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 6
@@ -2092,7 +2104,7 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
   local dir a_out b_out b_status c_out c_status a_status count
   dir=$(make_primary_dir "$TMP_ROOT/v2-superseded-silence")
   : > "$dir/state/task1.meta"
-  write_arm_fixture "$dir" blocking-actionable
+  write_arm_fixture "$dir" supersession-actionable
   a_out="$dir/state/a.out"
   # All three firings belong to ONE session, as concurrent Stop hooks do: the
   # fake harness holds the lock for the whole scenario and each hook runs as
@@ -2100,7 +2112,7 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
   FM_HOME="$dir" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     fire() { printf "%s\n" "{\"session_id\":\"s\",\"stop_hook_active\":false}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/$1.out" 2>&1; echo $? > "$FM_HOME/state/$1.rc"; }
-    fire a &
+    FM_TEST_SUPERSEDED_ARM=1 fire a &
     a_pid=$!
     i=0
     while ! grep -q "outcome=arming" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null || [ ! -e "$FM_HOME/state/arm-ran" ]; do
@@ -2113,6 +2125,7 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
     touch -t 202001010000 "$FM_HOME/state/.claude-autoarm-epoch"
     touch -t 202001010000 "$FM_HOME/state/.last-watcher-beat"
     fire c
+    : > "$FM_HOME/state/successor-finished"
     wait "$a_pid"
   '
   [ ! -e "$dir/state/scenario-fail" ] || fail "$(cat "$dir/state/scenario-fail")"
