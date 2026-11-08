@@ -34,4 +34,4 @@ fi
 CLAUDE_CODE_OAUTH_TOKEN=$token
 export CLAUDE_CODE_OAUTH_TOKEN
 unset token
-exec "$@"
+exec env "$@"

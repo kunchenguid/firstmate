@@ -773,6 +773,11 @@ test_token_exec_helper() {
     "$CASE/tokens/h.token" sh -c 'printf "%s" "$CLAUDE_CODE_OAUTH_TOKEN"'); rc=$?
   expect_code 0 "$rc" "the exec helper should run the command"
   [ "$out" = "$TOKEN_SENTINEL" ] || fail "the exec helper should export the token to the command"
+  # shellcheck disable=SC2016  # The command runs in the exec helper's shell.
+  out=$("$ROOT/bin/fm-claude-token-exec.sh" \
+    "$CASE/tokens/h.token" FM_TEST_ASSIGN=kept sh -c 'printf "%s:%s" "$FM_TEST_ASSIGN" "$CLAUDE_CODE_OAUTH_TOKEN"'); rc=$?
+  expect_code 0 "$rc" "the exec helper should run a command led by VAR=value assignments"
+  [ "$out" = "kept:$TOKEN_SENTINEL" ] || fail "an assignment-led command should receive both the assignment and the token"
   chmod 644 "$CASE/tokens/h.token"
   out=$("$ROOT/bin/fm-claude-token-exec.sh" \
     "$CASE/tokens/h.token" sh -c 'echo ran' 2>&1); rc=$?
