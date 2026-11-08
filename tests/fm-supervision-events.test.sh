@@ -42,7 +42,6 @@ reset_state() {
   _event_cap_fails=0
   _event_cap_off_at=0
   _event_cap_panes=""
-  _event_cap_diag_logged=""
 }
 
 mkrec() {  # <pane_id> <status>
@@ -211,8 +210,8 @@ event_wait_or_sleep   # off: polls only
 [ "$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')" = 2 ] || fail "setup: the path must be off after EVENT_CAP_FAIL_MAX failures"
 assert_contains "$(triage_text)" "event path off after 2 consecutive failures (herdr:default)" "the shutoff must be named in the triage log"
 assert_contains "$(triage_text)" "pane wG:pGone not found" "the shutoff line must carry the backend's cause"
-[ "$(triage_text | grep -c 'event wait degraded')" = 1 ] || fail "a persistent cause must be logged once, not every cycle, got: $(triage_text)"
-pass "event_wait_or_sleep: the failure switch-off is named in the triage log with its cause (once per cause)"
+[ "$(triage_text | grep -c 'event path off after')" = 1 ] || fail "the switch-off must be logged once, not every cycle, got: $(triage_text)"
+pass "event_wait_or_sleep: the failure switch-off is named in the triage log with its cause"
 
 # A changed pane set lifts the switch-off.
 fm_write_meta "$STATE_DIR/tk7.meta" "window=default:wG:pR" "backend=herdr" "kind=ship"
@@ -283,9 +282,7 @@ fm_write_meta "$STATE_DIR/tklive.meta" "window=default:wG:pLive" "backend=herdr"
 PATH="$FAKEBIN:$PATH" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$FAKEBIN/reader" event_wait_or_sleep
 grep -q 'default:wG:pLive' "$STATE_DIR/.wake-queue" 2>/dev/null || fail "the blocked pane's push wake must still fire past one gone pane, queue: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null)"
 grep -q 'herdr: agent blocked' "$STATE_DIR/.wake-queue" || fail "the wake must name the herdr-blocked cause"
-assert_contains "$(triage_text)" "default:wG:pGone" "a triage line must name the gone pane"
-assert_contains "$(triage_text)" "resubscribed without gone pane" "the triage line must say the wait recovered"
 [ "$_event_cap_fails" = 0 ] || fail "a recovered cycle must not count toward the shutoff, got $_event_cap_fails"
-pass "event_wait_or_sleep: one gone pane plus one blocked pane still wakes on the blocked pane and a triage line names the gone pane"
+pass "event_wait_or_sleep: one gone pane plus one blocked pane still wakes on the blocked pane"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

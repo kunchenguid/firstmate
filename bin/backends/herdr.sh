@@ -4038,8 +4038,8 @@ fm_backend_herdr_native_blocked_trusted() {  # <agent>
 }
 
 # fm_backend_herdr_event_diag: append one cause line to the file the watcher
-# named in FM_BACKEND_EVENTS_DIAG_FILE, so a degraded event wait can be named in
-# the watcher's triage log instead of failing silently. A no-op when no file is
+# named in FM_BACKEND_EVENTS_DIAG_FILE, so the watcher's event-path shutoff line
+# can name the cause instead of failing silently. A no-op when no file is
 # named (the wait then behaves exactly as before), and never fatal.
 fm_backend_herdr_event_diag() {  # <message>
   [ -n "${FM_BACKEND_EVENTS_DIAG_FILE:-}" ] || return 0

@@ -933,7 +933,6 @@ There is still one watcher process; the event reader is a bounded child of that 
 Herdr rejects the whole subscription when any one subscribed pane is gone (`pane_not_found`).
 The adapter then checks which recorded panes still exist, resubscribes once on those, and still runs the level reconcile, so one stale task record never takes the live panes off the push path.
 When no gone pane explains a rejection, the cycle falls back to polling.
-Either way the cause reaches the watcher's triage log as an `event wait degraded` line that names the gone pane or Herdr's error, once per distinct cause.
 
 After `FM_EVENT_CAP_FAIL_MAX` (3) consecutive failed cycles the watcher stops trying the push path and logs `event path off` with the cause.
 It is never off for the watcher's whole life.

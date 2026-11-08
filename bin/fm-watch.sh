@@ -487,10 +487,8 @@ _event_cap_fails=0
 # failures (a failed capability probe leaves this 0: that verdict is re-probed
 # only on a key change).
 _event_cap_off_at=0
-# Sorted list of the panes the last event wait covered, and the last cause text
-# logged for a degraded wait, so a persistent cause is logged once, not per cycle.
+# Sorted list of the panes the last event wait covered.
 _event_cap_panes=""
-_event_cap_diag_logged=""
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -3498,14 +3496,6 @@ event_wait_or_sleep() {
   diag=
   [ ! -f "$diag_file" ] || diag=$(tr '\n' ';' < "$diag_file" | sed 's/;$//; s/;/; /g')
   fm_wait_tmp_cleanup
-  # A degraded wait - a failed cycle, or one that recovered by dropping a gone
-  # pane - is named once per distinct cause; a clean cycle re-arms the log.
-  if [ -z "$diag" ]; then
-    _event_cap_diag_logged=""
-  elif [ "$diag" != "$_event_cap_diag_logged" ]; then
-    _event_cap_diag_logged=$diag
-    triage_log "event wait degraded ($first_backend:$first_session): $diag"
-  fi
   case "$rc" in
     0)
       _event_cap_fails=0
