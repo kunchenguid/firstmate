@@ -1077,7 +1077,7 @@ The flag is home-local and is not inherited by secondmate homes.
 
 The optional local, gitignored `config/verify-claimed-run` presence flag opts this home into checking that a ship worker's claimed validation run exists.
 With it present, no-mistakes ship briefs tell the worker to append `working [at=<epoch>]: validation started` before starting validation, and the watcher reads each new status line for that claim.
-`FM_CLAIMED_RUN_DELAY` seconds after a claim, which defaults to `180`, the watcher looks up no-mistakes runs for the task's branch and queues one `check: validation claim has no run for <branch> (worker reported validation started)` wake when none exists; a run on the branch clears the claim silently, and a failed lookup keeps it pending.
+180 seconds after a claim, the watcher looks up no-mistakes runs for the task's branch and queues one `check: validation claim has no run for <branch> (worker reported validation started)` wake when none exists; a run on the branch clears the claim silently, and a failed lookup keeps it pending.
 With the file absent, generated briefs omit the validation-started line, and the watcher reads no status log for claims, looks up no runs, and raises no such wake.
 The flag is home-local and is not inherited by secondmate homes.
 `bin/fm-watch.sh`'s `claimed_run_tick` owns the per-log cursor and claim records.
@@ -3414,7 +3414,6 @@ FM_TASKS_AXI_CHECK_REASON=   # internal one-hop handoff of the reason behind tha
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
-FM_CLAIMED_RUN_DELAY=180 # where config/verify-claimed-run arms it, seconds after a worker's validation-started status before checking for a no-mistakes run on that task branch; invalid values use 180
 FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this home's state/home-summary.json even without a status signal; invalid or zero values use 300
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536

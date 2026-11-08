@@ -342,8 +342,7 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-CLAIMED_RUN_DELAY=${FM_CLAIMED_RUN_DELAY:-180}
-case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) CLAIMED_RUN_DELAY=180 ;; esac
+CLAIMED_RUN_DELAY=180
 # The liveness beacon is touched once per cycle, immediately before the
 # terminal wait below (event_wait_or_sleep) as well as at the top of the next
 # one, so a healthy cycle's beacon can legitimately age up to POLL seconds
@@ -3596,7 +3595,7 @@ claimed_run_scan_log() {  # <status-log> <task> <dev> <ino> <size> <ctime>
     *) complete= ;;
   esac
   offset=$((start + kept + ${#complete}))
-  if claimed_run_text_claims "$complete" && [ ! -f "$marker" ]; then
+  if claimed_run_text_claims "$complete"; then
     printf '%s\n' "$verified_at" > "$marker" || return 0
   fi
   kept=$((offset - start))
