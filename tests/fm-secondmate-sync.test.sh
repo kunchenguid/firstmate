@@ -1561,6 +1561,52 @@ test_sync_ref_rebuild_skips_unsafe_homes() {
   pass "S4 a rebuilt sync ref skips and reports unpreserved, dirty, and named-branch homes"
 }
 
+# origin/<default> alone can preserve the old build: no local/patches-prev-*
+# family branch exists, so only a remote-tracking ref of the old commits decides
+# whether the rebuilt target may replace them. The allow case proves that ref is
+# enough; the block cases prove a missing or stale ref leaves the home untouched.
+test_sync_ref_rebuild_origin_only_protection() {
+  local w c1 c2 p1 p2 case_name before
+  for case_name in origin-holds origin-stale origin-absent; do
+    w=$(new_world "ref-origin-$case_name")
+    c1=$(head_of "$w/main")
+    p1=$(patch_commit "$w" "$c1" v1)
+    add_sm_worktree "$w" sm "$p1"
+    bump_primary "$w" instr
+    c2=$(head_of "$w/main")
+    p2=$(patch_commit "$w" "$c2" v2)
+    git -C "$w/main" branch local/patches "$p2"
+    set_sync_ref "$w" 'local/patches'
+    case "$case_name" in
+      origin-holds) git -C "$w/main" update-ref refs/remotes/origin/main "$p1" ;;
+      origin-stale) git -C "$w/main" update-ref refs/remotes/origin/main "$c1" ;;
+      origin-absent) ;;
+    esac
+    [ "$(git -C "$w/main" branch --list 'local/patches*' | wc -l | tr -d ' ')" = 1 ] \
+      || fail "$case_name precondition: only local/patches may exist, no family backup branch"
+    git -C "$w/sm" merge-base --is-ancestor HEAD "$p2" && fail "$case_name precondition: the rebuild must not be a fast-forward"
+    before=$(head_of "$w/sm")
+
+    run_boot "$w"
+
+    if [ "$case_name" = origin-holds ]; then
+      [ "$(head_of "$w/sm")" = "$p2" ] || fail "origin/main alone did not allow the rebuild move (out: $BOOT_OUT)"
+      [ "$(cat "$w/sm/bin/patch.sh")" = v2 ] || fail "the rebuilt content did not replace the old build in the home"
+      assert_contains "$BOOT_OUT" "BOOTSTRAP_INFO: nudged fm-sm " "an origin-only rebuild move is an update, so the running home is nudged"
+      assert_not_contains "$BOOT_OUT" "SECONDMATE_SYNC:" "an origin-only rebuild move is not reported as a skip"
+      [ ! -e "$w/home/state/.secondmate-update-reconcile/sm.pending" ] || fail "the origin-only move left a reconciliation record"
+    else
+      [ "$(head_of "$w/sm")" = "$before" ] || fail "$case_name without origin protection moved the home (out: $BOOT_OUT)"
+      [ "$(cat "$w/sm/bin/patch.sh")" = v1 ] || fail "$case_name without origin protection changed the home's content"
+      git -C "$w/sm" diff --quiet || fail "$case_name left the home dirty"
+      assert_contains "$BOOT_OUT" "SECONDMATE_SYNC: secondmate sm: skipped: diverged from $p2; reconciliation required" \
+        "$case_name keeps the diverged report"
+      [ -f "$w/home/state/.secondmate-update-reconcile/sm.pending" ] || fail "$case_name left no reconciliation record"
+    fi
+  done
+  pass "S4b origin/<default> alone allows a rebuild move, and a stale or missing origin ref leaves the home unchanged"
+}
+
 test_sync_ref_malformed_is_reported() {
   local w c1 c2 case_name content
   for case_name in two-lines missing-branch bad-name; do
@@ -1650,6 +1696,7 @@ test_sync_ref_absent_keeps_default_branch
 test_sync_ref_moves_homes_to_named_branch
 test_sync_ref_rebuild_moves_preserved_home
 test_sync_ref_rebuild_skips_unsafe_homes
+test_sync_ref_rebuild_origin_only_protection
 test_sync_ref_malformed_is_reported
 test_spawn_follows_sync_ref_before_launch
 
