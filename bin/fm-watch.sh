@@ -219,6 +219,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PR_DEGRADED_WATCH_ENABLED=0
+[ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
 mkdir -p "$STATE"
 # Hold this state directory open for the main loop's teardown check: a
 # directory recreated at the same path is then a different directory, and the
@@ -4105,7 +4107,7 @@ EOF
             continue
           fi
           wake "$reason"
-        elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ]; then
+        elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ] && [ "$PR_DEGRADED_WATCH_ENABLED" = 1 ]; then
           # A ready MR still on its merge train: remember it in the train
           # marker so a later drop (the car gone while the MR is still open)
           # is a transition worth a wake. The drop wake clears that marker,
@@ -4118,7 +4120,7 @@ EOF
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
           continue
-        elif [ "$is_pr_poll" -eq 1 ] && [ "${out%% *}" = degraded ]; then
+        elif [ "$is_pr_poll" -eq 1 ] && [ "${out%% *}" = degraded ] && [ "$PR_DEGRADED_WATCH_ENABLED" = 1 ]; then
           # A ready PR/MR that degraded after its ready report - a failing
           # check on GitHub, a failed head pipeline on GitLab, the readable
           # trace of a merge train dropping the merge request - would

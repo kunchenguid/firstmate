@@ -91,6 +91,11 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    if [ "$degraded_enabled" != 1 ]; then
+      result=$(GH_HOST=$host gh pr view "$url" --json state --jq '.state' 2>/dev/null) || exit $unknown
+      [ "$result" = MERGED ] && printf '%s\n' merged
+      exit 0
+    fi
     # One read answers both questions this poll owns: the merged wake it has
     # always owned, and the degraded state firstmate now watches for. The
     # parse runs through gh's own --jq, so no JSON processor is needed here.
@@ -176,6 +181,12 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
+    if [ "$degraded_enabled" != 1 ]; then
+      raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
+      [ "$state" = merged ] && printf '%s\n' merged
+      exit 0
+    fi
     # glab resolves the instance from the project URL passed to -R, so the host
     # comes from the validated record rather than glab's configured default,
     # and GITLAB_HOST pins it the same way the merge path pins it. It cannot

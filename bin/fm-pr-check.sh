@@ -56,6 +56,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DEGRADED_WATCH_ENABLED=0
+[ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-degraded-watch" ] || DEGRADED_WATCH_ENABLED=1
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -223,7 +225,7 @@ fi
 # trace of a merge train dropping the merge request - exists only there. A
 # missing jq would leave the poll silent on every read, so arming refuses for
 # the same reason it refuses without glab.
-if [ "$PROVIDER" = gitlab ] && ! command -v jq >/dev/null 2>&1; then
+if [ "$PROVIDER" = gitlab ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ] && ! command -v jq >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires jq on PATH" >&2
   exit 1
 fi
@@ -348,7 +350,7 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 # (bin/fm-pr-merge.sh already holds it) nor reads or rewrites the baseline: it
 # records before any forge call, and the marker it leaves is keyed to the PR
 # identity, so it can only ever match the PR it was written for.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   CONTROL_LOCK="$STATE/.control-$ID.lock"
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
   CONTROL_LOCK_HELD=1
@@ -417,28 +419,18 @@ fm_pr_metadata_identity_parse "$META_TMP" || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 
 # Keep the current registration recoverable until all replacement files commit.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
   BASELINE_BACKUP_COMPLETE=0
   restore_baselines() {
-    local artifact backup restore_tmp
-    [ "$BASELINE_BACKUP_COMPLETE" = 1 ] || return 1
+    local artifact backup
     for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
       "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
       backup="$BASELINE_BACKUP/$(basename "$artifact")"
       if [ -e "$backup" ]; then
-        if [ -e "$artifact" ] && [ ! -L "$artifact" ]; then
-          cat -- "$backup" > "$artifact" || return 1
-        else
-          restore_tmp=$(mktemp "$STATE/.fm-pr-restore.XXXXXX") || return 1
-          if cp -p -- "$backup" "$restore_tmp" && mv -f -- "$restore_tmp" "$artifact"; then
-            :
-          else
-            rm -f -- "$restore_tmp"
-            return 1
-          fi
-        fi
-      else
+        rm -f -- "$artifact" || return 1
+        mv -- "$backup" "$artifact" || return 1
+      elif [ "$BASELINE_BACKUP_COMPLETE" = 1 ]; then
         rm -f -- "$artifact" || return 1
       fi
     done
@@ -453,7 +445,11 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     [ -f "$artifact" ] && [ ! -L "$artifact" ] \
       && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
       && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
-    cp -p -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
+  done
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+    "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    mv -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
   done
   BASELINE_BACKUP_COMPLETE=1
   if [ -n "$BASELINE_DEGRADED" ]; then

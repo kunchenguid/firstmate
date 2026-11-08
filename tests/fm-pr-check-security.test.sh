@@ -128,6 +128,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  : > "$dir/home/config/pr-degraded-watch"
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
@@ -1505,6 +1506,71 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+test_degraded_watch_opt_in_absent_preserves_merged_only_behavior() {
+  local dir state out url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case degraded-opt-in-absent-github)
+  state="$dir/home/state"
+  rm -f "$dir/home/config/pr-degraded-watch"
+  make_poll_fixture "$dir"
+  : > "$dir/gh.log"
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ -z "$out" ] || fail "flag-absent GitHub poll emitted a degraded line"
+  grep -qF 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" \
+    || fail "flag-absent GitHub poll did not use the merged-only query"
+  ! grep -q 'statusCheckRollup' "$dir/gh.log" || fail "flag-absent GitHub poll requested rollup data"
+
+  rm -f "$state/task-a.check.sh" "$state/task-a.pr-poll"
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 1 "$POLL" \
+    || fail "could not prepare flag-absent GitHub poll"
+  fm_pr_poll_publish_prepared || fail "could not publish flag-absent GitHub poll"
+  add_stop_custom_check "$dir"
+  : > "$dir/gh.log"
+  FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/github-watch.out" 2> "$dir/github-watch.err" \
+    || fail "flag-absent GitHub watcher failed: $(cat "$dir/github-watch.err")"
+  ! grep -q 'degraded after ready' "$dir/github-watch.out" || fail "flag-absent GitHub watcher woke on degradation"
+  ! grep -q 'statusCheckRollup' "$dir/gh.log" || fail "flag-absent GitHub watcher made an extra rollup read"
+
+  dir=$(make_case degraded-opt-in-absent-gitlab)
+  state="$dir/home/state"
+  rm -f "$dir/home/config/pr-degraded-watch"
+  write_poll_meta "$state" task-a https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  fm_pr_poll_prepare "$state" task-a gitlab \
+    https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+    gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare flag-absent GitLab poll"
+  fm_pr_poll_publish_prepared || fail "could not publish flag-absent GitLab poll"
+  : > "$dir/glab.log"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ -z "$out" ] || fail "flag-absent GitLab poll emitted a degraded line"
+  grep -qF 'mr view 7 -R https://gitlab.example/group/subgroup/project' "$dir/glab.log" \
+    || fail "flag-absent GitLab poll did not use the merged-only query"
+  ! grep -qE '(-F json| api .*merge_trains|api .*pipelines)' "$dir/glab.log" \
+    || fail "flag-absent GitLab poll made an extra JSON, pipeline, or train read"
+  add_stop_custom_check "$dir"
+  : > "$dir/glab.log"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/gitlab-watch.out" 2> "$dir/gitlab-watch.err" \
+    || fail "flag-absent GitLab watcher failed: $(cat "$dir/gitlab-watch.err")"
+  ! grep -qE 'degraded after ready|ontrain' "$dir/gitlab-watch.out" \
+    || fail "flag-absent GitLab watcher processed an opt-in result"
+  ! grep -qE '(-F json| api .*merge_trains|api .*pipelines)' "$dir/glab.log" \
+    || fail "flag-absent GitLab watcher made an extra JSON, pipeline, or train read"
+
+  dir=$(make_case degraded-opt-in-absent-registration)
+  rm -f "$dir/home/config/pr-degraded-watch"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_check_entry "$dir" task-a https://gitlab.example/group/subgroup/project/-/merge_requests/7 \
+      > "$dir/register.out" 2> "$dir/register.err" \
+    || fail "flag-absent GitLab registration failed: $(cat "$dir/register.err")"
+  [ ! -s "$dir/glab.log" ] || fail "flag-absent registration performed a GitLab baseline read"
+  [ -e "$dir/home/state/task-a.check.sh" ] || fail "flag-absent registration did not preserve the merged poll"
+  pass "degraded wake reads are opt-in; absent flag keeps GitHub and GitLab polls merged-only, silent, and baseline-free"
+}
+
 test_github_degraded_poll() {
   local dir out
   dir=$(make_case github-degraded-poll)
@@ -1865,6 +1931,52 @@ test_arming_baselines_an_already_degraded_change() {
     || fail "the merge-time re-record changed the watch's degraded marker"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the merge-time re-record did not republish a valid poll"
   pass "the merge-time re-record skips the baseline read and keeps the watch's marker"
+}
+
+test_rearm_failure_after_partial_publish_restores_watch_identities() {
+  local dir state url1 url2 artifact before rc
+  dir=$(make_case rearm-partial-publish-rollback)
+  state="$dir/home/state"
+  url1=https://gitlab.example/group/subgroup/project/-/merge_requests/1
+  url2=https://gitlab.example/group/subgroup/project/-/merge_requests/2
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url1" >/dev/null 2> "$dir/initial.err" \
+    || fail "could not publish initial watched MR: $(cat "$dir/initial.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "initial watch was invalid"
+  for artifact in task-a.meta task-a.pr-poll-degraded task-a.pr-poll-train task-a.check.sh task-a.pr-poll task-a.pr-poll-registration; do
+    [ -e "$state/$artifact" ] || fail "initial watch omitted $artifact"
+    printf '%s %s\n' "$artifact" "$(fm_pr_file_identity "$state/$artifact")" >> "$dir/identities.before"
+  done
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${!#}" = "$FM_TEST_FAIL_REG_DEST" ] && [ ! -e "$FM_TEST_FAIL_REG_ONCE" ]; then
+  : > "$FM_TEST_FAIL_REG_ONCE"
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_FAIL_REG_DEST="$state/task-a.pr-poll-registration" \
+    FM_TEST_FAIL_REG_ONCE="$dir/fail-once" FM_TEST_REAL_MV="$REAL_MV" \
+    FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url2" > "$dir/rearm.out" 2> "$dir/rearm.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "re-arm succeeded despite the forced registration publication failure"
+  [ -e "$dir/fail-once" ] || fail "publication failure was not forced after a file had been published"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the previous watch failed artifact validation after partial publication: $(cat "$dir/rearm.err")"
+  for artifact in task-a.meta task-a.pr-poll-degraded task-a.pr-poll-train task-a.check.sh task-a.pr-poll task-a.pr-poll-registration; do
+    before=$(awk -v a="$artifact" '$1 == a { print $2 }' "$dir/identities.before")
+    [ "$(fm_pr_file_identity "$state/$artifact")" = "$before" ] \
+      || fail "rollback changed the registered identity for $artifact"
+    [ "$(fm_pr_file_link_count "$state/$artifact")" = 1 ] \
+      || fail "rollback left a non-single-link artifact: $artifact"
+  done
+  pass "partial poll publication failure restores the prior watch and registered file identities"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -4873,9 +4985,11 @@ test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_degraded_watch_opt_in_absent_preserves_merged_only_behavior
 test_github_degraded_poll
 test_degraded_poll_wakes_once_per_transition
 test_degraded_wake_survives_an_unsaved_marker
+test_rearm_failure_after_partial_publish_restores_watch_identities
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
