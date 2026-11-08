@@ -420,17 +420,31 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
   [ "$declared" = "$state" ]
 }
 
-# The task's delivered PR. Recorded meta pr= stands unless the terminal line is
-# in a ready-signal shape accepted by fm_dod_ready_note_url and either nothing
-# is recorded or the status log named the recorded PR, so that line replaces it
-# (fm_dod_status_names_pr); a PR a worker merely mentioned in prose is never
-# claimed as the delivery.
+# The task's delivered PR. Recorded meta pr= is authoritative; without one,
+# the fallback scrape accepts only a terminal line in a mode's ready-signal
+# shape (`done: PR <url>` or `done: PR <url> checks green`, optionally carrying
+# an emission-time tag this scrape steps over without reading), so a PR a
+# worker merely mentioned in prose is never claimed as the delivery.
+# With the home's config/pr-register-scan opt-in present, the terminal line
+# instead counts when its note is a ready report accepted by
+# fm_dod_ready_note_url, naming a GitHub-shaped or fm_pr_url_parse forge URL,
+# and it also replaces a recorded PR the status log named
+# (fm_dod_status_names_pr); a recorded PR the log never named stays.
 # A scout never delivers a PR, so it never carries one.
 pr_for_task() { # <meta> <terminal-line> <status-file>
   local meta=$1 terminal=$2 status=$3 value ready=
   local github_shape='^https?://[^[:space:])"]+/pull/[0-9]+$'
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
+  if [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-register-scan" ]; then
+    if [ -z "$value" ] && [ -n "$terminal" ]; then
+      value=$(printf '%s\n' "$terminal" \
+        | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
+        | head -1 || true)
+    fi
+    clean_field "$value"
+    return 0
+  fi
   if [ "$(status_line_verb "$terminal")" = "done" ]; then
     ready=$(fm_dod_ready_note_url "$(status_line_note "$terminal")") || ready=
     if [ -n "$ready" ] && ! fm_pr_url_parse "$ready" \
