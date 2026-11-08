@@ -708,6 +708,7 @@ Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` w
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
+It also keeps the local child scout task-data refusal; `--force --discard-scout-data` forwards the captain's explicit discard of that data to the configured host.
 
 No generic remote delete or write surface exists:
 
