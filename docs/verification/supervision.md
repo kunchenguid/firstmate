@@ -473,6 +473,19 @@ Observed output:
 ok - Claude 2.1.278 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
+On 2026-10-30 the guard passed with Claude Code 2.1.311 on Linux after the Stop hook took over the wake drain and its acknowledgement.
+Each rewake carried the hook's own drain under a ticket, the model issued no tool call, and the Stop after each completed handling turn acknowledged exactly that drain (`--ack-through 2`, then `--ack-through 3`).
+The lab now opts out of the supervision host, and its arm fixture parks the hook's handling successor instead of counting it as a cycle.
+Before those two fixture changes the guard failed on the unchanged tree under the default host, and on this tree with the host off, with `expected exactly 2 hook-owned arm cycles, got 4`.
+A separate run with the host on delivered `The wake drain already ran (ticket fmwake-...)`, and the next Stop acknowledged `--ack-through 2 --recovery-generation fixture-generation`.
+A live probe on the same version showed that a user interrupt fires no Stop and records `[Request interrupted by user]` under the interrupted turn's prompt id, so a ticket delivered to that turn stays unacknowledged.
+This NixOS host has no `/bin/bash` or `/bin/ln`, so the guard and the deterministic suites ran inside `bwrap --dev-bind / / --ro-bind /run/current-system/sw/bin /bin`.
+
+```text
+2.1.311 (Claude Code)
+ok - Claude 2.1.311 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles with hook-owned drains and acknowledgements, and preserved the competing-live-owner boundary
+```
+
 Current entry points:
 
 ```sh
@@ -607,7 +620,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
-| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | The tracked `SessionStart` hook reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
+| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | The tracked `SessionStart` hook reclaimed a stale owner before two Stop-owned cycles whose drains and acknowledgements the hook ran, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 FM_PI_LIVE_WATCH_ONLY=1 tests/fm-pi-primary-live-e2e.test.sh` | Three consecutive actionable closes each produced a ledger-linked successor, and an intentional stopped-chain failure still raised the outage alarm. |

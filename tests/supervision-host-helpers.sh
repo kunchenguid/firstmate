@@ -537,6 +537,16 @@ assert_rewoke_main() {  # <home> <label>
 }
 
 
+# The rewake carries the hook's own drain, which holds the recovery episode
+# open as handling until main's turn runs the acknowledgement it printed.
+assert_hook_drain_owes_episode() {  # <home> <msg>
+  local generation
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED: .* --recovery-generation \([^ ]*\)$/\1/p' "$1/hook.err" | tail -1)
+  [ -n "$generation" ] || fail "$2: the rewake must carry the hook's drain and its acknowledgement: $(cat "$1/hook.err")"
+  assert_re "^(pending|announced):handling:$generation\$" "$1/state/.watcher-down" "$2"
+}
+
+
 # A second task closes the successor while the first turn still owns handling
 # Its queued rows keep that handling episode open after the first turn's ack
 assert_main_only_close_after_handled_turn() {  # <restore|refuse>
@@ -589,8 +599,13 @@ SH
   [ "$(engine_calls "$home")" -eq 1 ] || fail "the engine took the main-only close"
   if [ "$mode" = restore ]; then
     assert_rewoke_main "$home" "inherited handling"
-    assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
-      "the inherited episode must become deliverable downtime"
+    # The handed-back downtime reaches main through the hook's own drain, which
+    # presents the rows and holds the episode open as handling until main's turn
+    # is acknowledged.
+    sed -n '/The wake drain already ran/,$p' "$home/hook.err" | grep -q 'beta.status' \
+      || fail "the rewake must carry the hook's drain presenting the main-owned rows: $(cat "$home/hook.err")"
+    assert_re '^announced:handling:' "$home/state/.watcher-down" \
+      "the inherited episode must reach main as a presented, unacknowledged recovery"
     watcher_live "$home" || fail "the repaired hand-back must keep its successor alive"
   else
     expect_code 2 "$(cat "$home/hook.rc")" "restore refusal must notify main rather than exit silently"

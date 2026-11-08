@@ -247,6 +247,43 @@ epoch_outcome() {
   sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+# Wake-drain fixture, installed as <dir>/bin/fm-wake-drain.sh. A presenting run
+# records its actor in state/drain-ran, prints state/drain-fixture-output (one
+# wake row by default), and prints the generation-bound acknowledgement line on
+# stderr like the real drain; state/drain-no-ack suppresses that line. An
+# acknowledgement run records its arguments in state/drain-acks.
+write_drain_fixture() {
+  local dir=$1
+  cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --ack-through ]; then
+  printf '%s\n' "$*" >> "$FM_HOME/state/drain-acks"
+  exit 0
+fi
+printf '%s\n' "${FM_SUPERVISION_ACTOR:-unset}" >> "$FM_HOME/state/drain-ran"
+cat "$FM_HOME/state/drain-fixture-output" 2>/dev/null || printf 'stale: fixture-row drained\n'
+[ -e "$FM_HOME/state/drain-no-ack" ] \
+  || printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-generation\n' >&2
+SH
+  chmod +x "$dir/bin/fm-wake-drain.sh"
+}
+
+# A Stop payload naming the turn that just ended and the session transcript.
+stop_payload() {  # <prompt-id> <transcript>
+  jq -cn --arg p "$1" --arg t "$2" \
+    '{session_id: "sess-autoarm", stop_hook_active: false, prompt_id: $p, transcript_path: $t}'
+}
+
+# Append a Claude transcript user entry: a prompt, rewake, or tool result.
+append_transcript_user() {  # <transcript> <prompt-id> <text>
+  jq -cn --arg p "$2" --arg t "$3" \
+    '{type: "user", promptId: $p, isSidechain: false, message: {role: "user", content: $t}}' >> "$1"
+}
+
+ack_ticket_nonce() {
+  printf '%s\n' "$1" | sed -n 's/^.*(ticket \(fmwake-[0-9a-f]*\)).*$/\1/p'
+}
+
 # Run the hook in the background under the fake harness, output captured to a
 # file. Sets RUN_AUTOARM_BG_PID (a direct child of the calling shell, so the
 # caller can `wait` on it for the hook's exit status).
@@ -497,6 +534,153 @@ test_stands_down_only_on_pi_code_transcript_path() {
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm without a transcript_path"
 
   pass "auto-arm: stands down only on a pi-code-delivered transcript_path (/.pi/)"
+}
+
+# The winning rewake carries the drain's output, so the handling turn neither
+# runs the drain nor the acknowledgement. The Stop that ends the turn that
+# received that delivery acknowledges exactly the presented rows; tool results,
+# assistant text, and queue bookkeeping that quote the ticket prove nothing.
+test_inline_drain_is_acknowledged_after_the_receiving_turn() {
+  local dir out status transcript nonce
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain")
+  transcript="$dir/transcript.jsonl"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  append_transcript_user "$transcript" turn-1 "Supervise the fleet."
+  out=$(run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an actionable close with a provable payload must still rewake"
+  assert_contains "$out" "stale: fixture-win actionable" "rewake must keep the arm's reason line"
+  assert_contains "$out" "stale: fixture-row drained" "rewake must carry the drain output inline"
+  assert_contains "$out" "without running bin/fm-wake-drain.sh or an --ack-through command" \
+    "a ticketed rewake must tell the turn the hook owns the drain and acknowledgement"
+  assert_not_contains "$out" "WAKE_ACK_REQUIRED" "a ticketed rewake must not hand the turn an acknowledgement command"
+  assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "rewake must keep forbidding a duplicate model re-arm"
+  [ "$(cat "$dir/state/drain-ran")" = main ] || fail "the hook must drain exactly once as main: $(cat "$dir/state/drain-ran" 2>/dev/null)"
+  [ ! -e "$dir/state/drain-acks" ] || fail "the drain was acknowledged before any turn handled it"
+  nonce=$(ack_ticket_nonce "$out")
+  [ -n "$nonce" ] || fail "rewake carried no ticket: $out"
+  grep -qx "nonce=$nonce" "$dir/state/.claude-autoarm-ack-ticket" || fail "ticket file does not record the delivered nonce"
+  rm -f "$dir/state/task.meta"
+
+  # The ending turn has not received the delivery yet: keep the ticket.
+  {
+    jq -cn --arg t "assistant quoting $nonce" \
+      '{type: "assistant", isSidechain: false, message: {role: "assistant", content: [{type: "text", text: $t}]}}'
+    jq -cn --arg t "Stop hook feedback: $nonce" '{type: "queue-operation", operation: "enqueue", content: $t}'
+    jq -cn --arg p turn-1 --arg t "$nonce" \
+      '{type: "user", promptId: $p, isSidechain: false, message: {role: "user", content: [{type: "tool_result", content: $t}]}}'
+  } >> "$transcript"
+  run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" >/dev/null 2>&1
+  [ ! -e "$dir/state/drain-acks" ] || fail "a Stop before the delivery acknowledged the wakes"
+  assert_present "$dir/state/.claude-autoarm-ack-ticket" "a Stop before the delivery dropped the ticket"
+
+  # The delivery's own turn completes.
+  append_transcript_user "$transcript" turn-2 "<task-notification>Stop hook feedback</task-notification> $out"
+  run_autoarm "$dir" "$(stop_payload turn-2 "$transcript")" >/dev/null 2>&1
+  [ "$(cat "$dir/state/drain-acks" 2>/dev/null)" = "--ack-through 7 --recovery-generation fixture-generation" ] \
+    || fail "the completed turn must acknowledge exactly the delivered rows: $(cat "$dir/state/drain-acks" 2>/dev/null)"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "an acknowledged ticket was left behind"
+  [ "$(wc -l < "$dir/state/drain-ran" | tr -d ' ')" = 1 ] || fail "a settling Stop ran a presenting drain"
+  pass "auto-arm: the rewake carries the drain, and the receiving turn's Stop acknowledges it"
+}
+
+# A rewake queued into a running turn arrives as a queued_command attachment of
+# that turn, so that turn's Stop proves it handled the delivery.
+test_mid_turn_delivery_is_acknowledged_by_its_turn() {
+  local dir out transcript
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-mid-turn")
+  transcript="$dir/transcript.jsonl"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  append_transcript_user "$transcript" turn-1 "Supervise the fleet."
+  out=$(run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" 2>/dev/null)
+  [ -n "$(ack_ticket_nonce "$out")" ] || fail "rewake carried no ticket: $out"
+  rm -f "$dir/state/task.meta"
+  append_transcript_user "$transcript" turn-3 "Check the release."
+  jq -cn --arg t "$out" '{type: "attachment", isSidechain: false, attachment: {type: "queued_command", prompt: $t}}' >> "$transcript"
+  run_autoarm "$dir" "$(stop_payload turn-3 "$transcript")" >/dev/null 2>&1
+  [ "$(cat "$dir/state/drain-acks" 2>/dev/null)" = "--ack-through 7 --recovery-generation fixture-generation" ] \
+    || fail "the running turn that received the queued delivery must acknowledge it: $(cat "$dir/state/drain-acks" 2>/dev/null)"
+  pass "auto-arm: a delivery queued into a running turn is acknowledged when that turn ends"
+}
+
+# Claude fires no Stop for an interrupted turn, so the next Stop belongs to a
+# later turn: the delivered rows stay unacknowledged for the next drain.
+test_interrupted_turn_leaves_the_drain_unacknowledged() {
+  local dir out transcript
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-interrupt")
+  transcript="$dir/transcript.jsonl"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  append_transcript_user "$transcript" turn-1 "Supervise the fleet."
+  out=$(run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" 2>/dev/null)
+  [ -n "$(ack_ticket_nonce "$out")" ] || fail "rewake carried no ticket: $out"
+  rm -f "$dir/state/task.meta"
+  append_transcript_user "$transcript" turn-2 "$out"
+  append_transcript_user "$transcript" turn-2 "[Request interrupted by user]"
+  append_transcript_user "$transcript" turn-4 "What is the fleet doing?"
+  run_autoarm "$dir" "$(stop_payload turn-4 "$transcript")" >/dev/null 2>&1
+  [ ! -e "$dir/state/drain-acks" ] || fail "an interrupted delivery was acknowledged: $(cat "$dir/state/drain-acks")"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "an interrupted delivery's ticket outlived the later turn"
+  pass "auto-arm: an interrupted handling turn leaves its wakes durable"
+}
+
+# Without proof the hook can later check, the delivery keeps the model-run
+# acknowledgement: no prompt id, a ticket that was never proven, an output too
+# large to carry, or a drain that printed no acknowledgement.
+test_unprovable_inline_drain_keeps_the_model_acknowledgement() {
+  local dir out transcript
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-no-proof")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  out=$(run_autoarm "$dir" 2>/dev/null)
+  assert_contains "$out" "stale: fixture-row drained" "an unprovable rewake must still carry the drain output"
+  assert_contains "$out" "WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation fixture-generation" \
+    "an unprovable rewake must hand the turn the exact acknowledgement"
+  [ -z "$(ack_ticket_nonce "$out")" ] || fail "a payload with no prompt id was promised a hook acknowledgement"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "a payload with no prompt id left a ticket"
+
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-unproven-ticket")
+  transcript="$dir/transcript.jsonl"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  append_transcript_user "$transcript" turn-1 "Supervise the fleet."
+  printf 'nonce=fmwake-0000000000000000\nack=3\ngeneration=old-generation\n' > "$dir/state/.claude-autoarm-ack-ticket"
+  out=$(run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" 2>/dev/null)
+  assert_contains "$out" "WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7" \
+    "a rewake after a never-proven ticket must hand the acknowledgement back to the turn"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "a never-proven ticket survived the next drain"
+  [ ! -e "$dir/state/drain-acks" ] || fail "a never-proven ticket was acknowledged"
+
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-oversize")
+  transcript="$dir/transcript.jsonl"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  append_transcript_user "$transcript" turn-1 "Supervise the fleet."
+  awk 'BEGIN { for (i = 0; i < 1000; i++) printf "signal: fixture row %04d padding padding padding padding padding\n", i }' \
+    > "$dir/state/drain-fixture-output"
+  out=$(run_autoarm "$dir" "$(stop_payload turn-1 "$transcript")" 2>/dev/null)
+  assert_contains "$out" "$dir/state/.claude-autoarm-drain-output" "an oversize drain must point the turn at its saved output"
+  assert_not_contains "$out" "signal: fixture row 0999" "an oversize drain must not be carried inline"
+  grep -q '^WAKE_ACK_REQUIRED: .* --ack-through 7 ' "$dir/state/.claude-autoarm-drain-output" \
+    || fail "the saved oversize drain output lost its acknowledgement line"
+  assert_absent "$dir/state/.claude-autoarm-ack-ticket" "an oversize drain left a ticket"
+
+  dir=$(make_primary_dir "$TMP_ROOT/inline-drain-no-ack-line")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/drain-no-ack"
+  write_arm_fixture "$dir" actionable
+  write_drain_fixture "$dir"
+  out=$(run_autoarm "$dir" 2>/dev/null)
+  assert_contains "$out" "Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command." \
+    "a drain that printed no acknowledgement must fall back to the model-run drain"
+  pass "auto-arm: an unprovable inline drain keeps the model-run acknowledgement"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -2126,6 +2310,7 @@ assert_host_lost_handback_notifies_once_per_episode() {
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a lost hand-back must reach main"
   assert_contains "$out" "auto-arm FAILED - the supervision host returned an actionable wake" "a lost hand-back must deliver the failure notice"
+  assert_contains "$out" "Run bin/fm-wake-drain.sh first" "a lost hand-back ran no drain, so the turn must run its own"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "a lost hand-back did not record its failure episode"
   [ "$(epoch_outcome "$dir")" = failed ] || fail "a lost hand-back must record outcome=failed, got: $(epoch_outcome "$dir")"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
@@ -2224,6 +2409,10 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_inline_drain_is_acknowledged_after_the_receiving_turn
+test_mid_turn_delivery_is_acknowledged_by_its_turn
+test_interrupted_turn_leaves_the_drain_unacknowledged
+test_unprovable_inline_drain_keeps_the_model_acknowledgement
 test_actionable_close_with_live_successor_rewakes_once
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes
