@@ -666,6 +666,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the per-call session option contract"
   assert_grep "direct \`herdr server stop\`" "$brief" \
     "Herdr lab brief missing the forbidden server-global command list"
+  # shellcheck disable=SC2016 # literal backticks are matched verbatim
   assert_grep 'See the `bin/fm-herdr-lab.sh` header for the fleet-state tripwire and `FM_HERDR_LAB_FLEET_SESSION` rule.' "$brief" \
     "Herdr lab brief missing the tripwire owner pointer"
   assert_grep "A missing, stopped, or changed fleet session is a hard tripwire failure" "$brief" \
