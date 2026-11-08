@@ -1547,6 +1547,17 @@ _fm_composer_row_is_braille_furniture() {  # <row>
   [ -z "$rest" ]
 }
 
+# _fm_composer_bare_row_is_ruled: 0 when the bare agent-glyph <row> of the plain
+# screen is the glyph followed only by rule cells, so the row is its own closing
+# border and owns no wrapped input below it.
+_fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
+  local text glyph
+  text=$(_fm_composer_screen_row "$2" "$1")
+  fm_composer_normalize_trim_var text
+  fm_composer_leading_agent_glyph_var glyph "$text" || return 1
+  _fm_composer_row_is_rule_furniture "${text#*"$glyph"}"
+}
+
 # _fm_composer_bare_row_strip_furniture_var: on a bare agent-glyph row, reduce
 # the row to its glyph when everything behind the glyph is braille furniture,
 # in place through the named variable; a row whose tail carries anything else,
@@ -1557,9 +1568,23 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
   local __fmbf_name=$1 __fmbf_text=${!1} __fmbf_glyph='' __fmbf_body
   fm_composer_leading_agent_glyph_var __fmbf_glyph "$__fmbf_text" || return 0
   __fmbf_body=${__fmbf_text#*"$__fmbf_glyph"}
-  if _fm_composer_row_is_braille_furniture "$__fmbf_body"; then
+  if _fm_composer_row_is_braille_furniture "$__fmbf_body" \
+     || _fm_composer_row_is_rule_furniture "$__fmbf_body"; then
     printf -v "$__fmbf_name" '%s' "$__fmbf_glyph"
   fi
+}
+
+# _fm_composer_row_is_rule_furniture: 0 when the text is non-blank and made only
+# of horizontal-rule cells (`─ ━ ═`). A divider drawn behind the prompt glyph
+# (claude left a stray `B❯ ────` row after a redraw glitch) is a border, never
+# typed input, whatever grey it is drawn in.
+_fm_composer_row_is_rule_furniture() {  # <text>
+  local text=$1 rest
+  fm_composer_normalize_trim_var text
+  [ -n "$text" ] || return 1
+  rest=${text//[─━═]/}
+  fm_composer_normalize_trim_var rest
+  [ -z "$rest" ]
 }
 
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
@@ -1568,6 +1593,7 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
 # rather than unrelated screen content.
 _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
   local plain=$1 g=$2 cy=$3 row line trimmed glyph
+  _fm_composer_bare_row_is_ruled "$plain" "$g" && return 1
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
@@ -2083,6 +2109,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
           && next=-1
       fi
     fi
+    _fm_composer_bare_row_is_ruled "$plain" "$FM_COMPOSER_SELECTED_FIRST" && next=-1
     while [ "$next" -ge 0 ]; do
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
@@ -2151,6 +2178,9 @@ EOF
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+          _fm_composer_bare_row_strip_furniture_var content
+        fi
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}

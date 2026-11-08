@@ -1907,3 +1907,43 @@ test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only
+
+# A stray dim `B` (spinner residue) and dim rule cells drawn on the prompt rows
+# once made an empty claude composer read pending, which skipped the doorbell
+# and refused relaunch. Fixture: the captured screen reduced to the prompt rows.
+stray_glyph_screen() {  # <typed-text-or-empty>
+  local typed=$1 gray=$'\033[0m\033[38;2;136;136;136m' rule i=0
+  rule=$(printf '─%.0s' $(seq 1 60))
+  printf '%s\n' \
+    "${gray}B"$'\033[0m'"❯"$'\xc2\xa0'"${gray}${rule}"$'\033[0m' \
+    "❯"$'\xc2\xa0'"${typed:+$'\033[0m\033[38;2;255;255;255m'}${typed:-${gray}${rule}}"$'\033[0m' \
+    $'  \033[38;2;255;107;128m⏵⏵ bypass permissions on\033[0m (shift+tab to cycle)'
+}
+
+test_stray_glyph_over_rule_is_not_pending_input() {
+  local caps screen out cy
+  caps=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
+  screen=$(stray_glyph_screen '')
+  for cy in '' 1; do
+    out=$(fm_composer_classify_screen "$caps" "$screen" "$cy" '')
+    [ "$out" != pending ] || fail "stray B over rule (cursor '$cy') must not read pending, got '$out'"
+  done
+  out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = empty ] || fail "cursorless stray B over rule must read empty, got '$out'"
+  out=$(fm_composer_extract_selected_content "$caps" "$screen")
+  [ -z "$out" ] || fail "stray B over rule must extract no composer text, got '$out'"
+  pass "a stray dim glyph and rule cells on the prompt rows are not pending input"
+}
+
+test_typed_text_on_prompt_row_still_pending() {
+  local screen out
+  screen=$(stray_glyph_screen 'hello world')
+  out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = pending ] || fail "typed text on the prompt row must still read pending, got '$out'"
+  out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+  case "$out" in "hello world"*) ;; *) fail "typed text must be extracted, got '$out'" ;; esac
+  pass "real typed text on the prompt row still reads pending"
+}
+
+test_stray_glyph_over_rule_is_not_pending_input
+test_typed_text_on_prompt_row_still_pending
