@@ -115,3 +115,4 @@ If validation, cloning, no-mistakes initialization, or registry update fails, ge
 Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+After a successful seed, read `references/backlog-handoff.md` and move existing in-scope queued work into the new home.

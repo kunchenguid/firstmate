@@ -21,7 +21,7 @@ Load a reference with `cat` through Bash (for example `cat .agents/skills/second
 | --- | --- |
 | `references/charter-and-seed.md` | Scaffolding a charter, seeding a local or remote home, and the single owner of the sync and inherited-local-material propagation contract. |
 | `references/record-intake.md` | The domain is existing or inherited, before the new mate acts on any inherited plan. |
-| `references/backlog-handoff.md` | Moving in-scope queued items to a secondmate. |
+| `references/backlog-handoff.md` | Moving in-scope queued items to a secondmate, including right after creating and seeding a new one, so existing in-scope main-backlog work is not left behind. |
 | `references/recovery.md` | A secondmate's endpoint is dead, or a live mate needs a new harness, model, or effort. |
 | `references/retirement.md` | The captain or main firstmate explicitly decides to retire a secondmate. |
 

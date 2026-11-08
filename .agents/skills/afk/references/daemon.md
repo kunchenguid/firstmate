@@ -3,7 +3,7 @@
 ## The daemon, where it still runs
 
 On the harness and backend combinations that still launch the daemon, the mechanics below are unchanged.
-Pi, pi-signed, a home that runs the supervision host, and the T3 Code limits above remain outside this section.
+Pi, pi-signed, a home that runs the supervision host, and the T3 Code limits in `references/entering.md` remain outside this section.
 
 ### Operational prefix contract
 

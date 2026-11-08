@@ -2,7 +2,7 @@
 
 Classify the domain before seeding, because this step applies to only one of the two cases.
 A greenfield domain has no delivered domain work yet: nothing already shipped in its projects, no live deployment, and no predecessor records to import.
-Seed a greenfield domain normally; there is nothing to reconcile and this section adds no work to it.
+Seed a greenfield domain normally; there is nothing to reconcile and this step adds no work to it.
 An existing or inherited domain is any domain whose product is already in development, and any predecessor's domain a new mate takes over, including a consolidation after a retirement.
 Both of those cases require record intake before the new mate acts on any inherited plan.
 

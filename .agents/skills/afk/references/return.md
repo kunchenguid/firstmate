@@ -2,7 +2,7 @@
 
 No `/back` is needed. The first genuine message is the return signal:
 
-- A message that is none of the internal forms below, and **not** starting with `/afk` -> the captain is back.
+- A message that is none of the internal forms listed under "Recognizing the return" in `SKILL.md`, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns the correct-ordered daemon shutdown where a daemon ran, the archive of the posture record, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, the return brief, and the return-catch-up gate.
   Relay every section of the return brief in its emitted order and in section 9 language; `bin/fm-afk-return.sh` owns that order.

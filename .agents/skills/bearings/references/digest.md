@@ -1,6 +1,6 @@
 # bearings: gather, notify, compose, and file-mode report
 
-For a contribution wake or linked-issue filing, go directly to Contribution follow-up; the digest procedure below applies to Bearings invocations.
+For a contribution wake or linked-issue filing, go directly to `references/contributions.md`; the digest procedure below applies to Bearings invocations.
 
 1. **Gather live fleet state with one deterministic command.**
    Run `snapshot=$(bin/fm-bearings-snapshot.sh --json)` at invocation time and read that compact output.
@@ -39,7 +39,7 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 
 3. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
-   The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
+   The chat response uses the four complete sections in the chat-response contract in `references/chat-contract.md`, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
 4. **In explicit file mode only, compose and replace the detailed report file.**
