@@ -108,13 +108,13 @@ enable_dispatch_profile() {
 
 # Writes the task record bin/fm-dispatch-resolve.sh leaves in data/<id>/ (its
 # documented shape: task, status, and profile with null for an unset axis).
-record_dispatch() {  # <home> <id> <status> [<harness> <model> <effort>]
+record_dispatch() {  # <home> <id> <status> [<harness> <model> <effort> [<account>]]
   local home=$1 id=$2 status=$3
   mkdir -p "$home/data/$id"
-  jq -cn --arg id "$id" --arg status "$status" --arg h "${4:-}" --arg m "${5:-}" --arg e "${6:-}" '
+  jq -cn --arg id "$id" --arg status "$status" --arg h "${4:-}" --arg m "${5:-}" --arg e "${6:-}" --arg a "${7:-}" '
     def opt: if . == "" then null else . end;
     {task: $id, status: $status,
-     profile: (if $status == "clear" then {harness: $h, model: ($m | opt), effort: ($e | opt)} else null end)}' \
+     profile: (if $status == "clear" then {harness: $h, model: ($m | opt), effort: ($e | opt)} + (if $a == "" then {} else {account: $a} end) else null end)}' \
     > "$home/data/$id/dispatch-resolution.json"
 }
 
@@ -509,6 +509,34 @@ test_recorded_dispatch_selection_refuses_conflicting_flags() {
   assert_absent "$HOME_DIR/state/$id.meta" "selection mismatch should refuse before task publication"
   assert_equals '' "$(cat "$LAUNCH_LOG")" "selection mismatch must not create a worker"
   pass "a recorded dispatch selection refuses conflicting explicit launch flags"
+}
+
+test_recorded_dispatch_selection_binds_the_profile_account() {
+  local rec id out status
+  id=profile-selected-account-z13
+  rec=$(make_spawn_case profile-selected-account claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear claude opus high ordinary
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --effort high --account /accounts/other)
+  status=$?
+  expect_code 1 "$status" "a different --account than the recorded one should be refused"
+  assert_contains "$out" 'launch flags do not match the clear dispatch selection --harness claude --model opus --effort high --account ordinary' "spawn did not name the recorded account"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --effort high)
+  status=$?
+  expect_code 1 "$status" "a launch that omits the recorded account should be refused"
+  assert_contains "$out" 'launch flags do not match the clear dispatch selection' "omitting the recorded account was not refused as a mismatch"
+  assert_absent "$HOME_DIR/state/$id.meta" "account mismatch should refuse before task publication"
+  assert_equals '' "$(cat "$LAUNCH_LOG")" "account mismatch must not create a worker"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --effort high --account /accounts/other \
+    --dispatch-override 'authorized account test')
+  assert_not_contains "$out" 'launch flags do not match the clear dispatch selection' "a recorded override should bypass the account binding"
+  pass "a recorded dispatch selection binds the profile's account and an override still bypasses it"
 }
 
 test_recorded_dispatch_selection_allows_matching_flags() {
@@ -2965,6 +2993,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_recorded_dispatch_selection_refuses_conflicting_flags
+test_recorded_dispatch_selection_binds_the_profile_account
 test_recorded_dispatch_selection_allows_matching_flags
 test_recorded_dispatch_selection_allows_recorded_override
 test_recorded_dispatch_selection_leaves_unset_effort_unbound

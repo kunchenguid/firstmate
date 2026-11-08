@@ -2080,6 +2080,9 @@ jq '.rules[3].use = [{"harness":"claude","model":"sonnet","account":"token:/keys
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "a claude profile with an account resolves"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --account 'token:/keys/second.token'" "the profile line carries the account"
+cp "$BRIEF" "$TASK_BRIEF"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'token:/keys/second.token' "$(jq -r '.profile.account' "$TASK_RECORD")" "the task record keeps the profile's account for fm-spawn to enforce"
 jq '.rules[3].use = [{"harness":"claude","model":"sonnet","account":"ordinary"},{"harness":"claude","model":"sonnet","account":"/accounts/second"}]' "$BASE_RULES" > "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "two profiles that differ only by account are not duplicates"
@@ -2100,6 +2103,9 @@ cp "$BASE_RULES" "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 assert_not_contains "$out" '--account' "a profile without an account prints no --account"
 assert_not_contains "$out" 'account=' "a candidate without an account prints no account="
+cp "$BRIEF" "$TASK_BRIEF"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'false' "$(jq '.profile | has("account")' "$TASK_RECORD")" "a profile without an account records none"
 pass "account: a claude profile passes its account to the profile line; malformed or non-claude accounts are refused"
 
 printf '# all fm-dispatch-resolve tests passed\n'
