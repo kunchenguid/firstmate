@@ -724,7 +724,51 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   pass "a secondmate's unmarked routine progress absorbs when provably working; routed, terminal, note, marked, and unknown lines surface"
 }
 
+# Creates <dir>/config/verify-claimed-run, the flag that arms claimed-run
+# verification, and prints that config directory for FM_CONFIG_OVERRIDE.
+arm_claimed_run() {  # <dir>
+  mkdir -p "$1/config" && : > "$1/config/verify-claimed-run" && printf '%s' "$1/config"
+}
 
+# Without config/verify-claimed-run a due claim with no run is never read, armed,
+# looked up, or woken on.
+test_claimed_run_off_without_flag() {
+  local dir state fakebin out wt task pid
+  dir=$(make_case claimed-run-off); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; task=claim
+  mkdir -p "$wt" "$dir/config"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
+  printf 'working [at=1234567890]: validation started\n' > "$state/$task.status"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
+    "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
+    > "$state/.seen-claim_status"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_NM_CALLS"
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_TEST_NM_CALLS="$dir/nm.calls" FM_CLAIMED_RUN_DELAY=0 \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "flag-off watcher exited: $(cat "$out")"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  unset FM_FAKE_CREW_STATE
+  ! grep -q 'validation claim' "$out" || fail "flag-off watcher raised a claimed-run wake: $(cat "$out")"
+  # Other watcher paths may query no-mistakes; only the full run inventory is the claim lookup.
+  ! grep -q '^runs --limit 2147483647$' "$dir/nm.calls" 2>/dev/null \
+    || fail "flag-off watcher looked up the claim's runs: $(cat "$dir/nm.calls")"
+  [ ! -e "$state/.claimed-run-$task" ] && [ ! -e "$state/.claimed-run-cursor-$task" ] \
+    || fail "flag-off watcher wrote claimed-run records"
+  pass "without config/verify-claimed-run the watcher never reads, arms, or wakes on a validation claim"
+}
 
 test_claimed_run_outcomes() {
   local outcome dir state fakebin out wt task branch pid expected delay age
@@ -763,7 +807,7 @@ SH
     chmod +x "$fakebin/no-mistakes"
     export FM_EXPECT_BRANCH="$branch"
     export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-    PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY="$delay" FM_STATE_OVERRIDE="$state" \
+    PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY="$delay" FM_STATE_OVERRIDE="$state" \
       FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
@@ -802,7 +846,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -830,7 +874,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -992,7 +1036,7 @@ status_retire_presentation_task "$STATE" a
 check test ! -e "$STATE/.claimed-run-a"
 check test ! -e "$STATE/.claimed-run-cursor-a"
 DRIVER
-  env FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_ROOT_OVERRIDE="$ROOT" \
+  env FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_ROOT_OVERRIDE="$ROOT" \
     PATH="$fakebin:$PATH" TEST_WT="$wt" TEST_BRANCH="$(git -C "$wt" symbolic-ref --short HEAD)" \
     bash "$driver" > "$dir/driver.out" 2>&1
   rc=$?
@@ -1018,7 +1062,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1052,7 +1096,7 @@ printf 'run other-branch\n'
 SH
   chmod +x "$fakebin/no-mistakes"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+  PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$(arm_claimed_run "$dir")" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -5805,6 +5849,7 @@ fm_test_run \
   test_worktree_write_probe_is_wall_clock_bounded \
   test_signal_crew_provably_working_classifier \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
+  test_claimed_run_off_without_flag \
   test_claimed_run_outcomes \
   test_claimed_run_path_with_spaces \
   test_claimed_run_incremental_log \

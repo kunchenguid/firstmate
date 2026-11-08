@@ -128,9 +128,10 @@
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
 #   check: validation claim has no run for <branch> (worker reported validation started)
-#                          a worker's validation-started status has no
-#                          no-mistakes run on its branch FM_CLAIMED_RUN_DELAY
-#                          seconds later; reported once per claim
+#                          opt-in config/verify-claimed-run: a worker's
+#                          validation-started status has no no-mistakes run
+#                          on its branch FM_CLAIMED_RUN_DELAY seconds later;
+#                          reported once per claim
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -3491,6 +3492,8 @@ event_wait_or_sleep() {
 }
 
 # --- validation-claim verification --------------------------------------------
+# OFF unless the home creates config/verify-claimed-run: absent the flag no
+# status log is read, no claim is armed, and no wake is raised.
 # A worker's `working: validation started` line claims a no-mistakes run exists
 # for its branch. .claimed-run-<task> holds the claim's epoch while it is pending,
 # and .claimed-run-cursor-<task> remembers how far the log was read: a header line
@@ -3599,6 +3602,7 @@ claimed_run_verify() {  # <task>
 }
 
 claimed_run_tick() {
+  [ -e "$CONFIG/verify-claimed-run" ] || return 0
   local logs=("$STATE"/*.status) listing dev ino size ctime f task
   [ -e "${logs[0]}" ] || return 0
   listing=$(stat_log_identities "${logs[@]}") || :

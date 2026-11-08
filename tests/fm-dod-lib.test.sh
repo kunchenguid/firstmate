@@ -391,19 +391,31 @@ EOF
   pass "fenced and indented Captain lines are not authorized intent"
 }
 
-test_no_mistakes_deliveries_render_one_validation_start_claim() {
-  local delivery out count
+# config/verify-claimed-run adds one validation-start line to the no-mistakes
+# drive text; without it the definition is exactly the flag-on text minus it.
+test_validation_start_claim_follows_verify_claimed_run_flag() {
+  local delivery off on cfg count
+  # shellcheck disable=SC2016  # single quotes keep the backticks literal
+  local claim='Before starting validation, append `working [at=<epoch>]: validation started` to the status file so Firstmate can verify that the run exists for this branch.'
+  cfg="$TMP_ROOT/verify-claimed-run-config"
+  mkdir -p "$cfg"
+  : > "$cfg/verify-claimed-run"
   for delivery in default manual gerrit; do
     case "$delivery" in
-      default) out=$(fm_dod_block no-mistakes dod-claim) ;;
-      manual) out=$(fm_dod_block no-mistakes dod-claim fm/dod-claim none '' '' manual) ;;
-      gerrit) out=$(fm_dod_block no-mistakes dod-claim fm/dod-claim gerrit) ;;
+      default) set -- no-mistakes dod-claim ;;
+      manual) set -- no-mistakes dod-claim fm/dod-claim none '' '' manual ;;
+      gerrit) set -- no-mistakes dod-claim fm/dod-claim gerrit ;;
     esac
-    # shellcheck disable=SC2016  # single quotes keep the backticks literal
-    count=$(printf '%s\n' "$out" | grep -Fxc -- '- Before starting validation, append `working [at=<epoch>]: validation started` to the status file so Firstmate can verify that the run exists for this branch.' || true)
-    assert_equals 1 "$count" "$delivery delivery must include one validation-start claim"
+    off=$(CONFIG="$TMP_ROOT/no-such-config" fm_dod_block "$@")
+    on=$(CONFIG=$cfg fm_dod_block "$@")
+    count=$(printf '%s\n' "$off" | grep -Fc -- 'validation started' || true)
+    assert_equals 0 "$count" "$delivery delivery without the flag must not mention a validation-start claim"
+    count=$(printf '%s\n' "$on" | grep -Fxc -- "$claim" || true)
+    assert_equals 1 "$count" "$delivery delivery with the flag must include one validation-start claim"
+    [ "$(printf '%s\n' "$on" | grep -Fxv -- "$claim")" = "$off" ] \
+      || fail "$delivery delivery with the flag differs from the flag-off text by more than the claim line"
   done
-  pass "default, pr=manual, and Gerrit definitions include one validation-start claim"
+  pass "default, pr=manual, and Gerrit definitions carry the validation-start claim only under config/verify-claimed-run"
 }
 
 # The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
@@ -611,7 +623,7 @@ test_external_rule_one_forbids_every_task_push
 test_external_dod_renders_the_adapter
 test_external_review_done_without_backup_is_accepted_on_the_url
 test_external_review_done_with_backup_needs_the_copy
-test_no_mistakes_deliveries_render_one_validation_start_claim
+test_validation_start_claim_follows_verify_claimed_run_flag
 
 test_worker_role_names_skill_and_fallback_file
 
