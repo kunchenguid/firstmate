@@ -49,7 +49,7 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
+#                       compact state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
@@ -407,6 +407,60 @@ SUBRULE='-----------------------------------------------------------------------
 
 section() { printf '\n%s\n%s\n%s\n' "$RULE" "$1" "$RULE"; }
 subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
+
+# Compact metadata retains scalar control facts across every backend. Unknown
+# fields, duplicate keys and malformed prose are visible, with the exact source
+# available on demand; long launch/handoff prose is never repeated in full.
+print_meta_compact() {  # <path>
+  local path=$1 line key omitted=0 unknown=0 seen=$'\n'
+  printf 'metadata: %s (compact; full record: cat %q)\n' "$path" "$path"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*)
+        key=${line%%=*}
+        case "$key" in
+          ''|*[!a-zA-Z0-9_]*) unknown=$((unknown + 1)); line="MALFORMED: $line" ;;
+          *)
+            case "$seen" in *$'\n'"$key"$'\n'*) printf 'metadata warning: duplicate %s (last value wins)\n' "$key" ;; esac
+            seen="$seen$key"$'\n'
+            ;;
+        esac
+        ;;
+      '') continue ;;
+      *) unknown=$((unknown + 1)); line="UNPARSED: $line" ;;
+    esac
+    fm_cap_line_var "$line" 220
+    [ "$line" = "$FM_LINE_CAP_LINE" ] || omitted=$((omitted + 1))
+    printf '%s\n' "$FM_LINE_CAP_LINE"
+  done < "$path"
+  printf 'metadata disclosure: %d capped fields/prose lines; %d unparsed lines; full record above\n' "$omitted" "$unknown"
+}
+
+print_registry_compact() {  # <path> <label>
+  local path=$1 label=$2 line summary fields omitted=0 unknown=0
+  subsection "$label"
+  if [ ! -f "$path" ]; then printf 'ABSENT\n'; return; fi
+  if [ ! -s "$path" ]; then printf '(present, empty)\n'; return; fi
+  printf 'compact registry; full record: cat %q\n' "$path"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '- '*' ('*')')
+        summary=${line%%' ('*}; fields=${line#*' ('}
+        fm_cap_line_var "$summary" 180
+        [ "$summary" = "$FM_LINE_CAP_LINE" ] || omitted=$((omitted + 1))
+        printf '%s (%s\n' "$FM_LINE_CAP_LINE" "$fields"
+        ;;
+      '#'*|'') ;;
+      *)
+        unknown=$((unknown + 1))
+        fm_cap_line_var "$line" 220
+        [ "$line" = "$FM_LINE_CAP_LINE" ] || omitted=$((omitted + 1))
+        printf 'UNPARSED registry: %s\n' "$FM_LINE_CAP_LINE"
+        ;;
+    esac
+  done < "$path"
+  printf 'registry disclosure: %d capped summaries/prose lines; %d unparsed lines\n' "$omitted" "$unknown"
+}
 
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
@@ -894,7 +948,7 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
+Everything below is represented once for this session start: compact state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
 and data/learnings.md.
@@ -905,6 +959,8 @@ point of this command.
 Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
   - its contents looked unparseable or corrupt,
+  - a compact metadata/registry disclosure capped a field needed for this turn,
+    or omitted prose may affect recovery (use its exact full-record pointer),
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
     printed with its tail),
@@ -932,7 +988,7 @@ for meta in "$STATE"/*.meta; do
   META_FOUND=1
   id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
-  cat "$meta"
+  print_meta_compact "$meta"
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
@@ -1052,8 +1108,8 @@ fi
 # take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+print_registry_compact "$DATA/projects.md" "data/projects.md"
+print_registry_compact "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"

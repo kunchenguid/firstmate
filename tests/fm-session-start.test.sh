@@ -2039,6 +2039,13 @@ EOF
   mkdir -p "$home/projects/firstmate"
   printf 'window=fm-sess:compact\nworktree=%s\nproject=firstmate\nkind=ship\n' "$home/projects/firstmate" \
     > "$home/state/compact-startup.meta"
+  {
+    printf 'mode=direct-PR\nyolo=off\nfuture_backend_field=visible\n'
+    printf 'handoff='; printf '%2000s' '' | tr ' ' x; printf 'HIDDEN-META-END\n'
+    printf 'malformed record stays visible\n'
+  } >> "$home/state/compact-startup.meta"
+  printf '%s\n' '- routed - brief summary (home: /synthetic/mate; scope: preserve the complete routing scope; projects: demo; added 2026-01-01)' \
+    > "$home/data/secondmates.md"
   log="$home/tasks-axi.log"
 
   out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_READY=3 \
@@ -2060,6 +2067,14 @@ EOF
   assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
+  assert_contains "$out" 'mode=direct-PR' 'compact metadata lost delivery authority'
+  assert_contains "$out" 'yolo=off' 'compact metadata lost merge authority'
+  assert_contains "$out" 'future_backend_field=visible' 'unknown metadata field disappeared'
+  assert_contains "$out" 'UNPARSED: malformed record stays visible' 'malformed metadata disappeared'
+  assert_contains "$out" 'metadata disclosure: 1 capped fields/prose lines; 1 unparsed lines' 'metadata omission counts are not truthful'
+  assert_not_contains "$out" 'HIDDEN-META-END' 'long handoff metadata was printed in full'
+  assert_contains "$out" 'full record: cat' 'compact metadata lacks an exact retrieval command'
+  assert_contains "$out" 'scope: preserve the complete routing scope' 'compact registry lost routing authority'
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
   assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
