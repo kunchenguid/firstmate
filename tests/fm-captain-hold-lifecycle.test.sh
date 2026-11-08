@@ -1525,6 +1525,40 @@ test_keyed_answer_cap_is_one_visible_limit() {
   case "$show" in *"$(printf 'L%.0s' $(seq 1 513))"*) fail "the label was not cut to 512" ;; esac
 }
 
+test_replay_matches_records_written_before_the_cap_change() {
+  local home out show id
+  home=$(make_home legacy-replay)
+  for id in legacy-sel legacy-spaced; do
+    tasks_in "$home" add "$id" "Legacy fixture $id" --kind ship --repo sample >/dev/null
+    run_captain "$home" hold "$id" --reason "captain call needed" >/dev/null
+  done
+  # Fixture: the earlier board stored only the selected option when the captain
+  # also typed a note, while the label still showed both.
+  printf 'legacy-sel\tyes\tPick -> yes - reason\n' \
+    | run_captain "$home" answers --source "legacy fixture" >/dev/null \
+    || fail "could not write the selection-only record"
+  show=$(tasks_in "$home" show legacy-sel --full)
+  assert_contains "$show" "Answer: yes" "the fixture record was not written"
+  out=$(printf 'legacy-sel\tyes - reason\tPick -> yes - reason\n' \
+    | run_captain "$home" answers --source "legacy fixture") \
+    || fail "replaying a selection plus note against a selection-only record did not exit 0"
+  assert_contains "$out" "closed: legacy-sel" "the selection-plus-note replay was reported as a skip"
+  if printf 'legacy-sel\tno - reason\tPick -> yes - reason\n' \
+    | run_captain "$home" answers --source "legacy fixture" >/dev/null 2>&1; then
+    fail "a different selection was accepted against the closed record"
+  fi
+  # Fixture: a decision file as the earlier build wrote it, keeping the
+  # answer's surrounding spaces.
+  printf 'Captain answered this call through legacy fixture.\nTask: legacy-spaced\nAnswer:  yes \n' \
+    > "$home/spaced-decision.txt"
+  run_captain "$home" answer legacy-spaced --decision-file "$home/spaced-decision.txt" >/dev/null \
+    || fail "could not write the spaced record"
+  out=$(printf 'legacy-spaced\t yes \t\n' | run_captain "$home" answers --source "legacy fixture") \
+    || fail "replaying a spaced answer did not exit 0"
+  assert_contains "$out" "closed: legacy-spaced" "the spaced replay was reported as a skip"
+  pass "replay still matches a selection-only record and a record that kept its spaces"
+}
+
 test_send_resolve_key_refuses_over_cap_before_sending() {
   local home id out rc
   home=$(make_home send-cap)
@@ -5205,6 +5239,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_keyed_answer_cap_is_one_visible_limit
 test_send_resolve_key_refuses_over_cap_before_sending
 test_full_answer_replay_matches_a_512_cut_record
+test_replay_matches_records_written_before_the_cap_change
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement

@@ -97,6 +97,10 @@
 # close mode both match the newest record is reported `closed:` and is a no-op;
 # a mode mismatch is skipped. An answer over `answer-limit` bytes (6000) is
 # refused visibly, never truncated; the label keeps its 512-character cut.
+# An answer is recorded exactly as sent (only an answer with no visible
+# character is dropped), and a replay also matches a record written by an
+# earlier build: one cut to 512 characters, or one that kept only the option
+# of an "<option> - <note>" answer.
 # The command exits nonzero when any key was
 # skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
@@ -1539,7 +1543,7 @@ sanitize_reconcile_provenance() {
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local cut_digest cut_answer recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local cut_digest cut_answer sel_digest sel_answer recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   local resolve_rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1574,9 +1578,9 @@ command_answers() {
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
     answer=$(sanitize_answer "${answer:-}")
-    answer=${answer#"${answer%%[![:space:]]*}"}
-    answer=${answer%"${answer##*[![:space:]]}"}
-    [ -n "$answer" ] || continue
+    # Surrounding spaces are part of the recorded text (a replay digest covers
+    # them); only an answer with no visible character is refused.
+    case "$answer" in *[![:space:]]*) : ;; *) continue ;; esac
     if answer_too_long "$answer"; then
       printf 'refused: %s (answer exceeds %s bytes)\n' "$key" "$ANSWER_MAX_BYTES"
       skipped=$((skipped + 1))
@@ -1632,6 +1636,17 @@ command_answers() {
     cut_answer=$(sanitize_field "$answer")
     [ "$cut_answer" = "$answer" ] \
       || cut_digest=$(sha256_text "$(keyed_decision_text "$source" "$id" "$cut_answer" "$label")")
+    # A board answer once recorded only the selected option when the captain
+    # also typed a note ("yes - reason" was stored as "yes"); a replay of the
+    # combined text still matches that record.
+    sel_digest=''
+    sel_answer=${answer%% - *}
+    if [ "$sel_answer" != "$answer" ] && [ "${#sel_answer}" -le 128 ]; then
+      case "$sel_answer" in
+        ''|*[!A-Za-z0-9._-]*) : ;;
+        *) sel_digest=$(sha256_text "$(keyed_decision_text "$source" "$id" "$sel_answer" "$label")") ;;
+      esac
+    fi
     legacy_digest=''
     if [ "$id" != "$key" ]; then
       legacy_key=$key
@@ -1654,6 +1669,7 @@ command_answers() {
     if body_has_resolution_record "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
         || { [ -n "$cut_digest" ] && [ "$recorded_digest" = "$cut_digest" ]; } \
+        || { [ -n "$sel_digest" ] && [ "$recorded_digest" = "$sel_digest" ]; } \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] \

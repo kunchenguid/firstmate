@@ -561,6 +561,13 @@ __FM_BEARINGS_BOARD_DATA__
       var note = (fd.get("note") || "").trim();
       var displayAnswer = value ? (note ? value + " - " + note : value) : note;
       if (!displayAnswer) return;
+      /* A reconcile note keeps its own 512-character bound: the board's
+         reconciles reader drops a longer one, so refuse it before queuing. */
+      if (value === "reconcile" && Array.from(note).length > 512) {
+        answerLimit.textContent = "Reconcile note is too long to queue (512 characters maximum).";
+        answerLimit.classList.add("is-visible");
+        return;
+      }
       /* Same cap as fm-captain-hold.sh answer-limit. */
       if (utf8ByteLength(displayAnswer) > 6000) {
         answerLimit.textContent = "Answer is too long to queue (6000 bytes maximum).";
