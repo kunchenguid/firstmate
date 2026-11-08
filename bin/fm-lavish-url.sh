@@ -201,9 +201,21 @@ PYSESSION
   ts=$(date -u +%Y%m%dT%H%M%SZ)
   claim="$SNAPSHOTS/$slug-$ts"
   while :; do
-    if mkdir "$claim.claim" 2>/dev/null; then
+    if python3 - "$claim.claim" <<'PYCLAIM'
+import os, sys
+try:
+    os.mkdir(sys.argv[1])
+except FileExistsError:
+    sys.exit(2)
+except OSError as exc:
+    print("cannot reserve snapshot name: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+PYCLAIM
+    then
       [ ! -e "$claim.html" ] && break
       rmdir "$claim.claim"
+    elif [ "$?" != 2 ]; then
+      die "cannot reserve snapshot name: $claim"
     fi
     suffix=$((suffix + 1))
     claim="$SNAPSHOTS/$slug-$ts~$(printf '%06d' "$suffix")"
@@ -228,13 +240,16 @@ PYSESSION
   browser_ok "let the page settle" eval "async () => { if (document.readyState !== 'complete') { await new Promise((resolve) => { addEventListener('load', resolve, { once: true }); setTimeout(resolve, 15000); }); } await new Promise((resolve) => setTimeout(resolve, $settle)); return document.readyState; }" >/dev/null
   browser eval --full "() => {
     const styles = [], inaccessible = [];
+    for (const node of document.querySelectorAll('[data-fm-captured-sheet]')) node.removeAttribute('data-fm-captured-sheet');
     for (const sheet of [...document.styleSheets, ...document.adoptedStyleSheets]) {
       if (sheet.disabled) continue;
       try {
         let css = Array.from(sheet.cssRules, rule => rule.cssText).join('\n');
         const media = sheet.media && sheet.media.mediaText;
         if (media) css = '@media ' + media + ' {' + css + '}';
-        styles.push({ css, baseURI: sheet.href || document.baseURI });
+        const owner = sheet.ownerNode;
+        if (owner) owner.setAttribute('data-fm-captured-sheet', String(styles.length));
+        styles.push({ css, baseURI: sheet.href || document.baseURI, owner: owner ? styles.length : null });
       } catch (_) { if (sheet.href) inaccessible.push(sheet.href); }
     }
     return { url: location.href, baseURI: document.baseURI, title: document.title, html: document.documentElement.outerHTML, styles, inaccessible_stylesheets: inaccessible };

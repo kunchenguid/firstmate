@@ -71,12 +71,13 @@ case "${1-}" in
 const fs = require("fs"), vm = require("vm");
 const [url, page, expression] = process.argv.slice(2);
 const fixture = JSON.parse(fs.readFileSync(page + ".json", "utf8"));
-const sheets = fixture.styles.map(s => ({href: s.baseURI, cssRules: [{cssText: s.css}], media: {mediaText: s.media || ""}, disabled: !!s.disabled}));
+let markup = fs.readFileSync(page, "utf8");
+const sheets = fixture.styles.map(s => ({ownerNode: s.owner ? {setAttribute(key, value) { markup = markup.replace(s.owner, s.owner.replace(">", ` ${key}="${value}">`)); }} : null, href: s.baseURI, cssRules: [{cssText: s.css}], media: {mediaText: s.media || ""}, disabled: !!s.disabled}));
 const adopted = sheets.pop();
 for (const href of fixture.inaccessible_stylesheets) {
   sheets.push({href, get cssRules() { throw new Error("SecurityError"); }});
 }
-const document = {baseURI: url, title: "Fixture page", documentElement: {outerHTML: fs.readFileSync(page, "utf8")},
+const document = {baseURI: url, title: "Fixture page", querySelectorAll: () => [], documentElement: {get outerHTML() { return markup; }},
   styleSheets: sheets, adoptedStyleSheets: [adopted]};
 const result = vm.runInNewContext("(" + expression + ")()", {document, location: {href: url}});
 console.log("result: " + JSON.stringify(JSON.stringify(result)));
@@ -493,9 +494,9 @@ test_overlapping_captures_keep_pages_and_names_distinct() {
 test_cssom_and_reserved_markup() {
   local home out snap
   home=$(make_home cssom)
-  printf '<html><head></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
+  printf '<html><head><style>.dynamic{color:black}</style><link rel="stylesheet" href="https://external.test/sheet.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
   cat > "$home/pages/css.test.html.json" <<'JSON'
-{"styles":[{"css":".disabled{color:green}","disabled":true},{"css":".dynamic{background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"}],"inaccessible_stylesheets":["https://external.test/sheet.css"]}
+{"styles":[{"css":".disabled{color:green}","disabled":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"}],"inaccessible_stylesheets":["https://external.test/sheet.css"]}
 JSON
   out=$(lu "$home" snapshot https://css.test/ 2>&1) || fail "$out"
   snap=$(field "$out" snapshot)
@@ -507,19 +508,24 @@ class Output(HTMLParser):
         super().__init__()
         self.ids = []
         self.styles = []
+        self.cascade = []
         self.in_style = False
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if "id" in attrs: self.ids.append(attrs["id"])
         assert attrs.get("name") != "fmLavishUrl"
         assert tag != "img"
+        if tag == "link" and attrs.get("href") == "https://external.test/sheet.css": self.cascade.append("external-blue")
         self.in_style = tag == "style"
     def handle_endtag(self, tag):
         if tag == "style": self.in_style = False
     def handle_data(self, data):
-        if self.in_style: self.styles.append(data)
+        if self.in_style:
+            self.styles.append(data)
+            if ".dynamic{color:red" in data: self.cascade.append("copied-red")
 p = Output()
 p.feed(open(sys.argv[1]).read())
+assert p.cascade == ["copied-red", "external-blue"], p.cascade
 assert "fm-lavish-url-panel" not in p.ids
 assert "fmLavishUrl" not in p.ids
 assert "fm-lavish-url-outline" not in p.ids
@@ -566,7 +572,39 @@ JS
   pass "CSSOM styles are rewritten safely and reserved page markup is stripped"
 }
 
+
+test_unwritable_snapshot_directory() {
+  local home rc out
+  home=$(make_home unwritable)
+  mkdir -p "$home/.lavish/snapshots"
+  chmod 0500 "$home/.lavish/snapshots"
+  if [ -w "$home/.lavish/snapshots" ]; then
+    chmod 0700 "$home/.lavish/snapshots"
+    fail "permission regression requires an unprivileged test user"
+  fi
+  rc=0
+  out=$(python3 - "$home" "$LU" <<'PYFAIL'
+import os, subprocess, sys
+home, command = sys.argv[1:]
+env = dict(os.environ, FM_HOME=home, PATH=home + "/fakebin:" + os.environ["PATH"])
+try:
+    result = subprocess.run(["bash", command, "snapshot", "https://plain.example.test/"], env=env, capture_output=True, text=True, timeout=10)
+except subprocess.TimeoutExpired:
+    sys.exit("snapshot did not stop promptly")
+print(result.stdout + result.stderr)
+assert result.returncode != 0
+assert "cannot reserve snapshot name" in result.stderr
+PYFAIL
+) || rc=$?
+  chmod 0700 "$home/.lavish/snapshots"
+  expect_code 0 "$rc" "unwritable snapshot regression failed: $out"
+  assert_absent "$home/browser.log" "reservation failure drove the browser"
+  assert_absent "$home/lavish-state/open" "reservation failure opened Lavish"
+  pass "unwritable snapshots fail promptly before capture or arming"
+}
+
 fm_test_run \
+  test_unwritable_snapshot_directory \
   test_overlapping_captures_keep_pages_and_names_distinct \
   test_cssom_and_reserved_markup \
   test_generic_url_capture_sanitizes_layers_and_arms \

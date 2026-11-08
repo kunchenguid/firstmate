@@ -148,8 +148,10 @@ def rewrite_css(text, base):
 
 
 class Sanitizer(HTMLParser):
-    def __init__(self, base, html_extra_attrs):
+    def __init__(self, base, html_extra_attrs, styles=()):
         super().__init__(convert_charrefs=False)
+        self.sheet_styles = {str(i): "<style>\n%s</style>" % rewrite_css(sheet["css"], sheet.get("baseURI") or base) for i, sheet in enumerate(styles) if sheet.get("owner") is not None}
+        self.pending_style = ""
         self.base = base
         self.html_extra_attrs = html_extra_attrs
         self.out = []
@@ -249,6 +251,7 @@ class Sanitizer(HTMLParser):
             if tag not in VOID and not selfclosing and tag not in DROP_VOID:
                 self.skip.append(tag)
             return
+        copied = self.sheet_styles.get(dict(attrs).get("data-fm-captured-sheet"), "")
         kept = self.clean_attrs(tag, attrs)
         if tag == "html":
             if self.saw_html:
@@ -260,6 +263,9 @@ class Sanitizer(HTMLParser):
             self.head_start = len(self.out)
         if tag == "style" and not selfclosing:
             self.in_style = True
+            self.pending_style = copied
+        elif copied:
+            self.out.append(copied)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
@@ -276,6 +282,9 @@ class Sanitizer(HTMLParser):
         if tag == "body" and self.body_end is None:
             self.body_end = len(self.out)
         self.out.append("</%s>" % tag)
+        if tag == "style":
+            self.out.append(self.pending_style)
+            self.pending_style = ""
 
     def handle_data(self, data):
         if self.skip:
@@ -419,7 +428,7 @@ def build(args):
     elif urlsplit(reported).scheme in ("http", "https"):
         base = reported
     html_attrs = [("data-fm-lavish-url", "snapshot"), ("data-fm-viewport", viewport)]
-    sanitizer = Sanitizer(base, html_attrs)
+    sanitizer = Sanitizer(base, html_attrs, capture.get("styles", []))
     sanitizer.feed(capture["html"])
     sanitizer.close()
     body = sanitizer.out
@@ -442,6 +451,8 @@ def build(args):
         core = inline_script(handle.read(), "core.js")
     captured_css = []
     for sheet in capture.get("styles", []):
+        if sheet.get("owner") is not None:
+            continue
         captured_css.append("<style>\n%s</style>" % rewrite_css(sheet["css"], sheet.get("baseURI") or base))
     head_inject = '<style id="fm-lavish-url-style">\n%s</style>' % css
     context_json = json.dumps(context).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
