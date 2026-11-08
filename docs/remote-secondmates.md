@@ -257,7 +257,7 @@ The script's own header owns the full line protocol.
 
 ### Repair with --fix
 
-`--fix` repairs only the automatable gaps and is safe to rerun:
+`--fix` repairs only the automatable gaps; observe the Herdr concurrency restriction below before rerunning it:
 
 ```sh
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
@@ -266,7 +266,7 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 Over the plain SSH doctor bootstrap, it writes and reloads the applicable Firstmate-owned launch agents on macOS:
 
 - `dev.firstmate.remote-job`.
-- `dev.firstmate.herdr.fm-remote`.
+- The code root's Herdr agent, resolved as described below.
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 The Herdr agent applies only to the herdr backend; a rex-verified host needs only the remote-job worker there.
@@ -276,7 +276,7 @@ The doctor records that root as the service owner, and a different code root on 
 A legacy service without an owner record is adopted only when its existing launch-agent guard proves the current root owns it; otherwise the doctor leaves it alone and reports the ownership gap.
 An operator's `--fix` refuses to rewrite, reload, or restart a Herdr service owned by another code root, one whose owner cannot be proven, or one whose pane list shows live panes or cannot be read; it reports the service and its owner instead.
 Readiness runs its unattended repair as `--fix --automatic`, which never stops, boots out, replaces, reloads, or takes over a running Herdr server or a loaded Herdr launch agent, because launchd can restart that server and a mate can create a pane in it at any moment.
-It only records ownership and starts a stopped server, and reports every other Herdr repair as an operator action.
+It can record ownership, install and bootstrap an unloaded agent for a stopped server, or start a stopped server through an already matching loaded agent; destructive Herdr repairs remain operator actions.
 A reload never force-restarts the freshly bootstrapped server.
 The operator's explicit `--fix` keeps a residual risk that automatic readiness does not: its empty-pane proof is taken before it boots out, reloads, or authorizes the guard to take the session over, and nothing stops a mate from creating a pane in that window, so a pane created concurrently during its repair is closed.
 Run an explicit `fm-remote-doctor.sh --fix` only when no mate is being launched, relaunched, or recovered on that account.
@@ -301,20 +301,10 @@ Every claude pane under such a server falls back to a stale plaintext credential
 ### How the guard converges on one server
 
 Herdr's own SSH remote attach starts a server born in another session when it finds none.
-At boot, that server wins the `fm-remote` socket, because sshd accepts connections before the login session exists.
-The guard is what makes the launch agent converge.
-It acts on whichever server owns the `fm-remote` socket:
-
-| Socket owner | Guard action |
-| --- | --- |
-| Nothing | Execs the server in the foreground under launchd. |
-| An Aqua-born server | Exits 0. |
-| Any other (foreign) server, on a start the operator's `--fix` authorized | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server. |
-| Any other (foreign) server, on any other start | Exits 0 and leaves it alone; the doctor reports it until an operator's `--fix` takes it over. |
-
-Only the operator's `--fix` authorizes a takeover, through a one-shot marker naming its own live process, so a login, a KeepAlive restart, or an automatic readiness repair never closes a running session's panes.
-`KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket.
-The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
+At boot, that server can win the configured session's socket, because sshd accepts connections before the login session exists.
+The [guard's header](../bin/fm-remote-herdr-guard.sh) owns the startup decision table and one-shot operator authorization mechanism; the [repair safety rules above](#repair-with---fix) explain when takeover is allowed and its concurrency risk.
+`KeepAlive={SuccessfulExit=false}` lets a successful guard exit rest instead of respawning against a held socket.
+[`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
 
 ### Other repairs and limits
 
@@ -329,7 +319,7 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 Its limits:
 
 - It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
-- The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server.
+- Each dedicated Herdr launch agent owns only its code root's remote-secondmate server.
   It does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 - It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
@@ -412,13 +402,8 @@ Launch records are created only when the secondmate is launched.
 
 ### The seed's readiness gate
 
-The seed gates readiness in these steps:
-
-1. The seed runs a read-only check.
-2. When that check reports a gap, it runs `--fix`.
-3. It then runs a second read-only check, whose verdict decides.
-
-So the operator never has to run the repair by hand, and a repair is never trusted on its own word.
+The seed uses [`bin/fm-remote-readiness-lib.sh`](../bin/fm-remote-readiness-lib.sh)'s check, automatic repair, and read-only recheck gate.
+The [repair safety rules](#repair-with---fix) distinguish unattended repairs from gaps requiring an operator; older doctors that cannot accept safe automatic repair are left not ready rather than retried with unrestricted `--fix`.
 When a host stays red, the seed prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
 
 ### Failure and rollback
@@ -717,7 +702,7 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`, never the shared session or a sibling's workspace or panes.
+Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its code root's remote session, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
@@ -758,6 +743,7 @@ bin/fm-test-run.sh tests/fm-remote-job-launchagent.test.sh
 bin/fm-test-run.sh tests/fm-remote-transport-lanes.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
+bin/fm-test-run.sh tests/fm-remote-herdr-identity.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
