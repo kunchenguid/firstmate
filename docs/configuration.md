@@ -941,11 +941,10 @@ Age-based retention works independently of the selected backlog backend and keep
 
 The optional local, gitignored `config/record-hygiene` presence flag opts this home into reporting its own inconsistent task records.
 Create it with `touch "$FM_HOME/config/record-hygiene"`; remove it to stop the report.
-With the flag present, session-start bootstrap prints a `RECORD_HYGIENE:` line for each inconsistency, and the watcher heartbeat runs the same scan in the background and raises one `check: record hygiene:` notification when its findings change.
-A mutating, locked session start also archives each orphan status log older than 24 hours to `data/<id>/status.log`; a detect-only session start and the heartbeat only report it.
-It is off by default: without the flag, session start and the heartbeat print no report, move no files, and read no records for it.
+With the flag present, session-start bootstrap prints a `RECORD_HYGIENE:` line for each inconsistency, and the watcher heartbeat runs the scan in the background and raises one `check: record hygiene:` notification when its findings change.
+It is off by default: without the flag, session start and the heartbeat print no report, move no files, and perform no record-hygiene reads.
 The flag takes effect at the next session start or heartbeat, and is a home-local preference that is not inherited by secondmate homes.
-[`architecture.md`](architecture.md#task-status-archives) describes what the scan reports; [`bin/fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh) owns the mechanics.
+[`architecture.md`](architecture.md#task-status-archives) owns scan scope and status-log archiving; [`bin/fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh) owns the mechanics.
 
 ## Record export (config/record-export-root)
 

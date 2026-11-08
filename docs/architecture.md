@@ -264,7 +264,7 @@ Text for a worker to read and commands that drive a worker's process are separat
 
 When [status archival is enabled](configuration.md#task-status-archive-configstatus-archive), teardown preserves the complete status stream in `data/<task>/status.log`, using a separate `status.<N>.log` for reused IDs without overwriting earlier histories.
 When [record hygiene is enabled](configuration.md#record-hygiene-report-configrecord-hygiene), session-start bootstrap and the watcher heartbeat report home-local record inconsistencies: status logs without metadata older than 24 hours, in-flight rows without metadata, metadata without a tab, and duplicate `pr=` references across records.
-Only the mutating, locked session-start bootstrap archives orphan status logs to `data/<id>/status.log`; the heartbeat report does not archive them.
+Only the mutating, locked session-start bootstrap archives orphan status logs older than 24 hours to `data/<id>/status.log`; a detect-only bootstrap and the heartbeat do not archive them.
 The scan is limited to the current home's records and is a report, not a general cleanup sweep.
 The shared report implementation is [`fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh).
 Forced secondmate retirement stores descendant logs under the surviving parent's `data/<secondmate>/children/<child>/` tree.
