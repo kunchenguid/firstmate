@@ -205,7 +205,7 @@ $ echo $?
 
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
-`bin/fm-pr-check.sh` refuses to arm a GitLab watch without `jq` because its degraded-state baseline is JSON-only.
+When `config/pr-degraded-watch` is present, `bin/fm-pr-check.sh` refuses to arm a GitLab watch without `jq` because its degraded-state baseline is JSON-only; with the flag absent, it arms the existing merged-only watch without `jq`.
 A car-endpoint 404 is confirmed with one bounded read of the project's active merge-train list; only a readable list omitting the merge request triggers one bounded MR-state re-read, while list errors stay silent.
 An `opened` or `locked` re-read reports the drop; `closed` stays silent, `merged` reports the merge, and an unreadable re-read reports the confirmed drop with `mr_state=unconfirmed`.
 The watcher emits a drop only after it has recorded the merge request on the train.
