@@ -209,7 +209,9 @@
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. An unknown pane verdict
+#      still reads unknown, but a local-only resolved `done:` first runs the
+#      bin/fm-dod-lib.sh gate so its landing head is latched.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux, herdr, and rex, which own a
@@ -220,8 +222,9 @@
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
 #
-# Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# Read-only apart from bin/fm-dod-lib.sh's local-only done-head latch. Always
+# exits 0 on a successful read regardless of state; exit 2 only on a usage
+# error (no id).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -329,6 +332,16 @@ emit_ship_status_done() {  # [extra-detail]
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
   emit blocked status-log "$reason"
+}
+
+# An unknown pane verdict stops the reading before the status log may answer,
+# but a local-only lane's resolved done declaration still owns its landing
+# identity. Run the same gate emit_ship_status_done runs, so the head is
+# latched exactly as it would be for an idle pane, and discard its verdict: the
+# reading stays unknown and the log never answers for the pane.
+latch_local_done_head() {
+  [ "$LOG_VERB" = "done" ] && [ "$(meta_value mode)" = local-only ] || return 0
+  fm_dod_accept_ship_done "$KIND" local-only "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META" >/dev/null || :
 }
 
 map_log_state() {  # <line>
@@ -1586,7 +1599,10 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      latch_local_done_head
+      emit unknown pane "harness state unavailable ($BUSY_VERDICT)"
+      ;;
   esac
 fi
 

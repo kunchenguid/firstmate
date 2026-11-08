@@ -308,7 +308,101 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+# A Codex lane whose pane verdict cannot be classified, read through the real
+# bin/fm-crew-state.sh. The fake tmux keeps the endpoint readable and the fake
+# no-mistakes attributes no run, so the reading reaches the pane verdict.
+make_codex_case() {  # <name> [status-line]
+  make_case "$1"
+  printf 'window=fm:fm-local-task\nharness=codex\n' >> "$META"
+  [ "$#" -lt 2 ] || printf '%s\n' "$2" > "$HOME_DIR/state/local-task.status"
+  mkdir -p "$CASE/fakebin"
+  printf '#!/bin/sh\nexit 0\n' > "$CASE/fakebin/no-mistakes"
+  cat > "$CASE/fakebin/tmux" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+  list-windows) sed -n 's/^window=[^:]*://p' "$FM_STATE_OVERRIDE"/*.meta ;;
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  chmod +x "$CASE/fakebin/no-mistakes" "$CASE/fakebin/tmux"
+}
+
+crew_state() {
+  PATH="$CASE/fakebin:$PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    bash "$ROOT/bin/fm-crew-state.sh" local-task
+}
+
+assert_unknown_pane_reading() {  # <reading> <context>
+  assert_contains "$1" 'state: unknown · source: pane · harness state unavailable (unknown codex-unverified)' \
+    "$2: an unclassifiable pane must stay unknown"
+  assert_not_contains "$1" 'state: done' "$2: the status log alone must not report the lane finished"
+  assert_not_contains "$1" 'status-log' "$2: the status log must not answer for an unknown pane"
+}
+
+test_unknown_pane_done_latches_and_lands() {
+  local out
+  make_codex_case unknown-done 'done [at=1790000000]: ready in branch fm/local-task'
+  out=$(crew_state)
+  assert_unknown_pane_reading "$out" 'finished lane'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] \
+    || fail "the finished head was not recorded from the status log: $(cat "$META")"
+  land >/dev/null || fail 'the recorded finished head did not land'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'landing did not use the recorded head'
+  pass 'a finished Codex lane with an unknown pane records its head, stays unknown, and lands'
+}
+
+test_unknown_pane_without_done_records_nothing() {
+  local line out
+  for line in '' 'working [at=1790000000]: still building' 'blocked [at=1790000000]: stuck'; do
+    if [ -z "$line" ]; then
+      make_codex_case "unknown-no-log"
+    else
+      make_codex_case "unknown-${line%% *}" "$line"
+    fi
+    out=$(crew_state)
+    assert_unknown_pane_reading "$out" "no finished line (${line:-absent log})"
+    assert_no_regex '^local_done_head=' "$META" "no finished line (${line:-absent log}) recorded a head"
+    out=$(land 2>&1) && fail "an unfinished lane landed: $out"
+    assert_contains "$out" 'missing or malformed local done head' 'an unfinished lane must refuse for its missing head'
+    [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'an unfinished lane moved main'
+  done
+  pass 'a lane with no finished line records nothing and still refuses to land'
+}
+
+test_unknown_pane_done_head_mismatch_refuses() {
+  local out
+  make_codex_case unknown-moved 'done [at=1790000000]: ready in branch fm/local-task'
+  crew_state >/dev/null
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'the finished head was not recorded'
+  git -C "$WT" commit -q --allow-empty -m Y
+  out=$(crew_state)
+  assert_unknown_pane_reading "$out" 'moved branch'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'a later reading rebound the recorded head'
+  out=$(land 2>&1) && fail "a branch that moved past the recorded head landed: $out"
+  assert_contains "$out" 'differs from the recorded local done head' 'a moved branch must refuse against the recorded head'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'a moved branch moved main'
+  pass 'a branch that moves after the head is recorded still refuses to land'
+}
+
+test_unknown_pane_done_on_foreign_branch_refuses() {
+  local out
+  make_codex_case unknown-foreign 'done [at=1790000000]: ready in branch fm/local-task'
+  git -C "$WT" checkout -q -b scratch
+  git -C "$WT" commit -q --allow-empty -m 'work on a branch that is not the lane'"'"'s'
+  out=$(crew_state)
+  assert_unknown_pane_reading "$out" 'foreign branch'
+  out=$(land 2>&1) && fail "work on another branch landed: $out"
+  assert_contains "$out" 'differs from the recorded local done head' 'another branch must refuse against the lane branch'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'another branch moved main'
+  [ "$(git -C "$PROJ" rev-parse refs/heads/fm/local-task)" = "$X" ] || fail 'the lane branch moved'
+  pass "a finished line on a branch that is not the lane's own still refuses to land"
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_unknown_pane_done_latches_and_lands test_unknown_pane_without_done_records_nothing \
+  test_unknown_pane_done_head_mismatch_refuses test_unknown_pane_done_on_foreign_branch_refuses
