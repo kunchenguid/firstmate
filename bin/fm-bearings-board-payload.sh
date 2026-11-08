@@ -12,14 +12,22 @@
 #
 # The payload goes to stdout. With no --snapshot the script runs
 # `fm-bearings-snapshot.sh --json` itself (--include-prs is passed through);
-# with --snapshot it reads that JSON from the file or stdin instead.
+# with --snapshot it reads that JSON from the file or stdin instead, so /bearings
+# lavish pipes the snapshot it already captured for the digest and the board
+# cannot disagree with it (--include-prs then has no effect).
 #
 # Mapping (snapshot field -> board section):
-#   decisions_open  -> captains_call: one `decision` card per captain-held task id,
-#                      titled from the row's `title`, `about` from its `reason`,
-#                      `pr_url` and `repo` from the PR the task recorded, and a
-#                      freeform answer box (a card with no authored options). The
-#                      snapshot already buckets holds, so every row is a live call.
+#   decisions_open  -> captains_call: one `decision` card per captain-held task (a
+#                      home-prefixed row is a different task from a main one that
+#                      shares its key), titled from the row's `title`, `about` from
+#                      its `reason`, `decide` from its full `question` whenever the
+#                      short title and reason cut any of it, `pr_url` and `repo` from
+#                      the PR the task recorded, and a freeform answer box (a card
+#                      with no authored options). The snapshot already buckets
+#                      holds, so every row is a live call. The card key is the task
+#                      id; a row whose id collides with an earlier card's key gets
+#                      `<home>.<id>` so no live hold is dropped, and the copy overlay
+#                      names that final key.
 #   contributions.captain
 #                   -> captains_call: one `link` card (answer-less: no options, no
 #                      answer box) for each distinct home, task, and contribution
@@ -43,7 +51,10 @@
 #                   -> charted warning rows for a home whose books disagree
 #                      (`reconcile-<id>`) or whose state is unavailable
 #                      (`unavailable-<id>`).
-#   omitted         -> charted_more, from the `gates showing N of M` surface.
+#   omitted         -> charted_more, from the `gates showing N of M` surface. The
+#                      snapshot reserves its warning gates ahead of that bound, so the
+#                      omitted gates are all queued work and no warning is counted in
+#                      charted_more.
 #
 # Copy overlay (--copy): a JSON object whose optional maps are keyed by the row
 # key or id they refine, so a missing entry leaves the deterministic default.
@@ -170,27 +181,37 @@ jq -n --argjson snap "$SNAP_JSON" --argjson copy "$COPY_JSON" '
   | (($snap.omitted // []) | map(.surface)) as $omitted
 
   | ( [ $snap.decisions_open[]? ]
-      | reduce .[] as $d ([]; if (map(.key) | index($d.key)) then . else . + [$d] end)
+      | reduce .[] as $d ([]; if (map(.id) | index($d.id)) then . else . + [$d] end)
+      | reduce .[] as $d ([];
+          ($d.key) as $plain
+          | (if (map(.card_key) | index($plain)) == null then $plain
+             else (($d.owner // "home") | gsub("[^A-Za-z0-9._-]"; "_")) + "." + $plain | .[0:128] end) as $ck
+          | . + [$d + {card_key: $ck}])
       | map(
           . as $d
           | pr_for($d.id; $contrib; $recorded) as $pr
+          | ( ($d.title // $d.summary // $d.key) | nz($d.key)) as $title
+          | ( if ($d.reason | nz(null)) != null then $d.reason else null end) as $reason
           | ( {
-              key: $d.key,
+              key: $d.card_key,
               type: "decision",
               repo: ( ($pr | repo_of_url)
                       // ([$in_flight[] | select(.id == $d.id or .id == $d.key) | .repo][0])
                       // null ),
-              title: (($d.title // $d.summary // $d.key) | nz($d.key)),
+              title: $title,
               options: [],
               allow_freeform: true,
               freeform_hint: "answer in your own words (say later to defer)"
             }
-            + (if ($d.reason | nz(null)) != null then {about: $d.reason} else {} end)
+            + (if $reason != null then {about: $reason} else {} end)
+            + (if ($d.question | nz(null)) != null
+                  and ([$title + ": " + ($reason // "-"), $title] | index($d.question) | not)
+               then {decide: $d.question} else {} end)
             + (if $pr != null then {pr_url: $pr} else {} end) )
-          + overlay("captains_call"; $d.key; card_fields)
+          + overlay("captains_call"; $d.card_key; card_fields)
           | . as $card
-          | select((($copy.captains_call // {}) | has($d.key) | not)
-                   or ($copy.captains_call[$d.key] != null))
+          | select((($copy.captains_call // {}) | has($d.card_key) | not)
+                   or ($copy.captains_call[$d.card_key] != null))
           | $card )
     ) as $cards
   | ( [ $contrib[]

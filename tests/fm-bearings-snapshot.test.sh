@@ -2194,6 +2194,31 @@ EOF
   pass "main orphan in-flight stays out of Underway and is disclosed in omitted/gates"
 }
 
+test_main_inventory_warning_survives_the_gate_bound() {
+  local home fakebin json
+  home=$(make_home main-orphan-bound)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] only-orphan - Structured in flight without meta (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] q-one - First queued (repo: firstmate) (kind: ship) (filed 2026-07-01)
+- [ ] q-two - Second queued (repo: firstmate) (kind: ship) (filed 2026-07-02)
+- [ ] q-three - Third queued (repo: firstmate) (kind: ship) (filed 2026-07-03)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_GATES=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.gates | any(.id == "(main-inventory)"))
+      and ([.gates[] | select(.id != "(main-inventory)")] | length) == 1
+      and (.omitted | any(.surface == "gates showing 1 of 3"))
+  ' >/dev/null || fail "the main-inventory warning was cut by the gate bound or counted as queued work: $json"
+  pass "the main-inventory warning survives the gate bound and is not counted as omitted queued work"
+}
+
 test_main_unstructured_current_is_disclosed_with_structured_sibling() {
   local home fakebin json canonical
   home=$(make_home main-unstructured)
@@ -3490,6 +3515,7 @@ fm_test_run \
   test_live_blocker_is_not_charted_queue_work \
   test_captains_call_anti_leak \
   test_main_orphan_in_flight_is_disclosed_not_invented \
+  test_main_inventory_warning_survives_the_gate_bound \
   test_main_unstructured_current_is_disclosed_with_structured_sibling \
   test_main_orphan_counterfactual_meta_clears_inventory_warning \
   test_working_captain_holds_keep_their_bucket_surfaces \

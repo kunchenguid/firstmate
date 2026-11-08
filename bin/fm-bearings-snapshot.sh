@@ -51,7 +51,8 @@
 # Ordinary Charted Next gates are ordered by durable filed date, newest first,
 # before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
 # date keep their input order after dated gates. The synthetic (return-catchup)
-# posture row is reserved ahead of that ordering and bound so it always surfaces.
+# posture row and the (main-inventory) integrity row are reserved ahead of that
+# ordering and bound so they always surface and never count as omitted queued work.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -574,15 +575,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          owner:"(main)",
          filed:null}]
      else [] end) as $return_catchup_gate
-  | ((if (.main_inventory.valid == false) then
+  | (if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",
           reason:"main inventory",
           owner:"(main)",
           filed:null}]
-      else [] end)
-     + [ .backlog.records[]
+      else [] end) as $inventory_gate
+  | ([ .backlog.records[]
          | . as $record
          | select(.structured and
              (.hold_bucket != null or .state == "queued" or
@@ -654,6 +655,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
       gates: ($return_catchup_gate
+              + $inventory_gate
               + ($gates_all | newest_filed_first
                  | if $all_queued == 1 then . else .[:$gates_n] end)),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
