@@ -21,7 +21,8 @@
 # Capture: only Claude scouts carry a session id. bin/fm-spawn.sh launches a
 # verified Claude scout with an explicit `--session-id <uuid>` and records it as
 # the task record key claude_session; every other harness records session=
-# empty, so a follow-up from it is a fresh scout.
+# empty, so a follow-up from it is a fresh scout. Backend t3code starts the
+# agent itself and never runs that launch, so it records no session id either.
 #
 # Follow-up (bin/fm-spawn.sh <new-id> <project> --scout --follow-up <old-id>):
 # the new scout always gets a fresh local copy at the base branch and a brief
@@ -32,7 +33,9 @@
 # carries `--resume <old> --fork-session --session-id <new>`: Claude 2.1.311
 # resumes a session recorded under another directory, and the fork writes a new
 # transcript under the new cwd, leaving the old one untouched and the follow-up
-# itself resumable. Any other case launches a fresh scout.
+# itself resumable. Any other case, including backend t3code, launches a fresh
+# scout. Every follow-up launch also grants the new scout read access to the
+# earlier scout's data directory so it can read the old report.
 
 # fm_scout_session_kv <file> <key>: last value of <key>, empty when absent.
 fm_scout_session_kv() {

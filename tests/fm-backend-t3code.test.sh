@@ -1869,6 +1869,33 @@ test_spawn_codex_accepts_bypass_approval_mode() {
   pass "fm-spawn.sh --backend t3code codex: config/codex-approval-mode=bypass still launches"
 }
 
+# T3 starts the agent itself, so a spawn can neither pass --session-id nor
+# --resume. A Claude scout there must record no session and a follow-up must
+# report the fresh-scout fallback even when the earlier transcript exists.
+test_follow_up_scout_is_fresh_on_t3code() {
+  local id old out rc session store
+  id=$(t3_uid t3followz)
+  old=t3-follow-old-z1
+  session=0f8fad5b-d9cb-469f-a165-70867728950e
+  t3_case follow-up-fresh
+  t3_worker_setup "$id"
+  mkdir -p "$CASE_DIR/data/$old"
+  printf 'Earlier scout report.\n' > "$CASE_DIR/data/$old/report.md"
+  printf '%s\n' harness=claude model=default effort=default "project=$WORKER_PROJ" "session=$session" \
+    "report=$CASE_DIR/data/$old/report.md" torn_down=2026-10-31T10:00:00Z > "$CASE_DIR/data/$old/session.ref"
+  store="$SPAWN_HOME/.claude/projects/old-project"
+  mkdir -p "$store"
+  : > "$store/$session.jsonl"
+  out=$(t3_worker_spawn "$id" claude --model claude-sonnet-5 --follow-up "$old"); rc=$?
+  expect_code 0 "$rc" "a t3code claude follow-up scout should launch"$'\n'"$out"
+  assert_contains "$out" "follow-up: fresh scout pointed at $CASE_DIR/data/$old/report.md" \
+    "t3code must report the fresh-scout fallback"
+  assert_not_contains "$out" "resuming" "t3code must not claim it resumes a session"
+  assert_no_grep "claude_session=" "$CASE_DIR/state/$id.meta" "t3code recorded a session id it never delivered"
+  assert_grep "follow_up=$old" "$CASE_DIR/state/$id.meta" "t3code follow-up lost the earlier scout id"
+  pass "fm-spawn.sh --backend t3code claude: a follow-up scout is fresh and records no session id"
+}
+
 test_spawn_refuses_raw_launch_command() {
   local id out rc
   id=$(t3_uid t3rawz)
@@ -2794,6 +2821,7 @@ test_spawn_refuses_launch_settings_t3_cannot_honor codex-approval-mode approve-f
 test_spawn_refuses_launch_settings_t3_cannot_honor codex-permission-mode restricted "config/codex-permission-mode=restricted" codex
 test_spawn_codex_accepts_bypass_approval_mode
 test_spawn_refuses_launch_settings_t3_cannot_honor launch-env-allowlist HOME "config/launch-env-allowlist"
+test_follow_up_scout_is_fresh_on_t3code
 test_spawn_refuses_raw_launch_command
 test_spawn_abort_returns_lease_only_after_archive ok
 test_spawn_abort_returns_lease_only_after_archive fail

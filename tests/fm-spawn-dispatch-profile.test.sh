@@ -2688,6 +2688,86 @@ test_scout_follow_up_falls_back_without_a_resumable_session() {
   pass "a non-resumable scout follow-up falls back to a fresh scout"
 }
 
+# The follow-up brief names the earlier scout's report, which lives in that
+# scout's data directory, outside the new scout's working directories. Drive the
+# real launch of a follow-up (and its relaunch) through the outside-read gate in
+# both permission modes: the earlier report directory must be granted.
+test_follow_up_scout_launch_grants_the_earlier_report_dir() {
+  local mode rec old id out status launch reqs eval_out eval_rc
+  for mode in bypass auto; do
+    old="adddir-fu-old-$mode"
+    id="adddir-fu-new-$mode"
+    rec=$(make_spawn_case "adddir-fu-$mode" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$mode" > "$HOME_DIR/config/claude-permission-mode"
+    make_finished_scout_record "$HOME_DIR" "$old" claude ''
+    fm_fake_claude_outside_read_gate "$FAKEBIN_DIR"
+    reqs="$CASE_DIR/channel-requirements.txt"
+    printf '%s\n' "$HOME_DIR/state/$id.inbox" "$HOME_DIR/data/$id" "$HOME_DIR/data/$old/report.md" > "$reqs"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --follow-up "$old")
+    status=$?
+    expect_code 0 "$status" "claude follow-up spawn under $mode should succeed"$'\n'"$out"
+    launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+    eval_out=$(fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" "FM_FAKE_CLAUDE_REQUIREMENTS=$reqs" 2>&1)
+    eval_rc=$?
+    [ "$eval_rc" -eq 0 ] \
+      || fail "claude follow-up launch under $mode would hit the outside-read gate on the earlier report"$'\n'"$eval_out"
+
+    # A scout that is not a follow-up must not gain the earlier directory.
+    id="adddir-plain-$mode"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    expect_code 0 "$?" "claude plain scout spawn under $mode should succeed"$'\n'"$out"
+    assert_not_contains "$(cat "$LAUNCH_LOG")" "data/$old" "a plain scout launch was granted another scout's directory"
+  done
+  pass "a follow-up scout launch grants the earlier scout's report directory in bypass and auto modes"
+}
+
+# A relaunch rebuilds the follow-up scout's brief and launch from its task
+# record: the earlier report directory stays granted, and the record keeps one
+# follow_up= line however many times the scout is relaunched.
+test_follow_up_scout_relaunch_keeps_grant_and_one_record_line() {
+  local rec old id out status launch reqs eval_out eval_rc n
+  old=relaunch-fu-old-z26
+  id=relaunch-fu-new-z26
+  rec=$(make_spawn_case relaunch-fu claude "$id")
+  read_case_record "$rec"
+  make_finished_scout_record "$HOME_DIR" "$old" claude ''
+  fm_fake_claude_outside_read_gate "$FAKEBIN_DIR"
+  reqs="$CASE_DIR/channel-requirements.txt"
+  printf '%s\n' "$HOME_DIR/data/$old/report.md" > "$reqs"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --follow-up "$old")
+  status=$?
+  expect_code 0 "$status" "follow-up scout spawn should succeed: $out"
+  # The relaunch needs a positively agent-free endpoint: the pane's foreground
+  # command reads as a bare shell, everything else answers as the spawn fake.
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux.spawn"
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_command}"*) printf 'zsh\n'; exit 0 ;;
+esac
+exec "$(dirname "$0")/tmux.spawn" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  for n in 1 2; do
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch)
+    status=$?
+    expect_code 0 "$status" "relaunch $n of a follow-up scout should succeed: $out"
+    [ "$(grep -c '^follow_up=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
+      || fail "relaunch $n left $(grep -c '^follow_up=' "$HOME_DIR/state/$id.meta") follow_up= lines: $(cat "$HOME_DIR/state/$id.meta")"
+    assert_grep "follow_up=$old" "$HOME_DIR/state/$id.meta" "relaunch $n lost the earlier scout id"
+    launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+    eval_out=$(fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" "FM_FAKE_CLAUDE_REQUIREMENTS=$reqs" 2>&1)
+    eval_rc=$?
+    [ "$eval_rc" -eq 0 ] \
+      || fail "relaunch $n dropped the grant on the earlier report"$'\n'"$eval_out"
+  done
+  pass "relaunching a follow-up scout keeps the earlier report grant and a single follow_up record"
+}
+
 test_scout_follow_up_refuses_without_a_prior_report() {
   local rec id out status
   id=scout-follow-up-missing-new-z25
@@ -2975,6 +3055,8 @@ test_claude_scout_records_a_native_session_id
 test_scout_follow_up_resumes_a_recorded_claude_session
 test_scout_follow_up_falls_back_without_a_resumable_session
 test_scout_follow_up_refuses_without_a_prior_report
+test_follow_up_scout_launch_grants_the_earlier_report_dir
+test_follow_up_scout_relaunch_keeps_grant_and_one_record_line
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode

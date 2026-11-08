@@ -3978,7 +3978,7 @@ rovo_config_override_flag() {
 # worker can read the skill file the launch role names as the fallback for a
 # session where the skill name does not resolve - so every Claude launch,
 # fresh spawn and relaunch, in both permission modes, grants exactly those
-# task-channel directories. The skills grant is that directory, not the
+# task-channel directories (plus a follow-up scout's earlier data/<scout-id>). The skills grant is that directory, not the
 # checkout root, so the grant does not open the whole checkout. Paths resolve
 # the way rovo_config_override_flag resolves them
 # (real paths under the task's home). The state channel dirs are created
@@ -3986,8 +3986,8 @@ rovo_config_override_flag() {
 # directory that does not exist at launch would leave the channel created
 # later outside the grant. The grant never covers the whole state/ (watcher
 # internals live there) or anything wider.
-claude_add_dirs_flag() {  # <kind> <state-dir> <data-dir> <code-root> <task-id>
-  local kind=$1 state_dir=$2 data_dir=$3 code_root=$4 id=$5
+claude_add_dirs_flag() {  # <kind> <state-dir> <data-dir> <code-root> <task-id> [<follow-up-scout-id>]
+  local kind=$1 state_dir=$2 data_dir=$3 code_root=$4 id=$5 follow_up=${6:-}
   local state_real data_real root_real out='' d
   local dirs=()
   state_real=$(cd "$state_dir" && pwd -P) || return 1
@@ -4002,6 +4002,11 @@ claude_add_dirs_flag() {  # <kind> <state-dir> <data-dir> <code-root> <task-id>
     [ -d "$root_real/.agents/skills" ] || return 1
     mkdir -p "$state_real/operational-inbox" "$state_real/$id.inbox/handled" "$data_real/$id" || return 1
     dirs=("$state_real/operational-inbox" "$state_real/$id.inbox" "$data_real/$id" "$root_real/.agents/skills")
+    # A follow-up scout's brief names the earlier scout's report, so that one
+    # data directory is granted too, on the launch and on every relaunch.
+    if [ -n "$follow_up" ] && [ -d "$data_real/$follow_up" ]; then
+      dirs+=("$data_real/$follow_up")
+    fi
     ;;
   esac
   for d in "${dirs[@]}"; do
@@ -7241,11 +7246,15 @@ SPAWN_META_PATH="$STATE/$ID.meta"
 # known session id, and a fresh follow-up resumes the earlier one when it can.
 CLAUDE_SESSION_ID=
 CLAUDE_SESSION_FLAG=
-if [ "$KIND" = scout ] && [ "$RAW_LAUNCH" = 0 ] && [ "$HARNESS" = claude ]; then
+# t3code never runs LAUNCH (T3 starts the agent itself), so it can neither carry
+# --session-id nor --resume; its scouts record no session and follow up fresh.
+if [ "$KIND" = scout ] && [ "$RAW_LAUNCH" = 0 ] && [ "$HARNESS" = claude ] && [ "$BACKEND" != t3code ]; then
   CLAUDE_SESSION_ID=$(fm_scout_session_new_id) || CLAUDE_SESSION_ID=
 fi
 if [ "$FOLLOW_UP_SET" -eq 1 ]; then
-  if follow_up_out=$(fm_scout_follow_up_resume_id "$DATA" "$FOLLOW_UP" "$HARNESS" "$RAW_LAUNCH" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"); then
+  if [ "$BACKEND" = t3code ]; then
+    echo "follow-up: fresh scout pointed at $DATA/$FOLLOW_UP/report.md (backend t3code starts the agent itself, so it cannot resume a session)"
+  elif follow_up_out=$(fm_scout_follow_up_resume_id "$DATA" "$FOLLOW_UP" "$HARNESS" "$RAW_LAUNCH" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"); then
     CLAUDE_SESSION_FLAG="--resume $follow_up_out --fork-session "
     echo "follow-up: resuming scout $FOLLOW_UP's claude session $follow_up_out in a fresh local copy"
   else
@@ -7268,7 +7277,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode claude_session traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode claude_session follow_up traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7610,7 +7619,7 @@ case "$LAUNCH" in
 esac
 case "$LAUNCH" in
 *__CLAUDEADDDIRS__*)
-  CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
+  CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID" "$FOLLOW_UP") || {
     echo "error: could not resolve the task-channel directories for $ID's claude --add-dir grant" >&2
     exit 1
   }
