@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTML and routing helper for bin/fm-lavish-url.sh; not a user entry point.
 
-Subcommands (all output is line-oriented `key: value` text):
+Subcommands (decode-eval outputs JSON; build and route output `key: value` text):
 
   decode-eval <file>
       Decode one `chrome-devtools-axi eval --full` response into the capture

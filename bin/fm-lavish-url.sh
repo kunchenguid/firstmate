@@ -53,11 +53,10 @@
 #              unrouted unless the domain map names them (with a port if
 #              needed). --file refuses it.
 # The routed host is always the REQUESTED URL's host, never anything the page
-# reported about itself. The domain map is config/lavish-url-domains, one
-# `<domain>[:<port>] <project>` pair per line with # comments; the longest
-# matching domain wins, and an entry naming an unregistered project or a
-# malformed line is an error rather than a guess (docs/configuration.md owns
-# the file's place in the home).
+# reported about itself. The longest matching domain-map entry wins; a
+# port-qualified entry takes precedence over entries without ports and
+# matches only that exact host and explicit URL port. docs/configuration.md
+# "Lavish URL domain map" owns the map's schema and validation contract.
 #
 # Environment: FM_HOME selects the home (FM_STATE_OVERRIDE, FM_DATA_OVERRIDE,
 # FM_CONFIG_OVERRIDE, FM_PROJECTS_OVERRIDE as elsewhere). The capture uses
