@@ -204,6 +204,20 @@ if scaffold --worker-role "$roles/ROLE.md"; then fail 'unresolved scaffold accep
 save_evidence
 pass 'unresolved selection refuses before scaffolding'
 
+new_case failed-scaffold-selection
+mkdir -p "$home/config"
+printf '%s\n' origin > "$home/config/external-review-backup"
+late_rc=0
+FM_HOME="$home" HOME="$home/user-home" bash "$ROOT/bin/fm-brief.sh" "$id" example --mode direct-PR --forge external --worker-role "$roles/ROLE.md" > "$case_dir/brief.log" 2>&1 || late_rc=$?
+[ "$late_rc" -ne 0 ] || fail 'late-failing scaffold unexpectedly succeeded'
+[ ! -e "$home/data/$id/brief.md" ] || fail 'failed scaffold created a brief'
+[ ! -e "$home/data/$id/worker-selection.json" ] || fail 'failed scaffold left an orphaned worker selection'
+rm "$home/config/external-review-backup"
+scaffold
+[ ! -e "$home/data/$id/worker-selection.json" ] || fail 'retry without selection inherited a stale worker selection'
+save_evidence
+pass 'failed scaffold publishes no worker selection'
+
 new_case nonregular
 scaffold --worker-role "$roles/ROLE.md"
 rm "$skills/associated/SKILL.md"
