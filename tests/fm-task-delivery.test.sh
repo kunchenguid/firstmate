@@ -271,6 +271,12 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
+  assert_grep '   Before rebasing or replaying this task branch onto its intended target' "$instructions_path" \
+    "promoted ship instructions did not carry the branch ancestry check"
+  assert_grep '   If the base or any outgoing commit is unclear or is not task work, stop and report it.' "$instructions_path" \
+    "promoted ship instructions did not stop on unclear or non-task outgoing commits"
+  assert_grep 'git rev-list --reverse --no-merges <merge-base>..HEAD' "$instructions_path" \
+    "promoted ship instructions did not isolate non-merge task commits before replay"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 

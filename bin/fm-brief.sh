@@ -776,6 +776,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
+ANCESTRY=$(fm_ship_ancestry_check)
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
 
 cat > "$BRIEF" <<EOF
@@ -796,9 +797,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-Before rebasing or replaying this task branch onto its intended target, verify the target branch and its current tip, then inspect \`git merge-base HEAD <target>\` and both sides of \`git log --oneline --left-right <target>...HEAD\` to confirm the branch base and every outgoing commit.
-If the base or any outgoing commit is unclear or is not task work, stop and report it.
-Before replay, isolate the task commits from the verified merge base with \`git rev-list --reverse <merge-base>..HEAD\` and replay only those commits; do not replay an unverified range.
+$ANCESTRY
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.

@@ -133,6 +133,8 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
 # a worker off a remote is exactly the rule that changes when the forge does.
+# fm_ship_ancestry_check owns the rebase/replay ancestry check both of those
+# contracts render as a continuation of rule 1.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-pr-lib.sh"
@@ -310,6 +312,13 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       return 1
       ;;
   esac
+}
+
+fm_ship_ancestry_check() {
+  printf '%s\n' \
+    "   Before rebasing or replaying this task branch onto its intended target, verify the target branch and its current tip, then inspect \`git merge-base HEAD <target>\` and both sides of \`git log --oneline --left-right <target>...HEAD\` to confirm the branch base and every outgoing commit." \
+    "   If the base or any outgoing commit is unclear or is not task work, stop and report it." \
+    "   Before replay, isolate the task commits from the verified merge base with \`git rev-list --reverse --no-merges <merge-base>..HEAD\` and replay only those commits; if \`git rev-list --merges <merge-base>..HEAD\` lists any merge commit, stop and report it instead of replaying an unverified range."
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
