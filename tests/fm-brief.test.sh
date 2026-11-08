@@ -1464,6 +1464,28 @@ test_base_branch_is_rendered_and_bounded() {
   pass "fm-brief.sh: --base-branch records the base, targets the PR at it, and is refused where no PR carries it"
 }
 
+test_ship_branch_ancestry_check_is_generated() {
+  local home brief
+  home="$TMP_ROOT/branch-ancestry-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-branch-ancestry some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold failed for branch ancestry check"
+  brief="$home/data/brief-branch-ancestry/brief.md"
+  assert_grep 'Before rebasing or replaying this task branch onto its intended target' "$brief" \
+    "ship brief did not put the ancestry check at the rebase/replay trigger"
+  assert_grep 'git merge-base HEAD <target>' "$brief" \
+    "ship brief did not require checking the task branch base against the target"
+  assert_grep 'git log --oneline --left-right <target>\.\.\.HEAD' "$brief" \
+    "ship brief did not require reviewing both sides of the target comparison"
+  assert_grep 'If the base or any outgoing commit is unclear or is not task work, stop and report it\.' "$brief" \
+    "ship brief did not stop on unclear or non-task outgoing commits"
+  assert_grep 'git rev-list --reverse <merge-base>\.\.HEAD' "$brief" \
+    "ship brief did not isolate task commits from the verified merge base before replay"
+  assert_grep 'replay only those commits; do not replay an unverified range\.' "$brief" \
+    "ship brief did not restrict replay to the isolated task commits"
+  pass "fm-brief.sh: generated ship instructions check ancestry and isolate task commits before replay"
+}
+
 # (a) An unregistered/default project - no --branch-prefix passed at all - must
 # keep every generated ship mode's branch on the legacy "fm/<task-id>" name, byte
 # for byte, so every existing firstmate installation is unaffected.
@@ -1725,6 +1747,7 @@ test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
+test_ship_branch_ancestry_check_is_generated
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes
 test_ship_branch_prefix_empty_override_yields_bare_task_id
