@@ -1149,7 +1149,7 @@ test_scan_does_not_replace_a_pr_whose_merge_is_being_recorded() {
   grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the first scan did not record pull/7"
   printf '%s\n' 'done [at=3]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
   (
-    STATE=$state
+    export STATE=$state
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_acquire_wait "$state/.wake-queue.lock" || exit 1
