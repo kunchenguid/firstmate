@@ -340,6 +340,20 @@ test_identical_rebase_lands() {
   pass 'a provably identical rebase lands and becomes the recorded head'
 }
 
+# The readiness gate re-reads the lane between its rebase and the landing
+# (bin/fm-crew-state.sh, bin/fm-inactive-reconcile.sh). Oracle: the intent that a
+# provably identical rebase needs no new task, while changed content still does.
+test_readiness_gate_accepts_only_identical_rebase() {
+  make_rebased_case gate-identical
+  record_done >/dev/null || fail 'the readiness gate refused an identical rebase'
+  assert_record_unchanged gate-identical
+  printf 'approved X, then edited\n' > "$WT/approved.txt"
+  git -C "$WT" commit -q -a --amend -m X
+  record_done >/dev/null && fail 'the readiness gate accepted a rebase whose content differs'
+  assert_record_unchanged gate-differs
+  pass 'the readiness gate keeps an identical rebase ready and refuses changed content'
+}
+
 test_rebase_with_different_content_refuses() {
   local variant
   for variant in amended extra-commit; do
@@ -436,6 +450,7 @@ fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_d
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
-  test_identical_rebase_lands test_rebase_with_different_content_refuses \
+  test_identical_rebase_lands test_readiness_gate_accepts_only_identical_rebase \
+  test_rebase_with_different_content_refuses \
   test_rebase_on_a_branch_not_the_lanes_own_refuses test_rebase_without_recorded_identity_refuses \
   test_rebase_keeps_the_existing_landing_checks

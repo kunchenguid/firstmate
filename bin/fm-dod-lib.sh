@@ -863,7 +863,11 @@ fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [met
   [ "$(cat "$live")" = "$captured" ] || return 1
   if grep -q '^local_done_head=' "$live"; then
     pinned=$(fm_dod_local_done_head "$live") || return 1
-    [ "$pinned" = "$sha" ]
+    [ "$pinned" = "$sha" ] && return 0
+    # A lane that rebased its recorded head onto a moved default branch stays
+    # ready only when the rebase is provably identical; bin/fm-merge-local.sh
+    # re-proves it and rebinds the record at landing.
+    fm_dod_rebased_lane_head_proven "$live" "$id" "$pinned" "$sha"
     return
   fi
   tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
@@ -916,6 +920,29 @@ fm_dod_rebased_identity_proof() (  # <proj> <default> <recorded> <candidate> <ta
     echo "the rebased content differs from the recorded done head combined with $default"
     return 1
   fi
+)
+
+# 0 when <sha> is the lane's own branch head and a provably identical rebase
+# of the recorded head <pinned> onto the project's current default branch
+# (origin/HEAD, else main, else master), by fm_dod_rebased_identity_proof.
+# Read-only: the record keeps <pinned> until a landing rebinds it.
+fm_dod_rebased_lane_head_proven() (  # <meta> <id> <pinned> <sha>
+  local meta=$1 id=$2 pinned=$3 sha=$4 proj branch default ref target
+  proj=$(fm_dod_meta_value "$meta" project)
+  [ -n "$proj" ] || return 1
+  branch=$(fm_dod_meta_value "$meta" branch)
+  [ -n "$branch" ] || branch="fm/$id"
+  [ "$(git -C "$proj" rev-parse --verify --quiet "refs/heads/$branch^{commit}")" = "$sha" ] || return 1
+  ref=$(git -C "$proj" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
+  default=${ref#origin/}
+  if [ -z "$default" ]; then
+    for ref in main master; do
+      git -C "$proj" show-ref --verify --quiet "refs/heads/$ref" && { default=$ref; break; }
+    done
+  fi
+  [ -n "$default" ] || return 1
+  target=$(git -C "$proj" rev-parse --verify --quiet "refs/heads/$default^{commit}") || return 1
+  fm_dod_rebased_identity_proof "$proj" "$default" "$pinned" "$sha" "$target" >/dev/null
 )
 
 # Swap the recorded head <old> for the rebased head <new> that
