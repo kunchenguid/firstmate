@@ -5704,23 +5704,24 @@ kimi_wait_for_delivery() {
 
 # Every launch-then-confirm gate failure (kimi, rovo, agy) ends here, after the
 # endpoint was launched. The failure is recorded in the task status first, and
-# a `close` argument then closes the endpoint (rovo_endpoint_cleanup). A fresh
-# dispatch keeps its provisional record as a cleanup-only record
+# a `close` argument then closes the endpoint (rovo_endpoint_cleanup). The task
+# record becomes cleanup-only
 # (bin/fm-backlog-transition-lib.sh) instead of rolling it back: an unconfirmed
 # delivery can still be a live worker that did receive its brief, so its
 # endpoint, local copy, harness wiring and slot claim are neither discarded
 # here nor stranded with no record naming them. bin/fm-teardown.sh cleans them
 # through its landed-work gates, and the backlog row is left unchanged. If the
-# record cannot be marked, the exit trap rolls it back as before. A relaunch
-# already owns an In-flight record and leaves it unchanged.
+# record cannot be marked, a fresh dispatch rolls it back as before.
 spawn_delivery_gate_failed() { # <detail> [close]
   local detail=$1 close=${2:-}
   printf '%s\n' "$(status_stamp_line "failed: $detail")" >>"$STATE/$ID.status"
   [ "$close" != close ] || rovo_endpoint_cleanup
-  if [ "$SPAWN_FRESH_COMMIT_PENDING" != 1 ]; then
-    echo "error: $detail; inspect window $T" >&2
-  elif ! spawn_mark_cleanup_only_record; then
-    echo "error: $detail; inspect window $T. Its task record could not be kept for cleanup${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)} and is rolled back - close out endpoint $T and local copy $WT by hand before retrying" >&2
+  if ! spawn_mark_cleanup_only_record; then
+    if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+      echo "error: $detail; inspect window $T. Its task record could not be kept for cleanup${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)} and is rolled back - close out endpoint $T and local copy $WT by hand before retrying" >&2
+    else
+      echo "error: $detail; inspect window $T. Its cleanup-only record could not be published${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}; clean up endpoint $T and local copy $WT by hand before retrying" >&2
+    fi
   elif [ "$close" = close ]; then
     echo "error: $detail; its endpoint $T was closed. Its task record was kept for cleanup and its backlog item was left unchanged: run bin/fm-teardown.sh $ID to clean up its local copy, then dispatch it again" >&2
   else
