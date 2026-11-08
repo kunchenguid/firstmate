@@ -118,6 +118,46 @@ test_resolution_and_reopen() {
   pass "resolution stops reminders immediately and a later episode starts fresh"
 }
 
+# A call held on another task with this one as its origin is a wait only while
+# the task is parked on an open decision of its own: a scout still working beside
+# it keeps its wedge ladder and its reminders.
+test_origin_linked_captain_call() {
+  local record
+  command -v tasks-axi >/dev/null 2>&1 \
+    || fail "tasks-axi is required (origin-linked captain call)"
+  reset_case
+  mkdir -p "$FM_HOME/data"
+  fm_test_tasks_toml "$FM_HOME/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$FM_HOME/data/backlog.md"
+  (cd "$FM_HOME" && tasks-axi add scout 'investigate the board' --file data/backlog.md) >/dev/null 2>&1 \
+    || fail "could not add the scout row"
+  "$ROOT/bin/fm-captain-hold.sh" hold scout-call --title 'the call scout raised' \
+    --reason 'awaiting the captain on the board' --origin scout >/dev/null 2>&1 \
+    || fail "could not hold the origin-linked call"
+
+  touch "$CONFIG/open-decision-reminders"
+  printf 'needs-decision [at=1000] [key=board]: choose\nworking [at=1100]: still investigating\n' \
+    > "$STATE/scout.status"
+  if record=$(wedge_wait_evidence scout); then
+    fail "a working scout's wedge was deferred to its origin-linked call: $record"
+  fi
+  open_decision_reminder_tick 1200
+  [ "$(count_wakes)" = 1 ] || fail "a working scout's overdue key was hidden by its origin-linked call"
+
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  printf 'needs-decision [at=1000] [key=board]: choose\n' > "$STATE/scout.status"
+  record=$(wedge_wait_evidence scout) \
+    || fail "a scout parked on its decision was not bounded by its origin-linked call"
+  [ "${record%%$'\037'*}" = 'captain hold' ] \
+    || fail "a parked scout's wait was not read from the backlog: $record"
+  open_decision_reminder_tick 1200
+  [ "$(count_wakes)" = 0 ] || fail "a parked scout's overdue key reminded despite its origin-linked call"
+
+  rm -rf -- "$FM_HOME/data" "$FM_HOME/.tasks.toml"
+  pass "an origin-linked captain call bounds a parked scout and leaves a working one its alarms"
+}
+
 test_wait_exemptions() {
   reset_case
   touch "$CONFIG/open-decision-reminders"
@@ -214,5 +254,5 @@ test_watcher_loop() {
 
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
-  test_wait_exemptions test_unknown_times_and_keyless test_timed_fold_is_incremental \
+  test_origin_linked_captain_call test_wait_exemptions test_unknown_times_and_keyless test_timed_fold_is_incremental \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop
