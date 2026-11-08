@@ -698,11 +698,21 @@ test_lane_capacity_gate_refuses_an_unreadable_opt_in() {
   expect_code 1 "$rc" "an unreadable opted-in lane capacity did not refuse: $out"
   assert_contains "$out" "this home's lane capacity cannot be read" "the refusal did not name the lane capacity"
   assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  printf 'auto\n' > "$home/config/lane-capacity"
+  chmod 000 "$home/config/lane-capacity"
+  if [ ! -r "$home/config/lane-capacity" ]; then
+    rc=0
+    out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+    expect_code 1 "$rc" "a lane capacity file that cannot be read did not refuse: $out"
+    assert_contains "$out" "this home's lane capacity cannot be read" "the refusal did not name the unreadable lane capacity"
+    assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  fi
+  chmod 600 "$home/config/lane-capacity"
   printf 'twelve\n' > "$home/config/lane-capacity"
   rc=0
   out=$(spawn_ship "$case_dir" task-c) || rc=$?
-  expect_code 0 "$rc" "an unreadable lane capacity without admit-spawns refused a spawn: $out"
-  pass "an unreadable lane capacity refuses spawns only when it asks for the gate"
+  expect_code 0 "$rc" "a malformed lane capacity without admit-spawns refused a spawn: $out"
+  pass "a malformed lane capacity refuses spawns only when it asks for the gate, and one that cannot be read always refuses"
 }
 
 test_undeclared_capacity_keeps_dispatch_uncapped

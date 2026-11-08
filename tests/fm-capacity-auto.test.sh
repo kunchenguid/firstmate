@@ -167,7 +167,14 @@ test_budget_binds_the_scarcest_resource() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --admit 2>&1) || rc=$?
   expect_code 75 "$rc" "--admit on a full budget"
   assert_contains "$out" 'memory: 8 GB available, 7 GB kept, 0 starting, a lane needs 2 GB' "the deferral must explain the memory arithmetic"
-  pass "the auto budget is the smallest of memory, cpu, and disk, each after its floor"
+  # A pressure-file beat may lower the live memory reading (8 GB here), never raise it.
+  for row in '30|3|a beat reporting more memory than the live probe must not add room' '4|1|a beat reporting less memory than the live probe must lower the budget'; do
+    printf '{"schema":"lookout.beat","schema_version":"1.0","host":"b","interval_s":60,"machine":{"pressure":{"level":"ok"},"mem":{"avail_gb":%s,"total_gb":16}}}\n' "${row%%|*}" > "$home/beat.json"
+    printf 'auto\npressure-file %s\n' "$home/beat.json" > "$home/config/lane-capacity"
+    row=${row#*|}
+    assert_equals "${row%%|*}" "$(json "$home" "$fakebin" '.budget.by.memory')" "${row#*|}"
+  done
+  pass "the auto budget is the smallest of memory, cpu, and disk, each after its floor, and a beat never adds memory"
 }
 
 test_ceiling_and_young_lanes() {
@@ -412,11 +419,19 @@ SH
   printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/powershell.exe"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null | jq -c '[.vitals.host.avail_gb, (.gates[] | select(.name == "host-memory") | .state)]')
   assert_equals '[2.08,"closed"]' "$out" "a fresh cached host view must stand in for a failed query outside --publish"
+  # WSL2 has no power_supply of its own, so the Windows host's power reading closes the battery gate.
+  mkdir -p "$TMP_ROOT/p-wsl/sys-empty"
+  printf '#!/usr/bin/env bash\nprintf "20480 32614400 60 10 16 battery\\r\\n"\n' > "$fakebin/powershell.exe"
+  rm -f "$home/state/.lane-vitals-host" "$home/state/lane-capacity.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" FM_SYS_ROOT_OVERRIDE="$TMP_ROOT/p-wsl/sys-empty" "$CAPACITY" --json 2>/dev/null |
+    jq -c '[.vitals.on_ac, (.gates[] | select(.name == "battery") | .state), .verdict.admit]')
+  assert_equals '[false,"closed",false]' "$out" "a Windows host on battery must close admission inside WSL"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/powershell.exe"
   rm -f "$home/state/.lane-vitals-host" "$home/state/lane-capacity.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
     jq -c '[(.gates[] | select(.name == "host-memory") | .state), .budget.notes, .verdict.admit]')
   assert_equals '["unknown",["Windows host view unavailable"],true]' "$out" "an unreadable host must be unknown, noted, and not judged"
-  pass "inside WSL the Windows host view can only close admission, --publish reads it live, and the cache serves the other modes"
+  pass "inside WSL the Windows host view can only close admission, including on battery, --publish reads it live, and the cache serves the other modes"
 }
 
 test_native_windows_reads_the_host_view() {
@@ -524,6 +539,17 @@ ROWS
 auto\nadmit-spawns\n|0|--spawn-gate-enabled with admit-spawns
 bogus\nadmit-spawns\n|0|--spawn-gate-enabled on an invalid opted-in file
 ROWS
+  printf 'auto\n' > "$home/config/lane-capacity"
+  chmod 000 "$home/config/lane-capacity"
+  if [ ! -r "$home/config/lane-capacity" ]; then
+    rc=0
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --spawn-gate >/dev/null 2>&1 || rc=$?
+    expect_code 1 "$rc" "an unreadable file must refuse spawns, since it cannot show it does not ask for the gate"
+    rc=0
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --spawn-gate-enabled >/dev/null 2>&1 || rc=$?
+    expect_code 0 "$rc" "--spawn-gate-enabled on an unreadable file"
+  fi
+  chmod 600 "$home/config/lane-capacity"
   rm -f "$home/config/lane-capacity"
   rc=0
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --spawn-gate >/dev/null 2>&1 || rc=$?
@@ -531,7 +557,7 @@ ROWS
   rc=0
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$CAPACITY" --spawn-gate-enabled >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "an absent file must report the gate disabled"
-  pass "--spawn-gate applies the verdict only when config/lane-capacity declares admit-spawns"
+  pass "--spawn-gate applies the verdict only when config/lane-capacity declares admit-spawns, and refuses when the file cannot be read"
 }
 
 test_auto_config_validation() {

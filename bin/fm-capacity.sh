@@ -116,9 +116,10 @@
 #
 # --admit exits 0 when config/lane-capacity is absent or the verdict admits,
 # and 75 with one `deferred:` line on stderr when it does not. --spawn-gate
-# exits 0 at once unless the file declares admit-spawns (an invalid file exits
-# 1 only when one of its lines names admit-spawns), and is otherwise --admit;
-# bin/fm-spawn.sh owns where it runs.
+# exits 0 at once unless the file declares admit-spawns (a malformed file exits
+# 1 only when one of its lines names admit-spawns, and a file that exists but
+# cannot be read exits 1, since nothing proves it does not), and is otherwise
+# --admit; bin/fm-spawn.sh owns where it runs.
 #
 # Auto mode. A first line of `auto` replaces the fixed cap with a lane budget
 # measured on every call; an integer first line keeps everything above exactly.
@@ -146,7 +147,9 @@
 #   unreadable table never looks like lanes with no agent.
 #   Budget: open = the smallest of
 #     memory  floor((available - kept - young x F_mem) / F_mem), where kept is
-#             min-avail-gb, else the larger of 10% of RAM and 2 GB
+#             min-avail-gb, else the larger of 10% of RAM and 2 GB, and
+#             available is the live probe, or the lower of it and a fresh
+#             pressure-file beat when both report, so a beat never adds room
 #     cpu     floor((cores x 0.85 - max(load1, load5) - young x F_cpu) / F_cpu);
 #             inside WSL the load is at least the Windows host CPU share
 #     disk    per filesystem (the home's, then each one holding a worktree),
@@ -179,7 +182,8 @@
 #                     RAM and 2 GB, or commit >= 95%; reopens 1 GB above it
 #                     and under 90%
 #     thermal         macOS CPU speed limit under 100 or a recorded warning
-#     battery         on battery (unknown power is never judged)
+#     battery         on battery (under WSL2 the Windows host's reading when
+#                     Linux has none; unknown power is never judged)
 #     gpu             with min-gpu-free-gb: the least free GPU memory under it
 #   In auto mode these gates replace the fixed-mode cpu, load, and battery
 #   constraints and the budget replaces the memory and disk constraints, so
@@ -189,7 +193,9 @@
 #   no-agent (under 16 MB attributed for 10 min), handed-off (pr= recorded, CPU
 #   under 2% of a core for 30 min), parked (paused with an until over 2 h away,
 #   or no until for 2 h, idle 30 min), quiet (no status event for 60 min, idle
-#   30 min); ranked in that order, then by memory held, then idle time.
+#   30 min); ranked in that order, then by memory held, then idle time. The
+#   report names the first three with their class, idle age, next step, and
+#   evidence.
 #   The document adds cap.mode "auto", budget {lanes, open, raw,
 #   machine_lanes, by {memory, cpu, disk, ceiling}, binding, young, damped,
 #   notes[]}, footprint {mem_gb, cpu_cores, disk_gb, source
@@ -423,11 +429,16 @@ if [ -e "$LANE_CONFIG" ]; then
   fi
 fi
 # --spawn-gate is --admit for bin/fm-spawn.sh, and only when the file opts in;
-# an invalid file refuses only when one of its lines asks for the gate.
+# a malformed file refuses only when one of its lines asks for the gate, and an
+# unreadable one always refuses, because it cannot show that it does not.
 if [ "$mode" = spawn_gate ] || [ "$mode" = spawn_gate_enabled ]; then
   gate_enabled=0
   if [ "$target" = invalid ]; then
-    grep -Eq '^[[:space:]]*admit-spawns([[:space:]#]|$)' "$LANE_CONFIG" 2>/dev/null && gate_enabled=1
+    if [ ! -r "$LANE_CONFIG" ]; then
+      gate_enabled=1
+    elif grep -Eq '^[[:space:]]*admit-spawns([[:space:]#]|$)' "$LANE_CONFIG" 2>/dev/null; then
+      gate_enabled=1
+    fi
   else
     [ "$admit_spawns" -eq 0 ] || gate_enabled=1
   fi
@@ -971,6 +982,10 @@ auto_budget() {
     host=$(auto_host_view) || { host=; auto_notes="${auto_notes}Windows host view unavailable
 "; }
   fi
+  # A pressure-file beat may lower the live reading, never raise it.
+  if [ -n "$avail_gb" ] && [ -n "$probe_avail_gb" ] && num_lt "$probe_avail_gb" "$avail_gb"; then
+    lim_avail=$probe_avail_gb
+  fi
   if [ "$windows" = 1 ] && [ -n "$host" ]; then
     # Native Windows: the host view is the memory, cores, load, and power probe.
     # shellcheck disable=SC2086
@@ -982,6 +997,11 @@ auto_budget() {
       v=$(awk -v p="$4" -v c="$cores" -v l="$load1" 'BEGIN { x = p / 100 * c; if (l != "unknown" && l + 0 > x) x = l; printf "%.2f", x }')
       load1=$v
     fi
+    case "$6" in ac) LV_ON_AC=true ;; battery) LV_ON_AC=false ;; esac
+  elif [ "$LV_WSL" = 1 ] && [ -n "$host" ] && [ -z "$LV_ON_AC" ]; then
+    # WSL2 has no power_supply of its own: the Windows host's power is the fallback.
+    # shellcheck disable=SC2086
+    set -- $host
     case "$6" in ac) LV_ON_AC=true ;; battery) LV_ON_AC=false ;; esac
   fi
 
@@ -1156,11 +1176,14 @@ if [ "$mode" = report ]; then
   if [ -n "$auto_doc" ]; then
     printf '%s' "$auto_doc" | jq -r --arg lanes "$lanes" '
       def gb: tostring + " GB";
+      def dur: if . >= 86400 then "\(. / 86400 | floor)d" elif . >= 3600 then "\(. / 3600 | floor)h"
+        elif . >= 60 then "\(. / 60 | floor)m" else "\(. | floor)s" end;
       "Lanes: \($lanes) running here, \(.budget.machine_lanes) on this machine; auto budget \(.budget.lanes) (\(.budget.open) open, bound by \(.budget.binding)\(if .budget.damped then ", growth damped" else "" end)).",
       "Per lane: \(.footprint.mem_gb | gb), \(.footprint.cpu_cores) core, \(.footprint.disk_gb | gb) disk (\(if .footprint.source == "learned" then "learned from \(.footprint.samples) lanes" else "default until 5 lanes are measured" end)).",
       (.gates | map(select(.state == "closed") | .name) | if length > 0 then "Gates closed: \(join(", "))." else empty end),
       (.reclaim | if length > 0 then
-        "Reclaim: \(length) (\(group_by(.class) | map("\(.[0].class) \(length)") | join(", "))), \(map(.mem_gb // 0) | add * 100 | floor / 100) GB held." else empty end)'
+        "Reclaim: \(length) (\(group_by(.class) | map("\(.[0].class) \(length)") | join(", "))), \(map(.mem_gb // 0) | add * 100 | floor / 100) GB held." else empty end),
+      (.reclaim[:3][] | "  - \(.id): \(.class), idle \(.idle_s | dur), next \(.next) (\(.evidence | join(", ")))")'
   elif [ "$cap_mode" = auto ]; then
     echo "Lanes: $lanes running, auto budget unavailable."
   fi

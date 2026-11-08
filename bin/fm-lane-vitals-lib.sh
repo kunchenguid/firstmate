@@ -88,6 +88,7 @@ _fm_lv_psi() {  # <file> <some|full> <avg10|avg60>
   awk -v kind="$2" -v key="$3" '$1 == kind { for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[1] == key) { print kv[2]; exit } } }' "$1" 2>/dev/null
 }
 
+# shellcheck disable=SC2034 # LV_* are output globals read by bin/fm-capacity.sh after sourcing.
 fm_lane_vitals_probe() {  # <os>
   local os=$1 v line dir type online status any_mains=0 mains_on=0
   LV_LOAD5='' LV_PSI_CPU10='' LV_PSI_MEM10='' LV_PSI_MEM60='' LV_PSI_MEMFULL10=''
