@@ -1134,8 +1134,22 @@ test_scan_does_not_replace_a_merged_pr() {
   pass "the scan does not replace a PR whose merge was already reported"
 }
 
-# A refused replacement keeps the current watch and reports the refusal, and a
-# PR the supervisor records during the replacement outranks it.
+test_scan_does_not_replace_a_pr_merged_after_candidate_collection() {
+  local dir state
+  dir=$(make_case scan-merge-race)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+  run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" || fail "the first scan failed: $(cat "$dir/stderr")"
+  printf '%s\n' 'done [at=3]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
+  FM_CHECK_TIMEOUT=60 FM_TEST_GH_SLOW_URL=pull/8 FM_TEST_GH_SLOW_SECONDS=3 run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" &
+  sleep 1
+  fm_pr_poll_merge_mark_notified "$state" task-a github github.com o/r 7 || fail "could not record merge notice"
+  wait $! || fail "the scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the merged PR was replaced"
+  pass "a merge notice recorded during registration prevents replacement"
+}
+
 test_scan_replacement_keeps_the_watch_it_cannot_take_over() {
   local dir state out
   dir=$(make_case scan-replacement-refused)
@@ -5398,6 +5412,7 @@ test_scan_reads_the_ready_line_past_supervisor_annotations
 test_scan_replaces_a_recorded_pr_named_by_an_older_line
 test_scan_keeps_a_recorded_pr_the_log_never_named
 test_scan_does_not_replace_a_merged_pr
+test_scan_does_not_replace_a_pr_merged_after_candidate_collection
 test_scan_replacement_keeps_the_watch_it_cannot_take_over
 test_scan_reports_a_timed_out_registration_once_and_retries
 test_scan_keeps_a_notice_owed_until_its_wake_is_queued

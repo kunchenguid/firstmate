@@ -418,6 +418,9 @@ META_LOCK_HELD=1
 # exact pr= the scan chose to replace gives way.
 if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
   RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -n "${FM_PR_CHECK_SCAN_REPLACES:-}" ] && [ "$RECORDED_PR" = "$FM_PR_CHECK_SCAN_REPLACES" ]; then
+    pr_check_pr_retired "$ID" "$RECORDED_PR" && exit 0
+  fi
   [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] \
     || [ "$RECORDED_PR" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ] || exit 0
 fi
