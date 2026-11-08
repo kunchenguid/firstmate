@@ -290,8 +290,11 @@ test_burst_of_spawns_never_exceeds_the_damped_budget() {
     case "$rc" in
       0) admitted=$((admitted + 1)) ;;
       "$DEFER_EXIT") deferred=$((deferred + 1))
-        assert_contains "$out" "damped: $published lanes started since the last publish against a published budget of $published" \
-          "a burst deferral must name the damped budget" ;;
+        # Live memory may drift under the floor mid-burst, in which case memory, not damping, is what refuses.
+        case "$out" in
+          *"damped: $published lanes started since the last publish against a published budget of $published"*|*"memory: "*) ;;
+          *) fail "a burst deferral must name the damped budget or memory: $out" ;;
+        esac ;;
       *) fail "spawn t$i exited $rc: $out" ;;
     esac
   done

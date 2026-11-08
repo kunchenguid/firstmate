@@ -488,7 +488,30 @@ test_unknown_reading_holds_a_closed_gate() {
   set_host "$fakebin" fail
   pub
   assert_equals '["unknown",0,true,4]' "$(gate)" "an open gate that becomes unreadable must be unknown and not judged"
-  pass "an unknown reading never counts as clean: a closed or clearing gate holds until a real reading clears it, and an open gate stays unjudged"
+  # The battery gate exists only while power is readable: closed, it must survive the reading going away.
+  mkdir -p "$TMP_ROOT/p-wsl-hold/sys-empty"
+  bpub() { PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" FM_SYS_ROOT_OVERRIDE="$TMP_ROOT/p-wsl-hold/sys-empty" FM_LANE_CAPACITY_PUBLISH_INTERVAL=0 "$CAPACITY" --publish >/dev/null 2>&1; }
+  bgate() { jq -c '[(.gates | map(select(.name == "battery")) | .[0] | if . == null then "omitted" else .state, .clear_count end), .vitals.on_ac, .verdict.admit, .verdict.free_lanes]' "$home/state/lane-capacity.json"; }
+  rm -f "$home/state/lane-capacity.json" "$home/state/.lane-vitals-host"
+  set_host "$fakebin" "20480 32614400 60 10 16 battery"
+  bpub
+  assert_equals '["closed",0,false,false,0]' "$(bgate)" "a Windows host on battery must close the battery gate"
+  set_host "$fakebin" fail
+  for i in 1 2 3; do
+    bpub
+    assert_equals '["closed",0,null,false,0]' "$(bgate)" "an unreadable power source must hold the closed battery gate through publish $i"
+    assert_contains "$(jq -r '.verdict.reasons[]' "$home/state/lane-capacity.json")" 'battery: power source unreadable' "the held gate must say power is unreadable"
+  done
+  set_host "$fakebin" "20480 32614400 60 10 16 ac"
+  bpub
+  assert_equals '["closed",1,true,false,0]' "$(bgate)" "the first real AC reading must count 1 of 3"
+  set_host "$fakebin" fail
+  bpub
+  assert_equals '["closed",1,null,false,0]' "$(bgate)" "an unreadable power source while clearing must hold the clean count"
+  rm -f "$home/state/lane-capacity.json"
+  bpub
+  assert_equals '["omitted",null,true,6]' "$(bgate)" "with no closed gate to hold, unreadable power must emit no battery gate"
+  pass "an unknown reading never counts as clean: a closed or clearing gate holds until a real reading clears it, including a gate that is otherwise omitted, and an open gate stays unjudged"
 }
 
 test_native_windows_reads_the_host_view() {

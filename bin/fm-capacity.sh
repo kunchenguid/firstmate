@@ -170,10 +170,11 @@
 #   room, the verdict names "damped" (lanes started since the last publish
 #   against the published budget) rather than a resource.
 #   Gates close admission at once and reopen only after their reopen test holds
-#   on 3 consecutive publishes. An unmeasurable gate is unknown and not judged
-#   unless it was closed at the previous publish: then an unknown reading never
-#   counts as clean, and the gate stays closed with its clean count held until
-#   a real reading clears it.
+#   on 3 consecutive publishes. An unmeasurable gate is unknown (or, for the
+#   signals below that only appear when read, omitted) and not judged, unless
+#   it was closed at the previous publish: then an unknown reading never counts
+#   as clean, and the gate stays closed with its clean count held until a real
+#   reading clears it.
 #     cpu             load1/cores >= 1; reopens < 0.8 with load5/cores < 0.85
 #     load            load1 >= max-load1; reopens < 0.9 x max-load1
 #     memory-pressure Linux PSI memory some avg10 >= 10 or full avg10 >= 5,
@@ -809,6 +810,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
         | if $n >= $reopen then {name: $name, state: "open", since_epoch: $now, clear_count: 0, what: $what}
           else {name: $name, state: "closed", since_epoch: $g.since_epoch, clear_count: $n, what: $what} end
       else {name: $name, state: "open", since_epoch: ($g.since_epoch // null), clear_count: 0, what: $what} end;
+  def held($name; $what): gate($name; null; false; $what) | select(.state == "closed");
   [ gate("cpu"; (if $load1 == null or $cores == null then null else ($load1 / $cores >= 1) end);
       ($load1 != null and $cores != null and ($load1 / $cores) < 0.8 and ($vit.load5 == null or ($vit.load5 / $cores) < 0.85));
       "load \($load1 | n2) on \($cores) cores"),
@@ -820,17 +822,17 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
         ((($vit.psi_mem60 // $vit.psi_mem10) < 5) and (($vit.psi_memfull10 // 0) < 1)); "memory stall \($vit.psi_mem10)%")
      elif $vit.vmpress != null then
       gate("memory-pressure"; ($vit.vmpress >= 2); ($vit.vmpress == 1); "vm pressure level \($vit.vmpress)")
-     else empty end),
-    (if $swap_rate == null then empty else gate("swap"; $swap_rate >= 100; $swap_rate < 10; "swap-in \($swap_rate) pages/s") end),
-    (if $vit.psi_io10 == null then empty else
+     else held("memory-pressure"; "memory pressure unreadable") end),
+    (if $swap_rate == null then held("swap"; "swap-in rate unreadable") else gate("swap"; $swap_rate >= 100; $swap_rate < 10; "swap-in \($swap_rate) pages/s") end),
+    (if $vit.psi_io10 == null then held("io"; "io stall unreadable") else
       gate("io"; $vit.psi_io10 >= 20; (($vit.psi_io60 // $vit.psi_io10) < 10); "io stall \($vit.psi_io10)%") end),
     (if $vit.wsl | not then empty elif $h == null or $h.avail_gb == null then gate("host-memory"; null; false; "Windows host unreadable")
      else ([(($h.total_gb // 0) * 0.10), 2] | max | r2) as $hmin
       | gate("host-memory"; ($h.avail_gb < $hmin or ($h.commit_pct // 0) >= 95);
           ($h.avail_gb >= $hmin + 1 and ($h.commit_pct // 0) < 90);
           "Windows host \($h.avail_gb | n2) GB available of \($h.total_gb | n2), \($h.commit_pct)% committed, \($hmin) GB kept") end),
-    (if $vit.thermal == null then empty else gate("thermal"; $vit.thermal == "limited"; $vit.thermal == "ok"; "thermal \($vit.thermal)") end),
-    (if $on_ac == null then empty else
+    (if $vit.thermal == null then held("thermal"; "thermal state unreadable") else gate("thermal"; $vit.thermal == "limited"; $vit.thermal == "ok"; "thermal \($vit.thermal)") end),
+    (if $on_ac == null then held("battery"; "power source unreadable") else
       gate("battery"; $on_ac == false; $on_ac == true;
         (if $on_ac then "on AC" else "on battery" + (if $vit.battery_pct != null then " at \($vit.battery_pct)%" else "" end) end)) end),
     (if $cfg.gpu_min == null then empty else
