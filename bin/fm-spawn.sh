@@ -2648,6 +2648,13 @@ elif [ "$KIND" = secondmate ]; then
   esac
 else
   PROJ=${POS[1]:-}
+  # An empty project would reach `cd ""` below, which bash accepts and stays in
+  # the caller's directory, so a ship or scout would spawn against whichever
+  # repository the shell happens to be in.
+  [ -n "$PROJ" ] || {
+    echo "error: ship and scout spawns need a project directory: fm-spawn.sh <task-id> <project-dir> ..." >&2
+    exit 1
+  }
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG

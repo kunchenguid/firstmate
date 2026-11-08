@@ -1394,24 +1394,28 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
-# --base-branch names the branch a task starts from and a ship's PR targets. It is
-# recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
-# refused where no pull request carries the work.
 # A ship invoked with only a task id has no project positional; under set -u the
-# bare ${POS[1]} read used to abort with "unbound variable" instead of reaching
-# the script's own handling.
+# bare ${POS[1]} read used to abort with "unbound variable". fm-brief.sh scaffolds
+# it, and fm-spawn.sh must refuse with its own message rather than carry an empty
+# project into `cd ""`, which would spawn against the caller's current repository.
 test_ship_with_only_a_task_id_is_not_an_unbound_variable() {
   local home out rc
   home="$TMP_ROOT/only-id-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-only-id-p1 --mode direct-PR 2>&1); rc=$?
   expect_code 0 "$rc" "a ship brief with only a task id should scaffold (got: $out)"
   case "$out" in *"unbound variable"*) fail "fm-brief.sh read an unset project positional: $out" ;; esac
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" brief-only-id-p1 --mode direct-PR --yolo off 2>&1) || true
+  out=$(cd "$ROOT" && FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" brief-only-id-p1 --mode direct-PR --yolo off 2>&1); rc=$?
+  expect_code 1 "$rc" "fm-spawn.sh with no project should refuse (got: $out)"
   case "$out" in *"unbound variable"*) fail "fm-spawn.sh read an unset project positional: $out" ;; esac
-  pass "fm-brief.sh and fm-spawn.sh: a ship with only a task id never hits an unbound positional"
+  assert_contains "$out" "need a project directory" "fm-spawn.sh did not name the missing project"
+  assert_absent "$home/state/brief-only-id-p1.meta" "a project-less spawn recorded task metadata"
+  pass "fm-brief.sh and fm-spawn.sh: a ship with only a task id never hits an unbound positional, and spawn refuses the missing project"
 }
 
+# --base-branch names the branch a task starts from and a ship's PR targets. It is
+# recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
+# refused where no pull request carries the work.
 test_base_branch_is_rendered_and_bounded() {
   local home out rc brief base meta_base
   home="$TMP_ROOT/base-branch-home"
