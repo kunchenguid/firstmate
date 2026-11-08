@@ -181,7 +181,7 @@ That record carries the retention intent as a `mode=retain` line.
 An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
 
 If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
-A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
+A retained Gerrit change, GitLab merge request, or Bitbucket pull request URL is instead recorded as a `Gerrit change <url>`, `GitLab merge request <url>`, or `Bitbucket pull request <url>` note on that close.
 Replay then retires the record.
 
 ### Known retained-delivery gaps
