@@ -432,6 +432,10 @@ if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
     fm_lock_acquire_wait "$MERGE_NOTICE_LOCK"
     MERGE_NOTICE_LOCK_HELD=1
     pr_check_pr_retired "$ID" "$RECORDED_PR" && exit 0
+    if [ "$RECORDED_PR" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ]; then
+      reported=$(pr_check_reported_url "$STATE/$ID.status") || exit 0
+      [ "$reported" = "$URL" ] || exit 0
+    fi
   fi
   [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] \
     || [ "$RECORDED_PR" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ] || exit 0

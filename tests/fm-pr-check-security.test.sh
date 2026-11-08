@@ -1188,6 +1188,33 @@ test_scan_does_not_replace_a_pr_whose_merge_is_being_recorded() {
   pass "a merge record holding its lock blocks the scan from replacing that PR"
 }
 
+test_scan_keeps_the_watch_when_replacement_status_changes_during_reads() {
+  local dir state before scan_pid
+  dir=$(make_case scan-status-race)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+  run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" || fail "the first scan failed: $(cat "$dir/stderr")"
+  printf '%s\n' 'done [at=3]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
+  before=$(poll_artifact_snapshot "$state" task-a)
+
+  FM_CHECK_TIMEOUT=60 FM_TEST_GH_SLOW_URL=pull/8 FM_TEST_GH_SLOW_SECONDS=3 \
+    run_check_entry "$dir" scan >/dev/null 2>"$dir/stderr" &
+  scan_pid=$!
+  for _ in $(seq 100); do
+    grep -q 'pull/8' "$dir/gh.log" 2>/dev/null && break
+    kill -0 "$scan_pid" 2>/dev/null || fail "the scan exited before reading pull/8: $(cat "$dir/stderr")"
+    sleep 0.1
+  done
+  grep -q 'pull/8' "$dir/gh.log" || fail "the scan never started reading pull/8"
+  printf '%s\n' 'working: replacement withdrawn' >> "$state/task-a.status"
+  wait "$scan_pid" || fail "the scan failed: $(cat "$dir/stderr")"
+
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "a withdrawn replacement changed pr="
+  [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "a withdrawn replacement changed the pull/7 poll"
+  pass "a scan keeps the recorded PR when its ready status is withdrawn during forge reads"
+}
+
 # A refused replacement keeps the current watch and reports the refusal, and a
 # PR the supervisor records during the replacement outranks it.
 test_scan_replacement_keeps_the_watch_it_cannot_take_over() {
@@ -5453,6 +5480,7 @@ test_scan_replaces_a_recorded_pr_named_by_an_older_line
 test_scan_keeps_a_recorded_pr_the_log_never_named
 test_scan_does_not_replace_a_merged_pr
 test_scan_does_not_replace_a_pr_whose_merge_is_being_recorded
+test_scan_keeps_the_watch_when_replacement_status_changes_during_reads
 test_scan_replacement_keeps_the_watch_it_cannot_take_over
 test_scan_reports_a_timed_out_registration_once_and_retries
 test_scan_keeps_a_notice_owed_until_its_wake_is_queued
