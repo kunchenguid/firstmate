@@ -28,8 +28,11 @@
 # Provision records the running fleet session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
 # The fleet session is "default" unless FM_HERDR_LAB_FLEET_SESSION names the
-# custom session the live fleet runs in; that name must contain only letters,
-# digits, underscores, or dashes and can never be an fm-lab- session.
+# custom session the live fleet runs in; that name must start with an ASCII
+# letter or digit, contain only ASCII letters, digits, underscores, or dashes,
+# and can never be an fm-lab- session.
+# Keep this setting unchanged from preparation/provisioning through teardown,
+# including in cleanup traps, so both snapshots protect the same fleet.
 # Every Herdr call made here clears HERDR_SOCKET_PATH, HERDR_PANE_ID,
 # HERDR_TAB_ID and HERDR_WORKSPACE_ID, which a worker pane inherits from the
 # live session.
