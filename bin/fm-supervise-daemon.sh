@@ -1356,7 +1356,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after overdue decision
-  local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc prior_pause new_pause pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc prior_pause new_pause pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} resolve_verb=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   fm_pause_ceiling_enabled || return 1
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || return 2
@@ -1380,7 +1380,7 @@ reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after o
     _fm_status_line_is_event "$line" "$legacy_re" || continue
     case "$verb" in
       blocked) ;;
-      resolved)
+      "$resolve_verb")
         key=$(_fm_decision_key "$line" '') || key=
         [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 1; }
         ;;
@@ -1394,7 +1394,7 @@ reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after o
 $added
 EOF
   [ "$resume" -eq 1 ] || return 0
-  fm_wake_status_append_self_announced "$state" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
+  fm_wake_status_append_self_announced "$state" "$statusf" "$resolve_verb [key=paused-overdue-$task]: worker pause changed"
   rc=$?
   [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 2
   rm -f "$marker"

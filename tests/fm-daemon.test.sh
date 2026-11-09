@@ -1622,7 +1622,7 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
 
 test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
   local dir state task statusf identity offset event
-  for event in blocked repeated prose custom "done" merged; do
+  for event in blocked repeated prose custom "done" merged configured-resolve; do
     dir=$(make_supercase "overdue-reconcile-$event"); state="$dir/state"
     arm_pause_ceiling "$dir"
     task=overdue-reconcile; statusf="$state/$task.status"
@@ -1638,17 +1638,25 @@ test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
       custom) printf 'holding [at=200]: waiting for dependency\n' >> "$statusf" ;;
       done) printf 'done: finished\n' >> "$statusf" ;;
       merged) printf 'merged\n' >> "$statusf" ;;
+      configured-resolve) printf 'working: resumed\n' >> "$statusf" ;;
     esac
     (
       FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
       if [ "$event" = custom ]; then
         FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"
+      elif [ "$event" = configured-resolve ]; then
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CLASSIFY_RESOLVE_VERB=answered reconcile_overdue_pause "$state" "$task"
       else
         FM_HOME="$dir" FM_STATE_OVERRIDE="$state" reconcile_overdue_pause "$state" "$task"
       fi
-      if [ "$event" = "done" ] || [ "$event" = merged ]; then
+      if [ "$event" = "done" ] || [ "$event" = merged ] || [ "$event" = configured-resolve ]; then
         [ ! -e "$state/.paused-overdue-$task" ] || fail "$event left the overdue marker"
-        ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
+        if [ "$event" = configured-resolve ]; then
+          ! FM_CLASSIFY_RESOLVE_VERB=answered status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
+          grep -Fq "answered [key=paused-overdue-$task]" "$statusf" || fail "$event did not record configured resolution"
+        else
+          ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
+        fi
       else
         [ -e "$state/.paused-overdue-$task" ] || fail "$event removed the overdue marker"
         status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event closed the overdue decision"

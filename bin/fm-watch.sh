@@ -2654,7 +2654,7 @@ clear_pause_tracking() {  # <window-key>
 # Keep the overdue decision open until the worker appends another status event.
 # Without config/pause-ceiling every marker reads as absent.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
-  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0 prior_pause new_pause pause_line pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0 prior_pause new_pause pause_line pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} resolve_verb=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   fm_pause_ceiling_enabled || return 1
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
@@ -2675,7 +2675,7 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
     _fm_status_line_is_event "$line" "$legacy_re" || continue
     case "$verb" in
       blocked) ;;
-      resolved)
+      "$resolve_verb")
         key=$(_fm_decision_key "$line" '') || key=''
         [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 1; }
         ;;
@@ -2689,7 +2689,7 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
 $added
 EOF
   [ "$resume" -eq 1 ] || return 0
-  fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
+  fm_wake_status_append_self_announced "$STATE" "$statusf" "$resolve_verb [key=paused-overdue-$task]: worker pause changed"
   append_rc=$?
   [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || return 0
   rm -f "$marker"
