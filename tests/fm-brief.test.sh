@@ -460,7 +460,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # pipeline, so it stays; but a worker that reads it as completion stops one wake
 # round short of its PR. Every no-mistakes shape must therefore say outright
 # that a commit does not complete the task, name its own completing report, and
-# point the intermediate stage at a `working:` line.
+# point the pipeline wait at the brief's existing `paused:` rule.
 test_no_mistakes_dod_commit_is_not_completion() {
   local home id flags label brief declared
   home="$TMP_ROOT/commit-not-done-home"
