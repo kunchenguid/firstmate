@@ -4258,6 +4258,16 @@ fi
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
 if [ -e "$TEARDOWN_DELIVERY_PENDING" ] || [ -L "$TEARDOWN_DELIVERY_PENDING" ]; then
+  TEARDOWN_META_CLEANUP_RECOVERY=$(fm_backlog_record_cleanup_reason "$META" || true)
+  if [ "$TEARDOWN_META_CLEANUP_RECOVERY" != delivery-unconfirmed ]; then
+    if ! printf 'cleanup_recovery=delivery-unconfirmed\n' >> "$META" ||
+      [ "$(fm_backlog_record_cleanup_reason "$META" || true)" != delivery-unconfirmed ]; then
+      fm_lock_release "$META_LOCK"
+      META_LOCK_HELD=0
+      echo "error: $ID cleanup finished but its task record could not retain delivery cleanup state" >&2
+      exit 1
+    fi
+  fi
   fm_backlog_atomic_transition remove "$TEARDOWN_DELIVERY_PENDING" "delivery cleanup marker" "$STATE" || {
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0

@@ -4352,14 +4352,8 @@ test_teardown_retains_journal_bound_to_another_pane() {
   pass "teardown retains a presentation journal bound to a pane other than the closed endpoint"
 }
 
-test_delivery_marker_removal_failure_keeps_retry_record() {
-  local case_dir marker real_rm
-  case_dir=$(make_case delivery-marker-removal-failure)
-  write_meta "$case_dir" local-only ship
-  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' >> "$case_dir/state/task-x1.meta"
-  marker="$case_dir/state/task-x1.delivery-unconfirmed"
-  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' > "$marker"
-  real_rm=$(command -v rm)
+install_rm_failpoint() {
+  local case_dir=$1
   cat > "$case_dir/fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
@@ -4370,6 +4364,17 @@ done
 exec "${REAL_RM_FOR_TEST:?}" "$@"
 SH
   chmod +x "$case_dir/fakebin/rm"
+}
+
+test_delivery_marker_removal_failure_keeps_retry_record() {
+  local case_dir marker real_rm
+  case_dir=$(make_case delivery-marker-removal-failure)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' >> "$case_dir/state/task-x1.meta"
+  marker="$case_dir/state/task-x1.delivery-unconfirmed"
+  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' > "$marker"
+  real_rm=$(command -v rm)
+  install_rm_failpoint "$case_dir"
   seed_backlog_in_flight "$case_dir"
 
   if REAL_RM_FOR_TEST="$real_rm" FM_FAIL_REMOVE_PATH="$marker" \
@@ -4390,6 +4395,36 @@ SH
   assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
     "retry closed the unconfirmed delivery row"
   pass "teardown keeps retry state when delivery marker removal fails"
+}
+
+test_task_record_removal_failure_keeps_delivery_state() {
+  local case_dir meta marker real_rm
+  case_dir=$(make_case delivery-record-removal-failure)
+  write_meta "$case_dir" local-only ship
+  meta="$case_dir/state/task-x1.meta"
+  marker="$case_dir/state/task-x1.delivery-unconfirmed"
+  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' > "$marker"
+  real_rm=$(command -v rm)
+  install_rm_failpoint "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+
+  if REAL_RM_FOR_TEST="$real_rm" FM_FAIL_REMOVE_PATH="$meta" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "delivery-record-removal-failure: teardown ignored the failed task record removal"
+  fi
+  assert_absent "$marker" "task record removal failure retained the side marker"
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+    "task record removal failure lost cleanup-only state"
+  assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
+    "task record removal failure closed the unconfirmed delivery row"
+
+  rm -f "$case_dir/fakebin/rm"
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" \
+    || fail "delivery-record-removal-failure: retry failed: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$meta" "retry kept the task record"
+  assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
+    "retry closed the unconfirmed delivery row"
+  pass "teardown keeps delivery state when task record removal fails"
 }
 
 # A version 1 attempt journal binds no pane, so proving the recorded task pane
@@ -6535,6 +6570,7 @@ test_herdr_projection_teardown_refused_close_preserves_task_and_copy
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
 test_delivery_marker_removal_failure_keeps_retry_record
+test_task_record_removal_failure_keeps_delivery_state
 test_teardown_retires_v1_journal_when_projected_workspace_gone
 test_teardown_retains_v1_journal_when_projected_workspace_present
 test_teardown_retains_v1_journal_when_workspace_query_ambiguous
