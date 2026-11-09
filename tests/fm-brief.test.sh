@@ -459,6 +459,85 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # A PR-based ship must not report done on a draft, which cannot be merged; a
 # lane that deliberately holds a draft declares a wait instead. local-only opens
 # no PR, so it must not carry the requirement.
+# The validation gate-policy section is OPT-IN: the shared, always-on ship
+# brief omits it entirely unless the home enables it through the tuning file
+# (brief_gate_policy=1) or FM_BRIEF_GATE_POLICY. The enabled brief keeps the
+# batched-findings and fix-round-ceiling guidance but must NOT carry the
+# pre-approved deviation class or domain-specific examples: those belong in a
+# home's own brief include, not the shared captain-agnostic surface.
+test_brief_gate_policy_is_opt_in() {
+  local home brief
+  home="$TMP_ROOT/gate-policy-home"
+  mkdir -p "$home/data" "$home/config"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gate-off some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a ship brief without the gate policy opt-in should still scaffold"
+  brief="$home/data/brief-gate-off/brief.md"
+  assert_no_grep "# Validation gate policy" "$brief" \
+    "the default ship brief must omit the validation gate-policy section"
+  assert_no_grep "Answer EVERY finding" "$brief" \
+    "the default ship brief must omit the batched-findings policy"
+
+  printf 'brief_gate_policy=1\n' > "$home/config/supervision-tuning"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gate-on some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a ship brief with brief_gate_policy=1 should still scaffold"
+  brief="$home/data/brief-gate-on/brief.md"
+  assert_grep "# Validation gate policy" "$brief" \
+    "brief_gate_policy=1 must include the validation gate-policy section"
+  assert_grep "Answer EVERY finding" "$brief" \
+    "the enabled gate-policy section must keep the batched-findings policy"
+  assert_grep "Spend at most 2 fix rounds" "$brief" \
+    "the enabled gate-policy section must state the max_fix_rounds ceiling"
+  assert_no_grep "ALREADY answered" "$brief" \
+    "the gate-policy section must not pre-approve deviation classes"
+  assert_no_grep "campaign number" "$brief" \
+    "the gate-policy section must not carry domain-specific examples"
+
+  # The off-state brief must be byte-identical to the pre-tuning template:
+  # the empty interpolation leaves no stray blank line at its point.
+  local offbrief onbrief
+  offbrief="$home/data/brief-gate-off/brief.md"
+  onbrief="$home/data/brief-gate-on/brief.md"
+  if awk 'BEGIN{b=0; bad=0} /^$/{b++; next} {if (b>=2 && $0 ~ /^# Definition of done/) bad=1; b=0} END{if (bad==0) exit 1}' "$offbrief"; then
+    fail "the off-state brief must not carry a stray doubled blank line at the gate-policy interpolation point"
+  fi
+  if awk '/^# Validation gate policy$/{if (prev_blank >= 2) bad=1; seen=1} /^$/{prev_blank++; next} {prev_blank=0} END{if (!seen || bad) exit 0; exit 1}' "$onbrief"; then
+    fail "the enabled brief must keep exactly one blank line above the gate-policy section"
+  fi
+  pass "fm-brief.sh: the validation gate-policy section is opt-in via brief_gate_policy"
+}
+
+# The tuning load must run AFTER home and config resolution: a launch with
+# neither FM_HOME nor FM_CONFIG_OVERRIDE set still defaults to the repository
+# home (FM_ROOT), and that home's supervision-tuning must be honoured exactly
+# like every other config file the same path resolves.
+test_brief_tuning_honours_default_home() {
+  local brief tuning rc=0 fixture
+  # Run entirely inside a temporary fixture: with neither FM_HOME nor
+  # FM_CONFIG_OVERRIDE set, FM_ROOT_OVERRIDE supplies the default home, so the
+  # tuning file lives under the fixture's config and no file under the real
+  # checkout is created, overwritten, or deleted. The script under test stays
+  # the real checkout's bin/fm-brief.sh.
+  fixture="$TMP_ROOT/brief-default-home"
+  mkdir -p "$fixture/config"
+  tuning="$fixture/config/supervision-tuning"
+  printf 'brief_gate_policy=1\nmax_fix_rounds=5\n' > "$tuning"
+  {
+    env -u FM_HOME -u FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE="$fixture" \
+      "$ROOT/bin/fm-brief.sh" brief-default-home some-proj --mode no-mistakes >/dev/null 2>&1
+    rc=$?
+  }
+  brief="$fixture/data/brief-default-home/brief.md"
+  [ ! -f "$brief" ] || brief_content=$(cat "$brief")
+  [ "$rc" -eq 0 ] \
+    || fail "a brief launched with neither FM_HOME nor FM_CONFIG_OVERRIDE set should still scaffold"
+  assert_grep "# Validation gate policy" <(printf '%s\n' "$brief_content") \
+    "the default home's brief_gate_policy must reach a launch with neither override set"
+  assert_grep "Spend at most 5 fix rounds" <(printf '%s\n' "$brief_content") \
+    "the default home's max_fix_rounds must reach a launch with neither override set"
+  pass "fm-brief.sh: the default home's tuning reaches a launch with neither FM_HOME nor FM_CONFIG_OVERRIDE set"
+}
+
 test_pr_based_dod_requires_non_draft() {
   local home mode id brief
   home="$TMP_ROOT/draft-dod-home"
@@ -1704,6 +1783,8 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
+test_brief_gate_policy_is_opt_in
+test_brief_tuning_honours_default_home
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

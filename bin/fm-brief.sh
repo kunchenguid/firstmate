@@ -178,6 +178,13 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# Home-local supervision tuning (config/supervision-tuning): the fix-round
+# ceiling a scaffolded brief states to its worker.
+. "$SCRIPT_DIR/fm-supervision-tuning-lib.sh"
+# The load itself runs AFTER home and config resolution below: a launch with
+# neither FM_HOME nor FM_CONFIG_OVERRIDE set still defaults to the repository
+# home, and that home's tuning (brief_gate_policy, max_fix_rounds) must be
+# honoured exactly like every other config file this path resolves.
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -216,6 +223,7 @@ else
 fi
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
+fm_supervision_tuning_load
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -650,6 +658,43 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# Validation-gate policy for a ship brief (OPT-IN).
+#
+# This section is NOT part of the shared, always-on captain-agnostic brief:
+# always shipping it made the brief read as a new default and pre-approved
+# scope changes beyond a task's ask. A home that wants the cost guidance turns
+# it on locally via config/supervision-tuning (brief_gate_policy=1) or the
+# FM_BRIEF_GATE_POLICY environment variable; the shipped template omits the
+# section entirely.
+#
+# The fix-round ceiling is home-local tuning (config/supervision-tuning,
+# max_fix_rounds), defaulting to 2.
+FIX_ROUNDS=$(fm_supervision_tuning_int "${FM_MAX_FIX_ROUNDS:-}" 2)
+GATE_POLICY_ENABLED=$(fm_supervision_tuning_int "${FM_BRIEF_GATE_POLICY:-}" 0)
+IFS= read -r -d '' GATE_POLICY_SECTION <<EOF || true
+# Validation gate policy
+- Answer EVERY finding the validation round raises IN ONE response, batched by class, each with its
+  code change or its recorded reason. Never spend one round per finding: a round is the most
+  expensive step in the pipeline, and one-finding rounds multiply the whole run's cost.
+- Spend at most $FIX_ROUNDS fix rounds on this run's own findings. If the last allowed round still
+  leaves findings, STOP the round loop: commit what you have, list the remaining findings
+  explicitly as follow-up work in the PR body, and continue. Another round is not a fix; it is cost.
+- A genuine gate is a decision only the captain can make: a product choice, a destructive action, or
+  new spend. Those stay captain decisions and the ask-user stop rule stands. Within the
+  implementation choices this brief already grants you, decide and record your choice; anything
+  beyond them is a captain decision, never a pre-approved one.
+EOF
+GATE_POLICY_SECTION=${GATE_POLICY_SECTION%$'\n'}
+# When the home has not opted in the section renders nothing at all, so the
+# shared template stays byte-identical to the pre-tuning brief; when it is on,
+# the leading and trailing newlines below reproduce the surrounding blank
+# lines the interpolation point used to provide.
+if [ "$GATE_POLICY_ENABLED" -le 0 ]; then
+  GATE_POLICY_BLOCK=
+else
+  GATE_POLICY_BLOCK="$GATE_POLICY_SECTION"$'\n\n'
+fi
+
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
 # The secondmate charter deliberately omits this rule because a secondmate
@@ -828,7 +873,7 @@ $WAIT_BLOCK$INBOX_SECTION
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
 
-$DOD
+$GATE_POLICY_BLOCK$DOD
 EOF
 append_brief_include
 if [ "$PR_TEXT" = manual ]; then

@@ -200,7 +200,9 @@
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
-# past the grace (FM_WATCHER_STALE_GRACE, default max(300, FM_POLL+60)) is
+# past the grace (FM_WATCHER_STALE_GRACE, default max(300, effective_poll+60),
+# where the effective poll is the slower of FM_POLL and the idle cadence —
+# docs/turnend-guard.md "Guard grace and the poll cadence" owns the formula) is
 # refused with "lock held by live pid ... but heartbeat is stale"; one stale past
 # the hard bound FM_WATCHER_STALL_BOUND (default 3x that grace) is instead
 # evicted with TERM after its recorded identity is re-verified, and this arm
@@ -295,6 +297,12 @@ WATCH_HOME_EXISTED=0
 # and wake emission (secondmate_liveness_tick below).
 # shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# Home-local supervision tuning (config/supervision-tuning): the cadence and
+# escalation ceilings this home runs with. Loaded BEFORE every knob below takes
+# its shipped default, so the file's values are what the watcher actually uses.
+# An environment variable of the same name still wins.
+. "$SCRIPT_DIR/fm-supervision-tuning-lib.sh"
+fm_supervision_tuning_load
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -341,14 +349,19 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
-WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
+# The effective cadence is the SLOWER of the fast poll and the idle poll: the
+# liveness beacon must stay inside the grace for the LONGEST wait a cycle can
+# take, not the shortest. A grace derived from the fast poll alone would let a
+# healthy watcher that waits on the idle cadence age past its own bound.
+EFFECTIVE_POLL=$(fm_effective_poll_seconds)
+WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$EFFECTIVE_POLL")}}
 # Hard bound on a live holder's beacon age. Under it a re-arm refuses and asks
 # for inspection (the grace above); at or past it the re-arm evicts the holder
 # instead, because a watcher whose beacon has stalled that long is not polling
 # and nothing else would ever replace it (evict_stalled_holder below).
 # fm_watcher_stall_bound (bin/fm-wake-lib.sh) owns the derivation, shared with
-# the arm that follows this watcher.
-WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
+# the arm that follows this watcher; both bound on the same effective cadence.
+WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$EFFECTIVE_POLL")
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -3412,6 +3425,40 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# fleet_idle_now: 0 when the fleet is idle (no crew pane shows live work), 1
+# otherwise. The only evidence is the busy signature the stale layer already
+# read this cycle, so this costs nothing extra. A crew waiting on a declared
+# pause, a finished crew waiting for a merge, and a parked idle pane are all
+# idle by this definition - which is exactly the state whose repeated poll
+# produced a full supervision turn every few minutes for no new information.
+fleet_idle_now() {
+  [ "${_fleet_busy:-0}" -eq 0 ]
+}
+
+# note_fleet_busy: the loop's per-window busy-evidence record, called from the
+# stale layer with the busy verdict and window kind that poll already read.
+# A crew pane showing a busy signature (kind other than secondmate) is live
+# work, so the fleet is NOT idle this cycle and the cadence decision at the
+# cycle's terminal wait must stay fast. The loop resets _fleet_busy=0 at the
+# top of every cycle; this is the only place a real crew sets it again.
+note_fleet_busy() {  # <busy_now> <kind>
+  if [ "$1" -eq 0 ] && [ "$2" != secondmate ]; then
+    _fleet_busy=1
+  fi
+}
+
+# supervision_poll_seconds: the cadence this cycle waits on. The fast cadence
+# whenever a crew pane shows live work; the slow one (FM_IDLE_POLL) when the
+# fleet is idle and the poll can find nothing. FM_IDLE_POLL is home-local tuning
+# and defaults to 0, which keeps the shipped fast cadence.
+supervision_poll_seconds() {
+  local fast slow
+  fast=$(fm_supervision_tuning_int "${POLL:-15}" 15)
+  slow=$(fm_supervision_tuning_int "${FM_IDLE_POLL:-0}" 0)
+  [ "$slow" -gt "$fast" ] || { printf '%s\n' "$fast"; return 0; }
+  if fleet_idle_now; then printf '%s\n' "$slow"; else printf '%s\n' "$fast"; fi
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -3426,6 +3473,14 @@ heartbeat_scan_finds_actionable() {
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
   local windows=() t3_windows=()
+  # Wave-scoped cadence: with no work in flight the watcher still polls, but on
+  # the slow cadence instead of the fast one. A fleet whose only live signal is
+  # an idle pane otherwise spends a full-context supervision turn every poll,
+  # which is pure overhead: the poll finds nothing, the turn is spent, and the
+  # next poll repeats it. FM_IDLE_POLL is home-local tuning and defaults to 0
+  # (off), so the shipped cadence is unchanged until a home opts in.
+  local poll_seconds
+  poll_seconds=$(supervision_poll_seconds)
   while IFS= read -r w; do
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
@@ -3457,7 +3512,7 @@ event_wait_or_sleep() {
   fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    sleep "$poll_seconds"
     return
   fi
 
@@ -3473,7 +3528,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    sleep "$poll_seconds"
     return
   fi
 
@@ -3482,7 +3537,7 @@ event_wait_or_sleep() {
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
   TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
-    fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
+    fm_backend_wait_transition "$first_backend" "$first_session" "$poll_seconds" "$STATE" "${windows[@]}"
   rc=$?
   rec=$WATCHER_CAPTURE
   fm_wait_tmp_cleanup
@@ -3874,6 +3929,9 @@ while :; do
     echo 'watcher: exiting - native Codex park owner is gone' >&2
     exit 1
   fi
+  # Wave-scoped cadence: reset the cycle's evidence that any crew is working.
+  # A pane that shows a busy signature sets it again (see the stale layer below).
+  _fleet_busy=0
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
   # disposable checkout). Exit with a logged reason rather than writing state
@@ -4324,6 +4382,10 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Wave-scoped cadence evidence: recorded here because this is where the
+    # cycle already captured the pane tail; the idle decision at the cycle's
+    # terminal wait reads it instead of re-capturing anything.
+    note_fleet_busy "$busy_now" "$kind"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
