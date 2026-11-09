@@ -3300,6 +3300,33 @@ test_native_grant_keeps_the_recorded_account() {
   pass "granted recovery: only the recorded account is relaunched, and a refused account leaves the grant unspent"
 }
 
+test_native_grant_spends_the_bytes_it_checked() {
+  local dir out rc=0 grant orig_sum
+  dir="$TMP_ROOT/grant-snapshot"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng7)
+  orig_sum=$(sha256sum < "$grant"); orig_sum=${orig_sum%% *}
+  # The producer replaces the file the moment the check first parses it.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    real_jq=$(command -v jq)
+    swapped=0
+    # shellcheck disable=SC2329  # shadows jq for the library under test
+    jq() {
+      if [ "$swapped" -eq 0 ]; then
+        swapped=1
+        printf '{"task":"ng7","pane":"%%9","agent":"claude","session":"%s","written":%s}' \
+          "$GRANT_SESSION" "$(date +%s)" > "$grant.new" && mv "$grant.new" "$grant"
+      fi
+      "$real_jq" "$@"
+    }
+    fm_native_grant_check "$grant" ng7 claude %7 "$dir/ledger" || exit 3
+    [ "$FM_NATIVE_GRANT_FINGERPRINT" = "$orig_sum" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "grant check must fingerprint the bytes it validated (rc=$rc)"
+}
+
 test_native_grant_refuses_a_pane_that_did_not_survive() {
   local dir out rc grant
   if ! command -v tasks-axi >/dev/null 2>&1 || ! fm_tasks_axi_compatible; then
@@ -3469,4 +3496,5 @@ test_native_grant_refuses_a_live_agent
 test_native_grant_refuses_malformed_expired_and_mismatched_grants
 test_native_grant_is_required_to_bypass_the_dispatchability_gate
 test_native_grant_keeps_the_recorded_account
+test_native_grant_spends_the_bytes_it_checked
 test_native_grant_refuses_a_pane_that_did_not_survive
