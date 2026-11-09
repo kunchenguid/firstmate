@@ -1582,7 +1582,9 @@ _fm_composer_row_is_rule_furniture() {  # <text>
   local text=$1 rest
   fm_composer_normalize_trim_var text
   [ -n "$text" ] || return 1
-  rest=${text//[─━═]/}
+  rest=${text//─/}
+  rest=${rest//━/}
+  rest=${rest//═/}
   fm_composer_normalize_trim_var rest
   [ -z "$rest" ]
 }

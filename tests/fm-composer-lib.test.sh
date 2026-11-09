@@ -1945,5 +1945,18 @@ test_typed_text_on_prompt_row_still_pending() {
   pass "real typed text on the prompt row still reads pending"
 }
 
+test_non_rule_unicode_on_prompt_row_still_pending_in_every_locale() {
+  local screen out locale
+  screen=$(stray_glyph_screen '—')
+  for locale in C "${LC_ALL:-${LANG:-C}}"; do
+    out=$(LC_ALL="$locale" fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+    [ "$out" = pending ] || fail "typed em dash must remain pending under LC_ALL=$locale, got '$out'"
+    out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+    [ "$out" = '—' ] || fail "typed em dash must be extracted intact under LC_ALL=$locale, got '$out'"
+  done
+  pass "non-rule Unicode on the prompt row remains pending under C and the active locale"
+}
+
 test_stray_glyph_over_rule_is_not_pending_input
 test_typed_text_on_prompt_row_still_pending
+test_non_rule_unicode_on_prompt_row_still_pending_in_every_locale
