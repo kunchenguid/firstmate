@@ -970,6 +970,35 @@ tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```
 
+### Acknowledged hand-back retry over herdr, 2026-11-09
+
+This supports [Reaching a lost Claude continuation](../supervision-host.md#reaching-a-lost-claude-continuation): the detached hand-back retry delivers to a Claude primary running in herdr through the inherited `HERDR_SESSION`/`HERDR_PANE_ID` pane identity, with the same ownership, idle, and composer guards as the verified tmux pane.
+It was measured on 2026-11-09 on macOS arm64 with Claude Code 2.1.321 (model `haiku`) in an isolated `fm-lab-*` herdr session; the default and `fm-remote` sessions were not touched.
+
+```text
+$ FM_SUPERVISION_HOST_HERDR_LIVE_E2E=1 tests/fm-supervision-host-herdr-live-e2e.test.sh
+# step 3: no Stop-hook rewake reached the transcript; owner 87432 alive on watcher 87805; pending host-83156-1794258417 unchanged
+# step 4: retry confirmed delivery - handoff log: 1794258429	retry	host-83156-1794258417	empty
+# step 5: pending marker removed only after the acknowledgement
+# step 6: turn end re-armed: 1794258437	start	gen=host-6155-1794258437; watcher 87805 under host 6155
+ok - herdr live e2e: a lost Claude hand-back is recovered by the detached retry, acknowledged, and supervision retained
+```
+
+| Case | Observed |
+| --- | --- |
+| Lost continuation | superseding the owning Stop hook's generation made it exit 0 with no exit-2, no banner, and no failure notice; the transcript shows no `firstmate watcher wake` between the hand-back and the doorbell |
+| Detached owner | stayed alive on the same pending token and kept a verified watcher |
+| Retry delivery | `retry <token> empty` in `.supervision-handoff.log`; the operational doorbell reached the inherited pane as a primary message |
+| Acknowledgement | the primary ran `bin/fm-wake-drain.sh` then `--ack-through 3 --recovery-generation <gen>`; the pending marker disappeared only after the ack |
+| After the acknowledged turn | the next Stop claimed a new generation, parked a host, and took over the detached owner's arm - one watcher retained |
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host-hook.test.sh
+tests/fm-backend-herdr.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
