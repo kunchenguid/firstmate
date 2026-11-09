@@ -8167,8 +8167,9 @@ else
     # therefore carries no shell expression of its own, because every supported
     # pane shell must parse it unchanged and fish has no `$0` to report a shell
     # with. fm_sol_cap_launch_shell reads the sourcing shell from the process
-    # tree instead.
-    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run-launch $(shell_quote "$ID") $(shell_quote "$STATE") $(shell_quote "$LAUNCH")"
+    # tree instead. The resolved configuration is passed so admission and
+    # launch read the same declaration under redirected config.
+    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run-launch $(shell_quote "$ID") $(shell_quote "$STATE") $(shell_quote "$LAUNCH")"
   fi
   if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
     chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then

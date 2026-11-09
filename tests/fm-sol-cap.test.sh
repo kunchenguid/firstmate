@@ -186,7 +186,7 @@ run_spawn() {  # <case-dir> <home> <pane-path> <args...>
   local case_dir=$1 home=$2 pane=$3
   shift 3
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_BACKEND=tmux FM_TEST_PANE_PID="$FM_SOL_TEST_LIVE_PID" \
     FM_FAKE_PANE_PATH="$pane" FM_FAKE_CALL_LOG="$case_dir/calls.log" \
     PATH="$case_dir/fakebin:$PATH" \
@@ -422,6 +422,54 @@ test_run_launch_falls_back_when_the_pane_shell_is_unusable() {
   expect_code 0 "$rc" "an unresolvable pane shell refused the launch"
   assert_contains "$out" fallback-ran "an unresolvable pane shell did not fall back to a working shell"
   pass "an unnamed pane shell falls back to a shell that runs the launch line"
+}
+
+# When a spawn uses a valid redirected config while the home's normal sol-cap
+# declaration is malformed, admission succeeds and run-launch must read that
+# same redirected configuration so promotion succeeds and the worker launches.
+test_redirected_config_spawn_with_malformed_home_declaration_launches_correctly() {
+  local case_dir redir_config out line pid rc=0
+  case_dir=$(make_case launch-redir task-c)
+  printf 'max=invalid\n' > "$case_dir/home/config/sol-cap"
+  redir_config="$case_dir/redirected-config"
+  mkdir -p "$redir_config"
+  printf 'max=4\nmodels=gpt-6.1-sol\n' > "$redir_config/sol-cap"
+  add_raw_launch_probe "$case_dir"
+  out=$(FM_CONFIG_OVERRIDE="$redir_config" spawn_raw_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "spawn with redirected config was refused: $out"
+  line=$(staged_launch_line "$case_dir")
+  assert_contains "$line" "FM_CONFIG_OVERRIDE=" \
+    "the capped launch handoff did not pass FM_CONFIG_OVERRIDE"
+  assert_contains "$line" "$redir_config" \
+    "the capped launch handoff did not pass the resolved config path"
+  rc=0
+  run_staged_launch "$case_dir" || rc=$?
+  expect_code 0 "$rc" "staged launch failed under redirected config: $rc"
+  pid=$(registry_row_field "$case_dir" task-c 4)
+  [ "$pid" != 0 ] || fail "staged launch left the reservation at pid 0 instead of promoting it"
+  assert_equals "--brief pane-syntax" "$(cat "$case_dir/invocation.argv")" \
+    "the redirected-config launch did not run the staged command"
+  pass "redirected-config spawn launches and promotes when home declaration is malformed"
+}
+
+# A spawn with a malformed redirected declaration must fail admission loudly
+# without creating a delivery reservation that would occupy Sol capacity.
+test_redirected_config_spawn_with_malformed_declaration_fails_admission_without_reservation() {
+  local case_dir redir_config out rc=0
+  case_dir=$(make_case launch-redir-malformed task-c)
+  redir_config="$case_dir/redirected-malformed"
+  mkdir -p "$redir_config"
+  printf 'max=invalid\n' > "$redir_config/sol-cap"
+  out=$(FM_CONFIG_OVERRIDE="$redir_config" spawn_sol_ship "$case_dir" task-c) || rc=$?
+  expect_code 1 "$rc" "a spawn with a malformed redirected config should fail admission"
+  assert_contains "$out" "Sol ceiling unavailable" \
+    "the refusal did not name Sol ceiling unavailable"
+  assert_contains "$out" "must declare max as a positive integer" \
+    "the refusal did not name the malformed max value"
+  [ ! -f "$case_dir/home/state/sol-sessions.tsv" ] ||
+    ! grep -q "task-c" "$case_dir/home/state/sol-sessions.tsv" ||
+    fail "refused spawn left a reservation in sol-sessions.tsv"
+  pass "redirected-config spawn with malformed declaration fails admission without reservation"
 }
 
 test_cap_refuses_the_fifth_and_names_its_sessions() {
@@ -1558,6 +1606,8 @@ test_under_cap_sol_spawn_launches_and_claims_its_slot
 test_capped_launch_keeps_the_uncapped_command_invocation
 test_capped_launch_survives_a_fish_pane
 test_run_launch_falls_back_when_the_pane_shell_is_unusable
+test_redirected_config_spawn_with_malformed_home_declaration_launches_correctly
+test_redirected_config_spawn_with_malformed_declaration_fails_admission_without_reservation
 test_cap_refuses_the_fifth_and_names_its_sessions
 test_stale_entries_do_not_count
 test_non_sol_model_never_claims_a_slot
