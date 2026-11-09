@@ -1,0 +1,46 @@
+
+
+  No secret access, no network, no worker launch, no watcher repair, no config mutation - it writes only into my own state/ (mine to operate) and the evidence
+  path. It matches the charter and the instruction's stated scope. Running it.
+
+  Ran 1 shell command
+
+⏺ Captain, the disposable-environment validation ran clean - every assertion passed. Output:
+
+  - Home isolation: FM_HOME resolved correctly to .../sub-poison.
+  - No leaked parent overrides: all five override vars (FM_ROOT_OVERRIDE, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE, FM_PROJECTS_OVERRIDE, FM_CONFIG_OVERRIDE) absent
+    from my environment - the launch-prefix unset is working.
+  - Check unregister: exited 0, removed lab-env.check.sh and its trust file, left the unrelated lab-env.keep untouched.
+  - Empty-state-override guard: exited 1 with state directory is unavailable and preserved both lab-empty files rather than deleting against a blank state dir.
+
+  Full result JSON (also written to the evidence dir at .../evidence/01M70ZY6MZS566QD0EAKS3F9WW/live-poison.json):
+
+  {
+    "scenario": "poison",
+    "FM_HOME": ".../live-secondmate/sub-poison",
+    "overrides": { /* all five: present=false, value=null */ },
+    "unregister": { "exit": 0, "stdout": "unregistered: state/lab-env.check.sh", "check_exists": false, "trust_exists": false, "unrelated_exists": true },
+    "explicit_empty_guard": { "exit": 1, "stderr": "error: state directory is unavailable", "check_preserved": true, "trust_preserved": true }
+  }
+
+  I read the script before running it, confirmed it only touches my own state/ and the evidence path (no operator data, no network, no worker launch, no watcher
+  repair, no config change), then executed it as asked. Nothing else to do - I did not touch the parent channel, since this was a direct validation ask and not
+  routed work with a captain-relevant outcome. Going idle now, shipshape, and waiting for the main firstmate to route the next task.
+
+✻ Brewed for 2m 5s · done 12:34 PM
+
+⏺ Stop hook feedback
+
+⏺ This is the auto-arm failure notice. Per protocol I drain first and inspect rather than manually looping an arm.
+
+⏺ Drain wake queue
+  ⎿  $ bin/fm-wake-drain.sh 2>&1 | head -60
+
+✽ Catapulting… (9s · ↓ 558 tokens · thinking with high effort)
+  ⎿  Tip: Paste images into Claude Code using control+v (not cmd+v!)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8 ctx window  ▌              96.1k / 1.0M
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

@@ -1,0 +1,40 @@
+{
+  "scenario": "poison",
+  "FM_HOME": "{run-worktree}/.live-secondmate/sub-poison",
+  "overrides": {
+    "FM_ROOT_OVERRIDE": {
+      "present": false,
+      "value": null
+    },
+    "FM_STATE_OVERRIDE": {
+      "present": false,
+      "value": null
+    },
+    "FM_DATA_OVERRIDE": {
+      "present": false,
+      "value": null
+    },
+    "FM_PROJECTS_OVERRIDE": {
+      "present": false,
+      "value": null
+    },
+    "FM_CONFIG_OVERRIDE": {
+      "present": false,
+      "value": null
+    }
+  },
+  "unregister": {
+    "exit": 0,
+    "stdout": "unregistered: state/lab-env.check.sh\n",
+    "stderr": "",
+    "check_exists": false,
+    "trust_exists": false,
+    "unrelated_exists": true
+  },
+  "explicit_empty_guard": {
+    "exit": 1,
+    "stderr": "error: state directory is unavailable\n",
+    "check_preserved": true,
+    "trust_preserved": true
+  }
+}

@@ -1,0 +1,2 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-secondmate/main
+spawned absent harness=claude kind=secondmate mode=secondmate yolo=off window=primary:fm-absent worktree={run-worktree}/.live-secondmate/sub-absent

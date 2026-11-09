@@ -1,0 +1,7 @@
+ok - seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only
+warning: secondmate design sync skipped before launch: primary default-branch commit cannot be resolved
+ok - spawn: launches in the subhome with persistent charter, records routing meta
+ok - send: a bare fm-<id> secondmate enqueues a marked request and rings the meta window
+ok - handoff: in-scope items move verbatim, out-of-scope stays, idempotent
+ok - recovery: respawns from the durable registry and persistent home
+ok - teardown: removes the home, then clears meta and the registry route

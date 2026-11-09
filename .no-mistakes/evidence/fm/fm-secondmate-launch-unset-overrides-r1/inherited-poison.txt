@@ -1,0 +1,5 @@
+FM_CONFIG_OVERRIDE={run-worktree}/.live-secondmate/poison-parent/FM_CONFIG_OVERRIDE
+FM_DATA_OVERRIDE={run-worktree}/.live-secondmate/poison-parent/FM_DATA_OVERRIDE
+FM_PROJECTS_OVERRIDE={run-worktree}/.live-secondmate/poison-parent/FM_PROJECTS_OVERRIDE
+FM_ROOT_OVERRIDE={run-worktree}/.live-secondmate/poison-parent/FM_ROOT_OVERRIDE
+FM_STATE_OVERRIDE={run-worktree}/.live-secondmate/poison-parent/FM_STATE_OVERRIDE

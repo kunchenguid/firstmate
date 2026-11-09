@@ -1,0 +1,26 @@
+[
+  {
+    "pane": "primary:fm-absent",
+    "pid": 46632,
+    "executable": "claude",
+    "override_values": {
+      "FM_ROOT_OVERRIDE": null,
+      "FM_STATE_OVERRIDE": null,
+      "FM_DATA_OVERRIDE": null,
+      "FM_PROJECTS_OVERRIDE": null,
+      "FM_CONFIG_OVERRIDE": null
+    }
+  },
+  {
+    "pane": "primary:fm-poison",
+    "pid": 81247,
+    "executable": "claude",
+    "override_values": {
+      "FM_ROOT_OVERRIDE": null,
+      "FM_STATE_OVERRIDE": null,
+      "FM_DATA_OVERRIDE": null,
+      "FM_PROJECTS_OVERRIDE": null,
+      "FM_CONFIG_OVERRIDE": null
+    }
+  }
+]

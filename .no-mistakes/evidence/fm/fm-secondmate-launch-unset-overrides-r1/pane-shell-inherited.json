@@ -1,0 +1,11 @@
+{
+  "surface": "real secondmate top-level pane shell before env -u launch",
+  "pid": "78446",
+  "overrides": {
+    "FM_ROOT_OVERRIDE": "{run-worktree}/.live-secondmate/poison-parent/FM_ROOT_OVERRIDE",
+    "FM_STATE_OVERRIDE": "{run-worktree}/.live-secondmate/poison-parent/FM_STATE_OVERRIDE",
+    "FM_DATA_OVERRIDE": "{run-worktree}/.live-secondmate/poison-parent/FM_DATA_OVERRIDE",
+    "FM_PROJECTS_OVERRIDE": "{run-worktree}/.live-secondmate/poison-parent/FM_PROJECTS_OVERRIDE",
+    "FM_CONFIG_OVERRIDE": "{run-worktree}/.live-secondmate/poison-parent/FM_CONFIG_OVERRIDE"
+  }
+}

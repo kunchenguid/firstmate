@@ -1,0 +1,9 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-secondmate/main
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e {run-worktree}/.live-secondmate/runtime/.pi/extensions/fm-primary-turnend-guard.ts -e {run-worktree}/.live-secondmate/runtime/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+spawned poison harness=claude kind=secondmate mode=secondmate yolo=off window=primary:fm-poison worktree={run-worktree}/.live-secondmate/sub-poison

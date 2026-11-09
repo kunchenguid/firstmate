@@ -1,0 +1,46 @@
+
+
+
+⏺ Same failure episode, already diagnosed - this is a suppressed continuation keeping the Stop-owned retry alive, with no new operator notice. I already
+  established the cause (a disposable validation checkout correctly refusing to arm a watcher, with no work under way) and confirmed there's no dropped wake or
+  unlanded work. Nothing new to act on, and I won't convert this into a manual-arm loop. Resting idle; validation task remains complete.
+
+✻ Cogitated for 7s · done 12:34 PM
+
+⏺ Stop hook feedback
+
+⏺ Same suppressed continuation of the already-diagnosed failure episode. No new signal, no dropped work, no action warranted. Idle; validation task complete.
+
+✻ Cooked for 2s · done 12:34 PM
+
+⏺ Stop hook feedback
+
+⏺ Idle. Same suppressed retry continuation, already diagnosed and benign. No action.
+
+✻ Cogitated for 2s · done 12:34 PM
+
+⏺ Stop hook feedback
+
+⏺ Diagnosis is complete and the state is now fully explained. Confirmed facts from my earlier inspection:
+
+  - No work under way - no task metadata, no crewmates, no backlog, no beacon, no unlanded changes. Nothing is being dropped.
+  - One registered check remains: state/lab-empty.check.sh - the fixture the probe deliberately preserved. It is what keeps the harness flagging supervision as
+    "needed."
+  - The auto-arm refuses by design: it will not stand up a watcher from a disposable validation checkout (.../sub-absent/bin). That guard is exactly what this
+    disposable-environment validation exercises.
+
+  Root cause, stated plainly: a leftover registered check holds the "supervision needed" flag on, while the disposable checkout correctly refuses to arm a
+  watcher for it. With the bounded retries now exhausted, the hook reports supervision genuinely down. This is the designed terminal outcome of the validation,
+  not a fault in real fleet work - there is none to supervise.
+
+  Per the notice, I'm keeping this session attended and am not launching a manual background arm. There is no unattended supervision to rely on here, and
+  nothing requires it, so resting attended is the correct and safe end state. This remains internal supervision mechanics with no captain decision pending, so
+  nothing goes to the parent channel. Validation task complete; I'm idle and attended.
+
+✻ Brewed for 33s · done 12:34 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8 ctx window  ▌              95.5k / 1.0M
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
