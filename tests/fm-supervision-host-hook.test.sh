@@ -169,7 +169,8 @@ case "${1:-}" in
   agent)
     [ "${2:-}" = get ] || exit 1
     if [ -e "$FM_HOME/foreign-agent" ]; then label=pi; else label=claude; fi
-    printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$label" "$(agent_status)" ;;
+    if [ -e "$FM_HOME/foreign-binding" ]; then binding=pi; else binding=claude; fi
+    printf '{"result":{"agent":{"agent":"%s","agent_status":"%s","agent_session":{"agent":"%s"}}}}\n' "$label" "$(agent_status)" "$binding" ;;
   pane)
     case "${2:-}" in
       process-info)
@@ -234,12 +235,30 @@ SH
     || fail "herdr doorbell: no foreign-agent retry"
   [ ! -s "$home/submits" ] || fail "herdr doorbell: retry reached a foreign registered agent"
   rm "$home/foreign-agent"
+  # All other delivery conditions pass: Claude, native/rendered idle, empty
+  # composer, and the pinned foreground owner. Only its binding is foreign.
+  : > "$home/foreign-binding"
+  cp "$home/state/.supervision-handoff.log" "$home/retries-before"
+  wait_until 150 bash -c '! cmp -s "$1/retries-before" "$1/state/.supervision-handoff.log"' _ "$home" \
+    || fail "herdr doorbell: no foreign-binding retry"
+  [ ! -s "$home/submits" ] || fail "herdr doorbell: retry reached a foreign session binding"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "herdr doorbell: foreign binding consumed the pending check"
+  rm "$home/foreign-binding"
   printf 'working\n' > "$home/herdr-status"
   cp "$home/state/.supervision-handoff.log" "$home/retries-before"
   wait_until 150 bash -c '! cmp -s "$1/retries-before" "$1/state/.supervision-handoff.log"' _ "$home" \
     || fail "herdr doorbell: no working-agent retry"
   [ ! -s "$home/submits" ] || fail "herdr doorbell: retry reached a busy agent"
   printf 'idle\n' > "$home/herdr-status"
+  # Native status is idle and the composer is empty; only the rendered footer
+  # says Claude is generating. The intent requires this independent veto.
+  printf 'Thinking… (esc to interrupt)\n❯ \n' > "$home/screen"
+  cp "$home/state/.supervision-handoff.log" "$home/retries-before"
+  wait_until 150 bash -c '! cmp -s "$1/retries-before" "$1/state/.supervision-handoff.log"' _ "$home" \
+    || fail "herdr doorbell: no rendered-busy retry"
+  [ ! -s "$home/submits" ] || fail "herdr doorbell: retry reached a rendered-busy agent with native idle status"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "herdr doorbell: rendered busy consumed the pending check"
+  printf '❯ \n' > "$home/screen"
   : > "$home/server-down"
   cp "$home/state/.supervision-handoff.log" "$home/retries-before"
   wait_until 150 bash -c '! cmp -s "$1/retries-before" "$1/state/.supervision-handoff.log"' _ "$home" \

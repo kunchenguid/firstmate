@@ -406,7 +406,12 @@ sleep 3
 [ -z "$(rewakes_since "$LAB_PRIMARY" "$e1")" ] \
   || fail "the killed hook still delivered a rewake; the retry path is not what is being proven"$'\n'"$(diagnose "$LAB_PRIMARY")"
 [ "$(pending_token "$LAB_PRIMARY")" = "$TOKEN" ] || fail "the pending token moved without an acknowledgement"
-evidence "step 3: no Stop-hook rewake reached the transcript; owner $OWNER_PID alive on watcher $(watcher_pid "$LAB_PRIMARY"); pending $TOKEN unchanged"
+SURVIVING_WATCHER=$(watcher_pid "$LAB_PRIMARY")
+SURVIVING_IDENTITY=$(PATH="$HERDR_ORIGINAL_PATH" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$SURVIVING_WATCHER")
+RETRY_ARM=$(cut -f1 "$LAB_PRIMARY/fm/state/.supervision-host-left")
+[ -n "$SURVIVING_IDENTITY" ] && [ -n "$RETRY_ARM" ] \
+  || fail "the retry owner left no identifiable watcher or recorded arm"
+evidence "step 3: no Stop-hook rewake reached the transcript; owner $OWNER_PID alive on watcher $SURVIVING_WATCHER ($SURVIVING_IDENTITY), recorded arm $RETRY_ARM; pending $TOKEN unchanged"
 
 # The detached owner retries the record-backed doorbell into the inherited
 # pane only; a confirmed submit verdict is logged but is never acknowledgement.
@@ -441,12 +446,20 @@ wait_until 300 pid_dead "$OWNER_PID" \
 wait_until "$TURN_POLLS" turn_idle "$LAB_PRIMARY" "$e1" || fail "the doorbell turn never ended"$'\n'"$(diagnose "$LAB_PRIMARY")"
 evidence "step 5: owner $OWNER_PID exited; queued check consumed; the doorbell turn ended"
 
-# The ended turn re-arms onto the owner's recorded arm: exactly one watcher,
-# the next park adopting what the hand-off left.
+# The next park takes over the owner's recorded arm, retiring its watcher
+# before starting the replacement cycle (not merely attaching to a live pid).
 wait_until "$TURN_POLLS" host_live "$LAB_PRIMARY" || fail "no host parked after the acknowledged turn"$'\n'"$(diagnose "$LAB_PRIMARY")"
+wait_until 300 env PATH="$HERDR_ORIGINAL_PATH" bash -c '. "$1/bin/fm-wake-lib.sh"; [ "$(fm_pid_identity "$2" 2>/dev/null)" != "$3" ]' _ "$ROOT" "$SURVIVING_WATCHER" "$SURVIVING_IDENTITY" \
+  || fail "the retry owner's watcher survived as an orphan after takeover"
 wait_until 300 watcher_live "$LAB_PRIMARY" || fail "the next park left no watcher"$'\n'"$(diagnose "$LAB_PRIMARY")"
 [ ! -e "$LAB_PRIMARY/fm/state/.supervision-handoff-owner" ] \
   || fail "the handoff owner record survived acknowledgement"
+host_log_since "$LAB_PRIMARY" "$e1" "$(printf '\ttake-over\tarm=%s$' "$RETRY_ARM")" | grep -q . \
+  || fail "the next park did not take over retry arm $RETRY_ARM"$'\n'"$(diagnose "$LAB_PRIMARY")"
+NEXT_WATCHER=$(watcher_pid "$LAB_PRIMARY")
+NEXT_IDENTITY=$(PATH="$HERDR_ORIGINAL_PATH" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$NEXT_WATCHER")
+[ "$NEXT_WATCHER:$NEXT_IDENTITY" != "$SURVIVING_WATCHER:$SURVIVING_IDENTITY" ] \
+  || fail "the next park only attached to the surviving watcher instead of taking over"
 evidence "step 6: turn end re-armed: $(host_log_since "$LAB_PRIMARY" "$e1" '	start	gen=' | tail -n 1 | cut -f1-3); watcher $(watcher_pid "$LAB_PRIMARY") under host $(awk -F '\t' '$1 == "host" { print $2; exit }' "$LAB_PRIMARY/fm/state/.supervision-host")"
 evidence "proof complete: lost hand-back -> herdr retry delivered to $HERDR_LAB_SESSION:$PANE -> drained -> acknowledged -> pending cleared -> one watcher retained"
 pass "herdr live e2e: a lost Claude hand-back is recovered by the detached retry, acknowledged, and supervision retained"
