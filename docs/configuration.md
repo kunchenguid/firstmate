@@ -496,8 +496,8 @@ Completion refuses to report success until the item is closed, and session start
 
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 
-When a `kimi`, `rovo`, or `agy` launch fails its brief-delivery check, the spawn keeps the task record with `cleanup_recovery=delivery-unconfirmed`.
-The spawn does not move the item, which normally stays Queued.
+When a `kimi`, `rovo`, or `agy` launch fails its brief-delivery check, the spawn records cleanup-only state, normally with `cleanup_recovery=delivery-unconfirmed` in the task record.
+The spawn does not move the item: a fresh dispatch leaves it Queued, and a relaunch leaves its existing state unchanged.
 The worker can still hold its brief, so the spawn keeps the local copy and the harness files.
 A `kimi` pane also stays open, while `rovo` and `agy` close their endpoint.
 Session start never moves that item In flight, and a relaunch refuses that record.
