@@ -1513,6 +1513,15 @@ test_green_run_wakes_before_worker_report() {
   pass "green no-mistakes runs wake once before worker reports under either merge posture"
 }
 
+test_busy_worker_does_not_withhold_early_readiness() {
+  make_world early-green-busy
+  write_unreported_ship "$MAIN"
+  arm_claude_busy "$MAIN" child busy
+  FM_FAKE_PANE_CMD=claude FM_FAKE_TASK_ID=child run_green_pipeline "$MAIN" child "$CI_GREEN"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "a busy worker withheld early readiness"
+  pass "a busy worker does not withhold early readiness"
+}
+
 test_early_readiness_requires_an_unreported_green_ship() {
   local scenario line
   for scenario in running failed parked unknown status-log no-url bad-url scout direct-PR secondmate registered captain-held; do
@@ -1615,6 +1624,7 @@ test_fast_cadence_resumes_after_an_exhausted_budget() {
 }
 
 test_green_run_wakes_before_worker_report
+test_busy_worker_does_not_withhold_early_readiness
 test_early_readiness_requires_an_unreported_green_ship
 test_early_readiness_reaches_the_parent_once
 test_worker_reported_readiness_is_not_repeated

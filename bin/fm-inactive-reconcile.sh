@@ -77,7 +77,8 @@
 # PR for a status-log state, and never a separately recorded task PR; a scout
 # delivers no PR on either path, so it carries none. Together they
 # prevent one captain-facing record from combining claims from different runs.
-# A live agent withholds that verdict only while it is busy, or while its
+# A live agent withholds that verdict (except the early no-mistakes readiness
+# above, which a busy worker never withholds) only while it is busy, or while its
 # incarnation postdates the terminal evidence (the spawn epoch in spawn_gen is
 # later than the last status line's [at=] epoch). An idle agent on the same
 # incarnation is a finished worker and keeps its record. The endpoint must read
@@ -706,8 +707,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   esac
   left=$((timeout - ($(date +%s) - started)))
   [ "$left" -ge 1 ] || left=1
-  task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
-  [ "$?" -ne 3 ] || return 3
+  if [ -z "$ready_pr" ]; then
+    task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
+    [ "$?" -ne 3 ] || return 3
+  fi
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
   pr=$(terminal_outcome_pr "$state_line" "$kind")
   [ -z "$ready_pr" ] || pr=$ready_pr
