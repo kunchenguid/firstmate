@@ -319,7 +319,6 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 The same guard now includes native Codex long-prompt submission when Codex is installed and reports its absence explicitly.
 Native Codex acceptance for this route remains unperformed; portable protocol simulations do not establish TUI paste acceptance.
 
-
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every backend supported at that time.
