@@ -162,7 +162,10 @@
 # reports after a confirmed delivery is labelled "advisory (steer delivered):"
 # and names that same record, and the remote leg's own notice lines lead with the
 # durable record, so no line of a delivered send can be mistaken for a refusal
-# that invites a resend.
+# that invites a resend. Holding that order means the remote leg's stderr is
+# buffered for the whole attempt and replayed only after the confirmation, so an
+# unusable temp directory refuses the send before any remote attempt: nonzero,
+# with the pending-reply expectation discarded, because nothing was delivered.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
