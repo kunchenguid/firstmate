@@ -371,6 +371,34 @@ fm_tmux_submit_busy_harness() {  # <target>
   [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
 }
 
+# fm_tmux_send_literal_bounded: type <text> literally, unsubmitted, in pieces
+# tmux accepts. tmux refuses one command above its 16 KiB message bound
+# ("command too long"), so a long text such as a prepared worker context is
+# sent as consecutive `send-keys -l` calls that the pane receives as one
+# uninterrupted input. A piece boundary never splits a UTF-8 sequence, never
+# leaves a piece ending in `;` (tmux reads a trailing `;` as a command
+# separator and drops it), and never starts a piece with `-` (tmux would parse
+# it as a flag). Text within one piece is sent exactly as before.
+fm_tmux_send_literal_bounded() {  # <target> <text>
+  local target=$1 text=$2 LC_ALL=C max=8192 end
+  while [ "${#text}" -gt "$max" ]; do
+    end=$max
+    while [ "$end" -gt 0 ]; do
+      case "${text:end:1}" in
+        [$'\x80'-$'\xbf']|-) end=$((end - 1)); continue ;;
+      esac
+      case "${text:end-1:1}" in
+        ';') end=$((end - 1)); continue ;;
+      esac
+      break
+    done
+    [ "$end" -gt 0 ] || { echo "error: text has no safe tmux piece boundary" >&2; return 1; }
+    tmux send-keys -t "$target" -l "${text:0:end}" || return 1
+    text=${text:end}
+  done
+  tmux send-keys -t "$target" -l "$text"
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err busy_harness
   # The turn-started baseline must predate our own typing: a pane already
@@ -379,9 +407,9 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   busy_harness=$(fm_tmux_submit_busy_harness "$target")
   baseline_state=$(fm_pane_busy_state "$target" "$busy_harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  # A failed literal send replays tmux's stderr (for example "command too
-  # long") so the caller can log why nothing was typed.
-  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
+  # A failed literal send replays tmux's stderr so the caller can log why the
+  # text was not fully typed.
+  if ! err=$(fm_tmux_send_literal_bounded "$target" "$text" 2>&1 >/dev/null); then
     [ -z "$err" ] || printf '%s\n' "$err" >&2
     printf 'send-failed'
     return 0

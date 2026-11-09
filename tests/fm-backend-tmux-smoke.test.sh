@@ -128,6 +128,43 @@ case "$out" in
 esac
 pass "real tmux: fm_backend_tmux_send_literal + fm_backend_tmux_send_key Enter submit as two separate steps"
 
+# --- long submit text ---------------------------------------------------------
+# tmux refuses one command above its 16 KiB message bound, so a long submit
+# (a prepared worker context, for example) must still reach the pane whole and
+# byte-exact. Three long runs each make one hazard dense enough that a piece
+# boundary must land on it: a 3-byte character run (splitting a UTF-8
+# sequence), an `a--` run (a piece starting with `-`, which tmux parses as a
+# flag) and an `a;;` run (a piece ending in `;`, which tmux drops as a command
+# separator). The reader runs in raw mode so the tty line limit cannot truncate
+# what tmux delivered.
+LONG_INPUT="$SHIM_DIR/long-input"
+tmux new-window -d -t "$SESSION:" -n fm-long "stty raw -echo; exec cat > '$LONG_INPUT'" \
+  || fail "real tmux: long-input reader window failed"
+for _ in $(seq 1 100); do
+  [ ! -e "$LONG_INPUT" ] || break
+  sleep 0.1
+done
+[ -e "$LONG_INPUT" ] || fail "real tmux: long-input reader did not start"
+long_text=
+for _ in $(seq 1 7000); do long_text+=$'\xe2\x9c\x93'; done
+for _ in $(seq 1 7000); do long_text+='a--'; done
+for _ in $(seq 1 7000); do long_text+='a;;'; done
+# A JSON worker context ends in `}`; end the same way so only piece
+# boundaries, not the final character, are under test.
+long_text+='}'
+long_bytes=$(printf '%s\r' "$long_text" | wc -c | tr -d ' ')
+[ "$long_bytes" -gt 49152 ] || fail "the long submit fixture is not long enough to need several pieces"
+verdict=$(fm_backend_tmux_send_text_submit "$SESSION:fm-long" "$long_text" 1 0.1 0) \
+  || fail "fm_backend_tmux_send_text_submit failed for a long text"
+[ "$verdict" != send-failed ] || fail "real tmux refused a long submit text instead of typing it whole"
+for _ in $(seq 1 100); do
+  [ "$(wc -c < "$LONG_INPUT" | tr -d ' ')" -lt "$long_bytes" ] || break
+  sleep 0.1
+done
+printf '%s\r' "$long_text" | cmp -s - "$LONG_INPUT" \
+  || fail "real tmux: a long submit text did not arrive byte-exact followed by one Enter"
+pass "real tmux: a submit text above tmux's command bound arrives whole and byte-exact before one Enter"
+
 # --- capture bounds -----------------------------------------------------------
 # Print enough numbered lines to overflow the pane's visible height, then
 # confirm a small capture window (-S -N) surfaces only the RECENT tail (the

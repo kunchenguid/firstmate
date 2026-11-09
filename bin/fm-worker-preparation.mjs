@@ -3,8 +3,11 @@
 // role/skill bodies. No runtime discovery, model call or shell/YAML execution.
 // select [--worker-role ROLE.md] [--skill SKILL.md]... [--skill-root DIR]...
 //   emits validated selection JSON; roots default to ~/.agents/skills.
-// prepare <selection.json> <provenance.json> emits initial-input Markdown and
-//   atomically records canonical sources, SHA-256 and role/independent origins.
+// prepare <selection.json> <provenance.json> [--reference-copies DIR] emits
+//   initial-input Markdown and atomically records canonical sources, SHA-256
+//   and role/independent origins. --reference-copies replaces DIR with a
+//   task-private copy of each prepared skill's directory and points relative
+//   references there, for workers whose file tools reach only task paths.
 // Metadata uses the canonical role subset: top-level name/description scalars,
 // autoloadSkills as a block or inline list of literal skill names. Unsupported
 // binding syntax is rejected, never interpreted as YAML code or silently lost.
@@ -138,11 +141,46 @@ function resolve(selection) {
   return { role, skills: [...skills.values()] };
 }
 function record({ content, ...source }) { return source; }
+// A copy holds only regular files and directories under the canonical skill
+// directory: a symlink or special file stops preparation instead of being
+// followed, and fixed bounds stop an unexpectedly large tree.
+const copyLimits = { entries: 2000, bytes: 64 * 1024 * 1024 };
+function copyTree(source, target, budget) {
+  fs.mkdirSync(target, { mode: 0o700 });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name), to = path.join(target, entry.name);
+    check(++budget.entries <= copyLimits.entries, `${from}: skill reference copy exceeds ${copyLimits.entries} entries`);
+    if (entry.isDirectory()) copyTree(from, to, budget);
+    else if (entry.isFile()) {
+      budget.bytes += fs.statSync(from).size;
+      check(budget.bytes <= copyLimits.bytes, `${from}: skill reference copy exceeds ${copyLimits.bytes} bytes`);
+      fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
+    } else throw new Error(`${from}: skill reference copy refuses symlinks and special files`);
+  }
+}
+function copyReferences(skills, dir) {
+  const temp = `${dir}.${process.pid}.tmp`, budget = { entries: 0, bytes: 0 };
+  fs.rmSync(temp, { recursive: true, force: true });
+  fs.mkdirSync(temp, { mode: 0o700 });
+  try {
+    for (const skill of skills) {
+      copyTree(path.dirname(skill.path), path.join(temp, skill.name), budget);
+      skill.referenceCopy = path.join(dir, skill.name);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.renameSync(temp, dir);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
 function render(prepared) {
   const parts = ['# Selected worker preparation',
     'FirstMate supplied these role and skill bodies before launch; this is prepared-input injection, not native OMP agent selection. Project instructions and applicable project-local skills take precedence over this selected role and shared skills. The current worker identity and task boundaries remain authoritative.'];
   if (prepared.role) parts.push(`## Selected role: ${prepared.role.name}\nSource: ${prepared.role.path}\n\n${prepared.role.content}`);
-  for (const skill of prepared.skills) parts.push(`## Prepared skill: ${skill.name}\nSource: ${skill.path}\nResolve relative skill references from: ${path.dirname(skill.path)}\nOrigins: ${skill.origins.join(', ')}\n\n${skill.content}`);
+  for (const skill of prepared.skills) {
+    const references = skill.referenceCopy
+      ? `Resolve relative skill references from: ${skill.referenceCopy}\nTask-private copy of: ${path.dirname(skill.path)}`
+      : `Resolve relative skill references from: ${path.dirname(skill.path)}`;
+    parts.push(`## Prepared skill: ${skill.name}\nSource: ${skill.path}\n${references}\nOrigins: ${skill.origins.join(', ')}\n\n${skill.content}`);
+  }
   return `${parts.join('\n\n')}\n`;
 }
 try {
@@ -164,8 +202,10 @@ try {
     resolve(selection);
     console.log(JSON.stringify(selection, null, 2));
   } else if (command === 'prepare') {
-    check(args.length === 2, 'prepare requires selection and provenance paths');
+    check(args.length === 2 || (args.length === 4 && args[2] === '--reference-copies' && path.isAbsolute(args[3])),
+      'prepare requires selection and provenance paths, optionally --reference-copies <absolute dir>');
     const prepared = resolve(JSON.parse(fs.readFileSync(args[0], 'utf8')));
+    if (args.length === 4) copyReferences(prepared.skills, args[3]);
     const manifest = { version: 1, mechanism: 'firstmate-prepared-input', role: prepared.role ? record(prepared.role) : null, skills: prepared.skills.map(record) };
     const temp = `${args[1]}.${process.pid}.tmp`;
     try {

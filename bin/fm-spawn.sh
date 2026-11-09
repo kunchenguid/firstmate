@@ -73,8 +73,11 @@
 #   Initial-input adapters carry those bodies through their existing envelope.
 #   Claude keeps its record doorbell and receives worker-context.md through a
 #   SessionStart stdout hook; Kimi/Rovo serialize that context and the brief
-#   pointer as one JSON line for readiness-gated text submission. Backend
-#   placement and lifecycle are unchanged.
+#   pointer as one JSON line for readiness-gated text submission. Rovo also
+#   gets each prepared skill's directory copied into data/<id>/worker-skills/
+#   (inside its existing grant) and resolves relative references there; the
+#   source skill directories are never granted. Backend placement and
+#   lifecycle are unchanged.
 #   Relaunch re-resolves the same selection; raw custom commands cannot guarantee
 #   prepared delivery and are refused when typed worker selection is present.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
@@ -4372,8 +4375,16 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       echo "error: typed worker selection requires a supported launch template, not a raw launch command" >&2
       exit 1
     }
+    # Rovo's file tools reach only the task paths its launch grants, so its
+    # skills' sibling references are copied into the already-granted task data
+    # directory (real path, as granted) instead of granting the skill sources.
+    WORKER_PREPARATION_ARGS=("$WORKER_SELECTION" "$DATA/$ID/worker-preparation.json")
+    if [ "$HARNESS" = rovo ]; then
+      WORKER_DATA_REAL=$(cd "$DATA/$ID" && pwd -P) || exit 1
+      WORKER_PREPARATION_ARGS+=(--reference-copies "$WORKER_DATA_REAL/worker-skills")
+    fi
     WORKER_PREPARATION=$(node "$SCRIPT_DIR/fm-worker-preparation.mjs" prepare \
-      "$WORKER_SELECTION" "$DATA/$ID/worker-preparation.json") || exit 1
+      "${WORKER_PREPARATION_ARGS[@]}") || exit 1
     # Pointer-only adapters need the same bytes before their first model turn,
     # not a later tool read. Keep the generic worker identity first here too.
     WORKER_CONTEXT_FILE="$DATA/$ID/worker-context.md"

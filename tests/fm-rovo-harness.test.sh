@@ -490,8 +490,9 @@ test_rovo_prepared_skill_precedes_first_prompt() {
   local id=rovo-prepared-skill rec out rc=0
   rec=$(make_spawn_case prepared-skill "$id")
   read_spawn_record "$rec"
-  mkdir -p "$HOME_DIR/.agents/skills/example"
-  printf '%s\n' '---' 'name: example' 'description: Example method' '---' 'PREPARED_METHOD_BODY' > "$HOME_DIR/.agents/skills/example/SKILL.md"
+  mkdir -p "$HOME_DIR/.agents/skills/example/references"
+  printf '%s\n' '---' 'name: example' 'description: Example method' '---' 'PREPARED_METHOD_BODY' 'See references/guide.md.' > "$HOME_DIR/.agents/skills/example/SKILL.md"
+  printf '%s\n' 'SIBLING_REFERENCE_BODY' > "$HOME_DIR/.agents/skills/example/references/guide.md"
   ln -s "$(command -v node)" "$FAKEBIN_DIR/node"
   rm "$HOME_DIR/data/$id/brief.md"
   FM_HOME="$HOME_DIR" HOME="$HOME_DIR" bash "$ROOT/bin/fm-brief.sh" "$id" example --mode no-mistakes --skill "$HOME_DIR/.agents/skills/example/SKILL.md" >/dev/null
@@ -509,6 +510,27 @@ JS
   jq -j .workerContext "$CASE_DIR/pointer.log" > "$CASE_DIR/decoded-context.md"
   cmp "$HOME_DIR/data/$id/worker-context.md" "$CASE_DIR/decoded-context.md" ||
     fail 'terminal serialization changed prepared source content'
+  # Rovo's file tools reach only its granted task paths, so the skill's
+  # sibling references must be readable from a task-private copy inside the
+  # granted data directory, while the original skill directory stays ungranted.
+  local data_real skill_real copy launch
+  data_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+  skill_real=$(cd "$HOME_DIR/.agents/skills/example" && pwd -P)
+  copy="$data_real/worker-skills/example"
+  assert_grep "Resolve relative skill references from: $copy" "$CASE_DIR/decoded-context.md" \
+    'rovo prepared skill did not resolve references from its task-private copy'
+  assert_grep "Source: $skill_real/SKILL.md" "$CASE_DIR/decoded-context.md" \
+    'rovo prepared skill lost its canonical source provenance'
+  cmp "$HOME_DIR/.agents/skills/example/references/guide.md" "$copy/references/guide.md" ||
+    fail 'rovo task-private copy lost the sibling reference file'
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "\"$data_real\"" 'rovo grant no longer covers the task data directory holding the copy'
+  case "$copy" in
+    "$data_real/"*) ;;
+    *) fail "rovo reference copy $copy is outside the granted task data directory" ;;
+  esac
+  assert_not_contains "$launch" "$skill_real" 'rovo launch granted the original skill directory'
+  assert_not_contains "$launch" "$HOME_DIR/.agents" 'rovo launch granted the original skill directory'
   if [ -n "${FM_PREPARATION_EVIDENCE_DIR:-}" ]; then
     mkdir -p "$FM_PREPARATION_EVIDENCE_DIR/rovo-context"
     cp "$CASE_DIR/pointer.log" "$CASE_DIR/decoded-context.md" \
@@ -517,7 +539,33 @@ JS
   pass 'rovo submits prepared context with its initial prompt rather than delaying a skill read'
 }
 
+test_rovo_reference_copy_refuses_symlink_before_launch() {
+  local id=rovo-reference-symlink rec out rc=0
+  rec=$(make_spawn_case reference-symlink "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/.agents/skills/example" "$CASE_DIR/private"
+  printf '%s\n' '---' 'name: example' 'description: Example method' '---' 'PREPARED_METHOD_BODY' > "$HOME_DIR/.agents/skills/example/SKILL.md"
+  printf '%s\n' 'UNRELATED_PRIVATE_DATA' > "$CASE_DIR/private/secret.txt"
+  ln -s "$CASE_DIR/private" "$HOME_DIR/.agents/skills/example/linked"
+  ln -s "$(command -v node)" "$FAKEBIN_DIR/node"
+  rm "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" HOME="$HOME_DIR" bash "$ROOT/bin/fm-brief.sh" "$id" example --mode no-mistakes --skill "$HOME_DIR/.agents/skills/example/SKILL.md" >/dev/null
+  node - "$HOME_DIR/data/$id/brief.md" <<'JS'
+const fs = require('node:fs'), file = process.argv[2];
+fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('{TASK}', 'Verify prepared delivery.').replace('{FIRSTMATE_SPEC}', 'No model generation.'));
+JS
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "rovo spawn accepted a skill directory holding a symlink: $out"
+  assert_contains "$out" 'skill reference copy refuses symlinks' 'rovo symlink refusal did not name its reason'
+  [ ! -s "$CASE_DIR/launch.log" ] || fail 'rovo launched a worker before refusing the skill reference copy'
+  if grep -rqs UNRELATED_PRIVATE_DATA "$HOME_DIR/data/$id"; then
+    fail 'rovo reference copy followed a symlink into unrelated private data'
+  fi
+  pass 'rovo reference copy refuses a symlinked entry before launch instead of following it'
+}
+
 test_rovo_prepared_skill_precedes_first_prompt
+test_rovo_reference_copy_refuses_symlink_before_launch
 test_rovo_launch_then_send_is_verified
 test_rovo_effort_xhigh_is_recorded_but_omitted
 test_rovo_effort_high_sets_config_override
