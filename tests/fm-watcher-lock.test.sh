@@ -286,25 +286,6 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
 }
 
-# Stop <pid> at a moment it holds no state lock but the watch lock, so a
-# successor never waits on a lock the stopped holder cannot release.
-stop_outside_state_locks() {  # <pid> <state>
-  local pid=$1 state=$2 i=0 lock held
-  while [ "$i" -lt 100 ]; do
-    kill -STOP "$pid" 2>/dev/null || return 1
-    held=0
-    for lock in "$state"/.*.lock "$state"/.*.lock.steal "$state"/*.lock; do
-      [ "$lock" != "$state/.watch.lock" ] || continue
-      [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$pid" ] || { held=1; break; }
-    done
-    [ "$held" -eq 1 ] || return 0
-    kill -CONT "$pid" 2>/dev/null || true
-    sleep 0.05
-    i=$((i + 1))
-  done
-  return 1
-}
-
 # Issue #7801: on a /proc-less host outside UTC, a watcher started before
 # fm_pid_identity pinned TZ=UTC0 recorded its lstart in local time, so after the
 # update its own identity no longer recomputes. A fresh watcher must replace that
@@ -315,7 +296,7 @@ stop_outside_state_locks() {  # <pid> <state>
 # was never torn down.
 run_legacy_identity_takeover() {  # <case> <successor-first>
   local case_name=$1 successor_first=$2
-  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released
+  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released real_sleep old_poll
   dir=$(make_case "$case_name")
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -323,7 +304,26 @@ run_legacy_identity_takeover() {  # <case> <successor-first>
   old_out="$dir/old-watch.out"
   new_out="$dir/new-watch.out"
   mkdir -p "$no_proc"
-  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$old_out" 2>&1 &
+  old_poll=1
+  if [ "$successor_first" -eq 1 ]; then
+    # Pause at the terminal poll sleep, after startup and state-lock mutations
+    # have completed. Sending STOP from the test then scanning locks races both
+    # signal delivery and an in-flight lock publication by the watcher's child.
+    # A distinctive poll interval keeps other sleeps and the successor untouched.
+    old_poll=17
+    real_sleep=$(command -v sleep)
+    cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 17 ]; then
+  kill -STOP "$PPID" || exit 1
+  : > "$FM_TEST_WATCH_PAUSED"
+  exit 0
+fi
+exec "$FM_TEST_REAL_SLEEP" "$@"
+SH
+    chmod +x "$fakebin/sleep"
+  fi
+  PATH="$fakebin:$PATH" FM_TEST_REAL_SLEEP="${real_sleep:-}" FM_TEST_WATCH_PAUSED="$dir/old.paused" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL="$old_poll" FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$old_out" 2>&1 &
   old=$!
   i=0
   lock_pid=
@@ -339,16 +339,21 @@ run_legacy_identity_takeover() {  # <case> <successor-first>
   legacy=$(COLUMNS=10000 LC_ALL=C TZ=America/Los_Angeles ps -p "$old" -o lstart= -o command= 2>/dev/null | sed 's/^[[:space:]]*//')
   [ -n "$legacy" ] && [ "$legacy" != "$current" ] \
     || fail "the legacy local-time identity does not differ from the UTC identity, so this case would pass vacuously ('$legacy')"
+  if [ "$successor_first" -eq 1 ]; then
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -e "$dir/old.paused" ] && is_live_non_zombie "$old"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -e "$dir/old.paused" ] \
+      || fail "old watcher never reached its lock-free poll sleep: $(cat "$old_out")"
+  fi
   # A pre-pin build recorded no start time either, so drop it to leave only the
   # legacy identity as the holder's record.
   rm -f "$state/.watch.lock/pid-start"
   printf '%s\n' "$legacy" > "$state/.watch.lock/pid-identity"
   is_live_non_zombie "$old" || fail "the old holder exited before its successor started, so the replacement would not be exercised: $(cat "$old_out")"
-  if [ "$successor_first" -eq 1 ]; then
-    stop_outside_state_locks "$old" "$state" \
-      || fail "could not pause the old holder outside its state locks: $(cat "$old_out")"
-  fi
-  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$new_out" 2>&1 &
+  PATH="$fakebin:$PATH" FM_TEST_REAL_SLEEP="${real_sleep:-}" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$new_out" 2>&1 &
   new=$!
   i=0
   claimed=0
@@ -1231,6 +1236,67 @@ test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
   pass "bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder"
 }
 
+assert_bounded_deadline_result() {
+  local mode=$1 expected=$2 dir out
+  dir=$(make_case "bounded-deadline-$mode")
+  out=$(FM_LOCK_STALE_AFTER=3600 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    lock=$2
+    mode=$3
+    mkdir "$lock" "$lock.steal" || exit 20
+    printf "%s\n" "$4" > "$lock.steal/pid"
+    sleep 300 &
+    holder=$!
+    trap "kill $holder 2>/dev/null || true; wait $holder 2>/dev/null || true" EXIT
+    printf "%s\n" "$holder" > "$lock/pid"
+    _fm_wake_require_timeout || exit 21
+    fm_run_timed() {
+      case "$mode" in
+        unpublished) rm "$lock/pid" ;;
+        exited) kill "$holder"; wait "$holder" 2>/dev/null || true ;;
+        absent) rm "$lock/pid"; rmdir "$lock" ;;
+        malformed) printf "invalid\n" > "$lock/pid" ;;
+        file) rm "$lock/pid"; rmdir "$lock"; printf "invalid\n" > "$lock" ;;
+      esac
+      return 124
+    }
+    rc=0
+    fm_lock_acquire_wait_bounded "$lock" 1 || rc=$?
+    case "$mode" in
+      live) [ "${FM_LOCK_HELD_PID:-}" = "$holder" ] || exit 22 ;;
+      *) [ -z "${FM_LOCK_HELD_PID:-}" ] || exit 23 ;;
+    esac
+    printf "%s\n" "$rc"
+  ' _ "$LIB" "$dir/state/.contend.lock" "$mode" "$$") || fail "$mode deadline fixture failed"
+  [ "$out" = "$expected" ] || fail "$mode deadline returned $out, expected $expected"
+}
+
+test_bounded_deadline_unpublished_holder() {
+  assert_bounded_deadline_result unpublished 124
+  pass "bounded deadline with an unpublished holder is retriable"
+}
+
+test_bounded_deadline_exited_holder() {
+  assert_bounded_deadline_result exited 124
+  pass "bounded deadline with an exited holder is retriable"
+}
+
+test_bounded_deadline_released_lock() {
+  assert_bounded_deadline_result absent 124
+  pass "bounded deadline with a released lock is retriable"
+}
+
+test_bounded_deadline_live_holder() {
+  assert_bounded_deadline_result live 124
+  pass "bounded deadline preserves the live holder advisory"
+}
+
+test_bounded_deadline_malformed_lock() {
+  assert_bounded_deadline_result malformed 1
+  assert_bounded_deadline_result file 1
+  pass "bounded deadline rejects malformed pid data and non-directory locks"
+}
+
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
   dir=$(make_case lock-paused-claim-steal)
@@ -1386,8 +1452,12 @@ test_watcher_exits_on_state_teardown_during_startup() {
     [ -e "$state/.watch.lock/watcher-path" ] && kill -STOP "$pid" 2>/dev/null && { stopped=1; break; }
   done
   [ "$stopped" -eq 1 ] || fail "watcher never finished claiming its lock: $(cat "$out")"
-  rm -rf "$state"
-  mkdir -p "$state"
+  # Stopping the watcher shell does not stop its already-forked helpers.
+  # Atomically detach the old directory instead of racing their writes with
+  # recursive deletion. Retain it until fixture cleanup so its inode cannot
+  # be reused for the replacement and mistaken for a successor's release.
+  mv "$state" "$dir/retired-state" || fail "could not detach startup state"
+  mkdir -p "$state" || fail "could not recreate startup state"
   kill -CONT "$pid" 2>/dev/null || true
   # wait_for_exit returns the watcher's own status, or TERMs a watcher that
   # kept running in the torn-down directory.
@@ -2405,6 +2475,11 @@ test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid
+test_bounded_deadline_unpublished_holder
+test_bounded_deadline_exited_holder
+test_bounded_deadline_released_lock
+test_bounded_deadline_live_holder
+test_bounded_deadline_malformed_lock
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer

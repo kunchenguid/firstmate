@@ -141,7 +141,8 @@ A claimed parent identity that cannot be resolved exactly stops the spawn before
 That covers:
 
 - A missing or unusable socket identity.
-- A closed or unreadable launcher pane.
+- A launcher pane that cannot be read, including a destroyed pane, which Herdr answers with `pane_not_found`. The refusal says it could not be read.
+- A launcher pane id that Herdr resolves to a different pane (such as a legacy id form), or a pane record with no tab or workspace. The refusal calls the pane id stale and names `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` as the variables to refresh in the shell.
 - A pane and tab that disagree about their workspace.
 - A workspace missing from the session.
 - A pane belonging to another named session or Herdr server.
@@ -300,6 +301,8 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
+If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -364,6 +367,11 @@ If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and
 Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate; a journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for that sweep.
 
 ### Restart recovery
+
+A fresh task leases its task copy durably with `treehouse get --lease` and then moves the pane's top-level shell into it.
+Herdr restores a pane from the cwd of that top-level shell, and the pane's `cwd` field does not follow the nested shell an interactive `treehouse get` opens, so a restart would otherwise reopen the worker in the primary clone.
+The lease outlives the pane: teardown closes the exact pane before it returns the lease, because returning the copy ends the pane's top-level shell and Herdr would then remove the pane outside the focus-preserving close.
+An aborted spawn returns the lease only when Herdr confirms the task pane gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
@@ -827,7 +835,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the shape the interactive `treehouse get` leaves behind; fresh Herdr spawns lease durably instead (see [Restart recovery](#restart-recovery)), but older or hand-driven panes can still have it (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
@@ -972,9 +980,7 @@ The helper:
 - Performs destructive stop/delete only through its guarded lifecycle actions.
 
 Immediately before every destructive call it re-queries the named session and refuses empty, missing, literal `default`, or `default:true` identities.
-Its before/after tripwire requires the live default-session snapshot to remain byte-identical.
-
-The helper's header and `--help` own exact commands.
+For the live-fleet tripwire and custom fleet-session selection, see the [helper's header](../bin/fm-herdr-lab.sh); its header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
 
 ## Active limits
@@ -1010,5 +1016,5 @@ tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
-Real Herdr tests use the named lab helper and default-session tripwire.
+Real Herdr tests follow [destructive lab safety](#destructive-lab-safety).
 [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.

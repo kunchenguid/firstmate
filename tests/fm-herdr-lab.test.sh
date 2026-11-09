@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset FM_HERDR_LAB_FLEET_SESSION
+
 TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_STATE="$TMP_ROOT/herdr-state"
@@ -20,6 +22,9 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
+for var in HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID; do
+  [ -z "${!var+x}" ] || printf '%s %s\n' "$var" "$*" >> "$state/leaked-env"
+done
 # Herdr reads --session only as an option, so it must end the arguments or
 # sit immediately before the first -- delimiter.
 last=
@@ -31,18 +36,24 @@ done
 [ "${previous:-}" = --session ] || { echo "fake herdr: missing --session before any -- delimiter" >&2; exit 90; }
 session=$last
 default_socket=$(cat "$state/default-socket")
+# A custom-named fleet runs in a non-default session, leaving the literal
+# default session stopped.
+fleet_rows='[{default:true,name:"default",running:true,socket_path:$socket}]'
+if [ -n "${FM_FAKE_HERDR_FLEET:-}" ]; then
+  fleet_rows='[{default:true,name:"default",running:false,socket_path:"/home/test/.config/herdr/default.sock"},{default:false,name:$fleet,running:true,socket_path:$socket}]'
+fi
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 
 case "$1 ${2:-}" in
   "session list")
     if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+      jq -nc --arg socket "$default_socket" --arg fleet "${FM_FAKE_HERDR_FLEET:-}" "{sessions:$fleet_rows}"
     else
       running=false
       [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      jq -nc --arg socket "$default_socket" --arg fleet "${FM_FAKE_HERDR_FLEET:-}" --arg name "$session" --argjson running "$running" \
+        "{sessions:($fleet_rows + [{default:false,name:\$name,running:\$running,socket_path:(\"/tmp/\" + \$name + \".sock\")}])}"
     fi
     ;;
   "server --session")
@@ -92,6 +103,7 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
+    FM_FAKE_HERDR_FLEET="${FM_FAKE_HERDR_FLEET:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -222,6 +234,92 @@ test_changed_default_trips_after_teardown() {
   printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
   rm -f "$TRIPWIRES/$name.fleet-state.json"
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
+}
+
+test_default_fleet_session_is_recorded() {
+  local name="fm-lab-default-fleet-$$"
+  : > "$FAKE_LOG"
+  FM_HERDR_LAB_FLEET_SESSION=default run_with_fake fm_herdr_lab_provision "$name" \
+    || fail "an explicit default fleet session failed to provision"
+  jq -e '.name == "default" and .default == true and .running == true' \
+    "$TRIPWIRES/$name.fleet-state.json" >/dev/null \
+    || fail "the default fleet tripwire did not record the running default session"
+  FM_HERDR_LAB_FLEET_SESSION=default run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "an explicit default fleet session failed teardown"
+  pass "fm-herdr-lab: the default fleet session stays the recorded tripwire"
+}
+
+test_custom_fleet_session_tripwire() {
+  local name="fm-lab-custom-fleet-$$" status=0 err="$TMP_ROOT/custom-fleet.err"
+  : > "$FAKE_LOG"
+  FM_FAKE_HERDR_FLEET=fleet-main run_with_fake fm_herdr_lab_provision "$name" 2>"$err" || status=$?
+  expect_code 1 "$status" "a custom-named fleet must not satisfy the default tripwire"
+  grep -F "exactly one running default session" "$err" >/dev/null \
+    || fail "the default tripwire refusal did not name the default session"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "a refused tripwire left a record behind"
+  assert_absent "$FAKE_STATE/$name" "a refused tripwire still started the lab session"
+
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "a custom fleet session failed to provision"
+  jq -e '.name == "fleet-main" and .default == false and .running == true and .socket_path == "/home/test/.config/herdr/herdr.sock"' \
+    "$TRIPWIRES/$name.fleet-state.json" >/dev/null \
+    || fail "the custom fleet tripwire did not record the running fleet session"
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_teardown "$name" || fail "a custom fleet session failed teardown"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "custom fleet teardown left its tripwire behind"
+
+  name="fm-lab-custom-change-$$"
+  status=0
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "custom fleet change fixture failed to provision"
+  printf '%s\n' '/changed/fleet.sock' > "$FAKE_STATE/default-socket"
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_teardown "$name" 2>"$err" || status=$?
+  expect_code 1 "$status" "a changed custom fleet session must fail teardown"
+  grep -F "FLEET-STATE TRIPWIRE FAILED: fleet-main session changed" "$err" >/dev/null \
+    || fail "the tripwire failure did not name the custom fleet session"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "failed custom tripwire should retain evidence"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_teardown "$name" || fail "custom fleet change fixture cleanup failed"
+  pass "fm-herdr-lab: a custom fleet session is recorded and compared like the default session"
+}
+
+test_refuses_unsafe_fleet_session_names() {
+  local name="fm-lab-bad-fleet-$$" fleet status err="$TMP_ROOT/bad-fleet.err"
+  for fleet in fm-lab-other 'bad name' -leading other-fleet; do
+    status=0
+    : > "$FAKE_LOG"
+    FM_HERDR_LAB_FLEET_SESSION=$fleet FM_FAKE_HERDR_FLEET=fleet-main \
+      run_with_fake fm_herdr_lab_provision "$name" 2>"$err" || status=$?
+    expect_code 1 "$status" "fleet session '$fleet' must be refused"
+    assert_absent "$TRIPWIRES/$name.fleet-state.json" "refused fleet session '$fleet' left a tripwire"
+    assert_absent "$FAKE_STATE/$name" "refused fleet session '$fleet' still started the lab session"
+  done
+  grep -F "exactly one running other-fleet session" "$err" >/dev/null \
+    || fail "an absent custom fleet session was not named in the refusal"
+  for fleet in fm-lab-other 'bad name'; do
+    status=0
+    FM_HERDR_LAB_FLEET_SESSION=$fleet fm_herdr_lab_fleet_session >/dev/null 2>"$err" || status=$?
+    expect_code 1 "$status" "fleet session '$fleet' must fail validation"
+    grep -F "never a lab session" "$err" >/dev/null || fail "fleet session '$fleet' refusal lacked its reason"
+  done
+  pass "fm-herdr-lab: the fleet session can never be a lab or malformed session"
+}
+
+test_clears_inherited_herdr_pane_env() {
+  local name="fm-lab-pane-env-$$"
+  rm -f "$FAKE_STATE/leaked-env"
+  : > "$FAKE_LOG"
+  # shellcheck disable=SC2016 # the single-quoted script expands in the child shell
+  HERDR_SOCKET_PATH=/live/herdr.sock HERDR_PANE_ID=live-pane HERDR_TAB_ID=live-tab HERDR_WORKSPACE_ID=live-ws \
+    run_with_fake bash -c '. "$1"; fm_herdr_lab_provision "$2" && fm_herdr_lab_cli "$2" workspace list >/dev/null && fm_herdr_lab_teardown "$2"' \
+    _ "$ROOT/bin/fm-herdr-lab.sh" "$name" || fail "lab lifecycle failed under an inherited pane environment"
+  [ -s "$FAKE_LOG" ] || fail "the inherited pane environment fixture reached no Herdr call"
+  if [ -e "$FAKE_STATE/leaked-env" ]; then
+    fail "inherited Herdr pane variables reached a Herdr call: $(cat "$FAKE_STATE/leaked-env")"
+  fi
+  pass "fm-herdr-lab: Herdr calls never inherit the live pane's socket or pane identity"
 }
 
 test_stopped_owned_lab_can_reprovision() {
@@ -539,6 +637,10 @@ test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
+test_default_fleet_session_is_recorded
+test_custom_fleet_session_tripwire
+test_refuses_unsafe_fleet_session_names
+test_clears_inherited_herdr_pane_env
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch

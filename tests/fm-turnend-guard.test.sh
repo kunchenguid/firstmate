@@ -188,6 +188,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-hermes-process-lib.sh" "$dir/bin/fm-hermes-process-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
@@ -936,13 +937,13 @@ test_tracked_claude_entries_inert_under_grok() {
       || fail "tracked entry for $target ran under a legacy GROK_AGENT environment"
   done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
 
-  [ "$guarded" -eq 7 ] || fail "expected 7 grok-guarded tracked entries, saw $guarded"
+  [ "$guarded" -eq 8 ] || fail "expected 8 grok-guarded tracked entries, saw $guarded"
   [ "$unguarded" -eq 1 ] || fail "expected 1 documented unguarded tracked entry, saw $unguarded"
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
-  local settings command dir expected_root outside payload out status
+  local settings command dir expected_root outside payload out status log
   settings="$ROOT/.codex/hooks.json"
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
@@ -952,22 +953,23 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   expected_root=$(cd "$dir" && pwd -P)
   outside="$TMP_ROOT/codex-hook-outside"
   mkdir -p "$outside"
+  log="$TMP_ROOT/codex-hook-root.log"
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'guard=%s\n' "$0"
-cat
+{ printf 'guard=%s\n' "$0"; cat; } > "${FM_CODEX_GUARD_LOG:?}"
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
   payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  out=$(printf '%s' "$payload" | (cd "$dir" && FM_CODEX_GUARD_LOG="$log" bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
-  assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
+  [ "$out" = '{}' ] || fail "codex hook must return a single success object: $out"
+  assert_contains "$(cat "$log")" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
+  assert_contains "$(cat "$log")" "$payload" "codex hook must pass the original payload to the guard"
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
 
 test_codex_hook_ignores_nested_git_root_guard() {
-  local settings command dir nested subdir expected_root payload out status
+  local settings command dir nested subdir expected_root payload out status log
   settings="$ROOT/.codex/hooks.json"
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
@@ -975,6 +977,7 @@ test_codex_hook_ignores_nested_git_root_guard() {
   dir=$(make_primary_dir "$TMP_ROOT/codex-hook-outer")
   mark_codex_hook_root "$dir"
   expected_root=$(cd "$dir" && pwd -P)
+  log="$TMP_ROOT/codex-hook-outer.log"
   nested="$dir/projects/other"
   mkdir -p "$nested"
   git init -q "$nested"
@@ -990,18 +993,117 @@ EOF
   chmod +x "$nested/bin/fm-turnend-guard.sh"
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'guard=%s\n' "$0"
-cat
+{ printf 'guard=%s\n' "$0"; cat; } > "${FM_CODEX_GUARD_LOG:?}"
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
   subdir="$nested/deep/path"
   mkdir -p "$subdir"
   payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  out=$(printf '%s' "$payload" | (cd "$dir" && FM_CODEX_GUARD_LOG="$log" bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must not execute a nested project guard"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
+  [ "$out" = '{}' ] || fail "codex hook must return a single success object: $out"
+  assert_contains "$(cat "$log")" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
   assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
+}
+
+test_codex_hook_preserves_streams_without_login_logout_output() {
+  local dir command fixture_login other child stdout stderr expected payload status fakebin tool
+  dir=$(make_primary_dir "$TMP_ROOT/codex-output-primary")
+  mark_codex_hook_root "$dir"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command' "$ROOT/.codex/hooks.json")
+  fixture_login="$TMP_ROOT/codex-output-login"
+  other="$TMP_ROOT/codex-output-other"
+  mkdir -p "$fixture_login" "$other"
+  printf ':\n' > "$fixture_login/.bash_profile"
+  printf "printf '\\033[H\\033[2J\\033[3J'\n" > "$fixture_login/.bash_logout"
+  stdout="$TMP_ROOT/codex-output.stdout"
+  stderr="$TMP_ROOT/codex-output.stderr"
+  expected="$TMP_ROOT/codex-output.expected"
+  printf '{}\n' > "$expected"
+  payload='{"stop_hook_active":false}'
+
+  # Assert the logout fixture is effective, so a green test cannot come from
+  # a host that happens to have a quiet login shell.
+  HOME="$fixture_login" BASH_ENV='' bash -lc 'exit 0' > "$stdout" 2> "$stderr"
+  [ -s "$stdout" ] || fail "the Codex noisy logout fixture did not emit anything"
+
+  codex_output_case() {
+    local label=$1 cwd=$2 input=$3 want=$4
+    shift 4
+    printf '%s' "$input" | (cd "$cwd" && env HOME="$fixture_login" BASH_ENV='' ENV='' \
+      FM_HOME="$dir" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE="$dir/state" \
+      FM_CONFIG_OVERRIDE="$dir/config" "$@" bash -c "$command") > "$stdout" 2> "$stderr"
+    status=$?
+    expect_code "$want" "$status" "Codex Stop wrapper $label must preserve its exit status"
+    if [ "$want" -eq 0 ]; then
+      cmp -s "$expected" "$stdout" || fail "Codex Stop wrapper $label emitted something other than one success object"
+    else
+      [ ! -s "$stdout" ] || fail "Codex Stop wrapper $label contaminated nonzero stdout"
+    fi
+  }
+
+  codex_output_case idle "$dir" "$payload" 0
+  [ ! -s "$stderr" ] || fail "idle Codex Stop wrapper emitted a diagnostic"
+  : > "$dir/state/task1.meta"
+  codex_output_case supervision-down "$dir" "$payload" 2
+  assert_contains "$(cat "$stderr")" 'TURN WOULD END BLIND' "Codex Stop wrapper lost its continuation reason"
+  codex_output_case already-active "$dir" '{"stop_hook_active":true}' 0
+  codex_output_case empty-input "$dir" '' 0
+  codex_output_case non-firstmate "$other" "$payload" 0
+  child=$(make_crewmate_worktree_dir "$TMP_ROOT/codex-output-parent" "$TMP_ROOT/codex-output-child")
+  mark_codex_hook_root "$child"
+  codex_output_case child-worktree "$child" "$payload" 0
+  printf '{' > "$dir/.codex/hooks.json"
+  codex_output_case malformed-registration "$dir" "$payload" 0
+  mark_codex_hook_root "$dir"
+  chmod -x "$dir/bin/fm-turnend-guard.sh"
+  codex_output_case nonexecutable-guard "$dir" "$payload" 0
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-output-nojq")
+  for tool in bash cat; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  codex_output_case missing-jq "$dir" "$payload" 0 PATH="$fakebin"
+
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'fixture guard failed\n' >&2
+exit 7
+EOF
+  codex_output_case runtime-error "$dir" "$payload" 7
+  [ "$(cat "$stderr")" = 'fixture guard failed' ] || fail "Codex Stop wrapper changed runtime-error stderr"
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-output-inherited-path")
+  printf '#!/usr/bin/env bash\nprintf "inherited PATH used\\n"\n' > "$fakebin/codex-path-probe"
+  chmod +x "$fakebin/codex-path-probe"
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+codex-path-probe >&2
+EOF
+  codex_output_case inherited-path "$dir" "$payload" 0 PATH="$fakebin:$PATH"
+  [ "$(cat "$stderr")" = 'inherited PATH used' ] || fail "Codex Stop wrapper lost its inherited PATH"
+
+  # Current primaries route through the optional park's synchronous guard.
+  # Exercise that dispatch without registering or running a native park.
+  cat > "$dir/bin/fm-codex-stop-park.sh" <<'EOF'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = --guard ] || exit 99
+cat > "${FM_HOME:?}/park-payload"
+printf 'fixture park guard\n' >&2
+exit "${FM_TEST_PARK_CODE:-0}"
+EOF
+  chmod +x "$dir/bin/fm-codex-stop-park.sh"
+  codex_output_case park-guard-allow "$dir" "$payload" 0
+  [ "$(cat "$dir/park-payload")" = "$payload" ] || fail "Codex Stop wrapper changed the park guard payload"
+  [ "$(cat "$stderr")" = 'fixture park guard' ] || fail "Codex Stop wrapper changed park guard stderr"
+  codex_output_case park-guard-block "$dir" "$payload" 2 FM_TEST_PARK_CODE=2
+  [ "$(cat "$stderr")" = 'fixture park guard' ] || fail "Codex Stop wrapper lost park guard continuation stderr"
+  unset -f codex_output_case
+  pass ".codex Stop wrapper: clean success JSON, inherited PATH, unchanged errors and continuation without logout output"
 }
 
 test_opencode_plugin_anchors_guard_to_worktree() {
@@ -2058,7 +2160,12 @@ SH
   # lock as its own session's however the test itself is launched.
   cat > "$dir/stop-driver.sh" <<'SH'
 i=$1 variant=$2
+# Each Stop is a new fake-claude pid, as a real Stop is a new hook process.
+# The session lock sidecar is what makes those Stops the same session, so an
+# interrupted episode can still exhaust its budget instead of resetting.
+export CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sess-claude-mode CLAUDE_PID=$$
 printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+printf '%s\n' "$CLAUDE_CODE_SESSION_ID" > "$FM_HOME/state/.lock-session"
 printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
   | FM_CLAUDE_AUTOARM_ATTEMPTS=1 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/auto-$i.out" 2>&1 &
 auto_pid=$!
@@ -2602,6 +2709,7 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
+test_codex_hook_preserves_streams_without_login_logout_output
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure

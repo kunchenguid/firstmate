@@ -39,14 +39,16 @@ ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
-# this test keeps open, with exactly the marker environment each birth needs.
-JQ=$(command -v jq)
+# Real socket-owner holders for the Darwin birth check: a non-platform jq
+# blocked on a fifo this test keeps open, with exactly the marker environment
+# each birth needs.
+HOLDER_JQ=$(fm_test_nonplatform_binary "$(command -v jq)" "$TMP_ROOT") ||
+  fail "cannot build a non-platform jq holder on this host"
 HOLDER_FD=5
 hold() { # <marker-env...> -> HOLDER_PID
   local fifo="$TMP_ROOT/holder-$HOLDER_FD.fifo"
   mkfifo "$fifo"
-  env -i "$@" "$JQ" . "$fifo" &
+  env -i "$@" "$HOLDER_JQ" . "$fifo" &
   HOLDER_PID=$!
   HOLDER_PIDS+=("$HOLDER_PID")
   eval "exec ${HOLDER_FD}>\"\$fifo\""
@@ -477,7 +479,7 @@ assert_grep "gui/$(id -u)" "$CASE_LAUNCHCTL_LOG" "the launch agent was not boots
 cmp -s "$CASE_STATE/interactive-before.plist" "$CASE_INTERACTIVE_PLIST" \
   || fail "the fm-remote repair rewrote the interactive default launch agent"
 assert_present "$CASE_STATE/interactive-loaded" "the fm-remote repair unloaded the interactive default launch agent"
-assert_no_grep "gui/$(id -u)/$INTERACTIVE_LABEL$" "$CASE_LAUNCHCTL_LOG" \
+assert_no_regex "gui/$(id -u)/${INTERACTIVE_LABEL//./\\.}$" "$CASE_LAUNCHCTL_LOG" \
   "the fm-remote repair inspected or controlled the interactive default launch agent"
 assert_no_dangerous_calls "the repair reached for auto-login, FileVault, or the keychain"
 pass "--fix installs the dedicated fm-remote launch agent without touching default"
@@ -767,7 +769,7 @@ expect_code 0 "$DOCTOR_RC" "repeated repair drifted when a second shell lookup w
 assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the installed login-shell plist was reported as drifted"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the loaded login-shell agent was reported as drifted"
 [ "$(cat "$CASE_STATE/dscl-count")" = 1 ] || fail "doctor resolved the account login shell more than once"
-assert_no_grep '^bootout\|^bootstrap\|^kickstart' "$CASE_LAUNCHCTL_LOG" \
+assert_no_regex '^(bootout|bootstrap|kickstart)' "$CASE_LAUNCHCTL_LOG" \
   "repeated repair reloaded an already healthy login-shell agent"
 pass "repeated repair reuses one resolved login shell and remains a no-op"
 
