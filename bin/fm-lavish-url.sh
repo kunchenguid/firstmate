@@ -22,6 +22,12 @@
 #           `bin/fm-procevent-lavish.sh arm`, which returns once the listener is
 #           confirmed - no poll ever runs in the caller's foreground. --mobile
 #           captures under mobile viewport and user-agent emulation.
+#           Snapshot names are reserved atomically; collisions add a sortable
+#           ~NNNNNN suffix rather than replacing an earlier capture.
+#           Readable CSSOM rules supplement captured markup at their owning
+#           stylesheet positions; adopted sheets follow document sheets.
+#           Unreadable linked sheets remain linked, and their hrefs are
+#           recorded in metadata as inaccessible_stylesheets.
 #           Output lines: snapshot, url, viewport, enhancers, session-url,
 #           source-id, armed (or still-listening), then the resolve route lines.
 # path      Print the newest snapshot captured for exactly <url>; exit 1 when
@@ -57,6 +63,12 @@
 # port-qualified entry takes precedence over entries without ports and
 # matches only that exact host and explicit URL port. docs/configuration.md
 # "Lavish URL domain map" owns the map's schema and validation contract.
+#
+# SNAPSHOT RECORD. The sidecar uses schema fm-lavish-url.v1 and records the
+# requested url and host, viewport and viewport_size, captured_at, enhancers,
+# title, reported_url, canonical snapshot path, source_id, and
+# inaccessible_stylesheets (hrefs whose CSSOM rules could not be read).
+# The requested URL owns routing; reported_url is captured page evidence only.
 #
 # Environment: FM_HOME selects the home (FM_STATE_OVERRIDE, FM_DATA_OVERRIDE,
 # FM_CONFIG_OVERRIDE, FM_PROJECTS_OVERRIDE as elsewhere). The capture uses
