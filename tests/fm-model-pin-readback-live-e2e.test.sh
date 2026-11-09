@@ -48,6 +48,33 @@ fail() {
   exit 1
 }
 
+# Whether the model a launch's session reported satisfies its pin: the same id, or
+# that id's dated snapshot, or - for Claude's short family aliases - any concrete id
+# in that family. That is the documented rule the assertion applies
+# (docs/verification/runtime-backends.md "Pinned model readback after a launch":
+# `sonnet` is satisfied by `claude-sonnet-<version>`, as the vendor's model-id page
+# defines the family), restated here rather than taken from `bin/fm-spawn.sh`.
+# Asking the assertion what it expects would make this guard a test of itself, so
+# the duplication is deliberate: the vendor's alias definitions are the oracle, and
+# a different version, another family, or a concrete id outside that family prefix
+# still fails the guard.
+claude_pin_matches() {  # <pin> <reported>
+  local pin=$1 reported=$2
+  [ -n "$pin" ] && [ -n "$reported" ] || return 1
+  [ "$pin" = "$reported" ] && return 0
+  case "$reported" in
+    "$pin"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
+  esac
+  case "$pin" in
+    opus | sonnet | haiku) ;;
+    *) return 1 ;;
+  esac
+  case "$reported" in
+    "claude-$pin-"[0-9]*) return 0 ;;
+  esac
+  return 1
+}
+
 # The provider and model of every assistant turn in a session record, oldest
 # first, as `<provider>/<model>`. This is the field pair the assertion reads: Pi
 # writes the turn as `.type == "message"` with a provider, Claude Code writes it
@@ -135,21 +162,19 @@ else
     '' | / | */)
       fail "$CLAUDE_WHO wrote no assistant model to $CLAUDE_RECORD, which is the field the assertion reads"
       ;;
-    '<synthetic>' | */'<synthetic>')
+    *'<synthetic>'*)
       # A session that ran no model (an exhausted limit, a refused request)
       # records <synthetic>. The assertion reads that as no statement, never as a
       # model that ran, so there is nothing here to compare a pin against.
-      printf '# %s recorded <synthetic> for pin %s, so no model ran and the assertion would emit unverified on stderr\n' \
-        "$CLAUDE_WHO" "$CLAUDE_PIN"
-      ;;
-  esac
-  case "$CLAUDE_REPORTED" in
-    *'<synthetic>'*) ;;
-    "$CLAUDE_PIN" | "$CLAUDE_PIN"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
-      printf '# %s reported %s for pin %s\n' "$CLAUDE_WHO" "$CLAUDE_REPORTED" "$CLAUDE_PIN"
+      printf '# %s recorded %s for pin %s, so no model ran and the assertion would emit unverified on stderr\n' \
+        "$CLAUDE_WHO" "$CLAUDE_REPORTED" "$CLAUDE_PIN"
       ;;
     *)
-      fail "$CLAUDE_WHO reported '$CLAUDE_REPORTED' for a launch pinned to $CLAUDE_PIN; the assertion would emit a mismatch on stderr"
+      if claude_pin_matches "$CLAUDE_PIN" "$CLAUDE_REPORTED"; then
+        printf '# %s reported %s for pin %s\n' "$CLAUDE_WHO" "$CLAUDE_REPORTED" "$CLAUDE_PIN"
+      else
+        fail "$CLAUDE_WHO reported '$CLAUDE_REPORTED' for a launch pinned to $CLAUDE_PIN; the assertion would emit a mismatch on stderr"
+      fi
       ;;
   esac
   pass "$CLAUDE_WHO: a pinned launch reads back the model its own session id addresses"

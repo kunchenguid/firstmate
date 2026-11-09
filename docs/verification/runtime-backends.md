@@ -627,21 +627,23 @@ The two 2026-10-31 vendor facts above are re-proven against the installed binari
 FM_MODEL_PIN_READBACK_LIVE=1 bash tests/fm-model-pin-readback-live-e2e.test.sh
 ```
 
-Its last run on this host, on pi 1.4.0 and Claude Code 2.1.316:
+Its last run on this host, on pi 1.5.0 and Claude Code 2.1.319:
 
 ```sh
 FM_MODEL_PIN_READBACK_LIVE=1 FM_MODEL_PIN_READBACK_PI_MODEL=openai-codex/gpt-5.6-luna \
-  bash tests/fm-model-pin-readback-live-e2e.test.sh
+  FM_MODEL_PIN_READBACK_CLAUDE_MODEL=sonnet bash tests/fm-model-pin-readback-live-e2e.test.sh
 ```
 
 ```text
-# pi 1.4.0: inherited turn openai-codex/gpt-5.6-luna, resumed turn openai-codex/gpt-5.6-sol in one record
-ok - pi 1.4.0: a resumed session's own turn carries the model it was pinned to, over an inherited record naming another
-# claude 2.1.316 (Claude Code) reported claude-haiku-4-5-20251001 for pin claude-haiku-4-5
-ok - claude 2.1.316 (Claude Code): a pinned launch reads back the model its own session id addresses
+# pi 1.5.0: inherited turn openai-codex/gpt-5.6-luna, resumed turn openai-codex/gpt-5.6-sol in one record
+ok - pi 1.5.0: a resumed session's own turn carries the model it was pinned to, over an inherited record naming another
+# claude 2.1.319 (Claude Code) reported claude-sonnet-5-5 for pin sonnet
+ok - claude 2.1.319 (Claude Code): a pinned launch reads back the model its own session id addresses
 ```
 
-That Claude half now confirms both facts the readback rests on: the transcript is written under the session id the launch carries, and the API reports the dated snapshot of the pinned alias, which is the pairing `spawn_model_pin_matches` normalizes and the portable `test_claude_model_pin_snapshot_verdicts` cases pin.
+That Claude half now confirms both facts the readback rests on: the transcript is written under the session id the launch carries, and the API reports the model the pin resolves to, which is the pairing `spawn_model_pin_matches` normalizes and the portable `test_claude_model_pin_snapshot_verdicts` cases pin.
+The guard's oracle applies that same documented equivalence itself instead of calling the assertion, so a launch pinned to the short family alias `sonnet` and the concrete id this host's API reports for it (`claude-sonnet-5-5`) is the pin holding rather than a mismatch; it stays independent of the code it checks and rejects another version, another family, or an id outside that family prefix.
+The default full-id pin `claude-haiku-4-5` still cannot run here: this host's gateway answers `API Error: 400 unknown provider for model claude-haiku-4-5`, and the guard fails naming `FM_MODEL_PIN_READBACK_CLAUDE_MODEL` rather than passing over it.
 An earlier run of the same guard on this host recorded `<synthetic>` because its session ran no model, and the guard reporting that instead of a verdict is the unverified path's live confirmation.
 
 ## Launch-prompt backstop signatures
