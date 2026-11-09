@@ -26,38 +26,37 @@
 # Claude runs once on FM_MODEL_PIN_READBACK_CLAUDE_MODEL (claude-haiku-4-5).
 # The guard spends a few tokens and is opt-in; an absent harness is reported by
 # name and none of its half runs.
+# The Claude comparator's case table also runs without the live opt-in or any
+# harness through FM_MODEL_PIN_READBACK_SELFTEST=1, which is how portable suites
+# pin the oracle this guard trusts.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_MODEL_PIN_READBACK_LIVE pi jq
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LAB=$(fm_test_tmproot fm-model-pin-readback)
-PI=$(command -v pi)
-PI_VERSION=$("$PI" --version 2>/dev/null | head -1 | tr -d '\r')
-[ -n "$PI_VERSION" ] || PI_VERSION=unknown
-WHO="pi $PI_VERSION"
-# The Claude half's pin. A host whose Claude is authorized for another model can
-# name it here; the guard reports which model answered either way.
-CLAUDE_PIN=${FM_MODEL_PIN_READBACK_CLAUDE_MODEL:-claude-haiku-4-5}
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
 
-# Whether the model a launch's session reported satisfies its pin: the same id, or
-# that id's dated snapshot, or - for Claude's short family aliases - any concrete id
-# in that family. That is the documented rule the assertion applies
-# (docs/verification/runtime-backends.md "Pinned model readback after a launch":
-# `sonnet` is satisfied by `claude-sonnet-<version>`, as the vendor's model-id page
-# defines the family), restated here rather than taken from `bin/fm-spawn.sh`.
+# Whether the model a launch's session reported satisfies its pin: the same id,
+# that id followed by an eight-digit snapshot date, a documented Claude
+# alias/snapshot pair spelled either way, or - for Claude's short family
+# aliases - any concrete id in that family. That is the documented rule the
+# assertion applies (docs/verification/runtime-backends.md "Pinned model
+# readback after a launch": `sonnet` is satisfied by `claude-sonnet-<version>`,
+# as the vendor's model-id page defines the family, and each documented alias
+# is its dated snapshot, as claude-haiku-4-5 is claude-haiku-4-5-20251001),
+# restated here rather than taken from `bin/fm-spawn.sh`.
 # Asking the assertion what it expects would make this guard a test of itself, so
-# the duplication is deliberate: the vendor's alias definitions are the oracle, and
-# a different version, another family, or a concrete id outside that family prefix
-# still fails the guard.
+# the duplication is deliberate: the vendor's alias definitions are the oracle,
+# and a different version, another family, an undocumented pair, or a concrete id
+# outside that family prefix still fails the guard. The eight-digit-date wildcard
+# stays one-directional on purpose: only the documented pairs compare a snapshot
+# pin back to its alias, so a snapshot date the vendor never documented for that
+# alias still mismatches it.
 claude_pin_matches() {  # <pin> <reported>
   local pin=$1 reported=$2
   [ -n "$pin" ] && [ -n "$reported" ] || return 1
@@ -65,6 +64,23 @@ claude_pin_matches() {  # <pin> <reported>
   case "$reported" in
     "$pin"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
   esac
+  local normalized_pin=$pin normalized_reported=$reported side snapshot
+  for side in pin reported; do
+    if [ "$side" = pin ]; then snapshot=$pin; else snapshot=$reported; fi
+    case "$snapshot" in
+      claude-haiku-4-5) snapshot=claude-haiku-4-5-20251001 ;;
+      claude-sonnet-4-5) snapshot=claude-sonnet-4-5-20250929 ;;
+      claude-opus-4-5) snapshot=claude-opus-4-5-20251101 ;;
+      claude-opus-4-1) snapshot=claude-opus-4-1-20250805 ;;
+      claude-opus-4-0) snapshot=claude-opus-4-20250514 ;;
+      claude-sonnet-4-0) snapshot=claude-sonnet-4-20250514 ;;
+      claude-3-7-sonnet-latest) snapshot=claude-3-7-sonnet-20250219 ;;
+      claude-3-5-haiku-latest) snapshot=claude-3-5-haiku-20241022 ;;
+      claude-3-5-sonnet-latest) snapshot=claude-3-5-sonnet-20241022 ;;
+    esac
+    if [ "$side" = pin ]; then normalized_pin=$snapshot; else normalized_reported=$snapshot; fi
+  done
+  [ "$normalized_pin" = "$normalized_reported" ] && return 0
   case "$pin" in
     opus | sonnet | haiku) ;;
     *) return 1 ;;
@@ -89,6 +105,56 @@ assistant_models() {  # <session-record>
       else (.message.model // "")
       end' "$1" 2>/dev/null
 }
+
+# The comparator's own case table, runnable without the live opt-in or any
+# harness so portable suites can pin the oracle this guard trusts. Each row is
+# <pin> <reported-model> <match|mismatch>; the snapshot wildcard's forward
+# date-agnostic row and the undocumented-date reverse mismatch row pin the
+# deliberate asymmetry the comment above describes.
+claude_pin_selftest() {
+  local pin reported want got
+  while read -r pin reported want; do
+    [ -n "$pin" ] || continue
+    if claude_pin_matches "$pin" "$reported"; then got=match; else got=mismatch; fi
+    [ "$got" = "$want" ] ||
+      fail "claude_pin_matches: pin '$pin' reported '$reported' must be $want, comparator said $got"
+  done <<'CASES'
+claude-haiku-4-5 claude-haiku-4-5 match
+claude-haiku-4-5 claude-haiku-4-5-20251001 match
+claude-haiku-4-5-20251001 claude-haiku-4-5 match
+claude-haiku-4-5 claude-haiku-4-5-19990101 match
+claude-haiku-4-5-19990101 claude-haiku-4-5 mismatch
+claude-sonnet-4-5 claude-sonnet-4-5-20250929 match
+claude-sonnet-4-5-20250929 claude-sonnet-4-5 match
+claude-opus-4-5 claude-opus-4-5-20251101 match
+claude-opus-4-5-20251101 claude-opus-4-5 match
+claude-3-5-sonnet-latest claude-3-5-sonnet-20241022 match
+claude-3-5-sonnet-20241022 claude-3-5-sonnet-latest match
+sonnet claude-sonnet-5-5 match
+sonnet claude-haiku-4-5 mismatch
+claude-opus-5 claude-opus-5-5 mismatch
+claude-opus-5 claude-opus-5[1m] mismatch
+claude-haiku-4-5 claude-haiku-4-5-5 mismatch
+claude-haiku-4-5-20251001 claude-haiku-4-5-20251002 mismatch
+CASES
+}
+
+if [ "${FM_MODEL_PIN_READBACK_SELFTEST:-}" = 1 ]; then
+  claude_pin_selftest
+  pass "claude_pin_matches: documented alias/snapshot pairs hold in either direction while the snapshot wildcard stays one-directional"
+  exit 0
+fi
+
+fm_live_gate opt-in FM_MODEL_PIN_READBACK_LIVE pi jq
+
+LAB=$(fm_test_tmproot fm-model-pin-readback)
+PI=$(command -v pi)
+PI_VERSION=$("$PI" --version 2>/dev/null | head -1 | tr -d '\r')
+[ -n "$PI_VERSION" ] || PI_VERSION=unknown
+WHO="pi $PI_VERSION"
+# The Claude half's pin. A host whose Claude is authorized for another model can
+# name it here; the guard reports which model answered either way.
+CLAUDE_PIN=${FM_MODEL_PIN_READBACK_CLAUDE_MODEL:-claude-haiku-4-5}
 
 # --- Pi: a resumed turn reports the pin, and the history it inherited does not --
 
