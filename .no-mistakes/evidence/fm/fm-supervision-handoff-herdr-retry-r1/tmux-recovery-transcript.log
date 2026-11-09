@@ -1,0 +1,16 @@
+# 13:31:40 primary step 1: primary idle (claude pid 19601, 2.1.321 (Claude Code), model haiku) in pane fm-lab-retry-draft-46277-22797:%0; tracked Stop hook registered; config/supervision-host and config/supervision-handoff-ack present; host pid 40186 parked on watcher 40713
+# 13:31:40 primary transcript: ~/.claude/projects/-Users-kunchen--no-mistakes-worktrees-52b07e9083e7-01M712KG2PEN1TVE81JAKN1054--test-tmp-fm-sh-herdr-live-BYpBnI-primary-fm/bed4ef13-8ca6-402d-9996-487d10b36069.jsonl
+# 13:31:40 step 2: needs-decision appended at 1794259900; the attended pass-through hands back and queues the acknowledged check
+# 13:31:41 step 2: pending token host-40186-1794259899 recorded; ledger: epoch=1 owner_pid=39420 outcome=arming updated_at=1794259899 owner_session_id=bed4ef13-8ca6-402d-9996-487d10b36069
+# 13:31:42 step 3: recorded completed epoch=2 over the hook's claim (pid 39420); ledger: epoch=2 owner_pid=17509 outcome=clean updated_at=1794259902 owner_session_id=bed4ef13-8ca6-402d-9996-487d10b36069
+# 13:31:42 step 3: detached owner pid 44435 verified running on the superseded generation's arm
+# 13:31:45 step 3: no Stop-hook rewake reached the transcript; owner 44435 alive on watcher 44774; pending host-40186-1794259899 unchanged
+# 13:31:51 draft guard: detached retry deferred; typed text unchanged, pending token and queued check retained, no doorbell delivered
+# 13:32:01 step 4: retry confirmed delivery - handoff log: 1794259921	retry	host-40186-1794259899	empty
+# 13:32:01 step 4: doorbell delivered as a primary message at 1794259920
+# 13:32:07 step 5: primary drained and acknowledged - commands: bin/fm-wake-drain.sh;bin/fm-wake-drain.sh --ack-through 3 --recovery-generation 40713.1794259900.8MrLmX;
+# 13:32:07 step 5: pending marker removed only after the acknowledgement
+# 13:32:08 step 5: owner 44435 exited; queued check consumed; the doorbell turn ended
+# 13:32:08 step 6: turn end re-armed: ; watcher 44774 under host 73721
+# 13:32:08 proof complete: lost hand-back -> tmux retry delivered to fm-lab-retry-draft-46277-22797:%0 -> drained -> acknowledged -> pending cleared -> one watcher retained
+ok - tmux live e2e: a lost Claude hand-back is recovered by the detached retry, acknowledged, and supervision retained

@@ -1,0 +1,34 @@
+# 13:46:08 lab session fm-lab-retry-binding-234-26551 provisioned (fleet tripwire: default)
+# 13:46:44 primary step 1: primary idle (claude pid 4255, 2.1.321 (Claude Code), model haiku) in pane fm-lab-retry-binding-234-26551:w1:p1; tracked Stop hook registered; config/supervision-host and config/supervision-handoff-ack present; host pid 28619 parked on watcher 29065
+# 13:46:44 primary transcript: ~/.claude/projects/-Users-kunchen--no-mistakes-worktrees-52b07e9083e7-01M712KG2PEN1TVE81JAKN1054--test-tmp-fm-sh-herdr-live-V2NGQ3-primary-fm/76198b30-c4cc-4029-8c6d-03c77d2611cf.jsonl
+# 13:46:44 ownership guard: real Claude accepted as own pane foreground; unrelated live process and unreadable pane refused
+# 13:46:44 step 2: needs-decision appended at 1794260804; the attended pass-through hands back and queues the acknowledged check
+# 13:46:46 step 2: pending token host-28619-1794260803 recorded; ledger: epoch=1 owner_pid=28008 outcome=arming updated_at=1794260803 owner_session_id=76198b30-c4cc-4029-8c6d-03c77d2611cf
+# 13:46:46 step 3: recorded completed epoch=2 over the hook's claim (pid 28008); ledger: epoch=2 owner_pid=305 outcome=clean updated_at=1794260806 owner_session_id=76198b30-c4cc-4029-8c6d-03c77d2611cf
+# 13:46:46 step 3: detached owner pid 32047 verified running on the superseded generation's arm
+# 13:46:49 step 3: no Stop-hook rewake reached the transcript; owner 32047 alive on watcher 32323; pending host-28619-1794260803 unchanged
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/.supervision-handoff.log: No such file or directory
+# 13:46:54 draft guard: detached retry deferred; typed text unchanged, pending token and queued check retained, no doorbell delivered
+# 13:46:54 foreign binding attempt: source=firstmate:test observed session agent=claude
+# 13:46:54 foreign binding attempt: source=herdr:pi observed session agent=claude
+not ok - setup: installed Herdr refused synthetic foreign session binding on the live registered Claude

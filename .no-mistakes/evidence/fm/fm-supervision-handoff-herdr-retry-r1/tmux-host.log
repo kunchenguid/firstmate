@@ -1,0 +1,5 @@
+1794259899	start	gen=host-40186-1794259899	primary=claude
+1794259901	pass-through	attended	main-only	signal: {run-worktree}/.test-tmp/fm-sh-herdr-live.BYpBnI/primary/fm/state/demo.status
+1794259903	handoff	host-40186-1794259899
+1794259928	start	gen=host-73721-1794259928	primary=claude
+1794259928	take-over	arm=44686

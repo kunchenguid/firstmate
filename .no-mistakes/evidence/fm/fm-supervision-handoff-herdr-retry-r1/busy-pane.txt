@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.321
+▝▜██████▀  Haiku 5.5 with low effort · Claude Ultra
+ ▝▝   ▝▝   ~/…/worktrees/52b07e9083e7/01M712KG2PEN1TVE81JAKN1054/.test-tmp/fm-sh-herdr-live.ldvSQZ/primary/fm
+
+
+❯ This is an isolated Firstmate test lab, not a real fleet. Reply with exactly READY now and use no tools. Later,
+  whenever a "Stop hook feedback" message wakes you, or whenever a message says Firstmate operational input waiting
+  and names a record file, do exactly this and nothing else: if a file is named, read it first and follow it; run
+  bin/fm-wake-drain.sh once with the Bash tool, then run the exact bin/fm-wake-drain.sh --ack-through ... command that
+  its WAKE_ACK_REQUIRED line prints, then reply with exactly ACKED. Never run any other command, never run
+  bin/fm-watch-arm.sh, and never use any other tool.
+
+⏺ READY
+
+✻ Cooked for 8s · done 1:34 PM
+
+❯ Run exactly python3 -c "import time; time.sleep(35)" with Bash, with timeout 60000, then reply READY. Do not drain
+  or acknowledge anything on this turn.
+
+  Sleeping 35 seconds · 6s
+  ⎿  $ python3 -c "import time; time.sleep(35)" (5s)
+     (ctrl+b to run in background)
+
+
+
+
+
+
+
+
+
+✳ Noodling… (7s · ↓ 118 tokens)
+  ⎿  Tip: Name your conversations with /rename to find them easily in /resume later
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Haiku 5.5 ctx window   ▉               61.2k / 1.0M
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

@@ -1,0 +1,24 @@
+1..2
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-doorbell/state/.supervision-handoff.log: No such file or directory
+ok - host+hook: hand-back retry submits only to the idle owning pane without replacing human input
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-supervision-host.ERLSTH/handoff-herdr-doorbell/state/.supervision-handoff.log: No such file or directory
+ok - host+hook: hand-back retry submits only to the idle owning herdr pane without replacing human input
+FM_TEST_COMPLETE

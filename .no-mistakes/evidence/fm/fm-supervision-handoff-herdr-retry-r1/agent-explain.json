@@ -1,0 +1,5 @@
+agent: claude
+state: working
+manifest: remote:~/.local/state/herdr/agent-detection/remote/claude.toml 2026.09.11.1
+rule: live_turn_working (region=bottom_non_empty_lines(12) priority=970)
+evidence: "  Running busy.py script with python3 · 3s\n  ⎿  $ python3 '{run-worktree}/.test-tmp/fm-sh-herdr-liv\n     e.JgcBhx/primary/busy.py' (3s)\n     (ctrl+b to run in background)\n\n\n\n\n\n\n..."

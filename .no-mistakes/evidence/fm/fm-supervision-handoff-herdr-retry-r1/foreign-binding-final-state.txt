@@ -1,0 +1,17 @@
+--- host log
+1794260803	start	gen=host-28619-1794260803	primary=claude
+1794260805	pass-through	attended	main-only	signal: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/demo.status
+1794260807	handoff	host-28619-1794260803
+--- handoff log
+1794260814	retry	host-28619-1794260803	deferred
+--- cycle exits
+arm_pid=28923	watcher_pid=29065	origin=started	started_at=1794260804	ended_at=1794260805	exit_code=0	signal=none	reason=actionable-signal
+arm_pid=32291	watcher_pid=32323	origin=started	started_at=1794260806	ended_at=1794260814	exit_code=143	signal=TERM	reason=signal-exit
+--- queue
+1794260805	1	signal	demo.status	needs-decision: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/demo.status
+1794260805	2	signal	demo.status	needs-decision: {run-worktree}/.test-tmp/fm-sh-herdr-live.V2NGQ3/primary/fm/state/demo.status
+1794260805	3	check	supervision-handoff:host-28619-1794260803	check: supervision-handoff - the host handed supervision to main; drain, handle, and acknowledge this hand-back
+--- ledger: epoch=2 owner_pid=305 outcome=clean updated_at=1794260806 owner_session_id=76198b30-c4cc-4029-8c6d-03c77d2611cf
+--- marker: announced:downtime:29065.1794260805.720wkf
+--- screen
+

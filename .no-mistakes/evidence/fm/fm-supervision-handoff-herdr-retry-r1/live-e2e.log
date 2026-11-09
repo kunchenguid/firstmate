@@ -1,0 +1,16 @@
+# 13:23:45 lab session fm-lab-retry-live-61318-11677 provisioned (fleet tripwire: default)
+# 13:24:05 primary step 1: primary idle (claude pid 62968, 2.1.321 (Claude Code), model haiku) in pane fm-lab-retry-live-61318-11677:w1:p1; tracked Stop hook registered; config/supervision-host and config/supervision-handoff-ack present; host pid 80148 parked on watcher 80947
+# 13:24:05 primary transcript: ~/.claude/projects/-private-var-folders-5x-4nqprlbx0518k3ybcb1sz6gr0000gn-T-fm-sh-herdr-live-mKXorx-primary-fm/adaad944-5c8a-49f0-bc16-abfd2402cf0b.jsonl
+# 13:24:05 step 2: needs-decision appended at 1794259445; the attended pass-through hands back and queues the acknowledged check
+# 13:24:06 step 2: pending token host-80148-1794259444 recorded; ledger: epoch=1 owner_pid=79452 outcome=arming updated_at=1794259443 owner_session_id=adaad944-5c8a-49f0-bc16-abfd2402cf0b
+# 13:24:06 step 3: recorded completed epoch=2 over the hook's claim (pid 79452); ledger: epoch=2 owner_pid=61387 outcome=clean updated_at=1794259446 owner_session_id=adaad944-5c8a-49f0-bc16-abfd2402cf0b
+# 13:24:07 step 3: detached owner pid 83505 verified running on the superseded generation's arm
+# 13:24:10 step 3: no Stop-hook rewake reached the transcript; owner 83505 alive on watcher 83991; pending host-80148-1794259444 unchanged
+# 13:24:17 step 4: retry confirmed delivery - handoff log: 1794259457	retry	host-80148-1794259444	empty
+# 13:24:17 step 4: doorbell delivered as a primary message at 1794259457
+# 13:24:24 step 5: primary drained and acknowledged - commands: bin/fm-wake-drain.sh;bin/fm-wake-drain.sh --ack-through 3 --recovery-generation 80947.1794259445.h0tW6u;
+# 13:24:24 step 5: pending marker removed only after the acknowledgement
+# 13:24:25 step 5: owner 83505 exited; queued check consumed; the doorbell turn ended
+# 13:24:25 step 6: turn end re-armed: 1794259465	start	gen=host-16349-1794259465; watcher 83991 under host 16349
+# 13:24:25 proof complete: lost hand-back -> herdr retry delivered to fm-lab-retry-live-61318-11677:w1:p1 -> drained -> acknowledged -> pending cleared -> one watcher retained
+ok - herdr live e2e: a lost Claude hand-back is recovered by the detached retry, acknowledged, and supervision retained

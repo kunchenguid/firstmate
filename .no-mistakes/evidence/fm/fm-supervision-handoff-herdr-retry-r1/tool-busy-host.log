@@ -1,0 +1,3 @@
+1794260090	start	gen=host-12330-1794260089	primary=claude
+1794260092	pass-through	attended	main-only	signal: {run-worktree}/.test-tmp/fm-sh-herdr-live.ldvSQZ/primary/fm/state/demo.status
+1794260093	handoff	host-12330-1794260089

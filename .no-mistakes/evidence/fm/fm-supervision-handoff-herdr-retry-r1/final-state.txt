@@ -1,0 +1,20 @@
+--- host log
+1794259732	start	gen=host-79185-1794259731	primary=claude
+1794259734	pass-through	attended	main-only	signal: {run-worktree}/.test-tmp/fm-sh-herdr-live.xU8hjo/primary/fm/state/demo.status
+1794259735	handoff	host-79185-1794259731
+1794259759	start	gen=host-8346-1794259759	primary=claude
+1794259759	take-over	arm=83049
+--- handoff log
+1794259742	retry	host-79185-1794259731	deferred
+1794259752	retry	host-79185-1794259731	empty
+--- cycle exits
+arm_pid=79662	watcher_pid=79812	origin=started	started_at=1794259732	ended_at=1794259733	exit_code=0	signal=none	reason=actionable-signal
+arm_pid=83049	watcher_pid=83106	origin=started	started_at=1794259734	ended_at=1794259760	exit_code=143	signal=TERM	reason=signal-exit
+arm_pid=8625	watcher_pid=83106	origin=attached	started_at=1794259760	ended_at=1794259760	exit_code=unknown	signal=unknown	reason=taken-over
+arm_pid=8625	watcher_pid=10187	origin=started	started_at=1794259760	ended_at=1794259760	exit_code=143	signal=TERM	reason=arm-interrupted
+--- queue
+
+--- ledger: epoch=3 owner_pid=7497 outcome=failed updated_at=1794259760
+--- marker: pending:downtime:83106.1794259760.NBCrm0
+--- screen
+

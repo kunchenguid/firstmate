@@ -1,0 +1,43 @@
+# 13:32:28 lab session fm-lab-retry-busy-86944-17420 provisioned (fleet tripwire: default)
+# 13:33:02 primary step 1: primary idle (claude pid 89826, 2.1.321 (Claude Code), model haiku) in pane fm-lab-retry-busy-86944-17420:w1:p1; tracked Stop hook registered; config/supervision-host and config/supervision-handoff-ack present; host pid 24201 parked on watcher 24512
+# 13:33:02 primary transcript: ~/.claude/projects/-Users-kunchen--no-mistakes-worktrees-52b07e9083e7-01M712KG2PEN1TVE81JAKN1054--test-tmp-fm-sh-herdr-live-439olU-primary-fm/5a24f6f3-593f-4585-a2e7-fe04bb0d6847.jsonl
+# 13:33:02 ownership guard: real Claude accepted as own pane foreground; unrelated live process and unreadable pane refused
+# 13:33:02 step 2: needs-decision appended at 1794259982; the attended pass-through hands back and queues the acknowledged check
+# 13:33:04 step 2: pending token host-24201-1794259981 recorded; ledger: epoch=1 owner_pid=23654 outcome=arming updated_at=1794259981 owner_session_id=5a24f6f3-593f-4585-a2e7-fe04bb0d6847
+# 13:33:04 step 3: recorded completed epoch=2 over the hook's claim (pid 23654); ledger: epoch=2 owner_pid=86964 outcome=clean updated_at=1794259984 owner_session_id=5a24f6f3-593f-4585-a2e7-fe04bb0d6847
+# 13:33:04 step 3: detached owner pid 27878 verified running on the superseded generation's arm
+# 13:33:07 step 3: no Stop-hook rewake reached the transcript; owner 27878 alive on watcher 28238; pending host-24201-1794259981 unchanged
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+grep: {run-worktree}/.test-tmp/fm-sh-herdr-live.439olU/primary/fm/state/.supervision-handoff.log: No such file or directory
+# 13:33:13 draft guard: detached retry deferred; typed text unchanged, pending token and queued check retained, no doorbell delivered
+# 13:33:21 busy guard: real Claude generating a long response; retry deferred with empty composer, no doorbell, and pending check intact; native agent: {"agent":"claude","agent_status":"working","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"5a24f6f3-593f-4585-a2e7-fe04bb0d6847"}}
+# 13:33:21 busy guard complete: a real generating Claude with an empty composer retained the queued check and received no doorbell
+ok - busy rendered Claude defers detached retry without consuming the pending check

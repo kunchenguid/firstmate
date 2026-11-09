@@ -1,0 +1,16 @@
+Runtime: Claude Code 2.1.321, Herdr 0.9.0, normal existing Claude authentication; no real-home opt-in changes.
+
+Successful product checks:
+- herdr-recovery-transcript.log: isolated named Herdr lab, real Claude, superseded owning Stop generation, silent lost continuation, draft deferral, detached doorbell, main drain and sequence-bound ack, pending removal after ack, same watcher retained for next park. An intentionally wrong explicit supervisor target did not redirect delivery.
+- tmux-recovery-transcript.log: equivalent lost-continuation/draft/retry/ack/surviving-watcher check on a private real tmux socket and real Claude.
+- herdr-busy-transcript.log: actual foreground Python tool, native working, rendered busy, positively empty composer, retry deferred, pending retained, no doorbell.
+- Real Herdr process-info accepted the actual Claude foreground owner and refused an unrelated live PID and nonexistent pane; see recovery transcript and process-info.json.
+- focused-regressions.log and ownership-regression.log: selected existing behavioral regressions, not the full suite. These are fixture tests, not live evidence.
+
+Missing required live adversaries:
+- Native idle plus rendered busy was not established. Long generation and a long foreground Python tool kept native state working. Real report-agent calls from outside and from a Claude-descended tool did not change this. A synthetic stale idle OSC title removed the OSC working signal, but Herdr still classified the real busy footer as working via rule live_turn_working (agent-explain.json). Thus the failed setup assertions in live-idle-mismatch.log are not observed Firstmate delivery failures; they leave the rendered-only guard unproven live.
+- The public report-agent-session API, tried with sources firstmate:test and herdr:pi, left the occupied Claude pane bound to Claude, so a mismatched registered session binding could not be established (live-foreign-binding.log). This is missing adversarial evidence, not an observed unsafe send.
+
+Setup-only retries: an explicit prepare followed by provision collided with provision's own prepare; teardown removed the tripwire before retry. A linked worktree was not a primary under the existing primary-scope contract; successful checks used disposable marked plain-checkout lab copies. A standalone sleep was rejected by Claude; a foreground Python wait subsequently exercised real busy state. Archived temporary drivers show the terminal/state-driving adaptations. Original long logs retain polling noise while waiting for the first retry log to appear; concise transcripts omit only that noise.
+
+No source changes remain. No linter, formatter, static analyzer, full suite, publication, or pipeline-control phase ran. All owned Herdr sessions, tripwires, private tmux server, lab homes, and temporary worktree drivers were cleaned up; cleanup.json records the final session check. Terminal automation changed, not UI rendering; reviewer evidence is CLI transcripts, pane captures, native responses, and persisted state rather than screenshots.
