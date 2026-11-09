@@ -796,6 +796,24 @@ SH
   pass "a proof read that spends the route budget still leaves the wake its named remote cause"
 }
 
+test_replaced_record_survives_tick() {
+  local real
+  reset_state
+  open_pane rr1 "$PI_DIALOG"
+  arm_task rr1 pi 1000
+  real=$(declare -f start_check_reason)
+  start_check_reason() {
+    START_CHECK_REASON='check: start rr1: superseded launch'
+    printf '1100 g-new.1.1 pi\n' > "$STATE/rr1.start-pending"
+  }
+  start_check_tick 1200 || fail "tick failed"
+  eval "$real"
+  [ "$(cat "$STATE/rr1.start-pending")" = '1100 g-new.1.1 pi' ] \
+    || fail "the tick removed or changed the replacement record"
+  [ "$(count_wakes)" = 0 ] || fail "the tick queued a wake for the superseded launch"
+  pass "a marker replaced during judgment survives without a superseded wake"
+}
+
 test_one_wake_per_poll() {
   reset_state
   open_pane a1 "$PI_DIALOG"
@@ -860,5 +878,6 @@ fm_test_run \
   test_remote_secondmate_reads_route \
   test_spent_route_budget_defers_remote_record \
   test_spent_proof_budget_keeps_remote_cause \
+  test_replaced_record_survives_tick \
   test_one_wake_per_poll \
   test_watcher_loop_single_named_wake

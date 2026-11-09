@@ -3070,8 +3070,12 @@ start_check_reason() {  # <id> <meta> <harness> <age>
   printf -v START_CHECK_REASON '%s); inspect: %s %q %q' "$head" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
 }
 
+start_check_record_current() {  # <path> <record>
+  [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]
+}
+
 start_check_tick() {  # [now-epoch], for deterministic clock callers
-  local now=${1:-} f id epoch gen harness meta mgen reason target lock remote
+  local now=${1:-} f id epoch gen harness meta mgen reason target lock remote record
   START_CHECK_WAKE=
   START_CHECK_TICK_STARTED=$(date +%s)
   for f in "$STATE"/*.start-pending; do
@@ -3084,6 +3088,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     [ -f "$f" ] || { fm_lock_release "$lock"; continue; }
     epoch=; gen=; harness=
     read -r epoch gen harness _ < "$f" || true
+    record=$(cat "$f") || record=
     case "$epoch" in ''|*[!0-9]*) rm -f -- "$f"; fm_lock_release "$lock"; continue ;; esac
     if [ ! -f "$meta" ]; then
       rm -f -- "$f"
@@ -3109,6 +3114,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     # the parent-side mirror can clear it, and the record waits for a later poll.
     if [ -n "$remote" ] && { [ "$((now - epoch))" -lt "$START_CHECK_SECS" ] || ! start_check_route_budget_left; }; then
       if start_check_local_proof "$id" "$epoch" "$meta"; then
+        start_check_record_current "$f" "$record" || { fm_lock_release "$lock"; continue; }
         rm -f -- "$f"
         fm_lock_release "$lock"
         triage_log "start check: $id started"
@@ -3118,6 +3124,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       continue
     fi
     if start_check_started "$id" "$meta" "$epoch" "$gen"; then
+      start_check_record_current "$f" "$record" || { fm_lock_release "$lock"; continue; }
       rm -f -- "$f"
       fm_lock_release "$lock"
       triage_log "start check: $id started"
@@ -3130,6 +3137,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     [ -z "$remote" ] || START_CHECK_TICK_STARTED=$(date +%s)
     start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
     reason=$START_CHECK_REASON
+    start_check_record_current "$f" "$record" || { fm_lock_release "$lock"; continue; }
     fm_wake_append check "start:$id" "$reason" || { fm_lock_release "$lock"; return 1; }
     rm -f -- "$f"
     fm_lock_release "$lock"
