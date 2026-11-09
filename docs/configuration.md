@@ -1601,6 +1601,29 @@ Pi ranks a root's stored logins above environment variables, so a pinned Pi laun
 
 A home that authenticates Claude through environment credentials on purpose should leave the pin absent.
 
+### Claude token source (config/claude-account-credential-source.json)
+
+A Claude pin may use a long-lived OAuth token from a declared credential source instead of the login stored in its config directory.
+Keep `config/claude-account` as the account pin and add `config/claude-account-credential-source.json` beside it, using the same credential-source declaration schema as [shared credential-source declaration](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model):
+
+```json
+{
+  "claude": { "source": "macos-keychain", "service": "firstmate-claude", "account": "worker" }
+}
+```
+
+The declaration names only the Keychain item, never its token.
+Add the long-lived OAuth token created by `claude setup-token` as a generic-password item in Keychain Access, using the declared service and account.
+For a local secondmate, place the same file beside its pin in `config/secondmate-accounts/<id>/`.
+This mapping applies only to a single `config/claude-account` pin, not `config/claude-accounts`.
+
+Before launch or relaunch, Firstmate loads the token through the shared credential-source adapter and requires `claude auth status` to report `authMethod` as `oauth_token`.
+The launch loads the token again into `CLAUDE_CODE_OAUTH_TOKEN`; it exists only in process memory and the worker's environment, never in arguments, files, or logs.
+A missing, unreadable, unsupported, malformed, or rejected source refuses the launch without falling back to the config directory's stored login.
+The source file without its matching pin also refuses.
+
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns how the source is bound to a pin, and [`bin/fm-claude-token.sh`](../bin/fm-claude-token.sh) loads it for the command; [`bin/fm-credential-source-lib.sh`](../bin/fm-credential-source-lib.sh) owns the shared source schema and adapters.
+
 ### Failures, reporting, and inheritance
 
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
@@ -2176,7 +2199,7 @@ It requires `service`, accepts an optional `account`, and reads that generic-pas
 Store the item with `security add-generic-password -s <service> [-a <account>] -w`, which prompts for the key and lets `security` read it back without an access dialog.
 Only the service and account reach `security`'s argument list, and the key comes back on a pipe.
 No other field is accepted, so the file has nowhere to put a key.
-`bin/fm-credential-source-lib.sh` owns the schema and the adapters, so a further source adds an adapter there rather than a special case in the resolver.
+`bin/fm-credential-source-lib.sh` owns the shared schema and adapters, so another credential consumer reuses them instead of implementing a parallel source path.
 
 The resolver reads the file only after the environment and `.env` have supplied no key for the selected provider, and it uses only that provider's entry.
 A declaration for one provider never feeds another provider and never selects a provider.

@@ -27,14 +27,26 @@ make_account_fakes() {
 #!/usr/bin/env bash
 if [ "\${1:-}" = auth ] && [ "\${2:-}" = status ]; then
   printf '%s\n' "\${CLAUDE_CONFIG_DIR-unset}" >> '$dir/claude-checks'
-  [ -z "\${ANTHROPIC_API_KEY:-}\${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || exit 0
-  [ -f "\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/.credentials.json" ]
-  exit
+  if [ -n "\${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token"}'
+    exit 0
+  fi
+  [ -z "\${ANTHROPIC_API_KEY:-}" ] || exit 0
+  if [ -f "\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/.credentials.json" ]; then
+    printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_session"}'
+    exit 0
+  fi
+  printf '%s\n' '{"loggedIn":false}'
+  exit 1
 fi
 {
   printf 'CLAUDE_CONFIG_DIR=%s\n' "\${CLAUDE_CONFIG_DIR-unset}"
   printf 'ANTHROPIC_API_KEY=%s\n' "\${ANTHROPIC_API_KEY-unset}"
-  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "\${CLAUDE_CODE_OAUTH_TOKEN-unset}"
+  case "\${CLAUDE_CODE_OAUTH_TOKEN:-}" in
+    fm-synthetic-oauth-token) printf 'CLAUDE_CODE_OAUTH_TOKEN=expected\n' ;;
+    '') printf 'CLAUDE_CODE_OAUTH_TOKEN=unset\n' ;;
+    *) printf 'CLAUDE_CODE_OAUTH_TOKEN=unexpected\n' ;;
+  esac
   printf 'CLAUDE_CODE_USE_BEDROCK=%s\n' "\${CLAUDE_CODE_USE_BEDROCK-unset}"
 } > '$dir/claude-worker'
 SH
@@ -69,7 +81,13 @@ esac
   printf 'ARGS=%s\n' "\$*"
 } > '$dir/pi-worker'
 SH
-  chmod +x "$fakebin/claude" "$fakebin/pi"
+  cat > "$fakebin/security" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$dir/security-argv'
+[ "\$*" = 'find-generic-password -s fm-claude-token -a worker -w' ] || exit 44
+printf '%s\n' 'fm-synthetic-oauth-token'
+SH
+  chmod +x "$fakebin/claude" "$fakebin/pi" "$fakebin/security"
   cp "$fakebin/pi" "$fakebin/pi-signed"
 }
 
@@ -630,8 +648,90 @@ test_account_list_secondmate_needs_its_own_pin() {
   pass "a list never chooses a secondmate's account: it needs its own pin and refuses --account"
 }
 
+test_claude_credential_source_requires_a_single_pin() {
+  local out rc id=acct-claude-token-source-invalid
+  new_case keychain-source-no-pin claude
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source.json"
+  out=$(spawn_ship "$id-no-pin"); rc=$?
+  expect_code 1 "$rc" "a credential source without a pin must refuse"
+  assert_refused_before_launch "$id-no-pin" "$out" "requires a Claude account pin"
+
+  new_case keychain-source-list claude
+  mkdir -p "$CASE/work"
+  declare_accounts "$CASE/work"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source.json"
+  out=$(spawn_ship "$id-list" --account "$CASE/work"); rc=$?
+  expect_code 1 "$rc" "a token source cannot apply to a Claude account list"
+  assert_refused_before_launch "$id-list" "$out" "applies to one config/claude-account pin, not config/claude-accounts"
+  pass "a credential-source mapping requires one matching Claude account pin"
+}
+
+test_local_secondmate_pin_uses_its_keychain_oauth_token() {
+  local out rc id=acct-mate-token
+  new_case keychain-mate-token claude
+  mkdir -p "$HOME_DIR/config/secondmate-accounts/$id"
+  signed_in_claude_root "$CASE/mate"
+  printf '%s\n' "$CASE/mate" > "$HOME_DIR/config/secondmate-accounts/$id/claude-account"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
+    > "$HOME_DIR/config/secondmate-accounts/$id/claude-account-credential-source.json"
+  out=$(spawn_account_secondmate "$id"); rc=$?
+  expect_code 0 "$rc" "a local secondmate pin with a readable Keychain OAuth token should launch: $out"
+  assert_contains "$out" "account=$CASE/mate" "the secondmate's own account pin is selected"
+  run_pane
+  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=expected' "$CASE/claude-worker" \
+    "the secondmate receives the synthetic token from its environment"
+  assert_equals $'find-generic-password -s fm-claude-token -a worker -w\nfind-generic-password -s fm-claude-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "the secondmate checks and loads only its declared item"
+  pass "a local secondmate uses its own credential source without inheriting the primary's"
+}
+
+test_claude_pin_uses_a_keychain_oauth_token() {
+  local out rc id=acct-claude-token
+  new_case keychain-token claude
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source.json"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "a Claude pin with a readable Keychain OAuth token should succeed: $out"
+  assert_contains "$out" "account=$CASE/work" "the pinned account remains the selected account"
+  assert_equals 'find-generic-password -s fm-claude-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "the shared credential-source adapter checks only the declared item"
+  run_pane
+  assert_equals $'find-generic-password -s fm-claude-token -a worker -w\nfind-generic-password -s fm-claude-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "the shared adapter loads the declared item once for check and once for launch"
+  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=expected' "$CASE/claude-worker" \
+    "the worker receives the synthetic token from its environment"
+  assert_not_contains "$(cat "$CASE/launch.log" "$CASE/security-argv" "$CASE/claude-worker")" \
+    'fm-synthetic-oauth-token' "the token never appears in the launch command or execution logs"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.meta")" 'fm-synthetic-oauth-token' \
+    "the task record never contains the token"
+  pass "a Claude pin uses its declared Keychain OAuth token without logging or passing the token as an argument"
+}
+
+test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable() {
+  local out rc id=acct-claude-token-missing
+  new_case keychain-token-missing claude
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"missing-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source.json"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 1 "$rc" "a missing Keychain token must refuse despite a stored Claude login"
+  assert_refused_before_launch "$id" "$out" "token could not be loaded"
+  assert_equals 'find-generic-password -s missing-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "only the configured missing Keychain item is queried"
+  pass "an unavailable mapped token refuses without falling back to the pinned Claude login"
+}
+
 test_secondmate_account_override
 test_secondmate_account_refusals
+test_local_secondmate_pin_uses_its_keychain_oauth_token
+test_claude_credential_source_requires_a_single_pin
+test_claude_pin_uses_a_keychain_oauth_token
+test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable
 test_remote_secondmate_account_override_refuses_locally
 test_remote_secondmate_refuses_account
 test_absent_pin_keeps_the_launch_unchanged

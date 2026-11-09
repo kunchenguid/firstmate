@@ -3517,10 +3517,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     "$(fm_meta_get "$RELAUNCH_META" account)" "$ACCOUNT_ARG" "$WORKER_ACCOUNT_MATE") || exit 1
 fi
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE" "$WORKER_ACCOUNT_REQUEST") || exit 1
+WORKER_ACCOUNT_SOURCE_FILE=
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
+WORKER_ACCOUNT_SOURCE_FILE=${WORKER_ACCOUNT_PROVIDER#*$'\t'}
+WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_PROVIDER%%$'\t'*}
 # T3 starts the agent itself, at full access, with its provider instance's own
 # account and environment, so a launch setting only a Firstmate-built command
 # line can apply refuses here instead of being silently widened or dropped.
@@ -7649,14 +7652,15 @@ esac
 # an unset value is the single-store default and needs no prefix.
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login.
+# sheds ambient credentials that could override it. A declared token source
+# wraps the command to load its OAuth token after the ambient credentials are shed.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
-      LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+      LAUNCH="$(fm_worker_account_claude_shed "$WORKER_ACCOUNT_SOURCE_FILE") CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     else
-      LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
+      LAUNCH="$(fm_worker_account_claude_shed "$WORKER_ACCOUNT_SOURCE_FILE") -u CLAUDE_CONFIG_DIR $LAUNCH"
     fi
     ;;
   pi | pi-signed)
@@ -7665,6 +7669,9 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ -n "$WORKER_ACCOUNT_SOURCE_FILE" ]; then
+  LAUNCH="$(shell_quote "$FM_WORKER_ACCOUNT_TOKEN_HELPER") exec $(shell_quote "$WORKER_ACCOUNT_SOURCE_FILE") -- $LAUNCH"
 fi
 # Like CLAUDE_CONFIG_DIR above, FM_HOME cannot be left to pane inheritance:
 # every worker gets its home explicitly, or its bin/*.sh scripts fall back to
