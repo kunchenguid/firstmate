@@ -203,6 +203,71 @@ test_crew_worktree_is_silent() {
   pass "a linked crew worktree stays silent even when the opt-in file and a high reading are present"
 }
 
+test_secondmate_home_is_silent() {
+  local second="$TMP_ROOT/second" rc=0
+  if ! git -C "$PRIMARY" rev-parse --verify HEAD >/dev/null 2>&1; then
+    git -C "$PRIMARY" add AGENTS.md
+    git -C "$PRIMARY" commit -qm fixture
+  fi
+  git -C "$PRIMARY" worktree add -q -b fixture-second "$second"
+  mkdir -p "$second/bin" "$second/state" "$second/config"
+  printf '# fixture\n' > "$second/AGENTS.md"
+  printf 'sm-fixture\n' > "$second/.fm-secondmate-home"
+  printf 'tokens=1000\n' > "$second/config/stow-guard"
+  prepare_case secondmate
+  write_usage 900000
+  payload | invoke_guard "$second" "$second/state" "$second/config" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a secondmate home must exit 0, got $rc: $(cat "$ERR")"
+  assert_silent "secondmate home"
+  [ ! -e "$second/state/.stow-guard.json" ] || fail "a secondmate home wrote trigger state"
+  pass "a marked secondmate home stays silent even when the opt-in file and a high reading are present"
+}
+
+test_missing_python_skips_the_age_ask() {
+  local rc=0 fakebin="$TMP_ROOT/no-python-bin" tool bin epoch now
+  command -v python3 >/dev/null 2>&1 || {
+    pass "missing python3 skips the age ask (skipped, python3 not found)"
+    return
+  }
+  prepare_case nopython
+  : > "$CASE_CONFIG/stow-guard"
+  epoch=$(python3 -c 'import datetime; print(int(datetime.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()))')
+  jq -nc \
+    '{timestamp:"2026-01-01T00:00:00Z",message:{content:[{type:"tool_use",name:"Skill",input:{skill:"stow"}}],usage:{input_tokens:10,cache_read_input_tokens:0,cache_creation_input_tokens:0}}}' \
+    > "$CASE_TRANSCRIPT"
+  jq -n --argjson last_stow "$((epoch - 100000))" --argjson asked 0 --argjson fired '{}' \
+    '{last_stow:$last_stow, asked:$asked, fired:$fired}' > "$CASE_STATE/.stow-guard.json"
+  mkdir -p "$fakebin"
+  for tool in bash cat dirname tail awk git jq date mktemp mv rm; do
+    bin=$(command -v "$tool" 2>/dev/null || true)
+    [ -n "$bin" ] || fail "test needs $tool on PATH"
+    ln -sf "$bin" "$fakebin/$tool"
+  done
+  PATH="$fakebin" command -v python3 >/dev/null 2>&1 && fail "fixture PATH still finds python3"
+  now=$((epoch + 100))
+  payload | env -u GROK_AGENT -u GROK_HOOK_EVENT -u GROK_HOOK_NAME -u GROK_SESSION_ID \
+    -u GROK_WORKSPACE_ROOT PATH="$fakebin" \
+    FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" \
+    FM_STATE_OVERRIDE="$CASE_STATE" FM_CONFIG_OVERRIDE="$CASE_CONFIG" \
+    FM_STOW_GUARD_NOW="$now" \
+    "$GUARD" >"$OUT" 2>"$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "missing python3 age stop must exit 0, got $rc: $(cat "$ERR")"
+  assert_silent "missing python3 with a recent /stow and a stale clock"
+
+  : > "$CASE_TRANSCRIPT"
+  write_usage 400000
+  rc=0
+  payload | env -u GROK_AGENT -u GROK_HOOK_EVENT -u GROK_HOOK_NAME -u GROK_SESSION_ID \
+    -u GROK_WORKSPACE_ROOT PATH="$fakebin" \
+    FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" \
+    FM_STATE_OVERRIDE="$CASE_STATE" FM_CONFIG_OVERRIDE="$CASE_CONFIG" \
+    FM_STOW_GUARD_NOW="$now" \
+    "$GUARD" >"$OUT" 2>"$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "missing python3 context stop must exit 0, got $rc: $(cat "$ERR")"
+  assert_block "missing python3 context crossing" "context is 400000 tokens"
+  pass "missing python3 skips the age ask and still asks on a context crossing"
+}
+
 test_bad_payloads_and_missing_jq_are_silent() {
   local rc=0 fakebin="$TMP_ROOT/no-jq-bin" entry name
   prepare_case bad
@@ -285,6 +350,8 @@ fm_test_run \
   test_age_interval_blocks_once_per_hour \
   test_recorded_stow_sets_the_age_clock \
   test_crew_worktree_is_silent \
+  test_secondmate_home_is_silent \
+  test_missing_python_skips_the_age_ask \
   test_bad_payloads_and_missing_jq_are_silent \
   test_overlong_token_line_keeps_the_default \
   test_tracked_stop_hook_is_synchronous_and_grok_inert

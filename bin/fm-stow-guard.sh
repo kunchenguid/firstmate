@@ -17,7 +17,9 @@
 # The context ask fires once when the newest usage in the transcript tail is at
 # or above the token line, then again only after a later read falls below
 # two-thirds of that line. The age ask fires when the newest seen /stow is
-# older than the hour line, and then not again for an hour. A continuation
+# older than the hour line, and then not again for an hour. It is skipped when
+# a /stow timestamp cannot be read, including when python3 is missing, so a
+# just-completed /stow is not asked for again from a stale clock. A continuation
 # stop (stop_hook_active / stopHookActive) still records a /stow and still
 # re-arms, and it does not block. The first opt-in stop with no /stow in the
 # tail starts the age clock instead of asking.
@@ -31,7 +33,9 @@
 # The hook prints one Claude block decision, or nothing. Any unreadable
 # payload, missing jq, scope miss, or state-write failure exits 0 and prints
 # nothing, so a Stop is never stuck on this hook. It is silent for a Cursor
-# payload, for Grok, and outside a primary home.
+# payload, for Grok, in a marked secondmate home, and outside a plain primary
+# checkout. A Stop block in a secondmate home would leave its parent recording
+# idle while that session was still working.
 set -u
 set -o pipefail
 
@@ -90,6 +94,7 @@ sid=$(jq -r '.session_id // .sessionId // empty' <<<"$payload" 2>/dev/null || tr
 transcript=$(jq -r '.transcript_path // .transcriptPath // empty' <<<"$payload" 2>/dev/null || true)
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_root_is_secondmate_home "$FM_ROOT" && exit 0
 [ -f "$CONFIG/stow-guard" ] || exit 0
 
 threshold=300000
@@ -160,6 +165,7 @@ fi
 
 tokens=0
 seen_stow=
+saves_readable=0
 if [ -n "$transcript" ] && [ -r "$transcript" ]; then
   tokens=$(tail -c 2000000 "$transcript" | jq -R -r '
       fromjson? | .message.usage // empty | select(type == "object")
@@ -169,7 +175,7 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     ''|*[!0-9]*) tokens=0 ;;
   esac
   if command -v python3 >/dev/null 2>&1; then
-    seen_stow=$(tail -c 2000000 "$transcript" | jq -R -r '
+    if seen_stow=$(tail -c 2000000 "$transcript" | jq -R -r '
         fromjson? | .timestamp as $ts | select($ts != null)
         | .message.content[]?
         | select(.type == "tool_use" and .name == "Skill" and .input.skill == "stow")
@@ -188,7 +194,11 @@ for line in sys.stdin:
         best = stamp
 if best:
     print(best)
-' 2>/dev/null || true)
+'); then
+      saves_readable=1
+    else
+      seen_stow=
+    fi
     case "$seen_stow" in
       ''|*[!0-9]*) seen_stow= ;;
     esac
@@ -210,9 +220,9 @@ if [ "$stop_active" -eq 0 ]; then
   if [ "$tokens" -ge "$threshold" ] && [ "$has_fired" -eq 0 ]; then
     reason="fm-stow-guard: context is ${tokens} tokens, near auto-compaction. Run the /stow skill now (full pass), then continue the turn you were in."
     fired=$(jq -c --arg sid "$sid" '.[$sid] = true' <<<"$fired") || exit 0
-  elif [ -z "$last_stow" ]; then
+  elif [ "$saves_readable" -eq 1 ] && [ -z "$last_stow" ]; then
     last_stow=$now
-  elif [ $((now - last_stow)) -ge "$max_age" ] && [ $((now - asked)) -ge 3600 ]; then
+  elif [ "$saves_readable" -eq 1 ] && [ $((now - last_stow)) -ge "$max_age" ] && [ $((now - asked)) -ge 3600 ]; then
     reason="fm-stow-guard: the last /stow is older than ${hours}h. Run the /stow skill now (full pass), then continue the turn you were in."
   fi
 fi
