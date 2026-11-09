@@ -3612,7 +3612,7 @@ test_herdr_flat_teardown_refusal_names_herdr_error_code() {
   : > "$case_dir/state/task-x1.status"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    FM_FAKE_HERDR_PANE_GET_FIRST_ERROR=$'server_busy\033[2J' FM_FAKE_HERDR_PANE_GET_ERROR_SEEN="$error_seen" \
+    FM_FAKE_HERDR_PANE_GET_FIRST_ERROR='server_busy\u001b[2J' FM_FAKE_HERDR_PANE_GET_ERROR_SEEN="$error_seen" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
