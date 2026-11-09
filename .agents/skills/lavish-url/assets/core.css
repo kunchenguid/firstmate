@@ -1,0 +1,103 @@
+/* lavish-url review panel and target outline, injected with assets/core.js.
+   Everything is scoped under the fm-lavish-url ids so captured site styles and
+   these styles cannot reach each other's elements by class name alone. */
+#fm-lavish-url-panel {
+  all: initial;
+  display: block;
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  max-width: min(360px, calc(100vw - 32px));
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1d1d1f;
+}
+#fm-lavish-url-panel details {
+  display: block;
+  background: #fffdf7;
+  border: 1px solid #c9b98f;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  padding: 8px 12px 10px;
+}
+#fm-lavish-url-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#fm-lavish-url-panel .fm-lu-target {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+#fm-lavish-url-panel .fm-lu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#fm-lavish-url-panel button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+  border: 1px solid #8a6d2b;
+  background: #f5ead0;
+  color: #3b2a06;
+  padding: 3px 10px;
+}
+#fm-lavish-url-panel button:hover,
+#fm-lavish-url-panel button:focus-visible {
+  background: #ead8a8;
+  outline: 2px solid #8a6d2b;
+  outline-offset: 1px;
+}
+#fm-lavish-url-panel .fm-lu-note {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 8px;
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid #c9b98f;
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  resize: vertical;
+}
+#fm-lavish-url-panel .fm-lu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+}
+#fm-lavish-url-panel .fm-lu-status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #5c4a1f;
+}
+#fm-lavish-url-panel .fm-lu-hint {
+  margin: 6px 0 0;
+  color: #5c4a1f;
+}
+#fm-lavish-url-outline {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 2147483645;
+  border: 2px dashed #b4720e;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+#fm-lavish-url-outline[data-pinned="yes"] {
+  border-style: solid;
+  background: rgba(180, 114, 14, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  #fm-lavish-url-panel { color: #f3ead6; }
+  #fm-lavish-url-panel details { background: #2a2418; border-color: #6b5a33; }
+  #fm-lavish-url-panel button { background: #3d321c; color: #f3ead6; border-color: #a88a46; }
+  #fm-lavish-url-panel button:hover,
+  #fm-lavish-url-panel button:focus-visible { background: #54452a; }
+  #fm-lavish-url-panel .fm-lu-note { background: #1d1912; border-color: #6b5a33; }
+  #fm-lavish-url-panel .fm-lu-status,
+  #fm-lavish-url-panel .fm-lu-hint { color: #d8c79f; }
+}

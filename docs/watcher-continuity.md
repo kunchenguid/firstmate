@@ -28,7 +28,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
-| Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
+| Claude | `.claude/settings.json` Stop/StopFailure `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
@@ -43,6 +43,9 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+The actionable restoration path applies the same live-child check after readiness, so output retained by a dead child's descendant cannot satisfy successor verification.
+Pi also settles an arm child on its process exit event, not only on stdio close, so a child that dies while a descendant still holds its pipes takes the same bounded retry.
+If a complete actionable line arrives while those pipes drain after exit, it replaces the provisional failure retry and takes the ordinary actionable restoration path.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
@@ -82,13 +85,15 @@ It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning a
 
 ### Claude Stop hook
 
-Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
+Claude's `.claude/settings.json` Stop/StopFailure `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its park; its header and help own the invocation contract.
-The hook fires on every Stop.
-On each Stop, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
-If a session exits mid-cycle and leaves an orphaned Stop hook, the replacement session's first eligible Stop supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
+The hook fires on every Stop and StopFailure, covering API-error turn ends that skip Stop entirely.
+On either event, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
+If a session exits mid-cycle and leaves an orphaned auto-arm hook, the replacement session's first eligible Stop or StopFailure supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
 [`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns the open-claim definition.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+StopFailure-driven continuations are paced rather than dropped during persistent API errors; after waiting, the hook stands down silently if away mode appeared or supervision is no longer needed.
+The script header owns the storm-bound mechanics, [configuration](configuration.md#environment-variables) lists the cooldown override, and [StopFailure verification](verification/supervision.md#stopfailure-auto-arm) records the Herdr-hosted evidence and deterministic regression entry point.
 
 ### Claude session-lock ownership
 
@@ -168,7 +173,7 @@ When restoration does not succeed, the model is never left blind.
 
 ### Claude handling successor
 
-Claude's Stop hook also starts one handling successor before notification.
+With the supervision host disabled, Claude's [auto-arm hook](#claude-stop-hook) also starts one handling successor before notification.
 After an actionable foreground close, including an attached peer cycle that ended, the hook:
 
 1. Launches `bin/fm-watch-arm.sh` with the closed arm's pid as `FM_WATCH_PREDECESSOR_ARM_PID`.
@@ -184,9 +189,9 @@ So that successor is the one deliberate detached launch in the continuity path:
 
 This is the shape `bin/fm-startup-network.sh` uses, and [`verification/supervision.md`](verification/supervision.md#detached-session-open-workers-survive-the-hook) verified that it survives the hook.
 
-The next Stop's foreground arm attaches to that live cycle.
+The next eligible auto-arm firing's foreground arm attaches to that live cycle.
 A successor that confirms no live watcher adds one line to the rewake banner and never withholds the wake.
-The next Stop then re-arms as before.
+The next eligible firing then re-arms as before.
 
 ### Durable queue and turn-end backstop
 
@@ -457,6 +462,9 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+- Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
+- Lets a verified Pi successor exit after delivery while a descendant holds its pipes to prove the exit alone schedules the bounded retry.
+- Delays a Pi arm's actionable line behind a descendant-held pipe until after its exit to prove that line still becomes the wake instead of a retry.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 
@@ -569,7 +577,7 @@ OpenCode support targets persistent TUI sessions rather than headless `opencode 
 
 The other harnesses rely on these mechanisms:
 
-- Claude normally depends on the Stop `asyncRewake` rewake.
+- Claude normally depends on the [auto-arm hook's rewake](#claude-stop-hook).
   The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) adds guarded tmux retries when that continuation is lost.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
