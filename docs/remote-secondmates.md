@@ -25,7 +25,7 @@ The remote second-mate agent runs on one of two session-provider backends, selec
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
 
-- `fm-remote` is reserved for remote fleet work and must not be used for personal work.
+- The code root's Herdr remote session is reserved for remote fleet work and must not be used for personal work; [launch placement](#launch-or-recover) identifies that session.
 - The user's interactive Herdr session remains `default` and is not a remote-secondmate prerequisite.
 - Herdr's remote-session server belongs to the host's own GUI login session rather than to the SSH connection.
   As a result, the agent's endpoint survives every disconnection the primary's supervision depends on.
@@ -257,7 +257,7 @@ The script's own header owns the full line protocol.
 
 ### Repair with --fix
 
-`--fix` repairs only the automatable gaps and is safe to rerun:
+`--fix` repairs only the automatable gaps; observe the Herdr concurrency restriction below before rerunning it:
 
 ```sh
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
@@ -266,12 +266,22 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 Over the plain SSH doctor bootstrap, it writes and reloads the applicable Firstmate-owned launch agents on macOS:
 
 - `dev.firstmate.remote-job`.
-- `dev.firstmate.herdr.fm-remote`.
+- The code root's Herdr agent, resolved as described below.
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 The Herdr agent applies only to the herdr backend; a rex-verified host needs only the remote-job worker there.
-Under `--backend rex --fix`, it also starts the account's persistent rex server when none answers.
-It never stops or restarts an answering server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
+The primary Firstmate code root keeps the `fm-remote` session and `dev.firstmate.herdr.fm-remote` launch-agent label.
+The doctor records that root as the service owner, and a different code root on the same account receives a separate, root-derived Herdr session and launch-agent label.
+[`bin/fm-remote-herdr-identity-lib.sh`](../bin/fm-remote-herdr-identity-lib.sh) owns that resolution, so readiness, launch, relaunch, and endpoint validation all name the same session for a code root.
+A legacy service without an owner record is adopted only when its existing launch-agent guard proves the current root owns it; otherwise the doctor leaves it alone and reports the ownership gap.
+An operator's `--fix` refuses to rewrite, reload, or restart a Herdr service owned by another code root, one whose owner cannot be proven, or one whose pane list shows live panes or cannot be read; it reports the service and its owner instead.
+Readiness runs its unattended repair as `--fix --automatic`, which never stops, boots out, replaces, reloads, or takes over a running Herdr server or a loaded Herdr launch agent, because launchd can restart that server and a mate can create a pane in it at any moment.
+It can record ownership, install and bootstrap an unloaded agent for a stopped server, or start a stopped server through an already matching loaded agent; destructive Herdr repairs remain operator actions.
+A reload never force-restarts the freshly bootstrapped server.
+The operator's explicit `--fix` keeps a residual risk that automatic readiness does not: its empty-pane proof is taken before it boots out, reloads, or authorizes the guard to take the session over, and nothing stops a mate from creating a pane in that window, so a pane created concurrently during its repair is closed.
+Run an explicit `fm-remote-doctor.sh --fix` only when no mate is being launched, relaunched, or recovered on that account.
+Under `--backend rex --fix`, the doctor starts the account's persistent Rex server only when none answers.
+It never stops or restarts an answering Rex server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
 An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.
 Because Rex starts a missing server as exit-empty, nothing else Firstmate runs for a remote second mate starts one: while no server answers, the remote endpoint state reads `unreadable`, and recovery waits for this repair to start the persistent server.
 
@@ -291,18 +301,10 @@ Every claude pane under such a server falls back to a stale plaintext credential
 ### How the guard converges on one server
 
 Herdr's own SSH remote attach starts a server born in another session when it finds none.
-At boot, that server wins the `fm-remote` socket, because sshd accepts connections before the login session exists.
-The guard is what makes the launch agent converge.
-It acts on whichever server owns the `fm-remote` socket:
-
-| Socket owner | Guard action |
-| --- | --- |
-| Nothing | Execs the server in the foreground under launchd. |
-| An Aqua-born server | Exits 0. |
-| Any other (foreign) server | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server. |
-
-`KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket.
-The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
+At boot, that server can win the configured session's socket, because sshd accepts connections before the login session exists.
+The [guard's header](../bin/fm-remote-herdr-guard.sh) owns the startup decision table and one-shot operator authorization mechanism; the [repair safety rules above](#repair-with---fix) explain when takeover is allowed and its concurrency risk.
+`KeepAlive={SuccessfulExit=false}` lets a successful guard exit rest instead of respawning against a held socket.
+[`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
 
 ### Other repairs and limits
 
@@ -310,13 +312,14 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 
 - It starts the same workers directly on Linux.
 - It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
+  An existing link to another Firstmate checkout's entrypoint is accepted as is, because every call names its code root, so a second code root on the account never repoints the first one's link.
 - It creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target.
   It stops after one harness satisfies the at-least-one requirement, which is the harness line of the [required remote tools](#required-remote-tools).
 
 Its limits:
 
 - It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
-- The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server.
+- Each dedicated Herdr launch agent owns only its code root's remote-secondmate server.
   It does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 - It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
@@ -399,13 +402,8 @@ Launch records are created only when the secondmate is launched.
 
 ### The seed's readiness gate
 
-The seed gates readiness in these steps:
-
-1. The seed runs a read-only check.
-2. When that check reports a gap, it runs `--fix`.
-3. It then runs a second read-only check, whose verdict decides.
-
-So the operator never has to run the repair by hand, and a repair is never trusted on its own word.
+The seed uses [`bin/fm-remote-readiness-lib.sh`](../bin/fm-remote-readiness-lib.sh)'s check, automatic repair, and read-only recheck gate.
+The [repair safety rules](#repair-with---fix) distinguish unattended repairs from gaps requiring an operator; older doctors that cannot accept safe automatic repair are left not ready rather than retried with unrestricted `--fix`.
 When a host stays red, the seed prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
 
 ### Failure and rollback
@@ -450,13 +448,13 @@ Without an explicit backend, a later launch or liveness recovery preserves the p
 An existing endpoint on a different backend is refused rather than migrated.
 Placement is per backend:
 
-- Herdr: all remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+- Herdr: all remote secondmates of one code root on a host share that root's remote session, `fm-remote` for the account's primary root, and retain separate `2ndmate-<id>` workspaces inside it.
 - Rex: each remote secondmate home gets its own `2ndmate-<id>-<hash>` session on the host's persistent personal rex server, the same placement rule a local secondmate home uses.
 
 ### Refused and unsupported launches
 
 - An explicit request for any backend other than herdr or rex is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than `fm-remote`, or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
+- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than its code root's remote session, or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
@@ -704,7 +702,7 @@ It refuses while any of these holds:
 - The primary has an unfinished backlog outbox.
 - A routed reply remains unresolved.
 
-Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`, never the shared session or a sibling's workspace or panes.
+Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its code root's remote session, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
@@ -745,6 +743,7 @@ bin/fm-test-run.sh tests/fm-remote-job-launchagent.test.sh
 bin/fm-test-run.sh tests/fm-remote-transport-lanes.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
+bin/fm-test-run.sh tests/fm-remote-herdr-identity.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh

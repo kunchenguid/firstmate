@@ -973,6 +973,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-remote-herdr-identity-lib.sh
+. "$SCRIPT_DIR/fm-remote-herdr-identity-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
@@ -1581,11 +1583,11 @@ spawn_remote_secondmate() {
   case "$remote_backend" in
     herdr)
       remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
-      if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
+      if ! fm_remote_herdr_session_name_valid "$remote_herdr_session" || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
         fm_lock_release "$remote_lock" || true
         fm_lock_release "$registry_lock" || true
         fm_lock_release "$SPAWN_TASK_LOCK" || true
-        echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+        echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote' or a code-root-derived 'fm-remote-<id>'; preserving the remote route for reconciliation" >&2
         return 1
       fi
       ;;
