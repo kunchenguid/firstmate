@@ -263,3 +263,28 @@ if spawn; then fail 'duplicate bindings silently discarded association'; fi
 [ ! -s "$case_dir/launch.sh" ] || fail 'duplicate binding emitted executable launch'
 save_evidence
 pass 'duplicate metadata fields cannot silently override a declared association'
+
+# The first line a Kimi/Rovo worker receives must reach it whole on every
+# backend. tmux types any length in bounded pieces, so it carries the context
+# inline; other backends send or verify the whole line in one terminal
+# operation, so an oversized inline line would fail there and the line names
+# the complete context file instead.
+new_case initial-input
+context="$case_dir/worker-context.md"
+for _ in $(seq 1 4000); do printf 'PREPARED_CONTEXT_LINE \xc3\xa9 \xe2\x9c\x93 "quoted"\n'; done > "$context"
+task='Read the brief at /tmp/launch-brief.md and follow it exactly.'
+node "$ROOT/bin/fm-worker-preparation.mjs" initial-input tmux "$context" "$task" > "$case_dir/tmux.line"
+[ "$(wc -l < "$case_dir/tmux.line" | tr -d ' ')" = 0 ] || fail 'tmux initial input is not one terminal line'
+jq -j .workerContext "$case_dir/tmux.line" | cmp -s - "$context" || fail 'tmux initial input changed the prepared context'
+[ "$(jq -r .task "$case_dir/tmux.line")" = "$task" ] || fail 'tmux initial input lost the brief pointer'
+context_real=$(cd "$(dirname "$context")" && pwd -P)/worker-context.md
+for backend in herdr zellij rex tern hc; do
+  node "$ROOT/bin/fm-worker-preparation.mjs" initial-input "$backend" "$context" "$task" > "$case_dir/$backend.line"
+  [ "$(wc -l < "$case_dir/$backend.line" | tr -d ' ')" = 0 ] || fail "$backend initial input is not one terminal line"
+  [ "$(wc -c < "$case_dir/$backend.line" | tr -d ' ')" -lt 1024 ] ||
+    fail "$backend initial input still grows with the prepared context"
+  [ "$(jq -r .workerContextFile "$case_dir/$backend.line")" = "$context_real" ] ||
+    fail "$backend initial input does not name the complete context file"
+  assert_grep 'Read the brief at /tmp/launch-brief.md' "$case_dir/$backend.line" "$backend initial input lost the brief pointer"
+done
+pass 'initial input carries the context inline on tmux and names the complete context file on other backends'

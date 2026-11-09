@@ -8,6 +8,10 @@
 //   and role/independent origins. --reference-copies replaces DIR with a
 //   task-private copy of each prepared skill's directory and points relative
 //   references there, for workers whose file tools reach only task paths.
+// initial-input <backend> <worker-context.md> <task> prints the one-line JSON a
+//   Kimi/Rovo worker receives first. tmux types any length in bounded pieces,
+//   so it carries the context inline. Other backends send or verify the whole
+//   line in one terminal operation, so they name the complete context file.
 // Metadata uses the canonical role subset: top-level name/description scalars,
 // autoloadSkills as a block or inline list of literal skill names. Unsupported
 // binding syntax is rejected, never interpreted as YAML code or silently lost.
@@ -213,7 +217,15 @@ try {
       fs.renameSync(temp, args[1]);
     } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
     process.stdout.write(render(prepared));
-  } else throw new Error('expected select or prepare');
+  } else if (command === 'initial-input') {
+    check(args.length === 3 && args.every(text), 'initial-input requires backend, worker context path and task');
+    const [backend, contextPath, task] = args;
+    const real = fs.realpathSync(path.resolve(contextPath));
+    const line = backend === 'tmux'
+      ? { workerContext: fs.readFileSync(real, 'utf8'), task }
+      : { workerContextFile: real, task: `Before anything else, read workerContextFile completely: it holds your worker identity and prepared role and skills. Then: ${task}` };
+    process.stdout.write(JSON.stringify(line));
+  } else throw new Error('expected select, prepare or initial-input');
 } catch (error) {
   console.error(`error: worker preparation: ${error.message}`);
   process.exitCode = 1;

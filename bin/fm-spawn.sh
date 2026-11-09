@@ -72,8 +72,10 @@
 #   refuses launch; an absent selection preserves legacy behavior.
 #   Initial-input adapters carry those bodies through their existing envelope.
 #   Claude keeps its record doorbell and receives worker-context.md through a
-#   SessionStart stdout hook; Kimi/Rovo serialize that context and the brief
-#   pointer as one JSON line for readiness-gated text submission. Rovo also
+#   SessionStart stdout hook; Kimi/Rovo get one JSON line for readiness-gated
+#   text submission (fm-worker-preparation.mjs initial-input): on tmux it
+#   carries the context and brief pointer inline, on other backends it names
+#   the complete worker-context.md with the brief pointer. Rovo also
 #   gets each prepared skill's directory copied into data/<id>/worker-skills/
 #   (inside its existing grant) and resolves relative references there; the
 #   source skill directories are never granted. Backend placement and
@@ -8149,9 +8151,10 @@ if [ "$HARNESS" = kimi ]; then
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
   if [ -n "${WORKER_PREPARATION:-}" ]; then
-    # Literal terminal delivery must not turn source newlines into submissions.
-    KIMI_POINTER=$(jq -cn --rawfile workerContext "$WORKER_CONTEXT_FILE" \
-      --arg task "$KIMI_POINTER" '{workerContext:$workerContext,task:$task}') || exit 1
+    # One JSON line: literal terminal delivery must not turn source newlines
+    # into submissions; fm-worker-preparation.mjs picks inline or file-backed.
+    KIMI_POINTER=$(node "$SCRIPT_DIR/fm-worker-preparation.mjs" initial-input \
+      "$BACKEND" "$WORKER_CONTEXT_FILE" "$KIMI_POINTER") || exit 1
   fi
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
@@ -8178,8 +8181,8 @@ if [ "$HARNESS" = rovo ]; then
   fi
   ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
   if [ -n "${WORKER_PREPARATION:-}" ]; then
-    ROVO_POINTER=$(jq -cn --rawfile workerContext "$WORKER_CONTEXT_FILE" \
-      --arg task "$ROVO_POINTER" '{workerContext:$workerContext,task:$task}') || exit 1
+    ROVO_POINTER=$(node "$SCRIPT_DIR/fm-worker-preparation.mjs" initial-input \
+      "$BACKEND" "$WORKER_CONTEXT_FILE" "$ROVO_POINTER") || exit 1
   fi
   ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
   ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
