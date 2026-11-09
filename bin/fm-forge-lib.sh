@@ -143,20 +143,20 @@ fm_forge_checkout_remote() {
 }
 
 fm_forge_registered_binding() {
-  local checkout=${1:-} project_id root home data projects forge
+  local checkout=${1:-} entry project_id root home data projects forge
 
   [ -d "$checkout" ] || return 1
   root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
   home=${FM_HOME:-$root}
   data=${FM_DATA_OVERRIDE:-$home/data}
   projects=${FM_PROJECTS_OVERRIDE:-$home/projects}
-  checkout=$(cd "$checkout" && pwd -P) || return 2
-  projects=$(cd "$projects" && pwd -P) || return 1
-  case "$checkout/" in
-    "$projects"/*/) ;;
-    *) return 1 ;;
-  esac
-  project_id=$(basename "$checkout")
+  for entry in "$projects"/*/; do
+    [ -e "$entry" ] || continue
+    [ "$entry" -ef "$checkout" ] || continue
+    project_id=$(basename "$entry")
+    break
+  done
+  [ -n "${project_id:-}" ] || return 1
   if forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null); then
     case "$forge" in

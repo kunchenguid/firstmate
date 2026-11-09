@@ -509,6 +509,30 @@ test_explicit_binding_does_not_cross_same_basename() {
   pass "explicit forge bindings stay scoped to registered checkout paths"
 }
 
+test_explicit_binding_survives_registered_symlink() {
+  local home clone remote_url origin_url out
+  home=$(new_home)
+  clone=$(build_pair "$home" symlinked)
+  advance_origin "$home" symlinked C1
+  remote_url=$(git -C "$clone" remote get-url origin)
+  mv "$clone" "$home/real-symlinked"
+  ln -s "$home/real-symlinked" "$clone"
+  origin_url="https://unrecognized.example/team/symlinked.git"
+  git -C "$clone" remote set-url origin "$origin_url"
+  git -C "$clone" config url."$remote_url".insteadOf "$origin_url"
+  mkdir -p "$home/data"
+  printf -- '- symlinked [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "symlinked: synced" \
+    "an explicit binding must apply to its registered symlinked clone"
+  [ "$(head_sha "$clone")" = "$(git -C "$home/work-symlinked" rev-parse HEAD)" ] \
+    || fail "the registered symlinked clone did not fast-forward"
+  pass "explicit forge bindings survive registered symlink paths"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -874,6 +898,7 @@ test_unknown_origin_is_skipped_even_when_invoked_directly
 test_explicit_gerrit_binding_allows_sync
 test_explicit_legacy_bindings_allow_sync
 test_explicit_binding_does_not_cross_same_basename
+test_explicit_binding_survives_registered_symlink
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves
