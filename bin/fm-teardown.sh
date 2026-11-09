@@ -49,8 +49,9 @@
 # refresh_remote_refs has updated those refs from each remote when the local ones
 # do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# the forge (GitHub, a GitLab merge request, or Forgejo) reports a PR head that
-# contains the current local work, or its content is
+# the forge (GitHub, Forgejo, or - only when config/park-on-review or
+# config/auto-land opts this home in - a GitLab merge request) reports a PR head
+# that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
@@ -1727,11 +1728,18 @@ EOF
 # forge for both the PR state and head: a recorded Forgejo URL is read through
 # tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
 # (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
-# squash or merge-train commit main received), and everything else through
-# GitHub. Returns
+# squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
+# and everything else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
+# The GitLab merged-MR read is opt-in with the park-on-review flags
+# (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
+# GitLab MR goes through the GitHub read like any other target.
+gitlab_mr_landing_opted_in() {
+  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
+}
+
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
@@ -1746,7 +1754,7 @@ pr_is_merged() {
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
-  elif fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+  elif gitlab_mr_landing_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
     fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD

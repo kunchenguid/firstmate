@@ -42,7 +42,9 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
-#   (q6) GitLab MR merged by squash or train, main moved on, MR head unfetched -> ALLOW; open MR -> REFUSE
+#   (q6) GitLab MR merged by squash or train, main moved on, MR head unfetched,
+#        config/park-on-review or config/auto-land present -> ALLOW; open MR -> REFUSE;
+#        neither flag -> REFUSE without a glab read, as before the opt-in
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -1505,13 +1507,16 @@ SH
 # A GitLab merge request squash-merged (or merged by a merge train) lands a
 # commit on main that is not the MR head, and main then moved on over the same
 # lines, so the content check is inconclusive. The MR's own head is published
-# only as refs/merge-requests/<n>/head, which this copy never fetched. Teardown
-# must read the MR through glab, fetch that ref, and accept the merged record;
-# the same history with the MR still open refuses.
+# only as refs/merge-requests/<n>/head, which this copy never fetched. With
+# config/park-on-review or config/auto-land present, teardown must read the MR
+# through glab, fetch that ref, and accept the merged record; the same history
+# with the MR still open refuses. With neither flag the merged MR is never read
+# through glab and teardown refuses on the inconclusive content check.
 test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
-  local case_dir rc local_head pr_head tmp state expected
-  for state in merged opened; do
-    case_dir=$(make_case "gitlab-mr-$state")
+  local case_dir rc local_head pr_head tmp scenario state expected
+  for scenario in merged:park-on-review merged:auto-land opened:park-on-review merged:; do
+    state=${scenario%%:*}
+    case_dir=$(make_case "gitlab-mr-$state-${scenario#*:}")
     write_meta "$case_dir" no-mistakes ship
     wt_commit_file "$case_dir" feature.txt hello "add feature"
     local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1536,17 +1541,25 @@ test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
       >> "$case_dir/state/task-x1.meta"
     add_gh_axi_error "$case_dir"
     add_glab_mr_for_head "$case_dir" "$state" "$pr_head"
+    [ -z "${scenario#*:}" ] || : > "$case_dir/config/${scenario#*:}"
 
     set +e
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
 
+    if [ -z "${scenario#*:}" ]; then
+      expect_code 1 "$rc" "gitlab-mr-no-flag: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+      [ ! -e "$case_dir/glab.log" ] || fail "gitlab-mr-no-flag: teardown read the merge request through glab without an opt-in flag"
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-no-flag: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" gitlab-mr-no-flag "$local_head"
+      continue
+    fi
     expected=1
     [ "$state" != merged ] || expected=0
-    expect_code "$expected" "$rc" "gitlab-mr-$state: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    expect_code "$expected" "$rc" "gitlab-mr-$scenario: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
     grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/sub/repo -F json' "$case_dir/glab.log" \
-      || fail "gitlab-mr-$state: teardown did not read the merge request through glab"
+      || fail "gitlab-mr-$scenario: teardown did not read the merge request through glab"
     if [ "$state" = merged ]; then
       ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
     else
@@ -1554,7 +1567,7 @@ test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
       assert_refusal_retained_task_state "$case_dir" gitlab-mr-opened "$local_head"
     fi
   done
-  pass "teardown proves a squash- or train-merged GitLab MR landed from the MR head, and refuses an open one"
+  pass "teardown proves a squash- or train-merged GitLab MR landed from the MR head only with an opt-in flag, and refuses an open one"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
