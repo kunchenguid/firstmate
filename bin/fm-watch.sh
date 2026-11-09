@@ -4476,6 +4476,21 @@ EOF
     fi
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
+    # An empty capture is not a wedge. A backend can answer a pruned endpoint
+    # with a successful empty read - herdr's capture proves only that its server
+    # is up, never that the pane still exists - and hashing that constant walks
+    # a window whose pane is already gone up the escalation ladder until it
+    # demands a deep inspection of a closed task. A pane that renders nothing
+    # carries no evidence of a wedge, so end the episode and wait for content.
+    if [ -z "${tail40//[[:space:]]/}" ]; then
+      if [ -e "$STATE/.count-$key" ] || [ -e "$STATE/.stale-$key" ] || [ -e "$STATE/.stale-since-$key" ]; then
+        triage_log "absorbed empty pane capture (endpoint renders nothing): $w"
+      fi
+      rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.stale-$key"
+      wedge_episode_end "$key"
+      clear_write_tracking "$key"
+      continue
+    fi
     # The matcher is already defined in this shell. It reads the capture this
     # poll already takes, and a miss drops a name the away daemon saved.
     dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=

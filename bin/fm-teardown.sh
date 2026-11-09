@@ -2286,7 +2286,7 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
   [ -n "$status" ] || return 1
   case "$status" in
-    completed|failed|cancelled|passed|checks-passed|running|fixing|ci) return 1 ;;
+    completed|failed|cancelled|handed_off|passed|checks-passed|running|fixing|ci) return 1 ;;
   esac
   if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
     # The strict object-local rule rejected this run head. That rejection is

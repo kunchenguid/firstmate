@@ -160,6 +160,7 @@ If the handoff confirmation fails, the adapter retries it once: Pi against that 
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
 Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
 On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
+A token whose named watcher is gone or no longer this home's lock owner is the same supersession, not a rejection, whenever another live watcher holds the lock: a newer cycle owns the episode, the drain transitions the recovery marker itself, and only a lock no live watcher owns is a real lapse (bin/fm-watch-arm.sh's `--handling-delivered` status 3).
 An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
 The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, and confirmation targets and results to state/.watch-extension.log, a bounded record that never changes supervision behavior.
 docs/configuration.md owns the knob's default and accepted values.
