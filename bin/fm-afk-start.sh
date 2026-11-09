@@ -48,37 +48,37 @@ fm_afk_start_usage() {
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
 # already running), drop the previous away session's leftover escalation-delivery
-# artifacts so they cannot surface as stale escalations under the new session.
-# These are session-scoped by timing: a fresh entry owns a new supervision
-# session and the new daemon has not produced anything yet, so anything present
-# here belongs to a PRIOR session. This never drops a genuinely-pending
-# escalation - the delivery buffer is a transient cache, and any condition still
-# true (a crew still blocked, a check still firing) is re-derived and re-escalated
-# fresh by the daemon's heartbeat catch-all scan and the durable
-# state/.wake-queue replay (see docs/herdr-backend.md "Away-mode stale-artifact
-# lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
-# NOT called on a refresh (daemon already alive), so the current session's own
-# buffered escalations are preserved.
+# artifacts AND its per-task supervision markers so they cannot surface under the
+# new session as its own. These are session-scoped by timing: a fresh entry owns
+# a new supervision session and the new daemon has not produced anything yet, so
+# anything present here belongs to a PRIOR session. The five per-task families -
+# .subsuper-stale-*, .subsuper-reported-stale-*, .subsuper-dialog-*,
+# .subsuper-paused-*, .subsuper-pause-until-due-* - are the prior session's
+# idle/wait episode state: left behind, the new daemon's first housekeeping
+# recheck reads a dead session's first-seen-idle clock as its own and reports a
+# possible wedge whose duration never happened (see .agents/skills/afk/SKILL.md
+# "Stale-artifact lifecycle" and bin/fm-supervise-daemon.sh's housekeeping).
+# This never drops a genuinely-pending escalation - the delivery buffer is a
+# transient cache, and any condition still true (a crew still blocked, a check
+# still firing, a wait still declared) is re-derived and re-escalated fresh by
+# the daemon's heartbeat catch-all scan, the durable state/.wake-queue replay,
+# and pause_marker_record/reconcile_pause_tracking (see
+# bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm). Accepted cost:
+# a declared wait spanning two away sessions restarts its pause-resurface
+# recheck window at re-entry. NOT called on a refresh (daemon already alive),
+# so the current session's own buffered escalations and episode state are
+# preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
-  local state=$1 line win key
-  # Unknown-state warnings suppress repeats even after delivery. Re-arm only
-  # warnings still in the buffer being discarded, preserving delivered ones.
-  if [ -s "$state/.subsuper-escalations" ] && compgen -G "$state/.subsuper-reported-stale-*" >/dev/null; then
-    _fm_wake_require_classify || return 1
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        stale\ persisted\ *s\ \(possible\ wedge\):\ *)
-          win=${line#* (possible wedge): }
-          key=$(window_to_task "$win" "$state" | tr ':/.' '___')
-          rm -f "$state/.subsuper-reported-stale-$key" || return 1
-          ;;
-      esac
-    done < "$state/.subsuper-escalations"
-  fi
+  local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" \
-        "$state/.subsuper-unknown-acked" 2>/dev/null
+        "$state/.subsuper-unknown-acked" \
+        "$state"/.subsuper-stale-* \
+        "$state"/.subsuper-reported-stale-* \
+        "$state"/.subsuper-dialog-* \
+        "$state"/.subsuper-paused-* \
+        "$state"/.subsuper-pause-until-due-* 2>/dev/null
 }
 
 daemon_lock_owner() {
