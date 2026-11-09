@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Codex 0.163.0 model-free supervision. Native SessionStart registers the
+# Verified Codex 0.163.0 / 0.167.0 model-free supervision. Native SessionStart registers the
 # session; asynchronous Stop owns one foreground arm and queues only a real
 # wake through `codex queue --thread`. This works in embedded CLI mode without
 # an app-server daemon. No terminal injection or separate event selector.
@@ -85,7 +85,10 @@ verified_cli() {
     fi
     case "$executable" in */codex) ;; *) continue ;; esac
     [ -x "$executable" ] || return 1
-    [ "$("$executable" --version 2>/dev/null)" = 'codex-cli 0.163.0' ] || return 1
+    case "$("$executable" --version 2>/dev/null)" in
+      'codex-cli 0.163.0'|'codex-cli 0.167.0') ;;
+      *) return 1 ;;
+    esac
     CODEX_COMMAND=$executable
     return 0
   done < <(fm_harness_ancestry_pids)

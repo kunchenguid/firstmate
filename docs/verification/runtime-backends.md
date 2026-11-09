@@ -3621,6 +3621,21 @@ The native TUI fired project SessionStart and asynchronous Stop hooks, and `code
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
 This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
 
+Refreshed on 2026-11-09 with `codex-cli 0.167.0` on Linux x86_64 / WSL using a real embedded TUI, private homes, tracked project hooks and a credential-free loopback Responses provider:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+```text
+ok - codex-cli 0.167.0: native park delivery-rearm
+ok - codex-cli 0.167.0: native park failure-fallback
+```
+
+The native guard also verifies startup harness selection through the bounded digest, two acknowledged idle-turn wakes, quiet provider-call stability and native exit cleanup.
+It runs without model tokens by default when Codex is installed and refuses a capability claim on an unverified release.
+[Supervision verification](supervision.md#codex-native-lifecycle-guard-2026-11-09) owns the detailed coverage and limits.
+
 ## hc
 
 Measured on 2026-10-29 with `hc 0.1.13` on macOS (Darwin 27.0.0, `/bin/bash` 3.2.57), against private cores only: a unique `HC_SESSION`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under a short `/tmp/fmhc.*` directory, and `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` unset.

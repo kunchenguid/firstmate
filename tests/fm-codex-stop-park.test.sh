@@ -195,7 +195,7 @@ test_unconfigured_home_keeps_the_foreground_checkpoint() {
 
 test_version_gate_selects_only_the_verified_cli() {
   local home out version
-  for version in 0.163.0 0.164.0; do
+  for version in 0.163.0 0.167.0 0.164.0 0.168.0; do
     home=$(make_home "version-$version" opted-in)
     out=$(under_codex "$home" '
       printf "%s" "{\"session_id\":\"$SESSION_ID\",\"transcript_path\":\"$FM_HOME/transcript.jsonl\"}" \
@@ -205,7 +205,7 @@ test_version_gate_selects_only_the_verified_cli() {
       "$PARK" --capable; echo "registered-capable=$?"
     ' FM_FAKE_CODEX_VERSION="$version" 2>&1)
     assert_contains "$out" "session-start=0" "session start under codex-cli $version: $out"
-    if [ "$version" = 0.163.0 ]; then
+    if [ "$version" = 0.163.0 ] || [ "$version" = 0.167.0 ]; then
       assert_equals "$SESSION_ID" "$(sed -n 1p "$home/state/.codex-park-session" 2>/dev/null)" \
         "the verified CLI's native session start must register the session"
       assert_equals "$SESSION_ID" "$(cat "$home/sessionstart-park-session")" \

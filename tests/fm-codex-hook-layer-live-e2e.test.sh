@@ -19,8 +19,10 @@
 # The Stop-output cases use the installed app-server and a loopback Responses
 # fixture with fixed text and no tool calls. They trust only the fixture hook
 # and preserve the wrapper's inherited PATH without loading operator config.
-# Neither layer spends model tokens, so the guard runs by default wherever
-# its tools are installed.
+# The native park guard also drives the real embedded TUI, project startup,
+# asynchronous Stop and queue with a loopback provider in private homes.
+# None of these layers spends model tokens, so the guard runs by default
+# wherever its tools are installed.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -298,6 +300,12 @@ PY
   [ "$status" -eq 0 ] || fail "codex $CODEX_VERSION: installed Stop parser regression failed"
 }
 
+test_installed_codex_native_park_delivers_rearms_and_reports_failure() {
+  python3 "$ROOT/tests/codex-stop-park-live.py" "$ROOT" "$TMP_ROOT/native-park" "$CODEX_VERSION" \
+    || fail "codex $CODEX_VERSION: native park lifecycle regression failed"
+}
+
+test_installed_codex_native_park_delivers_rearms_and_reports_failure
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
 test_installed_codex_accepts_the_stop_wrapper_and_rejects_invalid_output

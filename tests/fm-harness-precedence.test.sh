@@ -826,6 +826,36 @@ test_supervision_protocol_follows_corrected_verdict() {
   pass "session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE"
 }
 
+# Native SessionStart includes hook wrappers and a bounded digest runner.
+# A shallow tool probe must agree with detection below that real shell chain;
+# shortening the ancestry walk to eight processes breaks this contract.
+test_nested_startup_wrappers_preserve_nearest_harness() {
+  local dir bin wrapper got
+  dir="$TMP_ROOT/startup-depth"
+  bin=$(named_bin "$dir" codex)
+  wrapper="$dir/wrapper.sh"
+  cat > "$wrapper" <<'SH'
+if [ "$1" -gt 0 ]; then
+  result=$(bash "$0" "$(( $1 - 1 ))")
+else
+  result=$("$FM_TEST_HARNESS")
+fi
+printf '%s' "$result"
+SH
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_TEST_HARNESS="$HARNESS" "$bin" "$wrapper" 0)
+  assert_equals codex "$got" "the shallow ancestry signal must be live"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_TEST_HARNESS="$HARNESS" "$bin" "$wrapper" 9)
+  assert_equals codex "$got" "native startup wrappers must not hide the nearest Codex process"
+  got=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 \
+    FM_TEST_HARNESS="$HARNESS" "$bin" "$wrapper" 9)
+  assert_equals codex "$got" "deep structural ancestry must still outrank a retained foreign marker"
+  pass "native startup depth and shallow tool probes agree on the nearest harness"
+}
+
+test_nested_startup_wrappers_preserve_nearest_harness
 test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent

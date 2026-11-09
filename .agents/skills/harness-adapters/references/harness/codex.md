@@ -48,7 +48,8 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 
 Verified on 2026-07-08 with codex-cli 0.142.1: Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 
-Codex CLI 0.163.0 supports the native asynchronous Stop park registered by `bin/fm-codex-stop-park.sh` in a home that opts in with [`config/codex-stop-park`](../../../../../docs/configuration.md#codex-native-stop-park-configcodex-stop-park), verified in an isolated real CLI lab on 2026-10-19.
+Verified Codex CLI releases support the native asynchronous Stop park registered by `bin/fm-codex-stop-park.sh` in a home that opts in with [`config/codex-stop-park`](../../../../../docs/configuration.md#codex-native-stop-park-configcodex-stop-park).
+[Runtime verification](../../../../../docs/verification/runtime-backends.md#native-codex-supervision-park) records per-release evidence and the credential-free native lifecycle guard.
 The hook waits outside the model and delivers actionable wakes with `codex queue --thread`, including in embedded mode without a shared app-server daemon.
 The script owns version and native-session selection; [`codex.md`](../../../../../docs/supervision-protocols/codex.md) owns the operating protocol and failure fallback.
 Homes without the opt-in, unverified versions, and sessions without the native registration keep [`codex-checkpoint.md`](../../../../../docs/supervision-protocols/codex-checkpoint.md), the unchanged bounded foreground protocol.

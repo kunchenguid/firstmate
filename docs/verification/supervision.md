@@ -1073,6 +1073,32 @@ The retained native rollouts carry no paired hook-start and claim-publication ti
 
 The native mode is selected only in a home that opts in with `config/codex-stop-park`, for the verified CLI version and a registered TUI session owning this home's lock.
 Unverified sessions retain the foreground protocol, whose existing live guard remains `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
-The native proof above was a real adapter smoke; it did not add a test case or modify the foreground live guard.
+The native proof above was a real adapter smoke; the reusable native guard below now refreshes that capability evidence without changing the foreground live guard.
 `tests/fm-codex-stop-park.test.sh` separately covers the opt-in and version gates, single-flight claim, fallback latch, final-result delivery when supervision ends, owner-gone watcher exit and retained quiet boundary against a fake `codex`.
 [The Codex protocol](../supervision-protocols/codex.md) owns operating instructions; script headers own registration, failure fallback and process ownership.
+
+### Codex native lifecycle guard (2026-11-09)
+
+Verified with `codex-cli 0.167.0` on Linux x86_64 / WSL:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+```text
+ok - codex-cli 0.167.0: native park delivery-rearm
+ok - codex-cli 0.167.0: native park failure-fallback
+ok - codex codex-cli 0.167.0: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
+```
+
+`tests/codex-stop-park-live.py`, invoked by that guard, runs the installed embedded TUI with the tracked SessionStart and asynchronous Stop hooks, private `HOME` and `CODEX_HOME`, and a loopback Responses fixture that spends no model tokens.
+The real bounded digest must deliver `primary harness: codex` and the native park protocol to the provider before the initial turn.
+The successful session makes no provider calls during a three-second quiet park, then handles two registered custom-check wakes across separate idle turns through native `codex queue` delivery.
+Each wake invokes the real drain and its exact generation-bound acknowledgement, leaves an empty durable queue and establishes a new park owner.
+Normal `/quit` removes the native park.
+A second session substitutes a failing arm only, and must deliver both retry notices, record the repeated failure, latch foreground fallback and expose the synchronous fallback warning to the provider.
+Only unrelated bootstrap sweeps and deferred startup network work are stubbed; external-provider reasoning, real GitHub connectivity, compaction and long-duration resource behavior are not established by this guard.
+
+`tests/fm-harness-precedence.test.sh` separately pins shallow-tool and nested-startup detection agreement using real shell processes, including a retained foreign marker.
+Its nested case fails when the ancestry bound no longer reaches the native hook and bounded-digest wrapper chain.
+The exact bounded walk remains owned by `bin/fm-harness.sh`, not a harness-specific marker or lock-owner guess.
