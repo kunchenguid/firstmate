@@ -143,6 +143,35 @@ assert_no_grep 'harness=default' "$HOME_DIR/state/ios.meta" \
   "the parent record must not keep the unresolved request"
 pass "a remote relaunch records the identity the host confirmed"
 
+# --- without config/spawn-start-check a relaunch arms nothing ---------------
+# The start check is opt-in: with the flag absent the relaunch takes no spawn
+# lock, arms no record, and leaves queued wakes alone, exactly as before the
+# check existed; it only clears a record armed while the flag was present.
+reset_meta
+rm -f "$HOME_DIR/state/ios.start-pending" "$HOME_DIR/state/.wake-queue"
+FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '. "$0/bin/fm-wake-lib.sh"
+  fm_wake_append check "$1/ios.check.sh" "check: ios poll result"' "$ROOT" "$HOME_DIR/state" \
+  || fail "fixture: could not queue the wake"
+cp "$HOME_DIR/state/.wake-queue" "$TMP/queue-before-unflagged"
+SPAWN_LOCK="$HOME_DIR/state/.spawn-ios.lock"
+fm_lock_try_acquire "$SPAWN_LOCK" || fail "could not acquire spawn lock fixture"
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+fm_lock_release "$SPAWN_LOCK" || fail "could not release spawn lock fixture"
+expect_code 0 "$RC" "a relaunch without the start-check flag should not wait on the spawn lock"$'\n'"$OUT"
+assert_absent "$HOME_DIR/state/ios.start-pending" "a relaunch without the start-check flag armed a start check"
+cmp -s "$TMP/queue-before-unflagged" "$HOME_DIR/state/.wake-queue" \
+  || fail "a relaunch without the start-check flag changed the wake queue: $(cat "$HOME_DIR/state/.wake-queue")"
+rm -f "$HOME_DIR/state/.wake-queue"
+reset_meta
+printf '1 - pi\n' > "$HOME_DIR/state/ios.start-pending"
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 0 "$RC" "a relaunch without the start-check flag should succeed"$'\n'"$OUT"
+assert_absent "$HOME_DIR/state/ios.start-pending" \
+  "a relaunch without the start-check flag kept a record armed while the flag was present"
+pass "a remote relaunch without config/spawn-start-check arms nothing and clears an earlier record"
+
+touch "$HOME_DIR/config/spawn-start-check"
+
 # --- a confirmed relaunch arms the replacement's spawn start check ----------
 # The host-local relaunch arms nothing (no watcher scans its route state), so
 # the parent records the replacement's busy generation and arms its own record,

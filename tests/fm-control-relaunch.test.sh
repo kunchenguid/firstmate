@@ -400,6 +400,8 @@ test_relaunch_drops_the_replaced_launchs_queued_start_wake() {
   dir=$(new_case startwake rq1)
   add_ship_task "$dir" rq1 claude
   state="$dir/home/state"
+  mkdir -p "$dir/home/config"
+  touch "$dir/home/config/spawn-start-check"
   printf 'busy_gen=%s\n' "$("$ROOT/bin/fm-busy-event.sh" arm "$state" rq1)" >> "$state/rq1.meta"
   FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"
     fm_wake_append check start:rq1 "check: start rq1: no start signal 120s after spawn (harness=claude)"
@@ -414,6 +416,26 @@ test_relaunch_drops_the_replaced_launchs_queued_start_wake() {
   case $'\n'"$rows"$'\n' in *$'\nstart:other\n'*) ;; *) fail "the relaunch dropped another task's start wake: $rows" ;; esac
   case $'\n'"$rows"$'\n' in *$'\n'"$state/rq1.check.sh"$'\n'*) ;; *) fail "the relaunch dropped this task's other wake: $rows" ;; esac
   pass "fm-control relaunch: a relaunch drops only the replaced launch's queued start wake"
+}
+
+# Without the opt-in config/spawn-start-check flag a relaunch arms no start
+# check and leaves the wake queue exactly as it found it.
+test_relaunch_without_start_check_flag_arms_nothing() {
+  local dir out rc state
+  dir=$(new_case startwake-off rq2)
+  add_ship_task "$dir" rq2 claude
+  state="$dir/home/state"
+  printf 'busy_gen=%s\n' "$("$ROOT/bin/fm-busy-event.sh" arm "$state" rq2)" >> "$state/rq2.meta"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"
+    fm_wake_append check "$1/rq2.check.sh" "check: rq2 poll result"' "$ROOT" "$state" \
+    || fail "fixture: could not queue the wake"
+  cp "$state/.wake-queue" "$dir/queue-before"
+  out=$(run_control "$dir" rq2 relaunch --note "replace the launch"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ ! -e "$state/rq2.start-pending" ] || fail "a relaunch without config/spawn-start-check armed a start check"
+  cmp -s "$dir/queue-before" "$state/.wake-queue" \
+    || fail "a relaunch without config/spawn-start-check changed the wake queue: $(cat "$state/.wake-queue")"
+  pass "fm-control relaunch: without config/spawn-start-check a relaunch arms no start check"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -3170,6 +3192,7 @@ test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_drops_the_replaced_launchs_queued_start_wake
+test_relaunch_without_start_check_flag_arms_nothing
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

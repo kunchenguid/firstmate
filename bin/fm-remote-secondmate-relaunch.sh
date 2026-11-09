@@ -24,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -46,12 +47,18 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
-SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
-fm_lock_try_acquire "$SPAWN_TASK_LOCK" || die "a spawn is still creating task $ID; retry the relaunch"
-trap 'fm_lock_release "$SPAWN_TASK_LOCK" || true' EXIT
-# The start-check boundary is taken before the host relaunch delivers anything.
-LAUNCH_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
+# The spawn start check is opt-in (config/spawn-start-check). Only with it does
+# this relaunch serialize with a spawn's arm and arm the replacement's check.
+START_CHECK=0
+[ ! -e "$CONFIG/spawn-start-check" ] || START_CHECK=1
 START_CHECK_FAILED=0
+if [ "$START_CHECK" = 1 ]; then
+  SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+  fm_lock_try_acquire "$SPAWN_TASK_LOCK" || die "a spawn is still creating task $ID; retry the relaunch"
+  trap 'fm_lock_release "$SPAWN_TASK_LOCK" || true' EXIT
+  # The boundary is taken before the host relaunch delivers anything.
+  LAUNCH_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
+fi
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
@@ -106,8 +113,11 @@ done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
 # A start wake the replaced launch already queued is dropped with its record.
-fm_wake_queue_prune_task "$STATE" "$ID" "" start 2>/dev/null || true
-case "$NEW_HARNESS" in kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
+# Without the flag only a record left from when it was present is cleared.
+if [ "$START_CHECK" = 1 ] || [ -e "$STATE/$ID.start-pending" ]; then
+  fm_wake_queue_prune_task "$STATE" "$ID" "" start 2>/dev/null || true
+fi
+case "$START_CHECK:$NEW_HARNESS" in 0:* | 1:kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
   *)
     if [ "${FM_SPAWN_NO_START_CHECK:-0}" = 1 ]; then
       rm -f -- "$STATE/$ID.start-pending"

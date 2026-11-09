@@ -128,7 +128,8 @@
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
 #   check: start <id>: no start signal <n>s after spawn (harness=<h>[; <cause>]); <command>
-#                          a launch fm-spawn.sh could not prove started still has
+#                          opt-in config/spawn-start-check: a launch
+#                          fm-spawn.sh could not prove started still has
 #                          no start proof FM_START_CHECK_SECS (default 120) after
 #                          spawn, judged on the next poll, so the wake lands
 #                          within about FM_START_CHECK_SECS plus one FM_POLL for
@@ -2843,9 +2844,10 @@ EOF
   fi
 }
 
-# One-shot start check. bin/fm-spawn.sh writes STATE/<id>.start-pending as
-# `<spawn-epoch> <busy-gen or -> <harness>` for every launch it could not prove
-# started (its header names the exempt harnesses). Each poll this tick reads
+# One-shot start check. In a home with config/spawn-start-check, bin/fm-spawn.sh
+# writes STATE/<id>.start-pending as `<spawn-epoch> <busy-gen or -> <harness>`
+# for every launch it could not prove started (its header names the exempt
+# harnesses); without the flag nothing is armed and this tick finds no record. Each poll this tick reads
 # only those records, so a quiet fleet pays one glob. A record is removed
 # silently when its task record is gone or belongs to another busy generation,
 # or as soon as start_check_started finds a start proof. A record still without

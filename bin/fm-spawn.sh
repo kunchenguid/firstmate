@@ -1342,6 +1342,9 @@ fi
 # (fm_start_check_launch_epoch); arming without one, or failing to write the
 # record, returns nonzero with an error, so a launch is never reported as
 # checked when no check was armed. The worker itself is already running then.
+# The check is opt-in: without the home-local config/spawn-start-check flag
+# nothing is armed, locked, or pruned, except that a record left from when the
+# flag was present is removed so the watcher never judges a replaced launch.
 # FM_SPAWN_NO_START_CHECK=1 disables arming for a spawn whose watcher lives in
 # another home (bin/fm-remote-secondmate-control.sh sets it).
 # The remote path is called while holding STATE/.spawn-<id>.lock, which the only
@@ -1353,6 +1356,10 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [
   local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock locked=1 rc=0
 
   record="$STATE/$id.start-pending"
+  if [ ! -e "$CONFIG/spawn-start-check" ]; then
+    [ -e "$record" ] || return 0
+    enabled=0
+  fi
   [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0
   if [ "$enabled" -eq 1 ] && [ -z "$epoch" ]; then
     echo "error: $id launched, but no launch boundary was taken before delivery, so its start check was not armed; inspect the worker yourself in about two minutes" >&2

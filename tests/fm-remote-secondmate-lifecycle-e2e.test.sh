@@ -135,6 +135,8 @@ EOF
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
+# The parent opts into the spawn start check this suite exercises.
+touch "$PARENT/config/spawn-start-check"
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash

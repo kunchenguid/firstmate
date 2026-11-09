@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The spawn start check: bin/fm-spawn.sh arms STATE/<id>.start-pending, and
+# The spawn start check: in a home with the opt-in config/spawn-start-check
+# flag, bin/fm-spawn.sh arms STATE/<id>.start-pending, and
 # bin/fm-watch.sh's start_check_tick turns a launch with no start proof into one
 # named `check: start` wake at FM_START_CHECK_SECS, while the stale path stays
 # quiet for that pane. Real fm-spawn, real busy records, a real private tmux
@@ -105,6 +106,7 @@ test_spawn_arms_marker() {
     home="$case_dir/home"; proj="$case_dir/project"; wt="$case_dir/wt"
     fakebin=$(make_spawn_fakebin "$case_dir/fake" pi codex)
     fm_test_spawn_home "$home" "$harness"
+    touch "$home/config/spawn-start-check"
     fm_git_worktree "$proj" "$wt" "wt-$harness"
     fm_test_spawn_brief "$home" "$SPAWN_ID"
     out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$SPAWN_ID" "$proj" --mode no-mistakes --yolo off 2>&1) \
@@ -122,12 +124,14 @@ test_spawn_arms_marker() {
 }
 
 # A pi spawn into a fresh case home, after SPAWN_CASE_SETUP <fakebin> when set.
+# The home carries config/spawn-start-check unless SPAWN_CASE_UNFLAGGED=1.
 # Sets SPAWN_CASE_HOME, SPAWN_CASE_OUT and SPAWN_CASE_RC.
 spawn_case() {  # <case-name>
   local case_dir="$TMP_ROOT/$1" proj wt fakebin
   SPAWN_CASE_HOME="$case_dir/home"; proj="$case_dir/project"; wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" pi)
   fm_test_spawn_home "$SPAWN_CASE_HOME" pi
+  [ "${SPAWN_CASE_UNFLAGGED:-0}" = 1 ] || touch "$SPAWN_CASE_HOME/config/spawn-start-check"
   fm_git_worktree "$proj" "$wt" "wt-$(basename "$case_dir")"
   fm_test_spawn_brief "$SPAWN_CASE_HOME" "$SPAWN_ID"
   [ -z "${SPAWN_CASE_SETUP:-}" ] || "$SPAWN_CASE_SETUP" "$fakebin"
@@ -164,6 +168,50 @@ test_spawn_boundary_precedes_delivery() {
   [ "$epoch" -le "$(cat "$delivered")" ] \
     || fail "the start-check boundary $epoch was taken after the launch was delivered at $(cat "$delivered")"
   pass "a spawn takes its start-check boundary before it delivers the launch"
+}
+
+# One start_check_tick against <home>'s state, far past any deadline; prints the
+# number of start wakes it queued.
+tick_case_home() {  # <home>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config" FM_WAKE_QUEUE="$1/state/.wake-queue" \
+    bash -c '. "$1/bin/fm-watch.sh"; start_check_tick "$2"' _ "$ROOT" "$(($(date +%s) + 100000))" >/dev/null 2>&1 \
+    || fail "tick on $1 failed"
+  if [ -f "$1/state/.wake-queue" ]; then
+    awk -F '\t' '$3 == "check" && $4 ~ /^start:/' "$1/state/.wake-queue" | wc -l | tr -d ' '
+  else
+    printf 0
+  fi
+}
+
+# The check is opt-in: the same parked launch wakes once with the flag and never
+# without it, because an unflagged spawn arms no record for the watcher to judge.
+test_spawn_without_flag_arms_nothing() {
+  local flagged unflagged
+  spawn_case flagged
+  [ "$SPAWN_CASE_RC" = 0 ] || fail "flagged spawn failed: $SPAWN_CASE_OUT"
+  flagged=$SPAWN_CASE_HOME
+  [ -f "$flagged/state/$SPAWN_ID.start-pending" ] || fail "a flagged spawn armed no start check"
+  [ "$(tick_case_home "$flagged")" = 1 ] || fail "a flagged launch with no start proof did not wake once"
+  SPAWN_CASE_UNFLAGGED=1 spawn_case unflagged
+  [ "$SPAWN_CASE_RC" = 0 ] || fail "unflagged spawn failed: $SPAWN_CASE_OUT"
+  unflagged=$SPAWN_CASE_HOME
+  [ ! -e "$unflagged/state/$SPAWN_ID.start-pending" ] || fail "a spawn without config/spawn-start-check armed a start check"
+  [ "$(tick_case_home "$unflagged")" = 0 ] || fail "a launch spawned without config/spawn-start-check produced a start wake"
+  pass "without config/spawn-start-check a spawn arms no start check and the watcher sends no start wake"
+}
+
+# A record armed while the flag was present names a launch an unflagged spawn
+# replaces, so that spawn removes it.
+earlier_start_record() {  # <fakebin>
+  printf '1 - pi\n' > "$SPAWN_CASE_HOME/state/$SPAWN_ID.start-pending"
+}
+
+test_unflagged_spawn_clears_earlier_record() {
+  SPAWN_CASE_UNFLAGGED=1 SPAWN_CASE_SETUP=earlier_start_record spawn_case unflagged-earlier
+  [ "$SPAWN_CASE_RC" = 0 ] || fail "unflagged spawn failed: $SPAWN_CASE_OUT"
+  [ ! -e "$SPAWN_CASE_HOME/state/$SPAWN_ID.start-pending" ] \
+    || fail "a spawn without config/spawn-start-check kept a record armed while the flag was present"
+  pass "a spawn without config/spawn-start-check clears a record armed while the flag was present"
 }
 
 # A start-pending rename that fails, as on a full or read-only state directory.
@@ -786,6 +834,8 @@ test_watcher_loop_single_named_wake() {
 
 fm_test_run \
   test_spawn_arms_marker \
+  test_spawn_without_flag_arms_nothing \
+  test_unflagged_spawn_clears_earlier_record \
   test_spawn_boundary_precedes_delivery \
   test_spawn_fails_when_start_check_cannot_be_armed \
   test_proof_before_deadline_is_silent \
