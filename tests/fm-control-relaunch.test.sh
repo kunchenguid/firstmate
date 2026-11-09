@@ -3142,7 +3142,7 @@ test_native_grant_recovers_a_held_task_without_touching_its_item() {
     return 0
   }
   dir=$GRANT_CASE_DIR
-  sed -i 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' "$dir/home/state/ng1.meta"
+  sed -i.bak 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' "$dir/home/state/ng1.meta"
   grant=$(write_grant "$dir" ng1)
   before=$(cat "$dir/home/data/backlog.md")
 
@@ -3273,11 +3273,33 @@ test_native_grant_refuses_a_home_without_a_readable_backlog() {
   dir=$GRANT_CASE_DIR
   printf 'manual\n' > "$dir/home/config/backlog-backend"
   grant=$(write_grant "$dir" ng9)
+  tasks-axi "done" ng9 --file "$dir/home/data/backlog.md" >/dev/null
   out=$(run_spawn "$dir" ng9 --relaunch --native-grant "$grant"); rc=$?
-  expect_code 1 "$rc" "a grant must not recover a task in a manual-backlog home"$'\n'"$out"
-  assert_contains "$out" "machine-readable backlog" "the refusal should name the missing backlog"
+  expect_code 1 "$rc" "a grant must not recover a Done item in a manual-backlog home"$'\n'"$out"
+  assert_contains "$out" "not open work" "the refusal should name the closed item"
   assert_absent "$dir/fake/launched-command" "a refused recovery must launch nothing"
-  pass "granted recovery: a home with no machine-readable backlog refuses rather than launching unchecked"
+  rm -f "$dir/home/data/backlog.md"
+  : > "$dir/home/data/backlog.md"
+  rm -f "$dir/home/state/ng9.native-grant-spent"
+  out=$(run_spawn "$dir" ng9 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover a task with no backlog item"$'\n'"$out"
+  assert_absent "$dir/fake/launched-command" "a refused recovery must launch nothing"
+  pass "granted recovery: a manual-backlog home refuses a Done or missing item"
+}
+
+test_native_grant_recovers_a_held_item_in_a_manual_backlog_home() {
+  local dir out rc grant
+  grant_case_or_skip grant-manual-held ng11 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  grant=$(write_grant "$dir" ng11)
+  out=$(run_spawn "$dir" ng11 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 0 "$rc" "a readable held item should recover in a manual-backlog home"$'\n'"$out"
+  [ -s "$dir/fake/launched-command" ] || fail "granted recovery launched nothing"
+  pass "granted recovery: a readable held item recovers in a manual-backlog home"
 }
 
 test_native_grant_refuses_a_decoded_nul_in_an_identity_field() {
@@ -3562,6 +3584,7 @@ test_native_grant_refuses_malformed_expired_and_mismatched_grants
 test_native_grant_is_required_to_bypass_the_dispatchability_gate
 test_native_grant_keeps_the_recorded_account
 test_native_grant_refuses_a_home_without_a_readable_backlog
+test_native_grant_recovers_a_held_item_in_a_manual_backlog_home
 test_native_grant_refuses_a_decoded_nul_in_an_identity_field
 test_native_grant_spends_the_bytes_it_checked
 test_native_grant_refuses_nul_padding

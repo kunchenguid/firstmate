@@ -5038,8 +5038,17 @@ else
     exit 1
   fi
   if [ "$NATIVE_GRANT_VALID" -eq 1 ]; then
-    echo "error: a native grant recovers only an open item in a machine-readable backlog, and task $ID has none to read here (${FM_BACKLOG_TRANSITION_SKIP:-backlog transitions do not apply}); refusing" >&2
-    exit 1
+    if ! fm_backlog_row_probe "$DATA" "$ID"; then
+      echo "error: a native grant recovers only an existing open backlog item, and task $ID's item could not be read here (${FM_BACKLOG_ROW_ERROR:-${FM_BACKLOG_ROW_RESULT:-no item}}); refusing" >&2
+      exit 1
+    fi
+    case "$FM_BACKLOG_ROW_STATE" in
+    queued\ * | in_flight\ *) ;;
+    *)
+      echo "error: this home's backlog item $ID is in state $FM_BACKLOG_ROW_STATE, which is not open work a native grant may recover; refusing" >&2
+      exit 1
+      ;;
+    esac
   fi
 fi
 
