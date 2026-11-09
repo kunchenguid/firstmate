@@ -46,6 +46,9 @@
 # everywhere; the `config/backlog-backend=manual` knob only governs firstmate's
 # own hand-editing of its own backlog, not this validated helper. Idempotent:
 # re-running converges. Atomic: on any move failure nothing moves.
+# Every move names its markdown backlog files explicitly and pins
+# `--backend markdown`, so a `.tasks.toml` in the caller's working directory
+# cannot redirect the move to another backend.
 # See AGENTS.md project management and task lifecycle.
 # Remote routes use an outbox handoff: one atomic local tasks-axi mv removes the
 # selected set from the dispatchable backlog into data/handoff/<id>.outbox.md,
@@ -740,7 +743,7 @@ remove_interrupted_source_duplicates() { # <outbox> <keys...>
       backlog_key_section "$outbox" "$key" >/dev/null 2>&1 || continue
       if backlog_key_section "$MAIN_BACKLOG" "$key" >/dev/null 2>&1; then
         remaining=$((remaining + 1))
-        if tasks-axi rm "$key" --file "$MAIN_BACKLOG" >/dev/null 2>&1; then
+        if tasks-axi rm "$key" --file "$MAIN_BACKLOG" --backend markdown >/dev/null 2>&1; then
           progress=$((progress + 1))
         fi
       fi
@@ -824,7 +827,7 @@ remote_handoff() { # <secondmate-id> <keys...>
   fi
   seed_backlog_scaffold "$outbox"
   if [ "${#to_move[@]}" -gt 0 ]; then
-    if ! mv_out=$(tasks-axi mv "${to_move[@]}" --file "$MAIN_BACKLOG" --to "$outbox" 2>&1); then
+    if ! mv_out=$(tasks-axi mv "${to_move[@]}" --file "$MAIN_BACKLOG" --to "$outbox" --backend markdown 2>&1); then
       [ -z "$mv_out" ] || printf '%s\n' "$mv_out" >&2
       echo "error: atomic outbox staging failed; nothing new was handed off" >&2
       return 1
@@ -1069,7 +1072,7 @@ fi
 # together and, on any failure, neither backlog's content changes - the only
 # cleanup is a scaffold we just created. tasks-axi writes both its success and
 # error output to stdout, so capture it and surface it only on failure.
-if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BACKLOG" 2>&1); then
+if ! MV_OUT=$(tasks-axi mv "${TO_MOVE[@]}" --file "$MAIN_BACKLOG" --to "$SUB_BACKLOG" --backend markdown 2>&1); then
   if [ "$SUB_CREATED" -eq 1 ]; then
     rm -f "$SUB_BACKLOG"
   fi

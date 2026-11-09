@@ -218,6 +218,40 @@ export FM_REMOTE_JOB_TIMEOUT=5
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
+# ps lstart follows the caller's locale (de_DE renders "Fr. 16 Okt. ..."),
+# while lock and claim ownership records are written by one process and
+# verified by others, including SSH callers with no locale. A recorded live
+# owner must still verify under a checker whose locale renders lstart
+# differently, or the checker declares it dead and a second worker splits the
+# queue - the z590 remote job worker churn.
+IDENTITY_LOCALE=
+while IFS= read -r CANDIDATE; do
+  [ -n "$IDENTITY_LOCALE" ] && break
+  case "$CANDIDATE" in C|C.*|POSIX|en_US*) continue ;; esac
+  [ "$(LC_ALL="$CANDIDATE" ps -p "$$" -o lstart= 2>/dev/null)" = "$(LC_ALL=C ps -p "$$" -o lstart= 2>/dev/null)" ] && continue
+  IDENTITY_LOCALE=$CANDIDATE
+done <<EOF
+$(locale -a 2>/dev/null)
+EOF
+if [ -z "$IDENTITY_LOCALE" ]; then
+  printf 'note: no installed locale renders ps lstart differently from C; locale-invariance case is inert here\n'
+fi
+if [ -n "$IDENTITY_LOCALE" ]; then
+  RECORDED_START=$(LC_ALL="$IDENTITY_LOCALE" fm_remote_job_process_start "$$")
+  CHECKED_START=$(LC_ALL=C fm_remote_job_process_start "$$")
+  [ "$RECORDED_START" = "$CHECKED_START" ] \
+    || fail "the process start identity changed with the caller's locale"$'\n'"  recorded under $IDENTITY_LOCALE: $RECORDED_START"$'\n'"  checked under C:               $CHECKED_START"
+  IDENTITY_RECORD="$TMP_ROOT/identity-record"
+  mkdir -p "$IDENTITY_RECORD"
+  printf '%s\n' "$$" > "$IDENTITY_RECORD/pid"
+  printf '%s\n' "$RECORDED_START" > "$IDENTITY_RECORD/start"
+  LC_ALL="$IDENTITY_LOCALE" fm_remote_job_process_command "$$" > "$IDENTITY_RECORD/command"
+  LC_ALL=C fm_remote_job_recorded_owner_alive "$IDENTITY_RECORD" \
+    || fail "a live owner recorded under $IDENTITY_LOCALE looked dead to a C-locale checker"
+  rm -rf -- "$IDENTITY_RECORD"
+  pass "lock and claim owner identity stays locale-invariant ($IDENTITY_LOCALE)"
+fi
+
 LOCAL_BIN_PARENT="$ACCOUNT_HOME/.local"
 LOCAL_BIN_TARGET="$TMP_ROOT/local-bin-target"
 mkdir -p "$LOCAL_BIN_PARENT" "$LOCAL_BIN_TARGET"

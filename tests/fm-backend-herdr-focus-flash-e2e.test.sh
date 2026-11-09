@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-Herdr regression for the projected-cleanup focus flash (upstream
-# ogulcancelik/herdr#1621 family, live on 0.7.5 stable).
+# herdrdev/herdr#1621 family, live on 0.7.5 stable).
 # Part A reproduces the OLD path: an explicit last-pane close that empties a
 # non-focused workspace steals the focused workspace.
 # Part B proves the mitigation: the focus-safe emptying-close plan
@@ -15,7 +15,7 @@
 # On a future release whose explicit close preserves focus, Part A records
 # that and Parts B and C keep outcome-only assertions, so no version is guessed.
 # Every CLI operation is routed through one guarded named non-default lab, and
-# lab teardown verifies that the default fleet session is byte-identical.
+# lab teardown verifies that the configured fleet session is byte-identical.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -405,5 +405,5 @@ else
   pass "version floor: an unconfigured home stays projected on herdr $LIVE_VERSION and the explicit opt-in agrees"
 fi
 
-printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s default-session-tripwire=armed\n' \
+printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s fleet-session-tripwire=armed\n' \
   "$LIVE_VERSION" "$LIVE_PROTOCOL" "$STEAL_LIVE" "$FLOOR_VERDICT"

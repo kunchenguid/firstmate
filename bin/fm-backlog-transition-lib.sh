@@ -42,10 +42,10 @@
 # with it the completion links, so a process killed between the two halves would
 # leave nothing to reconstruct the close from. It writes
 # `state/<id>.backlog-close` first, and removes it once the close lands.
-# The writer and replay share one complete-record validator, and teardown stages
-# that record before destructive cleanup, so it never publishes or acts on a close
-# replay would reject. The validator pins the data path to this home's configured
-# root before any recovery mutation, then re-runs exactly that close.
+# The writer and replay share one complete-record validator, so teardown never
+# publishes or acts on a close replay would reject. The validator pins the data
+# path to this home's configured root before any recovery mutation, then re-runs
+# exactly that close.
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
@@ -78,9 +78,9 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # library does not source fm-tasks-axi-lib.sh does not apply.
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
-# fm-pr-lib.sh owns which URL is a Gerrit change. It is functions and empty
-# globals only, so it is sourced once rather than re-initialising a caller's
-# parsed identity.
+# fm-pr-lib.sh owns which URL is a Gerrit change or a GitLab merge request. It
+# is functions and empty globals only, so it is sourced once rather than
+# re-initialising a caller's parsed identity.
 if ! declare -F fm_pr_url_parse >/dev/null 2>&1; then
   # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
@@ -372,10 +372,9 @@ fm_tasks_axi() {
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   local data=$1 id=$2 out status addressing_status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
   shift 2
-  # A non-positive bound is not a bound (fm-timeout-lib.sh), and a padded zero
-  # such as 00 is still zero, so the digits test alone would let the very read
-  # this bound exists to prevent back in. Compare arithmetically, tolerating a
-  # value too large for the shell to compare at all.
+  # Enforce fm-timeout-lib.sh's bound contract arithmetically: the digits test
+  # alone accepts padded zero such as 00. Tolerate a value too large for the
+  # shell to compare at all.
   case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
   [ "$secs" -gt 0 ] 2>/dev/null || secs=10
   fm_backlog_tasks_axi_addressing "$data"
@@ -517,21 +516,27 @@ fm_backlog_start() {  # <data-dir> <id>
 }
 
 # tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
-fm_backlog_pr_is_gerrit_change() {  # <url>
-  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+# and refuses anything else, so a Gerrit change or GitLab merge request URL is
+# recorded on the row as a note instead. Prints the note's label for such a URL
+# and fails for one tasks-axi accepts. The subshell keeps the parse from
+# overwriting a caller's FM_PR_* identity.
+fm_backlog_pr_note_label() {  # <url>
+  ( fm_pr_url_parse "$1" || exit 1
+    case "$FM_PR_PROVIDER" in
+      gerrit) printf 'Gerrit change\n' ;;
+      gitlab) printf 'GitLab merge request\n' ;;
+      *) exit 1 ;;
+    esac )
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg previous_arg=''
+  local data=$1 id=$2 arg label previous_arg=''
   local -a done_args=()
   shift 2
   for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
+    if [ "$previous_arg" = --pr ] && label=$(fm_backlog_pr_note_label "$arg"); then
       done_args[${#done_args[@]}-1]=--note
-      done_args+=("Gerrit change $arg")
+      done_args+=("$label $arg")
     else
       done_args+=("$arg")
     fi
@@ -543,7 +548,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) ! fm_backlog_pr_is_gerrit_change "$value" ;;
+    --pr) ! fm_backlog_pr_note_label "$value" >/dev/null ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -579,7 +584,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
           deliverable="${deliverable:+$deliverable; }PR $arg"
           row_args=(--pr "$arg")
         else
-          deliverable="${deliverable:+$deliverable; }Gerrit change $arg"
+          deliverable="${deliverable:+$deliverable; }$(fm_backlog_pr_note_label "$arg") $arg"
         fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
@@ -977,7 +982,10 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          [ "${args[1]}" = "local%20main" ] \
+            || [ "${args[1]}" = "discarded" ]
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1151,7 +1159,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = "local%20main" ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"

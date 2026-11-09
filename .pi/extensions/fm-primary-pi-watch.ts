@@ -19,10 +19,11 @@
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// not consumed. An idle main consumes at a prompt-bearing before_agent_start;
+// a streaming main consumes at the user message_start carrying the exact wake
+// text. A no-prompt custom trigger cannot consume it, even with equal content.
+// Either user boundary finishes the pending record, and a still-unconsumed
+// record rides the replacement handoff.
 //
 // Postures (stated once here; docs/pi-supervision-branch.md "Postures"):
 // the away-posture record state/.afk-contract is read as a file at every
@@ -257,6 +258,16 @@ function liveArmChild(owner: SessionGeneration): ChildProcess | null {
   return child;
 }
 
+// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
+// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
+// Node on Windows sees Windows pids directly, so a tagged holder is compared
+// and probed by its digits. Any other value is no usable identity, "".
+function lockHolderPid(lockPid: string): string {
+  const tagged = process.platform === "win32" ? /^win:([0-9]+)$/.exec(lockPid) : null;
+  const pid = tagged ? tagged[1] : lockPid;
+  return /^[0-9]+$/.test(pid) && pid !== "1" ? pid : "";
+}
+
 function lockOwnership(): LockOwnership {
   let lockPid = "";
   try {
@@ -264,18 +275,44 @@ function lockOwnership(): LockOwnership {
   } catch {
     return "missing";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  const holderPid = lockHolderPid(lockPid);
+  if (!holderPid) return "other";
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === holderPid) return "owned";
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(holderPid) ? "other" : "missing";
+}
+
+// A Pi command started from inside the live session, such as the `pi --help`
+// capability probe in bin/fm-spawn.sh, auto-loads this extension too and passes
+// lockOwnership() through the same ancestor walk. Its pid dies at once, so the
+// marker must keep naming the live session above it (#5202). Pid equality with
+// the lock is not required because a wrapper such as pi-signed may hold the lock
+// while the extension host runs as its child.
+function markerNamesLiveAncestor(): boolean {
+  let markerPid = "";
+  try {
+    markerPid = readFileSync(marker, "utf8").split(/\r?\n/)[1] ?? "";
+  } catch {
+    return false;
+  }
+  if (!/^[0-9]+$/.test(markerPid) || markerPid === String(process.pid) || !pidAlive(markerPid)) {
+    return false;
+  }
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    pid = parentPid(pid);
+    if (!pid || pid === "1") return false;
+    if (pid === markerPid) return true;
+  }
+  return false;
 }
 
 function publishGenerationOwner(generation: SessionGeneration, phase: "active" | "handoff"): void {
-  if (lockOwnership() === "other") return;
+  if (lockOwnership() === "other" || markerNamesLiveAncestor()) return;
   mkdirSync(state, { recursive: true });
   const temporary = `${marker}.tmp-${process.pid}-${generation.id}`;
   writeFileSync(
@@ -992,16 +1029,22 @@ export default function (pi: ExtensionAPI) {
       appendExtensionLog(
         `restore attempt=${attempt} predecessor=${predecessorArmPid || "none"} start=${replacement.ok ? `ok pid=${successorChild?.pid ?? "none"}` : "failed"}`,
       );
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+      const ready = Boolean(replacement.ok && successorChild && await waitForReadiness(successorChild));
+      if (ready && successorChild && liveArmChild(owner) === successorChild) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
       }
       if (replacement.ok) {
-        appendExtensionLog(`restore attempt=${attempt} readiness=timeout pid=${successorChild?.pid ?? "none"}`);
-        failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
-        if (!(await retireArm(successorChild))) {
-          return {
-            failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
-          };
+        if (ready) {
+          appendExtensionLog(`restore attempt=${attempt} readiness=dead pid=${successorChild?.pid ?? "none"}`);
+          failure = "watcher: FAILED - Pi extension could not verify a live successor watcher";
+        } else {
+          appendExtensionLog(`restore attempt=${attempt} readiness=timeout pid=${successorChild?.pid ?? "none"}`);
+          failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
+          if (!(await retireArm(successorChild))) {
+            return {
+              failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+            };
+          }
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
@@ -1110,6 +1153,20 @@ export default function (pi: ExtensionAPI) {
       if (reason && !armPendingActionable.has(armChild)) {
         const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
         armPendingActionable.set(armChild, pending);
+        // `exit` can precede the final stdout/stderr data events. If that exit
+        // provisionally classified a partial buffer as a failure, replace its
+        // scheduled retry with the actionable restoration path once the full
+        // line arrives.
+        if (settled) {
+          enqueuePendingActionable(owner, pending);
+          if (!generationIsLive(owner)) return;
+          if (owner.retryTimer) {
+            clearTimeout(owner.retryTimer);
+            owner.retryTimer = null;
+          }
+          owner.retryFailures = 0;
+          void processPendingActionables(owner);
+        }
       }
     };
     const releaseChild = (): void => {
@@ -1124,7 +1181,7 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
-    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    const finishArm = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
       resolveClosed();
@@ -1152,6 +1209,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       scheduleRetry(owner, classification.message, predecessor);
+    };
+    armChild.on("close", finishArm);
+    armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      setImmediate(() => finishArm(code, signal));
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
@@ -1200,6 +1261,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("before_agent_start", (event) => {
+    // A custom message cannot consume a pending user wake, even with equal text.
+    if (!("prompt" in event)) return;
     consumeWake(generation, event.prompt);
   });
   pi.on?.("message_start", (event) => {

@@ -690,4 +690,26 @@ assert_not_contains "$fresh_out" 'SECONDMATE_HANDOFF:' "unconfigured bootstrap e
 [ ! -s "$SSH_COUNT" ] || fail "unconfigured bootstrap touched SSH"
 pass "unconfigured bootstrap has no remote handoff behavior"
 
+# A .tasks.toml for another backend in the receiver's working directory must
+# not redirect the receipt, which names explicit markdown files.
+RECV_HOME="$TMP_ROOT/decoy-receive-home"
+RECV_DECOY="$TMP_ROOT/decoy-receive-cwd"
+mkdir -p "$RECV_HOME/bin" "$RECV_HOME/data" "$RECV_HOME/state/handoff" "$RECV_DECOY"
+printf 'fixture\n' > "$RECV_HOME/AGENTS.md"
+printf 'ios\n' > "$RECV_HOME/.fm-secondmate-home"
+printf '## Queued\n\n## Done\n' > "$RECV_HOME/data/backlog.md"
+printf '## Queued\n- [ ] decoy-recv - received despite a cwd beads config (repo: alpha)\n\n## Done\n' \
+  > "$RECV_HOME/state/handoff/ios.outbox.md"
+recv_bytes=$(LC_ALL=C wc -c < "$RECV_HOME/state/handoff/ios.outbox.md" | tr -d ' ')
+recv_hash=$(sha256_file "$RECV_HOME/state/handoff/ios.outbox.md")
+printf '1\n%s\n%s\n' "$recv_bytes" "$recv_hash" > "$RECV_HOME/state/handoff/.ios.upload-generation"
+printf 'backend = "beads"\n\n[beads]\ndb = "%s/missing/beads.db"\n' "$RECV_DECOY" > "$RECV_DECOY/.tasks.toml"
+recv_out=$(cd "$RECV_DECOY" && FM_HOME="$RECV_HOME" "$ROOT/bin/fm-backlog-receive.sh" \
+  state/handoff/ios.outbox.md "$recv_bytes" "$recv_hash" 1 2>&1) \
+  || fail "receipt from a cwd with a beads .tasks.toml failed: $recv_out"
+assert_contains "$recv_out" 'received: ios moved=1 already=0' "decoy-cwd receipt did not move the item"
+assert_grep 'decoy-recv' "$RECV_HOME/data/backlog.md" "decoy-cwd receipt did not reach the destination backlog"
+assert_absent "$RECV_HOME/state/handoff/ios.outbox.md" "decoy-cwd receipt kept the delivered outbox"
+pass "a cwd .tasks.toml for another backend does not redirect a markdown receipt"
+
 echo "ALL TESTS PASSED"

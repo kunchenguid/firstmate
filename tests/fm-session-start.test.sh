@@ -295,11 +295,10 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: the window inventory contains only
+# the given live target's window.
 make_fake_tmux() {
-  local fakebin=$1 live=$2
+  local fakebin=$1 live=$2 live_window=${2#*:}
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -313,6 +312,10 @@ case "\${1:-}" in
     done
     [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
     exit 1
+    ;;
+  list-windows)
+    printf '%s\n' "$live_window"
+    exit 0
     ;;
 esac
 exit 1
@@ -794,6 +797,7 @@ EOF
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
+  assert_contains "$out" "fm-role: user (default)" "digest did not report the home's firstmate-repository role"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
@@ -936,6 +940,23 @@ EOF
   pass "locked session start freezes trace context and lock refusal leaves it unchanged"
 }
 
+# Wait until <dir> holds <count> entries. Forty workers poll this at once, so
+# the count is a builtin glob rather than a find pipeline (no process per
+# poll), and the wait ends early once the directory is gone, the suite has
+# died, or FM_TEST_STUB_MAX_BLOCK_SECONDS has passed, so an interrupted run
+# cannot leave forty pollers spinning under init.
+lock_concurrency_barrier() {  # <dir> <count>
+  local dir=$1 want=$2 start=$SECONDS entries
+  while [ -d "$dir" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+    && [ $((SECONDS - start)) -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+    entries=("$dir"/*)
+    [ -e "${entries[0]}" ] || entries=()
+    [ "${#entries[@]}" -lt "$want" ] || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
@@ -984,18 +1005,14 @@ SH
       harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
-      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_concurrency_barrier "$ready" 40
       if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
       : > "$completed/$i"
-      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_concurrency_barrier "$completed" 40
     ) &
     pids="$pids $!"
     i=$((i + 1))
@@ -2386,6 +2403,31 @@ SH
 
 # --- context re-emit (--reemit) ----------------------------------------------
 
+test_reemit_cue_survives_the_hook_output_preview() {
+  local rec root home fakebin reemit normal head2k
+  rec=$(new_world reemit-cue)
+  IFS='|' read -r root home fakebin <<FIXTURE
+$rec
+FIXTURE
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$home/data"
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "preference line %04d padding padding padding\n", i }' > "$home/data/captain.md"
+
+  normal=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$normal" "RE-EMIT CUE" "a normal start printed the re-emit cue"
+
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+  [ "${#reemit}" -gt 10000 ] || fail "re-emit fixture did not exceed the hook output limit"
+  head2k=$(printf '%s' "$reemit" | head -c 2000)
+  assert_contains "$head2k" "RE-EMIT CUE" "the re-emit cue is not inside the first 2000 characters"
+  assert_contains "$head2k" "Full output saved to" "the re-emit cue does not point at the saved output"
+
+  pass "--reemit puts its read cue in the first 2000 characters and a normal start omits it"
+}
+
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
   local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
@@ -2933,10 +2975,48 @@ EOF
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp supervision block missing"
   assert_contains "$out" "Mode: omp (Oh My Pi) extension background wake." "omp snippet missing from session start"
   assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp extension load diagnostic missing"
-  assert_contains "$out" "so $root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  assert_contains "$out" "$root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'exit omp and relaunch through `fm <project>` (the launcher sets FM_HOME and --cwd)' "omp diagnostic for a non-checkout home must direct to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp diagnostic omits the bare omp warning"
+  assert_not_contains "$out" "restart omp with this home as its working directory" "omp diagnostic still tells a non-checkout home to restart omp inside it"
   assert_not_contains "$out" "PI_WATCH_EXTENSION" "omp primary must not receive the Pi diagnostic"
   assert_not_contains "$out" "project trust" "omp diagnostic must not carry Pi's trust prerequisite"
   pass "session start emits the omp block and reports omp extension load state"
+}
+
+test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause() {
+  local rec root home fakebin out
+  rec=$(new_world omp-checkout-home)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+  mkdir -p "$root/state" "$root/data" "$root/config"
+
+  # Home is the checkout, FM_HOME exported, no marker: today's wording, no cause line.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT FM_FAKE_HARNESS=omp \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp diagnostic named the launcher for the checkout home"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause that no fact establishes"
+
+  # FM_HOME unset in the process environment.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u FM_HOME FM_FAKE_HARNESS=omp \
+    FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost the checkout wording with FM_HOME unset"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause for the checkout home with FM_HOME unset"
+
+  # Marker names a pid that is not this session.
+  install_omp_extension_fixtures "$root"
+  write_omp_loaded_markers "$root" "$root" 424242
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT FM_FAKE_HARNESS=omp \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "stale-pid marker must still report not loaded"
+  assert_contains "$out" "OMP_WATCH_CAUSE: the extension marker $root/state/.omp-watch-extension-loaded names pid 424242, which is not this session" "omp diagnostic did not name the foreign marker pid"
+  assert_not_contains "$out" "FM_HOME is unset" "omp diagnostic named an unset FM_HOME cause"
+  pass "omp diagnostic keeps today's wording for the checkout home and names the establishable cause"
 }
 
 test_omp_diagnostic_accepts_prelock_loaded_marker() {
@@ -3063,6 +3143,7 @@ test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_rejects_handoff_generation_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_omp_supervision_block_and_diagnostic
+test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause
 test_omp_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
@@ -3071,6 +3152,7 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

@@ -14,9 +14,16 @@
 #       the old gen are rejected as stale from then on.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--turn-ended]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
+#       A non-busy event also clears active stream evidence and closes any
+#       request ordering record, so a settled or unknown worker never leaves
+#       an observation standing.
+#       --turn-ended also touches state/<id>.turn-ended, the watcher
+#       notification, under the same lock, so a writer whose gen was refused,
+#       or whose incarnation is replaced right after, never signals the
+#       replacement.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
 #       hook that outlives its incarnation fails closed here. The legacy
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
@@ -35,6 +42,13 @@
 #       an old task from retiring a newly armed incarnation. A missing sidecar
 #       is already retired, so any orphan record is removed idempotently.
 #
+#   stream <state-dir> <id> <open|progress|close> --gen G --request N
+#       Mutate the optional Pi stream contract owned by fm-busy-lib.sh.
+#       Open requires a strictly newer request; open and progress both require
+#       a busy pi-ext record, and progress and close must name the recorded
+#       request. Close removes active evidence before persisting closed
+#       ordering, so a persistence failure cannot leave observation active.
+#
 # Exit codes: 0 applied; 1 refused (stale gen, unarmed task, lock timeout,
 # invalid input); 2 usage. Adapter hook command lines append `|| true` so a
 # refusal never breaks the harness's own lifecycle.
@@ -44,8 +58,9 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--turn-ended]
   fm-busy-event.sh progress <state-dir> <id> --gen G
+  fm-busy-event.sh stream <state-dir> <id> <open|progress|close> --gen G --request N
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -58,7 +73,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=${1:-}
 case "$CMD" in
-  arm|apply|progress|retire) shift ;;
+  arm|apply|progress|stream|retire) shift ;;
   *) usage ;;
 esac
 
@@ -72,8 +87,11 @@ case "$ID" in *[!A-Za-z0-9._-]*) echo "error: invalid task id" >&2; exit 1 ;; es
 NEW_STATE=
 GEN=
 USE_CURRENT_GEN=0
+TURN_ENDED=0
 SOURCE=
 EVENT=
+STREAM_OP=
+REQUEST=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -81,6 +99,9 @@ elif [ "$CMD" = arm ]; then
   NEW_STATE=busy
   SOURCE=fm-spawn
   EVENT=launch-brief
+elif [ "$CMD" = stream ]; then
+  STREAM_OP=${1:-}
+  case "$STREAM_OP" in open|progress|close) shift ;; *) usage ;; esac
 fi
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -89,6 +110,8 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --turn-ended) [ "$CMD" = apply ] || usage; TURN_ENDED=1; shift ;;
+    --request) REQUEST=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -99,6 +122,10 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
 fi
 
 [ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
+if [ "$CMD" = stream ]; then
+  [ "$USE_CURRENT_GEN" = 0 ] || usage
+  fm_busy_stream_uint_valid "$REQUEST" || usage
+fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
@@ -118,23 +145,35 @@ else
 fi
 
 # Serialize writers. The lock protects seq advancement and the sidecar/record
-# pair; a holder that died mid-write is broken after FM_BUSY_LOCK_STALE_SECS.
+# pair; a holder that died mid-write is broken once its lock is
+# FM_BUSY_LOCK_STALE_SECS old. A waiter keeps polling until that age can have
+# been reached, so a lock orphaned moments ago by a killed writer (teardown
+# kills a worker whose exit hook may be mid-write) is broken on the first try
+# instead of refused until some later retry. A lock that stays younger than the
+# stale bound for the whole wait - live writers repeatedly re-taking it, or an
+# mtime in the future - still ends in a lock-timeout refusal, about
+# FM_BUSY_LOCK_STALE_SECS + 2 seconds after the wait began.
 lock_acquire() {
-  local tries=0 now mtime age
+  local stale=${FM_BUSY_LOCK_STALE_SECS:-5} start now mtime age
+  case "$stale" in ''|*[!0-9]*) stale=5 ;; esac
+  stale=$((10#$stale))
+  start=$(date +%s)
   while ! mkdir "$LOCK" 2>/dev/null; do
-    tries=$((tries + 1))
-    if [ "$tries" -ge 40 ]; then
-      now=$(date +%s)
-      mtime=$(lock_mtime "$LOCK" || true)
-      # Anything unreadable or non-numeric reads as "just created", so an
-      # unforeseen stat surprise degrades to a lock-timeout refusal instead of
-      # aborting the writer - and its caller, fm-teardown.sh - under `set -u`.
-      case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
-      age=$((now - mtime))
-      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
-        rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
-        mkdir "$LOCK" 2>/dev/null && break
-      fi
+    now=$(date +%s)
+    mtime=$(lock_mtime "$LOCK" || true)
+    # Anything unreadable or non-numeric reads as "just created", so an
+    # unforeseen stat surprise degrades to a lock-timeout refusal instead of
+    # aborting the writer - and its caller, fm-teardown.sh - under `set -u`.
+    case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+    age=$((now - mtime))
+    if [ "$age" -ge "$stale" ]; then
+      rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
+      mkdir "$LOCK" 2>/dev/null && break
+    fi
+    # Whole-second clocks: once stale + 2 seconds have passed since the wait
+    # began, any lock that already existed then has crossed the stale bound
+    # above, so only a younger, re-taken lock can still be in the way.
+    if [ $((now - start)) -gt $((stale + 1)) ]; then
       echo "error: busy-state lock timeout for $ID" >&2
       return 1
     fi
@@ -152,6 +191,23 @@ write_record() {  # <gen> <seq>
   mv -f "$tmp" "$REC"
 }
 
+clear_stream() {
+  local order order_gen request phase
+  # Active observation must disappear even when closing-order persistence fails.
+  # The retained order still denies duplicate open, and progress needs a marker.
+  rm -f "$STATE/$ID.model-stream" || return 1
+  if order=$(fm_busy_stream_order_read "$STATE" "$ID"); then
+    read -r order_gen request phase <<< "$order"
+    printf 'v1 gen=%s request=%s phase=closed\n' "$order_gen" "$request" > "$STATE/$ID.model-stream-order.tmp.$$" &&
+      mv -f "$STATE/$ID.model-stream-order.tmp.$$" "$STATE/$ID.model-stream-order" || return 1
+  fi
+  return 0
+}
+
+clear_stream_incarnation() {
+  rm -f "$STATE/$ID.model-stream" "$STATE/$ID.model-stream-order" "$STATE/$ID.model-progress"
+}
+
 old_umask=$(umask)
 umask 077
 
@@ -160,7 +216,7 @@ if [ "$CMD" = arm ]; then
   lock_acquire || exit 1
   {
     printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
-      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress"
+      && write_record "$GEN" 1 && rm -f "$STATE/$ID.progress" && clear_stream_incarnation
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
   umask "$old_umask"
@@ -183,12 +239,12 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" "$STATE/$ID.progress" || {
+    if ! { rm -f "$REC" "$STATE/$ID.progress" && clear_stream_incarnation; }; then
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
       exit 1
-    }
+    fi
     lock_release
     umask "$old_umask"
     exit 0
@@ -208,12 +264,12 @@ if [ "$GEN" != "$CURRENT" ]; then
   exit 1
 fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" || {
+  if ! { rm -f "$GEN_FILE" "$REC" "$STATE/$ID.progress" && clear_stream_incarnation; }; then
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
     exit 1
-  }
+  fi
   lock_release
   umask "$old_umask"
   exit 0
@@ -222,6 +278,49 @@ if [ "$CMD" = progress ]; then
   touch "$STATE/$ID.progress" || { lock_release; umask "$old_umask"; exit 1; }
   lock_release
   umask "$old_umask"
+  exit 0
+fi
+if [ "$CMD" = stream ]; then
+  order_gen=$GEN old_request=0 phase=closed rev=1
+  if [ -e "$STATE/$ID.model-stream-order" ]; then
+    order=$(fm_busy_stream_order_read "$STATE" "$ID") || { lock_release; exit 1; }
+    read -r order_gen old_request phase <<< "$order"
+    [ "$order_gen" = "$GEN" ] || { lock_release; exit 1; }
+  fi
+  if [ "$STREAM_OP" = open ]; then
+    [ "$REQUEST" -gt "$old_request" ] || { lock_release; exit 1; }
+  else
+    [ "$REQUEST" = "$old_request" ] || { lock_release; exit 1; }
+  fi
+  if [ "$STREAM_OP" = close ]; then
+    clear_stream || { lock_release; exit 1; }
+    lock_release
+    exit 0
+  fi
+  case "$(fm_busy_record_read "$STATE" "$ID")" in 'busy pi-ext '*) : ;; *) lock_release; exit 1 ;; esac
+  if [ "$STREAM_OP" = progress ]; then
+    [ "$phase" = active ] || { lock_release; exit 1; }
+    snapshot=$(fm_busy_stream_record_read "$STATE/$ID.model-stream") || { lock_release; exit 1; }
+    read -r stream_gen stream_request old_rev _ <<< "$snapshot"
+    [ "$stream_gen" = "$GEN" ] && [ "$stream_request" = "$REQUEST" ] || { lock_release; exit 1; }
+    rev=$((old_rev + 1))
+  else
+    if ! { printf 'v1 gen=%s request=%s phase=active\n' "$GEN" "$REQUEST" > "$STATE/$ID.model-stream-order.tmp.$$" &&
+      mv -f "$STATE/$ID.model-stream-order.tmp.$$" "$STATE/$ID.model-stream-order"; }; then
+      lock_release; exit 1
+    fi
+  fi
+  if ! { printf 'v1 gen=%s request=%s rev=%s ts=%s\n' "$GEN" "$REQUEST" "$rev" "$(date +%s)" > "$STATE/$ID.model-stream.tmp.$$" &&
+    mv -f "$STATE/$ID.model-stream.tmp.$$" "$STATE/$ID.model-stream"; }; then
+    lock_release; exit 1
+  fi
+  if [ "$STREAM_OP" = progress ]; then
+    if ! { cp "$STATE/$ID.model-stream" "$STATE/$ID.model-progress.tmp.$$" &&
+      mv -f "$STATE/$ID.model-progress.tmp.$$" "$STATE/$ID.model-progress"; }; then
+      lock_release; exit 1
+    fi
+  fi
+  lock_release
   exit 0
 fi
 OLD_SEQ=0
@@ -244,6 +343,11 @@ write_record "$GEN" $((OLD_SEQ + 1)) || {
   echo "error: record write failed for $ID" >&2
   exit 1
 }
-lock_release
+if [ "$NEW_STATE" != busy ]; then
+  clear_stream || { lock_release; exit 1; }
+fi
 umask "$old_umask"
+# Best effort: the record already settled, so a failed touch never refuses it.
+[ "$TURN_ENDED" = 0 ] || touch "$STATE/$ID.turn-ended" 2>/dev/null || true
+lock_release
 exit 0
