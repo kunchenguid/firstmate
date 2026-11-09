@@ -21,17 +21,24 @@
 # it. Equal merge bases anchor on the local <default>, as does a local <default>
 # that already contains the branch, whose empty review says why; two unrelated
 # merge bases are reported and anchor there too.
-# When state/<id>.meta records pr= as a GitHub pull-request URL, a Forgejo
-# pull-request URL (addressed /pulls/<n> but served by the instance as the
-# same refs/pull/<n>/head ref), or a bare number for an open PR, the compare
-# side is ALWAYS a freshly fetched
-# refs/pull/<n>/head by default so review stays current after no-mistakes fix
-# rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
+# When state/<id>.meta records pr= as a GitHub pull-request URL, a GitLab
+# merge request URL, a Forgejo pull-request URL (addressed /pulls/<n> but
+# served by the instance as the same refs/pull/<n>/head ref), or a bare
+# number for an open PR, the compare side is ALWAYS a freshly fetched
+# refs/pull/<n>/head (GitHub and Forgejo) or refs/merge-requests/<iid>/head
+# (GitLab) by default so review stays current after no-mistakes fix rounds
+# push to the PR. A recorded pr_head= is only a fallback when fetch fails
 # (stale recorded SHAs must never win over a reachable remote PR head). If
 # neither PR head can be resolved, fall back to the local branch with a warning.
-# A GitLab merge request and a Gerrit change expose no comparable ref and record
-# no pr_head, so a task recording one always takes that warning path;
-# docs/architecture.md owns that fallback. Without pr=, compare the task's
+# A Gerrit change exposes no comparable ref and records no pr_head, so a task
+# recording one always takes that warning path;
+# docs/architecture.md owns that fallback. The GitLab merge-request head is
+# fetched only after the worktree's origin remote resolves to the same GitLab
+# host and project the recorded URL names (fm_pr_gitlab_origin_matches in
+# bin/fm-pr-lib.sh), so a fresh review head always comes from the project the
+# URL names and never from a same-numbered merge request of another project
+# the origin happens to serve; a mismatch counts the head as unavailable and
+# the offline fallbacks below apply. Without pr=, compare the task's
 # immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
 # created before that field existed), or the worktree's checked-out branch when
 # that branch does not exist in the worktree. A recorded branch that is not a
@@ -47,6 +54,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# fm_pr_url_parse and fm_pr_gitlab_origin_matches bind a recorded GitLab
+# merge-request URL to the origin remote its head is fetched from.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -115,6 +126,10 @@ pr_number_from_target() {
   local target=$1 n
   case "$target" in
     '' ) return 1 ;;
+    *"/-/merge_requests/"*)
+      n=${target##*/-/merge_requests/}
+      n=${n%%[!0-9]*}
+      ;;
     *"/pull/"*)
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
@@ -132,23 +147,46 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-fetch_pull_head() {
-  local n=$1 resolved
+# One fetch for one compare tip: <remote-ref> is fetched into the private
+# <local-ref> and resolved to a commit. Callers pick the ref pair from the
+# recorded pr= shape; bin/fm-pr-lib.sh fm_pr_url_parse owns what makes each
+# URL shape canonical.
+fetch_review_head() {  # <remote-ref> <local-ref>
+  local remote_ref=$1 local_ref=$2 resolved
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
-    "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+  git -C "$WT" fetch --quiet origin "+$remote_ref:$local_ref" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify "$local_ref^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
+  # resolved starts empty, not merely declared: under set -u a declared-but-
+  # unset local reads as unbound, and the GitLab mismatch arm below assigns it
+  # only when the origin remote resolves to the URL's project, so an unset
+  # start would crash this function on the very path that must fall back.
+  local pr_url=$1 recorded_head=$2 n resolved=
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
+    case "$pr_url" in
+      *"/-/merge_requests/"*)
+        # The fresh head must come from the project the recorded URL names:
+        # origin is fetched by merge request number alone, so its head is
+        # trusted only when the remote resolves to that URL's host and project.
+        # A mismatch leaves the head unresolved, so the offline fallbacks apply
+        # rather than reviewing another project's same-numbered merge request.
+        if fm_pr_url_parse "$pr_url" && [ "$FM_PR_PROVIDER" = gitlab ] \
+          && fm_pr_gitlab_origin_matches "$WT" "$FM_PR_HOST" "$FM_PR_PATH"; then
+          resolved=$(fetch_review_head "refs/merge-requests/$n/head" "refs/fm-review/mr/$n/head") || resolved=
+        fi
+        ;;
+      *)
+        resolved=$(fetch_review_head "refs/pull/$n/head" "refs/fm-review/pull/$n/head") || resolved=
+        ;;
+    esac
+    if [ -n "$resolved" ]; then
       printf '%s' "$resolved"
       return 0
     fi

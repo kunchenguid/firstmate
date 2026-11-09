@@ -228,6 +228,10 @@ test_ship_modes_generate_clean_briefs() {
 # contract line so bin/fm-spawn.sh can check it against the registry. A brief
 # with no --forge renders the unchanged gh-axi wording. The forge is a ship
 # input only, and the closed set refuses anything else.
+# --forge gitlab names glab-axi alongside gh-axi in the forge-CLI rule and in
+# the direct-PR Definition of done's own open-a-merge-request line, and a
+# no-mistakes gitlab brief's draft readback reads the pipeline's merge request
+# with glab-axi too.
 test_forge_selection_renders_correct_cli() {
   local home brief out rc
   home="$TMP_ROOT/forge-home"
@@ -280,6 +284,33 @@ test_forge_selection_renders_correct_cli() {
   assert_no_grep 'gh-axi pr ready' "$brief" \
     "a no-mistakes --forge forgejo DOD must not send the worker to gh-axi to clear a draft"
 
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-gitlab some-proj --mode direct-PR --forge gitlab >/dev/null 2>&1 \
+    || fail "--forge gitlab should scaffold a direct-PR ship brief"
+  brief="$home/data/brief-forge-gitlab/brief.md"
+  assert_grep "3. Use glab-axi for GitLab operations, gh-axi for GitHub operations, and chrome-devtools-axi for browser operations." "$brief" \
+    "--forge gitlab must render the glab-axi Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a merge request with `glab-axi`' "$brief" \
+    "--forge gitlab's direct-PR DOD must tell the worker to open the merge request with glab-axi"
+  grep -qx "Delivery contract: mode=direct-PR forge=gitlab" "$brief" \
+    || fail "--forge gitlab must mark the delivery contract line for the spawn's registry check"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-gitlab-nm some-proj --mode no-mistakes --forge gitlab >/dev/null 2>&1 \
+    || fail "--forge gitlab should scaffold a no-mistakes ship brief"
+  brief="$home/data/brief-forge-gitlab-nm/brief.md"
+  # The pipeline's publish on a GitLab remote is a merge request, so the
+  # no-mistakes draft readback reads and clears it with glab-axi.
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'confirm it is not a draft (`glab-axi mr view <iid> --full` must print `draft: no`' "$brief" \
+    "a no-mistakes --forge gitlab DOD must read the draft state back with glab-axi"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'mark it ready with `glab-axi mr update <iid> --ready`' "$brief" \
+    "a no-mistakes --forge gitlab DOD must clear a draft with glab-axi"
+  assert_no_grep 'gh-axi pr view' "$brief" \
+    "a no-mistakes --forge gitlab DOD must not read the merge request's draft state with gh-axi"
+  assert_no_grep 'gh-axi pr ready' "$brief" \
+    "a no-mistakes --forge gitlab DOD must not send the worker to gh-axi to clear a draft"
+
   while IFS='|' read -r label args expect; do
     [ -n "$label" ] || continue
     # shellcheck disable=SC2086 # The row's arguments must split into words.
@@ -288,14 +319,15 @@ test_forge_selection_renders_correct_cli() {
     assert_contains "$out" "$expect" "$label was refused without its reason"
     [ ! -e "$home/data/brief-forge-bad/brief.md" ] || fail "$label left a brief behind"
   done <<'ROWS'
-a value outside the closed set|--mode direct-PR --forge gitlab|expected none, gerrit, forgejo, or external
-the removed github value|--mode direct-PR --forge github|expected none, gerrit, forgejo, or external
+a value outside the closed set|--mode direct-PR --forge bitbucket|expected none, gerrit, gitlab, forgejo, or external
+the removed github value|--mode direct-PR --forge github|expected none, gerrit, gitlab, forgejo, or external
 forgejo on local-only|--mode local-only --forge forgejo|cannot ship mode=local-only
+gitlab on local-only|--mode local-only --forge gitlab|cannot ship mode=local-only
 a shape on forgejo|--mode direct-PR --forge forgejo --shape squash|--shape applies only with --forge gerrit
 forgejo on a scout|--scout --forge forgejo|apply only to ship briefs
 ROWS
 
-  pass "fm-brief.sh: --forge forgejo names tea in Rule 3, the direct-PR DOD, and the draft read-back, marks the delivery contract, and the closed set refuses everything else"
+  pass "fm-brief.sh: --forge forgejo and gitlab name their forge CLI in Rule 3 and the delivery contract, the draft read-back matches each forge's publish path, and the closed set refuses everything else"
 }
 
 # --forge external renders the external review rail from bin/fm-dod-lib.sh: a
