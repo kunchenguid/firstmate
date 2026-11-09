@@ -196,6 +196,28 @@ read -r rec_epoch rec_gen rec_harness _ < "$HOME_DIR/state/ios.start-pending" \
   || fail "the armed start check is not bounded by the relaunch: $rec_epoch"
 pass "a confirmed remote relaunch records the replacement's generation and arms its start check"
 
+# --- the reply cursor the relaunch found is recorded as the launch snapshot --
+# A cursor committed against a host reply log truncated before the relaunch can
+# lie past the replacement's offset; bin/fm-watch.sh counts reply progress as
+# start proof only after the cursor moves from this snapshot.
+reset_meta
+printf 'remote_replies_cursor=0:stale\n' >> "$HOME_DIR/state/ios.meta"
+mkdir -p "$HOME_DIR/state/remote-replies"
+printf 'schema=fm-remote-reply-cursor.v1\noffset=5000\nprefix_sha256=%064d\n' 7 > "$HOME_DIR/state/remote-replies/ios.cursor"
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 0 "$RC" "a remote relaunch with a mirrored reply cursor should succeed"$'\n'"$OUT"
+[ "$(grep -c '^remote_replies_cursor=' "$HOME_DIR/state/ios.meta")" = 1 ] \
+  || fail "the relaunch did not replace the previous cursor snapshot: $(cat "$HOME_DIR/state/ios.meta")"
+assert_grep "remote_replies_cursor=5000:$(printf '%064d' 7)" "$HOME_DIR/state/ios.meta" \
+  "the relaunch did not record the cursor it found as the launch snapshot"
+rm -f "$HOME_DIR/state/remote-replies/ios.cursor"
+reset_meta
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 0 "$RC" "a remote relaunch with no mirrored reply should succeed"$'\n'"$OUT"
+assert_grep 'remote_replies_cursor=none' "$HOME_DIR/state/ios.meta" \
+  "a relaunch before any mirrored reply should record an empty snapshot"
+pass "a remote relaunch records the reply cursor it found as the start check's snapshot"
+
 reset_meta
 rm -f "$HOME_DIR/state/ios.start-pending"
 OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?

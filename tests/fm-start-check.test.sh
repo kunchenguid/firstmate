@@ -585,15 +585,16 @@ test_held_lock_defers_without_waiting() {
 # A remote secondmate's proof and cause are read through its route; the stub
 # stands in for bin/fm-on.sh plus the host's control verbs, whose own suites
 # (fm-remote-secondmate-omp, fm-remote-secondmate-lifecycle-e2e) drive them.
-arm_remote() {  # <id> [record-gen]
-  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_busy_gen=g900.1.1\nremote_replies_offset=100\n' "$1" > "$STATE/$1.meta"
+arm_remote() {  # <id> [record-gen] [cursor-at-launch]
+  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_busy_gen=g900.1.1\nremote_replies_offset=100\nremote_replies_cursor=%s\n' "$1" "${3:-none}" > "$STATE/$1.meta"
   printf '1000 %s pi\n' "${2:-g900.1.1}" > "$STATE/$1.start-pending"
 }
 
-# The reply mirror's cursor: how far into the host's reply log it has read.
-mirror_cursor() {  # <id> <offset>
+# The reply mirror's cursor: how far into the host's reply log it has read, and
+# the digest of that prefix.
+mirror_cursor() {  # <id> <offset> [prefix-sha256]
   mkdir -p "$STATE/remote-replies"
-  printf 'schema=fm-remote-reply-cursor.v1\noffset=%s\n' "$2" > "$STATE/remote-replies/$1.cursor"
+  printf 'schema=fm-remote-reply-cursor.v1\noffset=%s\nprefix_sha256=%s\n' "$2" "${3:-$(printf '%064d' "$2")}" > "$STATE/remote-replies/$1.cursor"
 }
 
 # `observe <id> --start-proof` output: the observation line, then the host's
@@ -736,6 +737,43 @@ test_remote_secondmate_reads_route() {
 # A record whose route read would start after this poll's shared budget is
 # spent is neither proven nor judged: it waits for the next poll, so a slow
 # but healthy route never turns into a false start wake for the next mate.
+# A host reply log truncated or replaced before a relaunch is shorter than the
+# parent's reply cursor, which was committed against the old log. That cursor
+# already lies past the replacement's smaller launch offset, but it records no
+# reply from the replacement, so it is not proof: the parked replacement still
+# gets its one deadline wake. Only a cursor the mirror commits after the launch
+# counts.
+test_truncated_reply_log_relaunch_is_not_proof() {
+  reset_state
+  local real old
+  real=$(declare -f start_check_remote)
+  mirror_cursor t1 5000
+  old="5000:$(printf '%064d' 5000)"
+  arm_remote t1 g900.1.1 "$old"
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    "check: start t1: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog"*) ;;
+    *) fail "a reply cursor from the truncated log silenced the replacement's dialog wake: ${START_CHECK_WAKE:-none}" ;;
+  esac
+  [ "$(count_wakes)" = 1 ] || fail "expected one start wake for the parked replacement"
+  # The mirror then reads the replacement's first reply past the launch offset.
+  reset_state
+  mirror_cursor t2 5000
+  arm_remote t2 g900.1.1 "$old"
+  mirror_cursor t2 160
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/t2.start-pending" ] || fail "a reply mirrored past the launch offset after the relaunch did not count as proof"
+  [ "$(count_wakes)" = 0 ] || fail "a started replacement woke"
+  # A record without the launch's cursor snapshot cannot tell the logs apart.
+  reset_state
+  arm_remote t3
+  sed -i.bak '/^remote_replies_cursor=/d' "$STATE/t3.meta" && rm -f "$STATE/t3.meta.bak"
+  mirror_cursor t3 5000
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  [ -n "$START_CHECK_WAKE" ] || fail "a cursor with no launch snapshot counted as proof"
+  pass "a reply cursor from a truncated host log is not start proof for the relaunched replacement"
+}
+
 test_spent_route_budget_defers_remote_record() {
   reset_state
   local real saved_secs=$START_CHECK_ROUTE_SECS
@@ -876,6 +914,7 @@ fm_test_run \
   test_secondmate_launch_is_checked \
   test_held_lock_defers_without_waiting \
   test_remote_secondmate_reads_route \
+  test_truncated_reply_log_relaunch_is_not_proof \
   test_spent_route_budget_defers_remote_record \
   test_spent_proof_budget_keeps_remote_cause \
   test_replaced_record_survives_tick \

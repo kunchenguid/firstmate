@@ -186,6 +186,20 @@ fm_start_check_launch_epoch() {  # <state-dir> <task-id>
   printf '%s\n' "$now"
 }
 
+# fm_start_check_reply_cursor <state-dir> <task-id>: the remote reply mirror's
+# cursor for <task-id> as `<offset>:<prefix-sha256>`, or `none` when it has not
+# read anything (bin/fm-procevent-remote-reply.sh owns the cursor). A remote
+# launch records this beside remote_replies_offset; the start check counts reply
+# progress as proof only once the cursor differs from it, because a cursor left
+# from a truncated or replaced host log can already lie past the new offset.
+fm_start_check_reply_cursor() {  # <state-dir> <task-id>
+  local f="$1/remote-replies/$2.cursor" offset hash
+  [ -f "$f" ] || { printf 'none\n'; return 0; }
+  offset=$(sed -n 's/^offset=//p' "$f")
+  hash=$(sed -n 's/^prefix_sha256=//p' "$f")
+  printf '%s:%s\n' "$offset" "$hash"
+}
+
 fm_path_age() {
   local path=$1 m now
   m=$(fm_path_mtime "$path") || { echo 999999; return; }

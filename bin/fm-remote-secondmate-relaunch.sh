@@ -59,6 +59,9 @@ if [ "$START_CHECK" = 1 ]; then
   # The boundary is taken before the host relaunch delivers anything.
   LAUNCH_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
 fi
+# The mirror's cursor before the host relaunch: reply progress counts as the
+# replacement's start only once the cursor moves from it (bin/fm-watch.sh).
+REPLIES_CURSOR=$(fm_start_check_reply_cursor "$STATE" "$ID")
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
@@ -96,6 +99,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
   printf 'effort=%s\n' "$NEW_EFFORT"
   [ -z "$REMOTE_BUSY_GEN" ] || printf 'remote_busy_gen=%s\n' "$REMOTE_BUSY_GEN"
   [ -z "$REMOTE_REPLIES_OFFSET" ] || printf 'remote_replies_offset=%s\n' "$REMOTE_REPLIES_OFFSET"
+  printf 'remote_replies_cursor=%s\n' "$REPLIES_CURSOR"
 } >> "$META_TMP"
 # Every other line is preserved in its original relative order after the
 # refreshed harness/model/effort. A pr= line's own identity region (pr_head=
@@ -106,7 +110,7 @@ META_TMP=$(mktemp "$STATE/.fm-remote-relaunch-meta.XXXXXX") || {
 # that already had one armed.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    harness=*|model=*|effort=*|remote_busy_gen=*|remote_replies_offset=*) ;;
+    harness=*|model=*|effort=*|remote_busy_gen=*|remote_replies_offset=*|remote_replies_cursor=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" ;;
   esac
 done < "$META"

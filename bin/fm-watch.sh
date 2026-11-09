@@ -2875,13 +2875,18 @@ START_CHECK_WAKE=
 # which can append a line the previous worker wrote long after a relaunch, so
 # for it only reply bytes past the host's log offset at this launch
 # (remote_replies_offset) count: the mirror's cursor
-# (bin/fm-procevent-remote-reply.sh) must have read beyond it.
+# (bin/fm-procevent-remote-reply.sh) must have read beyond it, and must have
+# moved since the launch (remote_replies_cursor), since a cursor committed
+# against a host log truncated before a relaunch can already lie past it.
 start_check_local_proof() {  # <id> <epoch> <meta>
-  local f m boundary cursor
+  local f m boundary launch_cursor cursor
   if [ -n "$(fm_meta_get "$3" remote_host)" ]; then
     boundary=$(fm_meta_get "$3" remote_replies_offset)
-    cursor=$(sed -n 's/^offset=//p' "$STATE/remote-replies/$1.cursor" 2>/dev/null) || cursor=
+    launch_cursor=$(fm_meta_get "$3" remote_replies_cursor)
+    cursor=$(fm_start_check_reply_cursor "$STATE" "$1")
     case "$boundary" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$launch_cursor" ] && [ "$cursor" != "$launch_cursor" ] || return 1
+    cursor=${cursor%%:*}
     case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
     [ "$cursor" -gt "$boundary" ]
     return

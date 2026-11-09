@@ -1394,7 +1394,7 @@ spawn_remote_secondmate() {
   local start_check_armed
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
-  local remote_start_epoch remote_busy_gen remote_replies_offset
+  local remote_start_epoch remote_busy_gen remote_replies_offset remote_replies_cursor
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1599,6 +1599,7 @@ spawn_remote_secondmate() {
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   remote_start_epoch=$(fm_start_check_launch_epoch "$STATE" "$id")
+  remote_replies_cursor=$(fm_start_check_reply_cursor "$STATE" "$id")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1708,6 +1709,7 @@ spawn_remote_secondmate() {
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
     [ -z "$remote_busy_gen" ] || echo "remote_busy_gen=$remote_busy_gen"
     [ -z "$remote_replies_offset" ] || echo "remote_replies_offset=$remote_replies_offset"
+    echo "remote_replies_cursor=$remote_replies_cursor"
   } >"$tmp"
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
