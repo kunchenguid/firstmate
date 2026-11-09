@@ -1,0 +1,6 @@
+ok - fm-control relaunch: a recorded worktree that is a standalone clone relaunches
+ok - fm-control relaunch: the project primary checkout is refused after stop, leaving no replacement
+ok - fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy
+ok - fm-spawn --relaunch: a recorded worktree that is the primary home refuses
+ok - fm-spawn --relaunch: a recorded worktree that is the project primary checkout refuses
+ok - fm-spawn --relaunch: inherited Git overrides do not hide the project primary checkout

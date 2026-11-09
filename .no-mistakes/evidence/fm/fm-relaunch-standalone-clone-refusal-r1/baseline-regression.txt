@@ -1,0 +1,4 @@
+not ok - a standalone clone worktree should relaunch
+error: task rl45's recorded worktree '{run-worktree}/.live-lab/tmp/fm-control-relaunch.QNRsfO/clone-wt-24494/wt' is the primary home or checkout (its repository's primary checkout), not an isolated task worktree; refusing to relaunch a worker there
+error: the replacement agent for rl45 could not be launched on codex
+error: rl45's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at {run-worktree}/.live-lab/tmp/fm-control-relaunch.QNRsfO/clone-wt-24494/wt: expected exit 0, got 1

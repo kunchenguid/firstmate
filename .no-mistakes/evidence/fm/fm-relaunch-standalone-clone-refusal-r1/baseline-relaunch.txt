@@ -1,0 +1,5 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+error: task cloneproof's recorded worktree '{run-worktree}/.live-lab/copy' is the primary home or checkout (its repository's primary checkout), not an isolated task worktree; refusing to relaunch a worker there
+error: the replacement agent for cloneproof could not be launched on codex
+error: cloneproof's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at {run-worktree}/.live-lab/copy

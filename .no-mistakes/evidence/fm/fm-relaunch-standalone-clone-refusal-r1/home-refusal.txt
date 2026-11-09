@@ -1,0 +1,6 @@
+Recorded worktree deliberately points at marked FM_HOME
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+error: task cloneproof's recorded worktree '{run-worktree}/.live-lab/home' is the primary home or checkout ({run-worktree}/.live-lab/home), not an isolated task worktree; refusing to relaunch a worker there
+exit=1
+primary:codex command=codex cwd={run-worktree}
+primary:fm-cloneproof command=bash cwd={run-worktree}/.live-lab/copy

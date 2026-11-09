@@ -1,0 +1,3 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+relaunched cloneproof harness=codex from=codex model=default effort=default backend=tmux endpoint=primary:fm-cloneproof worktree={run-worktree}/.live-lab/copy

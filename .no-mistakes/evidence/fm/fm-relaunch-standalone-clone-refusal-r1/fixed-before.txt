@@ -1,0 +1,16 @@
+Before fixed running-worker relaunch
+window=primary:fm-cloneproof
+endpoint_task_id=cloneproof
+worktree={run-worktree}/.live-lab/copy
+project={run-worktree}/.live-lab/project
+harness=codex
+approval_mode=bypass
+kind=scout
+tasktmp=/tmp/fm-cloneproof
+model=default
+effort=default
+spawn_gen=s1794256468.43824.27883
+control_relaunch_tx=43420.20261109T203427Z.20946
+primary:codex pid=72006 command=codex cwd={run-worktree}
+primary:fm-cloneproof pid=18369 command=codex cwd={run-worktree}/.live-lab/copy
+18384 18369 /bin/bash

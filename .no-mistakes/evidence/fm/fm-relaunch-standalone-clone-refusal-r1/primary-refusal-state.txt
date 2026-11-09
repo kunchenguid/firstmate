@@ -1,0 +1,70 @@
+Adversarial recorded worktree is the synthetic project primary
+window=primary:fm-cloneproof
+endpoint_task_id=cloneproof
+worktree={run-worktree}/.live-lab/project
+project={run-worktree}/.live-lab/project
+harness=codex
+approval_mode=bypass
+kind=scout
+tasktmp=/tmp/fm-cloneproof
+model=default
+effort=default
+spawn_gen=s1794256499.66116.4202
+control_relaunch_tx=61912.20261109T203457Z.15448
+v1
+task=cloneproof
+phase=failed:launching
+ts=2026-11-09T20:35:54Z
+backend=tmux
+endpoint=primary:fm-cloneproof
+worktree={run-worktree}/.live-lab/project
+kind=scout
+from_harness=codex
+from_model=default
+from_effort=default
+to_harness=codex
+to_model=default
+to_effort=default
+rollback=prior-record-kept
+primary:codex command=codex cwd={run-worktree}
+primary:fm-cloneproof command=bash cwd={run-worktree}/.live-lab/copy
+
+  Lifecycle check only: reply CLONE_WORKER_RESTARTED and remain idle; do not run commands or change files.
+
+  ## Progress note (2026-11-09T20:34:27Z)
+
+  This task was relaunched. Continue from here; the local copy and every
+  uncommitted change are exactly as the previous worker left them.
+
+  First, check your instruction inbox: list it with
+  `find '{run-worktree}/.live-lab/home/state/
+  cloneproof.inbox' -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V`, act on
+  each message in numeric order, then mv each handled file into
+  '{run-worktree}/.live-lab/home/state/cloneproof.inbox/
+  handled/'. A steer sent before the relaunch survives there.
+
+  Lifecycle check only: reply CLONE_WORKER_RESTARTED and remain idle; do not run commands or change files.
+
+  ## Progress note (2026-11-09T20:34:53Z)
+
+  This task was relaunched. Continue from here; the local copy and every
+  uncommitted change are exactly as the previous worker left them.
+
+  First, check your instruction inbox: list it with
+  `find '{run-worktree}/.live-lab/home/state/
+  cloneproof.inbox' -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V`, act on
+  each message in numeric order, then mv each handled file into
+  '{run-worktree}/.live-lab/home/state/cloneproof.inbox/
+  handled/'. A steer sent before the relaunch survives there.
+
+  Lifecycle check only: reply CLONE_LIVE_RELAUNCH_OK and remain idle. Do not run commands or change files.
+
+
+• CLONE_LIVE_RELAUNCH_OK
+
+  done 12:35 PM
+Token usage: total=8,177 input=8,165 (+ 11,904 cached) output=12
+To continue this session, run:
+  codex resume 01a1c205-7ddc-7392-b69f-117a97b904b4
+Or run codex resume and select Review worker role contract.
+bash-3.2$

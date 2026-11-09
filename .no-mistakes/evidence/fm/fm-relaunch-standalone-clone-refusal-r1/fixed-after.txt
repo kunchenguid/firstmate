@@ -1,0 +1,76 @@
+After fixed running-worker relaunch
+window=primary:fm-cloneproof
+endpoint_task_id=cloneproof
+worktree={run-worktree}/.live-lab/copy
+project={run-worktree}/.live-lab/project
+harness=codex
+approval_mode=bypass
+kind=scout
+tasktmp=/tmp/fm-cloneproof
+model=default
+effort=default
+spawn_gen=s1794256499.66116.4202
+control_relaunch_tx=61912.20261109T203457Z.15448
+v1
+task=cloneproof
+phase=complete
+ts=2026-11-09T20:35:02Z
+backend=tmux
+endpoint=primary:fm-cloneproof
+worktree={run-worktree}/.live-lab/copy
+kind=scout
+from_harness=codex
+from_model=default
+from_effort=default
+to_harness=codex
+to_model=default
+to_effort=default
+worktree_head=097633ceea0b03b722d2893acaf997072773f73e
+worktree_dirty=yes
+note_file={run-worktree}/.live-lab/home/state/cloneproof.control-relaunch.note
+exit_result=stopped
+Unfinished file survives:
+unfinished sentinel
+primary:codex pid=72006 command=codex cwd={run-worktree}
+primary:fm-cloneproof pid=18369 command=codex cwd={run-worktree}/.live-lab/copy
+18384 18369 /bin/bash
+
+  Lifecycle check only: reply CLONE_WORKER_RESTARTED and remain idle; do not run commands or change files.
+
+  ## Progress note (2026-11-09T20:34:27Z)
+
+  This task was relaunched. Continue from here; the local copy and every
+  uncommitted change are exactly as the previous worker left them.
+
+  First, check your instruction inbox: list it with
+  `find '{run-worktree}/.live-lab/home/state/
+  cloneproof.inbox' -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V`, act on
+  each message in numeric order, then mv each handled file into
+  '{run-worktree}/.live-lab/home/state/cloneproof.inbox/
+  handled/'. A steer sent before the relaunch survives there.
+
+  Lifecycle check only: reply CLONE_WORKER_RESTARTED and remain idle; do not run commands or change files.
+
+  ## Progress note (2026-11-09T20:34:53Z)
+
+  This task was relaunched. Continue from here; the local copy and every
+  uncommitted change are exactly as the previous worker left them.
+
+  First, check your instruction inbox: list it with
+  `find '{run-worktree}/.live-lab/home/state/
+  cloneproof.inbox' -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V`, act on
+  each message in numeric order, then mv each handled file into
+  '{run-worktree}/.live-lab/home/state/cloneproof.inbox/
+  handled/'. A steer sent before the relaunch survives there.
+
+  Lifecycle check only: reply CLONE_LIVE_RELAUNCH_OK and remain idle. Do not run commands or change files.
+
+
+• CLONE_LIVE_RELAUNCH_OK
+
+  done 12:35 PM
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra default · ~/.no-mistakes/worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/.live-lab/copy · Review worker…

@@ -1,0 +1,1 @@
+scaffolded: {run-worktree}/.live-lab/home/data/cloneproof/brief.md (scout; replace {TASK} and {FIRSTMATE_SPEC})

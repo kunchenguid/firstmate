@@ -1,0 +1,127 @@
+BEFORE FIX: real fm-spawn and fm-control with Codex 0.155.1, isolated marked FM_HOME and private tmux; synthetic clone allocation supplied by workspace-local treehouse get adapter. Oracle: a separate standalone clone must start and be restartable, but the baseline must reproduce the reported stop-then-refuse bug.
+
+=== baseline-spawn.txt ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+spawned cloneproof harness=codex kind=scout window=primary:fm-cloneproof worktree={run-worktree}/.live-lab/copy
+
+=== baseline-ready.txt ===
+BASELINE: real fm-spawn scout + real Codex 0.155.1 on private tmux
+Allocation only: workspace-local treehouse get fixture enters the synthetic standalone clone.
+Clone git-dir / common-dir:
+{run-worktree}/.live-lab/copy/.git
+{run-worktree}/.live-lab/copy/.git
+Recorded project common-dir:
+{run-worktree}/.live-lab/project/.git
+primary:codex command=codex cwd={run-worktree}
+primary:fm-cloneproof command=codex cwd={run-worktree}/.live-lab/copy
+  the record file; that marked newline is not part of the logical message body, so remove only it and preserve any
+  intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the
+  file end.
+  The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or
+  absent inbox needs no action.
+
+  # Definition of done
+  Write your findings to `{run-worktree}/.live-lab/home/
+  data/cloneproof/report.md`.
+  The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references),
+  and what you recommend.
+  If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your
+  board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm
+  with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox,
+  write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at
+  session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled
+  <source-id> <sequence> to conclude and retire your board.
+  Before reporting done, read and follow `~/.no-mistakes/
+  worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/.agents/skills/captain-hold-lifecycle/SKILL.md` and pass its shared
+  completion gate for the report and any visual review.
+  Only when the reviewed inventory is empty, run `FM_HOME='~/.no-mistakes/
+  worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/.live-lab/home' bash '~/.no-mistakes/
+  worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/bin/fm-captain-hold.sh' complete 'cloneproof' --none`.
+  This exception permits only that command, not direct metadata edits, another task, or any backlog write.
+  If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.
+  If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.
+  When the report is complete, append `done [at=<epoch>]: {one-line conclusion}` to the status file and stop.
+  If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report;
+  firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up
+  message.
+
+
+• CLONE_WORKER_READY
+
+  done 12:33 PM
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra default · ~/.no-mistakes/worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/.live-lab/copy · Follow crewma…
+
+=== baseline-relaunch.txt ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+error: task cloneproof's recorded worktree '{run-worktree}/.live-lab/copy' is the primary home or checkout (its repository's primary checkout), not an isolated task worktree; refusing to relaunch a worker there
+error: the replacement agent for cloneproof could not be launched on codex
+error: cloneproof's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at {run-worktree}/.live-lab/copy
+
+=== baseline-stranded.txt ===
+BASELINE after rejected relaunch
+  the record file; that marked newline is not part of the logical message body, so remove only it and preserve any
+  intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the
+  file end.
+  The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or
+  absent inbox needs no action.
+
+  # Definition of done
+  Write your findings to `{run-worktree}/.live-lab/home/
+  data/cloneproof/report.md`.
+  The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references),
+  and what you recommend.
+  If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your
+  board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm
+  with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox,
+  write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at
+  session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled
+  <source-id> <sequence> to conclude and retire your board.
+  Before reporting done, read and follow `~/.no-mistakes/
+  worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/.agents/skills/captain-hold-lifecycle/SKILL.md` and pass its shared
+  completion gate for the report and any visual review.
+  Only when the reviewed inventory is empty, run `FM_HOME='~/.no-mistakes/
+  worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/.live-lab/home' bash '~/.no-mistakes/
+  worktrees/52b07e9083e7/01M7100KZNFBGSSARA1SDBEPA8/bin/fm-captain-hold.sh' complete 'cloneproof' --none`.
+  This exception permits only that command, not direct metadata edits, another task, or any backlog write.
+  If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.
+  If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.
+  When the report is complete, append `done [at=<epoch>]: {one-line conclusion}` to the status file and stop.
+  If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report;
+  firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up
+  message.
+
+
+• CLONE_WORKER_READY
+
+  done 12:33 PM
+Token usage: total=7,483 input=7,474 (+ 11,904 cached) output=9
+To continue this session, run:
+  codex resume 01a1c204-75e2-7e81-ba44-7fe19a1cce7c
+Or run codex resume and select Follow crewmate role contract.
+bash-3.2$
+v1
+task=cloneproof
+phase=failed:launching
+ts=2026-11-09T20:34:19Z
+backend=tmux
+endpoint=primary:fm-cloneproof
+worktree={run-worktree}/.live-lab/copy
+kind=scout
+from_harness=codex
+from_model=default
+from_effort=default
+to_harness=codex
+to_model=default
+to_effort=default
+rollback=prior-record-kept
+
+=== baseline-regression.txt ===
+not ok - a standalone clone worktree should relaunch
+error: task rl45's recorded worktree '{run-worktree}/.live-lab/tmp/fm-control-relaunch.QNRsfO/clone-wt-24494/wt' is the primary home or checkout (its repository's primary checkout), not an isolated task worktree; refusing to relaunch a worker there
+error: the replacement agent for rl45 could not be launched on codex
+error: rl45's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at {run-worktree}/.live-lab/tmp/fm-control-relaunch.QNRsfO/clone-wt-24494/wt: expected exit 0, got 1

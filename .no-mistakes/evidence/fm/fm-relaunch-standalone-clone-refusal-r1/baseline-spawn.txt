@@ -1,0 +1,2 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-lab/home
+spawned cloneproof harness=codex kind=scout window=primary:fm-cloneproof worktree={run-worktree}/.live-lab/copy
