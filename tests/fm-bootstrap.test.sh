@@ -1080,6 +1080,110 @@ SH
   pass "bootstrap applies provider-specific CLI and host-scoped auth policy"
 }
 
+test_forge_effective_remote_rewrites() {
+  local case_dir fakebin out project github_calls gitlab_calls
+
+  case_dir="$TMP_ROOT/forge-effective-remote"
+  github_calls="$case_dir/github.calls"
+  gitlab_calls="$case_dir/gitlab.calls"
+  mkdir -p "$case_dir/home/projects/github-alias" "$case_dir/home/projects/gitlab-alias" \
+    "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  project="$case_dir/home/projects/github-alias"
+  git -C "$project" init -q
+  git -C "$project" remote add origin ssh://github-alias.example/team/project.git
+  git -C "$project" config url."https://github.com/".insteadOf \
+    ssh://github-alias.example/
+  project="$case_dir/home/projects/gitlab-alias"
+  git -C "$project" init -q
+  git -C "$project" remote add origin ssh://gitlab-alias.example/team/project.git
+  git -C "$project" config url."https://gitlab.example/".insteadOf \
+    ssh://gitlab-alias.example/
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GLAB_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_FAKE_GH_CALLS="$github_calls" \
+    FM_FAKE_GLAB_CALLS="$gitlab_calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "Git URL aliases rewritten to supported providers must bootstrap cleanly, got: $out"
+  [ "$(cat "$github_calls")" = "auth status --hostname github.com" ] \
+    || fail "GitHub alias rewrite must authenticate against the effective host, got: $(cat "$github_calls")"
+  [ "$(cat "$gitlab_calls")" = "auth status --hostname gitlab.example" ] \
+    || fail "GitLab alias rewrite must authenticate against the effective host, got: $(cat "$gitlab_calls")"
+
+  case_dir="$TMP_ROOT/forge-effective-remote-unsupported"
+  project="$case_dir/home/projects/rewritten-away"
+  github_calls="$case_dir/github.calls"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/team/project.git
+  git -C "$project" config url."https://unsupported.example/".insteadOf \
+    https://github.com/
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$github_calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: rewritten-away (host: unsupported.example)" ] \
+    || fail "a GitHub URL rewritten to an unsupported host must fail closed, got: $out"
+  [ ! -s "$github_calls" ] \
+    || fail "an unsupported effective host must not invoke GitHub auth, got: $(cat "$github_calls")"
+  pass "bootstrap classifies Git remotes by their effective insteadOf destination"
+}
+
+test_forge_ssh_user_config_precedes_system_config() {
+  local case_dir fakebin real_ssh result
+
+  case_dir="$TMP_ROOT/forge-ssh-config-precedence"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/home/.ssh" "$fakebin"
+  real_ssh=$(command -v ssh)
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+config=$(mktemp)
+trap 'rm -f "$config"' EXIT
+cat > "$config"
+target=${!#}
+exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
+SH
+  chmod +x "$fakebin/ssh"
+  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_REAL_SSH_BIN="$real_ssh" \
+    bash -c '
+      . "$1"
+      fm_forge_safe_ssh_config_file() {
+        case "$1" in
+          "$HOME/.ssh/config")
+            printf "%s\n" "Host conflicting-alias" "HostName user.example"
+            ;;
+          /etc/ssh/ssh_config)
+            printf "%s\n" "Host conflicting-alias" "HostName system.example"
+            ;;
+        esac
+      }
+      fm_forge_resolve_host git@conflicting-alias:team/project.git 1
+    ' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = user.example ] \
+    || fail "user SSH HostName must win over the system value, got: $result"
+  pass "forge SSH resolution preserves user-before-system precedence"
+}
+
 
 test_forge_provider_bootstrap_contracts() {
   local case_dir fakebin out project project_two before after before_two after_two
@@ -2525,6 +2629,8 @@ test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
+test_forge_effective_remote_rewrites
+test_forge_ssh_user_config_precedes_system_config
 test_forge_provider_explicit_gerrit_binding
 test_forge_provider_explicit_legacy_bindings
 test_forge_provider_local_only_refusal_not_unsupported

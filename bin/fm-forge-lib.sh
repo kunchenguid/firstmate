@@ -63,7 +63,7 @@ fm_forge_host_is_gitlab() {
 
 fm_forge_safe_ssh_config() {
   local config
-  for config in /etc/ssh/ssh_config "${HOME:-}/.ssh/config"; do
+  for config in "${HOME:-}/.ssh/config" /etc/ssh/ssh_config; do
     fm_forge_safe_ssh_config_file "$config" 0
   done
 }
@@ -135,7 +135,7 @@ fm_forge_safe_ssh_config_file() {
 fm_forge_checkout_remote() {
   local checkout=${1:-} remote
   [ -d "$checkout" ] || return 1
-  remote=$(command git -C "$checkout" config --get remote.origin.url 2>/dev/null) && {
+  remote=$(command git -C "$checkout" remote get-url origin 2>/dev/null) && {
     printf '%s\n' "$remote"
     return 0
   }

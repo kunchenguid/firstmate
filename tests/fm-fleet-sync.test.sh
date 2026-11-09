@@ -494,11 +494,13 @@ test_explicit_binding_does_not_cross_same_basename() {
   git -C "$canonical" remote set-url origin "$origin_url"
   git -C "$canonical" config url."$remote_url".insteadOf "$origin_url"
   git -C "$foreign" remote set-url origin "$origin_url"
-  git -C "$foreign" config url."$remote_url".insteadOf "$origin_url"
   mkdir -p "$home/data"
   printf -- '- collision [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
     > "$home/data/projects.md"
   advance_origin "$home" collision C1
+  out=$(run_sync "$home" "$canonical")
+  assert_contains "$out" "collision: synced" \
+    "the registered clone must still sync through its explicit forge binding"
   before=$(head_sha "$foreign")
 
   out=$(run_sync "$home" "$foreign")
