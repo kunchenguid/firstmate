@@ -2142,9 +2142,9 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-
 # fm_backend_herdr_pane_presence_classify: classify one exact pane get response
 # as dead|present|unknown from its JSON body, never from process exit status.
 # Prints "<state>\t<reason>"; the reason is empty for dead and present, and for
-# unknown names which of the three causes applied: a herdr error code other
-# than pane_not_found, a response that is empty or not JSON, or a response
-# whose pane id does not match the one asked for.
+# unknown is bounded to printable one-line text naming the cause: a herdr error
+# code other than pane_not_found, an empty or non-JSON response, a response
+# without a pane id, or a pane id that does not match the requested one.
 fm_backend_herdr_pane_presence_display_value() {  # <value>
   printf '%s' "$1" | LC_ALL=C tr -c '\040-\176' '?' | cut -c1-80
 }
