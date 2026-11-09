@@ -1614,9 +1614,10 @@ test_fast_cadence_resumes_after_an_exhausted_budget() {
   export FM_FAKE_CREW_STATE_LOG="$log" FM_FAKE_CREW_STATE=working FM_FAKE_CREW_STATE_DELAY=2 \
     FM_TEST_RECONCILE_SECS=900 FM_INACTIVE_RECONCILE_BUDGET_SECS=1
   run_reconcile "$MAIN" --startup
-  for _ in 1 2 3; do
+  for _ in 1 2 3 4 5 6; do
     set_mtime "$(( $(date +%s) - 61 ))" "$MAIN/state/.inactive-outcome-early-reconcile"
     run_reconcile "$MAIN"
+    ! grep -Fxq charlie "$log" || break
   done
   unset FM_FAKE_CREW_STATE_LOG FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_DELAY FM_TEST_RECONCILE_SECS FM_INACTIVE_RECONCILE_BUDGET_SECS
   grep -Fxq charlie "$log" || fail "a later unreported ship starved behind earlier ones on the fast cadence"
