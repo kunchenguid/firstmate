@@ -53,7 +53,7 @@ ack_handled_wakes() {  # <state> <drain-stderr>
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
   [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+  FM_DRAIN_CONSUMER=daemon FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
     --recovery-generation "$generation"
 }
 
@@ -74,7 +74,7 @@ test_routine_then_terminal_after_restart() {
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not report the routine signal"
 
   # Drain it and route through the daemon: a routine status self-handles.
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
+  FM_DRAIN_CONSUMER=daemon FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
     || fail "drain after routine signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
     || fail "routine signal was not queued"
@@ -91,7 +91,7 @@ test_routine_then_terminal_after_restart() {
 
   # Drain and route the terminal: exactly ONE digest is buffered.
   : > "$drain_out"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
+  FM_DRAIN_CONSUMER=daemon FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
     || fail "drain after terminal signal failed"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $status_file" "$state"
   ack_handled_wakes "$state" "$drain_err" || fail "terminal wake acknowledgement failed"

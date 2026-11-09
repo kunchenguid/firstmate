@@ -4156,20 +4156,28 @@ test_dialog_name_after_demand_deep_inspection_still_escalates
 test_consumer_presentation_handover() (
   local dir state file snapshot first second capture out old_inode
   dir=$(make_supercase consumer-handover); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
   # Match executable daemon startup, which loads the portable lock owner.
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
   file="$state/receipt.status"; capture="$dir/endpoints"
-  printf 'done: first\n' > "$file"
+  printf 'note: first\n' > "$file"
   local i
-  for i in 2 3 4 5 6 7; do printf 'done: old-%s\n' "$i" >> "$file"; done
+  for i in 2 3 4 5 6 7; do printf 'note: old-%s\n' "$i" >> "$file"; done
   # Watcher classification is not a presentation receipt.
   status_presentation_marker_commit "$(status_signal_seen_marker_path "$state" receipt)" \
     "$file" "$(log_size "$file")" "$(_fm_open_decisions_file_ident "$file")"
   [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "watcher classification suppressed delivery"
   first=$(log_size "$file")
-  snapshot=$(status_presentation_snapshot "$state")
-  status_commit_presentation_snapshot "$state" "$snapshot" || fail "drain receipt failed"
+  # A drain that reaches the primary session hands its positions to the daemon.
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary-drain.out" 2>/dev/null || fail "primary drain failed"
+  [ "$(status_seen_offset "$state" receipt)" = "$first" ] || fail "primary drain receipt not shared"
+  # The daemon's own drain reads for classification, not for the primary.
+  printf 'note: unseen\n' > "$state/daemon-only.status"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_DRAIN_CONSUMER=daemon \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/daemon-drain.out" 2>/dev/null || fail "daemon drain failed"
+  [ "$(status_seen_offset "$state" daemon-only)" = 0 ] || fail "daemon drain acted as primary delivery"
   for FM_DAEMON_PRIMARY_HARNESS in claude codex; do
     [ "$(status_seen_offset "$state" receipt)" = "$first" ] || fail "handover replayed a presented event"
   done

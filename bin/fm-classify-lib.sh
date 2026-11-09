@@ -1664,8 +1664,16 @@ status_delivered_cursor_offset() {  # <status-file>
 # presentation lock serializes receipt updates with drains and retirement.
 # Independent receipts avoid overwriting the drain's newer fleet snapshot.
 status_commit_delivered_endpoints() {  # <state> <endpoint-file>
-  local state=$1 capture=$2 task endpoint ident old marker tmp size rc=0
+  local state=$1 capture=$2 rc=0
   fm_lock_acquire_wait_bounded "$state/.status-presentation-lock" 5 || return 1
+  _status_write_delivered_endpoints "$state" "$capture" || rc=1
+  fm_lock_release "$state/.status-presentation-lock" || rc=1
+  return "$rc"
+}
+
+# Lock-free body for a caller that already holds the presentation lock.
+_status_write_delivered_endpoints() {  # <state> <endpoint-file>
+  local state=$1 capture=$2 task endpoint ident old marker tmp size rc=0
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     case "$task" in *[!a-zA-Z0-9_.-]*) rc=1; continue ;; esac
@@ -1675,7 +1683,7 @@ status_commit_delivered_endpoints() {  # <state> <endpoint-file>
     case "$size" in ''|*[!0-9]*) rc=1; continue ;; esac
     [ "$endpoint" -le "$size" ] || { rc=1; continue; }
     marker="$state/.status-delivered-$task.status"
-    old=$(status_presentation_cursor_offset "$state/$task.status") || { rc=1; continue; }
+    old=$(status_delivered_cursor_offset "$state/$task.status") || { rc=1; continue; }
     [ "$endpoint" -gt "$old" ] || continue
     tmp="$marker.tmp.$$"
     if status_presentation_marker_commit "$tmp" "$state/$task.status" "$endpoint" "$ident"; then
@@ -1685,7 +1693,6 @@ status_commit_delivered_endpoints() {  # <state> <endpoint-file>
     fi
     rm -f "$tmp"
   done < "$capture"
-  fm_lock_release "$state/.status-presentation-lock" || rc=1
   return "$rc"
 }
 

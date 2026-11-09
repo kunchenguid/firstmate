@@ -785,6 +785,14 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
+  # A drain whose output reaches the primary session hands its presented
+  # positions to other consumers. The daemon's own drain only reads the queue
+  # for classification, so it publishes no delivery receipt.
+  if [ "${FM_DRAIN_CONSUMER:-}" != daemon ]; then
+    command printf '%s\n' "$acknowledged" > "$prepared" \
+      && _status_write_delivered_endpoints "$STATE" "$prepared" \
+      || echo "wake drain: delivered status receipt could not be committed; events may replay" >&2
+  fi
   rm -f -- "$prepared"
 }
 
