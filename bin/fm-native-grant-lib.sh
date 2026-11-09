@@ -184,9 +184,9 @@ fm_native_grant_spend() {  # <ledger>
     FM_NATIVE_GRANT_ERROR="grant spend ledger '$ledger' is not a regular file"
     return 1
   fi
-  printf '%s\n' "$FM_NATIVE_GRANT_FINGERPRINT" >> "$ledger" 2>/dev/null \
-    && grep -qxF "$FM_NATIVE_GRANT_FINGERPRINT" "$ledger" || {
+  if ! { printf '%s\n' "$FM_NATIVE_GRANT_FINGERPRINT" >> "$ledger" 2>/dev/null \
+    && grep -qxF "$FM_NATIVE_GRANT_FINGERPRINT" "$ledger"; }; then
     FM_NATIVE_GRANT_ERROR="grant spend ledger '$ledger' could not be written"
     return 1
-  }
+  fi
 }
