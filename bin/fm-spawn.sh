@@ -6705,7 +6705,11 @@ EOF
 // reports activity and ignores other sessions until the latched session settles,
 // so a child's terminal event can never clear the worker's busy state. The
 // turn-ended touch stays the watcher's wake NOTIFICATION, never current-state
-// truth.
+// truth. Every event applies strictly in emission order through one queue
+// shared by the server hook and the setup subscription: the record serializes
+// only on its lock, so a turn's terminal busy - emitted a millisecond before
+// its idle, delivered without awaiting this hook - would otherwise be free to
+// win the last write and leave an idle worker recorded busy.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state, event) =>
@@ -6739,7 +6743,8 @@ const setupEventSubscription = (ctx, handler) => {
 };
 const makeHandler = () => {
   let activeSession = null;
-  return async (event) => {
+  let queue = Promise.resolve();
+  const apply = async (event) => {
     const type = eventType(event);
     const id = sessionID(event);
     if (type === "session.execution.started") {
@@ -6777,9 +6782,13 @@ const makeHandler = () => {
       if (notifyTurnEnd) await touchTurnEnded();
     }
   };
+  return (event) => {
+    queue = queue.then(() => apply(event), () => apply(event));
+    return queue;
+  };
 };
+const handleEvent = makeHandler();
 export const FmBusyState = async () => {
-  const handleEvent = makeHandler();
   return {
     event: async ({ event }) => handleEvent(event),
   };
@@ -6789,7 +6798,7 @@ export default {
   id: "fm.busy-state",
   server: FmBusyState,
   setup(ctx) {
-    setupEventSubscription(ctx, makeHandler());
+    setupEventSubscription(ctx, handleEvent);
   },
 };
 EOF
@@ -6803,7 +6812,11 @@ EOF
 // only start while the main session is already busy) and ignores other
 // sessions' status until the latched session settles, so a child's idle can
 // never clear the worker's busy state. The session.idle touch stays the
-// watcher's wake NOTIFICATION, never current-state truth.
+// watcher's wake NOTIFICATION, never current-state truth. Every event applies
+// strictly in emission order through one queue: the record serializes only on
+// its lock, so a turn's terminal busy - emitted a millisecond before its idle,
+// delivered without awaiting this hook - would otherwise be free to win the
+// last write and leave an idle worker recorded busy.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state, event) =>
@@ -6815,33 +6828,38 @@ const busyEvent = (state, event) =>
   });
 export const FmBusyState = async () => {
   let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
-        }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
+  let queue = Promise.resolve();
+  const apply = async (event) => {
+    if (event.type === "session.status") {
+      const sessionID = event.properties.sessionID;
+      const statusType = event.properties.status && event.properties.status.type;
+      if (statusType === "busy" || statusType === "retry") {
+        if (activeSession === null) activeSession = sessionID;
+        if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
         return;
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        if (notifyTurnEnd) {
-          await new Promise((resolve) => {
-            execFile("touch", ["$TURNEND"], () => resolve());
-          });
-        }
+      if (statusType === "idle" && sessionID === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-status-idle");
       }
+      return;
+    }
+    if (event.type === "session.idle") {
+      if (event.properties.sessionID === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-idle");
+      }
+      if (notifyTurnEnd) {
+        await new Promise((resolve) => {
+          execFile("touch", ["$TURNEND"], () => resolve());
+        });
+      }
+    }
+  };
+  return {
+    event: ({ event }) => {
+      queue = queue.then(() => apply(event), () => apply(event));
+      return queue;
     },
   };
 };
