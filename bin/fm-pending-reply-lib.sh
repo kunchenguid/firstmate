@@ -1599,16 +1599,90 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
   '
 }
 
-# Remove this process's pending-reply decision snapshot directories under
-# $TMPDIR. fm_pending_reply_tick names its cache dir with the owning pid so an
-# interruption mid-tick still leaves the directory findable by this cleanup,
-# which the watcher's exit cleanup calls.
+_fm_pending_reply_path_owner() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %u "$1" 2>/dev/null
+  else
+    stat -c %u "$1" 2>/dev/null
+  fi
+}
+
+_fm_pending_reply_path_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+# Return or create a private directory (mode 0700, owned by current user)
+# for pending-reply decision snapshots under ${TMPDIR:-/tmp}.
+_fm_pending_reply_decision_cache_root() {
+  local base=${TMPDIR:-/tmp} root uid owner mode
+  [ -d "$base" ] || return 1
+  uid=$(id -u 2>/dev/null || echo "${EUID:-}")
+  [ -n "$uid" ] || return 1
+  root="$base/fm-pending-reply-$uid"
+  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+    (umask 077 && mkdir -p "$root") 2>/dev/null || return 1
+  fi
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  owner=$(_fm_pending_reply_path_owner "$root") || return 1
+  [ "$owner" = "$uid" ] || return 1
+  mode=$(_fm_pending_reply_path_mode "$root") || return 1
+  case "$mode" in
+    700|0700) ;;
+    *)
+      chmod 0700 "$root" 2>/dev/null || return 1
+      mode=$(_fm_pending_reply_path_mode "$root") || return 1
+      [ "$mode" = 700 ] || [ "$mode" = 0700 ] || return 1
+      ;;
+  esac
+  printf '%s\n' "$root"
+}
+
+# Safely remove a pending-reply decision snapshot directory. Re-checks
+# ownership and symlink status at delete time, refusing any path that is a
+# symlink, not a directory, or not owned by the current user.
+_fm_pending_reply_decision_cache_rm_one() {  # <dir-path>
+  local d=$1 uid owner f
+  [ -n "$d" ] || return 0
+  [ -e "$d" ] || [ -L "$d" ] || return 0
+  [ ! -L "$d" ] || return 1
+  [ -d "$d" ] || return 1
+
+  uid=$(id -u 2>/dev/null || echo "${EUID:-}")
+  owner=$(_fm_pending_reply_path_owner "$d")
+  [ -n "$uid" ] && [ -n "$owner" ] && [ "$owner" = "$uid" ] || return 1
+
+  for f in "$d"/*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ ! -L "$d" ] || return 1
+    rm -f -- "$f"
+  done
+
+  [ ! -L "$d" ] || return 1
+  owner=$(_fm_pending_reply_path_owner "$d")
+  [ "$owner" = "$uid" ] || return 1
+  rmdir "$d" 2>/dev/null || true
+}
+
+# Remove this process's pending-reply decision snapshot directories.
+# Cleans snapshot directories under the watcher user's private root (0700)
+# and sweeps any legacy PID-prefixed paths in ${TMPDIR:-/tmp}. Re-checks
+# ownership and symlink status at delete time and refuses otherwise.
 fm_pending_reply_decision_cache_cleanup() {
-  local d
+  local d root
+  if root=$(_fm_pending_reply_decision_cache_root 2>/dev/null) && [ -d "$root" ]; then
+    for d in "$root"/fm-pending-reply-decisions."$$".*; do
+      [ -e "$d" ] || [ -L "$d" ] || continue
+      _fm_pending_reply_decision_cache_rm_one "$d" || true
+    done
+    rmdir "$root" 2>/dev/null || true
+  fi
   for d in "${TMPDIR:-/tmp}"/fm-pending-reply-decisions."$$".*; do
-    [ -d "$d" ] && [ ! -L "$d" ] || continue
-    rm -f "$d/"*
-    rmdir "$d"
+    [ -e "$d" ] || [ -L "$d" ] || continue
+    _fm_pending_reply_decision_cache_rm_one "$d" || true
   done
 }
 
@@ -1643,8 +1717,11 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
-    _fm_pending_reply_decision_cache_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-pending-reply-decisions.$$.XXXXXX") \
-      || _fm_pending_reply_decision_cache_dir=
+    local _fm_cache_root
+    if _fm_cache_root=$(_fm_pending_reply_decision_cache_root 2>/dev/null); then
+      _fm_pending_reply_decision_cache_dir=$(mktemp -d "$_fm_cache_root/fm-pending-reply-decisions.$$.XXXXXX" 2>/dev/null) \
+        || _fm_pending_reply_decision_cache_dir=
+    fi
   fi
   for rec in ${selected[@]+"${selected[@]}"}; do
     corr=$(fm_pending_reply_get "$rec" corr_id)
@@ -1747,8 +1824,8 @@ fm_pending_reply_tick() {  # <state-dir>
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
   if [ -n "$_fm_pending_reply_decision_cache_dir" ]; then
-    rm -f "$_fm_pending_reply_decision_cache_dir/"*
-    rmdir "$_fm_pending_reply_decision_cache_dir"
+    _fm_pending_reply_decision_cache_rm_one "$_fm_pending_reply_decision_cache_dir" || true
+    rmdir "${_fm_pending_reply_decision_cache_dir%/*}" 2>/dev/null || true
   fi
   return 0
 }

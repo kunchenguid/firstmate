@@ -2291,6 +2291,69 @@ test_decision_cache_cleanup_removes_abandoned_dirs() {
   pass "decision-cache cleanup removes this pid's abandoned dirs only"
 }
 
+test_decision_cache_cleanup_refuses_unsafe_paths() (
+  local lab tmp root legit legit_legacy victim swapped foreign uid
+  lab=$(fm_test_tmproot fm-pr-cache-unsafe)
+  tmp=$lab/tmp
+  mkdir -p "$tmp"
+  TMPDIR=$tmp
+  uid=$(id -u 2>/dev/null || echo "${EUID:-}")
+
+  # (a) Legit snapshot dirs: one in the 0700 private user root, one legacy in TMPDIR
+  root=$(_fm_pending_reply_decision_cache_root)
+  [ -d "$root" ] || fail "private snapshot root must be created"
+  [ "$(_fm_pending_reply_path_mode "$root")" = 700 ] || [ "$(_fm_pending_reply_path_mode "$root")" = 0700 ] || fail "snapshot root must be mode 0700"
+  [ "$(_fm_pending_reply_path_owner "$root")" = "$uid" ] || fail "snapshot root must be user-owned"
+
+  legit="$root/fm-pending-reply-decisions.$$.legit"
+  legit_legacy="$tmp/fm-pending-reply-decisions.$$.legacy"
+  mkdir -p "$legit" "$legit_legacy"
+  printf 'snap' > "$legit/0"
+  printf 'snap-legacy' > "$legit_legacy/0"
+
+  # (b) Symlink-swapped path: a matching PID prefix path pointing to a victim dir
+  victim="$tmp/victim-files"
+  mkdir -p "$victim"
+  printf 'sensitive-data\n' > "$victim/secret.txt"
+  swapped="$tmp/fm-pending-reply-decisions.$$.swapped"
+  ln -s "$victim" "$swapped"
+
+  # (c) Foreign-owned matching dir
+  foreign="$tmp/fm-pending-reply-decisions.$$.foreign"
+  mkdir -p "$foreign"
+  printf 'foreign-data\n' > "$foreign/keep.txt"
+
+  # Mock _fm_pending_reply_path_owner in this subshell to report foreign ownership for $foreign
+  _fm_pending_reply_path_owner() {
+    if [ "$1" = "$foreign" ]; then
+      echo "99999"
+    elif [ "$(uname)" = Darwin ]; then
+      /usr/bin/stat -f %u "$1" 2>/dev/null
+    else
+      stat -c %u "$1" 2>/dev/null
+    fi
+  }
+
+  fm_pending_reply_decision_cache_cleanup
+
+  # (a) Allowed paths must be cleaned
+  [ ! -d "$legit" ] || fail "legit snapshot dir under private root must be cleaned"
+  [ ! -d "$legit_legacy" ] || fail "legit legacy snapshot dir must be cleaned"
+
+  # (b) Symlink-swapped path must NOT be followed or deleted
+  [ -f "$victim/secret.txt" ] || fail "symlink target file must not be deleted"
+  [ "$(cat "$victim/secret.txt")" = 'sensitive-data' ] || fail "symlink target content must be intact"
+  [ -d "$victim" ] || fail "symlink target directory must not be deleted"
+  [ -L "$swapped" ] || fail "symlink path itself must not be followed/removed"
+
+  # (c) Foreign-owned matching dir must be untouched
+  [ -d "$foreign" ] || fail "foreign-owned matching dir must be untouched"
+  [ -f "$foreign/keep.txt" ] || fail "foreign-owned matching dir contents must be untouched"
+  [ "$(cat "$foreign/keep.txt")" = 'foreign-data' ] || fail "foreign file content changed"
+
+  pass "cleanup cleans legit snapshot dirs, refuses symlink-swapped paths, and preserves foreign-owned dirs"
+)
+
 # --- run --------------------------------------------------------------------
 
 test_recovery_rechecks_decision_before_allowed_delivery || fail "pre-delivery decision regression failed"
@@ -2346,5 +2409,6 @@ test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
 test_decision_cache_cleanup_removes_abandoned_dirs
+test_decision_cache_cleanup_refuses_unsafe_paths
 
 printf 'ok - all pending-reply tests passed\n'
