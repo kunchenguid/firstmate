@@ -2033,7 +2033,7 @@ test_cleanup_only_records_never_transition_the_backlog() {
     || fail "unknown cleanup reason exempted a worker record from reconciliation: $out"
   out=$(run_teardown "$case_dir" "$id") \
     || fail "unknown cleanup reason task teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = done ] \
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "unknown cleanup reason exempted teardown from its backlog transition: $out"
 
   id=atomic-delivery-pending-b8
