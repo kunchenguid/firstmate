@@ -1664,11 +1664,44 @@ status_delivered_cursor_offset() {  # <status-file>
 # presentation lock serializes receipt updates with drains and retirement.
 # Independent receipts avoid overwriting the drain's newer fleet snapshot.
 status_commit_delivered_endpoints() {  # <state> <endpoint-file>
-  local state=$1 capture=$2 rc=0
-  fm_lock_acquire_wait_bounded "$state/.status-presentation-lock" 5 || return 1
-  _status_write_delivered_endpoints "$state" "$capture" || rc=1
+  local state=$1 capture=$2 rc=0 clamped task endpoint ident bounded
+  clamped=$(mktemp "$state/.status-delivered.clamped.XXXXXX") || return 1
+  fm_lock_acquire_wait_bounded "$state/.status-presentation-lock" 5 \
+    || { rm -f "$clamped"; return 1; }
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    bounded=$endpoint
+    case "$task" in *[!a-zA-Z0-9_.-]*) ;; *)
+      case "$endpoint" in ''|*[!0-9]*) ;; *)
+        bounded=$(_status_delivered_receipt_endpoint "$state/$task.status" "$endpoint") || bounded=$endpoint ;;
+      esac ;;
+    esac
+    printf '%s\t%s\t%s\n' "$task" "$bounded" "$ident" >> "$clamped" || rc=1
+  done < "$capture"
+  _status_write_delivered_endpoints "$state" "$clamped" || rc=1
+  rm -f "$clamped"
   fm_lock_release "$state/.status-presentation-lock" || rc=1
   return "$rc"
+}
+
+# A digest delivers actionable events only. Stop a receipt at the first unread
+# informational line in its span so the primary drain still presents that line.
+_status_delivered_receipt_endpoint() {  # <status-file> <endpoint>
+  local LC_ALL=C f=$1 endpoint=$2 start span line consumed=0
+  start=$(status_presentation_cursor_offset "$f") || return 1
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$start" -ge "$endpoint" ]; then printf '%s' "$endpoint"; return 0; fi
+  span=$(mktemp "${f%/*}/.status-delivered.span.XXXXXX") || return 1
+  if ! _fm_status_read_span "$f" "$start" "$((endpoint - start))" > "$span" 2>/dev/null; then
+    rm -f "$span"; return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    if status_line_is_unread_surface "$line"; then break; fi
+    consumed=$((consumed + ${#line} + 1))
+  done < "$span"
+  rm -f "$span"
+  [ "$((start + consumed))" -le "$endpoint" ] || consumed=$((endpoint - start))
+  printf '%s' "$((start + consumed))"
 }
 
 # Lock-free body for a caller that already holds the presentation lock.

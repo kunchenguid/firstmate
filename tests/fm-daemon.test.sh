@@ -4291,3 +4291,53 @@ test_native_ambiguity_holds_later_flushes() (
   pass "ambiguous native submission holds later flushes without dropping new events"
 )
 test_native_ambiguity_holds_later_flushes
+
+# A digest delivers actionable events only: informational lines in its captured
+# span stay unread for the primary, and a daemon drain presents nothing.
+test_delivery_receipts_preserve_unread_notes() (
+  local dir state file capture end out
+  dir=$(make_supercase receipt-notes); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  file="$state/notes.status"; capture="$dir/positions"
+  printf 'failed: build\nnote: diagnostic answer\n' > "$file"
+  end=$(log_size "$file")
+  printf 'notes\t%s\t%s\n' "$end" "$(_fm_open_decisions_file_ident "$file")" > "$capture"
+  status_commit_delivered_endpoints "$state" "$capture" || fail "receipt commit failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$(printf 'failed: build\n' | wc -c)" ] \
+    || fail "digest receipt covered an undelivered note"
+  out=$(status_new_lines_since_cursor "$file")
+  case "$out" in *'note: diagnostic answer'*) ;; *) fail "unread note was skipped: $out" ;; esac
+  pass "daemon delivery receipts stop before unread informational lines"
+)
+test_delivery_receipts_preserve_unread_notes
+
+test_daemon_drain_leaves_primary_presentation_unread() (
+  local dir state
+  dir=$(make_supercase daemon-drain-unread); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  printf 'note: unseen\n' > "$state/unseen.status"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_DRAIN_CONSUMER=daemon \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/daemon.out" 2>/dev/null || fail "daemon drain failed"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary.out" 2>/dev/null || fail "primary drain failed"
+  grep -q 'note: unseen' "$dir/primary.out" || fail "primary drain omitted a note the daemon drain discarded: $(cat "$dir/primary.out")"
+  pass "a daemon drain does not consume the primary's unread notes"
+)
+test_daemon_drain_leaves_primary_presentation_unread
+
+test_backstop_presentation_is_seen_by_the_daemon() (
+  local dir state file out
+  dir=$(make_supercase backstop-seen); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  file="$state/finished.status"
+  printf 'done: shipped\n' > "$file"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary.out" 2>/dev/null || fail "primary drain failed"
+  grep -q 'finished done: shipped' "$dir/primary.out" || fail "backstop did not present the event: $(cat "$dir/primary.out")"
+  [ "$(status_seen_offset "$state" finished)" = "$(log_size "$file")" ] \
+    || fail "daemon would escalate an event the primary drain already presented"
+  pass "an event presented by the primary's outcome backstop is not escalated again"
+)
+test_backstop_presentation_is_seen_by_the_daemon

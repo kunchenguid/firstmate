@@ -686,6 +686,8 @@ status_seen_offset() {  # <state> <task>
   classified=$(status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status")
   presented=$(status_delivered_cursor_offset "$1/$2.status") || presented=0
   [ "$presented" -le "$classified" ] || classified=$presented
+  presented=$(_status_drain_backstop_offset "$1/$2.status") || presented=0
+  [ "$presented" -le "$classified" ] || classified=$presented
   printf '%s' "$classified"
 }
 
@@ -1832,7 +1834,7 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   errf=$(mktemp "$state/.subsuper-inject-err.XXXXXX" 2>/dev/null) || errf=
   INJECT_SUBMIT_ATTEMPTED=1
   INJECT_SENT_MSG=$msg
-  verdict=$(FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
+  verdict=$(FM_HERDR_EXPECTED_HARNESS=$(fm_daemon_primary_harness) FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
   INJECT_LAST_VERDICT=$verdict
   if [ "$backend" = herdr ] && [ "$verdict" = pending ] \
     && [ "$(fm_daemon_primary_harness)" = codex ]; then
