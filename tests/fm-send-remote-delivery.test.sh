@@ -969,6 +969,34 @@ test_delivered_remote_steer_without_a_report_still_reports_delivery() {
   pass "fm-send remote: delivery is reported even when the remote leg names no record"
 }
 
+test_delivered_remote_steer_reports_sent_before_notices() {
+  local dir fb ssh_log home rhome rc err sent_line notice_line
+  dir="$TMP_ROOT/sent-before-notice"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/order.ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home sent-before-notice)
+  home=$(setup_remote_parent_home sent-before-notice "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 0 "$rc" "a delivered remote steer must exit 0: $err"
+  assert_contains "$err" "sent: steer to remote secondmate rsm durably recorded at " \
+    "a delivered remote steer must report its own delivery"
+  assert_contains "$err" "notice: steer durably recorded at " \
+    "a doorbell notice must be reported when the doorbell cannot be typed"
+
+  # sent: confirmation must precede notice: advisories on successful delivery
+  sent_line=$(grep -n '^sent: ' "$dir/err" | head -1 | cut -d: -f1)
+  notice_line=$(grep -n '^notice: ' "$dir/err" | head -1 | cut -d: -f1)
+  [ -n "$sent_line" ] || fail "stderr missing sent: confirmation: $err"
+  [ -n "$notice_line" ] || fail "stderr missing notice: advisory: $err"
+  [ "$sent_line" -lt "$notice_line" ] \
+    || fail "sent: must precede notice: on success, got sent: at line $sent_line, notice: at line $notice_line:"$'\n'"$err"
+
+  pass "fm-send remote: confirmation-first output reports sent: before replay of remote notices"
+}
+
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
@@ -988,5 +1016,6 @@ test_local_secondmate_pending_keeps_expectation_armed
 test_delivered_remote_steer_names_the_far_side_record
 test_delivered_remote_steer_advisory_cannot_read_as_refusal
 test_delivered_remote_steer_without_a_report_still_reports_delivery
+test_delivered_remote_steer_reports_sent_before_notices
 
 echo "all fm-send-remote-delivery tests passed"

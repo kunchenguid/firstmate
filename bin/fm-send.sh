@@ -1087,46 +1087,66 @@ else
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
-    remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
-      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
+    remote_stderr_file=
+    if remote_stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-send-remote-stderr.XXXXXX" 2>/dev/null); then
+      :
+    else
+      remote_stderr_file=
+    fi
+    if [ -n "$remote_stderr_file" ]; then
+      remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" 2>"$remote_stderr_file") || remote_rc=$?
+    else
+      remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
+    fi
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
     elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
-      remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
-        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
+      if [ -n "$remote_stderr_file" ]; then
+        remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+          "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" 2>>"$remote_stderr_file") || remote_rc=$?
+      else
+        remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+          "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
+      fi
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     # Anything the remote leg printed on stdout that this layer does not own
     # passes through unchanged on every outcome, so reading the report line
     # above never swallows a future remote line.
     printf '%s\n' "$remote_report" | sed -e '/^steer_record=/d' -e '/^$/d'
-    if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
-      if [ -n "$FIRE_AND_FORGET_ID" ]; then
-        echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
-        exit 3
-      fi
-      if [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      if [ "$remote_rc" -eq 255 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
-      elif [ "$remote_rc" -eq 124 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
-      else
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
-      fi
-      printf '%s' "$(fm_send_resend_env)" >&2
-      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
-        "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
-      for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
-        printf ' %q' "$resend_arg" >&2
-      done
-      printf '\n' >&2
-      exit 1
-    fi
     if [ "$remote_rc" -ne 0 ]; then
+      if [ -n "$remote_stderr_file" ] && [ -s "$remote_stderr_file" ]; then
+        cat "$remote_stderr_file" >&2
+      fi
+      [ -z "$remote_stderr_file" ] || rm -f "$remote_stderr_file"
+      if [ "$remote_completion_unknown" -eq 1 ]; then
+        if [ -n "$FIRE_AND_FORGET_ID" ]; then
+          echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
+          exit 3
+        fi
+        if [ -n "$PENDING_REPLY_CORR" ]; then
+          fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+        fi
+        if [ "$remote_rc" -eq 255 ]; then
+          echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        elif [ "$remote_rc" -eq 124 ]; then
+          echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        else
+          echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        fi
+        printf '%s' "$(fm_send_resend_env)" >&2
+        printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
+          "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
+        for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
+          printf ' %q' "$resend_arg" >&2
+        done
+        printf '\n' >&2
+        exit 1
+      fi
       fm_send_known_undelivered_cleanup ||
         echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
@@ -1147,6 +1167,10 @@ else
     fi
     printf 'sent: steer to remote secondmate %s %s - delivery is complete, do not resend\n' \
       "$TARGET_REMOTE_ID" "$remote_steer_where" >&2
+    if [ -n "$remote_stderr_file" ] && [ -s "$remote_stderr_file" ]; then
+      cat "$remote_stderr_file" >&2
+    fi
+    [ -z "$remote_stderr_file" ] || rm -f "$remote_stderr_file"
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
         :
