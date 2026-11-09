@@ -482,6 +482,33 @@ test_explicit_legacy_bindings_allow_sync() {
   pass "direct fleet-sync honors explicit Forgejo and external bindings"
 }
 
+test_explicit_binding_does_not_cross_same_basename() {
+  local home canonical foreign remote_url origin_url before out
+  home=$(new_home)
+  canonical=$(build_pair "$home" collision)
+  remote_url=$(git -C "$canonical" remote get-url origin)
+  mkdir -p "$home/foreign"
+  foreign="$home/foreign/collision"
+  git clone --quiet "$remote_url" "$foreign"
+  origin_url="https://unrecognized.example/team/collision.git"
+  git -C "$canonical" remote set-url origin "$origin_url"
+  git -C "$canonical" config url."$remote_url".insteadOf "$origin_url"
+  git -C "$foreign" remote set-url origin "$origin_url"
+  git -C "$foreign" config url."$remote_url".insteadOf "$origin_url"
+  mkdir -p "$home/data"
+  printf -- '- collision [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+  advance_origin "$home" collision C1
+  before=$(head_sha "$foreign")
+
+  out=$(run_sync "$home" "$foreign")
+
+  [ -z "$out" ] || fail "an unrelated same-basename clone must be skipped silently, got: $out"
+  [ "$(head_sha "$foreign")" = "$before" ] \
+    || fail "an explicit binding crossed into an unrelated same-basename clone"
+  pass "explicit forge bindings stay scoped to registered checkout paths"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -846,6 +873,7 @@ test_no_origin_skipped
 test_unknown_origin_is_skipped_even_when_invoked_directly
 test_explicit_gerrit_binding_allows_sync
 test_explicit_legacy_bindings_allow_sync
+test_explicit_binding_does_not_cross_same_basename
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves

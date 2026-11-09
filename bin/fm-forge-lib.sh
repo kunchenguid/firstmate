@@ -135,7 +135,7 @@ fm_forge_safe_ssh_config_file() {
 fm_forge_checkout_remote() {
   local checkout=${1:-} remote
   [ -d "$checkout" ] || return 1
-  remote=$(command git -C "$checkout" remote get-url origin 2>/dev/null) && {
+  remote=$(command git -C "$checkout" config --get remote.origin.url 2>/dev/null) && {
     printf '%s\n' "$remote"
     return 0
   }
@@ -143,12 +143,20 @@ fm_forge_checkout_remote() {
 }
 
 fm_forge_registered_binding() {
-  local project_id=${1:-} root home data forge
+  local checkout=${1:-} project_id root home data projects forge
 
-  [ -n "$project_id" ] || return 1
+  [ -d "$checkout" ] || return 1
   root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
   home=${FM_HOME:-$root}
   data=${FM_DATA_OVERRIDE:-$home/data}
+  projects=${FM_PROJECTS_OVERRIDE:-$home/projects}
+  checkout=$(cd "$checkout" && pwd -P) || return 2
+  projects=$(cd "$projects" && pwd -P) || return 1
+  case "$checkout/" in
+    "$projects"/*/) ;;
+    *) return 1 ;;
+  esac
+  project_id=$(basename "$checkout")
   if forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null); then
     case "$forge" in
@@ -201,7 +209,7 @@ fm_forge_detect_provider() {
     echo "local"
     return 0
   }
-  if binding=$(fm_forge_registered_binding "$(basename "$checkout")"); then
+  if binding=$(fm_forge_registered_binding "$checkout"); then
     echo "$binding"
     return 0
   else

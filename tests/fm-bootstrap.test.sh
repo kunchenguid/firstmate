@@ -1350,7 +1350,8 @@ test_forge_provider_local_only_refusal_not_unsupported() {
   rm -f "$fakebin/gh" "$fakebin/gh-axi"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "a local-only forge refusal must not become a forge diagnostic, got: $out"
+  [ "$out" = "FLEET_SYNC: local-project: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh local-project for the refusal)" ] \
+    || fail "bootstrap must surface the local-only forge refusal, got: $out"
   pass "bootstrap preserves local-only forge posture refusals"
 }
 
