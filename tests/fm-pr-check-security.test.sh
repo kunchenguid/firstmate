@@ -1379,16 +1379,21 @@ test_github_enterprise_hosts() {
 # exits on a later check's wake without the poll's result.
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
-  local check_timeout_env=(-u FM_CHECK_TIMEOUT) case_dir
+  local watch=${FM_TEST_WATCH_SCRIPT:-$WATCH} check_timeout_env=(-u FM_CHECK_TIMEOUT) home_env=("FM_HOME=$home") case_dir
   case_dir=$(dirname "$home")
   [ -z "${FM_TEST_CHECK_TIMEOUT:-}" ] || check_timeout_env=("FM_CHECK_TIMEOUT=$FM_TEST_CHECK_TIMEOUT")
+  # FM_TEST_WATCH_HOME_VIA_ROOT=1 reaches the home only through FM_ROOT_OVERRIDE, with FM_HOME unset.
+  if [ "${FM_TEST_WATCH_HOME_VIA_ROOT:-0}" = 1 ]; then
+    home_env=()
+    watch_root=$home
+  fi
   shift 2
   perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=shift; my $stop=shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; my $spent=$now - $last; $last=$now; unless (length $pause && -e $pause) { $left -= $spent; $left = 1 if length $stop && -e $stop && $left > 1; $stop = "" if length $stop && -e $stop } if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
-    "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" "${FM_TEST_WATCH_STOP_WHEN:-}" env "${check_timeout_env[@]}" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
+    "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" "${FM_TEST_WATCH_STOP_WHEN:-}" env -u FM_HOME "${check_timeout_env[@]}" \
+      ${home_env[@]+"${home_env[@]}"} FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
       FM_TEST_GH_LOG="$case_dir/gh.log" FM_TEST_GLAB_LOG="$case_dir/glab.log" \
       FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" FM_TEST_GERRIT_AXI_LOG="$case_dir/gerrit-axi.log" \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_JQ="$REAL_JQ" PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_JQ="$REAL_JQ" PATH="$fakebin:$BASE_PATH" "$watch" "$@"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -1594,6 +1599,46 @@ test_degraded_watch_flag_refreshes_each_sweep() {
   ! grep -q 'check: task-a.check.sh:' "$dir/watch.out" \
     || fail "disabled degraded result fell through to a generic wake: $(cat "$dir/watch.out")"
   pass "watcher refreshes the degraded-watch flag each sweep and drops disabled poll results"
+}
+
+test_degraded_watch_flag_in_an_overridden_home() {
+  local dir home state code url failing new_head
+  dir=$(make_case degraded-overridden-home)
+  home="$dir/home"
+  state="$home/state"
+  code="$dir/code"
+  url=https://github.com/o/r/pull/1
+  failing='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]'
+  new_head=fedcba9876543210fedcba9876543210fedcba98
+  # The opt-in flag exists only in a home reached through FM_ROOT_OVERRIDE
+  # with FM_HOME unset; the code checkout the scripts run from has none.
+  mkdir -p "$code/config" "$home/bin"
+  cp -R "$ROOT/bin" "$code/bin"
+  cp "$dir/root/bin/fm-guard.sh" "$home/bin/fm-guard.sh"
+  write_task_meta "$dir" task-a
+  env -u FM_HOME -u FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE="$home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_JQ="$REAL_JQ" \
+    FM_TEST_GH_ROLLUP="$failing" PATH="$dir/fakebin:$BASE_PATH" \
+    "$code/bin/fm-pr-check.sh" task-a "$url" > "$dir/register.out" 2> "$dir/register.err" \
+    || fail "registration in an overridden home failed: $(cat "$dir/register.err")"
+  [ -f "$state/task-a.pr-poll-degraded" ] \
+    || fail "the registration baseline read ignored the overridden home's flag: $(cat "$dir/gh.log")"
+  rm -f "$state/.last-check"
+  FM_TEST_WATCH_HOME_VIA_ROOT=1 FM_TEST_WATCH_SCRIPT="$code/bin/fm-watch.sh" \
+    FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GH_ROLLUP="$failing" \
+    run_watcher_bounded "$home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
+  [ "$(grep -c 'degraded after ready' "$dir/watch-1.out")" -eq 0 ] \
+    || fail "watcher in an overridden home woke for a head already failing at registration: $(cat "$dir/watch-1.out")"
+  ack_watcher_cycle "$state" || fail "overridden-home baseline cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_WATCH_HOME_VIA_ROOT=1 FM_TEST_WATCH_SCRIPT="$code/bin/fm-watch.sh" \
+    FM_TEST_GH_HEAD="$new_head" FM_TEST_GH_ROLLUP="$failing" \
+    run_watcher_bounded "$home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err" || true
+  [ "$(grep -c "degraded after ready: degraded head=$new_head" "$dir/watch-2.out")" -eq 1 ] \
+    || fail "watcher's validated poll ignored the overridden home's flag: $(cat "$dir/watch-2.out") $(cat "$dir/watch-2.err")"
+  pass "a degraded-watch flag only in a home reached through FM_ROOT_OVERRIDE arms the baseline and wakes"
 }
 
 test_github_degraded_poll() {
@@ -5070,6 +5115,7 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_degraded_watch_opt_in_absent_preserves_merged_only_behavior
 test_degraded_watch_flag_refreshes_each_sweep
+test_degraded_watch_flag_in_an_overridden_home
 test_github_degraded_poll
 test_degraded_poll_wakes_once_per_transition
 test_degraded_wake_survives_an_unsaved_marker
