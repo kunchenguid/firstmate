@@ -5,10 +5,12 @@
 # projects/. A slot that keeps them is not reusable - the next seed in that slot
 # refuses it as a home "already marked for <retired mate>" - and it turns a
 # routine retirement into a pool slot no secondmate can ever lease again.
-# Prune runs only on a return path, because that is the point where the caller
-# has already decided the home is retired; removal paths delete the whole home
-# and never reach here. A payload path that carries tracked files is left in
-# place and refuses the prune, so a home whose tree tracks any of them keeps its
+# Cleanup is return-only, because that is the point where the caller has already
+# decided the home is retired; removal paths delete the whole home and never
+# reach here. fm_home_payload_prune deletes the paths outright, while
+# fm_home_payload_return stages the same paths first so a failed return can put
+# them back. A payload path that carries tracked files is left in place and
+# refuses either entry point, so a home whose tree tracks any of them keeps its
 # checkout intact instead of being dirtied into a failed return.
 # The home-lock library owns Git lock ownership; this library owns only the
 # payload cleanup that makes the returned slot reusable.

@@ -1322,10 +1322,10 @@ Seeding also protects linked-worktree homes with a Git-native lock that identifi
 Repeated seeding preserves owned protection; existing unlocked linked homes gain it when reseeded, while standalone clones keep their existing lifecycle.
 Guarded retirement and attempt-owned rollback release only matching Firstmate protection, and refuse foreign locks or unknown ownership.
 A failed return restores protection when the worktree survives and preserves the route for retry.
-This lock does not prevent filesystem trash operations or an explicit Git lock override by a tool that ignores the protection.
+This lock does not prevent filesystem trash operations, a `treehouse return` that cleans the checkout in place, or an explicit Git lock override by a tool that ignores the protection.
 The [home-lock library](../bin/fm-home-worktree-lock-lib.sh) owns receipt validation and release mechanics.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
-A returned slot is an ordinary pool checkout again, so retirement clears the retired home's payload (`data/`, `state/`, `config/`, `projects/`, and both identity markers) once the return succeeds, and a failed return keeps the whole home for the preserved retry; a slot that kept the payload would refuse the next seed in it as already marked for a mate that no longer exists.
+A returned slot is an ordinary pool checkout again, so a successful retirement return or attempt-owned seed-rollback return clears the retired home's payload (`data/`, `state/`, `config/`, `projects/`, and both identity markers), while a failed return puts the whole home back for the preserved retry; a slot that kept the payload would refuse the next seed in it as already marked for a mate that no longer exists.
 The [payload library](../bin/fm-home-payload-lib.sh) owns that cleanup.
 
 ### Project modes and backlog handoff

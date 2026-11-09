@@ -2989,7 +2989,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend> [<lock-parent>]
     }
     fm_home_payload_return "$abs_home_path" "$expected_id" "$lock_parent" \
       teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse home return failed for $label $abs_home_path; preserving retirement records" >&2
+      echo "error: treehouse return failed for $label $abs_home_path; preserving the home and its records for retry (lease may still be held)" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
