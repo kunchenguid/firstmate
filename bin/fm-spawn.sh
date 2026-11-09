@@ -5839,8 +5839,7 @@ kimi_cleanup_readiness_resources() {
     }
   fi
   if [ "$cleanup_failed" = 1 ]; then
-    SPAWN_FRESH_COMMIT_PENDING=0
-    echo "warning: retaining task $ID for cleanup because Kimi readiness resources could not all be removed" >&2
+    echo "warning: Kimi readiness cleanup was incomplete for task $ID; its provisional task record will be rolled back" >&2
   fi
 }
 
@@ -5931,8 +5930,7 @@ rovo_readiness_fail() { # <detail>
     fi
   fi
   if [ "$cleanup_failed" = 1 ]; then
-    SPAWN_FRESH_COMMIT_PENDING=0
-    echo "warning: retaining task $ID for cleanup because Rovo readiness resources could not all be removed" >&2
+    echo "warning: Rovo readiness cleanup was incomplete for task $ID; its provisional task record will be rolled back" >&2
   fi
 }
 

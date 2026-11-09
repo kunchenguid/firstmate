@@ -308,6 +308,8 @@ test_rovo_readiness_gate_precedes_pointer() {
   assert_contains "$(status_line_note "$line")" 'rovo did not show a verified ready signal' \
     "rovo readiness failure did not leave a supervisor-visible failure"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "rovo pointer was sent before an observable ready signal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "rovo readiness failure left an unmarked task record after endpoint cleanup"
   grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
     || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
   status_line_at_epoch "$line" >/dev/null \
