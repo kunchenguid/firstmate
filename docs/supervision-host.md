@@ -250,15 +250,14 @@ A later retry does not depend on that hook or on another Stop firing.
 The detached owner writes a durable operational-input record and submits its watcher doorbell through the backend's existing submit primitive: the tmux pane the session inherited as `TMUX_PANE`, else the herdr pane the environment itself names through `HERDR_ENV`, `HERDR_SESSION`, and `HERDR_PANE_ID`.
 On herdr that identity comes only from the injected environment, so a remote home's `fm-remote` session hands its scripts the same path and remote homes need no extra plumbing.
 It uses only the inherited pane, proves the pinned session owner lives in that pane's foreground process tree, and requires an idle agent with an empty composer.
-On herdr the pane's registered agent must also read `claude`, and idle must hold in both the native agent state and the rendered footer, because a live Claude turn can leave the native status reading idle.
+On herdr the pane's registered agent and any registered session binding must also identify `claude`, and idle must hold in both the native agent state and the rendered footer, because a live Claude turn can leave the native status reading idle.
 Busy, unreadable, foreign, and partially typed panes defer delivery without changing the queued check.
 The default retry interval is five minutes, and successful submission still does not acknowledge the hand-back.
 
 Automatic retries currently reach Claude only through that verified tmux or herdr pane.
 A primary outside both, an unavailable pane, or a blocked composer keeps its watcher and queued work but needs another normal turn or a human message.
 A failed watcher restart or a terminated retry owner is not a guarantee of continued supervision.
-`tests/fm-supervision-host-herdr-live-e2e.test.sh` proves the herdr path against a real Claude primary in an isolated herdr session: the Stop-hook continuation is lost, the detached retry submits the doorbell to the inherited pane, the primary drains and acknowledges, the pending check is removed only after that acknowledgement, and the next park takes over the surviving arm.
-The tmux path's live coverage is in [verification/supervision.md](verification/supervision.md#supervision-host).
+[verification/supervision.md](verification/supervision.md#supervision-host) owns the dated live results and verification entry points for both transports.
 All other primaries and the host-off Stop path retain their existing behavior.
 
 ## Failure direction
