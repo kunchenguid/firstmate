@@ -6,6 +6,7 @@
 ## Verification inputs
 
 Balance hints come from serial runs of the real lanes on `ubuntu-latest`.
+- The `tests/fm-start-check.test.sh` hint of 88823 ms is its completed, passing Ubuntu sample from CI run [42658232603](https://github.com/kunchenguid/firstmate/actions/runs/42658232603) serial 10.
 The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
 Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
 
