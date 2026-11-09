@@ -642,7 +642,7 @@ ok - claude 2.1.319 (Claude Code): a pinned launch reads back the model its own 
 ```
 
 That Claude half now confirms both facts the readback rests on: the transcript is written under the session id the launch carries, and the API reports the model the pin resolves to, which is the pairing `spawn_model_pin_matches` normalizes and the portable `test_claude_model_pin_snapshot_verdicts` cases pin.
-The guard's oracle applies that same documented equivalence itself instead of calling the assertion, so a launch pinned to the short family alias `sonnet` and the concrete id this host's API reports for it (`claude-sonnet-5-5`) is the pin holding rather than a mismatch; it stays independent of the code it checks and rejects another version, another family, or an id outside that family prefix.
+The guard's oracle applies that same documented equivalence itself instead of calling the assertion, so a launch pinned to the short family alias `sonnet` and the concrete id this host's API reports for it (`claude-sonnet-5-5`) is the pin holding rather than a mismatch; it stays independent of the code it checks and still fails another family, an id outside that family prefix, or another version of a concrete pin.
 The default full-id pin `claude-haiku-4-5` still cannot run here: this host's gateway answers `API Error: 400 unknown provider for model claude-haiku-4-5`, and the guard fails naming `FM_MODEL_PIN_READBACK_CLAUDE_MODEL` rather than passing over it.
 An earlier run of the same guard on this host recorded `<synthetic>` because its session ran no model, and the guard reporting that instead of a verdict is the unverified path's live confirmation.
 
