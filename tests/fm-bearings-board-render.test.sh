@@ -295,7 +295,43 @@ EOF
   pass "the complete snapshot question and options reach rendered decision text"
 }
 
+# A decision card names the captain-hold class its call claims, so a call in the
+# wrong category is visible on the card. A class outside the vocabulary
+# bin/fm-captain-hold.sh classes prints (for example a hand-edited body line)
+# degrades to its literal text with an "unrecognized class" marker: the build
+# still succeeds and the card stays on screen.
+test_a_decision_card_badges_its_captain_hold_class() {
+  local home data out
+  home=$(make_home call-class)
+  data="$home/payload.json"
+  jq -n '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, underway:[], landed:[], charted:[],
+    captains_call:[
+      {key:"sample-money-call", type:"decision", repo:"sample", title:"Spend on the rental",
+       class:"money", options:[{value:"yes",label:"Spend it"}]},
+      {key:"sample-route-call", type:"decision", repo:"sample", title:"Pick the route",
+       class:"reversible-route-pick", options:[{value:"yes",label:"Go"}]},
+      {key:"sample-legacy-call", type:"decision", repo:"sample", title:"Legacy unclassed call",
+       options:[{value:"yes",label:"Go"}]}]}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build with an unrecognized class on one card"
+  require_listener_reached_poll "$home"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") || fail "the built board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.calls | length) == 3
+      and (.calls[] | select(.title == "Spend on the rental") | [.badges[] | .text] == ["decision", "money"])
+      and (.calls[] | select(.title == "Pick the route") | [.badges[] | .text] == ["decision", "reversible-route-pick - unrecognized class"])
+      and (.calls[] | select(.title == "Legacy unclassed call") | [.badges[] | .text] == ["decision"])
+  ' >/dev/null || fail "a decision card did not badge its captain-hold class, or an unrecognized class hid a card: $out"
+  pass "a decision card badges its captain-hold class and an unrecognized class degrades to a marked badge"
+}
+
 test_full_snapshot_question_reaches_the_rendered_decision
+test_a_decision_card_badges_its_captain_hold_class
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first

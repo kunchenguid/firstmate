@@ -63,6 +63,13 @@
 # keyed-answer intake as a blind close, are owned by
 # docs/captain-hold-lifecycle.md.
 #
+# A Captain's Call item MAY carry `class`, the captain-hold class the snapshot
+# projected for that call; the template renders it as a badge on the card.
+# bin/fm-captain-hold.sh refuses an unknown class at write time, so the board
+# only degrades: a class `bin/fm-captain-hold.sh classes` does not print is
+# marked class_unrecognized and rendered as its literal text with an
+# "unrecognized class" marker, and it never refuses the build or hides the card.
+#
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
 # the fm-bearings-board.v1 types and item invariants below. Every fleet row and
@@ -294,7 +301,7 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
 # card offers reconcile" a property of the board rather than of the composer's
 # memory; the validator prevents duplicate decision options.
 effective_payload() {  # <data.json> <dest.json>
-  local data=$1 dest=$2 landed_keys key reason drop='' tmp landed=0
+  local data=$1 dest=$2 landed_keys key reason drop='' tmp landed=0 classes
   landed_keys=$(jq -c '
     def version_parts: split(".") | map(tonumber);
     . as $payload
@@ -322,11 +329,16 @@ effective_payload() {  # <data.json> <dest.json>
     drop=$drop$key$'\n'
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
-  jq --argjson dropped "$tmp" '
+  classes=$("$SCRIPT_DIR/fm-captain-hold.sh" classes 2>/dev/null | jq -Rsc 'split("\n") | map(select(length > 0))') \
+    || classes='[]'
+  jq --argjson dropped "$tmp" --argjson classes "$classes" '
     .captains_call = [
       .captains_call[]
       | . as $card
       | select($card.type != "decision" or (($dropped | index($card.key)) == null))
+      | if (.class | type) == "string" and ($classes | index($card.class)) == null
+        then .class_unrecognized = true
+        else . end
       | if .type == "decision"
         then .options += [{
           value: "reconcile",

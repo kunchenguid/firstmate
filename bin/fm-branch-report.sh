@@ -15,11 +15,11 @@
 # the host's turn record; this script only compares against it.
 #
 # Usage:
-#   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
+#   fm-branch-report.sh --task <id|fleet> --verdict routine|main|captain \
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
-# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine outcome.
+# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine,
+# main, or captain"); --silent true is legal only for a routine outcome.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -34,12 +34,13 @@
 # remains: none, or quiet mode's, whose captain is present; bin/fm-afk-contract.sh
 # AWAY OR QUIET) may be missing from the return brief, so it is also queued
 # for MAIN as a durable check wake keyed supervision-host-return:<seq>,
-# presented by the drain until MAIN acknowledges it. bin/fm-afk-return.sh
+# presented by the drain until MAIN acknowledges it; a main row's wake tells
+# MAIN to act on it itself, never to relay it as a captain call. bin/fm-afk-return.sh
 # archives the record before it reads the store and this check follows the
 # append, so every visible row is in the brief, queued, or both: the relay does
 # not depend on the host surviving its turn or on its owner delivering the
 # host's own handback. Silent outcomes remain in the store but are not queued
-# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# or relayed as notes. An attended turn queues nothing: its main and captain rows reach
 # MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u
@@ -78,10 +79,10 @@ done
 
 TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
+case "$VERDICT" in routine|main|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
-  echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
+  echo "invalid report: --task, --verdict (routine|main|captain), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
@@ -132,8 +133,8 @@ if [ "$SILENT" = true ]; then
   exit 0
 fi
 if [ "$(turn_field posture)" = attended ]; then
-  if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
-    printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+  if [ "$VERDICT" != routine ] && ! fm_afk_contract_away_present "$STATE"; then
+    printf 'recorded seq %s [%s]; MAIN processes it from its next drain\n' "$SEQ" "$VERDICT"
   else
     printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
   fi
@@ -142,12 +143,16 @@ fi
 if ! fm_afk_contract_away_present "$STATE"; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  HANDOFF='relay it to the captain' HANDOFF_VERB=relay
+  if [ "$VERDICT" = main ]; then
+    HANDOFF='act on it yourself, it is not a captain call' HANDOFF_VERB='act on'
+  fi
   if ! fm_wake_append check "supervision-host-return:$SEQ" \
-    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; relay it to the captain: $SUMMARY"; then
+    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; $HANDOFF: $SUMMARY"; then
     printf 'recorded seq %s [%s], but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
     exit 0
   fi
-  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
+  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to %s\n' "$SEQ" "$VERDICT" "$HANDOFF_VERB"
   exit 0
 fi
 printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"

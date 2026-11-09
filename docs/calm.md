@@ -231,18 +231,19 @@ Each note is appended to the transcript as its own system-notice row, which Clau
 | --- | --- |
 | `⛵ <task>: <summary>` | The supervision session recorded a routine outcome that is not silent. |
 | `⚓ [seq N] <task>: <summary>` | It recorded a captain outcome; main still receives and processes it as [`supervision-host.md`](supervision-host.md#captain-outcomes) describes. |
+| `⚓ [seq N] [firstmate to act, not a captain call] <task>: <summary>` | It recorded a `main` outcome, firstmate's own to act on; main receives and processes it the same way. |
 | `⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.` | The host's broken-session latch trips. |
 | `⛵ Supervision session recovered after a successful cooldown probe.` | That latch clears. |
 
 Silent routine outcomes show nothing.
 The mod checks the outcome store's display tail copy and the host's latch file every 3 seconds, so a note can land a few seconds after its outcome.
-On the first tail read in a session, it replays unprocessed captain outcomes and unread visible routine outcomes from the bounded copy, showing at most the newest 20 notes with a count of older due notes within that copy.
+On the first tail read in a session, it replays unprocessed main and captain outcomes and unread visible routine outcomes from the bounded copy, showing at most the newest 20 notes with a count of older due notes within that copy.
 A home whose outcome store predates the copy gains one at its next locked session start, even while away; if the copy first appears after the mod starts, the replay still uses the read and processed markers captured when the session started.
 On later reads, if the copy skips sequence numbers since the last seen outcome, one line counts the missing outcomes.
 The display copy's row and byte bounds are owned by [`fm-branch-outcome.sh`](../bin/fm-branch-outcome.sh); older outcomes and oversized rows cannot always be displayed by the mod, while the outcome store and main's delivery remain authoritative.
 Claude Code keeps each note in the session as a display-only entry and restores it on `claude --continue`, so the mod remembers in its own plugin store how far each session has followed the outcomes, and a resumed session replays only outcomes it has not shown.
 Claude Code keys that store by plugin name, so a session that showed notes before the plugin was renamed from `firstmate-calm` to `fm` and is resumed afterwards replays its still-due notes once.
-The mod only reads outcome and host state: the drain owns off-Pi read-cursor advancement, and main explicitly acknowledges captain outcomes as processed.
+The mod only reads outcome and host state: the drain owns off-Pi read-cursor advancement, and main explicitly acknowledges main and captain outcomes as processed.
 Only a home that runs the supervision host has outcomes to show.
 
 ### What Calm hides on Claude Code
