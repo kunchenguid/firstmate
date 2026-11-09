@@ -1034,9 +1034,10 @@ export default function (pi: ExtensionAPI) {
         owner.delivering = false;
         if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
         // A close that arrived while the continuity operation held the guard
-        // keeps its bounded retry. The retry belongs to the continuity
-        // operation, so it runs when whichever of the delivery and the
-        // restoration settles LAST acts on it. The recorded close is consumed
+        // keeps its bounded retry. The retry belongs to the operation that held
+        // the guard when the close arrived, so this path acts only on a close
+        // recorded under its own "delivery" guard and the restoration's
+        // settlement acts on a "restore" one. The recorded close is consumed
         // here, so exactly one of the two paths schedules it.
         const deferred = owner.deferredClose;
         if (deferred && deferred.guard === "delivery") owner.deferredClose = null;
