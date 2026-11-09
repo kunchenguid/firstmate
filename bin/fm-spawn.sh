@@ -5740,8 +5740,10 @@ spawn_delivery_gate_failed() { # <detail> [close]
   fi
   if [ "$cleanup_marked" != 1 ]; then
     return
-  elif [ "$close" = close ]; then
+  elif [ "$close" = close ] && [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
     echo "error: $detail; its endpoint $T was closed. Its task record was kept for cleanup and its backlog item was left unchanged: run bin/fm-teardown.sh $ID to clean up its local copy, then dispatch it again" >&2
+  elif [ "$close" = close ]; then
+    echo "error: $detail; could not confirm that endpoint $T was closed. Inspect it before teardown. Its task record was kept for cleanup and its backlog item was left unchanged: run bin/fm-teardown.sh $ID after the endpoint is safe to clean up, then dispatch it again" >&2
   else
     echo "error: $detail; inspect window $T. Its task record was kept for cleanup and its backlog item was left unchanged: once the window holds nothing worth keeping, run bin/fm-teardown.sh $ID to clean up its endpoint and local copy, then dispatch it again" >&2
   fi
@@ -5813,6 +5815,33 @@ kimi_spawn_fail() { # <detail>
 
 kimi_readiness_fail() { # <detail>
   kimi_launch_fail "$1"
+  kimi_cleanup_readiness_resources
+}
+
+kimi_cleanup_readiness_resources() {
+  local cleanup_failed=0
+  rovo_endpoint_cleanup
+  if [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
+    cleanup_failed=1
+  fi
+  if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      cleanup_failed=1
+      echo "warning: could not remove Orca worktree $ORCA_WORKTREE_ID after the failed Kimi readiness check" >&2
+    else
+      ORCA_WORKTREE_ID=
+    fi
+  fi
+  if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && [ -n "${WT:-}" ] && [ -n "${STATE_REAL:-}" ]; then
+    clear_relaunch_harness_wiring kimi "$WT" "$STATE_REAL" "$ID" "$KIND" || {
+      cleanup_failed=1
+      echo "warning: could not remove Kimi turn-end files after the failed readiness check" >&2
+    }
+  fi
+  if [ "$cleanup_failed" = 1 ]; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    echo "warning: retaining task $ID for cleanup because Kimi readiness resources could not all be removed" >&2
+  fi
 }
 
 kimi_launch_fail() { # <detail>
@@ -5888,9 +5917,23 @@ rovo_spawn_fail() { # <detail>
 }
 
 rovo_readiness_fail() { # <detail>
+  local cleanup_failed=0
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
   rovo_endpoint_cleanup
+  [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] || cleanup_failed=1
+  if [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      cleanup_failed=1
+      echo "warning: could not remove Orca worktree $ORCA_WORKTREE_ID after the failed Rovo readiness check" >&2
+    else
+      ORCA_WORKTREE_ID=
+    fi
+  fi
+  if [ "$cleanup_failed" = 1 ]; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    echo "warning: retaining task $ID for cleanup because Rovo readiness resources could not all be removed" >&2
+  fi
 }
 
 # The launch-then-confirm gates run after the task record is published, when

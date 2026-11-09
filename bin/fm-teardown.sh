@@ -4260,13 +4260,19 @@ fi
 if [ -e "$TEARDOWN_DELIVERY_PENDING" ] || [ -L "$TEARDOWN_DELIVERY_PENDING" ]; then
   TEARDOWN_META_CLEANUP_RECOVERY=$(fm_backlog_record_cleanup_reason "$META" || true)
   if [ "$TEARDOWN_META_CLEANUP_RECOVERY" != delivery-unconfirmed ]; then
-    if ! printf 'cleanup_recovery=delivery-unconfirmed\n' >> "$META" ||
+    TEARDOWN_META_TMP="$STATE/.$ID.meta.delivery-unconfirmed.${BASHPID:-$$}"
+    if ! awk -F= '$1 != "cleanup_recovery"' "$META" >"$TEARDOWN_META_TMP" ||
+      ! printf 'cleanup_recovery=delivery-unconfirmed\n' >>"$TEARDOWN_META_TMP" ||
+      ! fm_backlog_atomic_transition publish "$TEARDOWN_META_TMP" "$META" "task record" "$STATE" ||
       [ "$(fm_backlog_record_cleanup_reason "$META" || true)" != delivery-unconfirmed ]; then
+      rm -f -- "$TEARDOWN_META_TMP" 2>/dev/null || true
+      TEARDOWN_META_TMP=
       fm_lock_release "$META_LOCK"
       META_LOCK_HELD=0
       echo "error: $ID cleanup finished but its task record could not retain delivery cleanup state" >&2
       exit 1
     fi
+    TEARDOWN_META_TMP=
   fi
   fm_backlog_atomic_transition remove "$TEARDOWN_DELIVERY_PENDING" "delivery cleanup marker" "$STATE" || {
     fm_lock_release "$META_LOCK"

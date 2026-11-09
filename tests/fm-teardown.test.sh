@@ -4427,6 +4427,37 @@ test_task_record_removal_failure_keeps_delivery_state() {
   pass "teardown keeps delivery state when task record removal fails"
 }
 
+test_read_only_delivery_record_is_replaced_for_retryable_cleanup() {
+  local case_dir meta marker real_rm
+  case_dir=$(make_case delivery-read-only-record)
+  write_meta "$case_dir" local-only ship
+  meta="$case_dir/state/task-x1.meta"
+  marker="$case_dir/state/task-x1.delivery-unconfirmed"
+  printf '%s\n' 'cleanup_recovery=delivery-unconfirmed' > "$marker"
+  chmod 0444 "$meta"
+  real_rm=$(command -v rm)
+  install_rm_failpoint "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+
+  if REAL_RM_FOR_TEST="$real_rm" FM_FAIL_REMOVE_PATH="$meta" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "read-only delivery record: teardown ignored the failed record removal"
+  fi
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+    "teardown did not replace the read-only task record with cleanup state"
+  assert_absent "$marker" "teardown retained the side marker after task record replacement"
+  assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
+    "teardown closed the row for an unconfirmed delivery"
+
+  rm -f "$case_dir/fakebin/rm"
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" \
+    || fail "read-only delivery record: retry failed: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$meta" "retry retained the replaced task record"
+  assert_equals "in_flight" "$(backlog_row_state "$case_dir")" \
+    "retry closed the row for an unconfirmed delivery"
+  pass "teardown replaces a read-only task record and keeps retry state"
+}
+
 # A version 1 attempt journal binds no pane, so proving the recorded task pane
 # gone does not prove its token-bearing projected workspace gone. When the v2
 # bind never landed (RETIRE_CANDIDATE stays 0 because the metadata workspace no
@@ -6571,6 +6602,7 @@ test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane
 test_delivery_marker_removal_failure_keeps_retry_record
 test_task_record_removal_failure_keeps_delivery_state
+test_read_only_delivery_record_is_replaced_for_retryable_cleanup
 test_teardown_retires_v1_journal_when_projected_workspace_gone
 test_teardown_retains_v1_journal_when_projected_workspace_present
 test_teardown_retains_v1_journal_when_workspace_query_ambiguous
