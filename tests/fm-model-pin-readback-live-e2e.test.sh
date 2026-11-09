@@ -52,11 +52,12 @@ fail() {
 # restated here rather than taken from `bin/fm-spawn.sh`.
 # Asking the assertion what it expects would make this guard a test of itself, so
 # the duplication is deliberate: the vendor's alias definitions are the oracle,
-# and a different version, another family, an undocumented pair, or a concrete id
-# outside that family prefix still fails the guard. The eight-digit-date wildcard
-# stays one-directional on purpose: only the documented pairs compare a snapshot
-# pin back to its alias, so a snapshot date the vendor never documented for that
-# alias still mismatches it.
+# and a different version, another family, or a concrete id outside that family
+# prefix still fails the guard. The eight-digit-date wildcard stays
+# one-directional on purpose: any snapshot date a report appends to an alias pin
+# holds, while only the documented pairs compare a snapshot pin back to its
+# alias, so a snapshot date the vendor never documented for that alias still
+# mismatches it.
 claude_pin_matches() {  # <pin> <reported>
   local pin=$1 reported=$2
   [ -n "$pin" ] && [ -n "$reported" ] || return 1
