@@ -460,9 +460,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # pipeline, so it stays; but a worker that reads it as completion stops one wake
 # round short of its PR. Every no-mistakes shape must therefore say outright
 # that a commit does not complete the task, name its own completing report, and
-# point the pipeline wait at the brief's existing `paused:` rule.
+# point intermediate reporting at the brief's existing status and declared-wait
+# rules without naming their verb, which stays owned by the brief.
 test_no_mistakes_dod_commit_is_not_completion() {
-  local home id flags label brief declared
+  local home id flags label brief declared pointer removed
   home="$TMP_ROOT/commit-not-done-home"
   mkdir -p "$home/data"
   for spec in \
@@ -484,8 +485,18 @@ test_no_mistakes_dod_commit_is_not_completion() {
     assert_grep "never reports this task complete: it only hands control to the pipeline" "$brief" \
       "$label: DoD does not say the handoff done is not completion"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'While the pipeline runs, declare that wait with `paused [at=<epoch>]: {job and completion condition}`' "$brief" \
-      "$label: DoD does not tell the worker to declare the pipeline wait as paused"
+    assert_grep "During the pipeline run, report the intermediate stage under this brief's existing status and declared-wait rules." "$brief" \
+      "$label: DoD does not point intermediate reporting at the brief's existing rules"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    removed='While the pipeline runs, declare that wait with `paused [at=<epoch>]: {job and completion condition}`; do not invent a working phase for it.'
+    assert_no_grep "$removed" "$brief" \
+      "$label: DoD still restates the declared-wait verb and its completion condition"
+    # The pointer must stay verb-free: the brief owns the verb, so a literal here
+    # would drift from FM_CLASSIFY_PAUSED_VERB and mislead a worker.
+    pointer=$(grep -F 'During the pipeline run, report the intermediate stage under' "$brief" || true)
+    printf '%s\n' "$pointer" >"$home/$id-pointer.txt"
+    assert_no_regex 'paused|awaiting|FM_CLASSIFY_PAUSED_VERB' "$home/$id-pointer.txt" \
+      "$label: the intermediate-reporting pointer names the declared-wait verb"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
     case "$label" in
       pr) declared='The only `done:` that completes this task is `done: PR <url> checks green`' ;;
