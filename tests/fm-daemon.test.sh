@@ -4292,6 +4292,30 @@ test_native_ambiguity_holds_later_flushes() (
 )
 test_native_ambiguity_holds_later_flushes
 
+# A frozen digest whose native resubmission is ambiguous must be held too.
+test_frozen_native_ambiguity_holds() (
+  local dir state calls=0 buf
+  dir=$(make_supercase frozen-native-ambiguity); state="$dir/state"
+  local FM_SUPERVISOR_BACKEND=t3code
+  buf="$state/.subsuper-escalations"
+  escalate_add "$state" 'a status event'
+  inject_msg() {
+    calls=$((calls + 1))
+    INJECT_SUBMIT_ATTEMPTED=1 INJECT_LAST_VERDICT=unconfirmed INJECT_SENT_MSG=$1
+    INJECT_RETRY_UNSAFE=0
+    [ "$calls" -lt 2 ] || INJECT_RETRY_UNSAFE=1
+    return 1
+  }
+  escalate_flush "$state" && fail "unconfirmed digest was delivered"
+  [ -f "$buf.frozen" ] || fail "digest was not frozen"
+  escalate_flush "$state" && fail "ambiguous frozen resubmission was delivered"
+  [ -s "$buf.native-unconfirmed" ] || fail "frozen ambiguity was not recorded"
+  escalate_flush "$state" && fail "held frozen digest was delivered"
+  [ "$calls" -eq 2 ] || fail "a later flush resubmitted the ambiguous frozen digest"
+  pass "ambiguous frozen native submission is held"
+)
+test_frozen_native_ambiguity_holds
+
 # A digest delivers actionable events only: informational lines in its captured
 # span stay unread for the primary, and a daemon drain presents nothing.
 test_delivery_receipts_preserve_unread_notes() (

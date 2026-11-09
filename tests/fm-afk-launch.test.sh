@@ -266,6 +266,8 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
+  : > "$st/state/.subsuper-escalations.positions"
+  : > "$st/state/.subsuper-escalations.frozen-positions"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -274,7 +276,9 @@ unit_clear_stale() {
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
-     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ] \
+     && [ ! -e "$st/state/.subsuper-escalations.positions" ] \
+     && [ ! -e "$st/state/.subsuper-escalations.frozen-positions" ]; then
     pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and unknown-wake acknowledgements"
   else
     fail "clear-stale: stale artifacts survived"

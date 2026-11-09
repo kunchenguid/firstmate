@@ -631,6 +631,8 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.positions" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.frozen-positions" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
     "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* || result=1

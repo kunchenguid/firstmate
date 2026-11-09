@@ -973,6 +973,12 @@ escalate_flush_frozen() {  # <state> <buf>
     return 0
   fi
   rm -f "$items"
+  if [ "${INJECT_RETRY_UNSAFE:-0}" = 1 ]; then
+    if ! printf '%s' "$INJECT_SENT_MSG" > "$buf.native-unconfirmed"; then
+      NATIVE_AMBIGUOUS_STATE=$state
+      log "native ambiguity marker could not be written; delivery held in this process"
+    fi
+  fi
   [ "$INJECT_LAST_VERDICT" != send-failed ] || rm -f "$buf.frozen" "$buf.frozen-msg" "$buf.frozen-positions" "$buf.next-since"
   return 1
 }

@@ -77,6 +77,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   fi
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
+        "$state/.subsuper-escalations.positions" \
+        "$state/.subsuper-escalations.frozen-positions" \
         "$state/.subsuper-inject-wedged" \
         "$state/.subsuper-unknown-acked" 2>/dev/null
 }
