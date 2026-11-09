@@ -2468,6 +2468,12 @@ test_pi_confirm_failure_spares_a_newer_arm() {
   retired="$TMP_ROOT/pi-confirm-newer.retired"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  # The newer arm below has to read as a verified home-bound watcher: the
+  # extension only accepts an arm that already exists as a viable successor
+  # when this home's watcher identity and fresh progress check out, exactly as
+  # a real fm-watch.sh watcher would. Without that proof the repair call's
+  # successor is withheld as unhealthy instead of delivered to.
+  install_pi_watch_identity_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -2491,6 +2497,7 @@ if [ "$count" -eq 2 ]; then
   ) &
   exit 0
 fi
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-newer\n' "$$"
 trap 'printf "retired\n" > "${FM_RETIRED_FILE:?}"; exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
