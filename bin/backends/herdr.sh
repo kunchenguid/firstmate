@@ -2152,6 +2152,10 @@ fm_backend_herdr_pane_presence_display_value() {  # <value>
 fm_backend_herdr_pane_presence_classify() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid
   out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
+  if [ -z "$out" ]; then
+    printf 'unknown\therdr returned an empty response'
+    return 0
+  fi
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
     if [ "$code" = "pane_not_found" ]; then
@@ -2162,11 +2166,7 @@ fm_backend_herdr_pane_presence_classify() {  # <session> <pane_id>
     return 0
   fi
   if ! printf '%s' "$out" | jq . >/dev/null 2>&1; then
-    if [ -n "$out" ]; then
-      printf 'unknown\therdr returned a non-JSON response'
-    else
-      printf 'unknown\therdr returned an empty response'
-    fi
+    printf 'unknown\therdr returned a non-JSON response'
     return 0
   fi
   pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
