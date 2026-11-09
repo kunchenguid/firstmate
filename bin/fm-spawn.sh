@@ -2592,9 +2592,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # refuse rather than fall back to wherever the restored pane happens to
     # sit. The checkout test is fresh spawn's own boundary
     # (spawn_worktree_isolated): the copy's git dir may not be the recorded
-    # project's common git dir. A standalone clone clears it, since its git
-    # dir equals only its OWN common dir and shares no object store with the
-    # recorded project.
+    # project's common git dir. A standalone clone clears it because its own
+    # git dir is distinct from the recorded project's common git dir.
     relaunch_wt_real=$(cd "$RELAUNCH_WT" 2>/dev/null && pwd -P) || relaunch_wt_real=$RELAUNCH_WT
     relaunch_primary=
     for relaunch_cand in "$FM_HOME" "$FM_ROOT"; do
@@ -4597,9 +4596,10 @@ real_path_or_raw() { # <path>
 
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
-# and does not share the project repository's common git dir. SPAWN_WT_TOP is
-# left holding the worktree root the check read, and SPAWN_WT_REASON a short
-# phrase naming why a rejected path failed, both for the refusal messages.
+# and has a git dir distinct from the project repository's common git dir.
+# SPAWN_WT_TOP is left holding the worktree root the check read, and
+# SPAWN_WT_REASON a short phrase naming why a rejected path failed, both for
+# the refusal messages.
 #
 # The worktree-discovery poll below reads this same predicate, so it can never
 # adopt a path the guard would then refuse. That matters because a pane's cwd
