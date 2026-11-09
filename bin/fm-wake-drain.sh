@@ -378,6 +378,11 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
         # captain-facing backstop remains its only safe presentation path.
         [ -z "$key" ] || continue
         ;;
+      done|failed) ;;
+      *)
+        _fm_status_route_key "$event" key
+        [ -z "$key" ] || continue
+        ;;
     esac
     load_branch_outcome_index "$task"
     if [ "$BRANCH_OUTCOME_INDEX_STATE" != ok ]; then

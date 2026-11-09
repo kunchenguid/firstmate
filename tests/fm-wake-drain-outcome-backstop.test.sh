@@ -64,6 +64,41 @@ test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
   pass "a newest keyless done, blocked, or needs-decision event with no newer branch outcome surfaces on the next main drain"
 }
 
+test_route_request_surfaces_only_as_an_open_decision() {
+  local dir state out
+  dir=$(make_case route-request)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'working [key=route-check]: run the real-app check\n' > "$state/request.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "main drain failed for a route request"
+  grep -F 'OPEN DECISIONS (' "$out" >/dev/null || fail "route request lost its open decision section"
+  grep -Fx 'request [key=route-check] working: run the real-app check' "$out" >/dev/null \
+    || fail "route request did not surface as an open decision: $(cat "$out")"
+  [ "$(grep -c 'run the real-app check' "$out")" -eq 1 ] \
+    || fail "route request was presented more than once: $(cat "$out")"
+  [ -z "$(backstop_body "$out")" ] || fail "route request was presented as an outcome: $(cat "$out")"
+  pass "a working route request surfaces only as an open decision"
+}
+
+test_route_terminal_events_still_surface_as_outcomes() {
+  local dir state out body verb
+  for verb in 'done' 'failed'; do
+    dir=$(make_case "route-$verb")
+    state="$dir/state"
+    out="$dir/drain.out"
+    printf '%s [key=route-check]: the check finished\n' "$verb" > "$state/request.status"
+
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "main drain failed for a route $verb event"
+    body=$(backstop_body "$out")
+    assert_contains "$body" "request $verb [key=route-check]: the check finished" \
+      "a route $verb event lost its outcome presentation"
+    grep -Fx "request [key=route-check] $verb: the check finished" "$out" >/dev/null \
+      || fail "a route $verb event lost its unresolved request: $(cat "$out")"
+  done
+  pass "route done and failed events remain outcomes as well as unresolved requests"
+}
+
 test_newer_task_outcome_and_routine_latest_events_stay_silent() {
   local dir state out old
   dir=$(make_case covered-and-routine)
@@ -513,6 +548,8 @@ test_backstop_output_is_bounded() {
   pass "the outcome backstop caps each item and its total task output deterministically"
 }
 
+test_route_request_surfaces_only_as_an_open_decision
+test_route_terminal_events_still_surface_as_outcomes
 test_uncovered_keyless_captain_events_surface_on_the_next_main_drain
 test_newer_task_outcome_and_routine_latest_events_stay_silent
 test_older_or_other_task_outcome_cannot_hide_a_new_captain_event
