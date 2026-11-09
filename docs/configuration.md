@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude session settings](#claude-session-settings-configclaude-session-settingsjson), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1468,6 +1468,33 @@ Both approval-mode files follow the primary-authoritative [`secondmate-provision
 T3 Code owns its provider command and always uses `full-access`, so `backend=t3code` accepts the default `bypass` posture and refuses `auto` before mutation; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## Claude session settings (config/claude-session-settings.json)
+
+The optional local, gitignored `config/claude-session-settings.json` adds Claude Code session settings to every Firstmate-built Claude command line: crewmates, scouts, Claude secondmates, and control-plane relaunches.
+It suits settings that cut a worker's standing cost, such as `skillOverrides` for skills a worker never invokes or an earlier compaction window.
+A worker's settings sources are not guaranteed to load the captain's `user` scope, so a setting meant for workers has to travel with the launch.
+
+The file holds one JSON object.
+Its members join the launch's single `--settings` value: the inline object of a crewmate or scout, or `state/<id>.claude-settings.json` for a secondmate.
+The Firstmate-owned keys `hooks`, `feedbackDrafts`, and `attribution` are not accepted.
+For example, this file compacts Claude Opus workers at 100k tokens, hides the PDF document skill from the model while `/anthropic-skills:pdf` still runs, and lists `caveman` by name only:
+
+```json
+{"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":100000}},"skillOverrides":{"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only"}}
+```
+
+The `--settings` value outranks the `user`, project, and local settings files, so its `modelSettings.<model>.autoCompactWindow` replaces a per-model window in the captain's `~/.claude/settings.json`.
+A top-level `autoCompactWindow` in the file also wins, because Claude Code drops lower-precedence per-model windows once a higher-precedence file sets the top-level value, and it then applies to every model.
+`skillOverrides` keys match a skill's listed name, including a qualifier such as `anthropic-skills:pdf`; a qualified key avoids hitting a same-named skill from another source.
+Skills from installed plugins, such as `mattpocock-skills:grilling`, did not respond to any override value in the verified version.
+Its values are `name-only` (listed without description), `user-invocable-only` (hidden from the model, `/name` still runs), and `off` (hidden from both).
+[Runtime-backend verification](verification/runtime-backends.md#claude-session-settings) records the observed behavior.
+
+An absent file adds nothing.
+Any other content, an unreadable file, or a missing `jq` refuses every spawn from that home before any endpoint, worktree, or task record exists.
+`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+Secondmate homes inherit the file, so their own crewmates carry the same settings.
 
 ## Codex permission mode (config/codex-permission-mode)
 

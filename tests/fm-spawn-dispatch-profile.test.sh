@@ -2315,6 +2315,87 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
   pass "a claude secondmate launch carries the attribution-off policy too"
 }
 
+# config/claude-session-settings.json reaches the one --settings value of both
+# launch forms, beside the Firstmate-owned keys, keeping the per-model
+# compaction form that outranks the captain's own per-model window; a quote in
+# a value survives the inline form's shell quoting.
+CLAUDE_SESSION_SETTINGS='{"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":100000}},"skillOverrides":{"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only"},"note":"it'\''s"}'
+
+assert_session_settings_overlay() {  # <launch-command> <what>
+  local launch=$1 what=$2 settings
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.skillOverrides == {"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only"}
+    and .modelSettings == {"claude-opus-5-5":{"autoCompactWindow":100000}} and (has("autoCompactWindow") | not)
+    and .note == "it'\''s" and .feedbackDrafts == "off" and .attribution.commit == ""' >/dev/null \
+    || fail "$what launch settings JSON does not carry config/claude-session-settings.json: $settings"
+}
+
+test_claude_session_settings_reach_crewmate_launch() {
+  local rec id out status launch
+  id=profile-claude-session-settings-z26
+  rec=$(make_spawn_case profile-claude-session-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with session settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_session_settings_overlay "$launch" "claude crewmate"
+  pass "config/claude-session-settings.json reaches a claude crewmate launch"
+}
+
+test_claude_session_settings_reach_secondmate_launch() {
+  local rec id sm out status launch
+  id=profile-secondmate-session-settings-z27
+  rec=$(make_spawn_case profile-secondmate-session-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with session settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_session_settings_overlay "$launch" "claude secondmate"
+  claude_settings_json_arg "$launch" | jq -e '.hooks.UserPromptSubmit and .hooks.SessionEnd' >/dev/null \
+    || fail "session settings displaced the secondmate busy hooks"
+  cmp -s "$HOME_DIR/config/claude-session-settings.json" "$sm/config/claude-session-settings.json" \
+    || fail "secondmate home did not inherit config/claude-session-settings.json"
+  pass "config/claude-session-settings.json reaches a claude secondmate launch beside its hooks"
+}
+
+test_claude_session_settings_invalid_refuses_before_endpoint_or_metadata() {
+  local rec id out status content n=0
+  for content in '{"hooks":{}}' '{"feedbackDrafts":"on"}' '{"attribution":{}}' '["skillOverrides"]' '{"a":1}{"b":2}' 'not json' ''; do
+    n=$((n + 1))
+    id=session-settings-invalid-z2$n
+    rec=$(make_spawn_case "session-settings-invalid-$n" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$content" > "$HOME_DIR/config/claude-session-settings.json"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "config/claude-session-settings.json holding $content must refuse the spawn"
+    assert_contains "$out" "config/claude-session-settings.json must be a readable file holding one JSON object" \
+      "refusal must name the file and the accepted shape"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid session settings must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  done
+  id=session-settings-unreadable-z29
+  rec=$(make_spawn_case session-settings-unreadable claude "$id")
+  read_case_record "$rec"
+  mkdir "$HOME_DIR/config/claude-session-settings.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unreadable config/claude-session-settings.json must refuse the spawn"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unreadable session settings file must launch nothing"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "an invalid config/claude-session-settings.json refuses before any endpoint or metadata"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -3043,6 +3124,9 @@ test_claude_crewmate_launch_carries_the_attribution_policy
 test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks
 test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
+test_claude_session_settings_reach_crewmate_launch
+test_claude_session_settings_reach_secondmate_launch
+test_claude_session_settings_invalid_refuses_before_endpoint_or_metadata
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

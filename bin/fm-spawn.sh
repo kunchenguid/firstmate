@@ -537,7 +537,8 @@
 #                  supplies its own trailing space, empty never used)
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
-#                  state/<task-id>.claude-settings.json for a secondmate
+#                  state/<task-id>.claude-settings.json for a secondmate; both
+#                  also carry config/claude-session-settings.json's members
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -853,6 +854,32 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
+# config/claude-session-settings.json (docs/configuration.md): extra Claude
+# session settings, such as skillOverrides or autoCompactWindow, that every
+# Firstmate-built Claude command line carries in its one --settings value.
+# Validated once per spawn or relaunch, before any mutation, so a malformed
+# file refuses instead of launching a worker on settings the captain did not
+# write. CLAUDE_SETTINGS_OVERLAY_MEMBERS holds the object's members with a
+# leading comma, or nothing for an absent file or an empty object.
+if ! CLAUDE_SETTINGS_OVERLAY_PRESENT=$(fm_config_source_present "$CONFIG/claude-session-settings.json"); then
+  exit 1
+fi
+CLAUDE_SETTINGS_OVERLAY_MEMBERS=
+if [ "$CLAUDE_SETTINGS_OVERLAY_PRESENT" = 1 ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: config/claude-session-settings.json needs jq to validate it; install jq or remove the file" >&2
+    exit 1
+  fi
+  if [ ! -f "$CONFIG/claude-session-settings.json" ] || [ ! -r "$CONFIG/claude-session-settings.json" ] \
+    || ! claude_settings_overlay=$(jq -cse 'select(length == 1) | .[0] | select(type == "object" and ([has("hooks", "feedbackDrafts", "attribution")] | any | not))' \
+      "$CONFIG/claude-session-settings.json" 2>/dev/null); then
+    echo "error: config/claude-session-settings.json must be a readable file holding one JSON object without the Firstmate-owned keys hooks, feedbackDrafts, or attribution" >&2
+    exit 1
+  fi
+  claude_settings_overlay=${claude_settings_overlay#\{}
+  claude_settings_overlay=${claude_settings_overlay%\}}
+  [ -z "$claude_settings_overlay" ] || CLAUDE_SETTINGS_OVERLAY_MEMBERS=",$claude_settings_overlay"
+fi
 if ! CODEX_APPROVAL_PRESENT=$(fm_config_source_present "$CONFIG/codex-approval-mode"); then
   exit 1
 fi
@@ -6559,7 +6586,7 @@ BUSY_GEN=
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then
         session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
       fi
-      printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
+      printf '{%s%s%s}\n' "$session_keys" "$hooks_json" "$CLAUDE_SETTINGS_OVERLAY_MEMBERS" >"$STATE_REAL/$ID.claude-settings.json"
     else
       mkdir -p "$WT/.claude"
       printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
@@ -7518,7 +7545,10 @@ case "$LAUNCH" in
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    # The inline object is single-quoted shell text, so the overlay's own
+    # single quotes are closed, escaped, and reopened.
+    claude_settings_overlay=${CLAUDE_SETTINGS_OVERLAY_MEMBERS//\'/\'\\\'\'}
+    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__$claude_settings_overlay}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;

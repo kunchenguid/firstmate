@@ -845,6 +845,33 @@ It covers writing once, preserving explicit and concurrent settings, invoking gu
 These behavior tests do not verify an actual vendor-refusal recovery or live relaunch; the prior live automatic-review probe verifies the fallback's capabilities, not that complete recovery path.
 There is no automatic detector or harness-output classifier to verify, and a generic login error does not establish a defeated bypass.
 
+## Claude session settings
+
+Verified 2026-10-30 with Claude Code 2.1.311, whose user settings set `"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":200000}}` and no `skillOverrides`.
+`/context` in print mode spends no model tokens and reports the effective window and the skill listing.
+
+```text
+$ claude -p --settings '{}' /context
+**Tokens:** 9.8k / 200k (5%)
+| caveman | User | ~130 |
+| pdf | claude.ai sync | ~150 |
+
+$ claude -p --settings '{"skillOverrides":{"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only"},"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":100000}}}' /context
+**Tokens:** 9.8k / 100k (10%)
+| caveman | User | < 20 |
+(no pdf row)
+
+$ claude -p --settings '{"autoCompactWindow":100000,"skillOverrides":{"docx":"user-invocable-only"}}' /context
+**Tokens:** 9.8k / 100k (10%)
+(no docx row)
+```
+
+With `{"skillOverrides":{"anthropic-skills:pdf":"user-invocable-only"}}`, the prompt `/anthropic-skills:pdf` still loaded the skill and the model answered `LOADED`.
+With the value `off`, the same prompt printed `Skill "anthropic-skills:pdf" is disabled via skillOverrides. Remove the override from your settings to run it.`
+With `{"skillOverrides":{"mattpocock-skills:grilling":"off"}}`, and with the keys `grilling`, `mattpocock-skills@mattpocock:grilling`, and `plugin:mattpocock-skills:grilling`, `/context` still listed `| mattpocock-skills:grilling | Plugin (mattpocock-skills) | ~60 |`.
+The bundled settings schema describes the four `skillOverrides` values and the per-model `autoCompactWindow`, whose accepted range is 100000 to 1000000 or `auto`.
+`tests/fm-spawn-dispatch-profile.test.sh` pins that the file's members reach crewmate and secondmate launches and that malformed files refuse before any launch.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
