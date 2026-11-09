@@ -10,13 +10,19 @@
 # host stops it before taking over the arm recorded in .supervision-host-left.
 # Ack and TERM both leave that verified arm for the next park, not a second arm.
 #
-# Automatic delivery is restricted to the inherited tmux pane on Claude. Its
-# pane pid must be an ancestor of the pinned session-lock pid, that session
-# must still be in the terminal's foreground group, and its composer must be
-# empty with no busy signature. All other endpoints retain the queued wake
-# and keep watching but need a normal turn or human message to resume main.
-# No terminal text proves acknowledgement. Busy, unknown, or pending input is
-# never overwritten. The existing backend submit primitive owns Enter retries.
+# Automatic delivery is restricted to the inherited pane on Claude, proven
+# through the transport the pane itself declares: TMUX_PANE for tmux, or
+# HERDR_ENV+HERDR_PANE_ID+HERDR_SESSION for herdr (a named session's pane,
+# including the fm-remote session remote homes run under). On tmux the pane's
+# pid must be an ancestor of the pinned session-lock pid and that session must
+# still be in the terminal's foreground group; on herdr the pane's own
+# process-info must show the same ancestor-or-self and foreground-group facts
+# for the pinned pid, and the pane's registered agent identity must be claude.
+# In both transports the agent must read idle and the composer must be
+# positively empty. All other endpoints retain the queued wake and keep
+# watching but need a normal turn or human message to resume main. No terminal
+# text proves acknowledgement. Busy, unknown, or pending input is never
+# overwritten. The existing backend submit primitive owns Enter retries.
 # Removing the opt-in, losing the pinned session, or entering daemon-backed
 # away mode stops retries and leaves the current arm for its next owner.
 set -u
@@ -34,6 +40,19 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 fm_backend_source tmux || exit 1
+# Delivery transport: only the pane identity the pane runtime injected is
+# trusted, mirroring bin/fm-supervisor-target-lib.sh's discovery order. An
+# explicit target variable is deliberately NOT honored - the handoff must
+# never deliver to a pane another home or a stray environment configured.
+TRANSPORT=
+HERDR_TARGET=
+if [ -n "${TMUX_PANE:-}" ]; then
+  TRANSPORT=tmux
+elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_SESSION:-}" ]; then
+  fm_backend_source herdr || exit 1
+  TRANSPORT=herdr
+  HERDR_TARGET="$HERDR_SESSION:$HERDR_PANE_ID"
+fi
 TOKEN=${1:-}
 PREDECESSOR=${2:-}
 case "$TOKEN" in ''|*[!A-Za-z0-9._-]*) exit 2 ;; esac
@@ -82,25 +101,55 @@ session_owned() {
 
 retry_delivery() {
   local pane_pid ancestor message verdict=deferred tmp pgid tpgid
+  local target proven=0 agent_out h_session h_pane
   # No fallback target: a guessed pane can belong to another home.
-  if [ -n "${TMUX_PANE:-}" ] && session_owned; then
-    pane_pid=$(tmux display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null) || pane_pid=
-    ancestor=$SESSION
-    case "$pane_pid" in ''|*[!0-9]*) ancestor= ;; esac
-    while [ -n "$ancestor" ] && [ "$ancestor" != 1 ] && [ "$ancestor" != "$pane_pid" ]; do
-      ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
-    done
-    read -r pgid tpgid < <(ps -o pgid=,tpgid= -p "$SESSION" 2>/dev/null) || pgid=
-    if [ -n "$ancestor" ] && [ "$ancestor" = "$pane_pid" ] \
-      && [ -n "$pgid" ] && [ "$pgid" = "$tpgid" ] && [ "$pgid" -gt 0 ] 2>/dev/null \
-      && fm_harness_pid_alive "$SESSION" \
-      && [ "$(fm_pane_busy_state "$TMUX_PANE" claude 2>/dev/null)" = idle ] \
-      && [ "$(fm_backend_composer_state tmux "$TMUX_PANE" 2>/dev/null)" = empty ] \
-      && session_owned && [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; then
-      if fm_operational_record_write "$STATE" watcher \
-        'check: supervision-handoff - the host hand-back is still unacknowledged. Run bin/fm-wake-drain.sh, handle its queued work, and run its exact WAKE_ACK_REQUIRED command. This is automatic supervision, not a captain return.' message; then
-        verdict=$(fm_backend_send_text_submit tmux "$TMUX_PANE" "$message" 2 0.2 0.2 2>/dev/null) || verdict=unconfirmed
-      fi
+  if session_owned; then
+    case "$TRANSPORT" in
+      tmux)
+        target=$TMUX_PANE
+        pane_pid=$(tmux display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null) || pane_pid=
+        ancestor=$SESSION
+        case "$pane_pid" in ''|*[!0-9]*) ancestor= ;; esac
+        while [ -n "$ancestor" ] && [ "$ancestor" != 1 ] && [ "$ancestor" != "$pane_pid" ]; do
+          ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+        done
+        read -r pgid tpgid < <(ps -o pgid=,tpgid= -p "$SESSION" 2>/dev/null) || pgid=
+        if [ -n "$ancestor" ] && [ "$ancestor" = "$pane_pid" ] \
+          && [ -n "$pgid" ] && [ "$pgid" = "$tpgid" ] && [ "$pgid" -gt 0 ] 2>/dev/null \
+          && fm_harness_pid_alive "$SESSION" \
+          && [ "$(fm_pane_busy_state "$TMUX_PANE" claude 2>/dev/null)" = idle ] \
+          && [ "$(fm_backend_composer_state tmux "$TMUX_PANE" 2>/dev/null)" = empty ]; then
+          proven=1
+        fi
+        ;;
+      herdr)
+        target=$HERDR_TARGET
+        if fm_backend_herdr_parse_target "$target" \
+          && [ "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" = running ]; then
+          h_session=$FM_BACKEND_HERDR_SESSION
+          h_pane=$FM_BACKEND_HERDR_PANE
+          # One read carries both halves of the registered-identity proof: the
+          # pane's agent must be claude, and any session binding it carries
+          # must be claude's own - a foreign label or binding never delivers.
+          agent_out=$(fm_backend_herdr_cli "$h_session" agent get "$h_pane" 2>/dev/null) || agent_out=
+          if fm_backend_herdr_pane_owns_session "$h_session" "$h_pane" "$SESSION" \
+            && [ "$(printf '%s' "$agent_out" | jq -r '.result.agent.agent // empty' 2>/dev/null)" = claude ] \
+            && printf '%s' "$agent_out" | jq -er '(.result.agent.agent_session.agent // "claude") == "claude"' >/dev/null 2>&1 \
+            && fm_harness_pid_alive "$SESSION" \
+            && [ "$(fm_backend_herdr_busy_state "$target" 2>/dev/null)" = idle ] \
+            && [ "$(fm_backend_herdr_rendered_busy_state "$target" claude 2>/dev/null)" = idle ] \
+            && [ "$(fm_backend_composer_state herdr "$target" 2>/dev/null)" = empty ]; then
+            proven=1
+          fi
+        fi
+        ;;
+    esac
+  fi
+  if [ "$proven" -eq 1 ] \
+    && session_owned && [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; then
+    if fm_operational_record_write "$STATE" watcher \
+      'check: supervision-handoff - the host hand-back is still unacknowledged. Run bin/fm-wake-drain.sh, handle its queued work, and run its exact WAKE_ACK_REQUIRED command. This is automatic supervision, not a captain return.' message; then
+      verdict=$(fm_backend_send_text_submit "$TRANSPORT" "$target" "$message" 2 0.2 0.2 2>/dev/null) || verdict=unconfirmed
     fi
   fi
   printf '%s\tretry\t%s\t%s\n' "$(date +%s)" "$TOKEN" "$verdict" >> "$LOG"
