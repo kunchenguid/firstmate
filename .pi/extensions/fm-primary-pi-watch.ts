@@ -1365,6 +1365,21 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
+    const retryFailedArm = (message: string, predecessor: string): void => {
+      if (!generationIsLive(owner)) return;
+      if (healthReplacementArms.has(armChild)) return;
+      if (owner.restoring || owner.delivering) {
+        if (!armRetired.has(armChild) && (!owner.restoring || establishedArms.has(armChild))) {
+          owner.deferredClose = {
+            message,
+            predecessorArmPid: predecessor,
+            guard: owner.restoring ? "restore" : "delivery",
+          };
+        }
+        return;
+      }
+      scheduleRetry(owner, message, predecessor);
+    };
     const finishArm = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
@@ -1381,23 +1396,7 @@ export default function (pi: ExtensionAPI) {
         void processPendingActionables(owner);
         return;
       }
-      if (!generationIsLive(owner)) return;
-      if (healthReplacementArms.has(armChild)) return;
-      if (owner.restoring || owner.delivering) {
-        // An operation holds the guard: a continuity restoration or a wake
-        // delivery. A verified successor that closes under it keeps its
-        // bounded retry for the end of that operation; an unready child's
-        // close belongs to the restore that started it.
-        if (establishedArms.has(armChild) && !armRetired.has(armChild)) {
-          owner.deferredClose = {
-            message: classification.message,
-            predecessorArmPid: predecessor,
-            guard: owner.restoring ? "restore" : "delivery",
-          };
-        }
-        return;
-      }
-      scheduleRetry(owner, classification.message, predecessor);
+      retryFailedArm(classification.message, predecessor);
     };
     armChild.on("close", finishArm);
     armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
@@ -1409,9 +1408,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      if (!generationIsLive(owner)) return;
-      if (owner.restoring || owner.delivering) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      retryFailedArm(`watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
     return {
       ok: true,

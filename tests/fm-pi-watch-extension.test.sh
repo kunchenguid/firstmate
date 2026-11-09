@@ -4914,6 +4914,103 @@ EOF
   pass "Pi retries a verified successor that failed during wake delivery once that delivery settles"
 }
 
+test_pi_unready_health_replacement_failure_during_delivery() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-unready-health-mid-delivery-root"
+  home="$TMP_ROOT/pi-unready-health-mid-delivery-home"
+  log="$TMP_ROOT/pi-unready-health-mid-delivery.log"
+  stop="$TMP_ROOT/pi-unready-health-mid-delivery.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 3 ]; then exit 3; fi
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: wake before the successor dies\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let healthCheck;
+const realSetInterval = globalThis.setInterval;
+globalThis.setInterval = (callback, ms, ...args) => {
+  if (ms === 30_000) healthCheck = callback;
+  return realSetInterval(callback, ms, ...args);
+};
+let releaseBranch = () => {};
+const branchSettlement = new Promise((resolve) => {
+  releaseBranch = resolve;
+});
+let branchAccepted = false;
+const prompts = [];
+const pi = {
+  on(event, handler) { if (event === "session_start") this.start = handler; },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: {
+    on() {},
+    emit(event, data) {
+      if (event !== "fm-branch-supervision:dispatch") return;
+      branchAccepted = true;
+      data.accept(branchSettlement);
+    },
+  },
+};
+const arms = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/mid-delivery.meta`, "project=/projects/mid-delivery\nwindow=fm-mid-delivery\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tmid-delivery.status\tsignal: wake before the successor dies\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await pi.start({});
+await waitFor(() => branchAccepted, "branch accepted the wake behind a verified successor");
+if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
+const stale = new Date(Date.now() - 1200_000);
+utimesSync(`${process.env.FM_HOME}/state/.last-watcher-beat`, stale, stale);
+healthCheck();
+await waitFor(() => arms() === 3, "unready health replacement failure");
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (arms() !== 3) throw new Error(`a retry launched while the delivery was still in flight: ${arms()} arms`);
+releaseBranch();
+await waitFor(() => arms() === 4, "a retry watcher after the delivery settled");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (arms() !== 4) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
+if (prompts.length !== 0) throw new Error(`a bounded retry surfaced a failure prompt: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must retry an unready health replacement that failed during wake delivery"
+  [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
+  pass "Pi retries an unready health replacement that failed during wake delivery once that delivery settles"
+}
+
 test_pi_late_retiring_actionable_reaches_replacement() {
   local repo home plugin count out status
   repo="$TMP_ROOT/pi-late-retiring-actionable-root"
@@ -6764,6 +6861,7 @@ test_pi_actionable_closes_restore_while_branch_delivery_is_held replacement
 test_pi_actionable_closes_restore_while_branch_delivery_is_held quit
 test_pi_repeated_close_under_a_held_delivery_keeps_its_confirmed_handoff
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
+test_pi_unready_health_replacement_failure_during_delivery
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_keeps_predecessor_until_successor
