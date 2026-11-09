@@ -2023,6 +2023,19 @@ test_cleanup_only_records_never_transition_the_backlog() {
       "$reason cleanup record teardown did not say its item was left alone"
   done
 
+  id=atomic-cleanup-unknown-b8
+  case_dir=$(make_home cleanup-unknown)
+  add_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only \
+    "spawn_gen=spawn-cleanup-unknown" "cleanup_recovery=typo"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "unknown cleanup reason exempted a worker record from reconciliation: $out"
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "unknown cleanup reason task teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = done ] \
+    || fail "unknown cleanup reason exempted teardown from its backlog transition: $out"
+
   id=atomic-delivery-pending-b8
   case_dir=$(make_home delivery-pending)
   add_item "$case_dir" "$id"

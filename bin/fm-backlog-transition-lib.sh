@@ -774,8 +774,10 @@ fm_backlog_record_publish() {
 fm_backlog_record_cleanup_reason() {  # <meta>
   local reason
   reason=$(LC_ALL=C awk -F= '$1 == "cleanup_recovery" { sub(/^[^=]*=/, ""); value = $0 } END { printf "%s", value }' "$1" 2>/dev/null) || reason=
-  [ -n "$reason" ] || return 1
-  printf '%s\n' "$reason"
+  case "$reason" in
+    orca|delivery-unconfirmed) printf '%s\n' "$reason" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_backlog_meta_spawn_gen() {
