@@ -172,8 +172,9 @@ Read the modes as stopping points rather than as artifacts and they line up clea
 - `no-mistakes` runs the pipeline, then publishes.
 
 On that reading the forge composes with the two modes that publish and is meaningless on the one that does not.
-That inverts both rules the delivery-mode design currently carries, which permit `local-only forge=gerrit` as an annotation that changes nothing and refuse `direct-PR forge=gerrit` outright.
-The composition test says that is backwards on both counts: the refusal lands on the combination that has a meaning, and the permission on the combination that does not.
+That exposed both rules the delivery-mode design needed to change: it had permitted `local-only forge=gerrit` as an annotation that changed nothing and refused `direct-PR forge=gerrit` outright.
+The composition test identified both reversals: the refusal belonged on the combination that has no meaning, and the permission on the combination that does.
+The implemented registry contract now refuses a forge binding on `local-only` and permits `direct-PR forge=gerrit`, while retaining the same composition rule for the other explicit forge bindings.
 
 The refusal reads as reasonable only because of the name.
 "That mode's definition of done is a pull request this forge does not have" is a true statement about the string `direct-PR` and not about the stopping point it names, and section 2 is why those two came apart.
