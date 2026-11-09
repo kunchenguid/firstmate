@@ -22,7 +22,7 @@
 #     pane equals the task record's herdr_pane_id, all as exact strings.
 #   - session is a lowercase native conversation UUID.
 #   - written is an integer Unix time no later than now and no older than
-#     FM_NATIVE_GRANT_MAX_AGE seconds (default 43200, the producer's window).
+#     43200 seconds (the producer's window).
 #   - The grant's byte fingerprint is not already recorded in the task's
 #     spend ledger, state/<id>.native-grant-spent. One grant licenses one
 #     recovery attempt, whether or not that attempt then launches.
@@ -40,7 +40,7 @@
 #     caller must refuse rather than launch on an unrecorded grant.
 
 FM_NATIVE_GRANT_MAX_BYTES=4096
-FM_NATIVE_GRANT_DEFAULT_MAX_AGE=43200
+FM_NATIVE_GRANT_MAX_AGE=43200
 
 fm_native_grant_fingerprint() {  # <file>
   local sum
@@ -61,7 +61,7 @@ fm_native_grant_fingerprint() {  # <file>
 
 fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
   local file=$1 id=$2 harness=$3 pane=$4 ledger=$5
-  local size keys fields now max_age g_task g_pane g_agent g_session g_written
+  local size keys fields now g_task g_pane g_agent g_session g_written
   FM_NATIVE_GRANT_ERROR=
   FM_NATIVE_GRANT_FINGERPRINT=
   FM_NATIVE_GRANT_SESSION=
@@ -145,16 +145,9 @@ EOF
       return 1
       ;;
   esac
-  max_age=${FM_NATIVE_GRANT_MAX_AGE:-$FM_NATIVE_GRANT_DEFAULT_MAX_AGE}
-  case "$max_age" in
-    '' | *[!0-9]*)
-      FM_NATIVE_GRANT_ERROR="FM_NATIVE_GRANT_MAX_AGE must be a whole number of seconds"
-      return 1
-      ;;
-  esac
   now=$(date +%s)
-  if [ "$g_written" -gt "$now" ] || [ $((now - g_written)) -gt "$max_age" ]; then
-    FM_NATIVE_GRANT_ERROR="grant was written outside the last $max_age seconds"
+  if [ "$g_written" -gt "$now" ] || [ $((now - g_written)) -gt "$FM_NATIVE_GRANT_MAX_AGE" ]; then
+    FM_NATIVE_GRANT_ERROR="grant was written outside the last $FM_NATIVE_GRANT_MAX_AGE seconds"
     return 1
   fi
   FM_NATIVE_GRANT_FINGERPRINT=$(fm_native_grant_fingerprint "$file") || {

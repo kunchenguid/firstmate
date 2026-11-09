@@ -3264,6 +3264,42 @@ test_native_grant_is_required_to_bypass_the_dispatchability_gate() {
   pass "granted recovery: without a grant the gate stays, and a grant cannot change the profile, start new work, or reopen a Done item"
 }
 
+test_native_grant_keeps_the_recorded_account() {
+  local dir out rc=0 grant
+  grant_case_or_skip grant-acct ng6 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/first" "$dir/second"
+  : > "$dir/first/.credentials.json"
+  : > "$dir/second/.credentials.json"
+  printf 'account=%s\n' "$dir/first" >> "$dir/home/state/ng6.meta"
+  grant=$(write_grant "$dir" ng6)
+
+  printf '%s\n' "$dir/second" > "$dir/home/config/claude-account"
+  out=$(run_spawn "$dir" ng6 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 1 "$rc" "a changed account pin must refuse granted recovery"$'\n'"$out"
+  assert_contains "$out" "different account" "the refusal should name the account change"
+  assert_absent "$dir/fake/launched-command" "a changed pin must launch nothing"
+  assert_absent "$dir/home/state/ng6.native-grant-spent" "a refused account must not spend the grant"
+
+  rm "$dir/home/config/claude-account"
+  rc=0
+  out=$(run_spawn "$dir" ng6 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 1 "$rc" "a removed account pin must refuse granted recovery"$'\n'"$out"
+  assert_contains "$out" "different account" "the refusal should name the account change"
+  assert_absent "$dir/fake/launched-command" "a removed pin must launch nothing"
+  assert_absent "$dir/home/state/ng6.native-grant-spent" "a refused account must not spend the grant"
+
+  printf '%s\n' "$dir/first" > "$dir/home/config/claude-account"
+  rc=0
+  out=$(run_spawn "$dir" ng6 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 0 "$rc" "the recorded account should still recover"$'\n'"$out"
+  pass "granted recovery: only the recorded account is relaunched, and a refused account leaves the grant unspent"
+}
+
 test_native_grant_refuses_a_pane_that_did_not_survive() {
   local dir out rc grant
   if ! command -v tasks-axi >/dev/null 2>&1 || ! fm_tasks_axi_compatible; then
@@ -3432,4 +3468,5 @@ test_native_grant_recovers_a_held_task_without_touching_its_item
 test_native_grant_refuses_a_live_agent
 test_native_grant_refuses_malformed_expired_and_mismatched_grants
 test_native_grant_is_required_to_bypass_the_dispatchability_gate
+test_native_grant_keeps_the_recorded_account
 test_native_grant_refuses_a_pane_that_did_not_survive

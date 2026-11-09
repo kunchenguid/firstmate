@@ -2729,11 +2729,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
       ;;
     esac
-    fm_native_grant_spend "$NATIVE_GRANT_LEDGER" || {
-      echo "error: native grant refused for task $ID: $FM_NATIVE_GRANT_ERROR" >&2
-      exit 1
-    }
-    NATIVE_GRANT_VALID=1
   fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
@@ -3606,6 +3601,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE" "$WORKER_ACCOUNT_REQUEST") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
+if [ "$NATIVE_GRANT_SET" -eq 1 ]; then
+  if [ "$WORKER_ACCOUNT_DECLARED" != "$(fm_meta_get "$RELAUNCH_META" account)" ]; then
+    echo "error: task $ID recorded account '$(fm_meta_get "$RELAUNCH_META" account)', but this home now selects '$WORKER_ACCOUNT_DECLARED'; refusing granted recovery on a different account" >&2
+    exit 1
+  fi
+  fm_native_grant_spend "$NATIVE_GRANT_LEDGER" || {
+    echo "error: native grant refused for task $ID: $FM_NATIVE_GRANT_ERROR" >&2
+    exit 1
+  }
+  NATIVE_GRANT_VALID=1
+fi
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
