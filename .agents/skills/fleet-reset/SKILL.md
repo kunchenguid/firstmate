@@ -30,7 +30,9 @@ Every step's mechanics stay with the skill or script named in it; do not restate
    Finish `updatefirstmate`'s restart step with `bin/fm-secondmate-restart.sh`.
    A mate it refuses because its composer holds unsent text is retried later in this step, never forced or skipped; if it still refuses, report that mate and what the captain must clear.
 6. **Hand back.**
-   Tell the captain, in plain outcomes, that main is safe to restart, naming anything left running and why.
+   Tell the captain, in plain outcomes, that main is safe to restart only when the `stow` completion receipt from step 2 claims reset-safe and no mate was skipped or left unrestarted.
+   Otherwise report what still prevents a safe reset (an unreachable memory tier, an unresolved over-budget decision, an unfiled open record, a skipped or unreached mate) and do not tell the captain to restart.
+   Name anything left running and why.
    Durable records, held captain calls, the backlog, and unread status survive a restart, and `bearings` restores the picture.
 
 ## Teardown rules
