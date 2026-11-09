@@ -505,9 +505,9 @@ test_overlapping_captures_keep_pages_and_names_distinct() {
 test_cssom_and_reserved_markup() {
   local home out snap
   home=$(make_home cssom)
-  printf '<html><head><style>.dynamic{color:black}</style><link rel="stylesheet" href="https://external.test/sheet.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
+  printf '<html><head><style>.removed{display:none}.dynamic{color:black}</style><style id="empty-sheet">.removed-empty{display:none}</style><style id="unreadable-sheet">.fallback{color:green}</style><link rel="stylesheet" href="https://external.test/sheet.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
   cat > "$home/pages/css.test.html.json" <<'JSON'
-{"styles":[{"css":".disabled{color:green}","disabled":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"}],"inaccessible_stylesheets":["https://external.test/sheet.css"]}
+{"styles":[{"css":".disabled{color:green}","disabled":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"owner":"<style id=\"empty-sheet\">","css":""},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"}],"inaccessible_stylesheets":["https://external.test/sheet.css"]}
 JSON
   out=$(lu "$home" snapshot https://css.test/ 2>&1) || fail "$out"
   snap=$(field "$out" snapshot)
@@ -544,6 +544,8 @@ assert any("url(https://css.test/assets/img.png)" in css for css in p.styles)
 assert any(".adopted{color:red}" in css for css in p.styles)
 assert any("@media (width < 600px)" in css for css in p.styles)
 assert not any(".disabled" in css for css in p.styles)
+assert not any(".removed" in css or ".dynamic{color:black}" in css for css in p.styles)
+assert any(".fallback{color:green}" in css for css in p.styles)
 PYHTML
   then fail "CSSOM or reserved markup output failed"; fi
   assert_equals 'https://external.test/sheet.css' "$(jq -r '.inaccessible_stylesheets[0]' "${snap%.html}.meta.json")" "inaccessible stylesheet was not disclosed"

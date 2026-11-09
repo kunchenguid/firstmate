@@ -150,8 +150,8 @@ def rewrite_css(text, base):
 class Sanitizer(HTMLParser):
     def __init__(self, base, html_extra_attrs, styles=()):
         super().__init__(convert_charrefs=False)
-        self.sheet_styles = {str(i): "<style>\n%s</style>" % rewrite_css(sheet["css"], sheet.get("baseURI") or base) for i, sheet in enumerate(styles) if sheet.get("owner") is not None}
-        self.pending_style = ""
+        self.sheet_styles = {str(i): rewrite_css(sheet["css"], sheet.get("baseURI") or base) for i, sheet in enumerate(styles) if sheet.get("owner") is not None}
+        self.style_replaced = False
         self.base = base
         self.html_extra_attrs = html_extra_attrs
         self.out = []
@@ -251,7 +251,7 @@ class Sanitizer(HTMLParser):
             if tag not in VOID and not selfclosing and tag not in DROP_VOID:
                 self.skip.append(tag)
             return
-        copied = self.sheet_styles.get(dict(attrs).get("data-fm-captured-sheet"), "")
+        copied = self.sheet_styles.get(dict(attrs).get("data-fm-captured-sheet"))
         kept = self.clean_attrs(tag, attrs)
         if tag == "html":
             if self.saw_html:
@@ -263,9 +263,11 @@ class Sanitizer(HTMLParser):
             self.head_start = len(self.out)
         if tag == "style" and not selfclosing:
             self.in_style = True
-            self.pending_style = copied
-        elif copied:
-            self.out.append(copied)
+            self.style_replaced = copied is not None
+            if self.style_replaced:
+                self.out.append(copied)
+        elif copied is not None:
+            self.out.append("<style>\n%s</style>" % copied)
 
     def handle_endtag(self, tag):
         tag = tag.lower()
@@ -283,14 +285,14 @@ class Sanitizer(HTMLParser):
             self.body_end = len(self.out)
         self.out.append("</%s>" % tag)
         if tag == "style":
-            self.out.append(self.pending_style)
-            self.pending_style = ""
+            self.style_replaced = False
 
     def handle_data(self, data):
         if self.skip:
             return
         if self.in_style:
-            self.out.append(rewrite_css(data, self.base))
+            if not self.style_replaced:
+                self.out.append(rewrite_css(data, self.base))
         else:
             self.out.append(html.escape(data, quote=False))
 
