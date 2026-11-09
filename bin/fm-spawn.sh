@@ -7805,10 +7805,12 @@ if [ "$HARNESS" = claude ] && [ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 
   # assertion after delivery reads THAT session's transcript instead of guessing
   # which session in the project is recent. Only a launch that carries the
   # __CLAUDESESSION__ placeholder is given one: a raw command has no such slot, so
-  # an id minted for it could never reach Claude or name a transcript. No uuidgen
-  # means no address either: the launch line is unchanged and the assertion
-  # records the pin as unverified instead of polling for a session that cannot be
-  # written.
+  # an id minted for it could never reach Claude or name a transcript. A T3 launch
+  # composes none of this line either, because T3 starts the agent itself, so an id
+  # minted there would name no session and the assertion would poll a transcript
+  # that cannot exist. No uuidgen means no address either: the launch line is
+  # unchanged and the assertion records the pin as unverified instead of polling
+  # for a session that cannot be written.
   case "$LAUNCH" in
   *__CLAUDESESSION__*)
     if CLAUDE_SESSION_ID=$(spawn_claude_fresh_session_id "$CLAUDE_SESSION_CONFIG_DIR"); then
