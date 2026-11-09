@@ -178,6 +178,10 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# Home-local supervision tuning (config/supervision-tuning): the fix-round
+# ceiling a scaffolded brief states to its worker.
+. "$SCRIPT_DIR/fm-supervision-tuning-lib.sh"
+fm_supervision_tuning_load
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -650,6 +654,39 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# Validation-gate policy for a ship brief.
+#
+# Every validation round that parks for a decision costs a full extra round of
+# the most expensive step in the pipeline, and a round that answers ONE finding
+# per round multiplies that cost by the finding count. The brief therefore
+# states, before the run starts, how many rounds may be spent, that every
+# finding is answered at once, and which recurring finding classes are already
+# answered - so the run asks the captain only about a decision only the captain
+# can make.
+#
+# The fix-round ceiling is home-local tuning (config/supervision-tuning,
+# max_fix_rounds), defaulting to 2.
+FIX_ROUNDS=$(fm_supervision_tuning_int "${FM_MAX_FIX_ROUNDS:-}" 2)
+IFS= read -r -d '' GATE_POLICY_SECTION <<EOF || true
+# Validation gate policy
+- Answer EVERY finding the validation round raises IN ONE response, batched by class, each with its
+  code change or its recorded reason. Never spend one round per finding: a round is the most
+  expensive step in the pipeline, and one-finding rounds multiply the whole run's cost.
+- Spend at most $FIX_ROUNDS fix rounds on this run's own findings. If the last allowed round still
+  leaves findings, STOP the round loop: commit what you have, list the remaining findings
+  explicitly as follow-up work in the PR body, and continue. Another round is not a fix; it is cost.
+- These classes are ALREADY answered for this task and must NOT come back as a gate:
+  * a deviation from the brief or from the intent: disclose it in the PR body and continue;
+  * a refactor, rename, or style change the review suggests but the task did not ask for: skip it and
+    list it as follow-up work;
+  * a missing campaign number, a null Sharpe, or an empty cell: that is a measurement result, not a
+    defect - report it as such;
+  * a promotion or graduation criterion: apply the registered bar exactly as written, do not re-ask.
+- A genuine gate is a decision only the captain can make: a product choice, a destructive action, or
+  new spend. Everything else is yours to decide and record.
+EOF
+GATE_POLICY_SECTION=${GATE_POLICY_SECTION%$'\n'}
+
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
 # The secondmate charter deliberately omits this rule because a secondmate
@@ -827,6 +864,8 @@ $WAIT_BLOCK$INBOX_SECTION
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
+
+$GATE_POLICY_SECTION
 
 $DOD
 EOF

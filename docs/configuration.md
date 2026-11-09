@@ -1084,6 +1084,24 @@ With the flag absent the wedge timer spends no current-state read for it and kee
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the deferral contract and `bin/fm-classify-lib.sh`'s `crew_run_is_validating` owns which verdicts count.
 
+## Supervision tuning (config/supervision-tuning)
+
+The optional local, gitignored `config/supervision-tuning` file is one home's supervision policy: the watcher's poll cadence and escalation ceilings, and the validation fix-round ceiling a ship brief states.
+[`bin/fm-supervision-tuning-lib.sh`](../bin/fm-supervision-tuning-lib.sh) owns the format and the loader; `bin/fm-watch.sh`, `bin/fm-supervise-daemon.sh`, and `bin/fm-brief.sh` all load the same file, so one write retunes every consumer.
+
+The file is one `KEY=VALUE` per line with `#` comments; a value must be a plain digit string, an unknown key is ignored, and nothing is evaluated as shell.
+An environment variable of the same name always wins, so a one-off launch override beats the file.
+An absent file leaves every knob at the shipped default, so a home that never writes this file behaves exactly as before.
+The keys, with their environment-variable overrides and shipped defaults:
+
+- `wedge_max_escalations` (`FM_WEDGE_MAX_ESCALATIONS`, default 0 = cap off): the wedge-escalation ceiling the [wedge ladder](architecture.md) describes and the [environment variables](#environment-variables) section owns in detail.
+- `escalate_batch_secs` (`FM_ESCALATE_BATCH_SECS`, default 0 = flush immediately): buffer window for batched escalation digests.
+- `idle_poll_secs` (`FM_IDLE_POLL`, default 0 = off): the slow poll cadence while no crew pane shows live work; the watcher still polls, only less often, and any live crew work returns the fast `FM_POLL` cadence at once.
+- `stale_escalate_secs` (`FM_STALE_ESCALATE_SECS`): the same escalation threshold the [environment variables](#environment-variables) section owns; this file is only another way to set it.
+- `max_fix_rounds` (`FM_MAX_FIX_ROUNDS`, default 2): the validation fix rounds a ship brief allows before the round loop must stop and list the remaining findings as follow-up work; `bin/fm-brief.sh` states the ceiling in the brief's `# Validation gate policy` section, which also tells the worker to answer every finding in one response and pre-answers the recurring finding classes (brief deviations, unrequested refactors, measurement results, registered promotion bars) so they never come back as a gate.
+
+The tuning file is a home-local policy file and is not inherited by secondmate homes.
+
 ## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
 
 The optional local, gitignored `config/spawn-base-primary-checkout` presence flag opts this home into a default-off base for fresh task worktrees on projects that land work locally.
@@ -3414,6 +3432,8 @@ FM_TASKS_AXI_CHECK_REASON=   # internal one-hop handoff of the reason behind tha
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
+FM_IDLE_POLL=0          # slow watcher poll cadence while no crew pane shows live work; usually set as idle_poll_secs in config/supervision-tuning; 0 keeps the FM_POLL cadence (see the "Supervision tuning (config/supervision-tuning)" section above)
+FM_MAX_FIX_ROUNDS=      # validation fix-round ceiling bin/fm-brief.sh states in a ship brief's # Validation gate policy; usually set as max_fix_rounds in config/supervision-tuning; default 2
 FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this home's state/home-summary.json even without a status signal; invalid or zero values use 300
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536

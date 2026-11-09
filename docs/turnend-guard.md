@@ -208,7 +208,7 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 ### Guard grace and the poll cadence
 
 `bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
-A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
+A healthy watcher's beacon can therefore legitimately age up to the effective poll cadence between touches: the slower of the fast poll and the idle poll (`max(FM_POLL, FM_IDLE_POLL)`, where `FM_IDLE_POLL` is home-local tuning from `config/supervision-tuning`, default 0, which keeps the fast cadence).
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.
@@ -219,8 +219,9 @@ Two readers derive their default grace from the configured poll instead of a bar
 - That hook.
 - `bin/fm-watch.sh`'s own pre-acquisition staleness check (the "lock held by live pid but heartbeat is stale" refusal).
 
-Both use `max(300, FM_POLL + 60)`.
+Both use `max(300, effective_poll + 60)`.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
+The effective poll is the slower of the fast poll and the idle poll, not the fast poll alone: the beacon must stay inside the grace for the longest wait a cycle can take, and a grace derived from the fast poll alone would let a healthy watcher waiting on the idle cadence age past its own bound.
 `fm_poll_derived_grace` in `bin/fm-wake-lib.sh` is the single owner of that formula.
 
 That refusal has a ceiling.
