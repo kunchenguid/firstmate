@@ -274,8 +274,8 @@ fm_pr_github_host_export() {  # <host>
 }
 
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
-# provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
+# provider-tagged identity. Validation is strict and per provider: a GitHub
+# owner must pass fm_pr_github_owner_valid, and GitLab, Gerrit, and Forgejo
 # each get their own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
