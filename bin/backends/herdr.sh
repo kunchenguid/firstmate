@@ -3633,10 +3633,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # unless the composer, empty before the send, shows this payload. A suffix
   # that then starts a turn must not report empty. Other harnesses keep the
   # unproven type-then-Enter path.
-  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || {
-    [ "${FM_HERDR_EXPECTED_HARNESS:-}" != codex ] || { printf 'unknown'; return 0; }
-    identity=
-  }
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
+  if [ -z "${identity%%$'\t'*}" ] && [ "${FM_HERDR_EXPECTED_HARNESS:-}" = codex ]; then
+    printf 'unknown'; return 0
+  fi
   if [ "${identity%%$'\t'*}" = codex ]; then
     fm_backend_herdr_codex_submit "$target" "$text"
     return 0

@@ -1673,7 +1673,7 @@ status_commit_delivered_endpoints() {  # <state> <endpoint-file>
     bounded=$endpoint
     case "$task" in *[!a-zA-Z0-9_.-]*) ;; *)
       case "$endpoint" in ''|*[!0-9]*) ;; *)
-        bounded=$(_status_delivered_receipt_endpoint "$state/$task.status" "$endpoint") || bounded=$endpoint ;;
+        bounded=$(_status_delivered_receipt_endpoint "$state/$task.status" "$endpoint") || { rc=1; continue; } ;;
       esac ;;
     esac
     printf '%s\t%s\t%s\n' "$task" "$bounded" "$ident" >> "$clamped" || rc=1
@@ -1684,24 +1684,61 @@ status_commit_delivered_endpoints() {  # <state> <endpoint-file>
   return "$rc"
 }
 
-# A digest delivers actionable events only. Stop a receipt at the first unread
-# informational line in its span so the primary drain still presents that line.
-_status_delivered_receipt_endpoint() {  # <status-file> <endpoint>
-  local LC_ALL=C f=$1 endpoint=$2 start span line consumed=0
-  start=$(status_presentation_cursor_offset "$f") || return 1
-  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+# Walk the unread span [start, endpoint) and return the offset of the first line
+# that was not delivered: an unread informational line (surface) or an
+# actionable event not ending at <covered-end> (actionable). Failure to read the
+# span fails closed so no receipt is published.
+_status_receipt_span_endpoint() {  # <status-file> <start> <endpoint> <surface|actionable> [<covered-end>]
+  local LC_ALL=C f=$1 start=$2 endpoint=$3 kind=$4 covered=${5:-} span line consumed=0 end
+  case "$start:$endpoint" in *[!0-9:]*|:*|*:) return 1 ;; esac
   if [ "$start" -ge "$endpoint" ]; then printf '%s' "$endpoint"; return 0; fi
   span=$(mktemp "${f%/*}/.status-delivered.span.XXXXXX") || return 1
   if ! _fm_status_read_span "$f" "$start" "$((endpoint - start))" > "$span" 2>/dev/null; then
     rm -f "$span"; return 1
   fi
   while IFS= read -r line || [ -n "$line" ]; do
-    if status_line_is_unread_surface "$line"; then break; fi
+    end=$((start + consumed + ${#line} + 1))
+    [ "$end" -le "$endpoint" ] || end=$endpoint
+    if [ "$kind" = surface ]; then
+      if status_line_is_unread_surface "$line"; then break; fi
+    elif status_is_captain_relevant "$line" && [ "$end" != "$covered" ]; then
+      break
+    fi
     consumed=$((consumed + ${#line} + 1))
   done < "$span"
   rm -f "$span"
   [ "$((start + consumed))" -le "$endpoint" ] || consumed=$((endpoint - start))
   printf '%s' "$((start + consumed))"
+}
+
+# A digest delivers actionable events only: its receipt stops before the first
+# unread informational line so the primary drain still presents that line.
+_status_delivered_receipt_endpoint() {  # <status-file> <endpoint>
+  local start
+  start=$(status_presentation_cursor_offset "$1") || return 1
+  _status_receipt_span_endpoint "$1" "$start" "$2" surface
+}
+
+# A primary drain presents notes, annotations and the latest backstop event, not
+# every actionable line. Publish its receipt only through contiguous delivery:
+# a task whose span the drain fully presented keeps its endpoint, every other
+# task stops before the first actionable line the daemon has not already seen.
+status_presented_receipts() {  # <state> <acknowledged-rows> <fully-presented-task-ids>
+  local state=$1 task endpoint ident f start seen bounded
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    case "
+$3
+" in *$'\n'"$task"$'\n'*) printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident"; continue ;; esac
+    f="$state/$task.status"
+    start=$(status_delivered_cursor_offset "$f") || continue
+    seen=$(status_presentation_marker_offset "$(status_daemon_seen_marker_path "$state" "$task")" "$f")
+    [ "$seen" -le "$start" ] || start=$seen
+    bounded=$(_status_receipt_span_endpoint "$f" "$start" "$endpoint" actionable) || continue
+    printf '%s\t%s\t%s\n' "$task" "$bounded" "$ident"
+  done <<EOF
+$2
+EOF
 }
 
 # Lock-free body for a caller that already holds the presentation lock.

@@ -4341,3 +4341,18 @@ test_backstop_presentation_is_seen_by_the_daemon() (
   pass "an event presented by the primary's outcome backstop is not escalated again"
 )
 test_backstop_presentation_is_seen_by_the_daemon
+
+test_primary_drain_receipt_keeps_unpresented_failure_unseen() (
+  local dir state file
+  dir=$(make_supercase receipt-failure-before-note); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  file="$state/mixed.status"
+  printf 'failed: build\nnote: diagnostic answer\n' > "$file"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary.out" 2>/dev/null || fail "primary drain failed"
+  grep -q 'note: diagnostic answer' "$dir/primary.out" || fail "note was not presented: $(cat "$dir/primary.out")"
+  [ "$(status_seen_offset "$state" mixed)" = 0 ] \
+    || fail "daemon would skip a failure the primary drain never presented"
+  pass "a primary drain receipt does not cover unpresented actionable events"
+)
+test_primary_drain_receipt_keeps_unpresented_failure_unseen

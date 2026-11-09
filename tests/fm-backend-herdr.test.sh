@@ -5347,6 +5347,18 @@ test_send_text_submit_unknown_when_identity_probe_fails() {
   pass "fm_backend_herdr_send_text_submit: an unreadable identity on an expected Codex pane returns 'unknown' without typing"
 }
 
+test_send_text_submit_unknown_when_identity_is_unnamed() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-identity-unnamed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_HERDR_EXPECTED_HARNESS=codex \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unnamed identity on an expected Codex pane must not select the legacy transport, got '$out'"
+  ! grep -q 'send-text\|send-keys' "$log" || fail "nothing may be typed into a pane whose harness is unresolved"
+  pass "fm_backend_herdr_send_text_submit: an unnamed identity on an expected Codex pane returns 'unknown' without typing"
+}
+
 test_send_text_submit_unknown_on_capture_failure() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6756,6 +6768,7 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_when_identity_probe_fails
+test_send_text_submit_unknown_when_identity_is_unnamed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte

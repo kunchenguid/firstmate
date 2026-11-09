@@ -796,7 +796,7 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 0
   fi
-  command printf '%s\n' "$acknowledged" > "$prepared" \
+  status_presented_receipts "$STATE" "$acknowledged" "$fully_presented" > "$prepared" \
     && _status_write_delivered_endpoints "$STATE" "$prepared" \
     || echo "wake drain: delivered status receipt could not be committed; events may replay" >&2
   rm -f -- "$prepared"

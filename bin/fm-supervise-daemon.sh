@@ -687,7 +687,11 @@ status_seen_offset() {  # <state> <task>
   presented=$(status_delivered_cursor_offset "$1/$2.status") || presented=0
   [ "$presented" -le "$classified" ] || classified=$presented
   presented=$(_status_drain_backstop_offset "$1/$2.status") || presented=0
-  [ "$presented" -le "$classified" ] || classified=$presented
+  if [ "$presented" -gt "$classified" ]; then
+    presented=$(_status_receipt_span_endpoint "$1/$2.status" "$classified" "$presented" actionable "$presented") \
+      || presented=0
+    [ "$presented" -le "$classified" ] || classified=$presented
+  fi
   printf '%s' "$classified"
 }
 
