@@ -54,3 +54,24 @@ The absence of a routed work item is not a divergence and the guard never requir
 
 `bin/fm-captain-hold.sh --help` owns command syntax, close modes, legacy-identity compatibility, completion attestation, retry behavior, and close ordering.
 `docs/captain-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.
+
+## What actually belongs to the captain
+
+A captain call is a decision the fleet may not make for itself. It has exactly three shapes:
+
+1. **Irreversible** - there is no backup, no revert, and no way to reconstruct what was destroyed.
+2. **Unbounded** - the blast radius cannot be named, capped, or allowlisted before it lands.
+3. **The captain's money or another person's data** - spend above the standing threshold, or disclosure of a real customer's data.
+
+Everything else is the fleet's own call and must never be held. Specifically, none of these is a captain call, and holding one is a defect of the same weight as shipping without approval:
+
+- a change that has a backup and a one-line documented revert;
+- a change whose blast radius is capped (a tick cap, an allowlist, a single repo, a single family);
+- re-enabling a feature whose blocking defect is provably fixed in the deployed tree;
+- choosing between two competent implementations, or between doing a thing and doing it slightly later;
+- recording a decision the captain already made in general terms ("no humans", "fix and go", "move expeditiously") as a specific action inside that scope;
+- anything the captain has already answered in this scope - asking again is not diligence, it is a second vote on a settled question.
+
+When a reversible, capped action is available and the captain's general instruction covers it, take it and write down what was done, the revert, and the blast radius. Present the revert with the result, never the permission request before it.
+
+A hold is a last resort, not a default. If the choice is between holding the work and taking a capped reversible step that moves it, take the step.
