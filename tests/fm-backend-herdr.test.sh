@@ -5342,9 +5342,9 @@ test_send_text_submit_unknown_when_identity_probe_fails() {
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_HERDR_EXPECTED_HARNESS=codex \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "an unreadable pane identity must not select the legacy transport, got '$out'"
+  [ "$out" = send-failed ] || fail "an unreadable pane identity must not select the legacy transport, got '$out'"
   ! grep -q 'send-text\|send-keys' "$log" || fail "nothing may be typed into a pane whose harness is unknown"
-  pass "fm_backend_herdr_send_text_submit: an unreadable identity on an expected Codex pane returns 'unknown' without typing"
+  pass "fm_backend_herdr_send_text_submit: an unreadable identity on an expected Codex pane returns 'send-failed' without typing"
 }
 
 test_send_text_submit_unknown_when_identity_is_unnamed() {
@@ -5354,9 +5354,9 @@ test_send_text_submit_unknown_when_identity_is_unnamed() {
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_HERDR_EXPECTED_HARNESS=codex \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "an unnamed identity on an expected Codex pane must not select the legacy transport, got '$out'"
+  [ "$out" = send-failed ] || fail "an unnamed identity on an expected Codex pane must not select the legacy transport, got '$out'"
   ! grep -q 'send-text\|send-keys' "$log" || fail "nothing may be typed into a pane whose harness is unresolved"
-  pass "fm_backend_herdr_send_text_submit: an unnamed identity on an expected Codex pane returns 'unknown' without typing"
+  pass "fm_backend_herdr_send_text_submit: an unnamed identity on an expected Codex pane returns 'send-failed' without typing"
 }
 
 test_send_text_submit_unknown_on_capture_failure() {
@@ -6865,17 +6865,17 @@ test_codex_native_submission() (
   for native_status in working blocked unknown; do
     : > "$dir/requests"
     verdict=$(fm_backend_herdr_send_text_submit selected:w9:p7 "$text" 3 0 0)
-    [ "$verdict" = unknown ] && [ ! -s "$dir/requests" ] || fail "native $native_status bypassed busy/blocked guard"
+    [ "$verdict" = send-failed ] && [ ! -s "$dir/requests" ] || fail "native $native_status bypassed busy/blocked guard"
   done
   native_status=idle
   for composer in pending pending-unproven unknown; do
     : > "$dir/requests"
     verdict=$(fm_backend_herdr_send_text_submit selected:w9:p7 "$text" 3 0 0)
-    [ "$verdict" = unknown ] && [ ! -s "$dir/requests" ] || fail "$composer composer received native input"
+    [ "$verdict" = send-failed ] && [ ! -s "$dir/requests" ] || fail "$composer composer received native input"
   done
   composer=empty reply_pane=w9:p8
   verdict=$(fm_backend_herdr_send_text_submit selected:w9:p7 "$text" 3 0 0)
-  [ "$verdict" = unknown ] && [ ! -s "$dir/requests" ] || fail "mismatched endpoint received native input"
+  [ "$verdict" = send-failed ] && [ ! -s "$dir/requests" ] || fail "mismatched endpoint received native input"
   pass "Codex native submission preserves exact text/endpoint, guards and single-attempt failures"
 )
 test_codex_native_submission

@@ -3596,8 +3596,9 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
 
 # Codex uses one native prompt request, never a literal-paste/Enter retry.
 # The exact pane, idle native identity and empty composer must agree first.
-# A blocked, stalled, malformed or ambiguous response is unconfirmed; there is
-# no transport fallback because the request may already have submitted text.
+# A refusal before the request is a known send-failed; a stalled or malformed
+# reply is unconfirmed; there is no transport fallback because the request may
+# already have submitted text.
 fm_backend_herdr_codex_submit() {  # <target> <text>
   local target=$1 text=$2 response pane=$FM_BACKEND_HERDR_PANE session=$FM_BACKEND_HERDR_SESSION
   if ! response=$(fm_backend_herdr_cli "$session" agent get "$pane") \
@@ -3605,10 +3606,10 @@ fm_backend_herdr_codex_submit() {  # <target> <text>
       .error == null and .result.agent.pane_id == $pane and
       .result.agent.agent == "codex" and
       (.result.agent.agent_status == "idle" or .result.agent.agent_status == "done")' >/dev/null; then
-    printf 'unknown'; return 0
+    printf 'send-failed'; return 0
   fi
   [ "$(fm_backend_herdr_composer_state "$target")" = empty ] \
-    || { printf 'unknown'; return 0; }
+    || { printf 'send-failed'; return 0; }
   if response=$(fm_backend_herdr_cli "$session" agent prompt "$pane" "$text" \
       --wait --until working --timeout 30000) \
     && printf '%s' "$response" | jq -e --arg pane "$pane" '
@@ -3635,7 +3636,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # unproven type-then-Enter path.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   if [ -z "${identity%%$'\t'*}" ] && [ "${FM_HERDR_EXPECTED_HARNESS:-}" = codex ]; then
-    printf 'unknown'; return 0
+    printf 'send-failed'; return 0
   fi
   if [ "${identity%%$'\t'*}" = codex ]; then
     fm_backend_herdr_codex_submit "$target" "$text"
