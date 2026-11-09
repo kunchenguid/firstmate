@@ -5,6 +5,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-pane)
 
 make_herdr_fakebin() {
@@ -112,6 +114,66 @@ test_watched_pane_supervision_need() {
   pass "valid nonempty pane watches need supervision independently of tasks and done policy"
 }
 
+test_watched_pane_locked_read_bound() {
+  local dir fb hangfb resp state pid rc i
+  dir="$TMP_ROOT/locked-read-bound"; resp="$dir/responses"; state="$dir/home/state"
+  mkdir -p "$resp" "$state"; : > "$dir/log"
+  fb=$(make_herdr_fakebin "$dir")
+  hangfb="$dir/fakebin-hang"; mkdir -p "$hangfb"
+  cat > "$hangfb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_HERDR_LOG"
+case "$1 $2" in
+  'workspace list') printf '%s\n' $$ > "$FM_HERDR_PID_FILE"; exec sleep 300 ;;
+  *) echo "unexpected Herdr command: $*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$hangfb/herdr"
+
+  # A hung session must not hold .watched-panes.lock across an unbounded wait:
+  # remove still finishes at the read bound, drops the row, frees the lock and
+  # leaves no read child behind. The outer bound only keeps a regression from
+  # hanging the suite; the fixed code answers in ~FM_WATCHED_PANE_READ_SECS.
+  printf 'hung-sess\tops\tdesign\tHung\t1\n' > "$state/watched-panes"
+  rc=0
+  fm_run_timed 12 env FM_WATCHED_PANE_READ_SECS=2 PATH="$hangfb:$PATH" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$dir/log" FM_HERDR_PID_FILE="$dir/hung-remove.pid" \
+    bash "$ROOT/bin/fm-watch-pane.sh" remove Hung 2>"$dir/error" || rc=$?
+  [ "$rc" -eq 0 ] || fail "remove of a hung-session watch must finish at the read bound: rc=$rc $(cat "$dir/error")"
+  [ ! -s "$state/watched-panes" ] || fail "hung-session row survived removal"
+  pid=$(cat "$dir/hung-remove.pid")
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -0 "$pid" 2>/dev/null && fail "bounded read's child outlived the lock release"
+  # The freed lock serves the next mutation immediately, so other sessions'
+  # healthy watches are not starved by the hung one.
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"ops"}]}}' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"design"}]}}' > "$resp/2.out"
+  printf '{"result":{"panes":[{"tab_id":"w1:t1","pane_id":"w1:p1"}]}}' > "$resp/3.out"
+  PATH="$fb:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$resp" \
+    bash "$ROOT/bin/fm-watch-pane.sh" add watch-session ops design Healthy \
+    || fail "registry lock still held after the bounded remove"
+  # A hung session's registration read fails the add at the same bound and
+  # changes nothing.
+  rc=0
+  fm_run_timed 12 env FM_WATCHED_PANE_READ_SECS=2 PATH="$hangfb:$PATH" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$dir/log" FM_HERDR_PID_FILE="$dir/hung-add.pid" \
+    bash "$ROOT/bin/fm-watch-pane.sh" add hung-sess ops design 'Hung add' 2>"$dir/error" || rc=$?
+  [ "$rc" -ne 0 ] || fail "hung-session add must fail at the read bound"
+  grep -q 'exceeded the 2s bound' "$dir/error" || fail "hung add did not report the read bound: $(cat "$dir/error")"
+  pid=$(cat "$dir/hung-add.pid")
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -0 "$pid" 2>/dev/null && fail "hung add's read child outlived the lock release"
+  grep -q Healthy "$state/watched-panes" || fail "healthy row lost to the failed add"
+  ! grep -q 'Hung add' "$state/watched-panes" || fail "failed add changed the registry"
+  pass "locked registry reads die at FM_WATCHED_PANE_READ_SECS, free the lock, and leave no child"
+}
+
 test_watched_pane_marker_retire() {
   local dir fb resp log state marker
   dir="$TMP_ROOT/marker-retire"; resp="$dir/responses"; state="$dir/home/state"; log="$dir/log"
@@ -206,6 +268,7 @@ test_watched_pane_marker_retire() {
 test_watched_pane_supervision_need
 test_watched_pane_identity_and_cli
 test_watched_pane_marker_retire
+test_watched_pane_locked_read_bound
 
 # Production bounded wait, fake transport: verify the snapshot survives the
 # wait boundary and both reconnect and streaming use the opt-in policy.

@@ -8,10 +8,13 @@
 # remove is idempotent; remove or replace also retires the pane's watch-owned
 # escalation marker (a pane task metadata owns keeps it); list prints the
 # stored TSV without contacting Herdr.
+# Real Herdr reads behind a locked registry mutation are bounded by
+# FM_WATCHED_PANE_READ_SECS (default 5s): a hung session fails add or skips
+# the retire instead of holding .watched-panes.lock and silencing every watch.
 # No command creates, closes, or changes a Herdr pane or session.
 set -euo pipefail
 
-usage() { sed -n '2,11s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,14s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 [ -n "${FM_HOME:-}" ] || { echo 'error: set FM_HOME explicitly' >&2; exit 2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,8 +62,7 @@ if [ "$COMMAND" = add ]; then
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$LABEL" "$NOTIFY" >> "$TMP"
   fm_watch_pane_validate "$TMP" || { echo 'error: invalid or duplicate watched-pane identity' >&2; exit 2; }
-  fm_backend_source herdr
-  fm_backend_herdr_resolve_watched_pane "$1" "$2" "$3" >/dev/null || exit 1
+  fm_watch_pane_resolve_timed "$1" "$2" "$3" >/dev/null || exit 1
 fi
 mv -f -- "$TMP" "$REGISTRY"
 TMP=

@@ -4,6 +4,8 @@
 # FM_WATCHED_PANES is a per-wait snapshot: target<TAB>label<TAB>notify_done.
 # It is passed through the existing waited backend call, never persisted as IDs.
 
+_FM_WATCH_PANE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 fm_watch_pane_validate() {  # <registry>
   [ ! -L "$1" ] || return 1
   [ -e "$1" ] || return 0
@@ -74,6 +76,37 @@ fm_watch_pane_lock_current() {
   return 1
 }
 
+# A locked registry mutation runs its real Herdr reads in a bounded child so
+# one hung session cannot hold .watched-panes.lock across an unbounded wait and
+# silence every healthy watch: fm_run_timed kills the whole read group at
+# FM_WATCHED_PANE_READ_SECS (default 5, the probe budget's normalization)
+# before the caller's lock is released, and a killed read fails like an
+# unresolvable pane. Prints the resolved "session:pane" target on success
+# only - whatever a killed read managed to emit is never a usable identity.
+fm_watch_pane_resolve_timed() {  # <session> <workspace-label> <tab-label>
+  local secs out rc=0
+  secs=${FM_WATCHED_PANE_READ_SECS:-5}
+  case "$secs" in
+    ''|*[!0-9]*|0) secs=5 ;;
+  esac
+  if ! declare -F fm_run_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+    . "$_FM_WATCH_PANE_LIB_DIR/fm-timeout-lib.sh" || return 1
+  fi
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  out=$(fm_run_timed "$secs" bash -c '
+    . "$1/fm-backend.sh"
+    fm_backend_source herdr || exit 1
+    fm_backend_herdr_resolve_watched_pane "$2" "$3" "$4"
+  ' _ "$_FM_WATCH_PANE_LIB_DIR" "$@") || rc=$?
+  if fm_timed_out "$rc"; then
+    printf 'error: watched pane read exceeded the %ss bound\n' "$secs" >&2
+    return 124
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s' "$out"
+}
+
 # Retire the watch-owned escalation marker of a registration's pane after its
 # row leaves the registry (remove or replace). The marker suppresses a pane's
 # next actionable edge, so leaving it behind would let a re-registered pane
@@ -83,7 +116,7 @@ fm_watch_pane_lock_current() {
 fm_watch_pane_retire() {  # <state_dir> <session> <workspace-label> <tab-label>
   local state=$1 session=$2 workspace=$3 tab=$4 target
   fm_backend_source herdr || return 0
-  target=$(fm_backend_herdr_resolve_watched_pane "$session" "$workspace" "$tab" 2>/dev/null) || return 0
+  target=$(fm_watch_pane_resolve_timed "$session" "$workspace" "$tab" 2>/dev/null) || return 0
   [ -z "$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null)" ] || return 0
   fm_backend_herdr_clear_transition "$state" "$target" || return 0
 }

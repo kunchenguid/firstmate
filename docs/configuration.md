@@ -73,6 +73,7 @@ Blocked states produce a durable wake naming the watch label and status; `--noti
 The transition policy and deduplication contract are owned by [`bin/fm-transition-lib.sh`](../bin/fm-transition-lib.sh).
 Removing or replacing a registration retires its deduplication marker if the old pane still resolves and has no task metadata; task-owned markers survive, and an unresolvable pane does not prevent idempotent removal.
 Registry mutation and watch notification commits share a lock; transitions from an outdated registry snapshot cannot publish wakes or change deduplication markers.
+The real Herdr reads behind a locked mutation run under the same `FM_WATCHED_PANE_READ_SECS` bound and are killed with their process group before the lock is released, so a hung session fails the add or skips the marker retire instead of silencing the other watches.
 Transient finish states may therefore notify for an opted-in watch; ordinary tasks continue to defer `done` to their existing completion handling.
 No command creates or closes a pane, and the operator should unregister a watch when its session ends.
 [`tests/fm-watch-pane.test.sh`](../tests/fm-watch-pane.test.sh) covers registration and marker retirement, and [`tests/fm-supervision-events.test.sh`](../tests/fm-supervision-events.test.sh) covers bounded reads and partial probe results.
