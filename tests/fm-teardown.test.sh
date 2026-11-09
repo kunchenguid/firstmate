@@ -3479,8 +3479,9 @@ case "\${1:-} \${2:-}" in
       printf '%s\n' 'not-json'
       exit 0
     fi
-    if [ -n "\${FM_FAKE_HERDR_PANE_GET_ERROR:-}" ]; then
-      printf '{"error":{"code":"%s"}}\n' "\$FM_FAKE_HERDR_PANE_GET_ERROR" >&2
+    if [ -n "\${FM_FAKE_HERDR_PANE_GET_FIRST_ERROR:-}" ] && [ ! -e "\${FM_FAKE_HERDR_PANE_GET_ERROR_SEEN:?}" ]; then
+      : > "\${FM_FAKE_HERDR_PANE_GET_ERROR_SEEN:?}"
+      printf '{"error":{"code":"%s"}}\n' "\$FM_FAKE_HERDR_PANE_GET_FIRST_ERROR" >&2
       exit 1
     fi
     if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
@@ -3593,21 +3594,25 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
     || fail "herdr-garbage-presence: ambiguous presence erased the task status record"
   assert_grep "ambiguous structured presence" "$case_dir/stderr" \
     "herdr-garbage-presence: the ambiguity refusal was not explained visibly"
-  assert_grep "non-JSON response: not-json" "$case_dir/stderr" \
+  assert_grep "herdr returned a non-JSON response" "$case_dir/stderr" \
     "herdr-garbage-presence: the refusal did not name the non-JSON cause"
+  ! grep -q "not-json" "$case_dir/stderr" \
+    || fail "herdr-garbage-presence: the refusal disclosed the raw backend response"
   pass "herdr flat teardown never erases records when pane presence is unparseable"
 }
 
 test_herdr_flat_teardown_refusal_names_herdr_error_code() {
-  local case_dir log closed rc
+  local case_dir log closed error_seen rc
   case_dir=$(make_case herdr-error-code-presence)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
+  error_seen="$case_dir/pane-get-error-seen"
   : > "$case_dir/state/task-x1.status"
   rc=0
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PANE_GET_ERROR=server_busy \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_HERDR_PANE_GET_FIRST_ERROR=server_busy FM_FAKE_HERDR_PANE_GET_ERROR_SEEN="$error_seen" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
@@ -3616,6 +3621,8 @@ test_herdr_flat_teardown_refusal_names_herdr_error_code() {
     || fail "herdr-error-code-presence: ambiguous presence erased the durable endpoint metadata"
   assert_grep "herdr returned error code server_busy" "$case_dir/stderr" \
     "herdr-error-code-presence: the refusal did not name the herdr error code"
+  [ "$(grep -c '^pane get' "$log")" -eq 1 ] \
+    || fail "herdr-error-code-presence: teardown classified pane presence more than once"
   pass "herdr flat teardown refusal names the herdr error code behind ambiguous presence"
 }
 

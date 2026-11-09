@@ -3367,6 +3367,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
   for prerequisite in \
     fm_backend_herdr_parse_target \
     fm_backend_herdr_pane_presence_state \
+    fm_backend_herdr_pane_presence_classify \
     fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed \
@@ -3388,7 +3389,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
 }
 
 teardown_herdr_preflight_target() {  # <target> <task-id>
-  local target=$1 task_id=$2 session pane presence reason lock_path verified_lock_path lock_session held_path attempt
+  local target=$1 task_id=$2 session pane classification presence reason lock_path verified_lock_path lock_session held_path attempt
   teardown_herdr_require_prerequisites "$task_id" || return 1
   if ! fm_backend_herdr_parse_target "$target"; then
     echo "error: herdr endpoint $target for $task_id could not be parsed exactly; nothing was changed - repair the endpoint metadata and rerun teardown" >&2
@@ -3396,15 +3397,12 @@ teardown_herdr_preflight_target() {  # <target> <task-id>
   fi
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+  classification=$(fm_backend_herdr_pane_presence_classify "$session" "$pane")
+  presence=${classification%%$'\t'*}
+  reason=${classification#*$'\t'}
   case "$presence" in
     dead|present) ;;
     *)
-      reason=
-      if declare -F fm_backend_herdr_pane_presence_reason >/dev/null 2>&1; then
-        reason=$(fm_backend_herdr_pane_presence_reason "$session" "$pane")
-      fi
-      [ -n "$reason" ] || reason="the cause could not be re-read"
       echo "error: herdr endpoint $target for $task_id has ambiguous structured presence ($reason); nothing was changed - restore reliable endpoint inspection and rerun teardown" >&2
       return 1
       ;;
