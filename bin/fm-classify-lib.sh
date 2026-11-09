@@ -435,7 +435,15 @@ status_pause_age() {  # <status-line> <file-age-seconds> <now-epoch>
   fi
 }
 
+# The pause ceiling is opt-in: only a home with the config/pause-ceiling presence
+# flag turns an overdue pause into a keyed decision; without it pauses behave as before.
+fm_pause_ceiling_enabled() {
+  local config=${FM_CONFIG_OVERRIDE:-${FM_HOME:+$FM_HOME/config}}
+  [ -n "$config" ] && [ -e "$config/pause-ceiling" ]
+}
+
 status_pause_is_overdue() {  # <status-line> <age-seconds> <now-epoch> -> success iff overdue
+  fm_pause_ceiling_enabled || return 1
   local until undated_max=${FM_PAUSE_UNDATED_MAX_SECS:-$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT}
   case "$undated_max" in ''|0|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
   if until=$(status_paused_until "$1"); then

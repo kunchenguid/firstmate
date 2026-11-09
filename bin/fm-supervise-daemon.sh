@@ -1357,6 +1357,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     the block below and escalate what it finds; that block owns its file set.
 reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after overdue decision
   local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc prior_pause new_pause pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  fm_pause_ceiling_enabled || return 1
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || return 2
   if [ "$(uname)" = Darwin ]; then
@@ -1404,6 +1405,7 @@ EOF
 # that hides the blocker from wake classification: a marker without it is the
 # watcher's, or an enqueue that failed, and either way the supervisor heard nothing.
 overdue_delivered_key() {  # <state> <task>
+  fm_pause_ceiling_enabled || return 0
   [ -z "$(sed -n 2p "$1/.paused-overdue-$2" 2>/dev/null)" ] || printf 'paused-overdue-%s' "$2"
 }
 
@@ -1515,12 +1517,14 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    if [ "$(uname)" = Darwin ]; then
-      pause_identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null) || continue
-    else
-      pause_identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null) || continue
+    if fm_pause_ceiling_enabled; then
+      if [ "$(uname)" = Darwin ]; then
+        pause_identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null) || continue
+      else
+        pause_identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null) || continue
+      fi
+      pause_size=$(_fm_status_file_size "$state/$task.status") || continue
     fi
-    pause_size=$(_fm_status_file_size "$state/$task.status") || continue
     last=$(status_declared_wait_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"

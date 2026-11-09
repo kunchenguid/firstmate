@@ -2652,8 +2652,10 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Keep the overdue decision open until the worker appends another status event.
+# Without config/pause-ceiling every marker reads as absent.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
   local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity marker_identity offset actual added line verb key append_rc resume=0 prior_pause new_pause pause_line pause_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT} legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  fm_pause_ceiling_enabled || return 1
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
   identity=$(stat_devino "$statusf") || return 0
@@ -4446,7 +4448,7 @@ EOF
             _wedge_cap_markers_clear "$key"
             wake "$stale_reason"
           fi
-        elif [ -e "$STATE/.paused-overdue-$task" ]; then
+        elif fm_pause_ceiling_enabled && [ -e "$STATE/.paused-overdue-$task" ]; then
           printf '%s' "$h" > "$sf"
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not

@@ -1400,9 +1400,15 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
   pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
 }
 
+# The pause ceiling is opt-in; a case that exercises it arms the home's presence flag.
+arm_pause_ceiling() {  # <home-dir>
+  mkdir -p "$1/config" && : > "$1/config/pause-ceiling"
+}
+
 test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   local dir state fakebin task win pane key statusf marker identity offset blocked actual_identity rc pause_size
   dir=$(make_supercase overdue-pause-away-mode)
+  arm_pause_ceiling "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"
   task=overdue-away; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
   key=$(printf '%s' "$task" | tr ':/.' '___')
@@ -1466,9 +1472,36 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
 }
 
+test_housekeeping_pause_ceiling_absent_keeps_the_pause_recheck() {
+  local dir state fakebin task win pane key statusf before
+  dir=$(make_supercase overdue-pause-flag-absent)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-off; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$key"
+  sleep 2
+  before=$(cat "$statusf")
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(cat "$statusf")" = "$before" ] || fail "without config/pause-ceiling housekeeping wrote to the status log: $(cat "$statusf")"
+  [ ! -e "$state/.paused-overdue-$task" ] || fail "without config/pause-ceiling housekeeping created an overdue marker"
+  [ "$(grep -c . "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "without config/pause-ceiling the pause recheck was not queued exactly once: $(cat "$state/.subsuper-escalations")"
+  grep -F "wait overdue" "$state/.subsuper-escalations" >/dev/null \
+    && fail "without config/pause-ceiling the recheck asked for an overdue decision"
+  pass "without config/pause-ceiling an old away-mode pause keeps the plain pause recheck"
+}
+
 test_housekeeping_overdue_queue_failure_leaves_decision_open() {
   local dir state fakebin task win pane statusf
   dir=$(make_supercase overdue-queue-retry)
+  arm_pause_ceiling "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"
   task=overdue-retry; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
   printf 'paused: waiting for dependency\n' > "$statusf"
@@ -1497,6 +1530,7 @@ test_housekeeping_overdue_queue_failure_leaves_decision_open() {
 test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
   local dir state task win statusf size identity
   dir=$(make_supercase overdue-watcher-marker)
+  arm_pause_ceiling "$dir"
   state="$dir/state"; task=overdue-shared; win="sess:fm-$task"; statusf="$state/$task.status"
   printf 'paused: waiting for dependency\n' > "$statusf"
   size=$(wc -c < "$statusf" | tr -d ' ')
@@ -1517,6 +1551,7 @@ test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
 test_overdue_open_decision_without_marker_is_not_repeated() {
   local dir state task statusf
   dir=$(make_supercase overdue-open-no-marker)
+  arm_pause_ceiling "$dir"
   state="$dir/state"; task=overdue-crash; statusf="$state/$task.status"
   printf 'paused: waiting for dependency\nblocked [key=paused-overdue-%s]: paused 9s, wait overdue - decide or release\n' "$task" > "$statusf"
   fm_write_meta "$state/$task.meta" "window=sess:fm-$task" "worktree=$dir/wt" "kind=ship" "harness=pi"
@@ -1532,12 +1567,13 @@ test_overdue_open_decision_without_marker_is_not_repeated() {
 }
 
 test_housekeeping_overdue_queue_failure_resume_discards() {
-  local event route dir state fakebin task win pane statusf original_enqueue original_append
+  local event route dir state fakebin task win pane statusf original_enqueue original_append undated
   original_enqueue=$(declare -f escalate_add)
   for event in working paused; do
     for route in housekeeping signal stale; do
       (
         dir=$(make_supercase "overdue-resume-$event-$route")
+        arm_pause_ceiling "$dir"
         state="$dir/state"; fakebin="$dir/fakebin"
         task=overdue-resume; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
         printf 'paused: waiting for dependency\n' > "$statusf"
@@ -1546,33 +1582,36 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
         FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away posture"
         printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
         sleep 2
-        PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-          FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999 \
-          . "$ROOT/bin/fm-wake-lib.sh"
+        . "$ROOT/bin/fm-wake-lib.sh"
+        # Prefix assignments on a sourced file last only while it is sourced, so each
+        # daemon call carries the fixture environment itself.
+        undated=1
+        fixture() { PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+          FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=$undated FM_ESCALATE_BATCH_SECS=999999 "$@"; }
         original_append=$(declare -f fm_wake_status_append_self_announced)
         escalate_add() { return 1; }
-        housekeeping "$state"
+        fixture housekeeping "$state"
         [ -e "$state/.paused-overdue-$task" ] || fail "failed queue lost the overdue marker"
-        FM_PAUSE_UNDATED_MAX_SECS=86400
+        undated=86400
         printf '%s: worker changed wait\n' "$event" >> "$statusf"
         eval "$original_enqueue"
         fm_wake_status_append_self_announced() { return 2; }
         case "$route" in
-          housekeeping) housekeeping "$state" ;;
-          signal) handle_wake "signal: $statusf" "$state" ;;
-          stale) handle_wake "stale: $win" "$state" ;;
+          housekeeping) fixture housekeeping "$state" ;;
+          signal) fixture handle_wake "signal: $statusf" "$state" ;;
+          stale) fixture handle_wake "stale: $win" "$state" ;;
         esac
         [ -e "$state/.paused-overdue-$task" ] || fail "failed resolution lost the overdue marker ($event/$route)"
         : > "$state/.subsuper-escalations"
         eval "$original_append"
         case "$route" in
-          housekeeping) housekeeping "$state" ;;
-          signal) handle_wake "signal: $statusf" "$state"; housekeeping "$state" ;;
-          stale) handle_wake "stale: $win" "$state"; housekeeping "$state" ;;
+          housekeeping) fixture housekeeping "$state" ;;
+          signal) fixture handle_wake "signal: $statusf" "$state"; fixture housekeeping "$state" ;;
+          stale) fixture handle_wake "stale: $win" "$state"; fixture housekeeping "$state" ;;
         esac
         [ ! -s "$state/.subsuper-escalations" ] || fail "resumed worker queued an obsolete alert ($event/$route)"
         [ ! -e "$state/.paused-overdue-$task" ] || fail "resume retained the overdue marker"
-        status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+        FM_HOME="$dir" status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
           && fail "resume left the overdue decision open ($event/$route)"
         grep -Fq "resolved [key=paused-overdue-$task]" "$statusf" || fail "resume did not record resolution"
       ) || fail "pending resume reconciliation failed ($event/$route)"
@@ -1583,8 +1622,9 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
 
 test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
   local dir state task statusf identity offset event
-  for event in blocked repeated prose custom done merged; do
+  for event in blocked repeated prose custom "done" merged; do
     dir=$(make_supercase "overdue-reconcile-$event"); state="$dir/state"
+    arm_pause_ceiling "$dir"
     task=overdue-reconcile; statusf="$state/$task.status"
     if [ "$event" = custom ]; then printf 'holding [at=100]: waiting for dependency\n' > "$statusf"; else printf 'paused [at=100]: waiting for dependency\n' > "$statusf"; fi
     offset=$(wc -c < "$statusf" | tr -d ' ')
@@ -1600,11 +1640,13 @@ test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
       merged) printf 'merged\n' >> "$statusf" ;;
     esac
     (
-      # shellcheck disable=SC2030
-      export FM_HOME="$dir" FM_STATE_OVERRIDE="$state"
-      . "$ROOT/bin/fm-wake-lib.sh"
-      if [ "$event" = custom ]; then FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"; else reconcile_overdue_pause "$state" "$task"; fi
-      if [ "$event" = done ] || [ "$event" = merged ]; then
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+      if [ "$event" = custom ]; then
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"
+      else
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" reconcile_overdue_pause "$state" "$task"
+      fi
+      if [ "$event" = "done" ] || [ "$event" = merged ]; then
         [ ! -e "$state/.paused-overdue-$task" ] || fail "$event left the overdue marker"
         ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
       else
@@ -1621,6 +1663,7 @@ test_housekeeping_overdue_initial_publication_reconciles_resume() {
   for timing in before after; do
     (
       dir=$(make_supercase "overdue-initial-resume-$timing"); state="$dir/state"
+      arm_pause_ceiling "$dir"
       task=overdue-initial; statusf="$state/$task.status"
       printf 'paused: waiting for dependency\n' > "$statusf"
       fm_write_meta "$state/$task.meta" "window=sess:fm-$task" "worktree=$dir/wt" "kind=ship" "harness=pi"
@@ -1652,6 +1695,7 @@ test_housekeeping_overdue_initial_publication_reconciles_resume() {
 test_housekeeping_quiet_overdue_pause_opens_decision() {
   local dir state fakebin task win pane statusf
   dir=$(make_supercase quiet-overdue-pause)
+  arm_pause_ceiling "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"
   task=overdue-quiet; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
   printf 'paused: waiting for dependency\n' > "$statusf"
@@ -1675,6 +1719,7 @@ test_housekeeping_quiet_overdue_pause_opens_decision() {
 test_housekeeping_overdue_pause_preserves_prior_actionable_event() {
   local dir state fakebin task win pane statusf blocked
   dir=$(make_supercase overdue-pause-unread-event)
+  arm_pause_ceiling "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"
   task=overdue-unread; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
   printf 'done: prior actionable event\npaused: waiting for dependency\n' > "$statusf"
@@ -3560,8 +3605,9 @@ test_discover_supervisor_t3code_after_env_tmux_and_herdr() {
   (
     t3_discovery_stub
     export FM_FAKE_T3_CALLS="$dir/calls" FM_FAKE_T3_THREAD=thread-captain
+    export FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9 FM_BACKEND=
     local out
-    if out=$(FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9 FM_BACKEND='' FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
       fail "T3 supervisor discovery must require explicit backend selection"
     fi
     [ "$out" = firstmate:0 ] || fail "without explicit T3 selection the tmux fallback must stand"
@@ -3852,6 +3898,7 @@ test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
+test_housekeeping_pause_ceiling_absent_keeps_the_pause_recheck
 test_housekeeping_overdue_queue_failure_leaves_decision_open
 test_housekeeping_overdue_queue_failure_resume_discards
 test_watcher_overdue_marker_does_not_hide_blocker_from_daemon
