@@ -161,6 +161,21 @@ fm_forge_registered_binding() {
   return 2
 }
 
+fm_forge_registry_refuses_local_only() {
+  local project_id=${1:-} root home data refusal
+
+  [ -n "$project_id" ] || return 1
+  root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+  home=${FM_HOME:-$root}
+  data=${FM_DATA_OVERRIDE:-$home/data}
+  refusal=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    "$root/bin/fm-project-mode.sh" "$project_id" 2>&1 >/dev/null || true)
+  case "$refusal" in
+    *"refused: $project_id is registered local-only with forge="*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_forge_clone_root() {
   local checkout=${1:-} proj_top proj_abs
 
@@ -191,6 +206,11 @@ fm_forge_detect_provider() {
     return 0
   else
     binding_status=$?
+    if [ "$binding_status" -eq 2 ] \
+      && fm_forge_registry_refuses_local_only "$(basename "$checkout")"; then
+      echo registry-refused
+      return 0
+    fi
     if [ "$binding_status" -eq 2 ]; then
       echo unknown
       return 0

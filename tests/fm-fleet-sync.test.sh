@@ -452,12 +452,20 @@ test_explicit_gerrit_binding_allows_sync() {
 }
 
 test_explicit_legacy_bindings_allow_sync() {
-  local home clone forge
+  local home clone forge host remote_url origin_url
   home=$(new_home)
   mkdir -p "$home/data"
   for forge in forgejo external; do
     clone=$(build_pair "$home" "$forge-project")
     advance_origin "$home" "$forge-project" C1
+    remote_url=$(git -C "$clone" remote get-url origin)
+    case "$forge" in
+      forgejo) host=forge.example ;;
+      external) host=review.example ;;
+    esac
+    origin_url="https://$host/$forge-project.git"
+    git -C "$clone" remote set-url origin "$origin_url"
+    git -C "$clone" config url."$remote_url".insteadOf "$origin_url"
     printf -- '- %s-project [no-mistakes forge=%s] - review project (added 2026-09-15)\n' "$forge" "$forge" \
       >> "$home/data/projects.md"
   done
@@ -467,6 +475,10 @@ test_explicit_legacy_bindings_allow_sync() {
     "an explicit Forgejo binding must allow clone refresh"
   assert_contains "$out" "external-project: synced" \
     "an explicit external binding must allow clone refresh"
+  [ "$(head_sha "$home/projects/forgejo-project")" = "$(git -C "$home/work-forgejo-project" rev-parse HEAD)" ] \
+    || fail "Forgejo binding did not fast-forward the unknown-origin clone"
+  [ "$(head_sha "$home/projects/external-project")" = "$(git -C "$home/work-external-project" rev-parse HEAD)" ] \
+    || fail "external binding did not fast-forward the unknown-origin clone"
   pass "direct fleet-sync honors explicit Forgejo and external bindings"
 }
 

@@ -1326,14 +1326,32 @@ test_forge_provider_explicit_legacy_bindings() {
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/gh" "$fakebin/gh-axi"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "MISSING: tea (install: brew install tea  # or the platform's package manager)" \
-    "explicit Forgejo binding must require tea"
-  assert_not_contains "$out" "FORGE_UNSUPPORTED: forgejo-project" \
-    "explicit Forgejo binding must remain supported"
-  assert_not_contains "$out" "FORGE_UNSUPPORTED: external-project" \
-    "explicit external binding must remain supported"
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING: tea (install: brew install tea  # or the platform's package manager)" ] \
+    || fail "explicit Forgejo binding must require tea, got: $out"
+  assert_not_contains "$out" "gh" \
+    "explicit Forgejo and external bindings must not require GitHub tooling or auth"
+  assert_not_contains "$out" "FORGE_UNSUPPORTED" \
+    "explicit Forgejo and external bindings must remain supported"
   pass "bootstrap preserves explicit Forgejo and external bindings"
+}
+
+test_forge_provider_local_only_refusal_not_unsupported() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-local-only-refusal"
+  project="$case_dir/home/projects/local-project"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- local-project [local-only forge=gerrit] - local work (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://review.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a local-only forge refusal must not become a forge diagnostic, got: $out"
+  pass "bootstrap preserves local-only forge posture refusals"
 }
 
 test_forge_host_trailing_dot_is_canonicalized() {
@@ -2508,6 +2526,7 @@ test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
 test_forge_provider_explicit_gerrit_binding
 test_forge_provider_explicit_legacy_bindings
+test_forge_provider_local_only_refusal_not_unsupported
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction

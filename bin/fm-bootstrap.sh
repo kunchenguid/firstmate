@@ -948,6 +948,7 @@ COMMON_TOOLS="node git no-mistakes chrome-devtools-axi tasks-axi quota-axi"
 FORGE_PROJECTS_RAW=$(fm_forge_scan_registered_projects "$PROJECTS")
 FORGE_PROJECTS=$(while IFS=$'\t' read -r _proj_id _proj_provider _proj_host; do
   [ -n "${_proj_provider:-}" ] || continue
+  [ "$_proj_provider" = registry-refused ] && continue
   if _proj_mode=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
     "$SCRIPT_DIR/fm-project-mode.sh" "$_proj_id" 2>/dev/null); then
     [ "${_proj_mode%% *}" = local-only ] && continue
