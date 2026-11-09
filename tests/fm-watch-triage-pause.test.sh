@@ -525,6 +525,270 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
 
+test_unverified_codex_declared_wait_keeps_pause_cadence() {
+  local dir state fakebin out capture_file statusf window key sig pid wakes round
+  dir=$(make_case unverified-codex-declared-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/pokemodz-encounter-camera-question.status"
+  window="default:wRQ:p2"; key=$(watch_window_key "$window")
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/pokemodz-encounter-camera-question.meta"
+  printf 'paused: waiting for firstmate to answer the encounter camera question\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-pokemodz-encounter-camera-question_status"
+  printf 'Codex is waiting for an answer\n' > "$capture_file"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+    FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    fail "an unverified Codex declared wait surfaced as a fast stale alarm: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "an unverified Codex declared wait did not record its pause marker"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "an unverified Codex declared wait started wedge aging"; }
+  reap "$pid"
+
+  for round in 1 2; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=codex \
+      FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)' \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"
+      fail "unverified Codex wait re-armed a fast stale alarm after restart $round: $(cat "$out")"
+    fi
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge unverified Codex restart $round"
+  done
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "unverified Codex declared wait queued $wakes fast stale wake(s)"
+  pass "an unverified Codex declared wait records and keeps the long pause cadence"
+}
+
+# The unreadable-pane recovery is admitted only while authoritative crew state is
+# itself unknown. A Codex wait first absorbed on that recovery must still get its
+# one first-sight wake once its run parks at a readable gate, even though the pane
+# never changes (the stable-hash route), and a readable parked gate seen on first
+# sight must surface rather than be absorbed. Plausible wrong behavior rejected:
+# an `unknown codex-unverified` busy verdict alone silencing a parked gate until
+# the status file is PAUSE_RESURFACE_SECS old.
+test_unverified_codex_wait_surfaces_once_its_run_parks() {
+  local dir state fakebin out capture_file statusf window key sig pid wakes start
+  local unknown_line='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  local parked_line='state: parked · source: run-step · ask-user gate awaiting a decision'
+  for start in unknown parked; do
+    dir=$(make_case "unverified-codex-parks-$start"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/lane.status"
+    window="test:fm-codex-$start"; key=$(watch_window_key "$window")
+    printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/lane.meta"
+    printf 'paused: waiting for the pipeline\n' > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-lane_status"
+    printf 'Codex idle at its prompt\n' > "$capture_file"
+    printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    if [ "$start" = unknown ]; then
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$unknown_line" \
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" \
+        || { reap "$pid"; fail "an unknown-state Codex wait surfaced on first sight: $(cat "$out")"; }
+      reap "$pid"
+      [ -e "$state/.paused-$key" ] || fail "an unknown-state Codex wait was not absorbed on the pause cadence"
+      [ "$(cat "$state/.stale-$key")" = "$(cat "$state/.hash-$key")" ] \
+        || fail "the absorbed Codex wait did not leave the pane on the stable-hash route"
+    fi
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$parked_line" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 \
+      || { reap "$pid"; fail "[$start] a Codex wait whose run parked at a readable gate stayed silent"; }
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$start] a parked Codex gate queued $wakes stale wake(s) instead of one"
+    ack_stopped_cycle "$state" || fail "[$start] could not acknowledge the parked-gate wake"
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=codex FM_FAKE_CREW_STATE="$parked_line" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" \
+      || { reap "$pid"; fail "[$start] the parked Codex gate re-alarmed inside its cadence"; }
+    reap "$pid"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] || fail "[$start] the parked Codex gate queued $wakes repeat wake(s)"
+  done
+  pass "an unverified Codex wait surfaces once when its run parks, on first sight or a still pane"
+}
+
+# A structurally confirmed Claude background-task exit picker is different from
+# an unreadable runtime verdict: it proves a human action is blocking the lane.
+# Both the idle-stale and busy-turn gates must surface that fact once, then let
+# the existing declaration throttle resume the long cadence.
+test_blocking_dialog_gets_one_first_sight_at_both_pause_gates() {
+  local gate dir state fakebin out capture_file statusf window key sig pid
+  local dialog='Background work is running
+❯ 1. Exit and stop tasks
+Enter to confirm · Esc to cancel'
+  for gate in stale busy-turn; do
+    dir=$(make_case "blocking-dialog-$gate"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+    window="test:fm-dialog-$gate"; key=$(watch_window_key "$window")
+    printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/gate.meta"
+    printf 'paused: waiting for a background task to finish\n' > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+    printf '%b\n' "$dialog" > "$capture_file"
+    printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    if [ "$gate" = busy-turn ]; then
+      : > "$state/gate.turn-ended"
+      set_mtime "$(( $(date +%s) - 500 ))" "$state/gate.turn-ended"
+      "$ROOT/bin/fm-busy-event.sh" arm "$state" gate --state busy --source claude-hook --event prompt >/dev/null \
+        || fail "could not arm the busy-turn dialog fixture"
+      state_line='state: working · source: pane · harness busy'
+      busy_max=1
+    else
+      state_line='state: unknown · source: pane · harness state unavailable (unknown claude-unverified)'
+      busy_max=999999
+    fi
+
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE="$state_line" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_BUSY_TURN_MAX_SECS="$busy_max" "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "$gate blocking dialog did not surface on first sight"; }
+    grep -F "blocked-on-prompt: Claude background-task exit picker" "$out" >/dev/null \
+      || fail "$gate first-sight wake did not name the confirmed dialog: $(cat "$out")"
+    [ -e "$state/.paused-resurfaced-$key" ] \
+      || fail "$gate dialog wake did not record the declaration throttle"
+    ack_stopped_cycle "$state" || fail "could not acknowledge $gate dialog wake"
+
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE="$state_line" \
+      FM_WATCH_HANDLING_SUCCESSOR=1 FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_BUSY_TURN_MAX_SECS="$busy_max" "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$gate dialog repeated its first-sight wake"; }
+    [ ! -s "$out" ] || { reap "$pid"; fail "$gate dialog repeated an alarm: $(cat "$out")"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge $gate silent recheck"
+  done
+  pass "a confirmed blocking dialog gets one first-sight wake at both pause gates"
+}
+
+# A picker that opens only after an unreadable lane's silent first sight still
+# owes that declaration's one wake (docs/architecture.md: a confirmed blocking
+# dialog shows "on first sight or later"), and then holds the cadence. Plausible
+# wrong behavior rejected: the stable pause arm ignoring a later dialog, leaving
+# the lane silent until PAUSE_RESURFACE_SECS.
+test_blocking_dialog_that_appears_later_surfaces_once() {
+  local dir state fakebin out capture_file statusf window key sig pid wakes
+  local state_line='state: unknown · source: pane · harness state unavailable (unknown claude-unverified)'
+  dir=$(make_case blocking-dialog-later); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-dialog-later"; key=$(watch_window_key "$window")
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'paused: waiting for a background task to finish\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  printf 'Claude idle at its prompt\n' > "$capture_file"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE="$state_line" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "an unreadable lane with no dialog surfaced on first sight: $(cat "$out")"; }
+  reap "$pid"
+  [ -e "$state/.paused-$key" ] || fail "the unreadable lane was not absorbed on the pause cadence"
+
+  printf 'Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE="$state_line" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a dialog that appeared after the first sight never surfaced"; }
+  grep -F "blocked-on-prompt: Claude background-task exit picker" "$out" >/dev/null \
+    || fail "the later dialog wake did not name the dialog: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the later dialog wake"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE="$state_line" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the later dialog repeated its wake"; }
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "the later dialog queued $wakes repeat wake(s)"
+  pass "a blocking dialog that appears after a silent first sight surfaces once"
+}
+
+# A far `until` time cannot extend the cadence (docs/architecture.md: a
+# forgotten wait cannot rot invisibly), even on a busy over-age pane showing a
+# confirmed dialog. Plausible wrong behavior rejected: the dialog route
+# answering a future `until` with silence on every poll.
+test_busy_dialog_with_far_until_keeps_the_cadence() {
+  local dir state fakebin out capture_file statusf window key sig pid
+  dir=$(make_case busy-dialog-far-until); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-dialog-until"; key=$(watch_window_key "$window")
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'paused: rate limit until 2099-01-01T00:00Z\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 2000 ))" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  printf 'Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n' > "$capture_file"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/gate.turn-ended"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/gate.turn-ended"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" gate --state busy --source claude-hook --event prompt >/dev/null \
+    || fail "could not arm the busy-turn fixture"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_BUSY_TURN_MAX_SECS=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a busy dialog pane with a far until stayed silent past the recheck cadence"; }
+  grep -F "declared time is beyond the recheck cadence" "$out" >/dev/null \
+    || fail "the far-until busy pane did not take the cadence re-surface: $(cat "$out")"
+  pass "a busy dialog pane with a far until still re-surfaces on the cadence"
+}
+
 test_live_paused_until_controls_recheck_time() {
   local dir state fakebin out capture_file statusf window key sig wakes future past
   dir=$(make_case live-paused-until); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1474,6 +1738,11 @@ fm_test_run \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
   test_live_declared_wait_churn_honors_the_resurface_throttle \
+  test_unverified_codex_declared_wait_keeps_pause_cadence \
+  test_unverified_codex_wait_surfaces_once_its_run_parks \
+  test_blocking_dialog_gets_one_first_sight_at_both_pause_gates \
+  test_blocking_dialog_that_appears_later_surfaces_once \
+  test_busy_dialog_with_far_until_keeps_the_cadence \
   test_live_paused_until_controls_recheck_time \
   test_open_captain_call_bounds_stale_churn \
   test_stale_churn_without_a_captain_call_still_alarms \
