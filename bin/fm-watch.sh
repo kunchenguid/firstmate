@@ -163,6 +163,11 @@
 #                          captain-relevant status; a present state/.afk emits every
 #                          heartbeat. The backlog consumer owns readiness;
 #                          supervision rechecks current stops and worker capacity.
+#                          Every other heartbeat is absorbed: the schedule
+#                          advances and the interval doubles per consecutive
+#                          absorbed pass, up to FM_HEARTBEAT_MAX, and any surfaced
+#                          non-heartbeat wake or actionable heartbeat backstop
+#                          resets it.
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
