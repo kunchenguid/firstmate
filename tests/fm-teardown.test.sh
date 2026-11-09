@@ -3612,7 +3612,7 @@ test_herdr_flat_teardown_refusal_names_herdr_error_code() {
   : > "$case_dir/state/task-x1.status"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    FM_FAKE_HERDR_PANE_GET_FIRST_ERROR=server_busy FM_FAKE_HERDR_PANE_GET_ERROR_SEEN="$error_seen" \
+    FM_FAKE_HERDR_PANE_GET_FIRST_ERROR=$'server_busy\033[2J' FM_FAKE_HERDR_PANE_GET_ERROR_SEEN="$error_seen" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
@@ -3621,6 +3621,8 @@ test_herdr_flat_teardown_refusal_names_herdr_error_code() {
     || fail "herdr-error-code-presence: ambiguous presence erased the durable endpoint metadata"
   assert_grep "herdr returned error code server_busy" "$case_dir/stderr" \
     "herdr-error-code-presence: the refusal did not name the herdr error code"
+  ! LC_ALL=C grep -q $'\033' "$case_dir/stderr" \
+    || fail "herdr-error-code-presence: the refusal preserved a terminal-control byte"
   [ "$(grep -c '^pane get' "$log")" -eq 1 ] \
     || fail "herdr-error-code-presence: teardown classified pane presence more than once"
   pass "herdr flat teardown refusal names the herdr error code behind ambiguous presence"
