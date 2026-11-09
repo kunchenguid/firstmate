@@ -1573,6 +1573,26 @@ EOF
   assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
     <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "body prose was incorrectly counted as a resolution record"
 
+  run_captain "$mate" hold dated-call --title "Choose the dated release" \
+    --reason "dated choice pending" --repo sample --until 2099-01-01 >/dev/null \
+    || fail "dated mate hold failed"
+  assert_grep 'needs-decision [key=captain-hold-dated-call-1] [until=2099-01-01]: captain hold dated-call: dated choice pending' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "a dated hold did not publish its structured deferral date"
+  # Re-holding A -> B -> A keeps one key, and the parent fold reads that key's
+  # latest line, so the final A must reach the channel; an exact retry of the
+  # latest state stays suppressed.
+  run_captain "$mate" hold dated-call --reason "dated choice pending" --until 2099-02-01 >/dev/null \
+    || fail "re-dated mate hold failed"
+  run_captain "$mate" hold dated-call --reason "dated choice pending" --until 2099-01-01 >/dev/null \
+    || fail "restored-date mate hold failed"
+  assert_equals 'needs-decision [key=captain-hold-dated-call-1] [until=2099-01-01]: captain hold dated-call: dated choice pending' \
+    "$(grep -F 'captain-hold-dated-call-1' "$channel" | tail -n 1 | sed -E 's/ \[at=[0-9]+\]//')" \
+    "a hold restored to an earlier date did not reach the parent channel"
+  run_captain "$mate" hold dated-call --reason "dated choice pending" --until 2099-01-01 >/dev/null \
+    || fail "retried dated mate hold failed"
+  assert_equals 3 "$(grep -c 'captain-hold-dated-call-1' "$channel")" \
+    "an exact retry of the latest hold state duplicated the parent line: $(cat "$channel")"
+
   run_captain "$mate" hold mate-call --title "Choose the mate release" \
     --reason "release choice pending" --repo sample >/dev/null \
     || fail "mate hold failed"
@@ -4397,7 +4417,7 @@ test_complete_refuses_an_entry_held_for_another_origin() {
 }
 
 test_hold_origins_follow_backend_holds() {
-  local home phase timing failure id shown origin out parent channel occurrence until_args=()
+  local home phase timing failure id shown origin out parent channel occurrence until_args=() until_field
   for phase in new active released; do
     for timing in plain dated; do
       home=$(make_home "origin-failure-$phase-$timing")
@@ -4483,7 +4503,9 @@ SH
           assert_grep 'held: yes' "$home/before-origin-write" "the origin write did not follow a live hold"
           assert_grep 'hold_kind: captain' "$home/before-origin-write" "the origin write did not follow a captain hold"
           assert_present "$home/parent-before-origin-write" "the verified hold was not published before the origin write"
-          assert_grep "needs-decision [key=captain-hold-$id-$occurrence]: captain hold $id: Choose for B" \
+          until_field=''
+          [ "$timing" != dated ] || until_field=' [until=2099-01-01]'
+          assert_grep "needs-decision [key=captain-hold-$id-$occurrence]$until_field: captain hold $id: Choose for B" \
             <(sed -E 's/ \[at=[0-9]+\]//' "$home/parent-before-origin-write") \
             "the origin-write failure stranded the hold without its parent event"
           assert_equals 1 "$(grep -Fc "needs-decision [key=captain-hold-$id-$occurrence]" "$channel")" \
