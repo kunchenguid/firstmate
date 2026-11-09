@@ -1280,7 +1280,7 @@ export default function (pi: ExtensionAPI) {
       return {
         ok: false,
         state: "unhealthy",
-        message: "watcher: unhealthy - existing arm has no verified home-bound watcher with fresh progress; replacement withheld because watcher identity is not proved",
+        message: "watcher: unhealthy - this session cannot take ownership of this home's watcher; replacement withheld because there is no verified home-bound watcher with fresh progress this session may retire",
       };
     }
     if (owner.retryTimer) {
