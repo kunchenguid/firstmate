@@ -39,7 +39,7 @@
 # daemon and the human share one input channel - so they live together under
 # /afk.
 #
-# Reliability model (see the /afk skill):
+# Reliability model (see .agents/skills/afk/references/daemon.md):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
