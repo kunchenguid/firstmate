@@ -2566,6 +2566,21 @@ test_lock_windows_native_junction() {
   out=$(lock_link_cycle "$lockdir" FM_STATE_OVERRIDE="$state") \
     || fail "native Windows acquire failed: $out"
   assert_lock_link_cycle "native Windows" "$out"
+  # Git Bash reports a junction and a native symlink alike, so ask Windows
+  # itself: a strict-symlink fallback would list as <SYMLINKD>, not <JUNCTION>.
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2" || exit 7
+    MSYS2_ARG_CONV_EXCL="*" cmd /d /c dir /AL "$(cygpath -w "${2%/*}")"
+    rc=$?
+    fm_lock_release "$2"
+    exit "$rc"
+  ' _ "$LIB" "$lockdir") || fail "native Windows link-type query failed: $out"
+  case "$out" in
+    *'<JUNCTION>'*' .contend.lock ['*) ;;
+    *) fail "native Windows lock link is not an NTFS junction: $out" ;;
+  esac
   [ -z "$(find "$state" -maxdepth 1 -name '.contend.lock*' -print)" ] \
     || fail "native Windows release left the lock or its owner behind"
   pass "native Windows lock is a junction to its owner and releases cleanly"
