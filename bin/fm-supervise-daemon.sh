@@ -1977,7 +1977,7 @@ handle_wake() {  # <reason> <state>
                        status_is_paused_or_captain_held "$last" \
                          || { [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-defer-worker-wait" ] \
                                 && status_worker_wait_verb "$state/$task.status" >/dev/null; } \
-                         || decision="escalate|${reason#stale: }"
+                         || { decision="escalate|${reason#stale: }"; : > "$capture"; }
                        ;;
                    esac ;;
               esac ;;
