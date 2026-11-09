@@ -518,7 +518,7 @@ fm_dod_nm_handoff_notice() {  # <pr|change>
   printf '%s\n' \
     "\`done: {summary}\` never reports this task complete: it only hands control to the pipeline." \
     "The only \`done:\` that completes this task is $terminal; a \`done:\` reporting a commit, a branch, or a pushed branch leaves the task unfinished, so stopping there costs an extra wake round before the pipeline even starts." \
-    "Between that handoff and this report, report your stage with \`working [key=<slug>]: {stage}\` lines instead of further \`done:\` lines."
+    "While the pipeline runs, declare that wait with \`paused [at=<epoch>]: {job and completion condition}\`; do not invent a working phase for it."
 }
 
 # The no-mistakes block for a pr=manual project, where the worker owns the PR

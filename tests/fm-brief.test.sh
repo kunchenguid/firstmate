@@ -484,8 +484,8 @@ test_no_mistakes_dod_commit_is_not_completion() {
     assert_grep "never reports this task complete: it only hands control to the pipeline" "$brief" \
       "$label: DoD does not say the handoff done is not completion"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'Between that handoff and this report, report your stage with `working [key=<slug>]: {stage}`' "$brief" \
-      "$label: DoD does not redirect the intermediate stage to a working line"
+    assert_grep 'While the pipeline runs, declare that wait with `paused [at=<epoch>]: {job and completion condition}`' "$brief" \
+      "$label: DoD does not tell the worker to declare the pipeline wait as paused"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
     case "$label" in
       pr) declared='The only `done:` that completes this task is `done: PR <url> checks green`' ;;
