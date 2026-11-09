@@ -194,9 +194,13 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
 # The coarse `no-mistakes runs` ledger emits database status words; an
 # `axi status` run object reports its terminal result through its own outcome
 # field as well, which fm_nm_run_is_active below checks directly.
+# `handed_off` is the terminal state a run reaches when green CI monitoring ends
+# with an open PR waiting for human review (`no-mistakes axi handoff`); it is as
+# terminal as `completed`, and treating it as an unknown word made every
+# handed-off task read as an unrecognized run status.
 fm_nm_run_status_class() {  # <status_word>
   case "${1:-}" in
-    completed|failed|cancelled) printf 'terminal' ;;
+    completed|failed|cancelled|handed_off) printf 'terminal' ;;
     pending|running)            printf 'live' ;;
     *)                          printf 'unknown' ;;
   esac
@@ -317,7 +321,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
       }
       if (first == "") { first = id; first_status = st }
       if (st == "running" || st == "pending") live++
-      if (st !~ /^(pending|running|completed|failed|cancelled)$/) unknown_status = 1
+      if (st !~ /^(pending|running|completed|failed|cancelled|handed_off)$/) unknown_status = 1
       next
     }
     inrows { inrows = 0 }
@@ -442,7 +446,7 @@ fm_nm_run_is_active() {  # <toon-output>
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$1" status)")
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$1" outcome)")
   [ -z "$outcome" ] || return 1
-  case "$status" in completed|failed|cancelled) return 1 ;; esac
+  case "$status" in completed|failed|cancelled|handed_off) return 1 ;; esac
 }
 
 # The custody exemption to the head rule above: while the pipeline OWNS the

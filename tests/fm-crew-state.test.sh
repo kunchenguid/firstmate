@@ -712,6 +712,22 @@ outcome: passed
 EOF
 }
 
+# A run whose green CI monitoring ended with its PR left open for human review
+# (`no-mistakes axi handoff`) reports status handed_off and outcome handed-off.
+# Both words are terminal and passing; neither may read as an unknown run.
+run_handed_off() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: handed_off
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: handed-off
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -1668,6 +1684,25 @@ test_terminal_passed_with_open_pr_does_not_claim_merged() {
   assert_not_contains "$out" "merged/closed" "open PR must not get the old merged/closed label"
   assert_not_contains "$out" "PR merged" "open PR must not be reported merged"
   pass "terminal passed run with open PR does not claim merged"
+}
+
+test_handed_off_run_reads_as_passed_with_open_pr() {
+  reset_fakes
+  local d; d=$(new_case handed-off)
+  make_repo_on_branch "$d/wt" fm/feat-dhand
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dhand.meta" "window=fm:fm-feat-dhand" \
+    "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/1"
+  FM_FAKE_PR_STATE=OPEN
+  FM_FAKE_PR_MERGED=false
+  FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)"
+  local out; out=$(run_crew_state "$d" feat-dhand)
+  assert_contains "$out" "state: done" "a handed-off run is a passing run"
+  assert_contains "$out" "run passed: PR open" "a handed-off run reports its open PR"
+  assert_not_contains "$out" "outcome: handed-off" "a handed-off run must not surface as an unmapped outcome"
+  assert_not_contains "$out" "unrecognized run status" "handed_off must be a recognized ledger status word"
+  assert_not_contains "$out" "state: unknown" "a handed-off run must never read as unknown"
+  pass "a handed-off run reads as passed with its open PR"
 }
 
 test_terminal_passed_run_pr_overrides_stale_metadata() {
@@ -6798,6 +6833,7 @@ test_terminal_passed_with_skips
 test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged
+test_handed_off_run_reads_as_passed_with_open_pr
 test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
