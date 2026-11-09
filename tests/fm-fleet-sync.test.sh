@@ -89,6 +89,15 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+assert_expected_provider() {
+  local home=$1 checkout=$2 expected=$3 actual
+  actual=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" \
+    bash -c '. "$1"; fm_forge_detect_provider "$2"' _ \
+    "$ROOT/bin/fm-forge-lib.sh" "$checkout")
+  [ "$actual" = "$expected" ] \
+    || fail "expected $checkout to classify as $expected before sync, got: $actual"
+}
+
 snapshot_clone_state() {
   local project=$1 output=$2 head
   {
@@ -441,13 +450,18 @@ test_explicit_gerrit_binding_allows_sync() {
   mkdir -p "$home/data"
   printf -- '- gerrit-project [no-mistakes forge=gerrit] - review project (added 2026-09-15)\n' \
     > "$home/data/projects.md"
+  assert_expected_provider "$home" "$clone" gerrit
+  snapshot_clone_state "$clone" "$home/gerrit-before"
 
   out=$(run_sync "$home" "$clone")
+  snapshot_clone_state "$clone" "$home/gerrit-after"
 
   assert_contains "$out" "gerrit-project: synced" \
     "an explicit Gerrit binding must allow the normal clone refresh path"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "an explicit Gerrit binding did not fast-forward the clone"
+  ! cmp -s "$home/gerrit-before" "$home/gerrit-after" \
+    || fail "an explicit Gerrit binding reported sync without changing clone state"
   pass "direct fleet-sync honors an explicit Gerrit binding"
 }
 
@@ -468,9 +482,14 @@ test_explicit_legacy_bindings_allow_sync() {
     git -C "$clone" config url."$remote_url".insteadOf "$origin_url"
     printf -- '- %s-project [no-mistakes forge=%s] - review project (added 2026-09-15)\n' "$forge" "$forge" \
       >> "$home/data/projects.md"
+    assert_expected_provider "$home" "$clone" "$forge"
+    snapshot_clone_state "$clone" "$home/$forge-before"
   done
 
   out=$(run_sync "$home")
+  for forge in forgejo external; do
+    snapshot_clone_state "$home/projects/$forge-project" "$home/$forge-after"
+  done
   assert_contains "$out" "forgejo-project: synced" \
     "an explicit Forgejo binding must allow clone refresh"
   assert_contains "$out" "external-project: synced" \
@@ -479,6 +498,10 @@ test_explicit_legacy_bindings_allow_sync() {
     || fail "Forgejo binding did not fast-forward the unknown-origin clone"
   [ "$(head_sha "$home/projects/external-project")" = "$(git -C "$home/work-external-project" rev-parse HEAD)" ] \
     || fail "external binding did not fast-forward the unknown-origin clone"
+  for forge in forgejo external; do
+    ! cmp -s "$home/$forge-before" "$home/$forge-after" \
+      || fail "$forge binding reported sync without changing clone state"
+  done
   pass "direct fleet-sync honors explicit Forgejo and external bindings"
 }
 
@@ -525,13 +548,18 @@ test_explicit_binding_survives_registered_symlink() {
   mkdir -p "$home/data"
   printf -- '- symlinked [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
     > "$home/data/projects.md"
+  assert_expected_provider "$home" "$clone" external
+  snapshot_clone_state "$clone" "$home/symlinked-before"
 
   out=$(run_sync "$home")
+  snapshot_clone_state "$clone" "$home/symlinked-after"
 
   assert_contains "$out" "symlinked: synced" \
     "an explicit binding must apply to its registered symlinked clone"
   [ "$(head_sha "$clone")" = "$(git -C "$home/work-symlinked" rev-parse HEAD)" ] \
     || fail "the registered symlinked clone did not fast-forward"
+  ! cmp -s "$home/symlinked-before" "$home/symlinked-after" \
+    || fail "a registered symlink binding reported sync without changing clone state"
   pass "explicit forge bindings survive registered symlink paths"
 }
 

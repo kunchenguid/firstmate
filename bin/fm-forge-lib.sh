@@ -62,9 +62,16 @@ fm_forge_host_is_gitlab() {
 }
 
 fm_forge_safe_ssh_config() {
-  local config
+  local config config_index=0
   for config in "${HOME:-}/.ssh/config" /etc/ssh/ssh_config; do
+    if [ "$config_index" -eq 1 ]; then
+      # Each top-level file starts a fresh OpenSSH scope. Keep the user's
+      # first-value precedence while preventing a trailing user Host/Match
+      # block from suppressing global directives in the system file.
+      printf '%s\n' 'Host *'
+    fi
     fm_forge_safe_ssh_config_file "$config" 0
+    config_index=$((config_index + 1))
   done
 }
 
@@ -85,7 +92,13 @@ fm_forge_safe_ssh_config_file() {
     case "$line" in
       \#*) continue ;;
     esac
-    read -r key rest <<< "$line"
+    if [[ "$line" =~ ^([^[:space:]=]+)([[:space:]]*=[[:space:]]*|[[:space:]]+)(.*)$ ]]; then
+      key=${BASH_REMATCH[1]}
+      rest=${BASH_REMATCH[3]}
+    else
+      key=$line
+      rest=
+    fi
     key=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')
     case "$key" in
       host)

@@ -1149,7 +1149,7 @@ SH
 }
 
 test_forge_ssh_user_config_precedes_system_config() {
-  local case_dir fakebin real_ssh result
+  local case_dir fakebin real_ssh result system_result
 
   case_dir="$TMP_ROOT/forge-ssh-config-precedence"
   fakebin="$case_dir/fakebin"
@@ -1170,17 +1170,34 @@ SH
       fm_forge_safe_ssh_config_file() {
         case "$1" in
           "$HOME/.ssh/config")
-            printf "%s\n" "Host conflicting-alias" "HostName user.example"
+            printf "%s\n" "Host conflicting-alias" "HostName user.example" "Host unrelated"
             ;;
           /etc/ssh/ssh_config)
-            printf "%s\n" "Host conflicting-alias" "HostName system.example"
+            printf "%s\n" "HostName system.example"
             ;;
         esac
       }
       fm_forge_resolve_host git@conflicting-alias:team/project.git 1
     ' _ "$ROOT/bin/fm-forge-lib.sh")
+  system_result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_REAL_SSH_BIN="$real_ssh" \
+    bash -c '
+. "$1"
+fm_forge_safe_ssh_config_file() {
+case "$1" in
+"$HOME/.ssh/config")
+printf "%s\n" "Host conflicting-alias" "HostName user.example" "Host unrelated"
+;;
+/etc/ssh/ssh_config)
+printf "%s\n" "HostName system.example"
+;;
+esac
+}
+fm_forge_resolve_host git@system-default:team/project.git 1
+' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = user.example ] \
     || fail "user SSH HostName must win over the system value, got: $result"
+  [ "$system_result" = system.example ] \
+    || fail "a trailing user Host block must not suppress system global HostName, got: $system_result"
   pass "forge SSH resolution preserves user-before-system precedence"
 }
 
@@ -1553,7 +1570,9 @@ Match host github-work,EXEC "touch $marker"
 EOF
   cat > "$config_dir/included.conf" <<'EOF'
   Host github-work
-  HostName github.com
+  HostName=github.com
+  Host github-whitespace-work
+  HostName = github.com
 EOF
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
@@ -1569,6 +1588,11 @@ SH
     bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
   [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
+
+  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
+    FM_REAL_SSH_BIN="$real_ssh" \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-whitespace-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github.com ] || fail "whitespace around SSH optional equals must resolve to its canonical host, got: $result"
 
   case_dir="$TMP_ROOT/forge-ssh-global-hostname"
   config_dir="$case_dir/home/.ssh"
