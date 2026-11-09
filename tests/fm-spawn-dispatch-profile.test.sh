@@ -2315,6 +2315,289 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
   pass "a claude secondmate launch carries the attribution-off policy too"
 }
 
+# config/claude-session-settings.json reaches the one --settings value of both
+# launch forms, beside the Firstmate-owned keys, keeping the per-model
+# compaction form that outranks the captain's own per-model window; a quote in
+# a value survives the inline form's shell quoting.
+CLAUDE_SESSION_SETTINGS='{"modelSettings":{"claude-opus-5-5":{"autoCompactWindow":100000}},"skillOverrides":{"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only"},"note":"it'\''s"}'
+
+assert_session_settings_overlay() {  # <launch-command> <what>
+  local launch=$1 what=$2 settings
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.skillOverrides == {"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only"}
+    and .modelSettings == {"claude-opus-5-5":{"autoCompactWindow":100000}} and (has("autoCompactWindow") | not)
+    and .note == "it'\''s" and .feedbackDrafts == "off" and .attribution.commit == ""' >/dev/null \
+    || fail "$what launch settings JSON does not carry config/claude-session-settings.json: $settings"
+}
+
+test_claude_session_settings_reach_crewmate_launch() {
+  local rec id out status launch
+  id=profile-claude-session-settings-z26
+  rec=$(make_spawn_case profile-claude-session-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with session settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_session_settings_overlay "$launch" "claude crewmate"
+  pass "config/claude-session-settings.json reaches a claude crewmate launch"
+}
+
+test_claude_session_settings_reach_secondmate_launch() {
+  local rec id sm out status launch
+  id=profile-secondmate-session-settings-z27
+  rec=$(make_spawn_case profile-secondmate-session-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with session settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_session_settings_overlay "$launch" "claude secondmate"
+  claude_settings_json_arg "$launch" | jq -e '.hooks.UserPromptSubmit and .hooks.SessionEnd' >/dev/null \
+    || fail "session settings displaced the secondmate busy hooks"
+  cmp -s "$HOME_DIR/config/claude-session-settings.json" "$sm/config/claude-session-settings.json" \
+    || fail "secondmate home did not inherit config/claude-session-settings.json"
+  pass "config/claude-session-settings.json reaches a claude secondmate launch beside its hooks"
+}
+
+test_claude_session_settings_invalid_refuses_before_endpoint_or_metadata() {
+  local rec id out status content n=0
+  for content in '{"hooks":{}}' '{"feedbackDrafts":"on"}' '{"attribution":{}}' '["skillOverrides"]' '{"a":1}{"b":2}' 'not json' ''; do
+    n=$((n + 1))
+    id=session-settings-invalid-z2$n
+    rec=$(make_spawn_case "session-settings-invalid-$n" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$content" > "$HOME_DIR/config/claude-session-settings.json"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "config/claude-session-settings.json holding $content must refuse the spawn"
+    assert_contains "$out" "config/claude-session-settings.json must be a readable file holding one JSON object" \
+      "refusal must name the file and the accepted shape"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid session settings must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  done
+  id=session-settings-unreadable-z29
+  rec=$(make_spawn_case session-settings-unreadable claude "$id")
+  read_case_record "$rec"
+  mkdir "$HOME_DIR/config/claude-session-settings.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unreadable config/claude-session-settings.json must refuse the spawn"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unreadable session settings file must launch nothing"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "an invalid config/claude-session-settings.json refuses before any endpoint or metadata"
+}
+
+# config/claude-crew-settings.json joins only a crewmate or scout launch,
+# deep-merged over config/claude-session-settings.json: the crew file wins a
+# conflicting key, while object members keep the session file's other entries.
+CLAUDE_CREW_SETTINGS='{"skillListingMaxDescChars":250,"skillOverrides":{"afk":"off","caveman":"off"},"modelSettings":{"claude-sonnet-5-5":{"autoCompactWindow":90000}},"crewnote":"crew'\''s"}'
+
+assert_crew_settings_overlay() {  # <launch-command> <what>
+  local launch=$1 what=$2 settings
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.skillOverrides == {"anthropic-skills:pdf":"user-invocable-only","caveman":"off","afk":"off"}
+    and .modelSettings == {"claude-opus-5-5":{"autoCompactWindow":100000},"claude-sonnet-5-5":{"autoCompactWindow":90000}}
+    and .skillListingMaxDescChars == 250 and .crewnote == "crew'\''s" and .note == "it'\''s"
+    and .feedbackDrafts == "off" and .attribution.commit == ""' >/dev/null \
+    || fail "$what launch settings JSON does not carry the crew file merged over the session file: $settings"
+}
+
+test_claude_crew_settings_merge_into_crewmate_launch() {
+  local rec id out status launch
+  id=profile-claude-crew-settings-z30
+  rec=$(make_spawn_case profile-claude-crew-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  printf '%s\n' "$CLAUDE_CREW_SETTINGS" > "$HOME_DIR/config/claude-crew-settings.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with crew settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_crew_settings_overlay "$launch" "claude crewmate"
+  pass "config/claude-crew-settings.json deep-merges over the session settings in a claude crewmate launch"
+}
+
+test_claude_crew_settings_merge_into_scout_launch() {
+  local rec id out status launch settings
+  id=profile-claude-crew-scout-z31
+  rec=$(make_spawn_case profile-claude-crew-scout claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  printf '%s\n' "$CLAUDE_CREW_SETTINGS" > "$HOME_DIR/config/claude-crew-settings.json"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with crew settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_crew_settings_overlay "$launch" "claude scout"
+
+  # Without a session file the crew file alone joins the launch.
+  id=profile-claude-crew-scout-only-z32
+  rec=$(make_spawn_case profile-claude-crew-scout-only claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_CREW_SETTINGS" > "$HOME_DIR/config/claude-crew-settings.json"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness claude)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with only crew settings should succeed"$'\n'"$out"
+  settings=$(claude_settings_json_arg "$(cat "$LAUNCH_LOG")")
+  printf '%s' "$settings" | jq -e '.skillOverrides == {"afk":"off","caveman":"off"} and .skillListingMaxDescChars == 250
+    and (has("note") | not) and .feedbackDrafts == "off"' >/dev/null \
+    || fail "a crew file without a session file did not reach the scout launch alone: $settings"
+  pass "config/claude-crew-settings.json reaches a claude scout launch, with or without session settings"
+}
+
+test_claude_crew_settings_reach_secondmate_home_not_its_launch() {
+  local rec id sm out status launch settings
+  id=profile-secondmate-crew-settings-z33
+  rec=$(make_spawn_case profile-secondmate-crew-settings claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  printf '%s\n' "$CLAUDE_CREW_SETTINGS" > "$HOME_DIR/config/claude-crew-settings.json"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate spawn with crew settings present should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_session_settings_overlay "$launch" "claude secondmate"
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '(has("skillListingMaxDescChars") | not) and (has("crewnote") | not)
+    and (.skillOverrides | has("afk") | not)' >/dev/null \
+    || fail "config/claude-crew-settings.json leaked into a secondmate launch: $settings"
+  cmp -s "$HOME_DIR/config/claude-crew-settings.json" "$sm/config/claude-crew-settings.json" \
+    || fail "secondmate home did not inherit config/claude-crew-settings.json"
+  pass "config/claude-crew-settings.json reaches a secondmate home but stays out of its claude launch"
+}
+
+test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata() {
+  local rec id out status content n=0
+  for content in '{"hooks":{}}' '{"attribution":{}}' '["skillOverrides"]' 'not json' ''; do
+    n=$((n + 1))
+    id=crew-settings-invalid-z4$n
+    rec=$(make_spawn_case "crew-settings-invalid-$n" claude "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+    printf '%s\n' "$content" > "$HOME_DIR/config/claude-crew-settings.json"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "config/claude-crew-settings.json holding $content must refuse the spawn"
+    assert_contains "$out" "config/claude-crew-settings.json must be a readable file holding one JSON object" \
+      "refusal must name the crew file and the accepted shape"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid crew settings must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  done
+  pass "an invalid config/claude-crew-settings.json refuses before any endpoint or metadata"
+}
+
+# A relaunch re-reads config/claude-crew-settings.json, so a change made after
+# the fresh launch reaches the replacement agent. bin/fm-control.sh relaunch
+# rebuilds the launch through bin/fm-spawn.sh --relaunch; this stub models just
+# enough pane lifecycle for that transaction: /exit leaves a bare shell behind
+# and the staged launch file starts the harness again.
+make_relaunch_tmux_stub() {  # <fakebin>
+  mkdir -p "$1"
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      case "$payload" in
+        ". '"*"'")
+          staged=${payload#". '"}
+          staged=${staged%"'"}
+          [ ! -f "$staged" ] || { printf '%s\n' "$(cat "$staged")" > "$D/launch"; printf 'claude' > "$D/command"; }
+          ;;
+        /exit|/quit) printf 'zsh' > "$D/command" ;;
+      esac
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$1/sleep"
+  chmod +x "$1/sleep"
+}
+
+test_claude_crew_settings_reach_relaunch() {
+  local rec id out status launch settings window rl_fake rl_dir
+  id=profile-claude-crew-relaunch-z34
+  rec=$(make_spawn_case profile-claude-crew-relaunch claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CLAUDE_SESSION_SETTINGS" > "$HOME_DIR/config/claude-session-settings.json"
+  printf '%s\n' "$CLAUDE_CREW_SETTINGS" > "$HOME_DIR/config/claude-crew-settings.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn before a relaunch should succeed"$'\n'"$out"
+  assert_crew_settings_overlay "$(cat "$LAUNCH_LOG")" "fresh claude crewmate"
+
+  # The captain edits the crew file while the worker runs.
+  printf '%s\n' '{"skillListingMaxDescChars":111,"skillOverrides":{"afk":"name-only"},"relaunchnote":"after the edit"}' \
+    > "$HOME_DIR/config/claude-crew-settings.json"
+
+  rl_dir="$CASE_DIR/relaunch"
+  rl_fake="$rl_dir/fakebin"
+  mkdir -p "$rl_dir"
+  make_relaunch_tmux_stub "$rl_fake"
+  window=$(sed -n 's/^window=//p' "$HOME_DIR/state/$id.meta")
+  printf '%s\n' "${window#*:}" > "$rl_dir/windows"
+  printf 'claude' > "$rl_dir/command"
+  printf '%s' "$WT_DIR" > "$rl_dir/cwd"
+  out=$(env PATH="$rl_fake:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_DIR="$rl_dir" \
+    HOME="$HOME_DIR/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$ROOT/bin/fm-control.sh" "$id" relaunch --note 'replacement continues the same task' 2>&1)
+  status=$?
+  expect_code 0 "$status" "claude relaunch after a crew settings edit should succeed"$'\n'"$out"
+
+  launch=$(cat "$rl_dir/launch" 2>/dev/null)
+  [ -n "$launch" ] || fail "relaunch sent no replacement launch command"
+  settings=$(claude_settings_json_arg "$launch")
+  printf '%s' "$settings" | jq -e '.skillListingMaxDescChars == 111 and .relaunchnote == "after the edit"
+    and .skillOverrides == {"anthropic-skills:pdf":"user-invocable-only","caveman":"name-only","afk":"name-only"}
+    and .modelSettings == {"claude-opus-5-5":{"autoCompactWindow":100000}}
+    and (has("crewnote") | not) and .note == "it'\''s" and .feedbackDrafts == "off"' >/dev/null \
+    || fail "the relaunch did not carry the edited crew file merged over the session file: $settings"
+  pass "a relaunched claude worker re-reads config/claude-crew-settings.json"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -3043,6 +3326,14 @@ test_claude_crewmate_launch_carries_the_attribution_policy
 test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks
 test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
+test_claude_session_settings_reach_crewmate_launch
+test_claude_session_settings_reach_secondmate_launch
+test_claude_session_settings_invalid_refuses_before_endpoint_or_metadata
+test_claude_crew_settings_merge_into_crewmate_launch
+test_claude_crew_settings_merge_into_scout_launch
+test_claude_crew_settings_reach_secondmate_home_not_its_launch
+test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata
+test_claude_crew_settings_reach_relaunch
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

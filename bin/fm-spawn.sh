@@ -537,7 +537,9 @@
 #                  supplies its own trailing space, empty never used)
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
-#                  state/<task-id>.claude-settings.json for a secondmate
+#                  state/<task-id>.claude-settings.json for a secondmate; both
+#                  also carry config/claude-session-settings.json's members,
+#                  and the inline object also config/claude-crew-settings.json's
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -853,6 +855,45 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
+# config/claude-session-settings.json and config/claude-crew-settings.json
+# (docs/configuration.md): extra Claude session settings, such as
+# skillOverrides or autoCompactWindow. Every Firstmate-built Claude command
+# line carries the session file in its one --settings value; a crewmate or
+# scout launch also carries the crew file, deep-merged over the session file.
+# Both are validated once per spawn or relaunch, before any mutation, so a
+# malformed file refuses instead of launching a worker on settings the captain
+# did not write. CLAUDE_SETTINGS_OVERLAY_MEMBERS holds the session object's
+# members with a leading comma, or nothing for an absent file or an empty
+# object; CLAUDE_CREW_SETTINGS_OVERLAY_MEMBERS holds the merged object's.
+claude_settings_config_object() {
+  local name=$1 present
+  present=$(fm_config_source_present "$CONFIG/$name") || return 1
+  [ "$present" = 1 ] || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: config/$name needs jq to validate it; install jq or remove the file" >&2
+    return 1
+  fi
+  if [ ! -f "$CONFIG/$name" ] || [ ! -r "$CONFIG/$name" ] \
+    || ! jq -cse 'select(length == 1) | .[0] | select(type == "object" and ([has("hooks", "feedbackDrafts", "attribution")] | any | not))' \
+      "$CONFIG/$name" 2>/dev/null; then
+    echo "error: config/$name must be a readable file holding one JSON object without the Firstmate-owned keys hooks, feedbackDrafts, or attribution" >&2
+    return 1
+  fi
+}
+claude_settings_overlay_members() {
+  local members=${1#\{}
+  members=${members%\}}
+  [ -z "$members" ] || printf ',%s' "$members"
+}
+CLAUDE_SESSION_SETTINGS=$(claude_settings_config_object claude-session-settings.json) || exit 1
+CLAUDE_CREW_SETTINGS=$(claude_settings_config_object claude-crew-settings.json) || exit 1
+CLAUDE_SETTINGS_OVERLAY_MEMBERS=$(claude_settings_overlay_members "$CLAUDE_SESSION_SETTINGS")
+CLAUDE_CREW_SETTINGS_OVERLAY_MEMBERS=$CLAUDE_SETTINGS_OVERLAY_MEMBERS
+if [ -n "$CLAUDE_CREW_SETTINGS" ]; then
+  claude_crew_settings_merged=$(jq -cn --argjson session "${CLAUDE_SESSION_SETTINGS:-null}" \
+    --argjson crew "$CLAUDE_CREW_SETTINGS" '($session // {}) * $crew') || exit 1
+  CLAUDE_CREW_SETTINGS_OVERLAY_MEMBERS=$(claude_settings_overlay_members "$claude_crew_settings_merged")
+fi
 if ! CODEX_APPROVAL_PRESENT=$(fm_config_source_present "$CONFIG/codex-approval-mode"); then
   exit 1
 fi
@@ -6559,7 +6600,7 @@ BUSY_GEN=
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then
         session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
       fi
-      printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
+      printf '{%s%s%s}\n' "$session_keys" "$hooks_json" "$CLAUDE_SETTINGS_OVERLAY_MEMBERS" >"$STATE_REAL/$ID.claude-settings.json"
     else
       mkdir -p "$WT/.claude"
       printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
@@ -7518,7 +7559,11 @@ case "$LAUNCH" in
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    # A crewmate or scout carries the crew file merged over the session file.
+    # The inline object is single-quoted shell text, so the overlay's own
+    # single quotes are closed, escaped, and reopened.
+    claude_settings_overlay=${CLAUDE_CREW_SETTINGS_OVERLAY_MEMBERS//\'/\'\\\'\'}
+    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__$claude_settings_overlay}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;
