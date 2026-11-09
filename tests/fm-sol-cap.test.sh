@@ -26,6 +26,13 @@ Exercise the Sol session ceiling.
 # Definition of done
 Delivery contract: mode=no-mistakes
 IFEOF
+  # This home keeps a dispatch table, and fm-spawn.sh refuses a crewmate spawn
+  # whose task has no recorded dispatch resolution once that table is active.
+  # Record the "off" outcome bin/fm-dispatch-resolve.sh writes when it has no
+  # provider key, which is the state these spawn cases drive: the explicit
+  # --harness/--model flags below are then this task's recorded selection.
+  printf '{"task":"%s","status":"off","profile":null}\n' "$2" \
+    > "$1/data/$2/dispatch-resolution.json"
 }
 
 add_item() {  # <home> <id>
@@ -243,10 +250,12 @@ run_staged_launch() {  # <case-dir>
       PATH="$case_dir/fakebin:$PATH" "$case_dir/fakebin/paneshell" -c ". \"\$1\"" _ "$file") 2>&1
 }
 
-# The staged launch line a spawn handed the pane, i.e. what the pane shell
-# would source. The fake tmux records one per send-keys of a source line.
+# The staged launch text a spawn handed the pane, i.e. everything the pane
+# shell would source. A staged file is not one line: fm-spawn.sh wraps the
+# worker command in the OSC 7501 arm/disarm guards, so the worker's own command
+# is the text between them and these cases assert on the text a pane receives.
 staged_launch_line() {  # <case-dir>
-  tail -1 "$1/calls.log.launch" 2>/dev/null || true
+  cat "$1/calls.log.launch" 2>/dev/null || true
 }
 
 # The staged launch file itself, as the pane was told to source it.
