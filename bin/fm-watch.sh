@@ -586,21 +586,9 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
-# The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
-# `_` so a window name is usable as a filename suffix. Every per-window file the
-# watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .wedge-permanent-, .wedge-terminal-queued-,
-# .wedge-rollback-failed-, .paused-*, .writing-*, .validating-*,
-# .waiting-*), and live homes
-# hold those markers on disk under the current format, so the format lives here
-# alone: a second copy is how a future change to it silently orphans a window's
-# markers instead of clearing them. The helpers below take the derived key
-# rather than re-deriving it, so one poll of one window derives it once.
-window_key() {  # <window>
-  local key=${1//:/_}
-  key=${key//\//_}
-  printf '%s' "${key//./_}"
-}
+# All per-window marker identities come from this shared owner.
+# shellcheck source=bin/fm-watch-key-lib.sh
+. "$SCRIPT_DIR/fm-watch-key-lib.sh"
 
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
@@ -751,8 +739,8 @@ inbox_steer_check() {  # <window> <task>
 #
 # The evidence is the one the pane-staleness backbone below already trusts for
 # liveness: this compares a fresh capture against the .hash- marker that backbone
-# recorded on the previous poll, which is why the derivation lives here with the
-# marker format rather than in the shared classifier. Absorbing here DEFERS a wake
+# recorded on the previous poll; fm-watch-key-lib.sh owns its marker identity.
+# Absorbing here DEFERS a wake
 # rather than swallowing it, and the deferral is BOUNDED: a task's turn-ends may
 # ride churn evidence for at most FM_TURNEND_CHURN_ABSORB_SECS, tracked per window
 # in .churn-since-, after which the wake surfaces and the window restarts. The
@@ -2745,13 +2733,37 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
+# 0 while a relayed captain hold stays exempt: undated (`-`), or before 00:00
+# UTC on its well-formed [until=] date. A malformed (`?`) or unreadable date
+# re-arms the key, so a bad field never silences it.
+open_decision_hold_deferred() {  # <until-column> <now-epoch>
+  local until=$1 now=$2 rearm
+  case "$until" in
+    -) return 0 ;;
+    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) ;;
+    *) return 1 ;;
+  esac
+  rearm=$(fm_utc_iso_to_epoch "${until}T00:00:00Z") || return 1
+  [ "$now" -lt "$rearm" ]
+}
+
 # Opt-in durable decision-age backstop. The shared fold owns all transitions;
-# its separate timed view preserves source [at=] values without changing drain
-# output. Scan only this home's logs, excluding its outbound parent channel.
-# Queue at most the oldest due key per poll. STATE/.open-decision-reminders
-# stores <task> TAB <key> TAB <opened> TAB <last-reminder> TAB <next-delay>, so
-# watcher restarts preserve per-key backoff. Resolution removes a row on the
-# next poll; pauses and captain calls suppress reminders without resetting it.
+# its separate timed view preserves source [at=] and [until=] values without
+# changing drain output. Scan only this home's logs, excluding its outbound
+# parent channel. Queue at most the oldest due key per poll.
+# STATE/.open-decision-reminders stores <task> TAB <key> TAB <opened> TAB
+# <last-reminder> TAB <next-delay>, so watcher restarts preserve per-key
+# backoff. A row matches its open key only on the same opened time; the timed
+# view keeps that time across an unchanged republish of a still-open key, so
+# the republish keeps its backoff, while a resolution and reopen or a changed
+# verb or note starts a new episode. Resolution removes a row on the next poll;
+# pauses and captain calls suppress reminders without resetting it.
+# A `captain-hold-` key is a child home's captain hold relayed on its parent
+# channel (bin/fm-captain-hold.sh), already in the captain's hands, so it is
+# exempt by that key prefix alone. Its optional structured [until=YYYY-MM-DD]
+# field (`hold --until`) re-arms it from 00:00 UTC on that date; a malformed
+# field re-arms it at once rather than silencing it. Note text is never read
+# for either decision.
 # FM_OPEN_DECISION_OVERDUE_SECS defaults to 1800; repeats start at that delay,
 # double after each repeat, and cap at FM_OPEN_DECISION_BACKOFF_MAX_SECS (14400).
 # Both settings must be canonical positive integers of at most nine digits,
@@ -2760,7 +2772,7 @@ task_captain_call_open() {  # <task>
 open_decision_reminder_tick() {  # [now-epoch], for deterministic clock callers
   local now=${1:-} threshold=${FM_OPEN_DECISION_OVERDUE_SECS:-1800}
   local cap=${FM_OPEN_DECISION_BACKOFF_MAX_SECS:-14400} value
-  local f task open key verb opened note exclude ledger rows='' old=''
+  local f task open key verb opened until exclude ledger rows='' old=''
   local old_task old_key old_opened old_last old_delay last delay
   local due_task='' due_key='' due_opened='' due_delay='' tmp reason
   OPEN_DECISION_REMINDER=
@@ -2783,7 +2795,7 @@ open_decision_reminder_tick() {  # [now-epoch], for deterministic clock callers
     task=${f##*/}; task=${task%.status}
     open=$(status_open_decisions_incremental "$f" '' timed) || return 1
     [ -n "$open" ] || continue
-    while IFS=$'\t' read -r key verb opened note; do
+    while IFS=$'\t' read -r key verb opened until _; do
       case "$opened" in ''|unknown|*[!0-9]*) continue ;; esac
       last=0; delay=$threshold
       while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
@@ -2801,6 +2813,9 @@ EOF
       rows="$rows$task"$'\t'"$key"$'\t'"$opened"$'\t'"$last"$'\t'"$delay"$'\n'
       [ "$now" -ge "$opened" ] && [ "$((now - opened))" -ge "$threshold" ] || continue
       [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$delay" ] || continue
+      case "$key" in
+        captain-hold-*) open_decision_hold_deferred "$until" "$now" && continue ;;
+      esac
       status_is_paused_or_captain_held "$(status_declared_wait_line "$f")" && continue
       task_captain_call_open "$task" && continue
       if [ -z "$due_opened" ] || [ "$opened" -lt "$due_opened" ]; then

@@ -9,6 +9,7 @@
 # No case touches the network, and the absent-key case proves the tool makes
 # no call at all.
 set -u
+unset TYPESAFE_BASE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -422,13 +423,14 @@ assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "rule and confidence line"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "argmax picks the highest spendPriority"
+assert_absent "$TMP_ROOT/dispatch-resolution.json" "a brief outside data/<id>/ writes no task record"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "every candidate is accounted for"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
 assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear results flag eligible unranked candidates once"
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request defaults to the typesafe.ai endpoint"
 assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
@@ -447,6 +449,127 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# --- TypeSafe base: default, environment/.env precedence, and safe URLs ------
+while IFS='|' read -r base endpoint; do
+  reset_log
+  TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "custom TypeSafe base resolves"
+  assert_contains "$out" '  status: clear' "custom TypeSafe base keeps the typed response contract"
+  assert_equals "$endpoint" "$(grep -E '^https?://' "$LOG/argv")" "custom base has exactly one endpoint suffix"
+  # curl argv is the external request contract: --globoff makes punctuation literal.
+  assert_contains "$(cat "$LOG/argv")" $'--globoff\n' "custom base disables curl URL expansion"
+  assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "custom base keeps the fd header transport"
+  assert_not_contains "$(cat "$LOG/argv")" "$KEY" "custom base keeps the key out of argv"
+  assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "custom base keeps the key out of child environments"
+done <<'BASE_ENDPOINTS'
+https://gateway.example/typesafe/|https://gateway.example/typesafe/v1/systemone
+http://localhost:8080/proxy///|http://localhost:8080/proxy/v1/systemone
+http://typesafe_gateway:8080|http://typesafe_gateway:8080/v1/systemone
+https://[::1]:8443/typesafe/|https://[::1]:8443/typesafe/v1/systemone
+https://gateway.example:1/tenant/{a,b}/|https://gateway.example:1/tenant/{a,b}/v1/systemone
+https://gateway.example:65535/|https://gateway.example:65535/v1/systemone
+http://127.0.0.1:8080/|http://127.0.0.1:8080/v1/systemone
+https://[2001:db8::abcd]/|https://[2001:db8::abcd]/v1/systemone
+https://[2001:db8:0:1:2:3:4:5]/|https://[2001:db8:0:1:2:3:4:5]/v1/systemone
+https://[::ffff:192.0.2.1]/|https://[::ffff:192.0.2.1]/v1/systemone
+BASE_ENDPOINTS
+printf '%s\n' 'TYPESAFE_BASE=https://dotenv.example/typesafe/' > "$HOME_DIR/.env"
+reset_log
+FM_DISPATCH_PROVIDER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://dotenv.example/typesafe/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" ".env supplies the TypeSafe base"
+reset_log
+TYPESAFE_BASE=https://environment.example/gateway/ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://environment.example/gateway/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "environment base wins over .env"
+rm -f "$HOME_DIR/.env"
+for base in \
+  ftp://gateway.example/typesafe \
+  gateway.example/typesafe \
+  https:///typesafe \
+  https://user:password@gateway.example/typesafe \
+  https://gateway.example/typesafe?key=value \
+  https://gateway.example/typesafe? \
+  https://gateway.example/typesafe#fragment \
+  https://gateway.example/typesafe# \
+  https://gateway.example:0 \
+  https://gateway.example:65536 \
+  https://gateway.example:999999999999999999999999999999 \
+  https://gateway.example:abc \
+  https://gateway.example: \
+  'https://[abc]' \
+  'https://[1:2:3:4:5:6:7]' \
+  'https://[1:2:3:4:5:6:7:8:9]' \
+  'https://[1:2:3:4:5:6:7::8]' \
+  'https://[1::2::3]' \
+  'https://[:::1]' \
+  'https://[12345::1]' \
+  'https://[::ffff:192.0.2.999]' \
+  https://::1 \
+  'https://gateway.example/tenant[1-2]' \
+  'https://gateway.example/tenant[' \
+  'https://gateway.example/tenant]' \
+  'https://gateway.example/bad path' \
+  $'https://gateway.example/\n' \
+  $'https://gateway.example/\npath'; do
+  reset_log
+  TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "invalid TypeSafe base is a configuration error"
+  assert_contains "$err" 'TYPESAFE_BASE' "invalid base names the setting"
+  assert_equals '' "$out" "invalid base never produces a fallback profile"
+  assert_absent "$LOG/argv" "invalid base never sends a request"
+  assert_absent "$LOG/quota-axi.calls" "invalid base never reads quota"
+done
+printf '%s\n' 'TYPESAFE_BASE=https://user:password@dotenv.example' > "$HOME_DIR/.env"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "invalid .env base is a configuration error"
+assert_contains "$err" 'TYPESAFE_BASE' "invalid .env base names the setting"
+assert_not_contains "$err" 'password' "invalid base diagnostic does not echo credentials"
+assert_absent "$LOG/argv" "invalid .env base never sends a request"
+reset_log
+run code out err "$BRIEF"
+expect_code 2 "$code" "invalid base is actionable even without a key"
+assert_absent "$LOG/argv" "invalid base without a key never sends a request"
+reset_log
+TYPESAFE_BASE=https://environment.example TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://environment.example/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "valid environment base overrides an invalid .env base"
+rm -f "$HOME_DIR/.env"
+
+# The configuration contract precedes both off and declared-key selection.
+# Invalid addresses must never reach Keychain, curl, or quota, for either
+# provider spelling and either configuration source. Literal errors are the
+# oracle; returning off or an HTTP error would violate that contract.
+for base in https://gateway.example:99999 'https://[abc]' \
+  'https://gateway.example/tenant[1-2]' 'https://gateway.example/tenant[' 'https://gateway.example/tenant]'; do
+  for provider in '' typesafe; do
+    for source in environment dotenv; do
+      for credential in absent environment declared; do
+        reset_log
+        configured_base=$base
+        configured_key=''
+        [ "$credential" != environment ] || configured_key=$KEY
+        if [ "$source" = dotenv ]; then
+          printf 'TYPESAFE_BASE=%s\n' "$base" > "$HOME_DIR/.env"
+          configured_base=''
+        fi
+        if [ "$credential" = declared ]; then
+          printf '%s\n' '{"typesafe":{"source":"macos-keychain","service":"must-not-be-read"}}' > "$HOME_DIR/config/dispatch-credential-sources.json"
+        fi
+        FM_DISPATCH_PROVIDER=$provider TYPESAFE_BASE=$configured_base TYPESAFE_API_KEY=$configured_key run code out err "$BRIEF"
+        expect_code 2 "$code" "invalid address fails before credential selection"
+        assert_contains "$err" 'TYPESAFE_BASE' "invalid address reports a configuration error"
+        assert_equals '' "$out" "invalid address emits no resolution"
+        assert_not_contains "$err" "$base" "invalid address is not echoed"
+        assert_not_contains "$err" "$KEY" "invalid address error keeps credentials private"
+        assert_absent "$LOG/security.argv" "invalid address never looks up credentials"
+        assert_absent "$LOG/argv" "invalid address never sends a request"
+        assert_absent "$LOG/quota-axi.calls" "invalid address never reads quota"
+        rm -f "$HOME_DIR/.env" "$HOME_DIR/config/dispatch-credential-sources.json"
+      done
+    done
+  done
+done
+pass "TypeSafe base supports environment and .env overrides and rejects unsafe URLs before sending"
+
 # --- OpenRouter uses the same Choice validation and resolution path ---------
 OR_KEY='test-openrouter-key-never-in-child-env-or-argv'
 OR_RESPONSE="$TMP_ROOT/openrouter-response.json"
@@ -462,7 +585,7 @@ assert_equals '' "$out" "an OpenRouter key alone does not select the provider"
 assert_contains "$err" 'TYPESAFE_API_KEY absent' "unset provider retains the typesafe off gate"
 assert_absent "$LOG/argv" "an OpenRouter key alone sends nothing"
 reset_log
-FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+TYPESAFE_BASE=invalid-but-unused FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
   OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "OpenRouter clear exits 0"
 assert_contains "$out" '  status: clear' "OpenRouter clear status"
@@ -836,6 +959,7 @@ assert_contains "$out" '  status: clear' "systemone clear status"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "systemone uses the shared quota argmax"
 assert_contains "$(cat "$LOG/argv")" 'http://127.0.0.1:8080/v1/systemone' "systemone posts to <base>/v1/systemone with a trailing slash trimmed"
 assert_contains "$(cat "$LOG/argv")" $'--max-time\n10' "systemone timeout"
+assert_contains "$(cat "$LOG/argv")" $'--globoff\n' "the keyless request path also disables curl URL expansion"
 assert_not_contains "$(cat "$LOG/argv")" '@/dev/fd/3' "systemone without a key sends no Authorization header"
 assert_equals 'fd3 unreadable' "$(cat "$LOG/header")" "systemone without a key opens no header descriptor"
 assert_equals "$(jq -Sc 'del(.model)' "$TMP_ROOT/typesafe-body.json")" "$(jq -Sc 'del(.model)' "$LOG/body")" "systemone sends the unchanged System One request"
@@ -1241,6 +1365,53 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
+
+# --- task record: data/<id>/dispatch-resolution.json for fm-spawn ---------------
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+TASK_RECORD="$HOME_DIR/data/pager-fix/dispatch-resolution.json"
+mkdir -p "$(dirname "$TASK_BRIEF")"
+cp "$BRIEF" "$TASK_BRIEF"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the task brief resolves clear"
+assert_equals '{"task":"pager-fix","status":"clear","profile":{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}}' \
+  "$(jq -c '{task, status, profile: (.profile | {harness, model, effort})}' "$TASK_RECORD")" \
+  "a clear run records the task, status, and the printed profile with an unset effort as null"
+reset_log
+write_response "$RESPONSE" rule_4 0.41
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'ambiguous null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" \
+  "a later non-clear run replaces the clear selection, so the manual intake is not bound to it"
+reset_log
+run code out err "$TASK_BRIEF" --project pager
+assert_contains "$err" 'dispatch-resolve: off (' "the keyless run is off"
+assert_equals 'off null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" "an off run records off so fm-spawn accepts the manual intake"
+mv "$RULES" "$RULES.keep"
+printf '{"broken":\n' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+expect_code 2 "$code" "malformed rules exit 2"
+assert_absent "$TASK_RECORD" "a configuration error leaves no task record to act on"
+mv "$RULES.keep" "$RULES"
+pass "task record: every exit-0 outcome records its decision for data/<id>/brief.md, and exit 2 records none"
+
+# A home with FM_DATA_OVERRIDE keeps briefs outside $FM_HOME/data; fm-spawn.sh
+# reads the record there, so the resolver must write it there too.
+OVERRIDE_DATA="$TMP_ROOT/custom-records"
+mkdir -p "$OVERRIDE_DATA/pager-fix" "$TMP_ROOT/data/pager-fix"
+cp "$BRIEF" "$OVERRIDE_DATA/pager-fix/brief.md"
+cp "$BRIEF" "$TMP_ROOT/data/pager-fix/brief.md"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+FM_DATA_OVERRIDE=$OVERRIDE_DATA TYPESAFE_API_KEY=$KEY run code out err "$OVERRIDE_DATA/pager-fix/brief.md" --project pager
+assert_equals 'pager-fix clear cursor' \
+  "$(jq -r '"\(.task) \(.status) \(.profile.harness)"' "$OVERRIDE_DATA/pager-fix/dispatch-resolution.json")" \
+  "a brief under FM_DATA_OVERRIDE records its decision beside it"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/data/pager-fix/brief.md" --project pager
+assert_absent "$TMP_ROOT/data/pager-fix/dispatch-resolution.json" "a data/<id>/ directory outside the configured data root writes no task record"
+pass "task record: the configured data root, including FM_DATA_OVERRIDE, decides where the record goes"
 
 # --- per-rule confidence floor ------------------------------------------------
 write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>

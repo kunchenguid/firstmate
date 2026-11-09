@@ -16,6 +16,7 @@ unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/t3-fake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
+. "$ROOT/bin/fm-watch-key-lib.sh"
 
 command -v node >/dev/null 2>&1 || { echo "skip: node absent"; exit 0; }
 
@@ -1105,8 +1106,7 @@ test_t3_stale_watcher() {  # <thread-status> <absorb|surface|dead> [harness] [fr
   local session=$1 expected=$2 harness=${3:-codex} state fb hash out _
   local fresh=${4:-} turn=${5:-} busy_bound=3600 turn_at
   local thread=mcp:6a0e1f2b-3c4d-4a5b-8c6d-0123456789ab key
-  # The watcher's per-window marker key turns `:` into `_` (fm-watch.sh window_key).
-  key=${thread//:/_}
+  key=$(window_key "$thread")
   t3_case "watch-$session-$harness-$fresh-$turn" "$session"
   t3_world "$(t3_thread_json "$thread" "$session" false)"
   # The spawn record below is aged past the bound, so only T3's own run
@@ -1552,12 +1552,13 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR, got '$(t3_json_field "$settings" 'd.env')'"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_ID')" = "$id" ] || fail "a ship worker's settings env must carry FM_TASK_ID"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_INBOX')" = "$state/$id.inbox" ] || fail "a ship worker's settings env must carry its steering inbox"
+  [ "$(t3_json_field "$settings" 'd.env.FM_HOME')" = "$CASE_DIR/home" ] || fail "a ship worker's settings env must carry the active home"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_VALUE_0')" = "$state/$id.git-hooks" ] || fail "T3 workers must select the installed Git hook"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_KEY_0')" = core.hooksPath ] || fail "T3 workers must select core.hooksPath"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_COUNT')" = 1 ] || fail "T3 workers must select one Git config override"
   [ "$(t3_json_field "$settings" 'd.env.TRACEPARENT')" = undefined ] || fail "TRACEPARENT must be absent when trace context is off"
   [ "$(t3_json_field "$settings" 'd.env.COMPACT_ADVISER_DISABLE')" = 1 ] || fail "settings env must carry the compact-adviser kill switch every launch carries"
-  [ "$(t3_json_field "$settings" 'Object.keys(d.env).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR" ] || fail "a worker env block carries the task inbox and Git hook with the launch environment"
+  [ "$(t3_json_field "$settings" 'Object.keys(d.env).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE FM_HOME FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR" ] || fail "a worker env block carries the task inbox and Git hook with the launch environment"
   t3_excluded "$wt" .claude/settings.local.json || fail "the settings file must be git-excluded"
   assert_present "$wt/CLAUDE.local.md" "a claude worker gets the task-worker channel statement as CLAUDE.local.md"
   assert_grep "task worker launched by Firstmate" "$wt/CLAUDE.local.md" "CLAUDE.local.md must carry the channel statement"

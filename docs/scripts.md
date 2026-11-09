@@ -51,12 +51,13 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON; refuses to execute in the repository primary checkout when `FM_TASK_ID` marks a task worker |
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Manually initialize project agent-memory files (see the helper's header and help) |
-| `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json` |
+| `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target, or a measured `auto` budget, and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json`, and `--spawn-gate` is the opt-in spawn check |
+| `fm-lane-vitals-lib.sh`  | Read-only host vitals and per-lane process attribution behind `fm-capacity.sh`'s auto budget (Linux, macOS, the Windows host from WSL2, and native Windows under Git Bash/MSYS) |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared session-lock ownership from harness ancestry, a trusted Claude session id, or on Windows/Git Bash a published harness pid, for fm-lock.sh and the Claude Stop auto-arm, plus the reclaim verdict recovery callers apply, the ps-free identity fallback behind it, and the read-only lock inspection behind `fm-lock.sh status` and `fm-inbox.sh ready` |
 | `fm-procinfo.py`         | Read one pid's ppid, comm, and args through macOS kernel syscalls when the `ps` binary cannot execute |
-| `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
+| `fm-claude-stop-autoarm.sh` | Claude Stop/StopFailure `asyncRewake` hook; see [watcher continuity](watcher-continuity.md#claude-stop-hook) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-kimi-turnend-hook.sh` | Surgically install or remove Kimi's guarded global crew turn-end hook                |
@@ -109,6 +110,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-codex-stop-park.sh`  | On an opted-in home, register verified native Codex sessions and park supervision in the asynchronous Stop hook, delivering wakes through the native thread queue |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes, detect stalled local-secondmate wake queues, and exit on actionable ones |
+| `fm-watch-key-lib.sh`    | Shared per-window watcher marker identity for the watcher and away daemon             |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
 | `fm-afk-contract.sh`     | Own the away-or-quiet record's posture, schema, entry, read-back, archive, and cross-subsystem authority lock |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
