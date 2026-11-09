@@ -602,6 +602,10 @@ seed_rollback_target() {
   printf '%s\n' "$abs_target"
 }
 
+seed_treehouse_return() {
+  ( cd "$FM_ROOT" && treehouse return --force "$1" >/dev/null )
+}
+
 seed_return_treehouse_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
@@ -621,18 +625,12 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  fm_home_worktree_lock_release "$abs_home" "$SEED_ID" "$FM_HOME" || return 0
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
-    fm_home_worktree_lock_acquire "$abs_home" "$SEED_ID" "$FM_HOME" || echo "error: cannot restore durable-home protection after failed rollback return: $abs_home" >&2
+  fm_home_payload_return "$abs_home" "$SEED_ID" "$FM_HOME" \
+    seed_treehouse_return "$abs_home" || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
-  # A returned slot is an ordinary pool checkout again, so a home this attempt
-  # half-seeded does not leave its payload behind for the next seed to refuse.
-  # Only a released slot is pruned, so a failed return above keeps the home whole.
-  fm_home_payload_prune "$abs_home" \
-    || echo "warning: could not clear the retired home payload at $abs_home; the next seed in that slot may refuse it" >&2
-  fm_home_worktree_lock_forget "$abs_home" "$SEED_ID" "$FM_HOME" || return 0
+
 }
 
 seed_remove_created_home() {
