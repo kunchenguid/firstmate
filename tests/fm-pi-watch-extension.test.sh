@@ -4548,6 +4548,7 @@ test_pi_actionable_closes_restore_while_branch_delivery_is_held() {
   trigger="$TMP_ROOT/pi-held-branch-$mode.close"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -4561,6 +4562,9 @@ previous=$(sed -n '1p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
 previous_marker=$(sed -n '2p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
 printf '%s\n%s\n' "$$" "$live" > "$FM_ARM_LOG.pid"
 if [ -n "$previous" ] && [ -f "$previous_marker" ]; then kill -TERM "$previous" 2>/dev/null || true; fi
+# Each successor records this home's watcher identity and a fresh beacon, so an
+# established arm reads healthy and a redundant manual re-arm stays a no-op.
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
 if [ "$FM_HELD_CLOSE_CASE" = replacement ] && [ "$count" -eq 3 ]; then
   printf 'waiting=3\n' >> "$FM_ARM_LOG"
   while :; do sleep 0.02; done
