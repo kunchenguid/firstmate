@@ -13,16 +13,56 @@
 # The home-lock library owns Git lock ownership; this library owns only the
 # payload cleanup that makes the returned slot reusable.
 
-fm_home_payload_prune() { # <home>
+fm_home_payload_check() {
   local home=$1 tracked
   [ -d "$home" ] || return 0
   if git -C "$home" rev-parse --git-dir >/dev/null 2>&1; then
-    tracked=$(git -C "$home" ls-files -- data state config projects 2>/dev/null) || tracked=
+    tracked=$(git -C "$home" ls-files -- data state config projects .fm-secondmate-home .fm-secondmate-parent 2>/dev/null) || return 1
     [ -z "$tracked" ] || {
       echo "error: durable home $home tracks payload paths ($tracked); leaving its slot payload in place" >&2
       return 1
     }
   fi
+}
+
+fm_home_payload_prune() {
+  local home=$1
+  fm_home_payload_check "$home" || return 1
   rm -rf -- "$home/data" "$home/state" "$home/config" "$home/projects" || return 1
   rm -f -- "$home/.fm-secondmate-home" "$home/.fm-secondmate-parent" || return 1
 }
+
+fm_home_payload_return() (
+  local home=$1 id=$2 parent=$3 backup path receipt= rc=0
+  shift 3
+  fm_home_payload_check "$home" || return 1
+  fm_home_worktree_lock_check "$home" "$id" "$parent" || return 1
+  backup=$(mktemp -d "$parent/state/.home-return.XXXXXX") || return 1
+  if [ "$FM_HOME_LOCK_LINKED" = 1 ] && [ -f "$FM_HOME_LOCK_RECEIPT" ]; then
+    receipt=$FM_HOME_LOCK_RECEIPT
+    cp -p "$receipt" "$backup/receipt" || { rmdir "$backup"; return 1; }
+  fi
+  for path in data state config projects .fm-secondmate-home .fm-secondmate-parent; do
+    if [ -e "$home/$path" ] || [ -L "$home/$path" ]; then
+      mv -- "$home/$path" "$backup/$path" || { rc=1; break; }
+    fi
+  done
+  if [ "$rc" = 0 ]; then
+    fm_home_worktree_lock_release "$home" "$id" "$parent" \
+      && fm_home_worktree_lock_forget "$home" "$id" "$parent" \
+      && "$@" || rc=1
+  fi
+  if [ "$rc" != 0 ]; then
+    for path in data state config projects .fm-secondmate-home .fm-secondmate-parent; do
+      if [ -e "$backup/$path" ] || [ -L "$backup/$path" ]; then
+        mv -- "$backup/$path" "$home/$path" || return 1
+      fi
+    done
+    if [ -n "$receipt" ]; then
+      cp -p "$backup/receipt" "$receipt" || return 1
+    fi
+    fm_home_worktree_lock_acquire "$home" "$id" "$parent" || return 1
+  fi
+  rm -rf -- "$backup" || echo "warning: retired payload backup remains at $backup" >&2
+  return "$rc"
+)
