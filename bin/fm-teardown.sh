@@ -1846,8 +1846,9 @@ backlog_done_args() {
 
 # Closing the backlog item is this script's own last act on the record, not a
 # printed instruction for a later turn (bin/fm-backlog-transition-lib.sh owns the
-# invariant). This prints what already happened, so the follow-up wording stays
-# only where a human still owes the edit.
+# invariant). This prints what already happened, so the backlog-edit wording
+# stays only where a human still owes the edit; the ready-work check it appends
+# is a dispatch obligation on the caller, not an unfinished transition.
 backlog_refresh_reminder() {
   local backlog_display root backend=markdown
   [ "$KIND" = secondmate ] && return 0
