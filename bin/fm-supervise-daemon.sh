@@ -8,7 +8,7 @@
 # captain-relevant events plus bounded declared-wait rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
 # signal/stale/heartbeat wakes cost zero firstmate context; routing is owned by
-# .agents/skills/afk/SKILL.md (Classification policy).
+# .agents/skills/afk/references/daemon.md (Classification policy).
 # Escalated events reach the LLM as one pre-read digest per
 # batch window. That digest is byte-bounded (see escalate_flush); when it cuts
 # or omits anything it names a state/.subsuper-digests/ file holding every
@@ -39,7 +39,7 @@
 # daemon and the human share one input channel - so they live together under
 # /afk.
 #
-# Reliability model (see the /afk skill):
+# Reliability model (see .agents/skills/afk/references/daemon.md):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a

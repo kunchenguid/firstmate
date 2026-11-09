@@ -413,7 +413,7 @@ Each away-posture wake includes a line naming the problem.
 The running host reads both files at every wake, so an engine change or an opt-out takes effect at the next wake without a restart.
 
 The opt-out is inherited into secondmate homes: a primary that opts out also opts its secondmates out, and clearing it restores each mate's own host setting at its next spawn or convergence.
-The primary-authoritative propagation contract, including removal of a mate's local opt-out when the primary has none, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+The primary-authoritative propagation contract, including removal of a mate's local opt-out when the primary has none, is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md).
 `config/supervision-host` is local to each home and not inherited, because each home's engine and model are its own choice.
 While the home runs the host, main's lease-checked commands also take the per-task lease lock, so a claim by the host's engine cannot race a mutation main already started (`bin/fm-lease-lib.sh`).
 
@@ -662,7 +662,7 @@ Legacy tmux metadata remains cleanup-compatible when its exact window name is `f
 [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
 
 The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
-The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md).
 The local `config/herdr-project-groups` file opts a home in to display-only Herdr project groups; [Project groups](herdr-backend.md#project-groups) owns its values, rules, tags, inheritance, and limits.
 
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
@@ -699,7 +699,7 @@ Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.
 tern uses one home-tagged session named `fm-<hometag>` (or `FM_TERN_SESSION` in tests) and one keep-open tab/block per task.
 The caller-facing endpoint is `<session-id>:<block-id>`; tab titles are `fm-<hometag>-<id>`; ids are 64-bit integers and must keep full precision.
 Test cleanup must use the guarded path in [`docs/tern-backend.md`](tern-backend.md#current-operation-and-safety) and only sessions named `fm-test-*`.
-`config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+`config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md).
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
@@ -1162,7 +1162,7 @@ The locked mutable bootstrap path materializes its visible default of `7500` est
 ### Set and validate the budget
 
 To select another allowance, replace the primary home's file with one valid positive value in the exact format below; the next locked bootstrap convergence or `bin/fm-config-push.sh` propagates it to registered secondmates.
-A secondmate does not create an independent default and instead receives the primary value through the inherited-local-material contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+A secondmate does not create an independent default and instead receives the primary value through the inherited-local-material contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md).
 
 The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a non-symlinked `config/` directory.
 Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than treated as a default.
@@ -1393,7 +1393,7 @@ A model or effort the record leaves empty is not bound, so the documented effort
 When the record is `ambiguous`, `escalate`, `error`, or `off`, the explicit flags from the manual intake are enough.
 An `fm-spawn.sh --relaunch` skips this check.
 
-The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
+The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
@@ -1464,7 +1464,7 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 ### When changes apply and inheritance
 
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
-Both approval-mode files follow the primary-authoritative [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
+Both approval-mode files follow the primary-authoritative [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md) inherited-local-material contract.
 T3 Code owns its provider command and always uses `full-access`, so `backend=t3code` accepts the default `bypass` posture and refuses `auto` before mutation; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
@@ -1500,7 +1500,7 @@ Only after that approval does firstmate invoke `bin/fm-approval-failover.sh`; th
 There is no automatic detection, polling, startup window, or approval-prompt answering.
 The command saves Codex's `approve-for-me` or Claude's `auto` in the owning home's absent mode file, so later launches use the model-reviewed remedy without retrying bypass.
 Existing explicit settings are never overwritten, including invalid or empty files, directories and dangling symlinks; a concurrent setting wins too.
-To retain a secondmate's remedy across convergence, select it in the primary home under the [inherited-local-material contract](../.agents/skills/secondmate-provisioning/SKILL.md).
+To retain a secondmate's remedy across convergence, select it in the primary home under the [inherited-local-material contract](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md).
 Recovery uses the existing [lifecycle control plane](agent-control.md), respecting its leases and supported-runtime limits; incomplete recovery is reported with the saved setting and work preserved.
 A `backend=t3code` task refuses before any change, because T3 already runs it at `full-access` and its spawns refuse both fallbacks; approve the pending request in T3 Code itself or choose another backend.
 Generic login failures do not establish a defeated bypass, and managed hook review remains a separate operator decision.
@@ -1735,7 +1735,7 @@ T3 Code starts the provider from the server's environment and cannot apply this 
 With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 
 Do not assume every worker inherits the invoking Firstmate process's current environment.
-The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
+The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md).
 
 Changes apply to subsequent launches; existing processes keep their environment.
 
@@ -1831,7 +1831,7 @@ Cortex Code has no attribution switch and its model writes a `Generated with Sno
 `bin/fm-git-strip-ai-trailers.sh` owns the identities, the install, and chaining the hooks of whichever repository git is running in, including when `git -c core.hooksPath` supplies the pane's hook override, so a project hook such as husky still runs when stripping is enabled.
 A repository whose config sets `core.hooksPath` to the empty string runs no project hook, as in plain git; if the wrapper otherwise cannot resolve that repository's hooks directory, the git operation fails rather than silently skipping a project hook such as a pre-push guard.
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
-The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
+The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
 ## Project capacity (config/project-capacity)
@@ -2318,7 +2318,7 @@ Local routes use direct guarded filesystem operations, while remote routes deleg
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh) declares the inherited items.
 
-- The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the local and remote re-read behavior shared with locked bootstrap inheritance, including unchanged retries and interrupted transfers.
+- The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md) owns the local and remote re-read behavior shared with locked bootstrap inheritance, including unchanged retries and interrupted transfers.
 - That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 - Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 

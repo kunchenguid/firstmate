@@ -665,7 +665,7 @@ Malformed or unreadable generation state stops the push before inherited payload
 Counter recovery requires a receiver that supports the generation query, so synchronize an older receiver's code before relying on recovery.
 The [`fm-remote-inherit-push.sh`](../bin/fm-remote-inherit-push.sh) header owns generation negotiation, transaction locking, and the compatibility fallback that keeps ordinary pushes to older receivers working.
 The synthetic transport regression is [`fm-remote-inherit-generation.test.sh`](../tests/fm-remote-inherit-generation.test.sh).
-The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
 
 ### Relaunch a live remote second mate
 
@@ -682,7 +682,7 @@ Move a live remote second mate onto a newly pinned harness, model, or effort wit
 ### Firstmate code convergence
 
 Session start and every remote launch converge the persistent remote home on the primary's own default-branch commit rather than on the Firstmate copy that host keeps.
-The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the guarded convergence contract, including the distinct `/updatefirstmate` behavior, and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh) owns the commit-import mechanics.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/references/charter-and-seed.md) owns the guarded convergence contract, including the distinct `/updatefirstmate` behavior, and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh) owns the commit-import mechanics.
 Neither session start nor launch moves the host's own Firstmate copy.
 An unsafe or unavailable target is reported and left untouched.
 A completed sync reports which watched instruction paths its advance changed.

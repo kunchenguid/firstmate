@@ -160,7 +160,9 @@ init_changed_fixture_repo() {
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
     "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
+  mkdir -p "$repo/.agents/skills/example/references"
   : >"$repo/.agents/skills/example/SKILL.md"
+  : >"$repo/.agents/skills/example/references/detail.md"
   : >"$repo/.agents/skills/harness-adapters/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   : >"$repo/.claude/settings.json"
@@ -380,6 +382,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "turn-end extension selects native-Windows shell coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/.agents/skills/example/references/detail.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill reference file selects pure contract coverage"
+  git -C "$repo" add .agents/skills/example/references
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm skill-reference-change
 
   printf '\n' >>"$repo/.pi/extensions/lib/fm-operational-input.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

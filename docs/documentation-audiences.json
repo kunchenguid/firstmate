@@ -130,6 +130,22 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/afk/references/daemon.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk/references/entering.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk/references/return.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk/references/while-away.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ahoy/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -139,6 +155,22 @@
     },
     {
       "path": ".agents/skills/bearings/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bearings/references/chat-contract.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bearings/references/contributions.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bearings/references/digest.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/bearings/references/lavish-board.md",
       "audience": "agent-runtime"
     },
     {
@@ -274,6 +306,18 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/project-management/references/add-create-initialize.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-management/references/delivery-posture.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-management/references/remove.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quiet/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -283,6 +327,26 @@
     },
     {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/backlog-handoff.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/charter-and-seed.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/record-intake.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/recovery.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/retirement.md",
       "audience": "agent-runtime"
     },
     {

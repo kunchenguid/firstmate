@@ -1851,7 +1851,7 @@ families_for_changed_path() {
       # The layers bin/fm-lavish-url.sh injects into every snapshot.
       printf '%s\n' "__script__:fm-lavish-url.test.sh"
       ;;
-    .agents/skills/*/SKILL.md)
+    .agents/skills/*/SKILL.md|.agents/skills/*/references/*)
       printf '%s\n' pure-contract-unit
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)

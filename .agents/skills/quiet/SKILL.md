@@ -21,7 +21,7 @@ For captain-held rechecks under quiet, see [architecture](../../../docs/architec
 ## What it does
 
 0. **First check whether quiet mode needs anything here.**
-   On Pi or pi-signed, enter nothing: the attended branch already keeps routine wakes out of this conversation (the `afk` skill's step 2); tell the captain so.
+   On Pi or pi-signed, enter nothing: the attended branch already keeps routine wakes out of this conversation (step 2 of the `afk` skill's `references/entering.md`); tell the captain so.
    Everywhere else run `bin/fm-afk-launch.sh quiet-check`; its header's QUIET MODE owns what each result means.
    - Exit 0: enter nothing - no record, no flag, no daemon, and `/quiet off` then needs nothing either.
      Tell the captain in `AGENTS.md` section 9 language that supervision here already works that way: routine fleet events stay off this conversation, while decisions, failures, credentials, and review-ready work still reach them.
@@ -54,7 +54,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 - Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
   mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
-  unchanged, exactly the procedure `/afk`'s "How to exit afk" section
+  unchanged, exactly the procedure the `afk` skill's `references/return.md`
   documents for its own return path (correct-ordered daemon shutdown,
   durable wake presentation and acknowledgement, escalation/wedge evidence,
   and the return-catch-up gate).
