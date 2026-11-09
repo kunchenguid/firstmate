@@ -42,12 +42,12 @@
 FM_NATIVE_GRANT_MAX_BYTES=4096
 FM_NATIVE_GRANT_MAX_AGE=43200
 
-fm_native_grant_fingerprint() {  # <file>
+fm_native_grant_fingerprint() {  # reads the grant bytes on stdin
   local sum
   if command -v sha256sum >/dev/null 2>&1; then
-    sum=$(sha256sum < "$1") || return 1
+    sum=$(sha256sum) || return 1
   elif command -v shasum >/dev/null 2>&1; then
-    sum=$(shasum -a 256 < "$1") || return 1
+    sum=$(shasum -a 256) || return 1
   else
     return 1
   fi
@@ -61,7 +61,7 @@ fm_native_grant_fingerprint() {  # <file>
 
 fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
   local file=$1 id=$2 harness=$3 pane=$4 ledger=$5
-  local size keys fields now g_task g_pane g_agent g_session g_written
+  local snap size keys fields now g_task g_pane g_agent g_session g_written
   FM_NATIVE_GRANT_ERROR=
   FM_NATIVE_GRANT_FINGERPRINT=
   FM_NATIVE_GRANT_SESSION=
@@ -77,13 +77,17 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
     FM_NATIVE_GRANT_ERROR="grant '$file' is not named $id.json"
     return 1
   fi
-  size=$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || size=
-  case "$size" in
-    '' | *[!0-9]*)
+  # One bounded read; every check and the fingerprint use these same bytes,
+  # so a file replaced mid-check cannot change what is spent.
+  snap=$(head -c $((FM_NATIVE_GRANT_MAX_BYTES + 1)) < "$file" 2>/dev/null; printf x) || snap=
+  case "$snap" in
+    *x) snap=${snap%x} ;;
+    *)
       FM_NATIVE_GRANT_ERROR="grant '$file' cannot be read"
       return 1
       ;;
   esac
+  size=$(printf '%s' "$snap" | wc -c | tr -d '[:space:]')
   if [ "$size" -eq 0 ] || [ "$size" -gt "$FM_NATIVE_GRANT_MAX_BYTES" ]; then
     FM_NATIVE_GRANT_ERROR="grant '$file' is empty or larger than $FM_NATIVE_GRANT_MAX_BYTES bytes"
     return 1
@@ -95,7 +99,7 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
   # Exactly one JSON value, and it is a flat object.
   if ! jq -se 'length == 1 and (.[0] | type == "object")
       and ([.[0][] | type] | all(. != "object" and . != "array"))' \
-      < "$file" >/dev/null 2>&1; then
+      <<<"$snap" >/dev/null 2>&1; then
     FM_NATIVE_GRANT_ERROR="grant '$file' is not exactly one flat JSON object"
     return 1
   fi
@@ -103,7 +107,7 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
   # repeated key (which a plain parse silently collapses to its last value) is
   # counted twice and no key text is ever word-split or globbed.
   keys=$(jq -nc --stream 'inputs | select(length == 2 and (.[0] | length) == 1) | .[0][0]' \
-    < "$file" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ') || keys=
+    <<<"$snap" 2>/dev/null | LC_ALL=C sort | tr '\n' ' ') || keys=
   if [ "$keys" != '"agent" "pane" "session" "task" "written" ' ]; then
     FM_NATIVE_GRANT_ERROR="grant '$file' must carry exactly the keys task, pane, agent, session and written, each once"
     return 1
@@ -114,7 +118,7 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
         and (.written | type) == "number" and .written == (.written | floor)
         and ([.task, .pane, .agent, .session] | all(test("^[^\t\n]+$")))
       then [.task, .pane, .agent, .session, (.written | tostring)] | join("\t")
-      else empty end' < "$file" 2>/dev/null) || fields=
+      else empty end' <<<"$snap" 2>/dev/null) || fields=
   if [ -z "$fields" ]; then
     FM_NATIVE_GRANT_ERROR="grant '$file' has a field of the wrong type"
     return 1
@@ -150,7 +154,7 @@ EOF
     FM_NATIVE_GRANT_ERROR="grant was written outside the last $FM_NATIVE_GRANT_MAX_AGE seconds"
     return 1
   fi
-  FM_NATIVE_GRANT_FINGERPRINT=$(fm_native_grant_fingerprint "$file") || {
+  FM_NATIVE_GRANT_FINGERPRINT=$(printf '%s' "$snap" | fm_native_grant_fingerprint) || {
     FM_NATIVE_GRANT_FINGERPRINT=
     FM_NATIVE_GRANT_ERROR="grant '$file' cannot be fingerprinted"
     return 1
