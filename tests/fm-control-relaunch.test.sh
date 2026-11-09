@@ -3302,10 +3302,19 @@ test_native_grant_keeps_the_recorded_account() {
 
 test_native_grant_spends_the_bytes_it_checked() {
   local dir out rc=0 grant orig_sum
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant snapshot test needs jq"
+    return 0
+  fi
   dir="$TMP_ROOT/grant-snapshot"
   mkdir -p "$dir"
   grant=$(write_grant "$dir" ng7)
-  orig_sum=$(sha256sum < "$grant"); orig_sum=${orig_sum%% *}
+  if command -v sha256sum >/dev/null 2>&1; then
+    orig_sum=$(sha256sum < "$grant")
+  else
+    orig_sum=$(shasum -a 256 < "$grant")
+  fi
+  orig_sum=${orig_sum%% *}
   # The producer replaces the file the moment the check first parses it.
   (
     # shellcheck source=/dev/null
@@ -3325,6 +3334,26 @@ test_native_grant_spends_the_bytes_it_checked() {
     [ "$FM_NATIVE_GRANT_FINGERPRINT" = "$orig_sum" ] || exit 4
   ) || rc=$?
   [ "$rc" -eq 0 ] || fail "grant check must fingerprint the bytes it validated (rc=$rc)"
+}
+
+test_native_grant_refuses_nul_padding() {
+  local dir rc=0 grant
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant NUL test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-nul"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng8)
+  head -c 5000 /dev/zero >> "$grant"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    if fm_native_grant_check "$grant" ng8 claude %7 "$dir/ledger"; then exit 3; fi
+    [ ! -s "$dir/ledger" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "NUL-padded grant must be refused and not spent (rc=$rc)"
+  pass "grant with NUL padding past the size limit is refused and not spent"
 }
 
 test_native_grant_refuses_a_pane_that_did_not_survive() {
@@ -3497,4 +3526,5 @@ test_native_grant_refuses_malformed_expired_and_mismatched_grants
 test_native_grant_is_required_to_bypass_the_dispatchability_gate
 test_native_grant_keeps_the_recorded_account
 test_native_grant_spends_the_bytes_it_checked
+test_native_grant_refuses_nul_padding
 test_native_grant_refuses_a_pane_that_did_not_survive

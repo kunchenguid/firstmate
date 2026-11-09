@@ -79,11 +79,17 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
   fi
   # One bounded read; every check and the fingerprint use these same bytes,
   # so a file replaced mid-check cannot change what is spent.
-  snap=$(head -c $((FM_NATIVE_GRANT_MAX_BYTES + 1)) < "$file" 2>/dev/null; printf x) || snap=
+  snap=$(head -c $((FM_NATIVE_GRANT_MAX_BYTES + 1)) < "$file" 2>/dev/null | LC_ALL=C tr '\000' '\001'; printf x) || snap=
   case "$snap" in
     *x) snap=${snap%x} ;;
     *)
       FM_NATIVE_GRANT_ERROR="grant '$file' cannot be read"
+      return 1
+      ;;
+  esac
+  case "$snap" in
+    *$'\001'*)
+      FM_NATIVE_GRANT_ERROR="grant '$file' contains a NUL or control byte"
       return 1
       ;;
   esac
