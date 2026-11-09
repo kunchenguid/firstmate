@@ -200,6 +200,7 @@ The worktree and the task's records are unaffected either way.
   For a ship or scout it also refuses, by name, a recorded worktree that is the home, the code root, or a repository's primary checkout (its git dir equals its git common dir), so a worker only ever comes back in its own task worktree.
   This check lives only in the launch owner, so on the `relaunch` verb it fires after the old agent has stopped and the transaction ends as a failed launch.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path (Herdr, whose shell may not be ready for it, gets one resend if the path has not moved after about 10 seconds), then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
+- `fm-spawn --relaunch --native-grant <file>` is granted recovery of an already stopped Herdr ship or scout: it keeps every check above and bypasses only the backlog dispatchability gate, without changing the backlog item, when a strict one-use native grant matches the task record (`bin/fm-spawn.sh` header and `bin/fm-native-grant-lib.sh` own the contract).
 
 ## Capability matrix
 

@@ -65,6 +65,7 @@
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
+#        fm-spawn.sh <task-id> --relaunch --native-grant <file>
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -95,6 +96,23 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
+#   --native-grant <file> is granted recovery of an already stopped ship or
+#   scout after a host restart. It is accepted only with --relaunch and refuses
+#   --harness, --model, --effort, --account, --hermes-profile and
+#   --dispatch-override, because recovery relaunches exactly the recorded
+#   harness, model, effort and account. Every relaunch check above still runs
+#   under the same task and metadata locks, and on top of them it requires a
+#   herdr task whose recorded pane classified `dead` (an adoptable pane, never a
+#   rebind or a live, unknown or unreadable agent) and a grant that passes
+#   bin/fm-native-grant-lib.sh's strict contract against this task's record. A
+#   checked grant is recorded as spent before launch, so one grant licenses one
+#   attempt. It bypasses exactly one thing: the backlog dispatchability gate,
+#   so a held or blocked Queued or In flight item may be recovered. The item
+#   must still exist, read cleanly and be open work (a Done or unknown item
+#   still refuses), and no backlog transition runs, so holds and rows stay
+#   exactly as they were. The grant file itself is left for
+#   its consumer, the native launch dispatcher. Without the flag nothing about
+#   relaunch changes and the gate applies as before.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -1015,6 +1033,9 @@ TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
 RELAUNCH=0
+NATIVE_GRANT=
+NATIVE_GRANT_SET=0
+NATIVE_GRANT_VALID=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -1077,6 +1098,10 @@ for a in "$@"; do
     account)
       ACCOUNT_ARG=$a
       ACCOUNT_SET=1
+      ;;
+    native-grant)
+      NATIVE_GRANT=$a
+      NATIVE_GRANT_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -1156,6 +1181,11 @@ for a in "$@"; do
     ACCOUNT_ARG=${a#--account=}
     ACCOUNT_SET=1
     ;;
+  --native-grant) want_value=native-grant ;;
+  --native-grant=*)
+    NATIVE_GRANT=${a#--native-grant=}
+    NATIVE_GRANT_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -1207,6 +1237,22 @@ fi
   echo "error: --account requires a non-empty value" >&2
   exit 1
 }
+# Granted recovery relaunches the recorded profile and nothing else (header).
+if [ "$NATIVE_GRANT_SET" -eq 1 ]; then
+  [ -n "$NATIVE_GRANT" ] || {
+    echo "error: --native-grant requires a non-empty value" >&2
+    exit 1
+  }
+  [ "$RELAUNCH" -eq 1 ] || {
+    echo "error: --native-grant applies only to --relaunch of an existing stopped task" >&2
+    exit 1
+  }
+  if [ "$HARNESS_SET" -eq 1 ] || [ "$MODEL_SET" -eq 1 ] || [ "$EFFORT_SET" -eq 1 ] \
+    || [ "$ACCOUNT_SET" -eq 1 ] || [ "$HERMES_PROFILE_SET" -eq 1 ] || [ -n "$DISPATCH_OVERRIDE" ]; then
+    echo "error: --native-grant relaunches the task's recorded profile; --harness, --model, --effort, --account, --hermes-profile and --dispatch-override cannot accompany it" >&2
+    exit 1
+  fi
+fi
 # A secondmate, local or remote, launches on its own per-mate pin, so --account
 # is refused here, before the remote route could ignore it.
 [ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
@@ -2647,6 +2693,48 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$NATIVE_GRANT_SET" -eq 1 ]; then
+    # Granted recovery (header): still under the task and metadata locks, and
+    # only after the endpoint classifier and absence proof above settled.
+    case "$KIND" in
+    ship | scout) ;;
+    *)
+      echo "error: --native-grant recovers a ship or scout; task $ID is a $KIND, which has no dispatchability gate to bypass" >&2
+      exit 1
+      ;;
+    esac
+    [ "$BACKEND" = herdr ] || {
+      echo "error: --native-grant recovers a herdr task whose pane the grant names; task $ID runs on $BACKEND" >&2
+      exit 1
+    }
+    [ "$RELAUNCH_REBIND" -eq 0 ] || {
+      echo "error: task $ID's recorded pane is gone, so a grant naming that pane cannot be honored; refusing granted recovery rather than rebinding" >&2
+      exit 1
+    }
+    # shellcheck source=bin/fm-native-grant-lib.sh
+    . "$SCRIPT_DIR/fm-native-grant-lib.sh"
+    NATIVE_GRANT_LEDGER="$STATE/$ID.native-grant-spent"
+    fm_native_grant_check "$NATIVE_GRANT" "$ID" "$RELAUNCH_PRIOR_HARNESS" "$HERDR_PANE_ID" "$NATIVE_GRANT_LEDGER" || {
+      echo "error: native grant refused for task $ID: $FM_NATIVE_GRANT_ERROR" >&2
+      exit 1
+    }
+    MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+    [ "$MODEL" != default ] || MODEL=
+    EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+    [ "$EFFORT" != default ] || EFFORT=
+    case "$EFFORT" in
+    '' | low | medium | high | xhigh | max | ultra) ;;
+    *)
+      echo "error: task $ID records effort '$EFFORT', which is not a launchable effort; refusing granted recovery" >&2
+      exit 1
+      ;;
+    esac
+    fm_native_grant_spend "$NATIVE_GRANT_LEDGER" || {
+      echo "error: native grant refused for task $ID: $FM_NATIVE_GRANT_ERROR" >&2
+      exit 1
+    }
+    NATIVE_GRANT_VALID=1
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
@@ -4920,6 +5008,19 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
     fi
+  elif [ "$NATIVE_GRANT_VALID" -eq 1 ]; then
+    # Granted recovery bypasses only the hold and dependency gate on open work,
+    # and changes no row (header). A closed or unknown item stays refused.
+    case "$BACKLOG_ROW_STATE" in
+    queued\ * | in_flight\ *) ;;
+    *)
+      echo "error: this home's backlog item $ID is in state $BACKLOG_ROW_STATE, which is not open work a native grant may recover; refusing" >&2
+      exit 1
+      ;;
+    esac
+    BACKLOG_TRANSITION=0
+    fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE" \
+      || echo "notice: recovering task $ID under its native grant; backlog item stays in state $BACKLOG_ROW_STATE" >&2
   elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
