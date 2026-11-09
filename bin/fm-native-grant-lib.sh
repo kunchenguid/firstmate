@@ -122,7 +122,7 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
       if (.task | type) == "string" and (.pane | type) == "string"
         and (.agent | type) == "string" and (.session | type) == "string"
         and (.written | type) == "number" and .written == (.written | floor)
-        and ([.task, .pane, .agent, .session] | all(test("^[^\t\n]+$")))
+        and ([.task, .pane, .agent, .session] | all(test("^[^\t\n]+$") and (contains("\u0000") | not)))
       then [.task, .pane, .agent, .session, (.written | tostring)] | join("\t")
       else empty end' <<<"$snap" 2>/dev/null) || fields=
   if [ -z "$fields" ]; then

@@ -5037,6 +5037,10 @@ else
     echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+  if [ "$NATIVE_GRANT_VALID" -eq 1 ]; then
+    echo "error: a native grant recovers only an open item in a machine-readable backlog, and task $ID has none to read here (${FM_BACKLOG_TRANSITION_SKIP:-backlog transitions do not apply}); refusing" >&2
+    exit 1
+  fi
 fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then

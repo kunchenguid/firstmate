@@ -3264,6 +3264,42 @@ test_native_grant_is_required_to_bypass_the_dispatchability_gate() {
   pass "granted recovery: without a grant the gate stays, and a grant cannot change the profile, start new work, or reopen a Done item"
 }
 
+test_native_grant_refuses_a_home_without_a_readable_backlog() {
+  local dir out rc grant
+  grant_case_or_skip grant-manual ng9 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  grant=$(write_grant "$dir" ng9)
+  out=$(run_spawn "$dir" ng9 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover a task in a manual-backlog home"$'\n'"$out"
+  assert_contains "$out" "machine-readable backlog" "the refusal should name the missing backlog"
+  assert_absent "$dir/fake/launched-command" "a refused recovery must launch nothing"
+  pass "granted recovery: a home with no machine-readable backlog refuses rather than launching unchecked"
+}
+
+test_native_grant_refuses_a_decoded_nul_in_an_identity_field() {
+  local dir rc=0 grant
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant NUL test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-decoded-nul"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng10 \
+    "$(printf '{"task":"ng10","pane":"%%7","agent":"cla\\u0000ude","session":"%s","written":%s}' "$GRANT_SESSION" "$(date +%s)")")
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    if fm_native_grant_check "$grant" ng10 claude %7 "$dir/ledger"; then exit 3; fi
+    [ ! -s "$dir/ledger" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a grant whose agent decodes to contain NUL must be refused (rc=$rc)"
+  pass "grant with a decoded NUL in an identity field is refused"
+}
+
 test_native_grant_keeps_the_recorded_account() {
   local dir out rc=0 grant
   grant_case_or_skip grant-acct ng6 || {
@@ -3525,6 +3561,8 @@ test_native_grant_refuses_a_live_agent
 test_native_grant_refuses_malformed_expired_and_mismatched_grants
 test_native_grant_is_required_to_bypass_the_dispatchability_gate
 test_native_grant_keeps_the_recorded_account
+test_native_grant_refuses_a_home_without_a_readable_backlog
+test_native_grant_refuses_a_decoded_nul_in_an_identity_field
 test_native_grant_spends_the_bytes_it_checked
 test_native_grant_refuses_nul_padding
 test_native_grant_refuses_a_pane_that_did_not_survive
