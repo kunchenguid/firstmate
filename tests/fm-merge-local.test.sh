@@ -324,8 +324,20 @@ test_stale_worker_copy_at_base_tip_does_not_latch() {
   pass 'a done at the base tip refuses without latching, and a later real head latches and lands'
 }
 
+test_unresolvable_base_does_not_block_reachable_done() {
+  make_case unavailable-base
+  printf 'base_branch=does-not-exist\n' >> "$META"
+  git -C "$WT" reset -q --hard "$X"
+  git -C "$PROJ" merge-base --is-ancestor "$X" refs/heads/fm/local-task \
+    || fail 'the worker head was not reachable outside the worktree'
+  record_done || fail 'an unresolvable base blocked a reachable done'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'the reachable head was not latched'
+  pass 'an unresolvable base does not block a reachable done head from latching'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
-  test_stale_worker_copy_at_base_tip_does_not_latch
+  test_stale_worker_copy_at_base_tip_does_not_latch \
+  test_unresolvable_base_does_not_block_reachable_done
