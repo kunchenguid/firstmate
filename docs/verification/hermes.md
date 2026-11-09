@@ -28,10 +28,13 @@ bash bin/fm-test-run.sh tests/fm-hermes-profile-safety-live-e2e.test.sh
 
 bash bin/fm-test-run.sh tests/fm-hermes-harness.test.sh tests/fm-tmux-agent-liveness.test.sh
 FM_TEST_STOCK_BASH=1 bash tests/fm-backend.test.sh
+FM_TEST_STOCK_BASH=1 bash tests/fm-hermes-harness.test.sh
 ```
 
 `FM_HERMES_PYTHON` must name the interpreter from the installed Hermes environment, so the native profile-safety guard imports that version's own APIs rather than substituting Firstmate implementations.
 When the bare runtime interpreter cannot import the gateway modules, point `FM_HERMES_PYTHON` at a small wrapper that runs it through Hermes's own `hermes_bootstrap`.
+The stock-Bash harness run executes only the empty-argument-list regressions: process identity with no readable argv, the default profile lookup, and the busy hook's idle-only flag.
+CI runs it under real `/bin/bash` 3.2, where an empty array expanded under `set -u` is otherwise unbound.
 An unavailable required tool is reported by the shared `fm_live_gate`; explicit opt-in refuses missing capabilities.
 
 ## Live worker observations
