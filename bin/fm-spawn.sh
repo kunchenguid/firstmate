@@ -7893,8 +7893,9 @@ if [ "$BACKEND" = t3code ]; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
   fi
   if [ "$KIND" = secondmate ]; then
-    # The secondmate launch prefix above, value for value, plus the supervisor
-    # identity its own away daemon cannot discover from inside a T3 thread.
+    # Unlike the pane launch prefix above, T3's config keeps the five
+    # operational overrides set-but-empty. Add the supervisor identity its own
+    # away daemon cannot discover from inside a T3 thread.
     T3CODE_ENV+=(FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \
       "FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$FM_HOME" "FM_HOME=$PROJ_ABS" "FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE" \
       "FM_SUPERVISION_MODEL=$supervision_model" FM_SUPERVISOR_BACKEND=t3code "FM_SUPERVISOR_TARGET=$T")
