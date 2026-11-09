@@ -1612,9 +1612,9 @@ STATUS_JSON=$(lab status --json)
 HERDR_VERSION=$(printf '%s' "$STATUS_JSON" | jq -r '.client.version // "unknown"')
 PATH="$HERDR_ORIGINAL_PATH" \
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" \
-  || fail "guarded Herdr lab teardown or default-session tripwire verification failed"
+  || fail "guarded Herdr lab teardown or fleet-session tripwire verification failed"
 LAB_READY=0
-pass "real Herdr lab validation completed on Herdr $HERDR_VERSION with the default-session tripwire intact"
+pass "real Herdr lab validation completed on Herdr $HERDR_VERSION with the fleet-session tripwire intact"
 
 cleanup_all
 trap - EXIT

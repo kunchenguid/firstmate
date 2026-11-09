@@ -26,6 +26,8 @@ trap 'if [ "${#HOLDER_PIDS[@]}" -gt 0 ]; then kill "${HOLDER_PIDS[@]}" 2>/dev/nu
 
 GUARD="$ROOT/bin/fm-remote-herdr-guard.sh"
 JQ=$(command -v jq)
+HOLDER_JQ=$(fm_test_nonplatform_binary "$JQ" "$TMP_ROOT") ||
+  fail "cannot build a non-platform jq holder on this host"
 SESSION=fm-remote
 
 # The guard must see only the fixture and the system tools it really needs,
@@ -107,7 +109,7 @@ hold() {
   # Open read-write so this never blocks on the reader; the holder sees EOF
   # only when the descriptor closes at exit.
   eval "exec ${HOLDER_FD}<>\"\$fifo\""
-  env -i "$@" "$JQ" . "$fifo" &
+  env -i "$@" "$HOLDER_JQ" . "$fifo" &
   HOLDER_PID=$!
   HOLDER_PIDS+=("$HOLDER_PID")
   HOLDER_FD=$((HOLDER_FD + 1))
@@ -121,7 +123,7 @@ hold_under() {
   rm -f "$fifo" "$pidfile"
   mkfifo "$fifo"
   eval "exec ${HOLDER_FD}<>\"\$fifo\""
-  ( export FM_HOLDER_JQ="$JQ" FM_HOLDER_FIFO="$fifo" FM_HOLDER_PIDFILE="$pidfile"
+  ( export FM_HOLDER_JQ="$HOLDER_JQ" FM_HOLDER_FIFO="$fifo" FM_HOLDER_PIDFILE="$pidfile"
     exec -a "$argv0" bash -c 'env -i FM_HOLDER=1 "$FM_HOLDER_JQ" . "$FM_HOLDER_FIFO" & printf "%s\n" "$!" > "$FM_HOLDER_PIDFILE"; wait' "$@" ) &
   HOLDER_PIDS+=("$!")
   HOLDER_FD=$((HOLDER_FD + 1))
@@ -160,7 +162,7 @@ guard() { # [extra env assignments...]
     env -i PATH="$CASE_PATH" HOME="$TMP_ROOT" \
       FM_FAKE_STATE="$CASE_STATE" FM_FAKE_HERDR_LOG="$CASE_LOG" FM_FAKE_HERDR_RUNNING="$CASE_RUNNING" \
       FM_FAKE_SOCKET_OWNER="$CASE_OWNER" FM_FAKE_HERDR_SOCKET="$CASE_SOCKET" \
-      FM_HOLDER_JQ="$JQ" \
+      FM_HOLDER_JQ="$HOLDER_JQ" \
       FM_REMOTE_HERDR_GUARD_STOP_WAIT_TENTHS=8 \
       "$@" "$GUARD" "$FAKE/herdr" "$SESSION" 2>&1
   )
@@ -194,7 +196,7 @@ sleep 0.2
 probe_env=$(fm_remote_herdr_process_env "$PROBE_PID")
 case "$probe_env" in
   *FM_PROBE_MARKER=1*) ;;
-  *) fail "this host does not expose a holder's environment (macOS hides platform-binary environments; jq at $JQ must be a non-platform binary): $probe_env" ;;
+  *) fail "this host does not expose a holder's environment (macOS hides platform-binary environments; the jq holder at $HOLDER_JQ must be a non-platform binary): $probe_env" ;;
 esac
 pass "holder processes expose their environment to the owner library"
 

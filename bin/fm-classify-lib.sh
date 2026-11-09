@@ -466,6 +466,30 @@ _fm_status_at_epoch() {  # <status-line> <out-var> -> 0 and the epoch when known
   printf -v "$2" '%s' "$__fm_at_value"
 }
 
+# --- optional captain-hold deferral date --------------------------------------
+# A relayed captain hold (bin/fm-captain-hold.sh `hold --until`) may carry
+# "[until=YYYY-MM-DD]" before the first colon, beside its key and time tags:
+#   needs-decision [key=captain-hold-api-1] [until=2026-12-01] [at=1788576000]: ...
+# The head is located on the unstamped copy, exactly as the key reader does, so
+# a worker stamp cannot move it. Returns 0 and the date when exactly one
+# well-formed field is present, 1 when none is, and 2 when one is malformed or
+# repeated. Only this bracketed field is read; note prose never supplies a date.
+_fm_status_until_date() {  # <status-line> <out-var> -> 0 date, 1 absent, 2 malformed
+  local __fm_until_head __fm_until_rest __fm_until_value
+  printf -v "$2" '%s' ''
+  _fm_status_unstamped "$1" __fm_until_head
+  case "$__fm_until_head" in *:*) __fm_until_head=${__fm_until_head%%:*} ;; *) return 1 ;; esac
+  case "$__fm_until_head" in *\[until=*) ;; *) return 1 ;; esac
+  __fm_until_rest=${__fm_until_head#*\[until=}
+  case "$__fm_until_rest" in *\]*) ;; *) return 2 ;; esac
+  __fm_until_value=${__fm_until_rest%%\]*}
+  case "${__fm_until_rest#*\]}" in *\[until=*) return 2 ;; esac
+  case "$__fm_until_value" in
+    [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) printf -v "$2" '%s' "$__fm_until_value" ;;
+    *) return 2 ;;
+  esac
+}
+
 status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
   local epoch
   _fm_status_at_epoch "$1" epoch || return 1
@@ -871,7 +895,7 @@ _fm_status_kind() {
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind> [timed]
   local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key route_key note unstamped
-  local timed=${6:-} epoch
+  local timed=${6:-} epoch until old_key old_verb old_epoch old_note
   # Both colon tests below ask where the head ends, the same question the note
   # and key readers ask, so they read the same unstamped copy those readers do.
   # A worker-written time tag must never decide whether a decision opens or
@@ -921,13 +945,30 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *)
       note=$(status_line_note "$line")
       if [ "$timed" = timed ]; then
-        # The timed view adds an emission-time column, without changing any
-        # open/closed rule. Keyless or unstamped events have unknown age.
+        # The timed view adds emission-time and deferral-date columns, without
+        # changing any open/closed rule. Keyless or unstamped events have
+        # unknown age. A republish of a still-open key with the same verb and
+        # note keeps the open row's earlier time, so its age and reminder
+        # schedule survive; a resolution has already dropped the key, so a
+        # reopen takes its own time. The deferral column always comes from the
+        # newest line; it is `-` when absent and `?` when malformed, never
+        # empty, so a TAB-split read cannot collapse it.
         epoch=unknown
         if [ -n "$(_fm_decision_key "$line" '')" ]; then
           _fm_status_at_epoch "$line" epoch || epoch=unknown
         fi
-        note="$epoch"$'\t'"$note"
+        _fm_status_until_date "$line" until || case $? in 1) until=- ;; *) until='?' ;; esac
+        while IFS=$'\t' read -r old_key old_verb old_epoch _ old_note; do
+          [ "$old_key" = "$key" ] || continue
+          case "$old_epoch" in
+            ''|unknown|*[!0-9]*) ;;
+            *) [ "$old_verb" = "$verb" ] && [ "$old_note" = "$note" ] && epoch=$old_epoch ;;
+          esac
+          break
+        done <<EOF
+$open
+EOF
+        note="$epoch"$'\t'"$until"$'\t'"$note"
       fi
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
@@ -1219,7 +1260,7 @@ EOF
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
 # kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
-# The optional timed view uses a separate `.timed` cursor and adds `:timed`
+# The optional timed view uses a separate `.timed` cursor and adds `:timed3`
 # to the version; status_open_decisions_incremental owns its row format.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
@@ -1390,8 +1431,10 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
   cf=$(_fm_open_decisions_cursor_path "$f")
   # A separate cursor keeps the ordinary presentation view byte-compatible.
-  # Timed rows are <key> TAB <verb> TAB <epoch-or-unknown> TAB <note>.
-  if [ "$timed" = timed ]; then cf="$cf.timed"; fold_version="$fold_version:timed"; fi
+  # Timed rows are <key> TAB <verb> TAB <epoch-or-unknown> TAB
+  # <until-date, `-` absent, `?` malformed> TAB <note>. The suffix number
+  # retires timed cursors persisted under an older row format or epoch rule.
+  if [ "$timed" = timed ]; then cf="$cf.timed"; fold_version="$fold_version:timed3"; fi
   offset=0
   ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
@@ -2794,10 +2837,9 @@ FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 # heartbeat instead of escalating. Hitting the bound is a negative outcome like
 # every other: it reads as no evidence, so the caller's escalation schedule is
 # untouched and a stall that writes nothing still escalates on the existing
-# schedule. A value that is not a positive integer is not a bound at all (`timeout
-# 0` and the perl fallback's `alarm 0` both disable the deadline), so the default
-# applies instead; the check lives at the point of use so an in-process override
-# gets it too.
+# schedule. The shared runner's bound contract is owned by bin/fm-timeout-lib.sh.
+# Invalid values use the default; the check lives at the point of use so an
+# in-process override gets it too.
 FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 
 # 0 when some regular file under <id>'s recorded worktree is newer than
