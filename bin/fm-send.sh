@@ -158,9 +158,11 @@
 # remote leg's "steer_record=<path>" stdout report (that leg's cmd_send owns
 # emitting it). Reading the report is decoration only - the confirmation and its
 # exit 0 come from the leg's status alone, so a remote leg older than the report
-# still gets a delivered verdict without the named path. Every advisory a
-# successful send can still print is labelled "advisory (steer delivered):" so
-# none of them can be mistaken for a refusal that invites a resend.
+# still gets a delivered verdict without the named path. Trouble this plane
+# reports after a confirmed delivery is labelled "advisory (steer delivered):"
+# and names that same record, and the remote leg's own notice lines lead with the
+# durable record, so no line of a delivered send can be mistaken for a refusal
+# that invites a resend.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
