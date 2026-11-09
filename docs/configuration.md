@@ -2390,7 +2390,7 @@ The provider delta is required only for registered origins discovered under `pro
 GitHub projects add `gh`, GitHub authentication, and compatible `gh-axi`.
 GitLab projects add `glab` and GitLab authentication.
 Projects with `forge=gerrit` add `gerrit-axi` and `jq`.
-Projects with `forge=forgejo` add `tea`.
+Projects with `forge=forgejo` add `tea` and a host login configured with `tea login add`.
 Projects with `forge=external` add no forge CLI.
 Local-only homes need neither forge delta.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI and the Rex server bundle's `rex`.
@@ -2471,8 +2471,7 @@ A remote-backed project on a Forgejo or Gitea server is registered with `forge=f
 Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
-A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
-A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
+Provider-specific CLI and authentication requirements are owned by the [Toolchain](#toolchain) section above.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.

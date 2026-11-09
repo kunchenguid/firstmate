@@ -144,7 +144,7 @@ The `forge=` binding is a confirmed project fact proposed at project-add intake 
 For projects without an explicit supported binding, bootstrap's provider boundary classifies origin hosts against the configured GitHub and GitLab lists to select required CLIs and authentication checks, and to fail closed on unknown hosts.
 This classification is operational bootstrap policy, not a new registry binding: it does not alter the delivery-mode decision or write `data/projects.md`.
 
-The binding remains the pre-publication signal needed by Gerrit, while GitHub and GitLab can derive their provider after a pull request or merge request URL exists.
+The binding remains the pre-publication signal needed by Gerrit, while GitHub and GitLab delivery records can derive their provider after a pull request or merge request URL exists.
 The registry fact therefore remains the authority for delivery semantics, and the bootstrap classifier supplies only the provider prerequisites needed before dispatch.
 #### Could the tool declare its own semantics instead?
 
