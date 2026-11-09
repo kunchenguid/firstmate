@@ -1221,7 +1221,7 @@ With the file present, the Claude Stop hook `bin/fm-stow-guard.sh` blocks one tu
 It asks when the newest context reading in the transcript tail is at least `tokens` (default 300000), once per crossing, and again only after a later reading falls below two-thirds of that line.
 It also asks when the newest `/stow` it has seen is at least `hours` old (default 24), and then not again for an hour.
 That age ask is skipped when a `/stow` timestamp cannot be read.
-A continuation of a turn that already blocked is not blocked again.
+The stored state is what makes each ask once per crossing, so a continuation stop is handled like any other stop.
 A hook error does not block the turn, and the hook never compacts the session itself.
 It runs for a plain Claude primary checkout of this home.
 It stays silent in a crew worktree and in a marked secondmate home, because a Stop block there leaves the parent recording that mate as idle while it is still working.

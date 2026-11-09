@@ -19,10 +19,10 @@
 # two-thirds of that line. The age ask fires when the newest seen /stow is
 # older than the hour line, and then not again for an hour. It is skipped when
 # a /stow timestamp cannot be read, including when python3 is missing, so a
-# just-completed /stow is not asked for again from a stale clock. A continuation
-# stop (stop_hook_active / stopHookActive) still records a /stow and still
-# re-arms, and it does not block. The first opt-in stop with no /stow in the
-# tail starts the age clock instead of asking.
+# just-completed /stow is not asked for again from a stale clock. The stored
+# state is what makes each ask once per crossing, so a continuation stop
+# (stop_hook_active / stopHookActive) is handled like any other stop. The first
+# opt-in stop with no /stow in the tail starts the age clock instead of asking.
 #
 # Context size is the same sum warm-cache compaction uses: input + cache_read
 # + cache_creation on the newest usage object in the last 2MB of the transcript.
@@ -82,12 +82,6 @@ fi
 
 cursor=$(jq -r '.cursor_version // .cursorVersion // empty' <<<"$payload" 2>/dev/null || true)
 [ -z "$cursor" ] || exit 0
-
-stop_active=$(jq -r 'if .stop_hook_active == true or .stopHookActive == true then "1" else "0" end' <<<"$payload" 2>/dev/null || echo 0)
-case "$stop_active" in
-  1) ;;
-  *) stop_active=0 ;;
-esac
 
 sid=$(jq -r '.session_id // .sessionId // empty' <<<"$payload" 2>/dev/null || true)
 [ -n "$sid" ] || sid=session
@@ -215,16 +209,14 @@ if [ -n "$seen_stow" ]; then
 fi
 
 reason=
-if [ "$stop_active" -eq 0 ]; then
-  has_fired=$(jq -r --arg sid "$sid" 'if .[$sid] == true then "1" else "0" end' <<<"$fired") || exit 0
-  if [ "$tokens" -ge "$threshold" ] && [ "$has_fired" -eq 0 ]; then
-    reason="fm-stow-guard: context is ${tokens} tokens, near auto-compaction. Run the /stow skill now (full pass), then continue the turn you were in."
-    fired=$(jq -c --arg sid "$sid" '.[$sid] = true' <<<"$fired") || exit 0
-  elif [ "$saves_readable" -eq 1 ] && [ -z "$last_stow" ]; then
-    last_stow=$now
-  elif [ "$saves_readable" -eq 1 ] && [ $((now - last_stow)) -ge "$max_age" ] && [ $((now - asked)) -ge 3600 ]; then
-    reason="fm-stow-guard: the last /stow is older than ${hours}h. Run the /stow skill now (full pass), then continue the turn you were in."
-  fi
+has_fired=$(jq -r --arg sid "$sid" 'if .[$sid] == true then "1" else "0" end' <<<"$fired") || exit 0
+if [ "$tokens" -ge "$threshold" ] && [ "$has_fired" -eq 0 ]; then
+  reason="fm-stow-guard: context is ${tokens} tokens, near auto-compaction. Run the /stow skill now (full pass), then continue the turn you were in."
+  fired=$(jq -c --arg sid "$sid" '.[$sid] = true' <<<"$fired") || exit 0
+elif [ "$saves_readable" -eq 1 ] && [ -z "$last_stow" ]; then
+  last_stow=$now
+elif [ "$saves_readable" -eq 1 ] && [ $((now - last_stow)) -ge "$max_age" ] && [ $((now - asked)) -ge 3600 ]; then
+  reason="fm-stow-guard: the last /stow is older than ${hours}h. Run the /stow skill now (full pass), then continue the turn you were in."
 fi
 if [ -n "$reason" ]; then
   asked=$now

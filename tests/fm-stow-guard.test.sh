@@ -113,6 +113,23 @@ test_context_crossing_blocks_once_until_rearm() {
   pass "a context crossing blocks once, a continuation below two-thirds re-arms, and the next crossing blocks"
 }
 
+test_continuation_stop_blocks_once_per_crossing() {
+  local rc=0
+  prepare_case continuation
+  printf 'tokens=1000\n' > "$CASE_CONFIG/stow-guard"
+  write_usage 1200
+  payload true | invoke_guard "$PRIMARY" "$CASE_STATE" "$CASE_CONFIG" || rc=$?
+  [ "$rc" -eq 0 ] || fail "continuation crossing must exit 0, got $rc"
+  assert_block "continuation crossing" "context is 1200 tokens"
+
+  write_usage 1300
+  rc=0
+  payload true | invoke_guard "$PRIMARY" "$CASE_STATE" "$CASE_CONFIG" || rc=$?
+  [ "$rc" -eq 0 ] || fail "second continuation above the line must exit 0, got $rc"
+  assert_silent "second continuation above the line"
+  pass "a continuation stop at the token line blocks once and the next continuation above it does not"
+}
+
 test_age_interval_blocks_once_per_hour() {
   local rc=0 now=1700000000 later soon again
   prepare_case age
@@ -347,6 +364,7 @@ test_tracked_stop_hook_is_synchronous_and_grok_inert() {
 fm_test_run \
   test_absent_config_is_silent \
   test_context_crossing_blocks_once_until_rearm \
+  test_continuation_stop_blocks_once_per_crossing \
   test_age_interval_blocks_once_per_hour \
   test_recorded_stow_sets_the_age_clock \
   test_crew_worktree_is_silent \
