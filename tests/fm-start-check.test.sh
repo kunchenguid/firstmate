@@ -774,6 +774,27 @@ test_truncated_reply_log_relaunch_is_not_proof() {
   pass "a reply cursor from a truncated host log is not start proof for the relaunched replacement"
 }
 
+# Cursor has no busy generation; its conversation-bound transcript is launch proof.
+test_remote_cursor_transcript_is_start_proof() {
+  reset_state
+  local real
+  real=$(declare -f start_check_remote)
+  arm_remote c1 -
+  sed -i.bak -e 's/^harness=pi$/harness=cursor/' -e '/^remote_busy_gen=/d' "$STATE/c1.meta" && rm -f "$STATE/c1.meta.bak"
+  printf '1000 - cursor\n' > "$STATE/c1.start-pending"
+  remote_tick "$(remote_proof idle 'idle cursor-transcript' '' '')" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/c1.start-pending" ] || fail "a settled remote cursor launch's transcript did not count as proof"
+  [ "$(count_wakes)" = 0 ] || fail "a started remote cursor launch woke: $START_CHECK_WAKE"
+  reset_state
+  arm_remote c2 -
+  sed -i.bak -e 's/^harness=pi$/harness=cursor/' -e '/^remote_busy_gen=/d' "$STATE/c2.meta" && rm -f "$STATE/c2.meta.bak"
+  printf '1000 - cursor\n' > "$STATE/c2.start-pending"
+  remote_tick "$(remote_proof idle 'unknown cursor-transcript' '' '')" alive '' 0 || fail "tick failed"; eval "$real"
+  [ -n "$START_CHECK_WAKE" ] || fail "an unresolvable cursor transcript counted as proof"
+  [ "$(count_wakes)" = 1 ] || fail "expected one wake for an unproven remote cursor launch"
+  pass "a remote cursor launch's own transcript proves its start without a busy generation"
+}
+
 test_spent_route_budget_defers_remote_record() {
   reset_state
   local real saved_secs=$START_CHECK_ROUTE_SECS
@@ -915,6 +936,7 @@ fm_test_run \
   test_held_lock_defers_without_waiting \
   test_remote_secondmate_reads_route \
   test_truncated_reply_log_relaunch_is_not_proof \
+  test_remote_cursor_transcript_is_start_proof \
   test_spent_route_budget_defers_remote_record \
   test_spent_proof_budget_keeps_remote_cause \
   test_replaced_record_survives_tick \
