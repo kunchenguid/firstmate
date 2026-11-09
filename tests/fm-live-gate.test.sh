@@ -304,6 +304,21 @@ EOF
   pass "all $checked live guards refuse together on FM_LIVE=0"
 }
 
+# The model-pin readback guard keeps its comparator oracle inside the opt-in
+# live file, so the only way portable CI can pin that oracle is a harness-free
+# entry point: FM_MODEL_PIN_READBACK_SELFTEST=1 runs the comparator's case table
+# and exits before the live gate. Drive the real guard and assert the oracle
+# reports, the same way the gated-off sweep above drives every guard.
+test_model_pin_readback_guard_selftest_runs_without_a_live_vendor() {
+  local out rc=0
+  out=$(clean_env FM_MODEL_PIN_READBACK_SELFTEST=1 \
+    bash "$ROOT/tests/fm-model-pin-readback-live-e2e.test.sh" 2>&1) || rc=$?
+  expect_code 0 "$rc" \
+    "the readback guard's comparator selftest must run without live harnesses: $out"
+  assert_contains "$out" "ok - claude_pin_matches" \
+    "the selftest must report the comparator oracle it ran: $out"
+}
+
 test_default_on_runs_when_the_tool_is_installed
 pass "a default-on guard runs wherever its tools are installed"
 test_default_on_skips_and_names_the_absent_tool
@@ -329,3 +344,5 @@ pass "DISABLE_AUTOUPDATER rides fm-spawn's claude launch through to the harness 
 test_disable_autoupdater_survives_a_daemon_pane_that_never_inherited_it
 pass "DISABLE_AUTOUPDATER is embedded in the launch so a daemon-built pane keeps it"
 test_every_live_guard_is_wired_to_the_shared_gate
+test_model_pin_readback_guard_selftest_runs_without_a_live_vendor
+pass "the model-pin readback guard exposes a harness-free comparator selftest"
