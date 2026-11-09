@@ -22,7 +22,8 @@ fm_hermes_profile_home() {
   fi
   local args=()
   [ -z "$profile" ] || args=(-p "$profile")
-  config=$("$binary" "${args[@]}" config path) || return 1
+  # args is empty without a profile; bash 3.2 under set -u rejects a bare "${args[@]}".
+  config=$("$binary" "${args[@]+"${args[@]}"}" config path) || return 1
   case "$config" in
     /*/config.yaml) printf '%s' "${config%/config.yaml}" ;;
     *) echo 'error: hermes config path did not return an absolute config.yaml path' >&2; return 1 ;;

@@ -18,6 +18,62 @@ set -u
 . "$ROOT/bin/fm-agent-process-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-hermes-harness)
 unset HERMES_HOME HERMES_MANAGED_DIR
+
+# Stock macOS Bash 3.2 treats "${arr[@]}" on an empty array as an unbound
+# variable under set -u, so each case below drives an empty argument list through
+# a real caller. They run before the fixtures that need /proc so a macOS host
+# reaches them, and the stock-bash CI lane runs only these.
+test_process_identity_tolerates_empty_args() {
+  local out rc=0
+  # A pid with no readable /proc cmdline forces the empty argument fallback.
+  out=$(fm_hermes_process_matches '' 2147483646 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "empty args with an unreadable pid returned $rc: $out"
+  [ -z "$out" ] || fail "empty args with an unreadable pid wrote output: $out"
+  pass 'process identity treats empty args as not Hermes instead of aborting'
+}
+
+test_profile_home_tolerates_missing_profile() {
+  local dir out
+  dir=$(mktemp -d "$TMP_ROOT/profile-home.XXXXXX") || fail 'profile fixture'
+  cat > "$dir/hermes" <<'SH'
+#!/bin/sh
+[ "$*" = 'config path' ] || exit 1
+printf '%s/config.yaml\n' "$FM_TEST_HERMES_HOME"
+SH
+  chmod +x "$dir/hermes"
+  out=$(FM_TEST_HERMES_HOME="$dir/profile" fm_hermes_profile_home "$dir/hermes" '' 2>&1) \
+    || fail "profile home without a profile failed: $out"
+  [ "$out" = "$dir/profile" ] || fail "profile home without a profile printed: $out"
+  pass 'profile home resolves the default profile without an empty argument'
+}
+
+test_busy_hook_tolerates_empty_turn_ended_args() {
+  local dir state gen rc=0 out
+  dir=$(mktemp -d "$TMP_ROOT/busy-hook.XXXXXX") || fail 'hook fixture'
+  state="$dir/state"
+  mkdir -p "$state/worker.hermes-hooks"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" worker) || fail 'busy arm'
+  out=$(printf '{"session_id":"main","extra":{"platform":"tui","turn_id":"main"}}\n' \
+    | "$BASH" "$ROOT/bin/fm-hermes-hook.sh" "$state" worker "$gen" busy 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "busy hook returned $rc: $out"
+  [ "$(fm_busy_classify tmux test:w hermes worker "$state")" = 'busy hermes-hook' ] \
+    || fail 'busy hook did not record a native busy event'
+  pass 'busy hook applies the event without the idle-only turn-ended flag'
+}
+
+# CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the bash-3.2
+# empty-array regressions. The rest of this file is not a 3.2 snapshot suite.
+# Adding another stock-bash case means adding it to this list, not to ci.yml.
+if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
+  fm_test_run \
+    test_process_identity_tolerates_empty_args \
+    test_profile_home_tolerates_missing_profile \
+    test_busy_hook_tolerates_empty_turn_ended_args
+  exit 0
+fi
+test_process_identity_tolerates_empty_args
+test_profile_home_tolerates_missing_profile
+test_busy_hook_tolerates_empty_turn_ended_args
 [ "$(fm_control_interrupt_transport hermes)" = key ] || fail 'interrupt transport'
 [ "$(fm_control_interrupt_key hermes)" = Escape ] || fail 'interrupt key'
 [ "$(fm_control_interrupt_repeat hermes)" = 2 ] || fail 'interrupt count'
