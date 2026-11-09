@@ -49,7 +49,8 @@
 #
 # park re-establishes everything itself and accepts no verdict as input. It
 # refuses unless: the task is a ship with pr= and an armed merge poll
-# (state/<id>.check.sh); its local copy is clean with HEAD equal to the forge
+# (state/<id>.check.sh); its backend can prove a stop and launch a replacement;
+# its local copy is clean with HEAD equal to the forge
 # head; bin/fm-crew-state.sh reads done or paused; the agent is idle; the
 # steering inbox holds no unhandled message; and the gate is clean. It then
 # durably leases a Treehouse slot to the task (treehouse lease, state-only, so a
@@ -164,6 +165,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG"
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -538,9 +541,15 @@ cmd_gate() {
 # copy at the forge head, a worker that finished its turn and reported, and no
 # instruction waiting for it. Prints the first refusal and returns 1.
 park_preflight() {  # <id>
-  local id=$1 meta kind pr wt crew secs
+  local id=$1 meta kind pr wt crew secs backend
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || { echo "no task record"; return 1; }
+  backend=$(fm_backend_of_meta "$meta")
+  if ! fm_control_backend_state_verified "$backend" ||
+    ! fm_control_backend_exit_supported "$backend" ||
+    ! fm_control_backend_relaunch_supported "$backend"; then
+    echo "the ${backend:-unknown} backend cannot stop and relaunch the agent"; return 1
+  fi
   kind=$(fm_meta_get "$meta" kind)
   [ "${kind:-ship}" = ship ] || { echo "only a ship lane can park (kind=$kind)"; return 1; }
   pr=$(fm_meta_get "$meta" pr)

@@ -393,6 +393,19 @@ test_park_stops_agent_records_lane_and_leases_slot() {
   pass "park evaluates the gate twice, leases the slot, writes a private record, stops the agent once, and declares the wait"
 }
 
+test_park_refuses_unsupported_backend_before_side_effects() {
+  local w out rc=0
+  w=$(make_world park-unsupported-backend "$GH_URL")
+  printf '%s\n' 'backend=zellij' >> "$w/state/lane.meta"
+  out=$(run_park "$w" park lane 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "park accepted unsupported backend"
+  case "$out" in *"zellij backend cannot stop and relaunch the agent"*) ;; *) fail "park did not name unsupported backend: $out" ;; esac
+  [ ! -e "$w/state/lane.review-park" ] || fail "park wrote a record before refusing"
+  [ ! -e "$w/treehouse.log" ] || [ ! -s "$w/treehouse.log" ] || fail "park requested a Treehouse lease before refusing"
+  [ ! -e "$w/control.log" ] || [ ! -s "$w/control.log" ] || fail "park invoked control before refusing"
+  pass "park refuses an unsupported backend before leasing, recording, or stopping"
+}
+
 test_park_refuses_when_head_moves_after_the_verdict() {
   local w out rc=0
   w=$(make_world park-head-moved "$GH_URL")
@@ -1172,6 +1185,7 @@ fm_test_run \
   test_github_gate_waits_for_review_bots_or_quiet_window \
   test_gitlab_gate_clean_and_unclean_conditions \
   test_park_stops_agent_records_lane_and_leases_slot \
+  test_park_refuses_unsupported_backend_before_side_effects \
   test_park_refuses_when_head_moves_after_the_verdict \
   test_park_refuses_when_the_lane_is_steered_before_the_stop \
   test_park_serializes_final_check_with_inbox_delivery \
