@@ -124,8 +124,32 @@ phase_spawn() {
   # Launch ran in the subhome, with the persistent charter and cleared overrides,
   # and never ran a project-style treehouse get.
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
-  assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
-  assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
+  assert_grep 'env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE' "$LOG" "launch did not clear operational overrides"
+  # The launch prefix must remove the parent's operational overrides, not leave
+  # them set-but-empty: bin/fm-check-unregister.sh deliberately refuses an
+  # explicitly empty FM_STATE_OVERRIDE. Run the staged agent command through a
+  # fake harness binary that records the launched process environment, with all
+  # five inherited non-empty, and assert none of them reach that environment.
+  local launch_file agent_line probe_bin probe_env v
+  launch_file=$(sed -n "s/.* -l \\. '\\([^']*\\)'.*/\\1/p" "$LOG" | head -1)
+  [ -n "$launch_file" ] && [ -f "$launch_file" ] || fail "staged secondmate launch file not found in the tmux log"
+  agent_line=$(grep -F 'FM_SUPERVISION_MODEL=' "$launch_file" | head -1)
+  [ -n "$agent_line" ] || fail "staged launch file held no agent command line"
+  probe_bin="$TMP_ROOT/probe-bin"
+  probe_env="$TMP_ROOT/launched-env.txt"
+  mkdir -p "$probe_bin"
+  printf '#!/usr/bin/env bash\nenv > "%s"\n' "$probe_env" > "$probe_bin/codex"
+  chmod +x "$probe_bin/codex"
+  FM_ROOT_OVERRIDE="$TMP_ROOT/ovr" FM_STATE_OVERRIDE="$TMP_ROOT/ovr" \
+    FM_DATA_OVERRIDE="$TMP_ROOT/ovr" FM_PROJECTS_OVERRIDE="$TMP_ROOT/ovr" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" FM_HOME="$SUB_ABS" \
+    PATH="$probe_bin:$PATH" bash -c "$agent_line" \
+    || fail "the staged secondmate agent command failed to run"
+  for v in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; do
+    assert_no_regex "^$v=" "$probe_env" "$v reached the launched secondmate environment (must be absent, not empty)"
+  done
+  assert_grep "FM_HOME=$SUB_ABS" "$probe_env" "launched secondmate environment lost FM_HOME"
+  assert_grep 'FM_SUPERVISION_MODEL=' "$probe_env" "launched secondmate environment lost FM_SUPERVISION_MODEL"
   assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
