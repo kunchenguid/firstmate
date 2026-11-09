@@ -833,7 +833,9 @@ The flag takes effect at the next check sweep, and is a home-local preference th
 ## Spawn start check (config/spawn-start-check)
 
 The optional local, gitignored `config/spawn-start-check` presence flag opts this home into a one-shot watcher check of each launch it spawns or relaunches, second mates included.
-With the flag present, a launch that has not visibly started its brief about `FM_START_CHECK_SECS` after spawn wakes the supervisor once with what is on screen, such as a named trust dialog, and the command that clears it.
+With the flag present, a launch without start proof about `FM_START_CHECK_SECS` after spawn wakes the supervisor once with what is on screen, such as a named trust dialog, and the command that clears it.
+Local status or completed-turn evidence counts only when written at or after the launch boundary.
+For remote secondmates, mirrored reply progress counts only when its cursor advanced from the launch snapshot and lies beyond the remote reply-log offset; a missing snapshot is not proof.
 Nothing is accepted automatically; the supervisor still accepts a folder-trust prompt for its own worker.
 With the file absent, spawn and relaunch arm no check, so the watcher sends no start wake.
 A check armed before the flag was removed still runs once, unless that task is spawned or relaunched first, which clears it.
