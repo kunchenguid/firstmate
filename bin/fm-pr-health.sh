@@ -97,7 +97,7 @@ fail() { printf 'fm-pr-health: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
-PR_URL_RE='https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*'
+PR_URL_RE='https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*'
 HEALTH="$STATE/pr-health.json"
 LOCK_HELD=0
 TMP=

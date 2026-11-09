@@ -76,11 +76,15 @@ case "$1 $2" in
   'pr view')
     case "$*" in
       *headRefOid,reviewDecision*) model "${3##*/}" | jq '{headRefOid:.head,reviewDecision:""}' ;;
-      *) printf 'https://github.com/o/r/pull/%s\n' "$3" ;;
+      *)
+        # Like gh, name the PR in the repository of the copy it runs in.
+        repo=$(git remote get-url origin)
+        repo=${repo#git@github.com:}
+        printf 'https://github.com/%s/pull/%s\n' "${repo%.git}" "$3" ;;
     esac ;;
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
-  'api repos/o/r/pulls/'*)
-    rest=${2#repos/o/r/pulls/}
+  'api repos/'*'/pulls/'*)
+    rest=${2##*/pulls/}
     if [ -f "$FORGE/interrupt-$rest" ]; then
       # Stop the whole pass mid-read, as a check timeout would. The case
       # records the pass's PID once it has started it.
@@ -387,6 +391,23 @@ test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered() {
     'the open PR on the unchanged branch must replace the closed one'
   expect_silent "$home" 'the replacement PR must dedupe like any other'
   pass 'an open PR that replaces a closed one on the same task branch is discovered'
+}
+
+test_enterprise_managed_owner_branch_pr_is_discovered() {
+  local home wt
+  home=$(new_home emu-owner)
+  wt="$home/copy"
+  git init -q -b feature-51 "$wt"
+  # An Enterprise Managed User owner appends "_" and the enterprise short code.
+  git -C "$wt" remote add origin git@github.com:matthew-moorcroft_data/personal_management.git
+  task "$home" emu "worktree=$wt"
+  printf '51\n' > "$home/forge/branch-feature-51"
+  pr "$home" 51 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 51 '.checks = [{name:"CI Status",conclusion:"FAILURE",required:true}]'
+  arm "$home"
+  expect_one "$home" '^pr-health: https://github\.com/matthew-moorcroft_data/personal_management/pull/51 has failing required checks at latest commit aaaaaaa: CI Status \(task emu\)$' \
+    'the open PR on a task branch under an Enterprise Managed User owner must be discovered'
+  pass 'an open PR on a task branch under an Enterprise Managed User owner is discovered'
 }
 
 test_many_recorded_contributions_do_not_starve_a_new_branch_pr() {
@@ -970,6 +991,7 @@ for test_name in test_maintainer_author_and_approval_states_are_distinct \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
   test_other_homes_red_check_is_silent test_enrolled_before_ready_and_after_cleanup_still_wake \
   test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered \
+  test_enterprise_managed_owner_branch_pr_is_discovered \
   test_green_without_reviewer_is_silent test_base_without_required_checks_counts_any_failing_check \
   test_retired_contribution_is_not_reclaimed_from_the_cached_branch \
   test_retired_contribution_is_not_reclaimed_by_a_fresh_branch_lookup \
