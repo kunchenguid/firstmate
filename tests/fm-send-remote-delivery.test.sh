@@ -52,6 +52,8 @@ FM_TEST_REAL_SLEEP=$(command -v sleep)
 export FM_TEST_REAL_SLEEP
 FM_TEST_REAL_MV=$(command -v mv)
 export FM_TEST_REAL_MV
+FM_TEST_REAL_MKTEMP=$(command -v mktemp)
+export FM_TEST_REAL_MKTEMP
 
 TMP_ROOT=$(fm_test_tmproot fm-send-remote-delivery)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
@@ -969,6 +971,32 @@ test_delivered_remote_steer_without_a_report_still_reports_delivery() {
   pass "fm-send remote: delivery is reported even when the remote leg names no record"
 }
 
+test_remote_buffer_failure_prevents_delivery() {
+  local dir fb ssh_log home rhome rc err
+  dir="$TMP_ROOT/buffer-failure"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/send.ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home buffer-failure)
+  home=$(setup_remote_parent_home buffer-failure "$rhome")
+  cat > "$fb/mktemp" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *fm-send-remote-stderr.*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+STUB
+  chmod +x "$fb/mktemp"
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 1 "$rc" "buffer creation failure must refuse the send: $err"
+  assert_contains "$err" "could not create remote stderr buffer" \
+    "buffer creation failure must identify the failed prerequisite"
+  [ ! -s "$ssh_log" ] || fail "buffer failure must prevent any remote attempt"
+  [ -z "$(pending_record "$home")" ] || fail "unsent reply expectation must be discarded"
+  pass "fm-send remote: buffer failure refuses delivery and cleans reply state"
+}
+
 test_delivered_remote_steer_reports_sent_before_notices() {
   local dir fb ssh_log home rhome rc err sent_line notice_line
   dir="$TMP_ROOT/sent-before-notice"; mkdir -p "$dir"
@@ -1017,5 +1045,6 @@ test_delivered_remote_steer_names_the_far_side_record
 test_delivered_remote_steer_advisory_cannot_read_as_refusal
 test_delivered_remote_steer_without_a_report_still_reports_delivery
 test_delivered_remote_steer_reports_sent_before_notices
+test_remote_buffer_failure_prevents_delivery
 
 echo "all fm-send-remote-delivery tests passed"
