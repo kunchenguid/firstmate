@@ -219,7 +219,7 @@ These readers derive their default grace from the configured poll instead of a b
 - That hook.
 - `bin/fm-watch.sh`'s own pre-acquisition staleness check (the "lock held by live pid but heartbeat is stale" refusal).
 - The watcher-health checks in `bin/fm-supervision-host.sh` and `bin/fm-supervision-handoff.sh`.
-- The Pi watch extension's health and repair checks (`.pi/extensions/fm-primary-pi-watch.ts`), which source the home's `config/watch.env` and `config/x-mode.env` so a home-configured `FM_POLL` reaches the derivation.
+- The watcher health check in `.pi/extensions/fm-primary-pi-watch.ts`, which sources the home's `config/watch.env` and `config/x-mode.env` so a home-configured `FM_POLL` reaches the derivation.
 
 All use `max(300, FM_POLL + 60)`.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
