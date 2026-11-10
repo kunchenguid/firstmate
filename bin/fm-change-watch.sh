@@ -102,6 +102,31 @@
 # sample proves the cluster answers once before reading any metric and records
 # the reason for every metric it could not read.
 #
+# Beta stage: before any production target is read, the change is read against
+# the pre-production copy of the service that serves it, so a change that breaks
+# something is caught while it is still only in beta. The beta map is the
+# built-in entry below plus the home's own config/change-watch-beta (local,
+# gitignored), whose lines are "<key> <namespace>/<deployment>" with <key> a
+# repository name or a changed-path prefix; a home line for a key replaces the
+# built-in line for that key. Built in: web-credits-next -> muso-dev/credits-gate.
+# The stage reads BETA_METRICS (restarts, oomkilled, rss_ratio, http_5xx_per_min,
+# p95_ms) on each resolved beta target through the same metric reader and the
+# same bar function a sample uses, scored against the absolute bar an empty
+# baseline gives, because the beta stage has no pre-deploy baseline of its own.
+# Its one verdict is recorded in the watch's beta record and reads:
+#   beta clean: <n> metric(s) read on <target>, none crossed its bar
+#   beta clean: nothing to measure: no changed path is served by a beta target (<map>)
+#   beta unmeasured: <reason>            (a beta target resolved, nothing readable)
+#   beta regressed on <metric> (<value>) at <target>
+# A beta failure is a beta failure: it is recorded as that verdict, reported on
+# its own wake line and steer, and the production watch is never armed for it, so
+# it can be neither read as a production regression nor upgraded to a production
+# pass. A change touching no beta-served path completes the stage clean with that
+# reason stated, and the production watch arms as before. The stage runs before
+# the production baseline is captured, and that ordering is the contract: a test
+# asserts the read order through FM_CW_TRACE rather than inferring it from the
+# outcome.
+#
 # Metrics, bars, and windows:
 #   http_5xx_per_min     5xx responses per minute from the pods' own access
 #                        logs. When the per-container line cap is hit the rate
@@ -214,6 +239,10 @@
 #   FM_CW_SEND_CMD         command replacing bin/fm-send.sh for the lane steer
 #   FM_CW_SLEEP_CMD        command replacing `sleep` for the drive loop
 #   FM_CW_NO_WIKI          set to 1 to skip the wiki note with a printed notice
+#   FM_CW_TRACE            file every metric read appends
+#                          "<stage><TAB><metric><TAB><target>" to, where stage is
+#                          beta or prod, so a test can assert the beta stage read
+#                          before any production target was read
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -231,6 +260,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 WATCH_ROOT="$STATE/change-watch"
 SCHEDULE_OFFSETS="300 900 1800 3600 7200 10800 14400 18000 21600 25200 28800 32400 36000 39600 43200"
 K8S_METRICS="restarts oomkilled rss_ratio http_5xx_per_min p95_ms pgbouncer_cl_waiting"
+# The beta stage reads the metrics that need no pool resolution and no
+# pre-deploy baseline of their own; the pool metric is left to the production
+# watch, whose registration resolves each target's own pool.
+BETA_METRICS="restarts oomkilled rss_ratio http_5xx_per_min p95_ms"
 SENTRY_METRICS="sentry_new_issues"
 RUN_METRICS="deploy_run"
 BASELINE_WINDOW_SECONDS=3600
@@ -381,6 +414,18 @@ cw_hash() {
   fi
 }
 
+# Which stage a metric read belongs to. The beta stage sets this to beta for its
+# own reads and restores it, so the trace below can prove the ordering.
+CW_STAGE=prod
+
+# Test seam: when FM_CW_TRACE names a file, every metric read appends
+# "<stage><TAB><metric><TAB><target>". A test asserts the beta stage read before
+# any production target was read from this record, never from the outcome.
+cw_trace() {  # <metric> <target>
+  [ -n "${FM_CW_TRACE:-}" ] || return 0
+  printf '%s\t%s\t%s\n' "$CW_STAGE" "$1" "$2" >> "$FM_CW_TRACE" 2>/dev/null || true
+}
+
 # --- watch records ------------------------------------------------------------
 
 cw_watch_id() { printf '%s-%s\n' "$1" "$2"; }
@@ -418,6 +463,9 @@ cw_drive_pid_path() { printf '%s/drive.pid\n' "$(cw_watch_dir "$1")"; }
 cw_drive_alive_path() { printf '%s/drive.alive\n' "$(cw_watch_dir "$1")"; }
 cw_drive_identity_path() { printf '%s/drive.identity\n' "$(cw_watch_dir "$1")"; }
 cw_last_path() { printf '%s/last.%s\n' "$(cw_watch_dir "$1")" "$2"; }
+# The beta stage's own record: its verdict on the first line, then one reading
+# line per metric it read.
+cw_beta_path() { printf '%s/beta\n' "$(cw_watch_dir "$1")"; }
 
 cw_meta_get() {  # <watch-id> <key>
   local file
@@ -446,19 +494,34 @@ cw_write() {  # <path>
 # LIVE QUERY (forge) - changed paths of the merged PR, one per line. GitHub is
 # read through gh; anything else degrades to no file list, so register reports
 # that it cannot derive a target rather than guessing one.
+# The merged file list is read once per process: the beta stage and the target
+# derivation both need it, and a second read is a second forge call.
+CW_FORGE_FILES_KEY=''
+CW_FORGE_FILES_CACHE=''
+CW_FORGE_FILES_OK=0
+
 cw_forge_files() {  # <url> <provider> <owner> <repo> <number>
-  if [ -n "${FM_CW_FORGE_DIR:-}" ]; then
-    [ -f "$FM_CW_FORGE_DIR/files.txt" ] || return 1
-    cat "$FM_CW_FORGE_DIR/files.txt"
+  local key="$1|$2" out
+  if [ "$CW_FORGE_FILES_OK" -eq 1 ] && [ "$CW_FORGE_FILES_KEY" = "$key" ]; then
+    [ -z "$CW_FORGE_FILES_CACHE" ] || printf '%s\n' "$CW_FORGE_FILES_CACHE"
     return 0
   fi
-  case "$2" in
-    github)
-      command -v gh >/dev/null 2>&1 || return 1
-      cw_forge_run gh pr view "$1" --json files -q '.files[].path' || return 1
-      ;;
-    *) return 1 ;;
-  esac
+  if [ -n "${FM_CW_FORGE_DIR:-}" ]; then
+    [ -f "$FM_CW_FORGE_DIR/files.txt" ] || return 1
+    out=$(cat "$FM_CW_FORGE_DIR/files.txt")
+  else
+    case "$2" in
+      github)
+        command -v gh >/dev/null 2>&1 || return 1
+        out=$(cw_forge_run gh pr view "$1" --json files -q '.files[].path') || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  CW_FORGE_FILES_KEY=$key
+  CW_FORGE_FILES_CACHE=$out
+  CW_FORGE_FILES_OK=1
+  [ -z "$out" ] || printf '%s\n' "$out"
 }
 
 # LIVE QUERY (forge) - the merged PR's unified diff.
@@ -880,6 +943,183 @@ cw_app_targets() {  # <repo>
     return 0
   fi
   printf '%s\n' "$out"
+}
+
+# --- beta stage ---------------------------------------------------------------
+
+# The home's beta map with comments removed. A `#` starts a comment only at the
+# start of a line or after whitespace.
+cw_beta_map_clean() {
+  sed -e 's/^#.*$//' -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    "$CW_CONFIG_DIR/change-watch-beta" 2>/dev/null | grep -v '^$' || true
+}
+
+# The built-in beta map: the pre-production copy of each service that has one.
+# web-credits-next is served in beta by muso-dev/credits-gate.
+CW_BETA_BUILTIN='web-credits-next muso-dev/credits-gate'
+
+# The beta map in force: the built-in entries, minus any key the home's own file
+# names (a home line replaces the built-in line for that key), then the home's
+# lines.
+cw_beta_map_lines() {
+  local home_keys=''
+  if [ -f "$CW_CONFIG_DIR/change-watch-beta" ]; then
+    home_keys=$(cw_beta_map_clean | awk 'NF >= 2 { print $1 }')
+  fi
+  printf '%s\n' "$CW_BETA_BUILTIN" | awk -v keys="$home_keys" '
+    BEGIN { n = split(keys, k, "\n"); for (i = 1; i <= n; i++) skip[k[i]] = 1 }
+    NF >= 2 && !($1 in skip)'
+  [ -z "$home_keys" ] || cw_beta_map_clean
+}
+
+# The beta map as one readable phrase, so a stage that measured nothing names
+# what it looked for instead of leaving a bare silence.
+cw_beta_map_summary() {
+  cw_beta_map_lines | awk 'NF >= 2 { printf "%s%s -> %s", sep, $1, $2; sep = ", " }'
+}
+
+# Resolve the beta targets a merged change is served by: one
+# "beta<TAB>namespace<TAB>deployment<TAB>matched-path" line per beta target whose
+# key matches a changed path or the repository name. A key matches a path when
+# the path is the key or sits under it, so a route prefix and a repository name
+# are both expressible.
+cw_beta_targets() {  # <repo-name> <files>
+  local repo=$1 files=$2 key target path matched
+  while IFS=' ' read -r key target; do
+    [ -n "$key" ] && [ -n "$target" ] || continue
+    case "$target" in */*) ;; *) continue ;; esac
+    matched=''
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      case "$path" in
+        "$key"|"$key"/*) matched=$path; break ;;
+      esac
+    done <<PATHS
+$files
+PATHS
+    if [ -z "$matched" ]; then
+      [ "$repo" = "$key" ] || continue
+      matched=$repo
+    fi
+    printf 'beta\t%s\t%s\t%s\n' "${target%%/*}" "${target#*/}" "$matched"
+  done <<MAP
+$(cw_beta_map_lines)
+MAP
+}
+
+# One beta reading: every beta metric of one beta target, read through the same
+# reader a sample uses and scored against the absolute bar the shared bar
+# function gives an empty baseline. Prints
+# "reading<TAB>metric<TAB>target<TAB>value<TAB>regressed<TAB>reason" per metric.
+cw_beta_read() {  # <watch-id> <ns> <deploy> <since-epoch>
+  local id=$1 ns=$2 deploy=$3 since=$4 target="$2/$3" metric value reason rc err regressed
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-cw-beta.XXXXXX" 2>/dev/null) || err=/dev/null
+  for metric in $BETA_METRICS; do
+    value=''; reason=''; rc=0; regressed=0
+    value=$(cw_metric_read "$id" "$metric" "$target" sample "$since" 2>"$err") || rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$value" ] \
+      || ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+      if [ -n "$value" ] && ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+        reason=$value
+      else
+        reason=$(tail -1 "$err" 2>/dev/null | cut -c1-200)
+        [ -n "$reason" ] || reason="the reader returned no value (exit $rc)"
+      fi
+      value=''
+    elif cw_metric_regressed "$metric" "$value" '' ''; then
+      regressed=1
+    fi
+    printf 'reading\t%s\t%s\t%s\t%s\t%s\n' "$metric" "$target" "$value" "$regressed" "$reason"
+  done
+  [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
+}
+
+# The beta stage: resolve the beta targets this change is served by, read them,
+# and state one verdict. Prints one "verdict<TAB><line>" line first, then one
+# "reading<TAB>..." line per metric read. Runs before any production target is
+# read; a stage with nothing beta-served completes clean and says why.
+cw_beta_stage() {  # <watch-id> <repo-name> <url> <provider> <owner> <repo> <number> <since-epoch>
+  local id=$1 repo_name=$2 url=$3 provider=$4 owner=$5 repo=$6 number=$7 since=$8
+  local files resolved targets ns deploy path readings='' cluster verdict
+  local read_count=0 regressed_line='' unmeasured_reason='' targets_seen=''
+  if ! files=$(cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" 2>/dev/null); then
+    printf 'verdict\tbeta unmeasured: the merged file list could not be read, so no beta target could be resolved\n'
+    return 0
+  fi
+  resolved=$(cw_beta_targets "$repo_name" "$files")
+  targets=$(printf '%s\n' "$resolved" | awk -F'\t' '$1 == "beta" { print $2 "\t" $3 "\t" $4 }')
+  if [ -z "$targets" ]; then
+    printf 'verdict\tbeta clean: nothing to measure: no changed path is served by a beta target (%s)\n' \
+      "$(cw_beta_map_summary)"
+    return 0
+  fi
+  cluster=$(cw_cluster_probe || true)
+  CW_STAGE=beta
+  while IFS=$'\t' read -r ns deploy path; do
+    [ -n "$ns" ] || continue
+    targets_seen="$targets_seen${targets_seen:+, }$ns/$deploy"
+    if [ -n "$cluster" ]; then
+      local metric
+      for metric in $BETA_METRICS; do
+        readings="$readings$(printf 'reading\t%s\t%s\t\t0\tcluster read failed: %s\n' \
+          "$metric" "$ns/$deploy" "$cluster")"$'\n'
+      done
+      continue
+    fi
+    readings="$readings$(cw_beta_read "$id" "$ns" "$deploy" "$since")"$'\n'
+  done <<TARGETS
+$targets
+TARGETS
+  CW_STAGE=prod
+  read_count=$(printf '%s\n' "$readings" | awk -F'\t' '$1 == "reading" && $4 != "" { n++ } END { print n + 0 }')
+  regressed_line=$(printf '%s\n' "$readings" | awk -F'\t' \
+    '$1 == "reading" && $5 == 1 { printf "beta regressed on %s (%s) at %s", $2, $4, $3; exit }')
+  unmeasured_reason=$(printf '%s\n' "$readings" | awk -F'\t' \
+    '$1 == "reading" && $4 == "" && $6 != "" { print $6; exit }')
+  if [ -n "$regressed_line" ]; then
+    verdict=$regressed_line
+  elif [ "$read_count" -eq 0 ]; then
+    verdict="beta unmeasured: ${unmeasured_reason:-no beta metric could be read} (targets: $targets_seen)"
+  else
+    verdict="beta clean: $read_count metric(s) read on $targets_seen, none crossed its bar"
+  fi
+  printf 'verdict\t%s\n' "$verdict"
+  printf '%s\n' "$readings" | grep -v '^$' || true
+}
+
+# The beta stage's recorded verdict, or nothing when the stage never ran.
+cw_beta_verdict() {  # <watch-id>
+  local file
+  file=$(cw_beta_path "$1")
+  [ -f "$file" ] || return 1
+  awk -F'\t' '$1 == "verdict" { print $2; exit }' "$file"
+}
+
+# A beta failure is reported as a beta failure: its own wake line and its own
+# steer, never the production regression path, so it can be neither read as a
+# production regression nor upgraded to a production pass.
+cw_report_beta_failure() {  # <watch-id>
+  local id=$1 task url verdict metric rc send_cmd
+  cw_watch_exists "$id" || return 0
+  verdict=$(cw_beta_verdict "$id" 2>/dev/null || true)
+  case "$verdict" in beta\ regressed*) ;; *) return 0 ;; esac
+  cw_mark_once "$(cw_watch_dir "$id")/beta-reported" || return 0
+  task=$(cw_meta_get "$id" task || true)
+  url=$(cw_meta_get "$id" pr_url || true)
+  metric=$(printf '%s' "$verdict" | sed -n 's/^beta regressed on \([^ ]*\) .*/\1/p')
+  fm_wake_append check "change-watch-$id-beta" \
+    "check: change-watch $task $url beta ${metric:-metric} regressed" 2>/dev/null \
+    || notice "change-watch: could not queue the beta failure wake for $url"
+  if [ -n "$task" ]; then
+    send_cmd=${FM_CW_SEND_CMD:-$SCRIPT_DIR/fm-send.sh}
+    if [ -x "$send_cmd" ] || command -v "$send_cmd" >/dev/null 2>&1; then
+      rc=0
+      FM_HOME="$FM_HOME" "$send_cmd" "$task" \
+        "change-watch $url failed the beta stage: $verdict; the production watch was not armed" \
+        >/dev/null 2>&1 || rc=$?
+      [ "$rc" -eq 0 ] || notice "change-watch: could not steer $task about the beta failure (rc=$rc); the wake carries it"
+    fi
+  fi
 }
 
 # --- live metric reads --------------------------------------------------------
@@ -1459,6 +1699,7 @@ cw_pool_spec() {  # <watch-id> <target>
 cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
   local id=$1 metric=$2 target=$3 window=$4 since=${5:-0}
   local file value sanitized secs ns='' deploy='' spec=''
+  cw_trace "$metric" "$target"
   if [ "$metric" = pgbouncer_cl_waiting ]; then
     if ! spec=$(cw_pool_spec "$id" "$target"); then
       printf 'no pgbouncer pool was resolved for this target, so its pool metric is unmeasured for the whole watch\n' >&2
@@ -2254,9 +2495,26 @@ cw_rearm() {  # <watch-id> <url>
 
 # --- commands -----------------------------------------------------------------
 
+# The watch's metadata record, written once at registration.
+cw_write_meta() {  # <id> <task> <url> <provider> <owner> <repo> <number> <t0> <now>
+  {
+    printf 'version=fm-change-watch-v1\n'
+    printf 'task=%s\n' "$2"
+    printf 'pr_url=%s\n' "$3"
+    printf 'watch_id=%s\n' "$1"
+    printf 'provider=%s\n' "$4"
+    printf 'owner=%s\n' "$5"
+    printf 'repo=%s\n' "$6"
+    printf 'number=%s\n' "$7"
+    printf 't0=%s\n' "$8"
+    printf 'created=%s\n' "$9"
+  } | cw_write "$(cw_meta_path "$1")"
+}
+
 cmd_register() {
   local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
   local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable
+  local beta_out beta_verdict
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -2277,6 +2535,35 @@ cmd_register() {
   fi
 
   cw_kubeconfig_init
+  now=$(cw_now)
+  t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
+  case "$t0" in
+    ''|*[!0-9]*) t0=$now ;;
+  esac
+  [ "$t0" -le "$now" ] || t0=$now
+
+  # BETA STAGE FIRST. The beta reading is taken before any production target is
+  # read, so a change that breaks something is caught while it is still only in
+  # beta. The ordering is the contract, not an accident of layout: nothing below
+  # this block may read a production target, and a beta failure returns here
+  # without deriving, baselining, or arming a production watch at all.
+  beta_out=$(cw_beta_stage "$id" "$repo_name" "$url" "$provider" "$owner" "$repo" "$number" "$t0")
+  beta_verdict=$(printf '%s\n' "$beta_out" | awk -F'\t' '$1 == "verdict" { print $2; exit }')
+  case "$beta_verdict" in
+    beta\ regressed*)
+      mkdir -p "$(cw_watch_dir "$id")" || die "cannot create watch directory"
+      chmod 0700 "$(cw_watch_dir "$id")" 2>/dev/null || true
+      cw_write_meta "$id" "$task" "$url" "$provider" "$owner" "$repo" "$number" "$t0" "$now"
+      cw_write_schedule "$id" "$t0"
+      printf '%s\n' "$beta_out" | cw_write "$(cw_beta_path "$id")"
+      printf '%s\n' "$beta_verdict" | cw_write "$(cw_verdict_path "$id")"
+      cw_report_beta_failure "$id"
+      printf 'change-watch: registered %s for %s (beta stage failed: %s; no production target was read and no production watch was armed)\n' \
+        "$id" "$url" "$beta_verdict"
+      return 0
+      ;;
+  esac
+
   derived=$(cw_derive_targets "$url" "$provider" "$owner" "$repo" "$number" "$repo_name" 2>/dev/null || true)
   targets=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "target" && $2 != "" && $3 != "" { print $2 "\t" $3 }' | sort -u)
   sentries=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "sentry" && $2 != "" { print $2 }' | sort -u)
@@ -2308,30 +2595,13 @@ cmd_register() {
     return 0
   fi
 
-  now=$(cw_now)
-  t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
-  case "$t0" in
-    ''|*[!0-9]*) t0=$now ;;
-  esac
-  [ "$t0" -le "$now" ] || t0=$now
-
   mkdir -p "$(cw_watch_dir "$id")" || die "cannot create watch directory"
   chmod 0700 "$(cw_watch_dir "$id")" 2>/dev/null || true
   [ -z "$targets" ] || printf '%s\n' "$targets" | cw_write "$(cw_targets_path "$id")"
   [ -z "$sentries" ] || printf '%s\n' "$sentries" | cw_write "$(cw_sentry_path "$id")"
   [ -z "$runs" ] || printf '%s\n' "$runs" | cw_write "$(cw_runs_path "$id")"
-  {
-    printf 'version=fm-change-watch-v1\n'
-    printf 'task=%s\n' "$task"
-    printf 'pr_url=%s\n' "$url"
-    printf 'watch_id=%s\n' "$id"
-    printf 'provider=%s\n' "$provider"
-    printf 'owner=%s\n' "$owner"
-    printf 'repo=%s\n' "$repo"
-    printf 'number=%s\n' "$number"
-    printf 't0=%s\n' "$t0"
-    printf 'created=%s\n' "$now"
-  } | cw_write "$(cw_meta_path "$id")"
+  cw_write_meta "$id" "$task" "$url" "$provider" "$owner" "$repo" "$number" "$t0" "$now"
+  printf '%s\n' "$beta_out" | cw_write "$(cw_beta_path "$id")"
   cw_write_schedule "$id" "$t0"
   cw_capture_baseline "$id" "$t0"
   # The rollout evidence: the images these Deployments run before the release
@@ -2349,8 +2619,9 @@ cmd_register() {
   } >> "$(cw_meta_path "$id")"
   cw_arm "$id" "$when_name" "$url"
 
-  printf 'change-watch: registered %s for %s (%s target(s)%s)\n' \
-    "$id" "$url" "$(( $(cw_target_ids "$id" | grep -c '' || true) ))" "${notes:+; $notes}"
+  printf 'change-watch: registered %s for %s (%s target(s)%s); beta: %s\n' \
+    "$id" "$url" "$(( $(cw_target_ids "$id" | grep -c '' || true) ))" "${notes:+; $notes}" \
+    "${beta_verdict:-beta unmeasured: the beta stage recorded no verdict}"
 }
 
 cmd_due() {
@@ -2454,10 +2725,14 @@ cmd_verdict() {
 # target whose rollout was never proven appended when there are any: a watch is
 # never summarized as clean without saying what it did not measure.
 cw_status_line() {  # <watch-id>
-  local id=$1 gaps unproven line
+  local id=$1 gaps unproven line beta
   gaps=$(cw_measured_gaps "$id")
   unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
   line=$(cw_verdict_line "$id")
+  # The beta stage's own verdict is stated beside the production one, so a beta
+  # reading is never read as a production result and a beta gap is never silent.
+  beta=$(cw_beta_verdict "$id" 2>/dev/null || true)
+  [ -z "$beta" ] || line="$line	beta: $beta"
   [ -z "$gaps" ] || line="$line	unmeasured: $gaps"
   [ -z "$unproven" ] || line="$line	rollout never proven: $unproven"
   printf '%s\t%s\n' "$id" "$line"

@@ -3,11 +3,12 @@ name: change-watch
 description: >-
   Agent-only procedure for the post-merge change watch.
   Use on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a
+  `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake, on a
   `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a
   `procevent when-cw-... <sequence>` completion wake for an armed change watch,
   or when deciding whether a merged change needs a by-effect watch.
-  Owns how a regression is read, routed, and closed, and what a clean completion
-  still owes.
+  Owns how a beta reading and a regression are read, routed, and closed, and what
+  a clean completion still owes.
 user-invocable: false
 metadata:
   internal: true
@@ -15,7 +16,7 @@ metadata:
 
 # change-watch
 
-Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a `procevent when-cw-<hash> <sequence>` completion wake, or when deciding whether a merged change needs a by-effect watch.
+Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a `procevent when-cw-<hash> <sequence>` completion wake, or when deciding whether a merged change needs a by-effect watch.
 
 ## What the watch is
 
@@ -26,7 +27,16 @@ A Kubernetes target is not scored until its rollout fingerprint (pod images plus
 A Sentry read waits for that same landing, taking it from whichever kind the watch has: the Deployments' rollout when the watch has any, otherwise its mapped deploy workflow's run for this merge, so a repository deployed by its own workflow is not read before that deploy has landed either.
 The per-sample budget bounds the cluster reads only; the Sentry and deploy-workflow reads go over the network under their own bounds and are never costed against a budget the pod reads spent.
 A registration that could not read a manifest says `could not read N manifest(s)`: that is a measurement gap to re-register once the forge answers, not a PR without a service; a manifest the PR deleted is named `manifest removed` and needs no watch.
-`bin/fm-change-watch.sh`'s header is the one owner of the exact commands, metrics, bars, schedule, and test seams; read it before acting.
+`bin/fm-change-watch.sh`'s header is the one owner of the exact commands, metrics, bars, schedule, the beta stage, and test seams; read it before acting.
+
+## The beta stage
+
+Registration reads the change against the pre-production copy of the service that serves it before it reads any production target, so a change that breaks something is caught while it is still only in beta rather than after it is live.
+The beta map is the built-in `web-credits-next -> muso-dev/credits-gate` plus the home's own `config/change-watch-beta`; a key matches a changed path or the repository name.
+The stage records one verdict in the watch's `beta` record, and `bin/fm-change-watch.sh status` states it beside the production verdict.
+A change touching no beta-served path completes the stage clean with the reason stated, and the production watch arms as before.
+A beta failure is a beta failure: it is reported on its own `beta` wake and its own steer, and the production watch is never armed for it, so it is never read as a production regression and never upgraded to a production pass.
+The ordering is the contract, not an accident of layout: a test asserts it from the `FM_CW_TRACE` read record rather than inferring it from the outcome.
 
 The watch is armed automatically when a merged PR touches a deployable service, from both `bin/fm-pr-merge.sh` and the watcher's merged-poll landing path.
 Registration is additive: a registration failure never turns a successful merge into a reported failure, and a PR that touches no deployable service registers nothing.
@@ -43,6 +53,17 @@ Never register a watch by hand for a merge the hooks already covered; check `bin
 3. Treat it as a live incident lead, not a report: the affected Deployment, the metric, and the timing are the evidence, and the next scheduled sample is already running.
    A captain-facing escalation states the service, the metric and its numbers, the time since the merge, and the next decision.
 4. The wake is handled when the lane has the numbers and the watch's verdict has been read; acknowledge it through the ordinary wake acknowledgement like any other `check` wake.
+
+## Handling a beta failure wake
+
+`check: change-watch <task-id> <pr-url> beta <metric> regressed`
+
+A beta target crossed its bar at registration, so the change is bad by effect before it ever reached production.
+1. Read the verdict with `bin/fm-change-watch.sh verdict <watch-id>`; it reads `change-watch beta regressed on <metric> (<value>) at <namespace>/<deployment>`.
+2. The mechanism already steered the owning task through `bin/fm-send.sh` with the numbers, and no production watch was armed, so there is no schedule to wait on.
+3. Route it to the lane that owns the service as a live incident lead, exactly as a production regression, and say plainly that the reading is from beta.
+4. Never restate a beta failure as a production regression, and never treat the absence of a production watch as a pass.
+5. The wake is handled when the lane has the numbers and the verdict has been read; acknowledge it through the ordinary wake acknowledgement like any other `check` wake.
 
 ## Handling an interruption wake
 

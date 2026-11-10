@@ -934,10 +934,10 @@ The watch is read-only against Sentry and GitHub, makes no model calls, and boun
 That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
 A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
 
-## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos)
+## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos, config/change-watch-beta)
 
-[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
-This section owns only the two local, gitignored files that point its reads at this home's cluster and this home's repository map.
+[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, the beta stage, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
+This section owns only the three local, gitignored files that point its reads at this home's cluster, this home's repository map, and this home's beta map.
 
 `config/change-watch-kubeconfig` holds one path on its first non-comment line: the kubeconfig every cluster read of a watch uses.
 Precedence is `FM_CW_KUBECONFIG`, then this file, then an operator's own `KUBECONFIG`, then `~/.kube/mcp-viewer.kubeconfig`, and only then the ambient `~/.kube/config` default.
@@ -960,6 +960,17 @@ Sentry reads use the org `auth_token` in `~/.config/muso/sentry-vault.json` (ove
 A Sentry read waits for the watch's own landing — the Deployments' rollout fingerprint when the watch has any, otherwise its mapped `run:` workflow's run for this merge — because before that landing those are the errors of the code the release replaced.
 Every mapped target is bounded — an image family is watched by its busiest `FM_CW_MAX_TARGETS` (default 8) Deployments and the registration line states the cap — and a Kubernetes target is scored only once its rollout fingerprint (pod images plus pod-template hash) differs from registration, so a sample taken before the rollout is recorded as awaiting the deploy rather than as health and a rollout that changes no image still counts.
 The per-sample budget (`FM_CW_SAMPLE_DEADLINE`) bounds the cluster reads only: the Sentry and deploy-workflow reads go over the network under their own bounds, so a sample whose pod reads spent the budget still measures them.
+
+`config/change-watch-beta` maps a changed path to the pre-production copy of the service that serves it, one entry per line, `<key> <namespace>/<deployment>`, where `<key>` is a repository name or a changed-path prefix.
+The beta stage runs at registration, before any production target is read, so a change that breaks something is caught while it is still only in beta rather than after it is live.
+A key matches a changed path when the path is the key or sits under it, and matches the repository name when no path does, so a route prefix and a repository name are both expressible.
+A line for a key replaces the built-in entry for that key rather than adding to it.
+Built in: `web-credits-next muso-dev/credits-gate`.
+The stage reads `restarts`, `oomkilled`, `rss_ratio`, `http_5xx_per_min`, and `p95_ms` on each resolved beta target through the same reader and the same bar function a sample uses, scored against the absolute bar an empty baseline gives, because the beta stage has no pre-deploy baseline of its own.
+Its one verdict is recorded in the watch's `beta` record and reads `beta clean: <n> metric(s) read on <target>, none crossed its bar`, `beta clean: nothing to measure: no changed path is served by a beta target (<map>)`, `beta unmeasured: <reason>`, or `beta regressed on <metric> (<value>) at <target>`.
+A change touching no beta-served path completes the stage clean with that reason stated, and the production watch arms as before.
+A beta failure is a beta failure: it is recorded as that verdict, reported on its own `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake and its own steer, and the production watch is never armed for it, so it can be neither read as a production regression nor upgraded to a production pass.
+`FM_CW_TRACE` names a file every metric read appends `<stage><TAB><metric><TAB><target>` to, where stage is `beta` or `prod`; the ordering is asserted from that record rather than inferred from the outcome.
 
 ## Relay (.env)
 
