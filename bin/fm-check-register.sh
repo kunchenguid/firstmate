@@ -49,6 +49,9 @@ if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
     );
     $tmp = $name;
     sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @state = stat($ARGV[1]);
+    my @input = stat($in);
+    @state && @input && $input[0] == $state[0] && $input[3] == 1 or exit 1;
     binmode $in or exit 1;
     binmode $out or exit 1;
     my $previous = select($out);
@@ -65,6 +68,8 @@ if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
     my @path = lstat($tmp);
     @file && @path && $file[0] == $path[0] && $file[1] == $path[1] && $path[3] == 1 or exit 1;
     rename $tmp, $ARGV[0] or exit 1;
+    my @published = lstat($ARGV[0]);
+    @file && @published && $file[0] == $published[0] && $file[1] == $published[1] && $published[3] == 1 or exit 1;
     close $out or exit 1;
     $cleanup = 0;
   ' "$CHECK" "$STATE"; then
@@ -78,22 +83,9 @@ fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
   || { echo "error: custom check trust path is unavailable" >&2; exit 1; }
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }
 umask 077
-TMP=$(perl -MFile::Temp -e '
-  my ($tmp, $cleanup);
-  END { unlink $tmp if $cleanup && defined $tmp; }
-  $cleanup = 1;
-  $SIG{HUP} = sub { exit 129; };
-  $SIG{INT} = sub { exit 130; };
-  $SIG{TERM} = sub { exit 143; };
-  my ($out, $name) = File::Temp::tempfile(
-    ".fm-custom-check-trust.XXXXXX", DIR => $ARGV[0], UNLINK => 0, PERMS => 0600,
-  );
-  $tmp = $name;
-  print {$out} "fm-custom-check-v1\n$ARGV[1]\n" or exit 1;
-  close $out or exit 1;
-  $cleanup = 0;
-  print STDOUT $tmp or exit 1;
-' "$STATE" "$HASH") || exit 1
+TMP=$(mktemp "$STATE/.fm-custom-check-trust.XXXXXX") || exit 1
+printf '%s\n%s\n' fm-custom-check-v1 "$HASH" > "$TMP" || exit 1
+chmod 0600 "$TMP" || exit 1
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1
 mv -f -- "$TMP" "$TRUST" || exit 1
 TMP=

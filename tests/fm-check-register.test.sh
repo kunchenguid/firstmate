@@ -13,7 +13,6 @@ set -u
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-check-register)
 PERL=$(command -v perl) || fail "fm-check-register requires perl"
-MKTEMP=$(command -v mktemp) || fail "fm-check-register requires mktemp"
 
 make_home() {
   local home="$TMP_ROOT/$1"
@@ -72,8 +71,8 @@ EOF
   pass "normalization does not follow a swapped check symlink"
 }
 
-test_check_swapped_to_hardlink_during_normalization_does_not_touch_target() {
-  local home target fakebin out status
+test_check_swapped_to_hardlink_during_normalization_is_refused() {
+  local home target fakebin err status
   home=$(make_home hardlink-race)
   target="$home/target"
   fakebin="$home/fakebin"
@@ -91,64 +90,76 @@ fi
 exec "$PERL" "\$@"
 EOF
   chmod 0700 "$fakebin/perl"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1); status=$?
+  err=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1 >/dev/null); status=$?
   [ "$(fm_pr_file_mode "$target")" = 600 ] || fail "hard-link swap changed the target mode"
-  [ "$status" -eq 0 ] || fail "hard-link swap during normalization was not recovered: $out"
-  [ "$(fm_pr_file_mode "$home/state/poll.check.sh")" = 700 ] || fail "published check was not set to mode 0700"
-  fm_custom_check_registered "$home/state" poll || fail "published check was not registered"
-  pass "normalization does not chmod a swapped hard-link target"
+  [ "$status" -eq 1 ] || fail "hard-link swap during normalization was not refused: $err"
+  [ ! -e "$home/state/poll.check-trust" ] || fail "refused hard-link swap left a trust record"
+  pass "normalization refuses a swapped hard-link input"
 }
 
 test_generated_temp_hardlink_swap_does_not_touch_target() {
-  local home target fakebin out status
+  local home target watcher status
   home=$(make_home generated-hardlink-race)
   target="$home/target"
-  fakebin="$home/fakebin"
-  mkdir -p "$fakebin"
   printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
   printf victim > "$target"
   chmod 0600 "$home/state/poll.check.sh" "$target"
-  cat > "$fakebin/mktemp" <<EOF
-#!/usr/bin/env bash
-case "\${1-}" in
-  "$home/state/.fm-custom-check.XXXXXX")
-    temp=\$("$MKTEMP" "\$@") || exit 1
-    rm -f -- "\$temp"
-    ln "$target" "\$temp" || exit 1
-    printf '%s\\n' "\$temp"
-    ;;
-  *) exec "$MKTEMP" "\$@" ;;
-esac
-EOF
-  chmod 0700 "$fakebin/mktemp"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1); status=$?
-  [ "$status" -eq 0 ] || fail "generated-temp hard-link swap prevented registration: $out"
+  dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=32 2>/dev/null
+  (
+    for _ in {1..1000}; do
+      for temp in "$home/state"/.fm-custom-check.*; do
+        [ -f "$temp" ] || continue
+        rm -f -- "$temp"
+        ln "$target" "$temp" || exit 1
+        exit 0
+      done
+      sleep 0.01
+    done
+    exit 1
+  ) &
+  watcher=$!
+  FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1; status=$?
+  wait "$watcher" || fail "generated temporary was not observed"
+  [ "$status" -eq 1 ] || fail "generated-temp hard-link swap was not refused"
   [ "$(cat "$target")" = victim ] || fail "generated-temp hard-link swap changed the target bytes"
   [ "$(fm_pr_file_mode "$target")" = 600 ] || fail "generated-temp hard-link swap changed the target mode"
-  fm_custom_check_registered "$home/state" poll || fail "published check was not registered"
-  pass "generated temp hard-link swap does not touch target"
+  [ ! -e "$home/state/poll.check-trust" ] || fail "refused generated-temp swap left a trust record"
+  [ -z "$(find "$home/state" -name '.fm-custom-check*' 2>/dev/null)" ] \
+    || fail "generated-temp hard-link swap left a temporary check copy"
+  pass "generated temp hard-link swap is refused without touching target"
 }
 
 test_interrupted_normalization_leaves_no_temporary_copy() {
-  local home fakebin sig status
+  local home fakebin sig status watcher
   for sig in TERM HUP; do
     home=$(make_home "interrupt-$sig")
     fakebin="$home/fakebin"
     mkdir -p "$fakebin"
     printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
     chmod 0600 "$home/state/poll.check.sh"
-    # Finish the copy, then signal the registration before it can publish.
     cat > "$fakebin/perl" <<EOF
 #!/usr/bin/env bash
-"$PERL" "\$@" || exit 1
-while [ ! -s "$home/register.pid" ]; do sleep 0.05; done
-kill -$sig "\$(cat "$home/register.pid")"
+printf '%s\n' "\$\$" > "$home/perl.pid"
+exec "$PERL" "\$@"
 EOF
     chmod 0700 "$fakebin/perl"
-    PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1 &
-    printf '%s\n' "$!" > "$home/register.pid"
-    wait "$!"; status=$?
-    [ "$status" -ne 0 ] || fail "$sig during normalization did not stop registration"
+    dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=32 2>/dev/null
+    (
+      for _ in {1..1000}; do
+        [ -s "$home/perl.pid" ] || { sleep 0.01; continue; }
+        for temp in "$home/state"/.fm-custom-check.*; do
+          [ -s "$temp" ] || continue
+          kill -$sig "$(cat "$home/perl.pid")"
+          exit 0
+        done
+        sleep 0.01
+      done
+      exit 1
+    ) &
+    watcher=$!
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1; status=$?
+    wait "$watcher" || fail "$sig was not delivered during the copy"
+    [ "$status" -eq 1 ] || fail "$sig during normalization did not stop registration"
     [ -z "$(find "$home/state" -name '.fm-custom-check*' 2>/dev/null)" ] \
       || fail "$sig during normalization left a temporary check copy"
     [ ! -e "$home/state/poll.check-trust" ] || fail "interrupted registration left a trust record"
@@ -160,5 +171,5 @@ test_mode_0600_check_is_normalized_and_registered
 test_interrupted_normalization_leaves_no_temporary_copy
 test_unsafe_check_is_refused_naming_the_check
 test_check_swapped_to_symlink_during_normalization_does_not_touch_target
-test_check_swapped_to_hardlink_during_normalization_does_not_touch_target
+test_check_swapped_to_hardlink_during_normalization_is_refused
 test_generated_temp_hardlink_swap_does_not_touch_target
