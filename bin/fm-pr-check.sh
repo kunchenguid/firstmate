@@ -461,7 +461,7 @@ fm_pr_metadata_identity_parse "$META_TMP" || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 
 # Keep the current registration recoverable until all replacement files commit.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && { [ "$DEGRADED_WATCH_ENABLED" = 1 ] || { [ "${FM_PR_CHECK_SCAN:-}" = 1 ] && [ "${RECORDED_PR:-}" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ] && [ -n "${RECORDED_PR:-}" ]; }; }; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
   restore_baselines() {
     local artifact backup

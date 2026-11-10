@@ -1102,6 +1102,24 @@ test_scan_replaces_a_recorded_pr_named_by_an_older_line() {
 # Only the log proves a line newer than the recorded PR. A pr= the log never
 # named is the supervisor's own choice, and a URL that merely starts with the
 # recorded one does not name it.
+test_scan_failed_replacement_restores_previous_watch() {
+  local dir state before
+  dir=$(make_case scan-failed-replacement)
+  state="$dir/home/state"
+  : > "$dir/home/config/pr-register-scan"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/7 'kind=ship' 'mode=no-mistakes'
+  printf '%s\\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$PR_CHECK" --scan >/dev/null 2>&1 || true
+  before=$(poll_artifact_snapshot "$state" task-a)
+  printf '%s\\n' 'working [at=3]: PR 7 closed' 'done [at=4]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
+  FM_TEST_FAIL_REG_DEST="$state/task-a.pr-poll-registration" \\
+    FM_TEST_FAIL_REG_ONCE="$dir/fail-once" FM_TEST_REAL_MV="$REAL_MV" \\
+    run_check_entry "$dir" scan >/dev/null 2>&1 && fail "forced publication failure succeeded"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "failed replacement lost prior pr="
+  [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "failed replacement changed prior poll"
+  pass "a failed scan replacement restores the previous watch without degraded watching"
+}
+
 test_scan_keeps_a_recorded_pr_the_log_never_named() {
   local dir state
   dir=$(make_case scan-keeps-unnamed-pr)
@@ -5477,6 +5495,7 @@ test_scan_arms_a_replacement_pr_despite_an_old_merge_marker
 test_scan_ignores_non_canonical_done_lines
 test_scan_reads_the_ready_line_past_supervisor_annotations
 test_scan_replaces_a_recorded_pr_named_by_an_older_line
+test_scan_failed_replacement_restores_previous_watch
 test_scan_keeps_a_recorded_pr_the_log_never_named
 test_scan_does_not_replace_a_merged_pr
 test_scan_does_not_replace_a_pr_whose_merge_is_being_recorded
