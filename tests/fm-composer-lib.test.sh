@@ -1986,8 +1986,12 @@ test_wrapped_draft_after_ruled_row_reads_pending() {
     out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
     [ "$out" = pending ] || fail "cursorless wrapped draft after a ruled row (footer $footer) must read pending, got '$out'"
     out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
-    [ "$out" = "$rule hello" ] \
-      || fail "cursorless wrapped draft must retain only its rule cells and continuation (footer $footer), got '$out'"
+    # Without a cursor the selection also takes a footer row directly below the
+    # draft, so the footer variant pins only the draft prefix.
+    case "$footer:$out" in
+      0:"$rule hello"|1:"$rule hello"*) ;;
+      *) fail "cursorless wrapped draft must retain its rule cells and continuation (footer $footer), got '$out'" ;;
+    esac
   done
   pass "ordinary text wrapped below a ruled prompt row keeps the draft pending with and without a cursor"
 }
@@ -2001,4 +2005,18 @@ test_ruled_row_over_footer_is_still_empty() {
 }
 
 test_wrapped_draft_after_ruled_row_reads_pending
+
+# A typed continuation row may itself open with a mode-hint glyph; it stays part
+# of the draft rather than ending the selection.
+test_wrapped_draft_with_mode_glyph_continuation_is_preserved() {
+  local screen out
+  screen=$(printf '%s\n' '❯ Explain these controls:' '⏸ pause playback')
+  out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = pending ] || fail "wrapped draft with a mode-glyph continuation must read pending, got '$out'"
+  out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = 'Explain these controls: ⏸ pause playback' ] \
+    || fail "mode-glyph continuation must be extracted in full, got '$out'"
+  pass "a wrapped draft whose continuation opens with a mode-hint glyph is preserved in full"
+}
+test_wrapped_draft_with_mode_glyph_continuation_is_preserved
 test_ruled_row_over_footer_is_still_empty

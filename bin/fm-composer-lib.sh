@@ -2152,8 +2152,6 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
-      fm_composer_idle_matches "$trimmed" \
-        "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
