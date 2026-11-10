@@ -3264,7 +3264,7 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
     select(.task == $id and (.status | IN("clear", "ambiguous", "escalate", "error", "off"))
       and (if .status == "clear" then (.profile.harness | type) == "string" and .profile.harness != "" else true end))
     | .status, (.profile.harness // ""), (.profile.model // ""), (.profile.effort // ""), (.profile.account // "")' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_fields=
-  { read -r dispatch_status; read -r selected_harness; read -r selected_model; read -r selected_effort; read -r selected_account; } <<<"$dispatch_fields" || true
+  { read -r dispatch_status; read -r selected_harness; read -r selected_model; read -r selected_effort; IFS= read -r selected_account; } <<<"$dispatch_fields" || true
   if [ -z "$dispatch_status" ]; then
     echo "error: malformed dispatch resolution $DISPATCH_RECORD for task $ID; rerun bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name>" >&2
     exit 1
