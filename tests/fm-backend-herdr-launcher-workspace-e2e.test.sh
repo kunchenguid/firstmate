@@ -21,7 +21,7 @@
 #
 # Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): every lifecycle
 # operation goes through bin/fm-herdr-lab.sh, which appends the named session
-# flag and verifies the default fleet session is unchanged after teardown.
+# flag and verifies the configured fleet session is unchanged after teardown.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -445,8 +445,8 @@ pass "real herdr E2E: teardown closes only the worker's own pane and leaves the 
 
 if ! cleanup_all; then
   trap - EXIT
-  printf 'not ok - isolated Herdr lab teardown failed or the default fleet session changed\n' >&2
+  printf 'not ok - isolated Herdr lab teardown failed or the configured fleet session changed\n' >&2
   exit 1
 fi
 trap - EXIT
-pass "real herdr E2E: isolated lab session removed and default fleet session unchanged"
+pass "real herdr E2E: isolated lab session removed and configured fleet session unchanged"

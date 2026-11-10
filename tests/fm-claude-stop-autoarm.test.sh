@@ -529,6 +529,126 @@ test_actionable_close_with_live_successor_rewakes_once() {
   pass "auto-arm: actionable close survives a healthy successor without duplicate delivery"
 }
 
+# A StopFailure firing is the API-error turn end that skips the whole Stop
+# phase, and it must drive the same claim/arm/rewake cycle a Stop does. No
+# Stop phase charges the guard's block budget during an error storm, so every
+# StopFailure-driven exit-2 continuation is paced instead: one inside the
+# previous one's cooldown waits out the remainder and then still delivers,
+# because dropping it would leave no further hook firing. An ordinary Stop is
+# never paced, and an expired cooldown delivers at once.
+test_stopfailure_close_rewakes_paced_per_cooldown() {
+  local dir out status fail_payload marker t0 elapsed
+  fail_payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"connection_failed","transcript_path":"/tmp/sess.jsonl"}'
+
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure")
+  marker="$dir/state/.claude-autoarm-stopfailure-rewake"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a StopFailure firing with an actionable close must rewake like Stop"
+  assert_contains "$out" "stale: fixture-win actionable" "StopFailure rewake must carry the arm's reason line"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "StopFailure epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ -e "$dir/state/arm-ran" ] || fail "the StopFailure hook never ran the arm"
+  [ -e "$marker" ] || fail "the committed StopFailure rewake never recorded its cooldown marker"
+
+  fm_touch_epoch $(( $(date +%s) - 1 )) "$marker"
+  t0=$(date +%s)
+  # Decimal configuration accepts leading zeros: 08 must wait eight seconds,
+  # not abort as an invalid octal once the previous commit's marker exists.
+  out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=08 run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  elapsed=$(( $(date +%s) - t0 ))
+  expect_code 2 "$status" "a StopFailure inside the cooldown must still deliver its rewake once the cooldown elapses"
+  assert_contains "$out" "stale: fixture-win actionable" "the paced StopFailure rewake must carry the arm's reason line"
+  [ "$elapsed" -ge 5 ] || fail "a StopFailure inside an 08s decimal cooldown set 1s ago must wait it out before delivering, took ${elapsed}s"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the paced StopFailure must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker")" -ge $(( t0 + 5 )) ] || fail "the paced StopFailure rewake must restart the cooldown at its commit"
+
+  : > "$marker"
+  t0=$(date +%s)
+  out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=60 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$(( $(date +%s) - t0 ))
+  expect_code 2 "$status" "an ordinary Stop inside the cooldown window must still rewake"
+  [ "$elapsed" -lt 60 ] || fail "an ordinary Stop must never wait out the StopFailure cooldown, took ${elapsed}s"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the ordinary Stop must record outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  fm_touch_epoch $(( $(date +%s) - 400 )) "$marker"
+  out=$(run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a StopFailure after the cooldown must rewake the still-pending wake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the post-cooldown StopFailure must record outcome=rewake, got: $(epoch_outcome "$dir")"
+
+  pass "auto-arm: StopFailure rewakes are paced to one per cooldown and never dropped"
+}
+
+# A persistent API error with a broken watcher start reaches the failure
+# continuations instead of an actionable rewake. They are StopFailure-driven
+# exit-2 continuations too, so the same pace must bound the notice and every
+# suppressed retry after it, or error -> failure rewake -> error runs at full
+# speed with no Stop phase to charge the guard's budget.
+test_stopfailure_failure_continuations_are_paced() {
+  local dir out status fail_payload marker t0 elapsed
+  fail_payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"authentication_failed","transcript_path":"/tmp/sess.jsonl"}'
+
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure-failed")
+  marker="$dir/state/.claude-autoarm-stopfailure-rewake"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  out=$(run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a StopFailure with a broken watcher start must deliver the failure notice"
+  assert_contains "$out" "automatic supervision mechanism is broken" "the StopFailure failure notice must describe the broken mechanism"
+  [ -e "$marker" ] || fail "the StopFailure failure notice must start the continuation cooldown"
+
+  fm_touch_epoch $(( $(date +%s) - 1 )) "$marker"
+  t0=$(date +%s)
+  out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=6 run_autoarm "$dir" "$fail_payload" 2>/dev/null); status=$?
+  elapsed=$(( $(date +%s) - t0 ))
+  expect_code 2 "$status" "a suppressed StopFailure failure retry must still keep the retry alive"
+  assert_contains "$out" "suppressed continuation" "the paced failure retry must carry its one-line reason: $out"
+  [ "$elapsed" -ge 3 ] || fail "a StopFailure failure retry inside a 6s cooldown set 1s ago must wait it out, took ${elapsed}s"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "the paced failure retry must record failed-suppressed, got: $(epoch_outcome "$dir")"
+  [ "$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker")" -ge $(( t0 + 3 )) ] || fail "the paced failure retry must restart the cooldown at its commit"
+
+  pass "auto-arm: StopFailure failure continuations are paced by the same cooldown"
+}
+
+# A StopFailure continuation that waits out the cooldown must re-honor the
+# gates it passed before the arm: AFK hands supervision to the away daemon and
+# a vanished need leaves nothing to supervise, so either one appearing during
+# the wait ends the firing silently instead of waking the primary late.
+test_stopfailure_paced_rewake_honors_afk_and_need_after_wait() {
+  local dir case_name status fail_payload rcfile hook_pid
+  fail_payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"connection_failed","transcript_path":"/tmp/sess.jsonl"}'
+  for case_name in afk need; do
+    dir=$(make_primary_dir "$TMP_ROOT/stopfailure-wait-$case_name")
+    : > "$dir/state/task.meta"
+    write_arm_fixture "$dir" actionable
+    : > "$dir/state/.claude-autoarm-stopfailure-rewake"
+    rcfile="$dir/hook-rc"
+    ( FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=5 run_autoarm "$dir" "$fail_payload" >/dev/null 2>&1; echo "$?" > "$rcfile" ) &
+    hook_pid=$!
+    for _ in $(seq 1 100); do
+      [ -e "$dir/state/successor-ran" ] && break
+      sleep 0.05
+    done
+    [ -e "$dir/state/successor-ran" ] || fail "$case_name: the paced StopFailure never reached its handling successor"
+    sleep 0.5
+    [ ! -e "$rcfile" ] || fail "$case_name: the StopFailure inside the cooldown finished before waiting it out"
+    if [ "$case_name" = afk ]; then
+      : > "$dir/state/.afk"
+    else
+      rm -f "$dir/state/task.meta"
+    fi
+    wait "$hook_pid"
+    status=$(cat "$rcfile")
+    expect_code 0 "$status" "$case_name appearing during the StopFailure cooldown wait must end the firing silently"
+    if [ "$case_name" = afk ]; then
+      [ "$(epoch_outcome "$dir")" = afk ] || fail "AFK during the wait must record outcome=afk, got: $(epoch_outcome "$dir")"
+    else
+      [ "$(epoch_outcome "$dir")" = clean ] || fail "a vanished need during the wait must record outcome=clean, got: $(epoch_outcome "$dir")"
+    fi
+  done
+  pass "auto-arm: a paced StopFailure rewake stands down when AFK or a lost need appears during its wait"
+}
+
 # An arm that attached to a peer cycle returns when that cycle ends with the wake
 # the peer delivered. Pi, omp, and OpenCode start the next arm before notifying
 # the model; the hook must do the same, naming the closed arm as the successor's
@@ -2225,6 +2345,9 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
+test_stopfailure_close_rewakes_paced_per_cooldown
+test_stopfailure_failure_continuations_are_paced
+test_stopfailure_paced_rewake_honors_afk_and_need_after_wait
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes
 test_failed_close_rewakes_with_failure_banner

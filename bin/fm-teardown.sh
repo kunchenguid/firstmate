@@ -466,13 +466,15 @@ teardown_prune_status_archives() {  # <task-directory>
 teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   local state=$1 task=$2 relative=${3:-$2} dir part archive n=0 entry
   if [ ! -e "$CONFIG/status-archive" ]; then
-    status_retire_presentation_task "$state" "$task"
-    return $?
+    status_retire_presentation_task "$state" "$task" || return $?
+    rm -f -- "$state/.paused-overdue-$task" || return 1
+    return 0
   fi
   # Preserve the remote-home no-op, including its lock-free fast path.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ]; then
-    status_retire_presentation_task "$state" "$task"
-    return $?
+    status_retire_presentation_task "$state" "$task" || return $?
+    rm -f -- "$state/.paused-overdue-$task" || return 1
+    return 0
   fi
   if [ -L "$state/$task.status" ] || [ ! -f "$state/$task.status" ]; then
     echo "error: unsafe status archive source: $state/$task.status" >&2
@@ -501,6 +503,7 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
     echo "error: status archival failed for $task; retaining live status for retry" >&2
     return 1
   }
+  rm -f -- "$state/.paused-overdue-$task" || return 1
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
@@ -1602,7 +1605,8 @@ validate_pr_poll_cleanup() {
   fm_task_id_path_safe "$id" || return 0
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1611,7 +1615,8 @@ validate_pr_poll_cleanup() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
@@ -1636,6 +1641,7 @@ remove_pr_poll_artifacts() {
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  fm_pr_poll_degraded_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
