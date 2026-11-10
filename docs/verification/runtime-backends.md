@@ -2324,6 +2324,29 @@ Ran 27 tests in 49.652s
 OK
 ```
 
+### Remote account selection and delivery review
+
+Verified on 2026-11-10 with Python 3.14.8 and Git 2.56.0 using synthetic account stores and SSH/Orca endpoints.
+The ship and scout regressions execute both coordinator and remote spawn, requiring the selected Claude account to survive staging and appear in the imported metadata.
+The review regressions exercise an imported local-only branch with no local worker worktree, missing-branch refusal, and fetched PR-head review without an imported branch.
+These checks do not claim live Claude authentication or rendered-terminal coverage.
+Run from the checkout with `REPO` naming its absolute path and `EVIDENCE_DIR` naming a private proof directory.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-review-diff.test.sh --json "$EVIDENCE_DIR/final-review-tests.json"
+bash -c '. "$1/tests/git-config-helpers.sh"; python3 "$1/tests/orca-worker-transport.py" Transport.test_real_remote_claude_ship_preserves_account_choice Transport.test_real_remote_claude_scout_preserves_account_choice' _ "$REPO"
+```
+
+Selected output:
+
+```text
+ok - remote publishing reviews fetch the PR head without an imported branch
+ok - remote reviews show the imported branch and refuse a missing delivery
+Ran 2 tests in 122.354s
+
+OK
+```
+
 ### Remote Orca workers
 
 The original implementation was exercised on two macOS hosts on 2026-11-07 with Orca 1.4.251 and Codex CLI 0.164.0.

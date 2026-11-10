@@ -450,9 +450,15 @@ fm_dod_accept_ship_done ship local-only "$2" "$2" 'done: ready in branch fm/task
         (self.state / "existing-local.meta").write_text("kind=ship\n")
         self.real_spawn(mode="direct-PR")
 
-    def real_spawn(self, mode=None, override=None, contract=""):
+    def test_real_remote_claude_ship_preserves_account_choice(self):
+        self.real_spawn(mode="local-only", harness="claude", account=True)
+
+    def test_real_remote_claude_scout_preserves_account_choice(self):
+        self.real_spawn(harness="claude", account=True)
+
+    def real_spawn(self, mode=None, override=None, contract="", harness="codex", account=False):
         (self.config / "backlog-backend").write_text("manual\n")
-        profile = dict(harness="codex", model="gpt-5" if override else None, effort=None)
+        profile = dict(harness=harness, model="gpt-5" if override else None, effort=None)
         (self.config / "crew-dispatch.json").write_text(json.dumps(dict(default=profile)))
         decision = dict(task="task", status="clear", profile=profile)
         (self.data / "task/dispatch-resolution.json").write_text(json.dumps(decision))
@@ -464,6 +470,20 @@ fm_dod_accept_ship_done ship local-only "$2" "$2" 'done: ready in branch fm/task
         codex = self.fakebin / "codex"
         codex.write_text("#!/bin/sh\nprintf 'codex-cli 0.999.0\\n'\n")
         codex.chmod(0o700)
+        if account:
+            selected = self.root / "selected-account"
+            selected.mkdir()
+            (selected / ".credentials.json").write_text("{}")
+            (self.config / "claude-accounts").write_text("ordinary\n" + str(selected) + "\n")
+            claude = self.fakebin / "claude"
+            claude.write_text('''#!/bin/sh
+if [ "$1 $2" = "auth status" ]; then
+    test -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+    exit
+fi
+printf '2.1.0 (Claude Code)\\n'
+''')
+            claude.chmod(0o700)
         orca = self.fakebin / "orca"
         orca.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
@@ -497,10 +517,12 @@ print(json.dumps(dict(ok=True,result=result)))
                    FM_CONFIG_OVERRIDE=str(self.config), FM_DATA_OVERRIDE=str(self.data),
                    FM_PROJECTS_OVERRIDE=str(self.home / "projects"), FM_SPAWN_NO_GUARD="1")
         flags = ["--mode", mode, "--yolo", "off"] if mode else ["--scout"]
+        if account:
+            flags += ["--account", str(selected)]
         if override:
             flags += ["--dispatch-override", override]
         result = subprocess.run(["bash", str(ROOT / "bin/fm-spawn.sh"), "task", str(self.local),
-                                 "--backend", "orca", "--harness", "codex", *flags],
+                                 "--backend", "orca", "--harness", harness, *flags],
                                 capture_output=True, text=True, env=env, timeout=180)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         fields = (self.state / "task.meta").read_text()
@@ -512,6 +534,8 @@ print(json.dumps(dict(ok=True,result=result)))
         self.assertEqual(json.loads((remote_home / "data/task/dispatch-resolution.json").read_text()), decision)
         if override:
             self.assertIn("dispatch_override=" + override, fields)
+        if account:
+            self.assertIn("account=" + str(selected), fields)
         if mode:
             self.assertIn("mode=" + mode, fields)
             return
@@ -522,6 +546,7 @@ print(json.dumps(dict(ok=True,result=result)))
             return result.stdout
         self.assertIn("ready", fm("fm-peek.sh"))
         fm("fm-send.sh", "Write the report, then acknowledge this message.")
+        self.assertFalse((self.state / "pending-replies").exists())
         remote_home = Path(self.route()["workspace"]) / "home"
         inbox = remote_home / "state/task.inbox"
         messages = list(inbox.glob("*.msg"))

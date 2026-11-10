@@ -4997,6 +4997,7 @@ if [ "$BACKEND" = orca ] && [ "$ORCA_MACHINE_ENV" != local ]; then
   [ -z "$MODE" ] || remote_args+=(--mode "$MODE" --yolo "$YOLO" --branch-prefix "$BRANCH_PREFIX")
   [ -z "$MODEL" ] || remote_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || remote_args+=(--effort "$EFFORT")
+  [ "$ACCOUNT_SET" -eq 0 ] || remote_args+=(--account "$ACCOUNT_ARG")
   [ -z "$BASE_BRANCH" ] || remote_args+=(--base-branch "$BASE_BRANCH")
   [ -z "$UPSTREAM_CONSENT" ] || remote_args+=(--upstream-consent "$UPSTREAM_CONSENT")
   [ "$RAW_LAUNCH" = 0 ] || {

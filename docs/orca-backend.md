@@ -56,6 +56,7 @@ When one host is unreachable, the watcher skips that host's other routes until i
 Transport failures report unknown remote state and preserve the task.
 
 For local-only work, readiness imports a Git bundle into the parent's named task branch without forcing a ref and records the accepted head through the ordinary readiness gate.
+`bin/fm-review-diff.sh` reviews the imported branch from the parent's project without requiring the worker's worktree locally.
 The usual approved fast-forward landing remains on the parent machine.
 Cleanup sends evidence from the parent's landed default branch back to the worker host and runs the ordinary dirty-worktree, landed-work, report, and decision checks there.
 A durable remote cleanup receipt lets a lost reply be retried before the parent retires its task record and backlog item.
