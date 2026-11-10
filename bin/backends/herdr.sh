@@ -3408,7 +3408,8 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # A missing read, a shorter suffix, or a paste placeholder followed by a
 # literal remainder does not press Enter: the composer is cleared back to
 # empty and the verdict is send-failed, or unknown when the clear cannot be
-# verified. Other harnesses skip this proof. Verified hazard
+# verified. Codex uses the guarded native prompt route below.
+# Other harnesses skip this proof. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3593,6 +3594,38 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
   return 1
 }
 
+# Codex uses one native prompt request, never a literal-paste/Enter retry.
+# The exact pane, idle native identity and empty composer must agree first.
+# A refusal before the request is a known send-failed; a stalled or malformed
+# reply is unconfirmed; there is no transport fallback because the request may
+# already have submitted text.
+fm_backend_herdr_codex_submit() {  # <target> <text>
+  local target=$1 text=$2 response pane=$FM_BACKEND_HERDR_PANE session=$FM_BACKEND_HERDR_SESSION
+  if ! response=$(fm_backend_herdr_cli "$session" agent get "$pane") \
+    || ! printf '%s' "$response" | jq -e --arg pane "$pane" '
+      .error == null and .result.agent.pane_id == $pane and
+      .result.agent.agent == "codex" and
+      (.result.agent.agent_status == "idle" or .result.agent.agent_status == "done")' >/dev/null; then
+    printf 'send-failed'; return 0
+  fi
+  [ "$(fm_backend_herdr_composer_state "$target")" = empty ] \
+    || { printf 'send-failed'; return 0; }
+  if response=$(fm_backend_herdr_cli "$session" agent prompt "$pane" "$text" \
+      --wait --until working --timeout 30000) \
+    && printf '%s' "$response" | jq -e --arg pane "$pane" '
+      .error == null and .result.type == "agent_prompted" and
+      .result.agent.pane_id == $pane and .result.agent.agent == "codex" and
+      .result.agent.agent_status == "working"' >/dev/null; then
+    printf 'empty'
+  elif printf '%s' "$response" | jq -e '.error.code == "agent_blocked"' >/dev/null 2>&1; then
+    printf 'send-failed'
+  else
+    # The request may have submitted before its reply was lost or stalled.
+    # Use the existing typed-but-unconfirmed verdict to forbid blind resend.
+    printf 'pending'
+  fi
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content busy_harness=''
@@ -3602,6 +3635,20 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # that then starts a turn must not report empty. Other harnesses keep the
   # unproven type-then-Enter path.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
+  if [ -z "${identity%%$'\t'*}" ] && [ "${FM_HERDR_EXPECTED_HARNESS:-}" = codex ]; then
+    printf 'send-failed'; return 0
+  fi
+  # A caller that names its expected harness must match the pane's live one:
+  # the daemon's retry hold is keyed to that harness, so a native Codex send
+  # to a differently-expected pane would be resubmittable after a lost reply.
+  if [ "${identity%%$'\t'*}" = codex ] && [ -n "${FM_HERDR_EXPECTED_HARNESS:-}" ] \
+    && [ "$FM_HERDR_EXPECTED_HARNESS" != codex ]; then
+    printf 'send-failed'; return 0
+  fi
+  if [ "${identity%%$'\t'*}" = codex ]; then
+    fm_backend_herdr_codex_submit "$target" "$text"
+    return 0
+  fi
   [ "${identity%%$'\t'*}" != polytoken ] || busy_harness=polytoken
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1

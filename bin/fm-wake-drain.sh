@@ -284,6 +284,7 @@ BRANCH_OUTCOME_INDEX_STATE=ok
 BRANCH_OUTCOME_INDEX_ENDPOINT=
 BRANCH_OUTCOME_INDEX_IDENT=
 STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+STATUS_OUTCOME_BACKSTOP_SKIPPED=0
 outcome_index_ready_ok() { # <ready-path>
   local seq
   [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ] || return 1
@@ -339,10 +340,12 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   lock="$STATE/.branch-outcomes.lock"
   if [ -e "$store" ] || [ -L "$store" ]; then
     if [ ! -f "$store" ] || [ ! -r "$store" ] || [ -L "$store" ]; then
+      STATUS_OUTCOME_BACKSTOP_SKIPPED=1
       printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history could not be read safely; repair it before relying on drain recovery.\n'
       return 0
     fi
     if ! fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
+      STATUS_OUTCOME_BACKSTOP_SKIPPED=1
       printf 'STATUS OUTCOME BACKSTOP SKIPPED: branch outcome history is busy; retry on the next drain.\n'
       return 0
     fi
@@ -351,6 +354,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       if ! "$SCRIPT_DIR/fm-branch-outcome.sh" processed-init --held-lock >/dev/null 2>&1 \
         || ! outcome_index_ready_ok "$ready"; then
         fm_lock_release "$lock"
+        STATUS_OUTCOME_BACKSTOP_SKIPPED=1
         printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes could not be rebuilt because the outcome store is unsafe; repair it before relying on drain recovery.\n'
         return 0
       fi
@@ -411,6 +415,7 @@ EOF
   if [ -e "$store" ] || [ -L "$store" ]; then fm_lock_release "$lock"; fi
   if [ "$rc" -eq 1 ]; then return 1; fi
   if [ "$rc" -eq 2 ]; then
+    STATUS_OUTCOME_BACKSTOP_SKIPPED=1
     printf 'STATUS OUTCOME BACKSTOP SKIPPED: a bounded task outcome index could not be read safely; repair it before relying on drain recovery.\n'
     STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
     return 0
@@ -785,10 +790,22 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
+  # The delivered receipt also covers the outcome backstop, so only a main
+  # drain whose backstop ran may publish it.
+  if [ "$ACTOR" != main ] || [ "$STATUS_OUTCOME_BACKSTOP_SKIPPED" = 1 ]; then
+    rm -f -- "$prepared"
+    return 0
+  fi
+  status_presented_receipts "$STATE" "$acknowledged" "$fully_presented" > "$prepared" \
+    && _status_write_delivered_endpoints "$STATE" "$prepared" \
+    || echo "wake drain: delivered status receipt could not be committed; events may replay" >&2
   rm -f -- "$prepared"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
+  # The daemon's drain discards every status section, and these sections
+  # advance shared presentation positions, so only the primary session runs them.
+  [ "${FM_DRAIN_CONSUMER:-}" != daemon ] || return 0
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then

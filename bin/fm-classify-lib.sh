@@ -1636,7 +1636,135 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
+# Only presentation receipts cross consumer boundaries. Watcher/daemon
+# classification positions remain private and never acknowledge delivery.
 status_presentation_cursor_offset() {  # <status-file>
+  local drained delivered
+  drained=$(_status_drain_cursor_offset "$1") || return 1
+  delivered=$(status_delivered_cursor_offset "$1") || return 1
+  [ "$delivered" -le "$drained" ] || drained=$delivered
+  printf '%s' "$drained"
+}
+
+status_delivered_cursor_offset() {  # <status-file>
+  local f=$1 delivered=0 size marker
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  marker="${f%/*}/.status-delivered-${f##*/}"
+  if [ -f "$marker" ] && [ -r "$marker" ] && [ ! -L "$marker" ]; then
+    delivered=$(status_presentation_marker_offset "$marker" "$f")
+  fi
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$delivered" -le "$size" ] || delivered=0
+  printf '%s' "$delivered"
+}
+
+# Publish only endpoints captured in the successfully submitted digest. The
+# presentation lock serializes receipt updates with drains and retirement.
+# Independent receipts avoid overwriting the drain's newer fleet snapshot.
+status_commit_delivered_endpoints() {  # <state> <endpoint-file>
+  local state=$1 capture=$2 rc=0 clamped task endpoint ident bounded
+  clamped=$(mktemp "$state/.status-delivered.clamped.XXXXXX") || return 1
+  fm_lock_acquire_wait_bounded "$state/.status-presentation-lock" 5 \
+    || { rm -f "$clamped"; return 1; }
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    bounded=$endpoint
+    case "$task" in *[!a-zA-Z0-9_.-]*) ;; *)
+      case "$endpoint" in ''|*[!0-9]*) ;; *)
+        bounded=$(_status_delivered_receipt_endpoint "$state/$task.status" "$endpoint") || { rc=1; continue; } ;;
+      esac ;;
+    esac
+    printf '%s\t%s\t%s\n' "$task" "$bounded" "$ident" >> "$clamped" || rc=1
+  done < "$capture"
+  _status_write_delivered_endpoints "$state" "$clamped" || rc=1
+  rm -f "$clamped"
+  fm_lock_release "$state/.status-presentation-lock" || rc=1
+  return "$rc"
+}
+
+# Walk the unread span [start, endpoint) and return the offset of the first line
+# that was not delivered: an unread informational line (surface) or an
+# actionable event not ending at <covered-end> (actionable). Failure to read the
+# span fails closed so no receipt is published.
+_status_receipt_span_endpoint() {  # <status-file> <start> <endpoint> <surface|actionable> [<covered-end>]
+  local LC_ALL=C f=$1 start=$2 endpoint=$3 kind=$4 covered=${5:-} span line consumed=0 end
+  case "$start:$endpoint" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  if [ "$start" -ge "$endpoint" ]; then printf '%s' "$endpoint"; return 0; fi
+  span=$(mktemp "${f%/*}/.status-delivered.span.XXXXXX") || return 1
+  if ! _fm_status_read_span "$f" "$start" "$((endpoint - start))" > "$span" 2>/dev/null; then
+    rm -f "$span"; return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    end=$((start + consumed + ${#line} + 1))
+    [ "$end" -le "$endpoint" ] || end=$endpoint
+    if [ "$kind" = surface ]; then
+      if status_line_is_unread_surface "$line"; then break; fi
+    elif status_is_captain_relevant "$line" && [ "$end" != "$covered" ]; then
+      break
+    fi
+    consumed=$((consumed + ${#line} + 1))
+  done < "$span"
+  rm -f "$span"
+  [ "$((start + consumed))" -le "$endpoint" ] || consumed=$((endpoint - start))
+  printf '%s' "$((start + consumed))"
+}
+
+# A digest delivers actionable events only: its receipt stops before the first
+# unread informational line so the primary drain still presents that line.
+_status_delivered_receipt_endpoint() {  # <status-file> <endpoint>
+  local start
+  start=$(status_presentation_cursor_offset "$1") || return 1
+  _status_receipt_span_endpoint "$1" "$start" "$2" surface
+}
+
+# A primary drain presents notes, annotations and the latest backstop event, not
+# every actionable line. Publish its receipt only through contiguous delivery:
+# a task whose span the drain fully presented keeps its endpoint, every other
+# task stops before its first actionable line past the confirmed delivery cursor.
+status_presented_receipts() {  # <state> <acknowledged-rows> <fully-presented-task-ids>
+  local state=$1 task endpoint ident f start bounded
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    case "
+$3
+" in *$'\n'"$task"$'\n'*) printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident"; continue ;; esac
+    f="$state/$task.status"
+    start=$(status_delivered_cursor_offset "$f") || continue
+    bounded=$(_status_receipt_span_endpoint "$f" "$start" "$endpoint" actionable) || continue
+    printf '%s\t%s\t%s\n' "$task" "$bounded" "$ident"
+  done <<EOF
+$2
+EOF
+}
+
+# Lock-free body for a caller that already holds the presentation lock.
+_status_write_delivered_endpoints() {  # <state> <endpoint-file>
+  local state=$1 capture=$2 task endpoint ident old marker tmp size rc=0
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    case "$task" in *[!a-zA-Z0-9_.-]*) rc=1; continue ;; esac
+    case "$endpoint" in ''|*[!0-9]*) rc=1; continue ;; esac
+    size=$(_fm_status_file_size "$state/$task.status") || { rc=1; continue; }
+    size=${size//[[:space:]]/}
+    case "$size" in ''|*[!0-9]*) rc=1; continue ;; esac
+    [ "$endpoint" -le "$size" ] || { rc=1; continue; }
+    marker="$state/.status-delivered-$task.status"
+    old=$(status_delivered_cursor_offset "$state/$task.status") || { rc=1; continue; }
+    [ "$endpoint" -gt "$old" ] || continue
+    tmp="$marker.tmp.$$"
+    if status_presentation_marker_commit "$tmp" "$state/$task.status" "$endpoint" "$ident"; then
+      mv -f "$tmp" "$marker" || rc=1
+    else
+      rc=1
+    fi
+    rm -f "$tmp"
+  done < "$capture"
+  return "$rc"
+}
+
+_status_drain_cursor_offset() {  # <status-file>
   local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
@@ -1681,6 +1809,14 @@ EOF
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
+  local drained delivered
+  drained=$(_status_drain_backstop_offset "$1") || return 1
+  delivered=$(status_delivered_cursor_offset "$1") || return 1
+  [ "$delivered" -le "$drained" ] || drained=$delivered
+  printf '%s' "$drained"
+}
+
+_status_drain_backstop_offset() {  # <status-file>
   local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
@@ -1872,7 +2008,8 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
     && [ ! -e "$home_appends_lock" ] && [ ! -L "$home_appends_lock" ] \
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
-    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
+    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ] \
+    && [ ! -e "$state/.status-delivered-$task.status" ] && [ ! -L "$state/.status-delivered-$task.status" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -1938,7 +2075,8 @@ EOF
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
       "$state/.$task.open-decisions-cursor.timed" \
-      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" \
+      "$state/.status-delivered-$task.status" || rc=1
     fm_lock_remove_path "$home_appends_lock" 2>/dev/null || true
   fi
   if [ "$archive_published" -eq 1 ] && [ "$rc" -ne 0 ] \

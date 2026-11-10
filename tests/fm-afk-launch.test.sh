@@ -266,6 +266,8 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
+  : > "$st/state/.subsuper-escalations.positions"
+  : > "$st/state/.subsuper-escalations.frozen-positions"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -274,7 +276,9 @@ unit_clear_stale() {
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
-     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ] \
+     && [ ! -e "$st/state/.subsuper-escalations.positions" ] \
+     && [ ! -e "$st/state/.subsuper-escalations.frozen-positions" ]; then
     pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and unknown-wake acknowledgements"
   else
     fail "clear-stale: stale artifacts survived"
@@ -1569,6 +1573,36 @@ unit_clear_failure_aborts_entry() {
   rm -rf "$st"
 }
 
+unit_rollback_restores_delivery_positions() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-rollback-positions.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'digest\n' > "$st/state/.subsuper-escalations"
+  printf 'task-a\t42\n' > "$st/state/.subsuper-escalations.positions"
+  printf 'task-b\t7\n' > "$st/state/.subsuper-escalations.frozen-positions"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_catchup_pending() { return 1; }
+    fm_afk_launch_daemon_allowed() { return 0; }
+    fm_afk_launch_record_require() { return 0; }
+    daemon_lock_held_by_live_daemon() { return 1; }
+    fm_afk_launch_reconcile() { return 0; }
+    fm_afk_clear_stale_artifacts() {
+      rm -f "$1/.subsuper-escalations" "$1/.subsuper-escalations.positions" "$1/.subsuper-escalations.frozen-positions"
+      return 1
+    }
+    ! fm_afk_launch_start_native
+  ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations" 2>/dev/null)" = digest ] \
+    && [ "$(cat "$st/state/.subsuper-escalations.positions" 2>/dev/null)" = "$(printf 'task-a\t42')" ] \
+    && [ "$(cat "$st/state/.subsuper-escalations.frozen-positions" 2>/dev/null)" = "$(printf 'task-b\t7')" ]; then
+    pass "rollback: failed entry restores the buffer with its delivery positions"
+  else
+    fail "rollback: failed entry lost the buffer's delivery positions"
+  fi
+  rm -rf "$st"
+}
+
 unit_confirmed_absence_succeeds() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-confirmed-absent.XXXXXX")
@@ -1836,6 +1870,7 @@ unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
+unit_rollback_restores_delivery_positions
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts

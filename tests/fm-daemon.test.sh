@@ -4151,3 +4151,232 @@ test_dialog_name_survives_away_self_handle
 test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
+
+# Consumer handover uses presentation receipts, never watcher classification.
+test_consumer_presentation_handover() (
+  local dir state file snapshot first second capture out old_inode
+  dir=$(make_supercase consumer-handover); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  # Match executable daemon startup, which loads the portable lock owner.
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  file="$state/receipt.status"; capture="$dir/endpoints"
+  printf 'note: first\n' > "$file"
+  local i
+  for i in 2 3 4 5 6 7; do printf 'note: old-%s\n' "$i" >> "$file"; done
+  # Watcher classification is not a presentation receipt.
+  status_presentation_marker_commit "$(status_signal_seen_marker_path "$state" receipt)" \
+    "$file" "$(log_size "$file")" "$(_fm_open_decisions_file_ident "$file")"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "watcher classification suppressed delivery"
+  first=$(log_size "$file")
+  # A drain that reaches the primary session hands its positions to the daemon.
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary-drain.out" 2>/dev/null || fail "primary drain failed"
+  [ "$(status_seen_offset "$state" receipt)" = "$first" ] || fail "primary drain receipt not shared"
+  # The daemon's own drain reads for classification, not for the primary.
+  printf 'note: unseen\n' > "$state/daemon-only.status"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_DRAIN_CONSUMER=daemon \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/daemon-drain.out" 2>/dev/null || fail "daemon drain failed"
+  [ "$(status_seen_offset "$state" daemon-only)" = 0 ] || fail "daemon drain acted as primary delivery"
+  for FM_DAEMON_PRIMARY_HARNESS in claude codex; do
+    [ "$(status_seen_offset "$state" receipt)" = "$first" ] || fail "handover replayed a presented event"
+  done
+  printf 'failed: second\n' >> "$file"
+  out=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$file" "$state")
+  case "$out" in escalate\|*second*) ;; *) fail "new append disappeared: $out" ;; esac
+  escalate_add "$state" "receipt.status: failed: second" || fail "buffer failed"
+  mark_escalated_seen "$state" "$capture" queued || fail "classification failed"
+  second=$(log_size "$file")
+  [ "$(status_presentation_cursor_offset "$file")" = "$first" ] || fail "classification acted as presentation"
+  inject_msg() { INJECT_SUBMIT_ATTEMPTED=1; INJECT_LAST_VERDICT=unknown; return 1; }
+  escalate_flush "$state" && fail "failed delivery confirmed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$first" ] || fail "failed delivery advanced receipt"
+  # A drain presents an append while the daemon is submitting its earlier cut.
+  inject_msg() {
+    printf 'done: third\n' >> "$file"
+    snapshot=$(status_presentation_snapshot "$state")
+    status_commit_presentation_snapshot "$state" "$snapshot" || return 1
+  }
+  escalate_flush "$state" || fail "successful delivery failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$(log_size "$file")" ] || fail "older daemon cut regressed drain receipt"
+  printf 'done: fourth\n' >> "$file"
+  out=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$file" "$state")
+  case "$out" in escalate\|*fourth*) ;; *) fail "append after interleaving disappeared" ;; esac
+  escalate_add "$state" 'receipt.status: done: fourth'
+  mark_escalated_seen "$state" "$capture" queued
+  second=$(log_size "$file")
+  inject_msg() { printf 'done: fifth\n' >> "$file"; return 0; }
+  escalate_flush "$state" || fail "daemon delivery failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$second" ] || fail "daemon acknowledged bytes appended after its captured cut"
+  [ "$(status_outcome_backstop_cursor_offset "$file")" = "$second" ] || fail "backstop ignored native delivery receipt"
+  out=$(status_new_lines_since_cursor "$file")
+  case "$out" in *fifth*) ;; *) fail "drain missed append after daemon receipt" ;; esac
+  printf 'malformed\n' > "$state/.status-presentation-cursor"
+  status_presentation_cursor_offset "$file" >/dev/null && fail "malformed manifest accepted"
+  rm "$state/.status-presentation-cursor"
+  old_inode="$file.old"; mv "$file" "$old_inode"
+  printf 'done: replacement\n' > "$file"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "replacement inherited receipt"
+  rm "$file"; mv "$old_inode" "$file"
+  printf 'x\n' > "$file"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "truncation inherited receipt"
+  printf 'malformed\n' > "$state/.status-delivered-receipt.status"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "malformed receipt accepted"
+  pass "consumer handover shares successful cuts and preserves interleaved appends and failures"
+)
+test_consumer_presentation_handover
+
+# An idempotent backend's frozen generation must not acknowledge the next
+# generation's positions when only its original digest was presented.
+test_frozen_delivery_receipts() (
+  local dir state file capture first second mode=unconfirmed
+  local FM_SUPERVISOR_BACKEND=t3code
+  dir=$(make_supercase frozen-receipts); state="$dir/state"
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  file="$state/frozen.status"; capture="$dir/capture"
+  printf 'done: first\n' > "$file"
+  first=$(log_size "$file")
+  classify_signal "$file" "$state" >/dev/null
+  printf 'frozen\t%s\t%s\n' "$first" "$(_fm_open_decisions_file_ident "$file")" > "$capture"
+  escalate_add "$state" 'frozen.status: done: first'
+  mark_escalated_seen "$state" "$capture" queued
+  inject_msg() {
+    INJECT_SUBMIT_ATTEMPTED=1 INJECT_LAST_VERDICT=$mode INJECT_SENT_MSG=$1
+    [ "$mode" = empty ]
+  }
+  escalate_flush "$state" && fail "unconfirmed digest was delivered"
+  [ "$(status_presentation_cursor_offset "$file")" = 0 ] || fail "frozen attempt became a receipt"
+  printf 'failed: second\n' >> "$file"
+  second=$(log_size "$file")
+  printf 'frozen\t%s\t%s\n' "$second" "$(_fm_open_decisions_file_ident "$file")" > "$capture"
+  escalate_add "$state" 'frozen.status: failed: second'
+  mark_escalated_seen "$state" "$capture" queued
+  mode=empty
+  escalate_flush_frozen "$state" "$state/.subsuper-escalations" || fail "frozen delivery failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$first" ] || fail "frozen delivery acknowledged next generation"
+  [ -s "$state/.subsuper-escalations" ] || fail "next generation was discarded"
+  escalate_flush "$state" || fail "next generation failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$second" ] || fail "next generation receipt missing"
+  pass "frozen digest receipts preserve next-generation endpoints"
+)
+test_frozen_delivery_receipts
+
+# A native request has no idempotency key: do not replay an ambiguous send.
+test_native_ambiguity_holds_later_flushes() (
+  local dir state calls=0
+  dir=$(make_supercase native-ambiguity); state="$dir/state"
+  local FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=lab:w9:p7
+  local FM_DAEMON_PRIMARY_HARNESS=codex
+  afk_active() { return 0; }
+  fm_backend_target_exists() { return 0; }
+  pane_is_busy() { return 1; }
+  fm_backend_composer_state() { printf empty; }
+  fm_backend_send_text_submit() { printf pending; }
+  inject_msg 'exact text' "$state" exact && fail "pending native request confirmed"
+  [ "$INJECT_RETRY_UNSAFE" = 1 ] || fail "native pending request was safe to retry"
+  escalate_add "$state" 'a status event'
+  inject_msg() {
+    calls=$((calls + 1))
+    INJECT_SUBMIT_ATTEMPTED=1 INJECT_LAST_VERDICT=pending
+    INJECT_RETRY_UNSAFE=1 INJECT_SENT_MSG=$1
+    return 1
+  }
+  escalate_flush "$state" && fail "ambiguous native delivery confirmed"
+  [ -s "$state/.subsuper-escalations.native-unconfirmed" ] || fail "native ambiguity was not recorded"
+  escalate_add "$state" 'a new event'
+  escalate_flush "$state" && fail "held native delivery confirmed"
+  [ "$calls" -eq 1 ] || fail "a later flush duplicated the ambiguous native request"
+  [ "$(wc -l < "$state/.subsuper-escalations")" -eq 2 ] || fail "holding native ambiguity lost buffered events"
+  pass "ambiguous native submission holds later flushes without dropping new events"
+)
+test_native_ambiguity_holds_later_flushes
+
+# A frozen digest whose native resubmission is ambiguous must be held too.
+test_frozen_native_ambiguity_holds() (
+  local dir state calls=0 buf
+  dir=$(make_supercase frozen-native-ambiguity); state="$dir/state"
+  local FM_SUPERVISOR_BACKEND=t3code
+  buf="$state/.subsuper-escalations"
+  escalate_add "$state" 'a status event'
+  inject_msg() {
+    calls=$((calls + 1))
+    INJECT_SUBMIT_ATTEMPTED=1 INJECT_LAST_VERDICT=unconfirmed INJECT_SENT_MSG=$1
+    INJECT_RETRY_UNSAFE=0
+    [ "$calls" -lt 2 ] || INJECT_RETRY_UNSAFE=1
+    return 1
+  }
+  escalate_flush "$state" && fail "unconfirmed digest was delivered"
+  [ -f "$buf.frozen" ] || fail "digest was not frozen"
+  escalate_flush "$state" && fail "ambiguous frozen resubmission was delivered"
+  [ -s "$buf.native-unconfirmed" ] || fail "frozen ambiguity was not recorded"
+  escalate_flush "$state" && fail "held frozen digest was delivered"
+  [ "$calls" -eq 2 ] || fail "a later flush resubmitted the ambiguous frozen digest"
+  pass "ambiguous frozen native submission is held"
+)
+test_frozen_native_ambiguity_holds
+
+# A digest delivers actionable events only: informational lines in its captured
+# span stay unread for the primary, and a daemon drain presents nothing.
+test_delivery_receipts_preserve_unread_notes() (
+  local dir state file capture end out
+  dir=$(make_supercase receipt-notes); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  file="$state/notes.status"; capture="$dir/positions"
+  printf 'failed: build\nnote: diagnostic answer\n' > "$file"
+  end=$(log_size "$file")
+  printf 'notes\t%s\t%s\n' "$end" "$(_fm_open_decisions_file_ident "$file")" > "$capture"
+  status_commit_delivered_endpoints "$state" "$capture" || fail "receipt commit failed"
+  [ "$(status_presentation_cursor_offset "$file")" = "$(printf 'failed: build\n' | wc -c)" ] \
+    || fail "digest receipt covered an undelivered note"
+  out=$(status_new_lines_since_cursor "$file")
+  case "$out" in *'note: diagnostic answer'*) ;; *) fail "unread note was skipped: $out" ;; esac
+  pass "daemon delivery receipts stop before unread informational lines"
+)
+test_delivery_receipts_preserve_unread_notes
+
+test_daemon_drain_leaves_primary_presentation_unread() (
+  local dir state
+  dir=$(make_supercase daemon-drain-unread); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  printf 'note: unseen\n' > "$state/unseen.status"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" FM_DRAIN_CONSUMER=daemon \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/daemon.out" 2>/dev/null || fail "daemon drain failed"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary.out" 2>/dev/null || fail "primary drain failed"
+  grep -q 'note: unseen' "$dir/primary.out" || fail "primary drain omitted a note the daemon drain discarded: $(cat "$dir/primary.out")"
+  pass "a daemon drain does not consume the primary's unread notes"
+)
+test_daemon_drain_leaves_primary_presentation_unread
+
+test_backstop_presentation_is_seen_by_the_daemon() (
+  local dir state file out
+  dir=$(make_supercase backstop-seen); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  file="$state/finished.status"
+  printf 'done: shipped\n' > "$file"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary.out" 2>/dev/null || fail "primary drain failed"
+  grep -q 'finished done: shipped' "$dir/primary.out" || fail "backstop did not present the event: $(cat "$dir/primary.out")"
+  [ "$(status_seen_offset "$state" finished)" = "$(log_size "$file")" ] \
+    || fail "daemon would escalate an event the primary drain already presented"
+  pass "an event presented by the primary's outcome backstop is not escalated again"
+)
+test_backstop_presentation_is_seen_by_the_daemon
+
+test_primary_drain_receipt_keeps_unpresented_failure_unseen() (
+  local dir state file
+  dir=$(make_supercase receipt-failure-before-note); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/supervision-host-off"
+  file="$state/mixed.status"
+  printf 'failed: build\nnote: diagnostic answer\n' > "$file"
+  FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$dir/primary.out" 2>/dev/null || fail "primary drain failed"
+  grep -q 'note: diagnostic answer' "$dir/primary.out" || fail "note was not presented: $(cat "$dir/primary.out")"
+  [ "$(status_seen_offset "$state" mixed)" = 0 ] \
+    || fail "daemon would skip a failure the primary drain never presented"
+  pass "a primary drain receipt does not cover unpresented actionable events"
+)
+test_primary_drain_receipt_keeps_unpresented_failure_unseen
