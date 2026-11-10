@@ -145,7 +145,8 @@ A captain who leaves while an attended turn runs turns its captain outcomes into
 `/quiet` asks for what the attended host already does: routine wakes stay off a present captain's main.
 So where the attended host runs, `/quiet` is a statement that enters nothing, because the host already gives what a quiet entry would; while [the broken-session latch](#the-broken-session-latch) holds, it says the session is paused instead.
 Where the home runs the host but the attended host lacks one of its parts, `/quiet` names the missing part and enters the quiet daemon, and while an away record is live the captain's return comes first.
-`bin/fm-afk-launch.sh` owns the readiness test and refusals in its `quiet-check` contract, and the [quiet skill](../.agents/skills/quiet/SKILL.md) owns the procedure.
+A subsequent `/afk` entry replaces fallback quiet mode with away posture and stops its daemon; a refused entry leaves quiet mode running.
+`bin/fm-afk-launch.sh` owns readiness, refusals, and guarded transition teardown (including teardown-failure reporting), and the [quiet skill](../.agents/skills/quiet/SKILL.md) owns the procedure.
 
 ## The dialog mirror
 
