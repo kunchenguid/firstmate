@@ -35,7 +35,7 @@ fm_home_payload_prune() {
 }
 
 fm_home_payload_return() (
-  local home=$1 id=$2 parent=$3 backup path receipt= rc=0
+  local home=$1 id=$2 parent=$3 backup path receipt='' rc=0
   shift 3
   fm_home_payload_check "$home" || return 1
   fm_home_worktree_lock_check "$home" "$id" "$parent" || return 1
