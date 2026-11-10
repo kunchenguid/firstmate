@@ -355,37 +355,32 @@ fm_sol_cap_entry_live() {  # <start> <pid>
 # is malformed, because skipping a home could claim a free slot that another
 # home holds.
 fm_sol_cap_home() {
-  if [ -n "${FM_STATE_OVERRIDE:-}" ] && {
-    [ "$1" = "$FM_STATE_OVERRIDE" ] ||
-    [ "$1" = "$FM_STATE_OVERRIDE/parent-route" ] ||
-    { [ -e "$1" ] && [ -e "$FM_STATE_OVERRIDE" ] && [ "$1" -ef "$FM_STATE_OVERRIDE" ]; }
-  }; then
-    printf '%s\n' "$FM_HOME"
-    return 0
-  fi
   case "$1" in
-    */state/parent-route) printf '%s\n' "${1%/state/parent-route}" ;;
-    *) printf '%s\n' "$FM_HOME" ;;
+    */state/parent-route) printf '%s\n' "${1%/state/parent-route}"; return 0 ;;
   esac
+  printf '%s\n' "$FM_HOME"
 }
 
 fm_sol_cap_adopt_workers() (
   local state=$1 now=$2 meta id model file home target backend verdict absence host pid lifecycle_lock='' owner current config lifecycle_held
   trap '[ -z "$lifecycle_lock" ] || fm_lock_release "$lifecycle_lock"' EXIT
   file=$state/$FM_SOL_REGISTRY_NAME
-  if [ -n "${FM_STATE_OVERRIDE:-}" ] && {
-    [ "$state" = "$FM_STATE_OVERRIDE" ] ||
-    [ "$state" = "$FM_STATE_OVERRIDE/parent-route" ] ||
-    { [ -e "$state" ] && [ -e "$FM_STATE_OVERRIDE" ] && [ "$state" -ef "$FM_STATE_OVERRIDE" ]; }
-  }; then
-    home=$FM_HOME
-  else
-    case "$state" in
-      */state/parent-route) home=${state%/state/parent-route} ;;
-      */state) home=${state%/state} ;;
-      *) home=$FM_HOME ;;
-    esac
-  fi
+  case "$state" in
+    */state/parent-route) home=${state%/state/parent-route} ;;
+    *)
+      if [ -n "${FM_STATE_OVERRIDE:-}" ] && {
+        [ "$state" = "$FM_STATE_OVERRIDE" ] ||
+        { [ -e "$state" ] && [ -e "$FM_STATE_OVERRIDE" ] && [ "$state" -ef "$FM_STATE_OVERRIDE" ]; }
+      }; then
+        home=$FM_HOME
+      else
+        case "$state" in
+          */state) home=${state%/state} ;;
+          *) home=$FM_HOME ;;
+        esac
+      fi
+      ;;
+  esac
   # The model set is the declaring home's own: a home that declared no
   # ceiling adopts nothing and owns no occupancy.
   config=$(fm_sol_cap_config_dir "$state") || return 1

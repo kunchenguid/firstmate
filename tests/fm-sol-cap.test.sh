@@ -452,6 +452,25 @@ test_redirected_config_spawn_with_malformed_home_declaration_launches_correctly(
   pass "redirected-config spawn launches and promotes when home declaration is malformed"
 }
 
+test_separate_state_staged_launch() {
+  local case_dir state out rc=0 pid
+  case_dir=$(make_case launch-state task-c)
+  state=$case_dir/runtime/state
+  mkdir -p "$state" "$case_dir/runtime/config"
+  touch "$state/.last-watcher-beat"
+  printf 'max=invalid\n' > "$case_dir/runtime/config/sol-cap"
+  add_raw_launch_probe "$case_dir"
+  out=$(FM_STATE_OVERRIDE="$state" spawn_raw_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "separate-state spawn failed: $out"
+  rc=0
+  out=$(run_staged_launch "$case_dir") || rc=$?
+  expect_code 0 "$rc" "separate-state staged launch failed: $out"
+  pid=$(awk -F '\t' '$1 == "task-c" {print $4}' "$state/sol-sessions.tsv")
+  [ -n "$pid" ] && [ "$pid" != 0 ] || fail "separate-state reservation was not promoted"
+  assert_equals "--brief pane-syntax" "$(cat "$case_dir/invocation.argv")" "separate-state worker did not run"
+  pass "separate-state staged launch retains effective configuration"
+}
+
 # A spawn with a malformed redirected declaration must fail admission loudly
 # without creating a delivery reservation that would occupy Sol capacity.
 test_redirected_config_spawn_with_malformed_declaration_fails_admission_without_reservation() {
@@ -1358,7 +1377,10 @@ test_remote_ownership_and_recovery() (
   write_sol_row "$case_dir/home" crew-c 1 "$$"
   fm_sol_cap_refuse_and_claim fifth ship codex gpt-6.1-sol "$case_dir/home/config" "$state" && fail "crew bypassed mate occupancy"
   FM_HOME=$ROOT
+  FM_STATE_OVERRIDE=$state/parent-route
+  FM_CONFIG_OVERRIDE=$case_dir/home/config
   fm_sol_cap_refuse_and_claim fifth ship codex gpt-6.1-sol "$case_dir/home/config" "$state/parent-route" && fail "nested route bypassed crew occupancy"
+  unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE
   FM_HOME=$case_dir/home
   scripts=$case_dir/probe
   mkdir "$scripts"
@@ -1625,6 +1647,7 @@ test_redirected_config_spawn_with_malformed_home_declaration_launches_correctly
 test_redirected_config_spawn_with_malformed_declaration_fails_admission_without_reservation
 test_cap_refuses_the_fifth_and_names_its_sessions
 test_separate_state_override_counts_against_ceiling
+test_separate_state_staged_launch
 test_stale_entries_do_not_count
 test_non_sol_model_never_claims_a_slot
 test_config_sol_cap_declares_the_ceiling

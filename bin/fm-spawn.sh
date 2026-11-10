@@ -1917,6 +1917,7 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
       SPAWN_ENDPOINT_CLOSED=1
+      SPAWN_ENDPOINT_CONFIRMED=1
     fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
@@ -8169,7 +8170,7 @@ else
     # with. fm_sol_cap_launch_shell reads the sourcing shell from the process
     # tree instead. The resolved configuration is passed so admission and
     # launch read the same declaration under redirected config.
-    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run-launch $(shell_quote "$ID") $(shell_quote "$STATE") $(shell_quote "$LAUNCH")"
+    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run-launch $(shell_quote "$ID") $(shell_quote "$STATE") $(shell_quote "$LAUNCH")"
   fi
   if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
     chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
