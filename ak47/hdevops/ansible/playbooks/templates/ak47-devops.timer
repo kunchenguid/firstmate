@@ -1,0 +1,12 @@
+[Unit]
+Description=ak47: hygiene tick every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# A missed run is not worth a catch-up burst: the next tick sees the same state.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

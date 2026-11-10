@@ -386,6 +386,19 @@ The filter runs at the worker command boundary, after the terminal daemon and pa
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
+## Per-task temporary directory (config/task-tmpdir)
+
+Every spawned task gets a temp root at `/tmp/fm-<id>/` with Go's build temp at `gotmp/` and, by default, the task's own `TMPDIR` at `tmp/`.
+`fm-spawn.sh` exports `TMPDIR=$TASK_TMP/tmp` into the worker pane, so a tool that calls `tempfile.mkdtemp()` or `mktemp -d` without a prefix writes inside the root `fm-teardown.sh` already removes instead of into `/tmp` itself.
+`GOTMPDIR` alone only covers Go; on 2026-11-10 the uncovered leaks had grown `/tmp` to 950,700 entries, which slowed every glob, `ls`, `find`, and test run on the box.
+
+The optional local, gitignored `config/task-tmpdir` restores the old behaviour: write `off` into it and `fm-spawn.sh` stops exporting `TMPDIR`.
+Any other content, or an absent file, leaves the per-task `TMPDIR` enabled.
+The path is kept short because a unix socket path is capped at 108 bytes.
+
+`ak47/guards/guard-producers.sh --systemic` fails when this export disappears, and [`tests/fm-gotmp.test.sh`](../tests/fm-gotmp.test.sh) covers the creation, the export, and the opt-out.
+The `ak47/` hygiene system that measures and reaps what still leaks is documented in [`ak47/README.md`](../ak47/README.md).
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

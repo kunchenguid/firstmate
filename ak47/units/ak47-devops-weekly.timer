@@ -1,0 +1,11 @@
+[Unit]
+Description=ak47: weekly hygiene review, Monday 09:00 local
+
+[Timer]
+OnCalendar=Mon 09:00
+AccuracySec=5min
+# A review that was missed because the box was off is still worth running.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

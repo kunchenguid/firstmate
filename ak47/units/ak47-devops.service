@@ -1,0 +1,19 @@
+[Unit]
+Description=ak47: deterministic hygiene tick (sample, self-heal the enumerated table, one log line)
+Documentation=file://%h/Projects/firstmate/ak47/README.md
+# The tick is cheap and idempotent; it must not be skipped just because the
+# previous run was slow, so it is not ordered against anything else.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=FM_HOME=%h/Projects/firstmate
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=%h/Projects/firstmate/ak47/tick.sh --apply
+# Below every interactive process on the box: the tick must never be the reason
+# an agent turn is slow.
+Nice=19
+IOSchedulingClass=idle
+# A tick that hangs is a tick that stops writing its line, which the next run
+# reports as a loop gap. Bound it so the timer keeps firing.
+TimeoutStartSec=240

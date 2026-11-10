@@ -2920,13 +2920,26 @@ if [ "$KIND" != secondmate ]; then
   esac
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/ and
+# every other program's temp nested at tmp/. Go won't create GOTMPDIR, so mkdir
+# before it is used; fm-teardown removes the whole root.
+#
+# TMPDIR is exported too, and that is deliberate. The earlier note here said
+# TMPDIR was "too broad (affects every program's temp, not just Go's)" and set
+# only GOTMPDIR. The measurement on 2026-11-10 showed the broadness is exactly
+# what is needed: /tmp held 950,700 entries, 831,000 of them the default temp
+# directory of a Python or shell test suite that never removed it. A leak that
+# lands in $TASK_TMP/tmp is removed by teardown; a leak that lands in /tmp is
+# removed by nobody. The path stays short because unix socket paths are capped
+# at 108 bytes and some suites put a socket under TMPDIR.
+#
+# Opt out with config/task-tmpdir containing "off" (docs/configuration.md).
 TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+mkdir -p "$TASK_TMP/gotmp" "$TASK_TMP/tmp"
+TASK_TMPDIR_ENABLED=1
+if [ -f "$CONFIG/task-tmpdir" ] && [ "$(tr -d '[:space:]' <"$CONFIG/task-tmpdir" 2>/dev/null)" = off ]; then
+  TASK_TMPDIR_ENABLED=0
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -3536,10 +3549,14 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
+# Export GOTMPDIR and TMPDIR into the crewmate's pane shell so the agent and
+# every child process (go build, go test, python tempfile, shell mktemp, ...)
+# inherit them. Sent before the launch command so the env is set when the agent
+# starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+if [ "$TASK_TMPDIR_ENABLED" = 1 ]; then
+  spawn_send_text_line "$T" "export TMPDIR=$TASK_TMP/tmp"
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

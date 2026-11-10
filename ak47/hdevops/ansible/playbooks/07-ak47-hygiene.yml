@@ -1,0 +1,142 @@
+---
+# ============================================================
+# 07-ak47-hygiene.yml — the ak47 factory box's hygiene system, as code
+# ============================================================
+# 2026-11-10: ak47's /tmp held 950,700 entries, 831,000 of them the default temp
+# directory of a Python or shell test suite that never removed it. Disk was 14%
+# full, so nothing that watched bytes ever looked. The cost was paid by every
+# glob, every `ls`, every `find` and every test run on the box, and it showed up
+# as load15 14-240 rather than as a disk alert.
+#
+# This playbook is the drift capture, not the fix. The fix is in firstmate:
+#   ak47/tick.sh            the deterministic 5-minute tick
+#   ak47/status.sh          the budget, rendered against live samples
+#   ak47/census.sh          which producer creates the growth
+#   ak47/guards/            a check per producer that fails when it stops cleaning up
+#   ak47/weekly-review.sh   proposes threshold diffs, never applies them
+#   bin/fm-spawn.sh         exports a per-task TMPDIR so a leak lands in the
+#                           task's own scratch root and teardown removes it
+#
+# What this playbook owns is everything that would be lost in a rebuild: the two
+# user timers, and the two sysctls that were hand-written on the box on
+# 2026-11-03 and 2026-11-10 with no record anywhere else.
+#
+# It is NOT in site.yml on purpose. site.yml targets the OVH cluster; this
+# targets one workstation over a local connection. Adding it to site.yml would
+# try to apply workstation units to cluster nodes.
+#
+# Revert (<1 min, keeps every log and every quarantine directory):
+#   systemctl --user disable --now ak47-devops.timer ak47-devops-weekly.timer
+#   rm ~/.config/systemd/user/ak47-devops{,-weekly}.{service,timer}
+#   systemctl --user daemon-reload
+#   sudo rm /etc/sysctl.d/60-ak47-swap.conf /etc/sysctl.d/60-ak47-inotify.conf
+#   sudo sysctl -w vm.swappiness=60 fs.inotify.max_user_instances=128
+#
+# Usage:
+#   ansible-playbook -i inventory/local playbooks/07-ak47-hygiene.yml --check --diff
+#   ansible-playbook -i inventory/local playbooks/07-ak47-hygiene.yml
+# ============================================================
+
+- name: ak47 hygiene — budget, tick, guards, weekly review
+  hosts: ak47
+  gather_facts: true
+
+  vars:
+    ak47_unit_dir: "{{ ak47_home }}/.config/systemd/user"
+    ak47_state_dir: "{{ ak47_home }}/.local/state/ak47"
+    ak47_config_dir: "{{ ak47_home }}/.config/ak47"
+
+  tasks:
+    # ---- the code must already be there -------------------------------------
+    # This playbook deploys a system whose scripts live in firstmate. If the
+    # checkout is missing, fail loudly rather than installing a timer that will
+    # fail every five minutes and look installed.
+    - name: The hygiene scripts must exist in the firstmate checkout
+      ansible.builtin.stat:
+        path: "{{ ak47_repo }}/ak47/tick.sh"
+      register: ak47_tick
+
+    - name: Refuse to install a timer whose unit cannot run
+      ansible.builtin.assert:
+        that: ak47_tick.stat.exists and ak47_tick.stat.executable
+        fail_msg: >-
+          {{ ak47_repo }}/ak47/tick.sh is missing or not executable. Update the
+          firstmate checkout first; this playbook only deploys, it does not
+          install the code.
+
+    # ---- sysctls ------------------------------------------------------------
+    # Both were hand-written on the box and existed nowhere else. Captured here
+    # verbatim, including their measured reasons and their revert lines.
+    - name: Install the ak47 sysctls
+      ansible.builtin.copy:
+        src: "templates/{{ item }}"
+        dest: "/etc/sysctl.d/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - 60-ak47-swap.conf
+        - 60-ak47-inotify.conf
+      become: true
+      register: ak47_sysctl
+
+    - name: Apply the sysctls now
+      ansible.builtin.command: sysctl --system
+      become: true
+      when: ak47_sysctl.changed
+      changed_when: true
+
+    # ---- state and config directories ---------------------------------------
+    - name: Create the state, cache and config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ak47_user }}"
+        mode: "0755"
+      loop:
+        - "{{ ak47_state_dir }}"
+        - "{{ ak47_home }}/.cache/ak47"
+        - "{{ ak47_config_dir }}"
+
+    # ---- units --------------------------------------------------------------
+    - name: Install the user units
+      ansible.builtin.copy:
+        src: "templates/{{ item }}"
+        dest: "{{ ak47_unit_dir }}/{{ item }}"
+        owner: "{{ ak47_user }}"
+        mode: "0644"
+      loop:
+        - ak47-devops.service
+        - ak47-devops.timer
+        - ak47-devops-weekly.service
+        - ak47-devops-weekly.timer
+      register: ak47_units
+
+    - name: Reload the user manager
+      ansible.builtin.systemd:
+        scope: user
+        daemon_reload: true
+      when: ak47_units.changed
+
+    # ---- enable -------------------------------------------------------------
+    # `enabled: true` only. Starting is left to the timer's own OnBootSec, so a
+    # deploy never fires a tick in the middle of someone's test run.
+    - name: Enable the timers
+      ansible.builtin.systemd:
+        scope: user
+        name: "{{ item }}"
+        enabled: true
+      loop:
+        - ak47-devops.timer
+        - ak47-devops-weekly.timer
+
+    # ---- prove it -----------------------------------------------------------
+    - name: Read the budget back
+      ansible.builtin.command: "{{ ak47_repo }}/ak47/status.sh --print"
+      register: ak47_status
+      changed_when: false
+      failed_when: ak47_status.rc != 0
+
+    - name: Show the budget
+      ansible.builtin.debug:
+        var: ak47_status.stdout_lines

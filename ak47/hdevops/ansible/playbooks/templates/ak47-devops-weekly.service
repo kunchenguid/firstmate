@@ -1,0 +1,12 @@
+[Unit]
+Description=ak47: weekly hygiene review (reads its own logs, proposes threshold diffs)
+Documentation=file://%h/Projects/firstmate/ak47/README.md
+
+[Service]
+Type=oneshot
+Environment=FM_HOME=%h/Projects/firstmate
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=%h/Projects/firstmate/ak47/weekly-review.sh
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=300

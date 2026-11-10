@@ -237,7 +237,9 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|\
+    ak47-budget.test.sh|ak47-census.test.sh|ak47-guards.test.sh|\
+    ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
