@@ -97,7 +97,7 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 
 ### Foreign session-lock owner
 
-When an active home instead has a live session lock held by a verified harness that the current session does not own, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
+When an active home instead has a session lock that the current session does not own and the shared `fm_session_lock_pid_blocks_reclaim` verdict refuses to reclaim, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
 
 Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 The current session owns the lock when either of these holds:
@@ -268,11 +268,15 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 The registrations in detail:
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+  The auto-arm also handles `StopFailure`, without this guard; [watcher continuity](watcher-continuity.md#claude-stop-hook) owns error-ended turn coverage.
   In a Claude secondmate home, `bin/fm-spawn.sh` writes a `.fm-busy-stop` pointer and gives the mate no `Stop` busy hook, so `--claude` is the only Stop writer of the parent home's busy record for that generation.
   It records idle when it allows the Stop and busy when its exit 2 blocks it into a continuation, because Claude runs Stop hooks in parallel and that continuation fires no `UserPromptSubmit`.
   A home whose guard predates `.fm-busy-stop` cannot close the turn, so that launch keeps the ordinary `Stop` idle hook instead.
   [Runtime backend verification](verification/runtime-backends.md#secondmate-busy-contract) owns the live evidence.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- Codex registers a synchronous `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard through `bin/fm-codex-stop-park.sh --guard` when that script is present.
+  Its inner wrapper uses non-login Bash with the inherited PATH to avoid login/logout output contaminating the hook response.
+  Allowed stops return one literal `{}` object; nonzero exits and stderr retain the shared guard's error or bounded-continuation behavior.
+  [Runtime backend verification](verification/runtime-backends.md#stop-response-parsing) owns the parser evidence and its portable and token-free live regression entry points.
 - OpenCode subscribes to the terminal `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events through `ctx.event.subscribe` in `.opencode/plugins/fm-primary-turnend-guard.js`, latched to the root worker session so child-session turns do not trip it, lets the watcher coordinator act first, and calls `ctx.session.prompt` once when the guard returns 2. The legacy OpenCode 1 `session.idle` + `client.session.promptAsync` path is retained in the plugin's `server` export.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
@@ -283,17 +287,17 @@ The registrations in detail:
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment.
   Cursor exports `CURSOR_INVOKED_AS`, `CURSOR_PROJECT_DIR`, and `CURSOR_VERSION` into every child process, so an environment guard would also disable the hooks of a Claude session started by hand from a Cursor pane, which is the hazard the `GROK_SESSION_ID` exclusion below records.
-  The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, and both `Stop` entries.
+  The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, both `Stop` entries, and the `StopFailure` auto-arm entry.
   Cursor 2026.08.11-e8db854 does not fire the Claude-shaped `Stop` entry at all, but it is guarded anyway because Cursor has no `asyncRewake`.
   If a later build did fire it, `bin/fm-claude-stop-autoarm.sh` would run synchronously inside Cursor's stop step and hold that turn open for its declared multi-hour timeout, exactly the wedge grok 1.0.0 produced.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
-  The tracked Claude Stop entries are inert when `GROK_AGENT` or `GROK_HOOK_EVENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
+  The tracked Claude Stop and StopFailure entries are inert when `GROK_AGENT` or `GROK_HOOK_EVENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
   Both markers are required because Grok does not inject the same variables into every process kind.
   grok 0.2.73 set `GROK_AGENT` for child and tool processes, while grok 1.0.0 hook processes carry `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` but no `GROK_AGENT`.
   A guard keyed on `GROK_AGENT` alone therefore stopped firing on grok 1.0.0, and the resulting Claude-only auto-arm ran synchronously under Grok.
   Grok has no `asyncRewake`, so it waited on the foregrounded watcher for the declared 28800-second timeout and the Grok turn never ended.
   Do NOT widen this guard to `GROK_SESSION_ID`: Grok injects that into every child process, so it can survive into a Claude session that Grok launched and would silently disable Claude's own continuity.
-  The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries.
+  The same marker guard carries both `Stop` entries, the `StopFailure` auto-arm entry, the `SessionStart` entry, and the two `PreToolUse` Bash entries in tracked `.claude/settings.json`.
   `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 - pi-code, Pi's Claude-hook compatibility extension, also loads `<project>/.claude/settings.json` and has no `asyncRewake`, so it awaits every Stop hook it delivers.
@@ -426,7 +430,7 @@ The block budget is charged by two rules:
 That second rule still bounds an inert auto-arm when a hook never fires or fails before its generation claim and therefore leaves the ledger frozen at its last outcome.
 Charging only epoch changes let the count freeze with that ledger, so the remaining inert-hook cases could re-block without limit and make the attended fail-open unreachable.
 `budget_account_current_epoch` in `bin/fm-turnend-guard.sh` owns the rule.
-A verified live foreign session-lock owner takes the earlier diagnostic safe exit instead and never reaches this budget path.
+A live foreign session-lock owner takes the earlier diagnostic safe exit instead and never reaches this budget path.
 Whenever both coordination locks are needed, positive auto-arm recovery, the terminal check, and the auto-arm's attended-alarm commit acquire the auto-arm owner lock before the budget lock.
 
 #### Attended fail-open

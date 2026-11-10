@@ -468,6 +468,63 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
 }
 
+# A standalone clone is a legitimate task copy: fresh spawn's isolation check
+# (spawn_worktree_isolated) accepts it because its git dir is not the recorded
+# project's common git dir, even though its own --git-dir and --git-common-dir
+# are equal. The relaunch isolation check must draw the same boundary, or every
+# clone-layout task starts once and can never be restarted. The fixture drives
+# a codex task because Claude's own launch-time trust pre-registration refuses
+# any path that is not a linked worktree of the project (bin/fm-claude-trust.sh).
+test_relaunch_accepts_a_standalone_clone_worktree() {
+  local dir out rc
+  dir=$(new_case clone-wt rl45)
+  add_ship_task "$dir" rl45 codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  git -C "$dir/proj" worktree remove --force "$dir/wt"
+  git clone -q "$dir/proj" "$dir/wt"
+  [ "$(git -C "$dir/wt" rev-parse --path-format=absolute --git-dir --git-common-dir | sort -u | wc -l | tr -d ' ')" = 1 ] \
+    || fail "fixture broken: the clone's git-dir and git-common-dir must be equal"
+  [ "$(git -C "$dir/wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$dir/proj" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture broken: the clone must not share the recorded project's common git dir"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continue in the clone"); rc=$?
+  expect_code 0 "$rc" "a standalone clone worktree should relaunch"$'\n'"$out"
+  assert_contains "$out" "relaunched rl45 harness=codex" "the outcome should name the transition"
+  [ "$(meta_field "$dir" rl45 worktree)" = "$dir/wt" ] \
+    || fail "the recorded copy must be reused, not reallocated"
+  [ "$(meta_field "$dir" rl45 window)" = "fmses:fm-rl45" ] \
+    || fail "the endpoint must be reused, not recreated"
+  [ "$(journal_field "$dir" rl45 phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  assert_grep "/quit" "$dir/fake/literal" "the previous agent should have been exited"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  pass "fm-control relaunch: a recorded worktree that is a standalone clone relaunches"
+}
+
+# The remaining refused case still stops the old agent first: the isolation
+# check lives only in the launch owner, so on the `relaunch` verb a refusal
+# ends as a failed launch with no replacement running.
+test_relaunch_refusal_of_the_project_primary_checkout_still_leaves_no_replacement() {
+  local dir out rc
+  dir=$(new_case projwt-stop rl46)
+  add_ship_task "$dir" rl46 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl46.meta"
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+
+  out=$(run_control "$dir" rl46 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a worktree that is the project primary checkout should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "the launch-owner refusal fires after the old agent has stopped"
+  assert_no_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "a refused relaunch must leave no replacement launched"
+  [ "$(journal_field "$dir" rl46 phase)" = "failed:launching" ] \
+    || fail "the journal should record the failed launch, got '$(journal_field "$dir" rl46 phase)'"
+  pass "fm-control relaunch: the project primary checkout is refused after stop, leaving no replacement"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -1864,6 +1921,51 @@ test_missing_worktree_refuses_before_stopping_anything() {
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
 }
 
+# A restart must never put a worker back in a primary home or a
+# repository's primary checkout; the recorded worktree is the only launch cwd.
+test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home() {
+  local dir out rc
+  dir=$(new_case homewt rl11)
+  add_ship_task "$dir" rl11 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/home#" "$dir/home/state/rl11.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl11 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "a worktree that is the primary home should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary home"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: a recorded worktree that is the primary home refuses"
+}
+
+test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout() {
+  local dir out rc
+  dir=$(new_case projwt rl12)
+  add_ship_task "$dir" rl12 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl12.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl12 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "a worktree that is the project primary checkout should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: a recorded worktree that is the project primary checkout refuses"
+}
+
+# Inherited Git location overrides must not disguise the primary checkout:
+# a linked worktree's GIT_DIR plus the primary checkout as GIT_WORK_TREE would
+# make the git-dir and common-dir probes disagree.
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides() {
+  local dir out rc linked_gd
+  dir=$(new_case projwtenv rl13)
+  add_ship_task "$dir" rl13 claude
+  linked_gd=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl13.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(GIT_DIR="$linked_gd" GIT_WORK_TREE="$dir/proj" run_spawn "$dir" rl13 --relaunch 2>&1); rc=$?
+  expect_code 1 "$rc" "the primary checkout should refuse even under inherited GIT_DIR/GIT_WORK_TREE"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  pass "fm-spawn --relaunch: inherited Git overrides do not hide the project primary checkout"
+}
+
 test_missing_instructions_refuse_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nobrief rl11)
@@ -3103,6 +3205,8 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
+test_relaunch_accepts_a_standalone_clone_worktree
+test_relaunch_refusal_of_the_project_primary_checkout_still_leaves_no_replacement
 test_relaunch_preserves_durable_task_metadata
 test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -3149,6 +3253,9 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_relaunch_refuses_a_recorded_worktree_that_is_the_primary_home
+test_relaunch_refuses_a_recorded_worktree_that_is_the_project_primary_checkout
+test_relaunch_refuses_the_primary_checkout_under_inherited_git_overrides
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status

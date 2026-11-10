@@ -262,14 +262,14 @@ current_session_still_ours() {
   fm_session_lock_owned_by_self "$STATE"
 }
 
-# Only the lock-owning session may arm or wake. A prior session that died
-# leaving its harness identity behind, a local pid or a Windows-tagged one, is
-# the one recoverable case, delegated to bin/fm-lock.sh so acquisition keeps its
-# single owner.
+# Only the lock-owning session may arm or wake. The shared
+# fm_session_lock_pid_blocks_reclaim verdict decides whether a recorded owner may
+# be reclaimed, and any reclaim is delegated to bin/fm-lock.sh so acquisition
+# keeps its single owner.
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   fm_session_pid_valid "$LOCK_PID" || exit 0
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_pid_blocks_reclaim "$LOCK_PID" && exit 0
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
