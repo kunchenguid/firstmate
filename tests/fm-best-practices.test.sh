@@ -417,8 +417,24 @@ SH
   rm -f "$home/.gemini/settings.json"
   commit_file "$proj" .gemini/settings.json '{"skills": {"disabled": ["security-and-hardening"]}}'
   assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")" enabled)" "the project's committed switch was not read"
+  commit_file "$proj" .gemini/settings.json '{}'
   rm -rf "$home/.gemini/skills/interview-me"
-  assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")" installed)" "a partial skills copy was taken for the pack"
+  r=$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")
+  assert_equals "true true unreviewed" "$(jq -r '"\(.installed) \(.enabled) \(.version)"' <<<"$r")" "a skills copy missing one pack skill was not read as a loaded, unreviewed pack"
+  assert_contains "$(field "$r" where)" "without interview-me" "the partial copy's read does not name the absent skill"
+  assert_equals "unreviewed: interview-me is absent from the reviewed 0.6.14 text" "$(run_bp "$home" version "$PACK" --harness gemini --project "$proj")" \
+    "the spawn's read of a partial skills copy does not name the absent skill"
+  pack_copy "$home/.agents/skills" skills
+  r=$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")
+  assert_equals 0.6.14 "$(field "$r" version)" "a complete skills copy in a later directory was not preferred over a partial one"
+  assert_contains "$(field "$r" where)" "$home/.agents/skills" "the read does not name the complete copy it took"
+  rm -rf "$home/.agents/skills" "$home/.gemini/skills"
+  mkdir -p "$home/.gemini/skills/unrelated-skill"
+  printf '# not a pack skill\n' > "$home/.gemini/skills/unrelated-skill/SKILL.md"
+  assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")" installed)" \
+    "a skills directory holding none of the pack's skills was taken for a usable copy"
+  assert_contains "$(run_bp "$home" version "$PACK" --harness gemini --project "$proj")" "missing: not installed" \
+    "a skills directory holding none of the pack's skills did not read as missing"
   pack_copy "$home/.commandcode/skills" skills
   assert_equals true "$(field "$(run_bp "$home" read "$PACK" --harness commandcode --project "$proj")" enabled)" "a full Command Code copy was not read as enabled"
   printf '{"disabledSkills": ["idea-refine"]}\n' > "$home/.commandcode/settings.json"
@@ -443,7 +459,7 @@ SH
   assert_contains "$out" "the pack ships no install path for grok" "the unsupported runtime does not name the missing side"
   assert_contains "$out" "claude, codex" "the unsupported runtime does not name the harnesses both support"
   assert_contains "$(run_bp "$home" check "$PACK" --harness copilot --project "$proj")" "firstmate has not verified copilot" "an unverified harness was not named as firstmate's missing side"
-  pass "agy and skills-directory reads follow their own records and switches, and unproven or unsupported runtimes are named, never claimed"
+  pass "agy and skills-directory reads follow their own records and switches, a partial skills copy reads as unreviewed naming what it lacks unless a complete one exists, and unproven or unsupported runtimes are named, never claimed"
 }
 
 test_read_takes_committed_files_from_the_checkout_given() {

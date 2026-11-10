@@ -656,43 +656,68 @@ fm_bp_read_agy() {  # <repo> <plugin>
   fm_bp_result false false "" "" "" "agy plugin list --json lists no $plugin whose installed manifest names $repo as its repository"
 }
 
-# A skills directory: installed means every one of the pack's skills is where
-# the harness loads them, at user level or committed in the project; enabled is
-# presence, unless the harness's switch (the manifest's `switch`: a list of
-# disabled skill names at one key path in a user settings file and the
-# project's committed one) names any of the pack's skills; the version is a
-# plugin.json the copy carries, never inferred.
+# The pack skills a skills directory lacks, one per line: for the project
+# scope, those whose SKILL.md the checkout does not commit under <dir>; for the
+# user scope, those with no SKILL.md under <dir> with ~/ expanded.
+fm_bp_skills_dir_absent() {  # <project|user> <checkout> <dir> <skills-json>
+  local scope=$1 checkout=$2 d=$3 skills=$4 dir listing s
+  if [ "$scope" = project ]; then
+    listing=$(git -C "$checkout" ls-files -- "$d" 2>/dev/null) || listing=
+    while IFS= read -r s; do
+      printf '%s\n' "$listing" | grep -qxF "$d/$s/SKILL.md" || printf '%s\n' "$s"
+    done < <(jq -r '.[]' <<<"$skills")
+  else
+    dir=$(fm_bp_expand_home "$d")
+    while IFS= read -r s; do
+      [ -f "$dir/$s/SKILL.md" ] || printf '%s\n' "$s"
+    done < <(jq -r '.[]' <<<"$skills")
+  fi
+}
+
+# A skills directory: installed means at least one of the pack's skills is
+# where the harness loads them, at user level or committed in the project, and
+# the first directory holding every one of them is preferred over the first
+# holding some, whose absent skills the fingerprint check then reports as
+# unreviewed; enabled is presence, unless the harness's switch (the manifest's
+# `switch`: a list of disabled skill names at one key path in a user settings
+# file and the project's committed one) names any of the pack's skills; the
+# version is a plugin.json the copy carries, never inferred.
 fm_bp_read_skills_dir() {  # <repo> <plugin> <checkout> <harness-entry-json> <skills-json>
-  local repo=$1 plugin=$2 checkout=$3 entry=$4 skills=$5 d dir listing missing s ver switch scope found='' disabled path user_file copy=null
+  local repo=$1 plugin=$2 checkout=$3 entry=$4 skills=$5 d dir absent total n ver switch scope found='' disabled path user_file copy=null
+  local pick_scope='' pick_dir='' pick_absent=''
+  total=$(jq 'length' <<<"$skills")
   for scope in project user; do
     while IFS= read -r d; do
       [ -n "$d" ] || continue
-      missing=0
-      if [ "$scope" = project ]; then
-        listing=$(git -C "$checkout" ls-files -- "$d" 2>/dev/null) || listing=
-        while IFS= read -r s; do
-          printf '%s\n' "$listing" | grep -qxF "$d/$s/SKILL.md" || { missing=1; break; }
-        done < <(jq -r '.[]' <<<"$skills")
-        [ "$missing" -eq 0 ] || continue
-        ver=$( { fm_bp_committed_file "$checkout" "$d/.claude-plugin/plugin.json" || fm_bp_committed_file "$checkout" "$d/plugin.json"; } \
-          | jq -r --arg p "$plugin" 'select(.name == $p) | .version // empty' 2>/dev/null) || ver=
-        found="the pack's skills are committed in the project at $d"
-        copy=$(jq -cn --arg g "$checkout" --arg p "$d" '{git: $g, prefix: $p}')
-      else
-        dir=$(fm_bp_expand_home "$d")
-        while IFS= read -r s; do
-          [ -f "$dir/$s/SKILL.md" ] || { missing=1; break; }
-        done < <(jq -r '.[]' <<<"$skills")
-        [ "$missing" -eq 0 ] || continue
-        ver=$(jq -r --arg p "$plugin" 'select(.name == $p) | .version // empty' "$dir/.claude-plugin/plugin.json" "$dir/plugin.json" 2>/dev/null | head -n 1) || ver=
-        found="the pack's skills are in $dir"
-        copy=$(fm_bp_dir_copy "$dir" skills)
+      absent=$(fm_bp_skills_dir_absent "$scope" "$checkout" "$d" "$skills")
+      n=0
+      [ -z "$absent" ] || n=$(printf '%s\n' "$absent" | wc -l | tr -d ' ')
+      if [ "$n" -eq 0 ]; then
+        pick_scope=$scope pick_dir=$d pick_absent=
+        break 2
       fi
-      break 2
+      if [ -z "$pick_dir" ] && [ "$n" -lt "$total" ]; then
+        pick_scope=$scope pick_dir=$d pick_absent=$absent
+      fi
     done < <(jq -r --arg k "${scope}_dirs" '.[$k] // [] | .[]' <<<"$entry")
   done
+  if [ -n "$pick_dir" ]; then
+    scope=$pick_scope d=$pick_dir
+    if [ "$scope" = project ]; then
+      ver=$( { fm_bp_committed_file "$checkout" "$d/.claude-plugin/plugin.json" || fm_bp_committed_file "$checkout" "$d/plugin.json"; } \
+        | jq -r --arg p "$plugin" 'select(.name == $p) | .version // empty' 2>/dev/null) || ver=
+      found="the pack's skills are committed in the project at $d"
+      copy=$(jq -cn --arg g "$checkout" --arg p "$d" '{git: $g, prefix: $p}')
+    else
+      dir=$(fm_bp_expand_home "$d")
+      ver=$(jq -r --arg p "$plugin" 'select(.name == $p) | .version // empty' "$dir/.claude-plugin/plugin.json" "$dir/plugin.json" 2>/dev/null | head -n 1) || ver=
+      found="the pack's skills are in $dir"
+      copy=$(fm_bp_dir_copy "$dir" skills)
+    fi
+    [ -z "$pick_absent" ] || found="$found, without $(printf '%s\n' "$pick_absent" | paste -sd ',' - | sed 's/,/, /g')"
+  fi
   if [ -z "$found" ]; then
-    fm_bp_result false false "" "" "" "no directory this harness loads skills from holds every one of the pack's skills"
+    fm_bp_result false false "" "" "" "no directory this harness loads skills from holds any of the pack's skills"
     return 0
   fi
   switch=$(jq -c '.switch // null' <<<"$entry")
