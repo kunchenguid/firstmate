@@ -613,6 +613,38 @@ test_replacement_published_during_removal_survives() {
   pass "a start check published while the watcher removes the record it judged survives"
 }
 
+# A watcher stopped after it claimed a due record but before its wake was queued
+# (the queue-lock wait is where a stop lands) leaves only the claimed copy.
+stop_watcher_before_wake() {  # <id>
+  { ( fm_wake_append() { kill -KILL "$BASHPID"; }; start_check_tick 5000 ); } 2>/dev/null
+  [ "$(count_wakes)" = 0 ] || fail "fixture: the stopped watcher queued a wake"
+  [ ! -e "$STATE/$1.start-pending" ] || fail "fixture: the stopped watcher had not claimed $1's record"
+  compgen -G "$STATE/$1.start-pending.claim.*" >/dev/null || fail "fixture: no claimed copy of $1's record was left"
+}
+
+test_watcher_stop_between_claim_and_wake_keeps_check() {
+  local replacement
+  reset_state
+  open_pane s1 "$PI_DIALOG"
+  arm_task s1 pi 1000
+  stop_watcher_before_wake s1
+  start_check_tick 5000 || fail "tick failed"
+  [ "$(count_wakes)" = 1 ] || fail "a watcher stop between claim and wake lost the start check"
+  ! compgen -G "$STATE/s1.start-pending*" >/dev/null || fail "the woken start check left a record behind"
+  # A record published after the stop wins over the abandoned claim.
+  reset_state
+  open_pane s2 "$PI_DIALOG"
+  arm_task s2 pi 1000
+  stop_watcher_before_wake s2
+  replacement="9000 $ARMED_GEN pi"
+  printf '%s\n' "$replacement" > "$STATE/s2.start-pending"
+  start_check_tick 5000 || fail "tick failed"
+  [ "$(count_wakes)" = 0 ] || fail "an abandoned claim woke over a newer record: $START_CHECK_WAKE"
+  [ "$(cat "$STATE/s2.start-pending")" = "$replacement" ] || fail "an abandoned claim replaced a newer record"
+  ! compgen -G "$STATE/s2.start-pending.claim.*" >/dev/null || fail "an abandoned claim was left behind"
+  pass "a start check claimed by a watcher stopped before its wake survives to the next poll"
+}
+
 test_held_lock_defers_without_waiting() {
   local lock start elapsed
   reset_state
@@ -989,6 +1021,7 @@ fm_test_run \
   test_secondmate_launch_is_checked \
   test_held_lock_defers_without_waiting \
   test_replacement_published_during_removal_survives \
+  test_watcher_stop_between_claim_and_wake_keeps_check \
   test_remote_secondmate_reads_route \
   test_truncated_reply_log_relaunch_is_not_proof \
   test_remote_cursor_transcript_is_start_proof \

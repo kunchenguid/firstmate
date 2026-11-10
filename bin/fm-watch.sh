@@ -3199,6 +3199,22 @@ start_check_unclaim() {  # <path>
   rm -f -- "$START_CHECK_CLAIM"
 }
 
+# start_check_restore_claims: put back each claimed record a stopped watcher
+# left behind, unless a newer one already stands there. A claim lives only while
+# its task's meta lock is held, so a claim whose lock this poll can take is
+# abandoned; one stopped after its wake was queued may wake once more.
+start_check_restore_claims() {
+  local c lock
+  for c in "$STATE"/*.start-pending.claim.*; do
+    [ -f "$c" ] || continue
+    lock=$(fm_meta_lock_path "$STATE/$(basename -- "${c%.start-pending.claim.*}").meta") || return 1
+    fm_lock_try_acquire "$lock" || continue
+    START_CHECK_CLAIM=$c
+    [ ! -f "$c" ] || start_check_unclaim "${c%.claim.*}"
+    fm_lock_release "$lock"
+  done
+}
+
 # start_check_drop <path> <record>: remove the judged record if it still stands.
 start_check_drop() {  # <path> <record>
   start_check_claim "$1" "$2" || return 0
@@ -3209,6 +3225,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
   local now=${1:-} f id epoch gen harness meta mgen reason target lock remote record
   START_CHECK_WAKE=
   START_CHECK_TICK_STARTED=$(date +%s)
+  start_check_restore_claims || return 1
   for f in "$STATE"/*.start-pending; do
     [ -f "$f" ] || continue
     id=${f##*/}
