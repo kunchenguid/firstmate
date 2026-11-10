@@ -150,7 +150,7 @@ record_state() {
 }
 
 PARITY_WINDOW="test:fm-wedge-cap-parity"
-PARITY_KEY=$(printf '%s' "$PARITY_WINDOW" | tr ':/.' '___')
+PARITY_KEY=
 # The unset-case trace the differential test drives against this branch's
 # watcher; the value-shape cases compare their own trace against it.
 PARITY_BRANCH_TRACE=
@@ -161,6 +161,7 @@ run_scenario() {  # <watch> <tag> [cap-env] [rounds]: drive the stuck-pane scena
   dir=$(make_case "wedge-cap-parity-$tag")
   state="$dir/state"
   statusf="$state/wedge-cap-parity.status"
+  PARITY_KEY=$(watch_window_key "$PARITY_WINDOW" "$watch")
   : > "$dir/trace"
 
   printf 'idle wedged content' > "$dir/pane.txt"

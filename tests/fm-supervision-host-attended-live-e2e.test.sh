@@ -293,7 +293,10 @@ start_primary() {  # <lab>
   jq -e '[.hooks.Stop[]?.hooks[]? | select(.type == "command" and .asyncRewake == true and (.command | endswith("/bin/fm-claude-stop-autoarm.sh") or endswith("/bin/fm-claude-stop-autoarm.sh\"")))] | length == 1' \
     "$lab/fm/.claude/settings.json" >/dev/null \
     || fail "$(basename "$lab"): the lab lacks the tracked Stop hook registration"
-  evidence "$(basename "$lab") step 1: primary idle (claude pid $(cat "$lab/fm/state/.lock"), $CLAUDE_VERSION, model $MODEL); tracked Stop hook registered; config/supervision-host present; host pid $(awk -F '\t' '$1 == "host" { print $2; exit }' "$lab/fm/state/.supervision-host") parked on watcher $(watcher_pid "$lab"); listener runner $(listener_pid "$lab"); captain prompts so far: $(captain_prompts "$lab")"
+  jq -e '[.hooks.StopFailure[]?.hooks[]? | select(.type == "command" and .asyncRewake == true and .timeout == 28800 and (.command | endswith("/bin/fm-claude-stop-autoarm.sh") or endswith("/bin/fm-claude-stop-autoarm.sh\"")))] | length == 1' \
+    "$lab/fm/.claude/settings.json" >/dev/null \
+    || fail "$(basename "$lab"): the lab lacks the tracked StopFailure hook registration"
+  evidence "$(basename "$lab") step 1: primary idle (claude pid $(cat "$lab/fm/state/.lock"), $CLAUDE_VERSION, model $MODEL); tracked Stop and StopFailure hooks registered; config/supervision-host present; host pid $(awk -F '\t' '$1 == "host" { print $2; exit }' "$lab/fm/state/.supervision-host") parked on watcher $(watcher_pid "$lab"); listener runner $(listener_pid "$lab"); captain prompts so far: $(captain_prompts "$lab")"
   evidence "$(basename "$lab") transcript: $(transcript "$lab")"
 }
 
