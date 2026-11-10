@@ -29,6 +29,36 @@ Enter and Ctrl-C are supported; Escape is not.
 `config/launch-env-allowlist` alone cannot scope worker credentials on Orca, because allowlisted values resolve from the Orca terminal's own environment.
 When scoped worker credentials live in a tmux session, configure the [Orca environment source](configuration.md#orca-environment-source-configlaunch-env-tmux-session).
 
+## Remote workers
+
+Pair the supervisor's Orca CLI with the target's full runtime-environment pairing offer using `orca environment add`, then configure [Orca machines](configuration.md#orca-machines-configorca-machines).
+Use the current CLI help for pairing flags and keep the pairing code out of tracked files and task reports.
+A mobile-scoped pairing link cannot authorize worktree operations.
+The remote project must already exist at the same absolute path and base commit; unavailable or stale copies are skipped.
+Firstmate does not administer the remote Orca service.
+
+Orca remains the worktree and terminal provider.
+SSH stages task files and runs the existing filesystem-dependent spawn, state, control, and cleanup checks on the host that owns the worktree.
+The staged workspace contains a private code snapshot, selected worker policy files, the brief, and task state; it is not a secondmate home and runs no supervisor.
+For publishing tasks, that snapshot includes full HEAD history and its origin before applying the current script overlay.
+Publishing tasks require a full-history project mirror with the same origin as the coordinator and working git-crypt filters when used.
+Provision and unlock that mirror on the target machine before dispatch; staging never repairs a shared mirror or transfers encryption keys.
+Harness credentials remain on the target machine, and a local tmux launch-environment source refuses remote placement.
+`bin/fm-orca-worker.py` owns the transport protocol and the policy-file allowlist.
+
+The parent home keeps the authoritative task record, backlog, decisions, and merge authority.
+The watcher imports remote status, reports, and inbox acknowledgements, and `fm-send.sh` transfers an immutable queued message before ringing the remote endpoint.
+A failed transfer retains the queued message and reports delivery as unconfirmed; do not enqueue another copy.
+Handled message records are checked against the original content and are never recreated as pending messages.
+A lost spawn reply retains its route for reconciliation instead of launching another worker.
+Transport failures report unknown remote state and preserve the task.
+
+For local-only work, readiness imports a Git bundle into the parent's named task branch without forcing a ref and records the accepted head through the ordinary readiness gate.
+The usual approved fast-forward landing remains on the parent machine.
+Cleanup sends evidence from the parent's landed default branch back to the worker host and runs the ordinary dirty-worktree, landed-work, report, and decision checks there.
+A durable remote cleanup receipt lets a lost reply be retried before the parent retires its task record and backlog item.
+The staged workspace remains as recovery evidence after the Orca worktree is released.
+
 ## Task shape and metadata
 
 Each task has one Orca-managed git worktree and one Orca terminal.
@@ -42,6 +72,11 @@ terminal=<orca terminal handle>
 orca_worktree_id=<orca repo id>::<absolute worktree path>
 worktree=<absolute Orca worktree path>
 ```
+
+A remote worker also records `orca_environment=`, `orca_runtime_id=`, `orca_machine_host=`, and `orca_machine_workspace=`.
+Its private `state/<id>.orca-route.json` binds the transport workspace to the same task and runtime.
+Terminal routing includes the saved environment and verifies the recorded runtime identity, so reused terminal ids on different machines cannot collide.
+An environment change affects future placement; existing tasks retain their recorded route.
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
@@ -72,9 +107,12 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 
 ## Active limits
 
-- Orca is macOS-only and explicit-only.
-- The app must be running and report ready.
+- Runtime selection is explicit; live verification currently covers macOS.
+- The selected runtime must report ready.
 - Secondmate spawns are unsupported.
+- Remote scouts cannot be promoted in place; preserve their report and dispatch a new ship.
+- Remote scout cleanup currently requires a reviewed empty captain-call inventory in the parent home; a non-empty inventory preserves the task for explicit reconciliation.
+- Remote placement requires an existing matching project and existing harness authentication on the target.
 - Escape is unsupported.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.

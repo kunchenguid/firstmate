@@ -593,6 +593,37 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, 
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 
+### Orca machines (config/orca-machines)
+
+An Orca home can distribute ordinary ship and scout tasks across saved Orca environments.
+Create the local, gitignored `config/orca-machines` as a JSON array in preference order:
+
+```json
+[
+  {"environment": "worker-mac", "ssh": "worker-mac", "max_load_per_core": 0.8},
+  {"environment": "local", "max_load_per_core": 0.8}
+]
+```
+
+Each remote row requires a saved environment name or id, a noninteractive SSH alias for that same machine, and a positive finite `max_load_per_core`.
+A local row omits `ssh`.
+Environment names must be unique, start with a letter or digit, and contain only letters, digits, dots, underscores, or hyphens.
+Unknown fields, duplicate environments, and malformed values refuse the spawn before probing machines.
+Without the file, Orca retains its local behavior.
+
+Selection takes the first reachable machine whose one-minute load divided by CPU count is strictly below its ceiling and whose project exists at the same absolute path with the same base commit.
+The saved Orca environment and the SSH probe must identify the same ready runtime.
+An unavailable, overloaded, missing-project, or stale-project candidate is skipped with a reason; exhaustion falls back to local.
+Selection does not clone, fetch, update, or restart a candidate machine.
+Project capacity counts are scoped to the selected environment among the supervising homes' recorded tasks.
+Remote Orca records do not consume the coordinator's local lane budget, and remote selection does not pass through that machine's lane admission gate.
+
+The target needs the standard Firstmate toolchain, Orca, and the selected harness and its existing authentication.
+Before staging a task, remote preflight names missing lifecycle tools or harness executables and refuses an incompatible `tasks-axi`, using the same compatibility checks as local completion.
+The supervisor also needs Python 3 and SSH.
+Pairing and task transport setup are described in [the Orca backend guide](orca-backend.md#remote-workers).
+This setting does not change secondmate placement, harness selection, or account pins.
+
 ### Liveness classification
 
 The session-start secondmate liveness sweep and the watcher's secondmate liveness tick use the recovery-grade `fm_backend_agent_state` classifier where verified.

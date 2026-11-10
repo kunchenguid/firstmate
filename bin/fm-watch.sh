@@ -795,7 +795,7 @@ signal_turnend_panes_churned() {  # <file> ...
     kind=$(fm_meta_get "$meta" kind)
     backend=$(fm_backend_of_meta "$meta")
     if [ "$backend" = orca ]; then
-      terminal=$(fm_meta_get "$meta" terminal)
+      terminal=$(fm_backend_target_of_meta "$meta")
       w=${terminal:-$(fm_meta_get "$meta" window)}
     else
       w=$(fm_meta_get "$meta" window)
@@ -3147,7 +3147,14 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
-  local f sig sf exclude
+  local f sig sf exclude orca_task
+  # Remote worker status/report/inbox files belong to their task workspace.
+  # Import before classifying events; an unreachable host never means dead.
+  for f in "$STATE"/*.orca-route.json; do
+    [ -f "$f" ] || continue
+    orca_task=${f##*/}
+    python3 "$SCRIPT_DIR/fm-orca-worker.py" sync "$STATE" "${orca_task%.orca-route.json}" --poll 2>/dev/null || true
+  done
   # A remote mate's own parent channel is not a self-home task status log; the
   # home-shape-aware exclusion and its precedent live in
   # status_scan_parent_channel_exclude (fm-classify-lib.sh).

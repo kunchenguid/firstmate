@@ -1578,7 +1578,7 @@ families_for_changed_path() {
       # coverage re-runs, mirroring the real-herdr-gated arm above.
       printf '%s\n' hc
       ;;
-    bin/backends/orca*|bin/backends/tmux.sh)
+    bin/backends/orca*|bin/fm-orca-*|tests/orca-worker-transport.py|bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;

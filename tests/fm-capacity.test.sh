@@ -106,6 +106,17 @@ test_target_yields_open_lanes_and_full() {
   pass "a target yields open lanes, full, and never a negative count"
 }
 
+test_remote_orca_occupies_no_local_lane() {
+  local home fakebin out
+  home=$(make_home remote-orca 1 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-remote-orca" 0.50 60 8 20971520)
+  fm_write_meta "$home/state/remote.meta" "kind=ship" "backend=orca" "orca_machine_host=worker-mac"
+  printf '2\nadmit-spawns\n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=1 reason=ok lanes=1 target=2' 'remote Orca must not fill the local lane budget'
+  pass 'remote Orca records do not consume the fixed local lane budget'
+}
+
 test_host_constraints_close_lanes() {
   local home fakebin out
   home=$(make_home constrained 1 0)
@@ -561,6 +572,7 @@ test_watcher_publishes_only_when_opted_in() {
 test_no_target_prints_counts_only
 test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full
+test_remote_orca_occupies_no_local_lane
 test_host_constraints_close_lanes
 test_unavailable_probes_degrade
 test_invalid_target_is_reported

@@ -2300,6 +2300,44 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Remote publishing context
+
+Portable publishing preparation was rechecked on 2026-11-09 with Python 3.14.8 and Git 2.56.0.
+`tests/orca-worker-transport.py`, run by `tests/fm-backend-orca.test.sh`, exercises history transfer, current-script overlays, self-repository refusal, shallow source refusal, publishing origins, locked git-crypt filters, and publishing spawn through both role gates.
+It also verifies immutable local readiness heads, dispatch decisions and overrides, and remote selection while the coordinator's runtime or local lane capacity is unavailable.
+Its SSH and Orca endpoints are fixtures; it does not publish or claim live harness coverage.
+The transport is shared by all Orca worker harnesses; other runtime backends do not use this staging path.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-orca.test.sh tests/fm-spawn-orca-worktree.test.sh \
+  tests/fm-project-capacity.test.sh tests/fm-capacity.test.sh tests/fm-capacity-auto.test.sh \
+  tests/fm-dod-lib.test.sh tests/fm-merge-local.test.sh \
+  --per-script-timeout-secs 1800 --json "$EVIDENCE_DIR/tests.json"
+```
+
+The run kept its timing artifact in a private `EVIDENCE_DIR`.
+The transport suite invoked by the Orca backend regression reported:
+
+```text
+Ran 23 tests in 855.560s
+
+OK
+```
+
+### Remote Orca workers
+
+The original implementation was exercised on two macOS hosts on 2026-11-07 with Orca 1.4.251 and Codex CLI 0.164.0.
+That live use covered remote scout spawn, reading its terminal, durable steering and acknowledgement, report import, completion, and cleanup.
+The exact worktree selector returned `selector_not_found` after cleanup, and the closed terminal reported `status=exited` with an empty tail.
+Orca retained the closed terminal handle.
+Private host identities and task transcripts are omitted; this is historical live evidence, not a new live run of this port.
+
+`tests/fm-backend-orca.test.sh` invokes the executable transport regressions in `tests/orca-worker-transport.py`.
+They cover machine preference and fallback, runtime-bound endpoint routing, dependency refusal before staging, generated brief paths, selected base refs, immutable steering and acknowledgements, status replay, branch-bundle import, dirty-worktree refusal, landing evidence, lost launch and cleanup replies, and retirement without recreating removed status files.
+`tests/fm-project-capacity.test.sh` confirms remote occupants do not consume local places while local admission remains bounded.
+The local Orca spawn/worktree suite remains `tests/fm-spawn-orca-worktree.test.sh`.
+Remote control retains the existing Orca capability refusals; this smoke proves scout spawn, read, steer, completion, and cleanup, not an unsupported lifecycle verb.
+
 ### Orca environment source
 
 The environment source was verified on 2026-10-14 on macOS 15.6.1 with tmux 3.6a, Bash 5.3.20, Bash 3.2.57, and zsh 5.9.

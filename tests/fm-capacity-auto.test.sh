@@ -136,6 +136,18 @@ test_fixed_mode_is_unchanged() {
   pass "an integer first line keeps fixed mode and its document unchanged"
 }
 
+test_remote_orca_occupies_no_local_lane() {
+  local home fakebin out
+  home=$(make_home remote-orca)
+  fakebin=$(make_probes "$TMP_ROOT/p-remote-orca")
+  printf 'auto\nmax-lanes 2\n' > "$home/config/lane-capacity"
+  write_lane "$home" local "$home/local"
+  write_lane "$home" remote "$home/remote" "backend=orca" "orca_machine_host=worker-mac"
+  out=$(run_cap "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=1 reason=ok lanes=1 target=2' 'remote Orca must not fill the automatic local lane budget'
+  pass 'remote Orca records do not consume the automatic local lane budget'
+}
+
 test_budget_binds_the_scarcest_resource() {
   local home fakebin p out rc
   home=$(make_home budget)
@@ -738,6 +750,7 @@ test_real_host_auto_smoke() {
 }
 
 test_fixed_mode_is_unchanged
+test_remote_orca_occupies_no_local_lane
 test_budget_binds_the_scarcest_resource
 test_ceiling_and_young_lanes
 test_gates_reopen_after_three_publishes

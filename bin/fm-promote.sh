@@ -226,6 +226,10 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+if [ -n "$(fm_meta_get "$META" orca_machine_host)" ]; then
+  echo "error: in-place promotion of a remote Orca scout is unsupported; preserve its report and dispatch a new ship" >&2
+  exit 1
+fi
 
 # Unlike the mode and yolo above, the forge is not a per-task decision: it is the
 # captain's project binding, so promotion takes it from the registry rather than

@@ -2838,6 +2838,9 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
   local -a names=() prune=()
   [ -n "$id" ] || return 1
   [ -f "$anchor" ] || return 1
+  # A path on another host may coincidentally exist here. It is never evidence
+  # of that remote worker's activity; use its transported semantic events.
+  ! grep -q '^orca_machine_host=.' "$state/$id.meta" 2>/dev/null || return 1
   wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)

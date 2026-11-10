@@ -30,8 +30,9 @@
 # (one physical line). A short human summary follows it. load1, cores,
 # mem_free_pct and disk_free_mb are always this host's own probes.
 #
-# lanes counts task metadata records whose kind is not secondmate (ship and
-# scout work, including records not yet reconciled after an endpoint died).
+# lanes counts local task metadata records whose kind is not secondmate (ship
+# and scout work, including records not yet reconciled after an endpoint died).
+# Recorded remote Orca workers are excluded from local fixed and auto budgets.
 # secondmates counts persistent secondmates separately; they hold no lane.
 #
 # target is the cap from config/lane-capacity. Absent means no target, so
@@ -308,6 +309,8 @@ pr_ready=0
 lane_ids=
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
+  # Remote Orca records belong to this home, but consume another host's lanes.
+  grep -q '^orca_machine_host=.' "$meta" 2>/dev/null && continue
   if grep -qx 'kind=secondmate' "$meta" 2>/dev/null; then
     secondmates=$((secondmates + 1))
   else
@@ -662,6 +665,7 @@ auto_lane_rows() {
   local idx=$1 dir=$2 meta id wt harness kind pr spawn line verb at until sf
   for meta in "$dir"/*.meta; do
     [ -f "$meta" ] || continue
+    grep -q '^orca_machine_host=.' "$meta" 2>/dev/null && continue
     grep -qx 'kind=secondmate' "$meta" 2>/dev/null && continue
     id=$(basename "$meta" .meta)
     wt=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -1)
