@@ -11,3 +11,8 @@ __pycache__/
 *.pyc
 .env
 config/
+
+# local operational artifacts (not tracked)
+.pi/acp.json
+archive/
+bin/*.DISABLED-*

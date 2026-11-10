@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# fm-tmp-top - the bounded way to see what is filling /tmp.
+#
+# Captain 2026-11-10: a `for d in /tmp/*/; do du -sm "$d"; done` loop forked
+# 900k du processes and ran 38 minutes with no result. Never glob or per-item
+# fork over /tmp. This does ONE du pass plus a cheap entry count.
+#
+# Usage: bin/fm-tmp-top [path]   (default /tmp)
+set -u
+P=${1:-/tmp}
+[ -d "$P" ] || { echo "fm-tmp-top: not a directory: $P" >&2; exit 2; }
+echo "== $P total"
+du -sh "$P" 2>/dev/null
+echo "== top 20 by size (one du pass, no per-item fork)"
+du -m --max-depth=1 "$P" 2>/dev/null | sort -rn | head -20 | awk '{printf "%6d MB  %s\n",$1,$2}'
+echo "== entry count"
+python3 -c 'import os,sys;print(len(os.listdir(sys.argv[1])))' "$P" 2>/dev/null || ls -1 "$P" | wc -l
