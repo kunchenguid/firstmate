@@ -233,15 +233,16 @@
 #   contention refuses rather than waits.
 #   Project capacity: when this machine declares how many workers a project
 #   admits at once (config/project-capacity; bin/fm-project-capacity-lib.sh owns
-#   the declaration, what holds a place, and the race argument), a fresh ship or
-#   scout spawn counts the places already held while holding that same
-#   project-identity lock - taken on every backend whenever the declaration caps
-#   any project, Orca included, because an uncapped clone's worker still holds a
-#   place for a capped clone of the same origin - and holds it through metadata
-#   publication. A spawn that finds
-#   every place held prints one `deferred:` line and exits 75 before any brief
-#   render, endpoint, worktree, record, or backlog move exists, so the task stays
-#   exactly as queued as it was; an unreadable declaration refuses with exit 1.
+#   the declaration, what holds a place, and the race argument), a ship or scout
+#   spawn counts the places already held, on a fresh launch or a relaunch, while
+#   holding that same project-identity lock - taken on every backend whenever the
+#   declaration caps any project, Orca included, because an uncapped clone's
+#   worker still holds a place for a capped clone of the same origin - and holds
+#   it through metadata publication. A fresh spawn that finds every place held
+#   prints one `deferred:` line and exits 75 before any brief render, endpoint,
+#   worktree, record, or backlog move exists, so the task stays exactly as queued
+#   as it was; a relaunch that finds every place held prints the same line and
+#   exits 75; an unreadable declaration refuses with exit 1.
 #   Lane capacity: only when this home's config/lane-capacity declares
 #   admit-spawns (bin/fm-capacity.sh --spawn-gate-enabled answers; that script
 #   owns the declaration and the verdict), a fresh ship or
