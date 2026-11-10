@@ -331,13 +331,12 @@ HUGE="$TDIR/huge.md"
 { printf 'seller leads\n'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$HUGE"
 out=$("$DISPATCH" --brief "$HUGE") || fail "a brief over 128 KiB must not abort the dispatcher"
 assert_contains "$out" "Route:      seller-outreach" "a brief over 128 KiB is classified"
-# A local send writes the inbox directly, so the remote encoded cap does not
-# apply: a brief past that cap (but within one argv string) is sent whole.
+# A local send under the single-argument ceiling is delivered whole.
 LOCALBIG="$TDIR/local-big.md"
 { printf 'seller leads\n'; head -c 100000 /dev/zero | tr '\0' 'l'; printf '\n'; } > "$LOCALBIG"
 rm -f "$TDIR/argv"
-"$DISPATCH" --brief "$LOCALBIG" --execute >/dev/null 2>&1 || fail "a brief over the remote cap to a local secondmate must be sent"
-[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALBIG")" ] || fail "a brief over the remote cap must reach a local fm-send.sh whole"
+"$DISPATCH" --brief "$LOCALBIG" --execute >/dev/null 2>&1 || fail "a local brief under the argument limit must be sent"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALBIG")" ] || fail "a local brief under the argument limit must reach fm-send.sh whole"
 # A local send still passes the message as one fm-send.sh argument: a message
 # at the 131072-byte single-argument limit is refused unsent, one byte under
 # is delivered whole.
@@ -358,23 +357,17 @@ for big in "$LOCALMAX" "$HUGE"; do
   [ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "a local over-limit brief must be reported undispatched"
   [ ! -e "$TDIR/argv" ] || fail "a local over-limit --json brief must not reach fm-send.sh"
 done
-# A remote secondmate's send rides one ssh argument, so it is capped.
+# A remote secondmate still receives the message as one fm-send.sh argument at
+# this dispatcher boundary, so the same argv ceiling refuses it unsent.
 printf 'kind=secondmate\nremote_host=box\n' > "$FAKE/state/seller-outreach.meta"
 rm -f "$TDIR/argv"
 code=0; err=$("$DISPATCH" --brief "$HUGE" --execute 2>&1 >/dev/null) || code=$?
-[ "$code" -eq 2 ] || fail "an oversized --execute message must be refused with exit 2, got $code"
-assert_contains "$err" "single-argument limit" "an oversized --execute message is refused loudly"
-# The cap is on the base64 form: one byte past it is refused unsent.
-CAP=90000 # the most raw bytes whose base64 fits MAX_ENCODED_BYTES=120000
-OVER="$TDIR/over.md"
-{ printf 'seller leads\n'; head -c $((CAP + 1 - 13)) /dev/zero | tr '\0' 'y'; } > "$OVER"
-rm -f "$TDIR/argv"
-code=0; "$DISPATCH" --brief "$OVER" --execute >/dev/null 2>&1 || code=$?
-[ "$code" -eq 2 ] || fail "a message one byte over the encoded cap must exit 2, got $code"
-[ ! -e "$TDIR/argv" ] || fail "a message over the encoded cap must not reach fm-send.sh"
+[ "$code" -eq 2 ] || fail "a remote brief at or over the argument limit must exit 2, got $code"
+assert_contains "$err" "not sent" "a remote over-limit brief is refused unsent"
+[ ! -e "$TDIR/argv" ] || fail "a remote over-limit brief must not reach fm-send.sh"
 code=0; json=$("$DISPATCH" --brief "$HUGE" --json --execute 2>/dev/null) || code=$?
-[ "$code" -eq 2 ] || fail "an oversized --json --execute message must exit 2, got $code"
-[ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "an oversized message must be reported undispatched"
+[ "$code" -eq 2 ] || fail "a remote over-limit --json --execute brief must exit 2, got $code"
+[ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "a remote over-limit brief must be reported undispatched"
 printf 'kind=secondmate\n' > "$FAKE/state/seller-outreach.meta"
 
 # A registry whose last entry has no trailing newline still offers that entry.
@@ -431,8 +424,8 @@ bash -c "$cmd"
 tail -n +3 "$TDIR/argv" | head -c "$(wc -c < "$BADBRIEF")" > "$TDIR/bad-argv"
 [ "$(cksum < "$TDIR/bad-argv")" = "$(cksum < "$BADBRIEF")" ] || fail "dispatch_cmd must carry invalid UTF-8 bytes intact"
 
-# A remote secondmate receives a brief at the encoded cap through the real
-# fm-on.sh, byte-identical, and every argument fits Linux's per-argument limit.
+# A remote secondmate receives a brief through the real fm-on.sh stdin path
+# (send-stdin), byte-identical, with the small control argv still fitting.
 fm_write_meta "$REAL/state/remote-ops.meta" \
   "window=fm-remote:w1:p1" "endpoint_task_id=remote-ops" "harness=claude" "kind=secondmate" \
   "mode=secondmate" "yolo=off" "remote_host=remote-box" "remote_root=/remote/root" \
@@ -440,7 +433,8 @@ fm_write_meta "$REAL/state/remote-ops.meta" \
 printf -- '- remote-ops - Remote ops work. (host: remote-box; root: /remote/root; home: /remote/home; scope: remote ops work; projects: d; added 2026-08-02)\n' >> "$REAL/data/secondmates.md"
 cat > "$TDIR/fakebin/fake-ssh" <<'SH'
 #!/usr/bin/env bash
-cat > /dev/null
+# Capture the stdin payload fm-send pipes for send-stdin, then decode ARGV_B64.
+cat > "$FM_SSH_STDIN"
 while [ "$1" != -- ]; do shift; done
 shift 2
 # sshd hands the joined command to the remote shell as one argument.
@@ -449,15 +443,18 @@ printf '%s' "$5" | base64 -d > "$FM_SSH_ARGV"
 SH
 chmod +x "$TDIR/fakebin/fake-ssh"
 CAPBRIEF="$TDIR/cap.md"
-{ printf 'remote-route\r\n\n'; head -c $((CAP - 16)) /dev/zero | tr '\0' 'z'; printf '\n'; } > "$CAPBRIEF"
-[ "$(wc -c < "$CAPBRIEF" | tr -d ' ')" -eq "$CAP" ] || fail "cap brief size wrong"
-rm -f "$TDIR/ssh-argv"
+{ printf 'remote-route\r\n\n'; head -c 4096 /dev/zero | tr '\0' 'z'; printf '\n'; } > "$CAPBRIEF"
+rm -f "$TDIR/ssh-argv" "$TDIR/ssh-stdin"
 # fm-on.sh only forwards commands tracked by a git checkout, so root at this repo.
 PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
-  FM_SSH_BIN="$TDIR/fakebin/fake-ssh" FM_SSH_ARGV="$TDIR/ssh-argv" \
-  "$REAL/bin/fm-route-dispatch.sh" --brief "$CAPBRIEF" --execute >/dev/null 2>&1 || fail "a brief at the encoded cap must reach a remote secondmate"
-python3 -c 'import sys; argv = open(sys.argv[1], "rb").read().split(b"\0"); sys.exit(0 if argv[2] == b"remote-ops" and argv[3].endswith(open(sys.argv[2], "rb").read()) else 1)' \
-  "$TDIR/ssh-argv" "$CAPBRIEF" || fail "the remote message must end with the brief byte-identical"
+  FM_SSH_BIN="$TDIR/fakebin/fake-ssh" FM_SSH_ARGV="$TDIR/ssh-argv" FM_SSH_STDIN="$TDIR/ssh-stdin" \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$CAPBRIEF" --execute >/dev/null 2>&1 || fail "a remote brief must reach a remote secondmate through stdin"
+python3 -c 'import sys; argv = open(sys.argv[1], "rb").read().split(b"\0"); sys.exit(0 if argv[0] == b"fm-remote-secondmate-control.sh" and argv[1] == b"send-stdin" and argv[2] == b"remote-ops" else 1)' \
+  "$TDIR/ssh-argv" || fail "remote argv must be send-stdin remote-ops"
+# The send-stdin payload is the dispatch message; it must end with the brief
+# bytes (a router may still prefix contract text ahead of them).
+tail -c "$(wc -c < "$CAPBRIEF")" "$TDIR/ssh-stdin" > "$TDIR/ssh-stdin-tail"
+[ "$(cksum < "$TDIR/ssh-stdin-tail")" = "$(cksum < "$CAPBRIEF")" ] || fail "the remote stdin payload must end with the brief byte-identical"
 
 # The text-mode dispatch command keeps a multi-line message on one runnable line.
 cmd=$("$ROUTER" --brief "$BRIEF" | sed -n 's/^dispatch_cmd=//p')

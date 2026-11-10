@@ -6,9 +6,10 @@
 #   fm-route-dispatch.sh --brief <file> [--execute] [--json]
 #
 # If --execute is specified, it automatically dispatches matched tasks to the
-# owning second mate using bin/fm-send.sh. A message to a remote second mate
-# whose base64 form exceeds MAX_ENCODED_BYTES, or to a local second mate at or
-# over MAX_ARG_BYTES, is refused unsent (exit 2). With --json --execute, the
+# owning second mate using bin/fm-send.sh. A message at or over MAX_ARG_BYTES is
+# refused unsent (exit 2): the dispatcher always passes the message as one
+# argument to fm-send.sh, whether the second mate is local or remote (remote
+# stdin transport starts only inside fm-send.sh). With --json --execute, the
 # router JSON is always printed, extended with `dispatched` and
 # `send_exit_code`, and the script exits with the send status.
 set -euo pipefail
@@ -17,11 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export FM_HOME="${FM_HOME:-$FM_ROOT}"
 
-# A remote send base64-encodes the message into one ssh argument, and Linux
-# caps a single argument at 131072 bytes (MAX_ARG_STRLEN). The rest is headroom
-# for the marker, correlation, ids, and the entrypoint's other encoded words.
-MAX_ENCODED_BYTES=120000
-# A local send passes the raw message to fm-send.sh as that same one argument.
+# The dispatcher passes the raw message to fm-send.sh as one argument. Linux
+# caps a single argument at 131072 bytes (MAX_ARG_STRLEN).
 MAX_ARG_BYTES=131072
 TASK=""
 BRIEF=""
@@ -82,20 +80,10 @@ NOUL=$(field needs_new_noul 0)
 MESSAGE=$(router_field dispatch_message)
 MESSAGE=${MESSAGE%x}
 MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
-# shellcheck disable=SC2017 # ceil(bytes / 3) * 4 is the base64 length
-ENCODED_BYTES=$(( (MESSAGE_BYTES + 2) / 3 * 4 ))
-
-# A remote send rides ssh argv base64-encoded; a local send rides fm-send.sh argv raw.
-REMOTE_HOST=$(sed -n 's/^remote_host=//p' "${FM_STATE_OVERRIDE:-$FM_HOME/state}/$ROUTE.meta" 2>/dev/null | tail -n 1) || true
 
 message_fits() {
-  if [ -n "$REMOTE_HOST" ]; then
-    [ "$ENCODED_BYTES" -le "$MAX_ENCODED_BYTES" ] && return 0
-    echo "error: remote dispatch message is $MESSAGE_BYTES bytes ($ENCODED_BYTES base64), over the $MAX_ENCODED_BYTES-byte encoded single-argument limit of the send transport; not sent" >&2
-    return 1
-  fi
   [ "$MESSAGE_BYTES" -lt "$MAX_ARG_BYTES" ] && return 0
-  echo "error: local dispatch message is $MESSAGE_BYTES bytes, at or over the $MAX_ARG_BYTES-byte single-argument limit of fm-send.sh; not sent" >&2
+  echo "error: dispatch message is $MESSAGE_BYTES bytes, at or over the $MAX_ARG_BYTES-byte single-argument limit of fm-send.sh; not sent" >&2
   return 1
 }
 
