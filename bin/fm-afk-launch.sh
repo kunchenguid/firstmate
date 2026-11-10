@@ -22,9 +22,14 @@
 # runs the supervision host (fm_supervision_host_enabled: by default on
 # Claude, by config/supervision-host elsewhere), where the host runs the away
 # session; `enter` there adds one line when the host has no
-# engine, because every away wake then reaches main. Every other harness still
-# runs the daemon for now, so `start` and `start-native` require the record
-# `enter` wrote before they launch the daemon.
+# engine, because every away wake then reaches main. Because the away daemon
+# is never launched on such a home, an away `enter` that finds daemon-lifecycle
+# state there - a running quiet daemon from an unready-host fallback, or a
+# stale flag or recorded terminal a dead daemon left - sends it through the
+# same guarded teardown `stop` uses before the record changes mode, so the
+# flag cannot outlive the record as quiet and split the readers. Every other
+# harness still runs the daemon for now, so `start` and `start-native` require
+# the record `enter` wrote before they launch the daemon.
 # QUIET MODE on a home that runs the supervision host needs nothing
 # where the attended host runs (docs/supervision-host.md "Quiet mode"): its
 # primary is attended-ready (fm_supervision_host_attended_ready: engine, tools,
@@ -43,7 +48,8 @@
 # through the daemon as it does without the host. A quiet `enter` records its
 # mode, so `start` and `start-native` launch the quiet daemon without
 # FM_AFK_MODE; a running quiet daemon is refreshed by a later `/quiet` and runs
-# until `/quiet off`. A quiet `start` or `start-native` that fails while no
+# until `/quiet off` or an away `enter` tears it down (above). A quiet `start`
+# or `start-native` that fails while no
 # daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
 # daemon to park a present captain's main.
 # On backend=t3code there is no terminal for `start` to create, so only a
@@ -373,6 +379,31 @@ fm_afk_launch_record_require() {
   }
 }
 
+# An away entry on a home that runs the supervision host leaves no daemon
+# behind: the host is that home's away session and the away daemon is never
+# launched there, so a live daemon can only be the quiet one an unready-host
+# fallback launched - plus any stale flag or recorded terminal a dead daemon
+# left. The entry sends it through the same guarded teardown `stop` uses
+# (SIGTERM, exact-id terminal close, flag clear) BEFORE the record changes
+# mode, so the flag cannot outlive the record as quiet and split the readers.
+# Nothing runs where no daemon-lifecycle state exists, and a failed teardown
+# is reported without blocking the entry: the record is the posture readers
+# now follow, and ENTRY IS THE GO never waits.
+fm_afk_launch_host_daemon_stop() {
+  local harness
+  harness=$(fm_afk_launch_primary_harness)
+  fm_afk_launch_host_primary "$harness" || return 0
+  fm_supervision_host_enabled "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$harness" || return 0
+  if ! daemon_lock_held_by_live_daemon \
+    && [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] && [ ! -e "$FM_AFK_LAUNCH_RECORD" ]; then
+    return 0
+  fi
+  fm_afk_launch_log "this home runs the supervision host, so the away entry ends daemon-mode here: stopping the daemon and clearing its flag by exact id before the record changes"
+  fm_afk_launch_daemon_teardown \
+    || fm_afk_launch_log "the daemon teardown did not complete; the away record still enters, and the leftover daemon state remains for retry"
+  return 0
+}
+
 fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending && return 1
   if [ "${FM_AFK_MODE:-}" = quiet ]; then
@@ -385,6 +416,8 @@ fm_afk_launch_enter() {
         fm_afk_launch_log "quiet mode refuses while this home's away record (state/.afk-contract) is live; run the /afk return (bin/fm-afk-return.sh) and pass its catch-up gate, then run bin/fm-afk-launch.sh quiet-check"
         return 3 ;;
     esac
+  else
+    fm_afk_launch_host_daemon_stop
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
@@ -888,17 +921,23 @@ fm_afk_launch_start_native() {
   return "$result"
 }
 
-fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
+# The daemon-side teardown `stop` performs, as a step of its own so an away
+# `enter` on a supervision-host home can end a daemon WITHOUT ending the
+# posture record: (1) SIGTERM the daemon so its cleanup trap flushes buffered
+# escalations WHILE state/.afk is still present (the exit-ordering fix:
+# clearing .afk first would make that flush a no-op via inject_msg's presence
+# gate), (2) close its recorded terminal by exact id, (3) clear the flag.
+# Sets FM_AFK_LAUNCH_CLOSED_DAEMON_TERMINAL=1 when a real terminal record
+# (not a native/none one) was closed, for the caller's reporting.
+fm_afk_launch_daemon_teardown() {
+  local pid pid_identity current_identity result=0 read_result
+  FM_AFK_LAUNCH_CLOSED_DAEMON_TERMINAL=0
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
-    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    fm_afk_launch_log "malformed daemon terminal record; refusing the daemon teardown"
     return 1
   fi
-  # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
-  # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
-  # first would make that flush a no-op via inject_msg's presence gate).
   pid=""
   pid_identity=""
   if daemon_lock_held_by_live_daemon; then
@@ -925,18 +964,15 @@ fm_afk_launch_stop() {
       return 1
     fi
   fi
-  # (2) Close the daemon's own terminal by exact id. A native/none record or
-  # an absent record means no terminal existed for this entry (Pi never
-  # launches one).
+  # A native/none record or an absent record means no terminal existed for
+  # this entry (Pi never launches one).
   if [ "$read_result" -eq 0 ]; then
     if [ "$FM_AFK_REC_BACKEND" != none ]; then
-      closed_daemon_terminal=1
+      FM_AFK_LAUNCH_CLOSED_DAEMON_TERMINAL=1
     fi
     fm_afk_launch_close_recorded || result=1
-    [ "$result" -eq 0 ] || closed_daemon_terminal=0
+    [ "$result" -eq 0 ] || FM_AFK_LAUNCH_CLOSED_DAEMON_TERMINAL=0
   fi
-  # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
-  # posture ends only once every daemon-side artifact is down.
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1
@@ -953,6 +989,15 @@ fm_afk_launch_stop() {
     fm_afk_launch_log "failed to clear the session's per-task supervision markers"
     result=1
   fi
+  return "$result"
+}
+
+fm_afk_launch_stop() {
+  local result archived
+  fm_afk_launch_daemon_teardown
+  result=$?
+  # Archive the posture record LAST so the posture ends only once every
+  # daemon-side artifact is down.
   if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
     if archived=$("$FM_AFK_CONTRACT_CMD" archive); then
       fm_afk_launch_log "away-posture record archived at $archived"
@@ -962,7 +1007,7 @@ fm_afk_launch_stop() {
     fi
   fi
   if [ "$result" -eq 0 ]; then
-    if [ "$closed_daemon_terminal" -eq 1 ]; then
+    if [ "$FM_AFK_LAUNCH_CLOSED_DAEMON_TERMINAL" -eq 1 ]; then
       fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
     else
       fm_afk_launch_log "away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived"

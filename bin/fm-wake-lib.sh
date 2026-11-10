@@ -452,20 +452,38 @@ fm_afk_daemon_owns_supervision() {
 }
 
 # fm_afk_mode <state>
-# The single owner of reading state/.afk's declared mode. Always prints
+# The single owner of reading the declared posture mode. Always prints
 # exactly one of "away" or "quiet" and always succeeds - every caller gets a
-# definitive answer, never an error to handle. Presence/liveness stays owned
-# by fm_afk_daemon_owns_supervision and the raw `-e "$state/.afk"` checks
-# throughout the tree; this is the mode of an ALREADY-present flag.
+# definitive answer, never an error to handle. The away-posture record
+# (state/.afk-contract, read through bin/fm-afk-contract.sh's
+# fm_afk_contract_mode) IS the mode wherever a record stands: the flag's own
+# first-line word answers only on a flag-without-record home, so a leftover
+# flag can never make a reader report a mode the record no longer declares.
+# Presence/liveness stays owned by fm_afk_daemon_owns_supervision and the raw
+# `-e "$state/.afk"` checks throughout the tree; this decides nothing about
+# whether a daemon should exist.
 # "away" (today's return-on-any-unmarked-message behavior) is the safe
-# default: missing, empty, unreadable, or unrecognized content, and the
-# legacy bare-epoch-timestamp content written before mode existed, all read
-# as "away". Only an exact first-line "quiet" ever reads as "quiet" -
+# default: with no record, a missing, empty, unreadable, or unrecognized
+# flag, and the legacy bare-epoch-timestamp content written before mode
+# existed, all read as "away". Only a record the owner reads quiet, or an
+# exact first-line "quiet" in a recordless flag, ever reads as "quiet" -
 # kunchenguid/firstmate#2356's standing captain-present quiet mode, entered
 # only through /quiet and exited only through an explicit /quiet off
 # (AGENTS.md section 8's away-mode stub).
 fm_afk_mode() {
   local state=$1 mode
+  if ! command -v fm_afk_contract_mode >/dev/null 2>&1; then
+    # An analysis boundary, like fm-session-lock-lib.sh above: the contract
+    # script lazily sources this library for its lock helpers, so it is
+    # resolved here at call time and never at source time, keeping the two
+    # owners acyclic.
+    # shellcheck source=/dev/null
+    . "$FM_WAKE_LIB_DIR/fm-afk-contract.sh"
+  fi
+  if mode=$(fm_afk_contract_mode "$state" 2>/dev/null); then
+    printf '%s\n' "$mode"
+    return 0
+  fi
   mode=$(head -n 1 "$state/.afk" 2>/dev/null) || { printf '%s\n' away; return 0; }
   case "$mode" in
     quiet) printf '%s\n' quiet ;;
