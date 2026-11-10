@@ -544,3 +544,46 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+# --- emptiness checks stay linear on long multibyte bodies -------------------
+# A `${body//[[:space:]]/}` emptiness check is quadratic under stock macOS bash
+# 3.2 in a UTF-8 locale (a 12000-character body took minutes). Run through
+# /bin/bash with a UTF-8 locale so that shell is the one under test where it
+# exists; elsewhere the run is still a plain correctness check.
+
+run_inbox_utf8() {
+  local home=$1
+  shift
+  LC_ALL=en_US.UTF-8 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" /bin/bash "$INBOX_BIN" "$@"
+}
+
+home=$(make_home long-body)
+long_body=$(python3 -c 'print(("café note line with text. " * 2000)[:50000])')
+
+start=$SECONDS
+queued=$(run_inbox_utf8 "$home" note "$long_body") || fail "a 50 KB UTF-8 note should be queued"
+elapsed=$((SECONDS - start))
+[ "$elapsed" -le 10 ] || fail "queueing a 50 KB note took ${elapsed}s, expected well under 10s"
+assert_equals "1" "$(count_notes "$home")" "the long note is queued"
+long_id=${queued#queued }
+long_id=${long_id%%$'\n'*}
+
+start=$SECONDS
+run_inbox_utf8 "$home" reply "$long_id" "$long_body" >/dev/null || fail "a 50 KB UTF-8 reply should be recorded"
+elapsed=$((SECONDS - start))
+[ "$elapsed" -le 10 ] || fail "recording a 50 KB reply took ${elapsed}s, expected well under 10s"
+pass "a long UTF-8 note and reply are accepted quickly"
+
+set +e
+ws_note_out=$(run_inbox_utf8 "$home" note $' \t\n ' 2>&1)
+ws_note_code=$?
+ws_reply_out=$(run_inbox_utf8 "$home" reply "$long_id" $' \t\n ' 2>&1)
+ws_reply_code=$?
+set -e
+expect_code 1 "$ws_note_code" "an all-whitespace note is still refused"
+expect_code 1 "$ws_reply_code" "an all-whitespace reply is still refused"
+assert_contains "$ws_note_out" "refusing to queue an empty note" "the note refusal keeps its message"
+assert_contains "$ws_reply_out" "refusing to record an empty reply" "the reply refusal keeps its message"
+assert_equals "1" "$(count_notes "$home")" "the refused note writes nothing"
+pass "all-whitespace notes and replies are still refused"
