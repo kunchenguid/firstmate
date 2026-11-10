@@ -766,7 +766,7 @@ write_registry() {
   today=$(date +%F)
   tmp="$REG.tmp.$$"
   if [ -f "$REG" ]; then
-    grep -vE "^- $id( |$)" "$REG" > "$tmp" || true
+    secondmate_registry_lines_without_id "$REG" "$id" > "$tmp" || true
   else
     : > "$tmp"
   fi

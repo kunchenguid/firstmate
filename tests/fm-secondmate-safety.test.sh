@@ -1445,6 +1445,81 @@ test_home_seed_preserves_existing_parent_binding() {
   pass "home reseeding preserves and enforces the durable parent binding"
 }
 
+# A secondmate id may contain ".", so every registry rewrite must compare the
+# id literally: dropping the route for a.c must never drop abc's route.
+test_registry_rewrite_compares_ids_literally() {
+  local reg out
+  reg="$TMP_ROOT/literal-rewrite-secondmates.md"
+  printf '%s\n' \
+    '- a.c - dotted (home: /h/a.c; scope: one; projects: ; added 2026-06-22)' \
+    '- abc - sibling (home: /h/abc; scope: scope two; projects: ; added 2026-06-22)' \
+    '- a.cd - longer (home: /h/a.cd; scope: three; projects: ; added 2026-06-22)' \
+    '- a.c' > "$reg"
+  printf '%s' '- axc - unterminated (home: /h/axc; scope: four; projects: ; added 2026-06-22)' >> "$reg"
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh disable=SC1091
+  out=$(. "$ROOT/bin/fm-secondmate-registry-lib.sh" && secondmate_registry_lines_without_id "$reg" a.c) \
+    || fail "literal registry rewrite failed"
+  [ "$out" = "$(printf '%s\n' \
+    '- abc - sibling (home: /h/abc; scope: scope two; projects: ; added 2026-06-22)' \
+    '- a.cd - longer (home: /h/a.cd; scope: three; projects: ; added 2026-06-22)' \
+    '- axc - unterminated (home: /h/axc; scope: four; projects: ; added 2026-06-22)')" ] \
+    || fail "literal registry rewrite dropped or kept the wrong routes: $out"
+  pass "registry rewrite removes only the literal id's routes"
+}
+
+test_home_seed_dotted_id_keeps_colliding_registry_sibling() {
+  local home sub sibling sibling_abs
+  home="$TMP_ROOT/dotted-seed-home"
+  sub="$TMP_ROOT/dotted-seed-subhome"
+  sibling="$TMP_ROOT/dotted-seed-sibling"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$sibling"
+  sibling_abs=$(cd "$sibling" && pwd -P)
+  printf '%s\n' "- abc - sibling (home: $sibling_abs; scope: scope two; projects: ; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Dotted id charter.' FM_SECONDMATE_SCOPE='dotted scope' \
+    "$ROOT/bin/fm-home-seed.sh" a.c "$sub" --no-projects >/dev/null \
+    || fail "seeding the dotted id failed"
+  assert_grep "- abc - sibling (home: $sibling_abs; scope: scope two;" "$home/data/secondmates.md" \
+    "seeding a.c deleted the colliding abc route"
+  [ "$(grep -c -F -- '- a.c - ' "$home/data/secondmates.md")" -eq 1 ] \
+    || fail "seeding a.c did not register exactly one a.c route"
+
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" a.c "$sub" --no-projects >/dev/null \
+    || fail "reseeding the dotted id failed"
+  [ "$(grep -c -F -- '- a.c - ' "$home/data/secondmates.md")" -eq 1 ] \
+    || fail "reseeding a.c did not replace its own route"
+  assert_grep "- abc - sibling (home: $sibling_abs; scope: scope two;" "$home/data/secondmates.md" \
+    "reseeding a.c deleted the colliding abc route"
+  pass "home seeding a dotted id keeps a colliding sibling route"
+}
+
+test_remote_home_seed_dotted_id_keeps_colliding_registry_sibling() {
+  local home sibling sibling_abs fakebin
+  home="$TMP_ROOT/dotted-remote-seed-home"
+  sibling="$TMP_ROOT/dotted-remote-seed-sibling"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$sibling"
+  sibling_abs=$(cd "$sibling" && pwd -P)
+  printf '%s\n' "- rbc - sibling (home: $sibling_abs; scope: scope two; projects: ; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+  fakebin=$(fm_fakebin "$TMP_ROOT/dotted-remote-seed-fake")
+  printf '#!/usr/bin/env bash\nexit 255\n' > "$fakebin/ssh"
+  chmod +x "$fakebin/ssh"
+
+  # SSH status 255 leaves completion unknown, so the seed keeps the route it
+  # wrote and stops before touching the host.
+  if FM_HOME="$home" FM_SSH_BIN="$fakebin/ssh" FM_SECONDMATE_CHARTER='Dotted remote charter.' \
+    FM_SECONDMATE_SCOPE='dotted remote scope' \
+    "$ROOT/bin/fm-remote-home-seed.sh" r.c dotted-host /srv/fm-root /srv/fm-home --no-projects \
+    >/dev/null 2>&1; then
+    fail "remote seeding succeeded without a reachable host"
+  fi
+  assert_grep "- rbc - sibling (home: $sibling_abs; scope: scope two;" "$home/data/secondmates.md" \
+    "remote seeding r.c deleted the colliding rbc route"
+  assert_grep '- r.c - ' "$home/data/secondmates.md" "remote seeding r.c did not keep its own route"
+  pass "remote home seeding a dotted id keeps a colliding sibling route"
+}
+
 test_secondmate_spawn_requires_seeded_matching_home() {
   local home subhome wronghome marker_only active_descendant active_ancestor ancestor_active_home fakeroot root_descendant root_ancestor root_inside fakebin log err
   home="$TMP_ROOT/spawn-validate-home"
@@ -1646,6 +1721,49 @@ EOF
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
   pass "secondmate teardown retires empty homes and releases routing"
+}
+
+test_secondmate_teardown_dotted_id_keeps_colliding_registry_sibling() {
+  local home subhome sibling sibling_abs fakebin lease fmroot
+  home="$TMP_ROOT/dotted-teardown-home"
+  subhome="$TMP_ROOT/dotted-teardown-subhome"
+  sibling="$TMP_ROOT/dotted-teardown-sibling"
+  fmroot="$TMP_ROOT/dotted-teardown-fmroot"
+  make_firstmate_git_root "$fmroot"
+  git -C "$fmroot" worktree add --quiet --detach "$subhome" HEAD
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$sibling"
+  sibling_abs=$(cd "$sibling" && pwd -P)
+  printf 'a.c\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/a.c.meta" <<EOF
+window=firstmate:fm-a.c
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' \
+    "- a.c - dotted domain (home: $subhome; scope: dotted domain; projects: alpha; added 2026-06-22)" \
+    "- abc - sibling (home: $sibling_abs; scope: scope two; projects: ; added 2026-06-22)" \
+    > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dotted-teardown-fake")
+  lease="$TMP_ROOT/dotted-teardown-fake/lease"
+  printf 'a.c\n' > "$lease"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
+    FM_FAKE_TMUX_LOG="$TMP_ROOT/dotted-teardown-fake/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/dotted-teardown-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    "$ROOT/bin/fm-teardown.sh" a.c >/dev/null 2>&1 \
+    || fail "teardown failed for the dotted secondmate id"
+  [ ! -e "$home/state/a.c.meta" ] || fail "dotted teardown did not clear parent meta"
+  grep -F -- '- a.c ' "$home/data/secondmates.md" >/dev/null \
+    && fail "dotted teardown did not remove its own registry route"
+  assert_grep "- abc - sibling (home: $sibling_abs; scope: scope two;" "$home/data/secondmates.md" \
+    "dotted teardown of a.c deleted the colliding abc route"
+  pass "secondmate teardown of a dotted id keeps a colliding sibling route"
 }
 
 # A second mate's status log relays child outcomes, so a merged child PR there
@@ -3159,10 +3277,14 @@ test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_unsafe_leaf_files
 test_home_seed_preserves_existing_parent_binding
+test_registry_rewrite_compares_ids_literally
+test_home_seed_dotted_id_keeps_colliding_registry_sibling
+test_remote_home_seed_dotted_id_keeps_colliding_registry_sibling
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_dotted_id_keeps_colliding_registry_sibling
 test_branch_actor_cannot_retire_secondmate
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_sweeps_process_events_before_removal

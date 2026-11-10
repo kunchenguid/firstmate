@@ -222,7 +222,7 @@ MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 
 TODAY=$(date +%F)
 REG_TMP="$TMP/secondmates.next"
-if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
+if [ -f "$REG" ]; then secondmate_registry_lines_without_id "$REG" "$ID" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
 printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
   "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
 mv -f -- "$REG_TMP" "$REG"
