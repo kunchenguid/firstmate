@@ -1624,6 +1624,7 @@ Before any worker endpoint, local copy, or task record exists, and before a rela
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
 
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
+With a [Claude token source](#claude-token-source-configclaude-account-credential-sourcejson), the launch sets `CLAUDE_CODE_OAUTH_TOKEN` from that source instead of unsetting it.
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
 
 A home that authenticates Claude through environment credentials on purpose should leave the pin absent.
