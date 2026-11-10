@@ -47,6 +47,7 @@ make_lease_case() {
 set -u
 D=$FM_FAKE_DIR
 printf '%s\n' "$*" >> "$D/treehouse-log"
+[ "${1:-}" != --root ] || shift 2
 case "$*" in
   'get --lease '*) [ ! -f "$D/lease-fails" ] || { echo 'lease failed' >&2; exit 1; }
     printf '%s\n' "$FM_FAKE_SLOT" ;;
@@ -150,8 +151,8 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   out=$(run_lease_spawn "$dir" "$id")
   status=$?
   expect_code 0 "$status" "spawn should succeed"$'\n'"$out"
-  assert_grep "get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
-    "the task copy was not leased durably under the task id"
+  grep -Fqx -- "get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    || fail "the task copy was not leased durably from Treehouse's default pool under the task id"
   ! grep -qx 'get' "$dir/fake/treehouse-log" \
     || fail "the interactive treehouse get opened a nested shell the restore cannot see"
   [ "$(cat "$dir/fake/cwd")" = "$dir/slot" ] \
@@ -159,6 +160,22 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   [ "$(cat "$dir/fake/cd-sends")" = 1 ] || fail "an immediately ready pane received a redundant cd"
   assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
   pass "a fresh herdr spawn leases the copy and moves the pane's top-level shell into it"
+}
+
+test_local_secondmate_leases_from_its_own_pool() {
+  local id=lease-secondmate-pool dir out status state
+  dir=$(make_lease_case "$id")
+  mkdir -p "$dir/parent-home/state"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$dir/parent-home" > "$dir/home/.fm-secondmate-parent"
+  state=$(CDPATH='' cd -- "$dir/home/state" && pwd -P)
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  expect_code 0 "$status" "a local secondmate's herdr spawn should succeed"$'\n'"$out"
+  grep -Fqx -- "--root $state/treehouse get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    || fail "a local secondmate's lease did not come from the pool under its own state: $(cat "$dir/fake/treehouse-log")"
+  assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
+  pass "a local secondmate's herdr spawn leases its copy from a pool of its own clone"
 }
 
 test_failed_lease_refuses_without_a_record() {
@@ -294,6 +311,7 @@ test_dropped_worktree_entry
 test_never_moving_worktree_entry
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell
+test_local_secondmate_leases_from_its_own_pool
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
 test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
