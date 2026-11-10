@@ -186,7 +186,7 @@ run_spawn() {  # <case-dir> <home> <pane-path> <args...>
   local case_dir=$1 home=$2 pane=$3
   shift 3
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
+    FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="${FM_CONFIG_OVERRIDE:-}" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_BACKEND=tmux FM_TEST_PANE_PID="$FM_SOL_TEST_LIVE_PID" \
     FM_FAKE_PANE_PATH="$pane" FM_FAKE_CALL_LOG="$case_dir/calls.log" \
     PATH="$case_dir/fakebin:$PATH" \
@@ -492,6 +492,21 @@ test_cap_refuses_the_fifth_and_names_its_sessions() {
   assert_contains "$out" "config/sol-cap" "the refusal did not name the ceiling's override file"
   assert_nothing_created "$case_dir" task-c "$before" "$worktrees"
   pass "a dispatch at the ceiling is refused, naming sessions and ages, and creates nothing"
+}
+
+test_separate_state_override_counts_against_ceiling() {
+  local case_dir state_override out rc=0
+  case_dir=$(make_case separate-state task-c)
+  printf 'max=1\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  state_override="$case_dir/runtime/state"
+  mkdir -p "$state_override"
+  touch "$state_override/.last-watcher-beat"
+  printf 's1\tgpt-6.1-sol\t%s\t0\n' "$(fresh_start)" > "$state_override/sol-sessions.tsv"
+  out=$(FM_STATE_OVERRIDE="$state_override" spawn_sol_ship "$case_dir" task-c gpt-6.1-sol "$case_dir/unused") || rc=$?
+  expect_code 1 "$rc" "a spawn with separate state override should be refused at ceiling: $out"
+  assert_contains "$out" "Sol ceiling reached" "the refusal did not name the Sol ceiling"
+  assert_contains "$out" "s1 (gpt-6.1-sol" "the refusal did not name active session in state override"
+  pass "separate state override ending in /state counts against the declared ceiling"
 }
 
 test_stale_entries_do_not_count() {
@@ -1609,6 +1624,7 @@ test_run_launch_falls_back_when_the_pane_shell_is_unusable
 test_redirected_config_spawn_with_malformed_home_declaration_launches_correctly
 test_redirected_config_spawn_with_malformed_declaration_fails_admission_without_reservation
 test_cap_refuses_the_fifth_and_names_its_sessions
+test_separate_state_override_counts_against_ceiling
 test_stale_entries_do_not_count
 test_non_sol_model_never_claims_a_slot
 test_config_sol_cap_declares_the_ceiling

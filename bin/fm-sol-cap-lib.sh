@@ -90,8 +90,23 @@ fm_sol_cap_age_text() {  # <seconds>
 # state belongs to the parent home; any other state belongs to the home that
 # holds it. The dispatching home's own config override wins for its own
 # state, so a home that redirects its config is read from where it reads.
+# When FM_STATE_OVERRIDE redirects this dispatch's state root, its effective
+# configuration wins before inferring another home's configuration from the path.
 fm_sol_cap_config_dir() {  # <state-dir>
   local state=$1 home
+  if [ -n "${FM_STATE_OVERRIDE:-}" ] && {
+    [ "$state" = "$FM_STATE_OVERRIDE" ] ||
+    [ "$state" = "$FM_STATE_OVERRIDE/parent-route" ] ||
+    { [ -e "$state" ] && [ -e "$FM_STATE_OVERRIDE" ] && [ "$state" -ef "$FM_STATE_OVERRIDE" ]; }
+  }; then
+    if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+      printf '%s\n' "$FM_CONFIG_OVERRIDE"
+      return 0
+    fi
+    [ -n "${FM_HOME:-}" ] || return 1
+    printf '%s/config\n' "$FM_HOME"
+    return 0
+  fi
   case "$state" in
     */state/parent-route) home=${state%/state/parent-route} ;;
     */state) home=${state%/state} ;;
@@ -340,6 +355,14 @@ fm_sol_cap_entry_live() {  # <start> <pid>
 # is malformed, because skipping a home could claim a free slot that another
 # home holds.
 fm_sol_cap_home() {
+  if [ -n "${FM_STATE_OVERRIDE:-}" ] && {
+    [ "$1" = "$FM_STATE_OVERRIDE" ] ||
+    [ "$1" = "$FM_STATE_OVERRIDE/parent-route" ] ||
+    { [ -e "$1" ] && [ -e "$FM_STATE_OVERRIDE" ] && [ "$1" -ef "$FM_STATE_OVERRIDE" ]; }
+  }; then
+    printf '%s\n' "$FM_HOME"
+    return 0
+  fi
   case "$1" in
     */state/parent-route) printf '%s\n' "${1%/state/parent-route}" ;;
     *) printf '%s\n' "$FM_HOME" ;;
@@ -350,11 +373,19 @@ fm_sol_cap_adopt_workers() (
   local state=$1 now=$2 meta id model file home target backend verdict absence host pid lifecycle_lock='' owner current config lifecycle_held
   trap '[ -z "$lifecycle_lock" ] || fm_lock_release "$lifecycle_lock"' EXIT
   file=$state/$FM_SOL_REGISTRY_NAME
-  case "$state" in
-    */state/parent-route) home=${state%/state/parent-route} ;;
-    */state) home=${state%/state} ;;
-    *) home=$FM_HOME ;;
-  esac
+  if [ -n "${FM_STATE_OVERRIDE:-}" ] && {
+    [ "$state" = "$FM_STATE_OVERRIDE" ] ||
+    [ "$state" = "$FM_STATE_OVERRIDE/parent-route" ] ||
+    { [ -e "$state" ] && [ -e "$FM_STATE_OVERRIDE" ] && [ "$state" -ef "$FM_STATE_OVERRIDE" ]; }
+  }; then
+    home=$FM_HOME
+  else
+    case "$state" in
+      */state/parent-route) home=${state%/state/parent-route} ;;
+      */state) home=${state%/state} ;;
+      *) home=$FM_HOME ;;
+    esac
+  fi
   # The model set is the declaring home's own: a home that declared no
   # ceiling adopts nothing and owns no occupancy.
   config=$(fm_sol_cap_config_dir "$state") || return 1
