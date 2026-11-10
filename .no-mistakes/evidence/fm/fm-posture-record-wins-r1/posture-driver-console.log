@@ -1,0 +1,166 @@
+$ bin/fm-lab-home.sh create {run-worktree}/.posture-live-lab
+{run-worktree}/.posture-live-lab
+[exit 0]
+Oracle: author intent option A: record mode wins; without a record the legacy flag word wins; neither means present in readiness.
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:28Z", "posture": {"state": "present"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=none flag=none: ready=present, fm_afk_mode=away, expected_ready=present
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:29Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=none flag=away: ready=away, fm_afk_mode=away, expected_ready=away
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:29Z", "posture": {"state": "quiet"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=none flag=quiet: ready=quiet, fm_afk_mode=quiet, expected_ready=quiet
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:29Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=away flag=none: ready=away, fm_afk_mode=away, expected_ready=away
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:30Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=away flag=away: ready=away, fm_afk_mode=away, expected_ready=away
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:30Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=away flag=quiet: ready=away, fm_afk_mode=away, expected_ready=away
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:31Z", "posture": {"state": "quiet"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=quiet flag=none: ready=quiet, fm_afk_mode=quiet, expected_ready=quiet
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:31Z", "posture": {"state": "quiet"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=quiet flag=away: ready=quiet, fm_afk_mode=quiet, expected_ready=quiet
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:32Z", "posture": {"state": "quiet"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+MATRIX record=quiet flag=quiet: ready=quiet, fm_afk_mode=quiet, expected_ready=quiet
+SCENARIO PASS: all nine record/flag readiness and shared-mode combinations
+tmux private lab primary: claude [exit 0] 
+$ tmux -L fm-lab capture-pane -p -t primary
+
+ ▐▛███▛█   Claude Code v2.1.321
+▝▜██████▀  Opus 4.8 with high effort · Claude Ultra
+ ▝▝   ▝▝   ~/.no-mistakes/worktrees/52b07e9083e7/01M71CSGESZJH0GDRK9XQPKK4T
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                      ● high · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "how does fm-branch-supervision.ts work?"
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
+[exit 0]
+$ bin/fm-afk-launch.sh quiet-check
+Quiet mode is not already the ordinary posture on this home, because the main session could not be identified, so every attended wake reaches this conversation; quiet mode enters through the quiet daemon instead.
+[exit 1]
+$ bin/fm-afk-launch.sh enter --words quiet lab posture
+Quiet mode recorded at 2026-11-10T00:21:35Z: you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation. Only an explicit /quiet off ends it.
+Quiet mode (recorded):
+  entered: 2026-11-10T00:21:35Z
+  holds: none - you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.
+  your words (verbatim):
+    quiet lab posture
+[exit 0]
+$ bin/fm-afk-launch.sh start
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-1005354210-74754-19185-1794270096', supervising %0
+[exit 0]
+Actual fm-supervise-daemon pid=74951
+$ ps -p 74951 -o pid=,command=
+74951 bash {run-worktree}/bin/fm-supervise-daemon.sh
+[exit 0]
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:36Z", "posture": {"state": "quiet"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": null, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+$ bin/fm-afk-launch.sh enter --words-file {run-worktree}/.posture-live-lab/missing-words
+fm-afk-contract: words file not found: {run-worktree}/.posture-live-lab/missing-words
+[exit 2]
+Refused entry preserved all three persisted records byte-for-byte and the real daemon remained alive.
+$ bin/fm-afk-launch.sh enter --expected-return not-a-time
+fm-afk-contract: --expected-return must be UTC ISO 8601 (YYYY-MM-DDTHH:MM[:SS]Z), got 'not-a-time'
+[exit 2]
+Refused entry preserved all three persisted records byte-for-byte and the real daemon remained alive.
+$ bin/fm-afk-launch.sh enter --words blocked by concurrent record holder
+fm-afk-contract: the away-posture record is locked by live process 70260 (an in-flight merge, or another change to this record); nothing was changed
+[exit 1]
+Lock refusal preserved quiet record, flag, terminal record and real daemon.
+$ bin/fm-afk-launch.sh enter --words blocked publication
+mv: rename {run-worktree}/.posture-live-lab/state/afk-contracts/.afk-contract.archiving.SW6hbS to {run-worktree}/.posture-live-lab/state/afk-contracts/1794270095-superseded-1794270098.afk-contract: Operation not permitted
+rm: {run-worktree}/.posture-live-lab/state/afk-contracts/.afk-contract.archiving.SW6hbS: Operation not permitted
+[exit 1]
+Immutable-record archive/publication-preparation refusal preserved all quiet state and the real daemon.
+SCENARIO PASS: invalid arguments, lock contention and publication failure leave daemon-backed quiet mode intact
+$ bin/fm-afk-launch.sh enter --words merge anything green
+fm-afk-contract: quiet mode became the away posture; the quiet record is archived at {run-worktree}/.posture-live-lab/state/afk-contracts/1794270095-superseded-1794270098.afk-contract
+Away posture recorded at 2026-11-10T00:21:38Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-10T00:21:38Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    merge anything green
+fm-afk-launch: this home runs the supervision host, so the away entry ends daemon-mode here: stopping the daemon and clearing its flag by exact id under the away record
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+[exit 0]
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:39Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": 3, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+$ tmux -L fm-lab list-sessions
+primary: 1 windows (created Mon Nov  9 16:21:32 2026)
+[exit 0]
+SCENARIO PASS: away entry kept the away record, stopped the real quiet daemon and exact daemon terminal, cleared the flag, and preserved primary
+$ bin/fm-afk-launch.sh start
+fm-afk-launch: the away daemon is not launched on this claude home, which runs the supervision host (docs/supervision-host.md); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)
+[exit 1]
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:39Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": 3, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+$ bin/fm-afk-launch.sh stop
+fm-afk-launch: away-posture record archived at {run-worktree}/.posture-live-lab/state/afk-contracts/1794270098.afk-contract
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
+[exit 0]
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:39Z", "posture": {"state": "present"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": 3, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+SCENARIO PASS: host away daemon start refuses without changing away posture; stop archives record and readiness returns present
+$ bin/fm-afk-launch.sh enter --words quiet non-host
+Quiet mode recorded at 2026-11-10T00:21:39Z: you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation. Only an explicit /quiet off ends it.
+Quiet mode (recorded):
+  entered: 2026-11-10T00:21:39Z
+  holds: none - you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.
+  your words (verbatim):
+    quiet non-host
+[exit 0]
+$ bin/fm-afk-launch.sh start
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-1005354210-78075-1442-1794270099', supervising %0
+[exit 0]
+$ bin/fm-afk-launch.sh enter --words away non-host
+fm-afk-contract: quiet mode became the away posture; the quiet record is archived at {run-worktree}/.posture-live-lab/state/afk-contracts/1794270099-superseded-1794270100.afk-contract
+Away posture recorded at 2026-11-10T00:21:40Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-10T00:21:40Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    away non-host
+[exit 0]
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:40Z", "posture": {"state": "away"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": 0, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+$ bin/fm-afk-launch.sh start
+fm-afk-launch: daemon already running; refreshed away-mode flag (no new terminal)
+[exit 0]
+SCENARIO PASS: non-host away entry preserves real daemon, record wins over stale quiet flag, refresh writes away
+$ bin/fm-afk-launch.sh stop
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+fm-afk-launch: away-posture record archived at {run-worktree}/.posture-live-lab/state/afk-contracts/1794270100.afk-contract
+fm-afk-launch: away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived
+[exit 0]
+fm-inbox.sh ready: {"can_receive": false, "home": "01M71CSGESZJH0GDRK9XQPKK4T/.posture-live-lab", "lock": {"live_harness": false, "pid": null, "state": "free"}, "observed_at": "2026-11-10T00:21:41Z", "posture": {"state": "present"}, "schema": "fm-primary-ready.v1", "wake_consumer": {"beacon_age_seconds": 1, "reason": "supervision-model-unknown-for-home", "state": "unknown"}}
+ALL LIVE SCENARIOS PASSED
+$ tmux -L fm-lab kill-server
+[exit 0]
+$ bin/fm-lab-home.sh teardown {run-worktree}/.posture-live-lab
+[exit 0]
+Disposable lab and private tmux server removed.
