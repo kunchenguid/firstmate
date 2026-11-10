@@ -542,6 +542,7 @@ tests/fm-send-popup-settle.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
+tests/fm-start-check.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-t3-mcp.test.sh
 tests/fm-test-run.test.sh
@@ -576,6 +577,7 @@ tests/fm-send-popup-settle.test.sh 6624
 tests/fm-send-settle.test.sh 2310
 tests/fm-send-strict.test.sh 4804
 tests/fm-spawn-batch.test.sh 2987
+tests/fm-start-check.test.sh 88823
 tests/fm-supervision-instructions.test.sh 809
 tests/fm-t3-mcp.test.sh 57613
 tests/fm-test-run.test.sh 156781
@@ -605,9 +607,9 @@ list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-backend-t3code.test.sh
+tests/fm-start-check.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-t3-mcp.test.sh
-tests/fm-arm-pretool-check.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-grok-harness.test.sh
@@ -626,6 +628,7 @@ tests/fm-pr-merge.test.sh
 tests/fm-lint.test.sh
 tests/fm-test-run.test.sh
 tests/fm-backend-herdr.test.sh
+tests/fm-arm-pretool-check.test.sh
 tests/fm-x-mode.test.sh
 tests/fm-brief.test.sh
 tests/fm-composer-lib.test.sh
@@ -922,7 +925,6 @@ tests/fm-spawn-dispatch-profile.test.sh 197548
 tests/fm-spawn-orca-worktree.test.sh 2400
 tests/fm-spawn-pool-base-freshen.test.sh 68652
 tests/fm-spawn-worktree-settle.test.sh 9309
-tests/fm-start-check.test.sh 88823
 tests/fm-startup-memory-budget.test.sh 8086
 tests/fm-startup-network.test.sh 72106
 tests/fm-stat-shadowing.test.sh 75
