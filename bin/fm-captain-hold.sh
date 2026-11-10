@@ -74,7 +74,8 @@
 # without `--release` is not gated by posture. An exact retry also completes
 # unfinished ordering normalization and
 # is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is rejected.
+# and declared source match the newest record; a changed decision, source, or
+# mode is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
@@ -95,9 +96,9 @@
 # record exists is reported as `refused:` under the same attended-only rule as
 # `answer --release` and feeds nothing. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing. A replayed delivery whose answer digest and requested
-# close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
+# and feeds nothing. A replayed delivery whose answer digest, declared source,
+# and requested close mode match the newest record is reported `closed:` and
+# is a no-op; a source or mode mismatch is skipped. The command exits nonzero when any key was
 # skipped. Source fields are recorded in the durable decision, never a
 # per-channel behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.

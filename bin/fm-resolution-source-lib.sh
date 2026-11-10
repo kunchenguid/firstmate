@@ -6,7 +6,8 @@
 # References name the answering message, supervisor judgement, or owning
 # operation and evidence respectively. These are caller declarations, not
 # authentication or proof that a human authored an answer.
-# References are at most 512 bytes. Fields are single-line printable text, so
+# References are at most 512 bytes and cannot contain square brackets.
+# Fields are single-line printable text, so
 # parent notes and status closes can retain
 # the entire provenance or refuse before delivery. Older stored records remain
 # readable without migration; new writes must supply provenance.
