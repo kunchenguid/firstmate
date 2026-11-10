@@ -18,11 +18,12 @@
 # A session whose <herdr config>/sessions/<session>/herdr-client.sock path
 # would exceed the 103-byte sun_path limit is refused by name, prepare and
 # provision.
-# The herdr config root is FM_HERDR_LAB_CONFIG_DIR when set, otherwise
-# $HOME/.config/herdr, the documented default on Linux and macOS.
+# The herdr config root is $HOME/.config/herdr, herdr's documented default on
+# Linux and macOS; the check assumes herdr does not relocate it.
 # The length is counted in bytes, not characters.
 # Provision keeps the lab server output in <session>.server.log in the state
-# directory, truncated on every provision and shown only as a bounded tail.
+# directory, truncated on every provision and capped at 64 KiB (later output
+# is discarded), and shown only as a bounded tail.
 # Provision also stops waiting as soon as the server process exits, and prints
 # the log tail when the session never reports running.
 # Every Herdr call made here carries --session <session>: trailing, or
@@ -74,7 +75,7 @@ fm_herdr_lab_validate_name() { # <session>
 fm_herdr_lab_sun_path_limit=103
 
 fm_herdr_lab_config_dir() {
-  printf '%s' "${FM_HERDR_LAB_CONFIG_DIR:-${HOME:-}/.config/herdr}"
+  printf '%s' "${HOME:-}/.config/herdr"
 }
 
 fm_herdr_lab_check_socket_path() { # <session>
@@ -505,7 +506,7 @@ fm_herdr_lab_provision() { # <session>
   server_log=$(fm_herdr_lab_server_log_path "$name")
   mkdir -p "$(dirname "$server_log")"
   : > "$server_log"
-  fm_herdr_lab_raw "$name" server > "$server_log" 2>&1 &
+  fm_herdr_lab_raw "$name" server > >(head -c 65536 > "$server_log"; cat > /dev/null) 2>&1 &
   server_pid=$!
   attempt=0
   max_attempts=300
@@ -521,6 +522,7 @@ fm_herdr_lab_provision() { # <session>
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
       wait "$server_pid" 2>/dev/null || true
+      sleep 0.2
       running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
       [ "$running" = true ] && continue
       fm_herdr_lab_error "lab server for '$name' exited before reporting running"
