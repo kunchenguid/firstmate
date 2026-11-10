@@ -14,7 +14,7 @@
 # stop both the watcher and away daemon, then archive the obsolete files outside
 # STATE (or remove the reviewed files). Limit this to per-endpoint marker families:
 # .hash-, .count-, .stale-, .stale-since-, .churn-since-, .dead-reported-,
-# .wedge-escalations-, .wedge-permanent-, .wedge-terminal-queued-,
+# .wedge-escalations-, .jev-suppress-, .wedge-permanent-, .wedge-terminal-queued-,
 # .wedge-rollback-failed-, .paused-, .paused-rechecked-, .paused-resurfaced-,
 # .waiting-resurfaced-, .writing-since-, .writing-resurfaced-, .validating-since-,
 # .validating-resurfaced-, and .guard-deferrals-. Preserve every current filename

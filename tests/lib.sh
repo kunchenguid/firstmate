@@ -59,6 +59,11 @@ export FM_TEST_SEAM=1
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
 
+# Isolate the Jev wake-triage key. A leaked TYPESAFE_API_KEY in the operator
+# shell would send live typesafe.ai calls from watcher tests on the fail-open
+# path; those suites unset it here and the helper never reads .env.
+unset TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
+
 # Clear the launcher identity, terminal marker, runtime-backend selector, and
 # home/state overrides a suite inherits from the terminal that started it. A
 # session running inside herdr exports HERDR_ENV/HERDR_PANE_ID/HERDR_SOCKET_PATH/...

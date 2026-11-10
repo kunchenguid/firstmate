@@ -83,7 +83,15 @@
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          verdict escalates unchanged. After those probes, Jev
+#                          classifies the candidate as pipeline_wait, true_wedge,
+#                          or healthy_idle (bin/fm-jev-wake-triage.sh); only
+#                          true_wedge, or Jev unavailable, still escalates.
+#                          pipeline_wait and healthy_idle suppress the wake and
+#                          restart the idle timer, up to a capped streak per
+#                          unchanged status line. The gate is off unless
+#                          config/jev-wake-triage or FM_JEV_WAKE_TRIAGE turns
+#                          it on.
 #                          Where config/wedge-evidence-guards lists operator
 #                          guards, a live pane about to escalate whose guard
 #                          answers CRITICAL defers a bounded run of windows
@@ -1373,6 +1381,9 @@ _wedge_cap_markers_clear() {
 # wedge_episode_end <window-key> [keep-cap] [keep-count]
 wedge_episode_end() {
   local key=$1 keep_cap=${2:-0} keep_count=${3:-0} status=0
+  # A Jev suppress streak belongs to the episode that wrote it; clear it with
+  # every episode end so a later wedge cannot inherit an old suppress count.
+  rm -f "$STATE/.jev-suppress-$key" || status=1
   if [ "$keep_cap" = 1 ]; then
     rm -f "$STATE/.stale-since-$key" || status=1
   else
@@ -1926,6 +1937,67 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
+# Last gate before a possible-wedge wake: Jev classifies pipeline_wait vs
+# true_wedge vs healthy_idle. Escalate only on true_wedge, or when Jev is
+# unavailable (fail-open to today's wake). pipeline_wait and healthy_idle
+# suppress the wake, restart the idle timer, and leave the escalation
+# counter untouched. Consecutive suppressions are capped per window at
+# FM_WEDGE_DEMAND_INSPECT_COUNT while the last status line is unchanged: at the
+# cap the gate escalates without a model call, so the counter climbs to the
+# demand-deep-inspection page on schedule. .jev-suppress-<key> holds the
+# status-line fingerprint and streak; a new line or any non-suppress answer
+# restarts it. bin/fm-jev-wake-triage.sh owns the request, telemetry,
+# and calibration log. Default off with no override. A non-empty
+# FM_JEV_WAKE_TRIAGE beats config/jev-wake-triage's first line; either is on
+# only for on/1/true/yes (any case), and off, empty, or any other value is off.
+wedge_jev_enabled() {
+  local v
+  if [ -n "${FM_JEV_WAKE_TRIAGE-}" ]; then
+    v=$FM_JEV_WAKE_TRIAGE
+  elif [ -f "$CONFIG/jev-wake-triage" ]; then
+    v=$(head -n 1 "$CONFIG/jev-wake-triage" 2>/dev/null || true)
+  else
+    return 1
+  fi
+  v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  case "$v" in
+    on|1|true|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wedge_jev_triage() {  # <window> <task> <age> <escalation-count> <since-file> <triage-label>
+  # 0 = suppress; 1 = escalate (including fail-open).
+  local win=$1 task=$2 age=$3 n=$4 since_file=$5 label=$6 kind bin out action choice streak fp prev='' count=''
+  wedge_jev_enabled || return 1
+  bin=${FM_JEV_WAKE_TRIAGE_BIN:-$SCRIPT_DIR/fm-jev-wake-triage.sh}
+  [ -e "$bin" ] || return 1
+  streak="$STATE/.jev-suppress-$(window_key "$win")"
+  fp=$(printf '%s' "$(tail -n 1 "$STATE/$task.status" 2>/dev/null || true)" | hash_pane)
+  { read -r prev count < "$streak"; } 2>/dev/null || true
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  [ "$prev" = "$fp" ] || count=0
+  [ "$count" -lt "$FM_WEDGE_DEMAND_INSPECT_COUNT" ] || return 1
+  kind=$(window_kind "$win")
+  case "$kind" in ship|scout|secondmate) ;; *) kind=unknown ;; esac
+  out=$(bash "$bin" --class "$kind" --age "$age" --escalation-count "$n" \
+    --task "$task" --status-file "$STATE/$task.status" 2>/dev/null) || out='action=unavailable'
+  action=$(printf '%s\n' "$out" | awk -F= '/^action=/{print $2; exit}')
+  case "$action" in
+    suppress)
+      printf '%s %s\n' "$fp" "$(( count + 1 ))" > "$streak"
+      date +%s > "$since_file"
+      choice=$(printf '%s\n' "$out" | awk -F= '/^choice=/{print $2; exit}')
+      [ -n "$choice" ] || choice=jev
+      triage_log "absorbed $label (jev $choice, idle ${age}s): $win"
+      return 0
+      ;;
+    *) rm -f "$streak"; return 1 ;;
+  esac
+}
+
 # A guard file is trusted only when it is a regular file, not a symlink, owned
 # by the watcher's own user, and writable by nobody else, so no other account
 # can choose what this watcher executes.
@@ -2107,6 +2179,10 @@ wedge_write_escalation_count() {  # <window> <window-key> <escalation-file> <sin
 # above, immediately before the wake it authorized is published: a close, a
 # fresh progress write, or a replacement request during those reads cancels
 # that wake and its count instead of surfacing an obsolete observation.
+# Jev (wedge_jev_triage) runs after every cheaper deferral above, still inside
+# this at-threshold branch, so a candidate that already has a cheaper deferral
+# never pays for a model call. Fail-open: a disabled, missing, or unavailable
+# Jev keeps today's escalate path.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name] [stream snapshot]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
   local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
@@ -2247,6 +2323,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # arithmetic as whatever bytes a partial write left in it.
         prev=$(cat "$escalation_file" 2>/dev/null || true)
         _wedge_cap_int prev "$prev" 0 0
+        if wedge_jev_triage "$win" "$task" "$age" "$prev" "$since_file" "$label"; then
+          return 0
+        fi
         n=$(( prev + 1 ))
         # A stream observation writes its count only after the guarded append,
         # so a close, progress, or replacement during the publication lock wait
