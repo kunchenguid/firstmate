@@ -71,6 +71,26 @@ EOF
   pass "normalization does not follow a swapped check symlink"
 }
 
+test_check_swapped_to_fifo_during_normalization_is_refused() {
+  local home fakebin err status
+  home=$(make_home fifo-race)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
+  chmod 0600 "$home/state/poll.check.sh"
+  cat > "$fakebin/perl" <<EOF
+#!/usr/bin/env bash
+mv "$home/state/poll.check.sh" "$home/state/original.check.sh"
+mkfifo "$home/state/poll.check.sh"
+exec "$PERL" "\$@"
+EOF
+  chmod 0700 "$fakebin/perl"
+  err=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1 >/dev/null); status=$?
+  [ "$status" -eq 1 ] || fail "FIFO swap during normalization was not refused: $err"
+  [ ! -e "$home/state/poll.check-trust" ] || fail "refused FIFO swap left a trust record"
+  pass "normalization refuses a swapped FIFO input"
+}
+
 test_check_swapped_to_hardlink_during_normalization_is_refused() {
   local home target fakebin err status
   home=$(make_home hardlink-race)
@@ -104,7 +124,7 @@ test_generated_temp_hardlink_swap_does_not_touch_target() {
   printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
   printf victim > "$target"
   chmod 0600 "$home/state/poll.check.sh" "$target"
-  dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=32 2>/dev/null
+  dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=256 2>/dev/null
   (
     for _ in {1..1000}; do
       for temp in "$home/state"/.fm-custom-check.*; do
@@ -143,7 +163,7 @@ printf '%s\n' "\$\$" > "$home/perl.pid"
 exec "$PERL" "\$@"
 EOF
     chmod 0700 "$fakebin/perl"
-    dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=32 2>/dev/null
+    dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=256 2>/dev/null
     (
       for _ in {1..1000}; do
         [ -s "$home/perl.pid" ] || { sleep 0.01; continue; }
@@ -171,5 +191,6 @@ test_mode_0600_check_is_normalized_and_registered
 test_interrupted_normalization_leaves_no_temporary_copy
 test_unsafe_check_is_refused_naming_the_check
 test_check_swapped_to_symlink_during_normalization_does_not_touch_target
+test_check_swapped_to_fifo_during_normalization_is_refused
 test_check_swapped_to_hardlink_during_normalization_is_refused
 test_generated_temp_hardlink_swap_does_not_touch_target

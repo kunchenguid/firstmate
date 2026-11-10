@@ -37,7 +37,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
-  if ! perl -MFile::Temp -MFcntl=O_RDONLY,O_NOFOLLOW -e '
+  if ! perl -MFile::Temp -MFcntl=O_RDONLY,O_NOFOLLOW,O_NONBLOCK -e '
     my ($tmp, $cleanup);
     END { unlink $tmp if $cleanup && defined $tmp; }
     $cleanup = 1;
@@ -48,10 +48,10 @@ if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
       ".fm-custom-check.XXXXXX", DIR => $ARGV[1], UNLINK => 0, PERMS => 0700,
     );
     $tmp = $name;
-    sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
+    sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;
     my @state = stat($ARGV[1]);
     my @input = stat($in);
-    @state && @input && $input[0] == $state[0] && $input[3] == 1 or exit 1;
+    @state && @input && ($input[2] & 0170000) == 0100000 && $input[0] == $state[0] && $input[3] == 1 or exit 1;
     binmode $in or exit 1;
     binmode $out or exit 1;
     my $previous = select($out);
