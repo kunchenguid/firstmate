@@ -1640,7 +1640,7 @@ Keep `config/claude-account` as the account pin and add `config/claude-account-c
 ```
 
 The declaration names only the Keychain item, never its token.
-Add the long-lived OAuth token created by `claude setup-token` as a generic-password item in Keychain Access, using the declared service and account.
+Store the long-lived OAuth token created by `claude setup-token` with `security add-generic-password -s <service> -a <account> -w`, using the declared service and account; it prompts for the token, keeps it out of arguments, and lets `security` read it back without an access dialog.
 For a local secondmate, place the same file beside its pin in `config/secondmate-accounts/<id>/`.
 This mapping applies only to a single `config/claude-account` pin, not `config/claude-accounts`.
 

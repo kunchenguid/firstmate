@@ -78,6 +78,13 @@
 
 FM_WORKER_ACCOUNT_CHECK_SECONDS=${FM_WORKER_ACCOUNT_CHECK_SECONDS:-30}
 FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE=claude-account-credential-source.json
+
+# fm_worker_account_has_credential_source <config-dir>
+# Succeeds when <config-dir> holds a Claude credential-source declaration
+# entry of any kind, including a dangling symlink.
+fm_worker_account_has_credential_source() {
+  [ -e "$1/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ] || [ -L "$1/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]
+}
 FM_WORKER_ACCOUNT_TOKEN_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-claude-token.sh"
 
 # Credentials Claude Code ranks above the /login stored in its config root
@@ -141,10 +148,7 @@ fm_worker_account_config() {
   rc=$?
   case "$rc" in
   3)
-    if [ "$file" = claude-account ] && {
-      [ -e "$candidate/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ] ||
-        [ -L "$candidate/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]
-    }; then
+    if [ "$file" = claude-account ] && fm_worker_account_has_credential_source "$candidate"; then
       printf '%s\n' "$candidate"
     else
       printf '%s\n' "$config"
@@ -170,11 +174,8 @@ fm_worker_account_resolve() {
   case "$rc" in
   0) ;;
   3)
-    if [ "$file" = claude-account ] && {
-      [ -e "$config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ] ||
-        [ -L "$config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]
-    }; then
-      echo "error: $setting-credential-source requires a Claude account pin: $config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" >&2
+    if [ "$file" = claude-account ] && fm_worker_account_has_credential_source "$config"; then
+      echo "error: $config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE requires a Claude account pin: $cfg" >&2
       return 1
     fi
     return 0
@@ -291,24 +292,24 @@ fm_worker_account_pi_provider() {
   esac
 }
 
-# fm_worker_account_credential_source_file <config-dir> <setting>
+# fm_worker_account_credential_source_file <config-dir>
 # Prints the checked Claude credential-source declaration path, or nothing
 # when this account uses the selected root's stored login.
 fm_worker_account_credential_source_file() {
-  local config=$1 setting=$2 path source problem
+  local config=$1 path source problem
   path="$config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE"
-  [ -e "$path" ] || [ -L "$path" ] || return 0
+  fm_worker_account_has_credential_source "$config" || return 0
   if [ ! -f "$path" ] || [ ! -r "$path" ]; then
-    echo "error: $setting-credential-source must be a readable regular file: $path" >&2
+    echo "error: $path must be a readable regular file" >&2
     return 1
   fi
   problem=$(fm_credsrc_check "$path" claude) || {
-    echo "error: malformed $setting-credential-source $path - $problem" >&2
+    echo "error: malformed $path - $problem" >&2
     return 1
   }
   source=$(fm_credsrc_field "$path" claude source)
   fm_credsrc_supported "$source" || {
-    echo "error: $setting-credential-source declares unsupported source $source on this host: $path" >&2
+    echo "error: $path declares unsupported source $source on this host" >&2
     return 1
   }
   printf '%s\n' "$path"
@@ -334,15 +335,15 @@ fm_worker_account_check() {
       if [ "$rc" -eq 0 ]; then
         method=$(printf '%s\n' "$out" | jq -r 'if type == "object" and .loggedIn == true then (.authMethod // "") else "" end' 2>/dev/null)
         [ "$method" = oauth_token ] && return 0
-        echo "error: $setting-credential-source maps the pinned Claude account to a token source, but claude auth status did not confirm authMethod oauth_token; the launch never falls back to the stored login" >&2
+        echo "error: $source_file maps the pinned Claude account to a token source, but claude auth status did not confirm authMethod oauth_token; the launch never falls back to the stored login" >&2
         return 1
       fi
       if [ "$rc" -eq 3 ]; then
-        echo "error: $setting-credential-source token could not be loaded; the launch never falls back to the stored login" >&2
+        echo "error: $source_file token could not be loaded; the launch never falls back to the stored login" >&2
       elif fm_timed_out "$rc"; then
-        echo "error: $setting-credential-source sign-in check timed out; the launch never falls back to the stored login" >&2
+        echo "error: $source_file sign-in check timed out; the launch never falls back to the stored login" >&2
       else
-        echo "error: $setting-credential-source token was not accepted by claude auth status (exit $rc); the launch never falls back to the stored login" >&2
+        echo "error: $source_file token was not accepted by claude auth status (exit $rc); the launch never falls back to the stored login" >&2
       fi
       return 1
     fi
@@ -402,9 +403,10 @@ fm_worker_account_request_valid() {
 # The whole launch-time decision. Prints nothing for an unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one, or a Claude
 # ship or scout launching on a declared config/claude-accounts entry named by
-# <account>, prints "declared<TAB>root<TAB>provider", where provider is the
-# Pi launch model's own (empty for Claude), after the model guard and the
-# sign-in check pass. On refusal prints one error and returns 1.
+# <account>, prints "declared<TAB>root<TAB>provider<TAB>source-file", where
+# provider is the Pi launch model's own (empty for Claude) and source-file is
+# the checked Claude credential-source declaration (empty without one), after
+# the model guard and the sign-in check pass. On refusal prints one error and returns 1.
 # bin/fm-spawn.sh runs it before any endpoint exists, and bin/fm-control.sh
 # before a relaunch stops the live agent.
 fm_worker_account_select() {
@@ -471,14 +473,11 @@ fm_worker_account_select() {
     root=${root%%$'\t'*}
   fi
   if [ "$harness" = claude ]; then
-    if [ -n "$listed" ] && [ -z "$mate" ] && {
-      [ -e "$selected_config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ] ||
-        [ -L "$selected_config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]
-    }; then
-      echo "error: $setting-credential-source applies to one config/claude-account pin, not config/claude-accounts" >&2
+    if [ -n "$listed" ] && [ -z "$mate" ] && fm_worker_account_has_credential_source "$selected_config"; then
+      echo "error: $selected_config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE applies to one config/claude-account pin, not config/claude-accounts" >&2
       return 1
     fi
-    source_file=$(fm_worker_account_credential_source_file "$selected_config" "$setting") || return 1
+    source_file=$(fm_worker_account_credential_source_file "$selected_config") || return 1
     for word in $raw; do
       case "$word" in
       [A-Za-z_]*=*)

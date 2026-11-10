@@ -105,6 +105,21 @@ new_case() {
   : > "$CASE/launch.log"
 }
 
+# fake_macos_host: the Keychain adapter runs only on Darwin, so the Keychain
+# cases report Darwin to `uname -s` on every host. Other uname forms still
+# answer from the real host, so platform-specific stat and /proc readers keep
+# working.
+fake_macos_host() {
+  local real
+  real=$(command -v uname)
+  cat > "$FAKEBIN/uname" <<SH
+#!/usr/bin/env bash
+[ "\$*" != -s ] || { printf '%s\n' Darwin; exit 0; }
+exec '$real' "\$@"
+SH
+  chmod +x "$FAKEBIN/uname"
+}
+
 # signed_in_claude_root <dir>: a Claude config root holding a stored login.
 signed_in_claude_root() {
   mkdir -p "$1"
@@ -671,6 +686,11 @@ test_claude_credential_source_requires_a_single_pin() {
 test_local_secondmate_pin_uses_its_keychain_oauth_token() {
   local out rc id=acct-mate-token
   new_case keychain-mate-token claude
+  fake_macos_host
+  signed_in_claude_root "$CASE/primary"
+  printf '%s\n' "$CASE/primary" > "$HOME_DIR/config/claude-account"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"primary-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source.json"
   mkdir -p "$HOME_DIR/config/secondmate-accounts/$id"
   signed_in_claude_root "$CASE/mate"
   printf '%s\n' "$CASE/mate" > "$HOME_DIR/config/secondmate-accounts/$id/claude-account"
@@ -690,6 +710,7 @@ test_local_secondmate_pin_uses_its_keychain_oauth_token() {
 test_claude_pin_uses_a_keychain_oauth_token() {
   local out rc id=acct-claude-token
   new_case keychain-token claude
+  fake_macos_host
   signed_in_claude_root "$CASE/work"
   printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
   printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
@@ -714,6 +735,7 @@ test_claude_pin_uses_a_keychain_oauth_token() {
 test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable() {
   local out rc id=acct-claude-token-missing
   new_case keychain-token-missing claude
+  fake_macos_host
   signed_in_claude_root "$CASE/work"
   printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
   printf '%s\n' '{"claude":{"source":"macos-keychain","service":"missing-token","account":"worker"}}' \
