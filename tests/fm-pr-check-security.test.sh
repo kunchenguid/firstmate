@@ -177,8 +177,12 @@ case "${1:-} ${2:-}" in
             [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
             [ -n "${FM_TEST_JQ:-}" ] || exit 1
             rollup=${FM_TEST_GH_ROLLUP:-'[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'}
-            printf '%s' "{\"baseRefName\":\"${FM_TEST_BASE-main}\",\"state\":\"${FM_TEST_GH_POLL_STATE:-${FM_TEST_GH_STATE:-OPEN}}\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statusCheckRollup\":$rollup}" \
-              | "$FM_TEST_JQ" -r "${@: -1}"
+            "$FM_TEST_JQ" -nr \
+              --arg base "${FM_TEST_BASE-main}" \
+              --arg state "${FM_TEST_GH_POLL_STATE:-${FM_TEST_GH_STATE:-OPEN}}" \
+              --arg head "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+              --argjson rollup "$rollup" \
+              '{baseRefName:$base,state:$state,headRefOid:$head,statusCheckRollup:$rollup} | '"${@: -1}"
             ;;
           *)
             printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
