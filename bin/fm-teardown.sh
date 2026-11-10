@@ -276,8 +276,9 @@
 # return of a pool slot, teardown moves a clean slot whose HEAD is reachable from a
 # local branch but from no remote-tracking branch back to the remote default commit
 # (origin/HEAD, else origin/main or origin/master). A HEAD no branch holds is left
-# untouched with one warning, dirty slots are never moved, branches are never
-# deleted, and nothing is forced.
+# untouched with one warning, dirty slots are never moved (a slot counts as clean
+# only when `git status --porcelain --untracked-files=all` succeeds and reports
+# nothing), branches are never deleted, and nothing is forced.
 #
 # Pre-teardown cleanup sequence (starts after the initial landed/discard-work
 # safety checks pass, and BEFORE any worktree return or branch
@@ -2145,9 +2146,10 @@ teardown_note_dirty_return() {
 # branch yet contained in no remote-tracking branch is moved, and never with force;
 # a HEAD no branch holds is left untouched with one warning naming it.
 teardown_detach_returned_slot() {
-  local wt=$1 label=$2 head ref target
+  local wt=$1 label=$2 head ref target status
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  [ -z "$(git -C "$wt" status --porcelain)" ] || return 0
+  status=$(git -C "$wt" status --porcelain --untracked-files=all) || return 0
+  [ -z "$status" ] || return 0
   [ -z "$(git -C "$wt" for-each-ref refs/remotes/ --contains=HEAD)" ] || return 0
   head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   # for-each-ref, not `git branch --contains`: the branch listing adds a

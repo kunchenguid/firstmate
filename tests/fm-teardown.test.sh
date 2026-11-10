@@ -1185,6 +1185,44 @@ test_returned_pool_slot_on_local_only_commit_detaches_to_published() {
   pass "a clean returned pool slot on a local-only commit is detached back to the published commit"
 }
 
+test_returned_pool_slot_with_hidden_untracked_file_stays() {
+  local case_dir wt rc head published
+  case_dir=$(make_case pool-slot-hidden-untracked)
+  wt_commit "$case_dir" "local-only landed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # Land the work only in the project's local main; no remote ever sees it.
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  published=$(git -C "$case_dir/wt" rev-parse origin/HEAD)
+  wt=$(move_case_to_pool_slot "$case_dir" 7)
+  write_meta "$case_dir" local-only ship "$wt"
+  git -C "$wt" config status.showUntrackedFiles no
+  # The return succeeds but leaves one untracked file behind in the slot.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  for a in "$@"; do wt=$a; done
+  printf '%s\n' residue > "$wt/left-behind.txt"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 4 "$rc" "pool-slot-hidden-untracked: a dirty return should report the lost slot"
+  [ -f "$wt/left-behind.txt" ] \
+    || fail "pool-slot-hidden-untracked: the untracked file left in the slot is gone"
+  [ -z "$(git -C "$wt" status --porcelain)" ] \
+    || fail "pool-slot-hidden-untracked: fixture did not hide the untracked file from plain status"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] \
+    || fail "pool-slot-hidden-untracked: slot HEAD moved to $(git -C "$wt" rev-parse HEAD), expected local-only $head"
+  [ "$head" != "$published" ] || fail "pool-slot-hidden-untracked: fixture local-only commit equals published"
+  pass "a returned pool slot with an untracked file hidden by status.showUntrackedFiles=no is not moved"
+}
+
 test_returned_pool_slot_on_unreferenced_commit_stays_with_warning() {
   local case_dir wt rc head
   case_dir=$(make_case pool-slot-orphan)
@@ -6518,6 +6556,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_returned_pool_slot_on_local_only_commit_detaches_to_published
+test_returned_pool_slot_with_hidden_untracked_file_stays
 test_returned_pool_slot_on_unreferenced_commit_stays_with_warning
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
