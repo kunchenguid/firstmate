@@ -59,7 +59,7 @@
 # that refusal instead of being cut. Once that time has passed, the sweep
 # starts no further registration, so the cursor stays on the last task that
 # had a full turn; the first registration of a sweep still runs, and with no
-# time left to fetch it refuses on the last-known refs.
+# time left to fetch it decides on the last-known refs.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu

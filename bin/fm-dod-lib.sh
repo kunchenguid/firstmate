@@ -984,14 +984,13 @@ fm_dod_nm_custody_returned() {  # <worktree>
 # would count work that no real remote holds. Each fetch is bounded to
 # <seconds> (default 30), and to the time left before <deadline> (epoch
 # seconds) when one is given, and is non-interactive; a remote whose turn comes
-# after <deadline> is not fetched. --no-prune keeps a branch a
-# remote has dropped visible whatever fetch.prune says, and the explicit
-# refspec covers every branch even when a clone tracks only some of them.
+# after <deadline> is not fetched. --no-prune keeps a branch a remote has
+# dropped visible whatever fetch.prune says, and the explicit refspec covers
+# every branch even when a clone tracks only some of them.
 # A fetch that fails, times out, or is not made only leaves the last-known refs
-# in place; its
-# remote is appended to FM_DOD_REFRESH_FAILED (", "-separated) so a refusal can
-# say its verdict used those refs. Always returns 0. bin/fm-teardown.sh and the
-# named-head gate below share this one refresh.
+# in place; its remote is appended to FM_DOD_REFRESH_FAILED (", "-separated) so
+# a refusal can say its verdict used those refs. Always returns 0.
+# bin/fm-teardown.sh and the named-head gate below share this one refresh.
 FM_DOD_REFRESH_FAILED=
 fm_dod_refresh_remote_refs() {  # <repo> [<seconds>] [<deadline>]
   local repo=$1 seconds=${2:-30} deadline=${3:-} remote bound left
