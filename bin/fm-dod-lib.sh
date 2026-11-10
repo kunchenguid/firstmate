@@ -1049,9 +1049,11 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # gated publishing claim must start its note with PR <canonical-supported-url>
 # and supply task metadata whose expected destination matches the live forge.
 # This applies to every direct-PR done: and to the no-mistakes ready reports
-# selected by fm_dod_should_gate_ship_done, before any recorded-head shortcut.
-# Head proof then accepts the task's recorded PR whose head the forge holds,
-# a Gerrit change whose current patch set carries the worker copy's HEAD tree,
+# selected by fm_dod_should_gate_ship_done. On the non-recorded path, cheap
+# local head proofs run before the destination gate. Recorded-head acceptance
+# follows the destination gate. Head proof accepts the task's recorded PR whose
+# head the forge holds, a Gerrit change whose current patch set carries the
+# worker copy's HEAD tree,
 # or otherwise the worker copy's HEAD reachable outside that disposable copy.
 # A published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is

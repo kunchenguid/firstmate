@@ -534,15 +534,22 @@ change_read_record_bounded() {  # <host> <number>
 passed_pr_detail() {
   local provider url host path number owner repo raw_pr state_lc
   raw_pr=$(strip_quotes "$(nm_field pr)")
-  if ! fm_pr_url_parse "$raw_pr"; then
+  if fm_pr_url_parse "$raw_pr"; then
+    provider=$FM_PR_PROVIDER
+    url=$FM_PR_URL
+    host=$FM_PR_HOST
+    path=$FM_PR_PATH
+    number=$FM_PR_NUMBER
+  elif fm_pr_metadata_identity_parse "$META"; then
+    provider=$FM_PR_META_PROVIDER
+    url=$FM_PR_META_URL
+    host=$FM_PR_META_HOST
+    path=$FM_PR_META_PATH
+    number=$FM_PR_META_NUMBER
+  else
     printf 'run passed: PR state unknown (no PR identity)'
     return
   fi
-  url=$FM_PR_URL
-  provider=$FM_PR_PROVIDER
-  host=$FM_PR_HOST
-  path=$FM_PR_PATH
-  number=$FM_PR_NUMBER
   if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
     && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
     && [ "$FM_PR_RETIRE_URL" = "$url" ] \
