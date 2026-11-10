@@ -26,8 +26,8 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
-# That merge-time re-record also skips the degraded baseline read below, so it
-# makes no forge read the merge's own live reads would duplicate.
+# That merge-time re-record skips the degraded baseline read below and carries
+# its destination proof into the named-head gate rather than reading it twice.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 #
@@ -269,7 +269,8 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
   fi
 fi
 
-fm_pr_require_base "$META" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" || exit 1
+PR_DESTINATION_PROOF=
+fm_pr_require_base "$META" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" PR_DESTINATION_PROOF || exit 1
 EXPECTED_BASE=$(fm_pr_expected_base "$META") || exit 1
 
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -309,7 +310,7 @@ case "$PROVIDER:$MODE" in
   *) DONE_LINE="done: PR $URL" ;;
 esac
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
-  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
+  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META" '' "$PR_DESTINATION_PROOF"); then
   echo "error: $GATE_REASON" >&2
   exit 1
 fi

@@ -916,8 +916,8 @@ fm_dod_read_timeout() {
 # inactive terminal presentation. The caller supplies the PR from that claim's
 # own source, never a different run's recorded PR. All live reads share the
 # caller's remaining scan deadline, including timeout cleanup.
-fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url>
-  local kind=${1:-ship} mode=$2 meta=$3 url=$4 read_timeout reason expected
+fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url> [<destination-proof>]
+  local kind=${1:-ship} mode=$2 meta=$3 url=$4 read_timeout reason expected proof_key
   [ "$kind" = ship ] || return 0
   [ "$mode" != local-only ] || return 0
   [ "$(fm_dod_meta_value "$meta" forge)" != external ] || return 0
@@ -925,6 +925,14 @@ fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url>
     expected=$(fm_pr_expected_base "$meta") || expected=unavailable
     printf 'expected PR base %s, actual base unavailable: no canonical PR identity\n' "$expected"
     return 1
+  fi
+  # Registration may carry fm_pr_require_base's proof from this invocation.
+  # A changed task snapshot or PR identity falls back to live verification.
+  if [ -n "${5:-}" ] && expected=$(fm_pr_expected_base "$meta") \
+    && proof_key=$(fm_pr_base_proof_key "$meta" "$expected" "$FM_PR_PROVIDER" "$url" \
+      "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER") \
+    && [ "$proof_key" = "$5" ]; then
+    return 0
   fi
   if ! read_timeout=$(fm_dod_read_timeout 5 2>&1); then
     expected=$(fm_pr_expected_base "$meta") || expected=unavailable
@@ -1054,7 +1062,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 # The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked [<destination-proof>]]]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured=''
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
@@ -1078,7 +1086,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   fi
   if [ "$mode" != local-only ]; then
-    fm_dod_claim_destination "$kind" "$mode" "$meta" "$url" || return 1
+    fm_dod_claim_destination "$kind" "$mode" "$meta" "$url" "${10:-}" || return 1
   fi
   if [ -n "$url" ] && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

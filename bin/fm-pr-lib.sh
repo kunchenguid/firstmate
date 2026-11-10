@@ -396,14 +396,32 @@ fm_pr_read_base() (  # <provider> <url> <host> <path> <number>
   esac
 )
 
-fm_pr_require_base() {  # <meta> <provider> <url> <host> <path> <number>
-  local meta=$1 expected actual
+# An invocation-local proof binds the validated destination to the complete
+# metadata snapshot and canonical PR identity. Length prefixes keep paths inert.
+# Consumers compare against a freshly constructed key, never an environment flag.
+fm_pr_base_proof_key() {  # <meta> <expected-base> <provider> <url> <host> <path> <number>
+  local digest field
+  digest=$(fm_pr_sha256 "$1") || return 1
+  for field in fm-pr-base-proof-v1 "$digest" "$@"; do
+    printf '%s:%s' "${#field}" "$field"
+  done
+}
+
+fm_pr_require_base() {  # <meta> <provider> <url> <host> <path> <number> [<proof-variable>]
+  local meta=$1 expected actual proof_var=${7:-} proof_key= current_key=
   shift
+  if [ -n "$proof_var" ]; then
+    case "$proof_var" in [0-9]*|*[!A-Za-z0-9_]*) return 1 ;; esac
+    printf -v "$proof_var" '%s' ''
+  fi
   if ! expected=$(fm_pr_expected_base "$meta"); then
     printf '%s\n' 'error: expected PR base is unavailable or inconsistent in task metadata. The supervising firstmate must recover the originally authorized destination from task-owned launch/brief evidence, never from the current PR or current default branch. Source bin/fm-wake-lib.sh and use fm_meta_lock_path with fm_lock_acquire_wait to hold the task metadata lock while recording exactly one valid expected_base=<branch> in state/<id>.meta, keeping any existing base_branch consistent. Release the lock with fm_lock_release, then rerun bin/fm-pr-check.sh <id> <PR-URL>.' >&2
     return 1
   fi
-  if ! actual=$(fm_pr_read_base "$@" 2>/dev/null) \
+  if [ -n "$proof_var" ]; then
+    proof_key=$(fm_pr_base_proof_key "$meta" "$expected" "${@:1:5}") || return 1
+  fi
+  if ! actual=$(fm_pr_read_base "${@:1:5}" 2>/dev/null) \
     || [ -z "$actual" ] || ! git check-ref-format "refs/heads/$actual" >/dev/null 2>&1; then
     printf 'error: expected PR base %s, actual base unavailable\n' "$expected" >&2
     return 1
@@ -411,6 +429,14 @@ fm_pr_require_base() {  # <meta> <provider> <url> <host> <path> <number>
   if [ "$actual" != "$expected" ]; then
     printf 'error: expected PR base %s, actual base %s\n' "$expected" "$actual" >&2
     return 1
+  fi
+  if [ -n "$proof_var" ]; then
+    current_key=$(fm_pr_base_proof_key "$meta" "$expected" "${@:1:5}") || return 1
+    if [ "$proof_key" != "$current_key" ]; then
+      printf '%s\n' 'error: task metadata changed during PR destination verification' >&2
+      return 1
+    fi
+    printf -v "$proof_var" '%s' "$proof_key"
   fi
 }
 

@@ -1931,10 +1931,13 @@ test_arming_baselines_an_already_degraded_change() {
     || fail "arming a GitLab watch for the baseline order failed"
   # Destination preflights may read before locking; exactly one baseline read
   # must be last, under the control lock, and every read must precede publication.
-  [ "$(tail -1 "$dir/glab.log.probe")" = 'published=no locked=yes' ] \
+  if [ "$(tail -1 "$dir/glab.log.probe")" = 'published=no locked=yes' ] \
     && [ "$(grep -c '^published=no locked=yes$' "$dir/glab.log.probe")" = 1 ] \
-    && ! grep -vE '^published=no locked=(no|yes)$' "$dir/glab.log.probe" >/dev/null \
-    || fail "the arming baseline was not read before publishing under the control lock: $(cat "$dir/glab.log.probe")"
+    && ! grep -vE '^published=no locked=(no|yes)$' "$dir/glab.log.probe" >/dev/null; then
+    :
+  else
+    fail "the arming baseline was not read before publishing under the control lock: $(cat "$dir/glab.log.probe")"
+  fi
   [ -f "$state/task-a.check.sh" ] || fail "arming did not publish the poll after its baseline"
   [ ! -e "$state/.control-task-a.lock" ] || fail "arming left the task's control lock held"
   fm_pr_poll_degraded_already_notified "$state" task-a gitlab gitlab.example group/subgroup/project 7 pipeline=941 \
@@ -5222,6 +5225,40 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_destination_proof_is_scoped_to_claim() {
+  local dir scenario out rc reads url=https://github.com/o/r/pull/1
+  for scenario in missing other-pr changed-meta; do
+    dir=$(make_case "destination-proof-$scenario")
+    write_task_meta "$dir"
+    rc=0
+    out=$(FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" \
+      bash -c '
+        . "$1/bin/fm-wake-lib.sh"
+        . "$1/bin/fm-dod-lib.sh"
+        meta=$2/home/state/task-a.meta
+        url=$4
+        proof=
+        if [ "$3" != missing ]; then
+          fm_pr_require_base "$meta" github "$url" github.com o/r 1 proof || exit 2
+        fi
+        case "$3" in
+          other-pr) url=https://github.com/o/r/pull/2 ;;
+          changed-meta) printf "proof_revision=changed\n" >> "$meta" ;;
+        esac
+        export FM_TEST_BASE=other
+        fm_dod_accept_ship_done ship no-mistakes "$2/wt" "$2/project" \
+          "done: PR $url checks green" "$2/home/state" task-a "$meta" "" "$proof"
+      ' _ "$ROOT" "$dir" "$scenario" "$url" 2>&1) || rc=$?
+    [ "$rc" = 1 ] || fail "$scenario destination proof bypassed the claim gate: $out"
+    assert_contains "$out" 'actual base other' "$scenario proof skipped live destination verification"
+    reads=2
+    [ "$scenario" != missing ] || reads=1
+    [ "$(grep -c -- '--json baseRefName ' "$dir/gh.log")" = "$reads" ] \
+      || fail "$scenario proof did not perform the required live read"
+  done
+  pass 'missing, foreign-PR and changed-metadata proofs retain live destination checks'
+}
+
 test_expected_destination_fail_closed_and_retarget() {
   local dir state out value rc
   dir=$(make_case destination-retarget)
@@ -5531,6 +5568,7 @@ test_legacy_parent_notice_retries_after_delivery
 test_legacy_notice_audiences_are_independent
 test_legacy_poll_notices_once_until_rearmed
 test_expected_destination_refuses_registration
+test_destination_proof_is_scoped_to_claim
 test_expected_destination_fail_closed_and_retarget
 test_parser_matrix
 test_github_enterprise_config_resolution
