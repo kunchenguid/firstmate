@@ -1071,7 +1071,7 @@ The retained successful native macOS arm64 Codex CLI 0.163.0 lab sessions record
 This is derived from those no-latch observations, not from measured per-Stop minimum, median or maximum values or a cold-shell latency distribution.
 The retained native rollouts carry no paired hook-start and claim-publication timestamps, so no such measurement is claimed and the wait is not a strict wall-clock guarantee.
 
-The native mode is selected only in a home that opts in with `config/codex-stop-park`, for the verified CLI version and a registered TUI session owning this home's lock.
+[Configuration](../configuration.md#codex-native-stop-park-configcodex-stop-park) owns native-mode eligibility.
 Unverified sessions retain the foreground protocol, whose existing live guard remains `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
 The native proof above was a real adapter smoke; the reusable native guard below now refreshes that capability evidence without changing the foreground live guard.
 `tests/fm-codex-stop-park.test.sh` separately covers the opt-in and version gates, single-flight claim, fallback latch, final-result delivery when supervision ends, owner-gone watcher exit and retained quiet boundary against a fake `codex`.
@@ -1079,17 +1079,7 @@ The native proof above was a real adapter smoke; the reusable native guard below
 
 ### Codex native lifecycle guard (2026-11-09)
 
-Verified with `codex-cli 0.167.0` on Linux x86_64 / WSL:
-
-```sh
-bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
-```
-
-```text
-ok - codex-cli 0.167.0: native park delivery-rearm
-ok - codex-cli 0.167.0: native park failure-fallback
-ok - codex codex-cli 0.167.0: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
-```
+[Runtime verification](runtime-backends.md#native-codex-supervision-park) owns the per-release platform, refresh command and native lifecycle output.
 
 `tests/codex-stop-park-live.py`, invoked by that guard, runs the installed embedded TUI with the tracked SessionStart and asynchronous Stop hooks, private `HOME` and `CODEX_HOME`, and a loopback Responses fixture that spends no model tokens.
 The real bounded digest must deliver `primary harness: codex` and the native park protocol to the provider before the initial turn.

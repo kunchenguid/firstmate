@@ -35,11 +35,14 @@ def alive(pid):
 def run_case(name, fail_arm=False):
     case = LAB / name
     home = case / "home"
-    home.mkdir(parents=True)
+    # The real arm refuses unmarked homes inside disposable gate checkouts.
+    # Mint the supported lab rather than bypassing that production boundary.
+    subprocess.run([str(ROOT / "bin/fm-lab-home.sh"), "create", str(home)],
+                   check=True, stdout=subprocess.DEVNULL)
     for directory in ["bin", "docs"]:
         shutil.copytree(ROOT / directory, home / directory)
     for directory in [".codex", "state", "config", "data", "projects"]:
-        (home / directory).mkdir()
+        (home / directory).mkdir(exist_ok=True)
     shutil.copy2(ROOT / ".codex/hooks.json", home / ".codex/hooks.json")
     (home / "AGENTS.md").write_text("Isolated native supervision transport fixture.\n")
     subprocess.run(["git", "init", "-q", str(home)], check=True)
@@ -95,7 +98,12 @@ printf 'consumed\n' >> consumed.log
             user = next((json.dumps(item) for item in reversed(body.get("input", []))
                          if item.get("role") == "user"), "")
             queue = home / "state/.wake-queue"
-            consume = "Firstmate watcher wake:" in user and queue.exists() and queue.stat().st_size
+            # Codex also sends title-generation requests containing the wake
+            # text, but those requests cannot execute tools. Do not feed them
+            # unsupported calls while the real interactive turn drains.
+            can_execute = any(tool.get("name") == "exec_command" for tool in body.get("tools", []))
+            consume = can_execute and "Firstmate watcher wake:" in user \
+                and queue.exists() and queue.stat().st_size
             if consume:
                 message = {"type": "function_call", "name": "exec_command",
                            "call_id": f"call_{number}", "arguments": json.dumps({

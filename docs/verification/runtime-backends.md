@@ -3630,11 +3630,11 @@ bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
 ```text
 ok - codex-cli 0.167.0: native park delivery-rearm
 ok - codex-cli 0.167.0: native park failure-fallback
+ok - codex codex-cli 0.167.0: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
 ```
 
-The native guard also verifies startup harness selection through the bounded digest, two acknowledged idle-turn wakes, quiet provider-call stability and native exit cleanup.
-It runs without model tokens by default when Codex is installed and refuses a capability claim on an unverified release.
-[Supervision verification](supervision.md#codex-native-lifecycle-guard-2026-11-09) owns the detailed coverage and limits.
+The guard runs without model tokens by default when Codex is installed and refuses a capability claim on an unverified release.
+[Supervision verification](supervision.md#codex-native-lifecycle-guard-2026-11-09) owns its lifecycle assertions, isolation and limits.
 
 ## hc
 
