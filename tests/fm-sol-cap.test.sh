@@ -1260,6 +1260,48 @@ test_malformed_declaration_refuses_loudly() {
   pass "a malformed declaration refuses loudly instead of falling back to a default"
 }
 
+# An unresolvable parent binding leaves the shared root home - and so the
+# ceiling - unknowable. Every path that needs that root must refuse loudly
+# naming the binding instead of exiting 1 with no output, because a silent
+# refusal tells the operator nothing and leaves reservations unmanaged.
+test_unresolvable_root_refuses_loudly() {
+  local case_dir out rc binding
+  case_dir=$(make_case unresolvable-root task-c)
+  binding=$case_dir/home/.fm-secondmate-parent
+  printf '%s\n' schema=fm-secondmate-parent.v1 route=local \
+    "parent_home=$case_dir/missing-parent" > "$binding"
+  # Admission cannot decide a covered dispatch, so it dispatches nothing.
+  rc=0
+  out=$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-sol-cap-lib.sh" \
+    refuse-claim task-c ship codex gpt-6.1-sol \
+    "$case_dir/home/config" "$case_dir/home/state" 2>&1) || rc=$?
+  expect_code 1 "$rc" "an unresolvable root did not refuse admission"
+  assert_contains "$out" "ceiling unavailable" "the admission refusal did not name the Sol ceiling"
+  assert_contains "$out" "$case_dir/home" "the admission refusal did not name the home"
+  assert_contains "$out" ".fm-secondmate-parent" "the admission refusal did not name the unresolvable binding"
+  assert_contains "$out" "task-c" "the admission refusal did not name the refused dispatch"
+  [ ! -e "$case_dir/home/state/sol-sessions.tsv" ] ||
+    fail "a refused dispatch left a reservation"
+  # Promotion reports why an existing delivery reservation could not move.
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" 0
+  rc=0
+  out=$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-sol-cap-lib.sh" \
+    run task-c "$case_dir/home/state" true 2>&1) || rc=$?
+  expect_code 1 "$rc" "an unresolvable root did not refuse promotion"
+  assert_contains "$out" "$case_dir/home" "the promotion refusal did not name the home"
+  assert_contains "$out" ".fm-secondmate-parent" "the promotion refusal did not name the unresolvable binding"
+  assert_equals 0 "$(registry_row_field "$case_dir" task-c 4)" \
+    "a refused promotion changed the reservation"
+  # Reported-model reconciliation takes the same admission boundary.
+  rc=0
+  out=$(FM_HOME="$case_dir/home" "$ROOT/bin/fm-sol-cap-lib.sh" \
+    record-actual task-c gpt-6.1-sol "$case_dir/home/state" 2>&1) || rc=$?
+  expect_code 1 "$rc" "an unresolvable root did not refuse reconciliation"
+  assert_contains "$out" "$case_dir/home" "the reconciliation refusal did not name the home"
+  assert_contains "$out" ".fm-secondmate-parent" "the reconciliation refusal did not name the unresolvable binding"
+  pass "an unresolvable parent binding refuses admission, promotion, and reconciliation loudly"
+}
+
 test_review_regressions() {
   local case_dir out rc=0 worker i
   case_dir=$(make_case review docs)
@@ -1675,5 +1717,6 @@ test_adopted_uncertain_claim_survives_reported_sol
 test_sol_report_under_an_existing_claim_keeps_the_row
 test_malformed_registry_row_refuses_loudly
 test_malformed_declaration_refuses_loudly
+test_unresolvable_root_refuses_loudly
 
 test_non_sol_report_bypasses_admission_without_occupancy

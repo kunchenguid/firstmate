@@ -53,10 +53,13 @@ FM_SOL_PENDING_PREFIX=.sol-cap-supersede-
 
 # The refusal message of the refusing call, and FM_SOL_CLAIM_CREATED set to
 # the claimed task id after a call that both passed the cap and wrote its
-# reserve row.
+# reserve row. FM_SOL_ROOT_HOME is set by fm_sol_cap_root_home to the resolved
+# anchor home of a successful call.
 # shellcheck disable=SC2034 # read by bin/fm-spawn.sh after sourcing.
 FM_SOL_CAP_REFUSAL=
 FM_SOL_CLAIM_CREATED=
+FM_SOL_ROOT_HOME=
+FM_SOL_ADMISSION_LOCK=
 
 # Set by fm_sol_cap_config (FM_SOL_CAP_ACTIVE, FM_SOL_CAP, FM_SOL_CAP_MAX,
 # FM_SOL_CAP_MODELS, FM_SOL_CAP_PATTERN, FM_SOL_CAP_CONFIG_ERROR) and by
@@ -359,6 +362,24 @@ fm_sol_cap_home() {
     */state/parent-route) printf '%s\n' "${1%/state/parent-route}"; return 0 ;;
   esac
   printf '%s\n' "$FM_HOME"
+}
+
+# fm_sol_cap_root_home <home> <what>
+# The anchor home every local admission shares, left in FM_SOL_ROOT_HOME. An
+# unreachable or malformed parent binding leaves that anchor unknown, and an
+# unknown anchor would mean an unknown ceiling, so this refuses loudly in
+# FM_SOL_CAP_REFUSAL naming the home, its binding, and the affected work
+# instead of returning silently.
+#
+# The result is published in a global rather than on stdout because setting the
+# refusal inside a command substitution would lose it in the subshell.
+fm_sol_cap_root_home() {  # <home> <what>
+  local home=$1 what=$2
+  FM_SOL_ROOT_HOME=
+  FM_SOL_ROOT_HOME=$(fm_firstmate_root_home "$home") || {
+    FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: cannot resolve the root Firstmate home from $home (check that home and its .fm-secondmate-parent binding); $what"
+    return 1
+  }
 }
 
 fm_sol_cap_adopt_workers() (
@@ -747,7 +768,9 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     fm_sol_cap_model_capped "$model"; then
     covered=1
   fi
-  root=$(fm_firstmate_root_home "$(fm_sol_cap_home "$state")") || return 1
+  fm_sol_cap_root_home "$(fm_sol_cap_home "$state")" \
+    "task $id with model $model was not dispatched rather than launched possibly uncounted" || return 1
+  root=$FM_SOL_ROOT_HOME
   lock=$root/state/$FM_SOL_LOCK_NAME
   if [ "$covered" = 0 ]; then
     # A genuine endpoint reuse keeps its row: the same session continues, and
@@ -946,14 +969,21 @@ fm_sol_cap_reconcile_remote() {
 
 # fm_sol_cap_admission_lock_path <state-dir>
 # The shared admission boundary's lock directory, underneath the local root
-# home's state directory. A caller that must present a route-record publication
-# and the occupancy reconcile derived from it as one transition acquires this
-# lock itself with fm_sol_cap_lock_acquire, then drives the locked core below,
-# instead of doing either half of the transition outside the boundary.
+# home's state directory, also left in FM_SOL_ADMISSION_LOCK so a caller that
+# must see the refusal can call this directly and read the global instead of
+# losing FM_SOL_CAP_REFUSAL in a command substitution. A caller that must
+# present a route-record publication and the occupancy reconcile derived from
+# it as one transition acquires this lock itself with fm_sol_cap_lock_acquire,
+# then drives the locked core below, instead of doing either half of the
+# transition outside the boundary.
 fm_sol_cap_admission_lock_path() {  # <state-dir>
   local root
-  root=$(fm_firstmate_root_home "$(fm_sol_cap_home "$1")") || return 1
-  printf '%s/state/%s\n' "$root" "$FM_SOL_LOCK_NAME"
+  FM_SOL_ADMISSION_LOCK=
+  fm_sol_cap_root_home "$(fm_sol_cap_home "$1")" \
+    "the Sol admission boundary could not be located" || return 1
+  root=$FM_SOL_ROOT_HOME
+  FM_SOL_ADMISSION_LOCK=$root/state/$FM_SOL_LOCK_NAME
+  printf '%s\n' "$FM_SOL_ADMISSION_LOCK"
 }
 
 # fm_sol_cap_record_actual <id> <actual-model> <state-dir>
@@ -977,7 +1007,8 @@ fm_sol_cap_record_actual() {  # <id> <actual-model> <state-dir>
     }
     [ "$owned" -eq 0 ] || return 0
   fi
-  lock=$(fm_sol_cap_admission_lock_path "$state") || return 1
+  fm_sol_cap_admission_lock_path "$state" >/dev/null || return 1
+  lock=$FM_SOL_ADMISSION_LOCK
   fm_sol_cap_lock_acquire "$lock" "the reported model of task $id" || return 1
   fm_sol_cap_record_actual_locked "$@" || rc=$?
   fm_lock_release "$lock" || true
@@ -1068,7 +1099,9 @@ fm_sol_cap_promote() {
     [ -f "$registry" ] || return 0
     awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END {exit !found}' "$registry" || return 0
   fi
-  root=$(fm_firstmate_root_home "$(fm_sol_cap_home "$state")") || return 1
+  fm_sol_cap_root_home "$(fm_sol_cap_home "$state")" \
+    "the promotion of task $id's delivery reservation was refused" || return 1
+  root=$FM_SOL_ROOT_HOME
   lock=$root/state/$FM_SOL_LOCK_NAME
   fm_sol_cap_lock_acquire "$lock" "the promotion of task $id" || return 1
   fm_sol_cap_registry_promote "$id" "$pid" "$state" || rc=$?
@@ -1218,7 +1251,10 @@ fm_sol_cap_cli() {
   run)
     local id=$2 state=$3
     shift 3
-    fm_sol_cap_promote "$id" "$$" "$state" || return 1
+    fm_sol_cap_promote "$id" "$$" "$state" || {
+      [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL" >&2
+      return 1
+    }
     exec "$@"
     ;;
   run-launch)
@@ -1239,7 +1275,10 @@ fm_sol_cap_cli() {
     else
       shell=$(fm_sol_cap_launch_shell) || return 1
     fi
-    fm_sol_cap_promote "$id" "$$" "$3" || return 1
+    fm_sol_cap_promote "$id" "$$" "$3" || {
+      [ -z "$FM_SOL_CAP_REFUSAL" ] || printf '%s\n' "$FM_SOL_CAP_REFUSAL" >&2
+      return 1
+    }
     exec "$shell" -c "$line"
     ;;
   refuse-claim)
