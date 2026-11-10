@@ -631,14 +631,11 @@ fm_afk_contract_cmd_enter() {
     standing=$(fm_afk_contract_record_mode "$record")
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
   fi
-  # The away posture is a mandate this session has to carry out, so the write
-  # needs the fleet lock: a read-only session must not record one. The boundary
-  # is taken FIRST and held until this command returns (the caller's cleanup
-  # releases it), so neither the check below nor the write it authorizes can be
-  # overtaken by a concurrent acquisition: the record lock alone excludes record
-  # writers, not acquisitions. The check runs HERE, under both locks, so it also
-  # cannot be overtaken by a concurrent writer of this record, and it applies to
-  # every writer of this record, not only the launcher's.
+  # The away posture is a mandate this session has to carry out, so a read-only
+  # session must not record one (the header owns the authoritative-verdict
+  # mechanism). The boundary is taken FIRST and held until this command returns,
+  # with the caller's cleanup as the release, so the check below and the write it
+  # authorizes stay one critical section.
   if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
     fm_afk_contract_claim_hold "${FM_AFK_CONTRACT_STATE}" || return 1
     fm_session_lock_may_record "${FM_AFK_CONTRACT_STATE}" || return 1

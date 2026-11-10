@@ -179,11 +179,10 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
-# The fleet-lock check for the away record is owned by the record writer
-# (bin/fm-afk-contract.sh), which runs it under its own mutation lock just
-# before the write. It lives there so every writer of the record is covered,
-# not only this launcher, and so the check and the write cannot be overtaken
-# between them.
+# The fleet lock's away-entry check belongs to the record writer
+# (bin/fm-afk-contract.sh), whose header owns that authoritative-verdict
+# mechanism. Keeping it there covers every writer of the record, not only this
+# launcher.
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -401,14 +400,10 @@ fm_afk_launch_enter() {
         return 3 ;;
     esac
   fi
-  # The quiet path above is settled first on purpose: a quiet entry never takes
-  # the fleet-lock check, because quiet mode is presentation only and holds
-  # nothing, so a read-only session may still enter it. Where attended
-  # supervision already does what quiet asks it writes no record and spawns
-  # nothing; otherwise it falls through to the quiet daemon, which does start
-  # one. The fleet-lock check belongs to away-mode record writes, so a standing away
-  # record keeps away mode even for a quiet-mode caller, and that write is
-  # refused too.
+  # The quiet path above is settled first on purpose: the header owns that
+  # ordering and both quiet entries. The fleet-lock check belongs to away-mode
+  # record writes, so a standing away record keeps away mode even for a
+  # quiet-mode caller, and that write is refused too.
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }
