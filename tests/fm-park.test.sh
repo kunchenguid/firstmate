@@ -986,6 +986,28 @@ SH
   pass "land queue fails when the cleanup request cannot be written"
 }
 
+test_land_report_keeps_lost_pool_slot_details() {
+  local w out report
+  w=$(make_world land-slot-lost "$GH_URL")
+  : > "$w/config/auto-land"
+  printf 'pr=%s\n' "$GH_URL" > "$w/state/lane.review-park-land"
+  cat > "$w/fakebin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'warning: treehouse return left pool slot 7 (/pool/7) dirty or unverified; the pool lost this slot. Remaining paths:' '  untracked paths:' '  lost.txt'
+exit 4
+SH
+  chmod +x "$w/fakebin/fm-teardown.sh"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-slot-lost: starting tick printed: $out"
+  wait_land_settled "$w" land-slot-lost
+  report=$(grep -l 'cleaned up lane:' "$w"/state/.review-park-report-* 2>/dev/null) || fail "land-slot-lost: no saved report"
+  grep -q 'pool slot 7' "$report" || fail "land-slot-lost: report omitted lost slot: $(cat "$report")"
+  grep -q 'lost.txt' "$report" || fail "land-slot-lost: report omitted leftover path: $(cat "$report")"
+  out=$(run_park "$w" tick 2>&1)
+  case "$out" in *'pool slot 7'*'lost.txt'*) ;; *) fail "land-slot-lost: tick omitted repair details: $out" ;; esac
+  pass "a lost pool slot and its leftover paths survive in the detached land report"
+}
+
 # The merge poll's land only starts a detached teardown: it returns at once
 # however slow the teardown is, and the next tick reports the outcome, even in
 # a home that opted out of everything the tick otherwise watches.
@@ -1206,6 +1228,7 @@ fm_test_run \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \
   test_land_queue_fails_when_cleanup_request_cannot_be_written \
+  test_land_report_keeps_lost_pool_slot_details \
   test_detached_land_returns_at_once_and_the_tick_reports_it \
   test_pending_land_recovers_after_watcher_restart \
   test_pending_land_retries_after_control_lock_refusal \

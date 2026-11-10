@@ -535,6 +535,7 @@ tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-lint.test.sh
+tests/fm-park.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
@@ -569,6 +570,7 @@ tests/fm-ensure-agents-md.test.sh 895
 tests/fm-grok-harness.test.sh 7666
 tests/fm-herdr-lab.test.sh 18325
 tests/fm-lint.test.sh 252498
+tests/fm-park.test.sh 70085
 tests/fm-pi-primary-types.test.sh 5426
 tests/fm-pr-merge.test.sh 300199
 tests/fm-review-diff.test.sh 4134
@@ -606,8 +608,8 @@ list_portable_parallel_1() {
 tests/fm-captain-hold-lifecycle.test.sh
 tests/fm-backend-t3code.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-park.test.sh
 tests/fm-t3-mcp.test.sh
-tests/fm-arm-pretool-check.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-grok-harness.test.sh
@@ -626,6 +628,7 @@ tests/fm-pr-merge.test.sh
 tests/fm-lint.test.sh
 tests/fm-test-run.test.sh
 tests/fm-backend-herdr.test.sh
+tests/fm-arm-pretool-check.test.sh
 tests/fm-x-mode.test.sh
 tests/fm-brief.test.sh
 tests/fm-composer-lib.test.sh
@@ -863,7 +866,6 @@ tests/fm-pi-primary-live-e2e.test.sh 72
 tests/fm-pi-seeded-home-trust-live-e2e.test.sh 45
 tests/fm-pi-watch-extension.test.sh 56515
 tests/fm-pi-windows-shell-invocation.test.sh 5121
-tests/fm-park.test.sh 65161
 tests/fm-polytoken-harness.test.sh 21090
 tests/fm-polytoken-signals-live-e2e.test.sh 103
 tests/fm-pr-check-security.test.sh 300675

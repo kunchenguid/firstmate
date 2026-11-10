@@ -736,7 +736,10 @@ cmd_land() {
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$TEARDOWN_BIN" "$id" 2>&1) || rc=$?
   case "$rc" in
     0) printf 'cleaned up %s: PR %s merged; lane torn down and its working copy returned\n' "$id" "$pr" ;;
-    4) printf 'cleaned up %s: PR %s merged; lane torn down, but its returned pool slot was lost (see teardown output)\n' "$id" "$pr" ;;
+    4)
+      printf 'cleaned up %s: PR %s merged; lane torn down, but its returned pool slot was lost\n' "$id" "$pr"
+      printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' || true
+      ;;
     *)
       why=$(printf '%s\n' "$out" | grep -m1 -E 'REFUSED|^error|refus' || printf '%s\n' "$out" | tail -1)
       printf 'cleanup-refused %s: PR %s merged; automatic cleanup refused: %s\n' "$id" "$pr" "$why"
