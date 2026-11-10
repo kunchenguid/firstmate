@@ -2309,7 +2309,7 @@ make_wait_gate_case() {  # <name> <status-line> -> sets WG_DIR WG_WINDOW
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wg.meta"
   printf '%s\n' "$2" > "$state/wg.status"
   printf '%s' "$(seen_sig "$state/wg.status")" > "$state/.seen-wg_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf '%s' "$(hash_text "finished, awaiting review")" > "$state/.hash-$key"
   printf '%s' "$(hash_text "finished, awaiting review")" > "$state/.stale-$key"
   printf '3\n' > "$state/.count-$key"
@@ -2340,7 +2340,7 @@ test_gate_after_done_or_paused_wakes_once_per_gate() {
     ack_stopped_cycle "$state" || fail "$wait: could not acknowledge the gate wake"
 
     : > "$out"; : > "$dir/crew-state.log"
-    rm -f "$state/.wait-gate-checked-test_fm-wg"
+    rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
     wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
     pid=$!
     wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke twice: $(cat "$out")"
@@ -2349,7 +2349,7 @@ test_gate_after_done_or_paused_wakes_once_per_gate() {
     ack_stopped_cycle "$state" || true
 
     : > "$out"; : > "$dir/crew-state.log"
-    rm -f "$state/.wait-gate-checked-test_fm-wg"
+    rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
     export FM_FAKE_CREW_STATE='state: unknown · source: run-step · run inventory unavailable'
     wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
     pid=$!
@@ -2358,7 +2358,7 @@ test_gate_after_done_or_paused_wakes_once_per_gate() {
     wait_poll_cycle "$state" "$pid" || fail "$wait: an unknown read woke: $(cat "$out")"
     reap "$pid"
     ack_stopped_cycle "$state" || true
-    rm -f "$state/.wait-gate-checked-test_fm-wg"; : > "$dir/crew-state.log"
+    rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"; : > "$dir/crew-state.log"
     export FM_FAKE_CREW_STATE=$gate
     wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
     pid=$!
@@ -2397,7 +2397,7 @@ test_gate_reparked_after_answer_wakes_again() {
 
   : > "$out"; : > "$dir/crew-state.log"
   printf 'finished, awaiting review' > "$dir/pane.txt"
-  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
   wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "the same gate re-parked after an answer did not wake again"; }
@@ -2432,7 +2432,7 @@ test_gate_reparked_between_reads_wakes_again() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
 
   : > "$out"; : > "$dir/crew-state.log"
-  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
   wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
   pid=$!
   for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
@@ -2444,7 +2444,7 @@ test_gate_reparked_between_reads_wakes_again() {
 
   : > "$out"; : > "$dir/crew-state.log"
   set_gate_opened_at "$nm" 01RUN 1700000600
-  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
   wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a gate reopened between two reads with an identical line did not wake"; }
@@ -2484,7 +2484,7 @@ test_stamped_gate_survives_a_busy_poll() {
 
   wait_gate_busy_poll "$dir" "$out" NM_HOME="$nm"
   : > "$out"; : > "$dir/crew-state.log"
-  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
   wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
   pid=$!
   for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
@@ -2497,7 +2497,7 @@ test_stamped_gate_survives_a_busy_poll() {
   wait_gate_busy_poll "$dir" "$out" NM_HOME="$nm"
   set_gate_opened_at "$nm" 01RUN 1700000600
   : > "$out"
-  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  rm -f "$state/.wait-gate-checked-$(watch_window_key "$WG_WINDOW")"
   wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out" NM_HOME="$nm"
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a gate reopened after a busy poll did not wake"; }
