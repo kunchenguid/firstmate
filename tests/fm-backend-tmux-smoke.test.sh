@@ -319,7 +319,11 @@ ENV_LAUNCH_FILE="$ENV_LAUNCH_DIR/launch.1.sh"
 (umask 077 && mkdir "$ENV_LAUNCH_DIR")
 ENV_SECRET_QUOTED="'$(printf '%s' "$ENV_SECRET" | sed "s/[\\\\']/'\\\\&'/g")'"
 ENV_SECRET_SUM=$(printf '%s' "$ENV_SECRET" | cksum)
-(umask 077 && printf '%s\n' "command rm -- '$ENV_LAUNCH_FILE' || return 1 2>/dev/null || exit 1; export FM_SMOKE_STALE_VAR=$ENV_SECRET_QUOTED; sh -c 'printf \"worker=%s\\n\" \"\$(printf %s \"\$FM_SMOKE_STALE_VAR\" | cksum)\"'" > "$ENV_LAUNCH_FILE")
+# Same layout as bin/fm-spawn.sh writes: unlink line, one export line per
+# value, then the launch line.
+(umask 077 && printf '%s\n' "command rm -- '$ENV_LAUNCH_FILE' || return 1 2>/dev/null || exit 1" \
+  "export FM_SMOKE_STALE_VAR=$ENV_SECRET_QUOTED" \
+  "sh -c 'printf \"worker=%s\\n\" \"\$(printf %s \"\$FM_SMOKE_STALE_VAR\" | cksum)\"'" > "$ENV_LAUNCH_FILE")
 [ "$(stat -c '%a' "$ENV_LAUNCH_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_LAUNCH_FILE")" = 600 ] || fail "the smoke launch file is not private"
 fm_backend_tmux_send_literal "$ENV_TARGET" ". '$ENV_LAUNCH_FILE'" || fail "fm_backend_tmux_send_literal failed to send the source line"
 fm_backend_tmux_send_key "$ENV_TARGET" Enter || fail "fm_backend_tmux_send_key failed to submit the source line"

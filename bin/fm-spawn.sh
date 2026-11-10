@@ -491,14 +491,20 @@
 #   sources; the pane receives only `. '<file>'`, never the value. The
 #   sourcing pane unlinks the file before the worker starts and refuses the
 #   worker if it cannot; the spawn waits for that and otherwise reclaims the
-#   file, as on a failed send or an interrupt. A named variable absent there
-#   is removed from the worker with env -u, so a reused pane's older value
-#   cannot stand in for it; values are never invented. When
-#   launch-env-allowlist is also enabled, every forwarded name is added to
-#   its retained set so the export survives the exec-boundary filter; with
-#   an Orca launch-env-tmux-session source, a forwarded name takes the
-#   caller's value instead of the session's. backend=t3code has no pane and
-#   no launch file, so it refuses when any named variable is set.
+#   file, as on a failed send or an interrupt. Each export is a line of its
+#   own ahead of the launch line, so a shell that cannot parse the launch
+#   line (fish and the allowlist's ${NAME+...}) never echoes a value. A named
+#   variable absent there is never invented: the allowlist's cleared
+#   environment drops it, and without the allowlist the pane's own value, if
+#   any, stays. When launch-env-allowlist is also enabled, every forwarded
+#   name is added to its retained set so the export survives the
+#   exec-boundary filter; with an Orca launch-env-tmux-session source, a
+#   forwarded name takes the caller's value instead of the session's.
+#   Names this script sets for the worker itself (every FM_*, GOTMPDIR,
+#   TRACEPARENT, COMPACT_ADVISER_DISABLE, LAVISH_AXI_HOST, CLAUDE_CONFIG_DIR,
+#   PI_CODING_AGENT_DIR, DISABLE_AUTOUPDATER, GIT_CONFIG_NOSYSTEM) and
+#   SPAWN_CALLER_ENV are refused. backend=t3code has no pane and no launch
+#   file, so it refuses whenever the file names anything.
 # Codex permission mode: docs/configuration.md owns config/codex-permission-mode.
 #
 # Claude permission mode (config/claude-permission-mode):
@@ -872,6 +878,20 @@ if [ "$LAUNCH_ENV_FORWARD_ENABLED" = 1 ]; then
     echo "error: config/launch-env-forward must contain one environment name per line, blank lines, or # comments" >&2
     exit 1
   fi
+  # Names this script sets, pins or removes itself in the pane or the launch
+  # (every FM_* plus the list below) would silently lose to, or override, that
+  # value, and SPAWN_CALLER_ENV holds the caller snapshot the values are read
+  # from; refuse them before any pane exists instead of documenting precedence.
+  for env_copy_name in $LAUNCH_ENV_COPY_NAMES; do
+    case "$env_copy_name" in
+    FM_* | SPAWN_CALLER_ENV | GOTMPDIR | TRACEPARENT | COMPACT_ADVISER_DISABLE | \
+      LAVISH_AXI_HOST | CLAUDE_CONFIG_DIR | PI_CODING_AGENT_DIR | \
+      DISABLE_AUTOUPDATER | GIT_CONFIG_NOSYSTEM)
+      echo "error: config/launch-env-forward names $env_copy_name, which firstmate sets for the worker itself; remove that line" >&2
+      exit 1
+      ;;
+    esac
+  done
 fi
 # Read one name from the caller's environment captured at the top of this
 # script, never from this shell. Prints the value followed by a guard `x` so
@@ -901,14 +921,14 @@ spawn_env_quote() {  # <value>
   printf "%s'" "$out"
 }
 # Resolve every forwarded name once, before any mutation: a set name becomes an
-# export in the private launch file (LAUNCH_ENV_COPY_EXPORTS), an unset one is
-# removed from the worker so a reused pane's old value cannot stand in for it.
+# export line in the private launch file (LAUNCH_ENV_COPY_EXPORTS); an unset one
+# is dropped by the allowlist's cleared environment and otherwise left alone.
 LAUNCH_ENV_COPY_EXPORTS=
 LAUNCH_ENV_COPY_SET_NAMES=
 LAUNCH_ENV_COPY_UNSET_NAMES=
 for env_copy_name in $LAUNCH_ENV_COPY_NAMES; do
   if env_copy_value=$(spawn_caller_env_get "$env_copy_name"); then
-    LAUNCH_ENV_COPY_EXPORTS="${LAUNCH_ENV_COPY_EXPORTS}export $env_copy_name=$(spawn_env_quote "${env_copy_value%x}"); "
+    LAUNCH_ENV_COPY_EXPORTS="${LAUNCH_ENV_COPY_EXPORTS}export $env_copy_name=$(spawn_env_quote "${env_copy_value%x}")"$'\n'
     LAUNCH_ENV_COPY_SET_NAMES="$LAUNCH_ENV_COPY_SET_NAMES$env_copy_name"$'\n'
   else
     LAUNCH_ENV_COPY_UNSET_NAMES="$LAUNCH_ENV_COPY_UNSET_NAMES$env_copy_name"$'\n'
@@ -3662,8 +3682,8 @@ if [ "$BACKEND" = t3code ]; then
     echo "error: backend=t3code cannot apply config/launch-env-allowlist because T3 starts the agent with its provider instance's environment; remove that file or choose another backend" >&2
     exit 1
   fi
-  if [ -n "$LAUNCH_ENV_COPY_EXPORTS" ]; then
-    echo "error: backend=t3code cannot apply config/launch-env-forward because T3 starts the agent with its provider instance's environment; unset the named variables, remove that file, or choose another backend" >&2
+  if [ -n "$LAUNCH_ENV_COPY_NAMES" ]; then
+    echo "error: backend=t3code cannot apply config/launch-env-forward because T3 starts the agent with its provider instance's environment; remove that file or choose another backend" >&2
     exit 1
   fi
   if [ -n "$WORKER_ACCOUNT" ]; then
@@ -3770,12 +3790,14 @@ resolve_rovo_binary() {
 # supervision like a wedged worker rather than a missing credential.
 muse_worker_meta_api_key_present() {
   local session worker_env
-  # A forwarded META_API_KEY reaches the worker through the private launch file
-  # on every pane backend.
-  case $'\n'"$LAUNCH_ENV_COPY_SET_NAMES" in
+  # A forwarded META_API_KEY is decided by the caller's value alone: set and
+  # non-empty reaches the worker through the private launch file, anything else
+  # is missing, with no fallback to a pane or tmux value.
+  case $'\n'"$LAUNCH_ENV_COPY_NAMES"$'\n' in
   *$'\nMETA_API_KEY\n'*)
     worker_env=$(spawn_caller_env_get META_API_KEY) || return 1
     [ "$worker_env" = x ] || return 0
+    return 1
     ;;
   esac
   if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
@@ -8117,18 +8139,6 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-# config/launch-env-forward (header above): the caller's values travel only in
-# the private launch file, never as pane input. A name the caller left unset is
-# removed with env -u, since fish has no unset; the cleared environment above
-# already drops it when the allowlist is on.
-if [ -n "$LAUNCH_ENV_COPY_UNSET_NAMES" ] && [ "$LAUNCH_ENV_ENABLED" != 1 ]; then
-  env_copy_unset=
-  for env_copy_name in $LAUNCH_ENV_COPY_UNSET_NAMES; do
-    env_copy_unset="$env_copy_unset -u $env_copy_name"
-  done
-  LAUNCH="/usr/bin/env$env_copy_unset /bin/sh -c $(shell_quote "$LAUNCH")"
-fi
-LAUNCH="$LAUNCH_ENV_COPY_EXPORTS$LAUNCH"
 if [ "$BACKEND" = t3code ]; then
   # No pane: the launch is the thread's first message, carrying the same
   # encoded brief the LAUNCH template embeds; MODEL/EFFORT were fixed as the
@@ -8157,14 +8167,25 @@ else
   fi
   LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
   LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+  LAUNCH_UNLINK=
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     # The sourcing shell already holds the open file; unlink the credentials
     # before launching the worker, including on a later command failure.
-    LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || { echo 'error: cannot remove private launch file; refusing worker launch' >&2; return 1 2>/dev/null || exit 1; }; $LAUNCH"
+    LAUNCH_UNLINK="command rm -- $(shell_quote "$LAUNCH_FILE") || { echo 'error: cannot remove private launch file; refusing worker launch' >&2; return 1 2>/dev/null || exit 1; }"
   elif [ "$SPAWN_LAUNCH_FILE_SECRET" = 1 ]; then
     # Forwarded values: the same unlink-or-refuse contract, in the plain
-    # command, && and || form a fish pane also sources (no if or { }).
-    LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || return 1 2>/dev/null || exit 1; $LAUNCH"
+    # command and || form a fish pane also sources (no if or { }).
+    LAUNCH_UNLINK="command rm -- $(shell_quote "$LAUNCH_FILE") || return 1 2>/dev/null || exit 1"
+  fi
+  if [ -n "$LAUNCH_ENV_COPY_EXPORTS" ]; then
+    # config/launch-env-forward (header above): the caller's values travel only
+    # in this file, never as pane input, each export on a line of its own ahead
+    # of the launch line. A shell that cannot parse the launch line (fish reads
+    # the allowlist's ${NAME+...} as an error) reports only that line, never
+    # one carrying a value.
+    LAUNCH="$LAUNCH_UNLINK"$'\n'"$LAUNCH_ENV_COPY_EXPORTS$LAUNCH"
+  elif [ -n "$LAUNCH_UNLINK" ]; then
+    LAUNCH="$LAUNCH_UNLINK; $LAUNCH"
   fi
   if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
     echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2

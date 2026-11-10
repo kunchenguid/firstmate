@@ -736,8 +736,8 @@ test_orca_forwarded_names_win_over_tmux_source() {
   touch "$home/state/.last-watcher-beat"
   printf 'manual\n' > "$home/config/backlog-backend"
   printf 'scoped-source\n' > "$home/config/launch-env-tmux-session"
-  printf 'GH_TOKEN\nGH_CONFIG_DIR\nFM_TEST_FORWARD\n' > "$home/config/launch-env-allowlist"
-  printf 'GH_CONFIG_DIR\nFM_TEST_FORWARD\n' > "$home/config/launch-env-forward"
+  printf 'GH_TOKEN\nGH_CONFIG_DIR\nFWD_TEST_FORWARD\n' > "$home/config/launch-env-allowlist"
+  printf 'GH_CONFIG_DIR\nFWD_TEST_FORWARD\n' > "$home/config/launch-env-forward"
   fm_git_init_commit "$case_dir/project"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
@@ -749,7 +749,7 @@ Execute read-only environment checks.
 EOF
   cat > "$case_dir/probe.sh" <<'EOF'
 #!/bin/sh
-printf '%s\n' "${GH_TOKEN-unset}" "${GH_CONFIG_DIR-unset}" "${FM_TEST_FORWARD-unset}"
+printf '%s\n' "${GH_TOKEN-unset}" "${GH_CONFIG_DIR-unset}" "${FWD_TEST_FORWARD-unset}"
 EOF
   fb=$(make_orca_fakebin "$case_dir")
   cat > "$fb/tmux" <<'EOF'
@@ -767,7 +767,7 @@ EOF
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" \
     FM_TEST_ORCA_LOG="$case_dir/terminal.log" FM_TEST_ORCA_CONSUME=1 \
-    GH_CONFIG_DIR=caller-gh FM_TEST_FORWARD=caller-forward-secret \
+    GH_CONFIG_DIR=caller-gh FWD_TEST_FORWARD=caller-forward-secret \
     PATH="$fb:$PATH" "$SPAWN" "$id" "$case_dir/project" \
     --mode direct-PR --yolo off --backend orca --harness "/bin/sh '$case_dir/probe.sh'" 2>&1)
   status=$?
