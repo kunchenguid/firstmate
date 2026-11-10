@@ -10,6 +10,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
+# The adapter only reads a core whose socket is live (fm_backend_hc_get), so the
+# stub's session fmtest gets one at hc's own XDG_RUNTIME_DIR layout.
+HC_RUN=$(TMPDIR=/tmp fm_test_tmproot fm-hc-run)
+export XDG_RUNTIME_DIR=$HC_RUN
+fm_test_live_unix_sock "$HC_RUN/herdr-core/fmtest.sock" || { echo "error: could not park the fake core socket" >&2; exit 1; }
 
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
@@ -203,6 +208,25 @@ test_agent_state_classifies_foreground_and_absence() {
   assert_equals "$out" "t1=alive t2=dead t3=missing t4=ambiguous t5=unreadable t6=unreadable t7=missing " \
     "agent_state over claude, shell, finished, other, no foreground, core error, not found"
   pass "hc: agent_state maps foreground, finished, not_found and core errors onto the shared vocabulary"
+}
+
+# hc starts a fresh, empty core for a socket that is not live, and that core
+# reports every address not_found; reading that as `missing` would let recovery
+# respawn a second agent beside the live one, so no socket and a stale socket
+# file both read unreadable and hc is never asked.
+test_dead_core_socket_reads_unreadable_without_calling_hc() {
+  local tag out
+  setup_case deadcore
+  tag=$(hometag_of)
+  write_terminal "$D" t1 finished fm-a1 "$tag" "" ""
+  python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$HC_RUN/herdr-core/stale.sock" \
+    || fail "could not leave a stale socket file"
+  # shellcheck disable=SC2016 # the inner shell expands it
+  out=$(hc_shell 'for s in gone stale; do printf "%s=%s/%s " $s "$(fm_backend_agent_state hc $s:t1)" "$(fm_backend_hc_endpoint_state $s:t1)"; done')
+  assert_equals "$out" "gone=unreadable/unreadable stale=unreadable/unreadable " \
+    "a core with no socket or a dead one must read unreadable, never missing or absent"
+  assert_not_contains "$(cat "$D/log" 2>/dev/null)" $'\x1fget\x1f' "hc must never be asked about a core whose socket is not live"
+  pass "hc: a dead or absent core socket reads unreadable and never reaches hc get"
 }
 
 test_agent_state_reads_a_shell_wrappers_group() {
@@ -416,6 +440,7 @@ fm_test_run \
   test_invalid_session_never_reaches_hc \
   test_inherited_socket_never_overrides_the_session \
   test_agent_state_classifies_foreground_and_absence \
+  test_dead_core_socket_reads_unreadable_without_calling_hc \
   test_agent_state_reads_a_shell_wrappers_group \
   test_kill_proves_the_terminal_is_gone \
   test_kill_refuses_another_tasks_terminal \

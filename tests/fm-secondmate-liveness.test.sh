@@ -39,6 +39,11 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
+# The hc adapter only reads a core whose socket is live, so the fake core's
+# session fmtest gets one at hc's own XDG_RUNTIME_DIR layout.
+HC_RUN=$(TMPDIR=/tmp fm_test_tmproot fm-hc-run)
+export XDG_RUNTIME_DIR=$HC_RUN
+fm_test_live_unix_sock "$HC_RUN/herdr-core/fmtest.sock" || { echo "error: could not park the fake core socket" >&2; exit 1; }
 
 # --- unit level: fm_backend_tmux_agent_state --------------------------------
 
@@ -791,7 +796,7 @@ cmd=${1:-}
 last=''
 for a in "$@"; do last=$a; done
 case "$cmd" in
-  --version) printf 'hc 0.1.14\n' ;;
+  --version) printf 'hc 0.1.15\n' ;;
   server) printf '{"pid":1}\n' ;;
   connect) IFS= read -r _ || true; printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n' ;;
   ls)
@@ -1135,7 +1140,7 @@ test_move_relaunches_an_already_stopped_tmux_secondmate_on_hc() {
 }
 
 # add_move_remote_dead <w>: places sm1 on a remote host whose stubbed state
-# probe reports the agent dead, so the move reaches the relaunch step.
+# probe would report the agent dead and logs every ssh call it receives.
 add_move_remote_dead() {
   local w=$1 sshbin
   printf 'remote_host=lab-host\nremote_backend=herdr\nremote_herdr_session=fm-remote\nremote_target=fm-remote:w1:p1\n' >> "$w/home/state/sm1.meta"
@@ -1184,8 +1189,8 @@ test_move_refuses_before_stopping_anything() {
       harness-mismatch) assert_contains "$out" "runs only the claude and codex harnesses" "a target that cannot launch the mate's configured harness refuses before any stop" ;;
       missing-hc) assert_contains "$out" "backend=hc needs 'hc', which is not available here; nothing was stopped or moved" "a missing target binary refuses before any stop" ;;
       remote)
-        assert_contains "$out" "a local move is refused" "a dead remote mate reaches the library's own refusal"
-        assert_contains "$(cat "$W_DIR/ssh.log")" "-- lab-host " "the remote mate must have been probed on its host"
+        assert_contains "$out" "on remote host lab-host, whose backend is its own; a local move is refused" "a remote mate is refused by name"
+        [ ! -e "$W_DIR/ssh.log" ] || fail "a remote mate must be refused before its host is probed: $(cat "$W_DIR/ssh.log")"
         ;;
       unreadable) assert_contains "$out" "cannot be classified" "an unreadable endpoint refuses before any stop" ;;
       pending-composer) assert_contains "$out" "could not be proven stopped" "a refused stop ends the move" ;;

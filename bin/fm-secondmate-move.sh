@@ -27,8 +27,8 @@
 #      the attempt and its outcome in the ordinary relaunch ledger.
 # An ambiguous, unreadable, or unverified endpoint refuses before anything is
 # stopped. A mate recorded with no endpoint at all is simply launched on the
-# target backend. A remote mate is refused: its backend belongs to its host
-# (docs/remote-secondmates.md).
+# target backend. A remote mate is refused before any lock or probe: its
+# backend belongs to its host (docs/remote-secondmates.md).
 #
 # The target must be a spawn-capable backend that hosts second mates
 # (bin/fm-backend.sh's FM_BACKEND_SECONDMATE) and must be ready to launch one:
@@ -93,6 +93,8 @@ case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid second mate id: $ID" >&
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || die "no task record for $ID in $STATE; a move needs the mate's own record"
 [ "$(fm_meta_get "$META" kind)" = secondmate ] || die "task $ID is not a second mate; fm-secondmate-move moves kind=secondmate records only"
+REMOTE_HOST=$(fm_meta_get "$META" remote_host)
+[ -z "$REMOTE_HOST" ] || die "second mate $ID is placed on remote host $REMOTE_HOST, whose backend is its own; a local move is refused and nothing was stopped or moved"
 
 OLD_BACKEND=$(fm_backend_of_meta "$META")
 [ "$OLD_BACKEND" != "$TARGET" ] || die "second mate $ID is already recorded on backend=$TARGET; to restart it in place use bin/fm-control.sh $ID relaunch"

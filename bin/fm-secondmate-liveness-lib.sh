@@ -293,12 +293,12 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # lock, records the attempt, kills a confirmed-dead local endpoint if required
 # (FM_SM_LIVE_KILL), runs the guarded spawn, then records its outcome.
 # An explicit [backend] is a deliberate move (bin/fm-secondmate-move.sh): the
-# respawn is passed `--backend <backend>` in place of the recorded backend. It
-# is refused for a remote mate before any attempt is recorded, because a remote
-# mate's backend belongs to its host. A move never resumes in place: a T3
-# resume becomes a kill that must prove the thread archived before the
-# respawn on the target. Without it a local mate is respawned on its recorded
-# backend.
+# respawn is passed `--backend <backend>` in place of the recorded backend.
+# The move refuses a remote mate before calling here, because a remote mate's
+# backend belongs to its host. A move never resumes in place: a T3 resume
+# becomes a kill that must prove the thread archived, and the T3 environment
+# the old launch wrote into the home is removed before the respawn on the
+# target. Without it a local mate is respawned on its recorded backend.
 # On t3code a close that cannot be proven stops there: the thread and its
 # metadata stay as recorded, the verdict becomes skipped, and nothing is
 # spawned, because a second thread beside a live one is the duplicate
@@ -316,12 +316,6 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs] [backend]
   local meta=$1 id=$2 timeout=${3:-} move_backend=${4:-} relaunch_lock wait_seconds rc=0
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
-  if [ -n "$move_backend" ] && [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
-    FM_SM_LIVE_STATUS=skipped
-    FM_SM_LIVE_REASON="secondmate $id is placed on remote host $(fm_meta_get "$meta" remote_host), whose backend is its own; a local move is refused"
-    FM_SM_LIVE_RC=1
-    return 1
-  fi
   if [ -n "$move_backend" ] && [ "$FM_SM_LIVE_RESUME" = 1 ]; then
     FM_SM_LIVE_RESUME=0 FM_SM_LIVE_KILL=1
   fi
@@ -371,6 +365,22 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs] [backend]
       FM_SM_LIVE_STATUS=skipped
       fm_lock_release "$relaunch_lock" || true
       FM_SM_LIVE_REASON="could not prove the old $backend endpoint $target closed; it and its record are left in place, not replaced"
+      FM_SM_LIVE_RC=1
+      return 1
+    fi
+  fi
+  # A move off t3code removes what the T3 launch wrote into the mate's home
+  # once its thread is closed: the replacement would otherwise inherit
+  # FM_SUPERVISOR_BACKEND=t3code and the archived thread as its target.
+  if [ -n "$move_backend" ] && [ "$(fm_backend_of_meta "$meta")" = t3code ]; then
+    local mate_home
+    mate_home=$(fm_meta_get "$meta" home)
+    [ -n "$mate_home" ] || mate_home=$(fm_meta_get "$meta" worktree)
+    if ! { fm_backend_source t3code && fm_backend_t3code_home_env_cleanup "$mate_home"; } 2>/dev/null; then
+      fm_secondmate_liveness_ledger_add "$id" failed || true
+      FM_SM_LIVE_STATUS=skipped
+      fm_lock_release "$relaunch_lock" || true
+      FM_SM_LIVE_REASON="could not remove the T3 environment from $mate_home after its thread closed; nothing was launched on $move_backend"
       FM_SM_LIVE_RC=1
       return 1
     fi
