@@ -1896,6 +1896,70 @@ test_degraded_wake_survives_an_unsaved_marker() {
     || fail "a degraded transition whose marker could not be saved was not queued as a wake"
   pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
 }
+test_degraded_baseline_rechecks_destination_before_registration() {
+  local scenario dir state replies rc out base check_fail
+  # Issue #3103: a later baseline read must not register/report ready using
+  # only the destination proof from the first read. Unknown checks with a
+  # matching destination remain allowed. Drive both through the public CLIs.
+  for scenario in retarget missing matching unknown; do
+    dir=$(make_case "degraded-baseline-destination-$scenario")
+    state="$dir/home/state"
+    replies="$state/parent-replies.status"
+    seed_secondmate_home "$dir"
+    write_task_meta "$dir" task-a
+    mv "$dir/fakebin/gh" "$dir/fakebin/gh-before-retarget"
+    cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *statusCheckRollup*" --jq "*) export FM_TEST_BASE=${FM_TEST_BASE_AFTER-main} ;;
+esac
+exec "$(dirname "$0")/gh-before-retarget" "$@"
+SH
+    chmod +x "$dir/fakebin/gh"
+    case "$scenario" in
+      retarget) base=other ;;
+      missing) base= ;;
+      *) base=main ;;
+    esac
+    check_fail=0
+    [ "$scenario" != unknown ] || check_fail=1
+    rc=0
+    FM_TEST_BASE_AFTER="$base" FM_TEST_GH_FAIL="$check_fail" \
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/register.out" 2> "$dir/register.err" || rc=$?
+    assert_grep '--json baseRefName ' "$dir/gh.log" 'registration skipped its initial destination proof'
+    assert_grep '--json state,headRefOid,statusCheckRollup,baseRefName --jq' "$dir/gh.log" 'registration never reached the later baseline read'
+    case "$scenario" in
+      retarget|missing)
+        [ "$rc" -ne 0 ] || fail "$scenario baseline destination registered a PR"
+        assert_no_regex '^pr=' "$state/task-a.meta" "$scenario baseline destination recorded pr="
+        assert_absent "$state/task-a.check.sh" "$scenario baseline destination published a poll"
+        assert_absent "$state/task-a.pr-poll" "$scenario baseline destination published a sidecar"
+        [ ! -s "$replies" ] || fail "$scenario baseline destination reported ready to the parent"
+        ;;
+      *)
+        [ "$rc" = 0 ] || fail "$scenario checks with a matching destination refused registration"
+        assert_grep 'pr=https://github.com/o/r/pull/1' "$state/task-a.meta" "$scenario matching destination did not record the PR"
+        assert_present "$state/task-a.check.sh" "$scenario matching destination did not publish a poll"
+        assert_grep 'child task-a PR ready:' "$replies" "$scenario matching destination did not report ready"
+        ;;
+    esac
+    assert_absent "$state/.control-task-a.lock" "$scenario baseline left the control lock held"
+    rc=0
+    out=$(FM_HOME="$dir/home" FM_TEST_BASE_AFTER="$base" \
+      FM_TEST_GH_FAIL="$check_fail" \
+      FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_JQ="$REAL_JQ" PATH="$dir/fakebin:$BASE_PATH" \
+      bash "$POLL" --baseline github https://github.com/o/r/pull/1 github.com o/r 1 main) || rc=$?
+    case "$scenario" in
+      retarget|missing) [ "$rc" = 4 ] || fail "$scenario destination baseline did not return status 4: $rc" ;;
+      unknown) [ "$rc" = 3 ] || fail "unknown checks lost status 3: $rc" ;;
+      matching) [ "$rc" = 0 ] || fail "matching destination baseline failed: $rc" ;;
+    esac
+    [ -z "$out" ] || fail "$scenario baseline emitted an unexpected claim: $out"
+  done
+  pass 'a later missing or retargeted baseline destination refuses registration while matching unknown checks still arm'
+}
+
 test_arming_baselines_an_already_degraded_change() {
   local dir state url url1 fail_env value
   dir=$(make_case degraded-baseline)
@@ -5576,6 +5640,7 @@ test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch
+test_degraded_baseline_rechecks_destination_before_registration
 test_arming_baselines_an_already_degraded_change
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes
