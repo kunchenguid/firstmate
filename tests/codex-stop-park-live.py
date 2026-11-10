@@ -154,6 +154,7 @@ enabled=false
     consent_last = 0
     park_pids = set()
     closed = False
+    native_reaped = False
     log = (case / "terminal.log").open("wb")
     actions = (case / "input.log").open("w")
 
@@ -251,23 +252,28 @@ enabled=false
             pump()
         os.write(fd, b"\r")
         wait_for(lambda: closed, "native /quit did not exit", seconds=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not native_reaped:
+                native_reaped = os.waitpid(pid, os.WNOHANG)[0] == pid
+            if native_reaped and not any(alive(owner) for owner in park_pids):
+                break
+            time.sleep(0.1)
+        assert native_reaped, f"native child survived /quit: {case}"
+        assert not any(alive(owner) for owner in park_pids), f"native park survived exit: {case}"
     finally:
-        if alive(pid):
-            try:
-                os.killpg(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        os.waitpid(pid, 0)
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        if not native_reaped:
+            os.waitpid(pid, 0)
         os.close(fd)
         log.close()
         actions.close()
         server.shutdown()
         server.server_close()
         thread.join()
-        deadline = time.monotonic() + 10
-        while any(alive(owner) for owner in park_pids) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert not any(alive(owner) for owner in park_pids), f"native park survived exit: {case}"
     print(f"ok - {VERSION}: native park {name}")
 
 
