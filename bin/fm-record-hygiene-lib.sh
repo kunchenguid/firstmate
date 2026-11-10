@@ -23,25 +23,36 @@ record_hygiene_report() {
         # must remain read-only.
         if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
           case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
-          mkdir -p -- "$DATA" || continue
-          dir=$(CDPATH='' cd -- "$DATA" && pwd -P) || continue
-          dir="$dir/$id"
-          if { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || { [ -d "$dir" ] && [ ! -L "$dir" ]; }; then
-            mkdir -p -- "$dir" || continue
-            archive="$dir/status.log"
-            n=0
-            while [ -e "$archive" ] || [ -L "$archive" ]; do
-              n=$((n + 1))
-              archive="$dir/status.$n.log"
-            done
-            if mv -- "$file" "$archive"; then
-              # Start status-archive retention at archive time, not at the
-              # orphan's last write, so teardown's 30-day prune keeps it.
-              touch -- "$archive" || echo "RECORD_HYGIENE: could not refresh archived status log time: $id" >&2
-            else
-              echo "RECORD_HYGIENE: could not archive orphan status log: $id" >&2
+          command -v fm_meta_lock_path >/dev/null 2>&1 || . "$SCRIPT_DIR/fm-wake-lib.sh"
+          lock=$(fm_meta_lock_path "$STATE/$id.meta") || continue
+          fm_lock_try_acquire "$lock" || continue
+          if { [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; } \
+            && [ -f "$file" ] && [ ! -L "$file" ]; then
+            file_mtime=$(_fm_status_file_mtime "$file" 2>/dev/null) || file_mtime=
+            case "$file_mtime" in ''|*[!0-9]*) file_mtime= ;; esac
+            if [ -n "$file_mtime" ] && [ "$file_mtime" -lt "$cutoff" ]; then
+              mkdir -p -- "$DATA" || { fm_lock_release "$lock"; continue; }
+              dir=$(CDPATH='' cd -- "$DATA" && pwd -P) || { fm_lock_release "$lock"; continue; }
+              dir="$dir/$id"
+              if { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || { [ -d "$dir" ] && [ ! -L "$dir" ]; }; then
+                mkdir -p -- "$dir" || { fm_lock_release "$lock"; continue; }
+                archive="$dir/status.log"
+                n=0
+                while [ -e "$archive" ] || [ -L "$archive" ]; do
+                  n=$((n + 1))
+                  archive="$dir/status.$n.log"
+                done
+                if mv -- "$file" "$archive"; then
+                  # Start status-archive retention at archive time, not at the
+                  # orphan's last write, so teardown's 30-day prune keeps it.
+                  touch -- "$archive" || echo "RECORD_HYGIENE: could not refresh archived status log time: $id" >&2
+                else
+                  echo "RECORD_HYGIENE: could not archive orphan status log: $id" >&2
+                fi
+              fi
             fi
           fi
+          fm_lock_release "$lock"
         fi
       fi
     fi

@@ -318,6 +318,7 @@ test_record_hygiene_archives_old_orphan_status() {
   assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
+  [ ! -e "$case_dir/home/state/orphan.meta.lock" ] || fail "successful archive left its metadata lock behind"
   assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
     "bootstrap lost duplicate PR detection across an intervening metadata record"
   pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
@@ -1715,6 +1716,20 @@ SH
 }
 
 test_record_hygiene_archives_old_orphan_status
+test_record_hygiene_old_orphan_skips_held_metadata_lock() {
+  local case_dir fakebin lock
+  case_dir="$TMP_ROOT/record-hygiene-lock"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  lock=$(FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_meta_lock_path "$2"' _ "$ROOT" "$case_dir/home/state/orphan.meta")
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+  [ -f "$case_dir/home/state/orphan.status" ] || fail "bootstrap moved orphan status while metadata lock was held"
+  [ -d "$lock" ] || fail "bootstrap removed another holder's metadata lock"
+  pass "bootstrap skips archiving while the task metadata lock is held"
+}
+test_record_hygiene_old_orphan_skips_held_metadata_lock
 test_record_hygiene_watcher_data_is_defined
 test_record_hygiene_reclaims_stale_running_marker
 test_record_hygiene_bounds_backlog_read
