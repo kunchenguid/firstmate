@@ -1187,14 +1187,14 @@ SH
     [ "$harness" = claude ] || printf 'openai-codex\n' >> "$pin"
     out=$(run_control "$dir" "$id" relaunch); rc=$?
     expect_code 0 "$rc" "the secondmate should relaunch on its $harness pin: $out"
-    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/mate'" "the replacement must use the mate's pin"
+    assert_contains "$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$dir/fake/literal")")")" "$variable='$dir/mate'" "the replacement must use the mate's pin"
     [ "$(meta_field "$dir" "$id" account)" = "$dir/mate" ] || fail "the record must name the mate's account"
     printf '%s\n' "$dir/new-mate" > "$pin"
     [ "$harness" = claude ] || printf 'openai-codex\n' >> "$pin"
     : > "$dir/fake/literal"
     out=$(run_control "$dir" "$id" relaunch); rc=$?
     expect_code 0 "$rc" "a changed durable pin should govern relaunch: $out"
-    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/new-mate'" "relaunch must not reuse the old recorded account"
+    assert_contains "$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$dir/fake/literal")")")" "$variable='$dir/new-mate'" "relaunch must not reuse the old recorded account"
     rm "$dir/new-mate/.credentials.json" "$dir/new-mate/signed-in"
     cp "$dir/home/state/$id.meta" "$dir/meta-before"
     : > "$dir/fake/literal"
@@ -1208,7 +1208,7 @@ SH
     rm "$pin"
     out=$(run_control "$dir" "$id" relaunch); rc=$?
     expect_code 0 "$rc" "removing the mate pin should restore the primary's pin: $out"
-    assert_contains "$(cat "$dir/fake/literal")" "$variable='$dir/primary'" "an absent mate setting must restore the primary's pin"
+    assert_contains "$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$dir/fake/literal")")")" "$variable='$dir/primary'" "an absent mate setting must restore the primary's pin"
   done
   pass "fm-control relaunch: mate pins are re-read for Claude and Pi, and unusable pins refuse before stopping the agent"
 }

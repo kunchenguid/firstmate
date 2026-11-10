@@ -259,12 +259,13 @@ test_secondmate_launch_relies_on_discovery() {
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
   launch=$(cat "$launchlog")
+  assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
+  launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$launch")")
   [ "$(printf '%s\n' "$launch" | grep -o ' -e ' | wc -l | tr -d ' ')" = 1 ] \
     || fail "an omp secondmate launch must name exactly one -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch"
   assert_contains "$launch" "-e '$world/home/state/sm.omp-ext.ts'" "an omp secondmate launch must load the parent-home busy extension: $launch"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
-  assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
   assert_present "$world/home/state/sm.omp-ext.ts" "a secondmate must receive the per-task busy extension"
   pass "fm-spawn: a real omp secondmate launch loads only the busy -e and auto-discovers its primary extensions"
 }
@@ -342,7 +343,7 @@ test_secondmate_omp_profile_pin() {
   out=$(run_omp_secondmate_spawn "$world" omp --secondmate --model openai-codex/gpt-6-speak4)
   status=$?
   expect_code 0 "$status" "a pinned omp secondmate spawn should succeed under its profile's catalog: $out"
-  launch=$(cat "$world/launch.log")
+  launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$world/launch.log")")")
   assert_contains "$launch" "OMP_SKIP_SETUP=1 '$fakebin/omp' --profile 'speak4' --config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$world/sm'" \
     "a pinned omp secondmate launch must carry --profile right after the executable: $launch"
   [ "$(printf '%s\n' "$launch" | grep -o -- '--profile' | wc -l | tr -d ' ')" = 1 ] \
@@ -367,6 +368,7 @@ test_secondmate_omp_profile_absent_or_foreign_adds_nothing() {
     expect_code 0 "$status" "an unpinned ($variant) omp secondmate spawn should succeed: $out"
     launch=$(cat "$world/launch.log")
     [ -n "$launch" ] || fail "the $variant case recorded no launch, so its absence assertions would be vacuous"
+    launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$launch")")
     assert_not_contains "$launch" "--profile" "an unpinned ($variant) omp secondmate launch must carry no --profile: $launch"
     assert_contains "$launch" "OMP_SKIP_SETUP=1 '$world/fake/fakebin/omp' --config" "an unpinned ($variant) launch must keep the executable directly before --config: $launch"
     if grep -q '^omp_profile=' "$world/home/state/sm.meta"; then

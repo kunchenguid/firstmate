@@ -447,7 +447,8 @@ SH
   assert_not_contains "$out" 'SECONDMATE_LIVENESS: secondmate sm1:' "account recovery should succeed: $out"
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" "recovery must finish"
   assert_grep "account=$w/mate-account" "$w/home/state/sm1.meta" "recovery must record the configured mate account"
-  assert_grep "CLAUDE_CONFIG_DIR='$w/mate-account'" "$w/launch.log" "recovery must launch on the durable mate pin, not the ambient account"
+  assert_contains "$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$w/launch.log")")")" \
+    "CLAUDE_CONFIG_DIR='$w/mate-account'" "recovery must launch on the durable mate pin, not the ambient account"
   pass "sweep: secondmate recovery resolves its durable account despite a different ambient login"
 }
 
