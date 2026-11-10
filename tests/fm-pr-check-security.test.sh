@@ -260,6 +260,10 @@ case " $* " in
 esac
 case " $* " in
   *" -F json "*)
+    if [ -n "${FM_TEST_GLAB_RAW:-}" ]; then
+      printf '%s\n' "$FM_TEST_GLAB_RAW"
+      exit 0
+    fi
     # The arming probe records, at each record read, whether task-a's poll
     # was already published and whether its control lock was held.
     if [ -n "${FM_TEST_GLAB_ARMING_PROBE:-}" ]; then
@@ -1925,8 +1929,11 @@ test_arming_baselines_an_already_degraded_change() {
   FM_TEST_GLAB_ARMING_PROBE="$state" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=car \
     run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "arming a GitLab watch for the baseline order failed"
-  [ "$(cat "$dir/glab.log.probe")" = 'published=no locked=no
-published=no locked=yes' ] \
+  # Destination preflights may read before locking; exactly one baseline read
+  # must be last, under the control lock, and every read must precede publication.
+  [ "$(tail -1 "$dir/glab.log.probe")" = 'published=no locked=yes' ] \
+    && [ "$(grep -c '^published=no locked=yes$' "$dir/glab.log.probe")" = 1 ] \
+    && ! grep -vE '^published=no locked=(no|yes)$' "$dir/glab.log.probe" >/dev/null \
     || fail "the arming baseline was not read before publishing under the control lock: $(cat "$dir/glab.log.probe")"
   [ -f "$state/task-a.check.sh" ] || fail "arming did not publish the poll after its baseline"
   [ ! -e "$state/.control-task-a.lock" ] || fail "arming left the task's control lock held"
@@ -1995,13 +2002,16 @@ published=no locked=yes' ] \
   [ ! -e "$state/.control-task-a.lock" ] || fail "a failed re-arm left the control lock held"
   pass "a stalled re-arm leaves the previous watch and metadata intact"
 
-  # An unreadable forge read is an unknown baseline, not a clean one: arming
-  # fails like a timeout, and a failed re-arm keeps the previous watch.
+  # Destination proof is required even when a degradation baseline is unknown.
   dir=$(make_case degraded-baseline-unreadable)
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  FM_TEST_GLAB_FAIL=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+  if FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err"; then
+    fail "arming accepted an unreadable destination"
+  fi
+  [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable destination published a poll"
+  FM_TEST_GLAB_RAW='{"target_branch":"main","state":"opened","head_pipeline":false}' \
     run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err" \
     || fail "arming failed although the unreadable baseline should be unknown"
   [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held"
@@ -2030,7 +2040,8 @@ published=no locked=yes' ] \
   rm -f "$state/task-a.check.sh"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
     || fail "arming the first GitLab watch for the unreadable case failed"
-  FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+  FM_TEST_GLAB_RAW='{"target_branch":"main","state":"opened","head_pipeline":false}' \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
     || fail "re-arming failed although an unreadable baseline should be unknown"
   grep -q "^pr=$url\$" "$state/task-a.meta" || fail "an unreadable re-arm did not publish the new PR metadata"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
@@ -2044,9 +2055,8 @@ published=no locked=yes' ] \
   [ -e "$state/task-a.check.sh" ] || fail "an unreadable GitHub baseline read did not publish a poll"
   pass "an unreadable baseline read permits arming with an unknown baseline"
 
-  # The merge-time re-record makes no forge read of its own, so an unreadable
-  # forge cannot fail it before the merge's own live reads, and the watch's
-  # marker for that same PR stays exactly as the watcher left it.
+  # The merge-time re-record requires destination proof but does not read a
+  # degradation baseline, so unreadable pipeline data leaves its marker intact.
   dir=$(make_case degraded-baseline-merge-record)
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
@@ -2056,9 +2066,11 @@ published=no locked=yes' ] \
     || fail "arming a GitLab watch with a failed head pipeline failed before the merge-time re-record"
   "$REAL_CP" "$state/task-a.pr-poll-degraded" "$dir/marker.before"
   : > "$dir/glab.log"
-  FM_PR_CHECK_MERGE=1 FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/merge-record.err" \
+  FM_PR_CHECK_MERGE=1 FM_TEST_GLAB_RAW='{"target_branch":"main","state":"opened","head_pipeline":false}' \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/merge-record.err" \
     || fail "the merge-time re-record failed on an unreadable forge: $(cat "$dir/merge-record.err")"
-  [ ! -s "$dir/glab.log" ] || fail "the merge-time re-record read the forge: $(cat "$dir/glab.log")"
+  [ "$(wc -l < "$dir/glab.log" | tr -d ' ')" = 1 ] \
+    || fail "the merge-time re-record read beyond destination proof: $(cat "$dir/glab.log")"
   cmp -s "$dir/marker.before" "$state/task-a.pr-poll-degraded" \
     || fail "the merge-time re-record changed the watch's degraded marker"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the merge-time re-record did not republish a valid poll"
