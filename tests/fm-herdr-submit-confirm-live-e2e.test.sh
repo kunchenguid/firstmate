@@ -255,15 +255,24 @@ if command -v codex >/dev/null 2>&1; then
   CODEX_VERSION=$(codex --version 2>/dev/null | head -1)
   lab pane run "$PANE" codex >/dev/null \
     || fail "could not launch Codex ($CODEX_VERSION) on $HERDR_VER"
+  # The empty composer renders before Herdr's native status settles: agent get
+  # can report "unknown" for several seconds afterwards, and the native submit
+  # guard refuses anything but idle or done. Wait for both before sending.
   ready=0
+  composer_ready=0
+  codex_status=
   i=0
   while [ "$i" -lt 60 ]; do
     if [ "$(fm_backend_herdr_composer_state "$TARGET")" = empty ]; then
-      ready=1; break
+      composer_ready=1
+      codex_status=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+      case "$codex_status" in idle|done) ready=1; break ;; esac
     fi
     i=$((i + 1)); sleep 1
   done
-  [ "$ready" = 1 ] || fail "Codex ($CODEX_VERSION) on $HERDR_VER: composer not ready; inspect trust/auth dialogs"
+  [ "$composer_ready" = 1 ] || fail "Codex ($CODEX_VERSION) on $HERDR_VER: composer not ready; inspect trust/auth dialogs"
+  [ "$ready" = 1 ] \
+    || fail "Codex ($CODEX_VERSION) on $HERDR_VER: composer is empty but Herdr never reported the agent idle within 60s (last status '${codex_status:-none}')"
   CODEX_TOKEN="FMCODEXPONG$$_$RANDOM"
   padding=$(printf '%6000s' '' | tr ' ' x)
   payload="Ignore this filler: $padding. Reply with exactly $CODEX_TOKEN and nothing else."
