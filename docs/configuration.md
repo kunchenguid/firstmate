@@ -1860,11 +1860,29 @@ It is a distinct opt-in from `config/launch-env-allowlist` above: the allowlist 
 Absent means no change: nothing is copied, matching every home that predates this option.
 
 Create the file with one environment variable **name** per line, in the same format as `launch-env-allowlist` (never a value, assignment, wildcard, or shell command; blank lines and `#` comments allowed).
-For each valid name currently set in firstmate's own process at spawn time, `bin/fm-spawn.sh` sends one literal, quoted `export NAME=value` into the fresh pane through the same pre-launch channel already used for `GOTMPDIR`, `FM_TASK_ID`, and `TRACEPARENT`, before the harness launch command.
-A listed name that is unset in firstmate's own process is skipped, never forced empty.
-When `launch-env-allowlist` is also enabled, every forwarded name is added to its retained set automatically, so the explicit export a forwarding name produces is not then stripped by the exec-boundary filter.
+Values come only from the environment `bin/fm-spawn.sh` was started with, captured before the script assigns anything, so a spawn-internal shell variable of the same name (`ID`, `MODEL`) is never forwarded.
+
+Values are never typed into the pane.
+For each listed name set in that environment, `bin/fm-spawn.sh` writes one quoted `export NAME=value` into the private launch file it already stages for every pane launch (mode 0600, in a 0700 directory owned by this user); the pane receives only `. '<file>'`.
+The pane unlinks the file before the worker starts and refuses the worker if it cannot; the spawn waits for that unlink and otherwise removes the file itself, as it does after a failed send or an interrupt.
+The quoting reads the same in sh, bash, and fish, including backslashes and newlines.
+This holds for every pane backend, because they all source the same launch file.
+`backend=t3code` has no pane and no launch file, so a spawn refuses there when any listed name is set.
+
+A listed name that is unset in that environment is removed from the worker with `env -u`, so an older value in a reused pane cannot stand in for it; values are never invented.
+When `launch-env-allowlist` is also enabled, every forwarded name is added to its retained set automatically, so the export is not then stripped by the exec-boundary filter.
+With an [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session), a forwarded name takes the invoking environment's value instead of the session's.
+
+What this does not hide:
+
+- The value lives in the pane shell's and the worker's process environment, readable by the same user.
+- A pane shell with tracing enabled (`set -x`) prints the export while sourcing the file.
+- With `launch-env-allowlist` enabled, the value passes through `/usr/bin/env` arguments, like every allowlisted value (#7064).
+- A forwarded `GOTMPDIR`, `FM_TASK_ID`, or similar name overrides the value Firstmate set in the pane shell before the launch.
+
+A remote secondmate does not receive forwarded values: its commands run on the remote host under `env -i` with a fixed set of variables.
 The file is inherited into secondmate homes through the same [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md) as `launch-env-allowlist`.
-Regression coverage lives in [`tests/fm-launch-env-forward.test.sh`](../tests/fm-launch-env-forward.test.sh); the underlying tmux staleness this closes is demonstrated against a real, isolated tmux server in [`tests/fm-backend-tmux-smoke.test.sh`](../tests/fm-backend-tmux-smoke.test.sh).
+Regression coverage lives in [`tests/fm-launch-env-forward.test.sh`](../tests/fm-launch-env-forward.test.sh); [`tests/fm-backend-tmux-smoke.test.sh`](../tests/fm-backend-tmux-smoke.test.sh) shows the staleness gap and checks against a real tmux server that the worker sees the value while the pane's whole scrollback does not contain it.
 
 ### Compact adviser setting
 
