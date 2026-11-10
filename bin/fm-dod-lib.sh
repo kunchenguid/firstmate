@@ -978,7 +978,10 @@ fm_dod_nm_custody_returned() {  # <worktree>
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
 # any remote-tracking ref except the local no-mistakes gate mirror
 # (refs/remotes/no-mistakes/*, which never leaves this machine), or - for
-# local-only - heads in the project clone.
+# local-only - heads in the project clone. Because the gate mirror does not
+# count, a head that reached origin only through the pipeline's gate clone,
+# and that neither this copy nor the project clone has fetched, is refused
+# until its remote-tracking ref is fetched.
 fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
   local wt=$1 project=$2 mode=$3 sha=$4 gate_mirror='refs/remotes/no-mistakes/*'
   fm_dod_ref_contains "$wt" refs/remotes "$sha" "$gate_mirror" && return 0
