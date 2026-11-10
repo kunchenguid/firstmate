@@ -128,6 +128,39 @@ test_head_pushed_from_gate_clone_is_accepted_after_refresh() {
   pass "head origin holds through the gate clone is accepted after a refresh, and later reads see it"
 }
 
+test_separate_project_clone_is_refreshed() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/separate-project-repo"
+  wt="$TMP_ROOT/separate-project-wt"
+  origin="$repo.origin.git"
+  fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$origin"
+  # The copy is a repository of its own whose only remote is the project clone,
+  # so only a refresh of the project clone reaches the origin holding the head.
+  git clone -q "$repo" "$wt"
+  git -C "$wt" checkout -q -b fm/separate
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/separate:refs/heads/fm/separate"
+  [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture: the copy shares the project clone's git directory"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unfetched refusal without a refresh did not name the commit: $reason" ;;
+  esac
+  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green" >/dev/null \
+    || fail "head the project clone's origin holds was refused after a refresh"
+  [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/separate)" = "$sha" ] \
+    || fail "the refresh did not fetch the project clone's origin"
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/separate >/dev/null \
+    || fail "fixture: the copy's own remote held the head"
+  pass "a project clone with its own git directory is refreshed too, and its origin's head is accepted"
+}
+
 test_failed_refresh_refuses_with_last_known_refs() {
   local repo wt sha reason rc
   repo="$TMP_ROOT/refresh-fail-repo"
@@ -553,6 +586,7 @@ test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_gate_mirror_only_named_head_is_refused
 test_head_pushed_from_gate_clone_is_accepted_after_refresh
+test_separate_project_clone_is_refreshed
 test_failed_refresh_refuses_with_last_known_refs
 test_local_only_branch_beside_gate_mirror_is_accepted
 test_moved_branch_without_named_head_is_refused

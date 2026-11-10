@@ -13,7 +13,9 @@
 # the gate caller that refreshes the copy's remote-tracking refs before it
 # refuses (FM_DOD_REFRESH_REMOTES), because a no-mistakes pipeline pushes from
 # its own gate clone and nothing else fetches that push into the copy; the
-# fetch also leaves the refs that the gate's other callers read.
+# fetch also leaves the refs that the gate's other callers read. The
+# merge-time re-record (FM_PR_CHECK_MERGE=1) never refreshes, because
+# bin/fm-pr-merge.sh holds the task's control lock around it.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
@@ -51,7 +53,11 @@
 # (state/.pr-check-scan-cursor), so a registration that hangs or is refused
 # cannot take the whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
-# registration cut at that bound prints nothing and is retried.
+# registration cut at that bound prints nothing and is retried. A
+# registration's remote-ref refresh ends 5 seconds before that bound
+# (FM_DOD_REFRESH_DEADLINE) and is skipped once that time has passed, so a
+# registration still refused after it reports that refusal instead of being
+# cut.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -137,7 +143,8 @@ pr_check_scan() {
     marker="$STATE/$id.pr-register-refused"
     printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
-    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 FM_DOD_REFRESH_DEADLINE=$((start + budget - 5)) \
+      bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
       rm -f -- "$marker"
       continue
@@ -311,6 +318,7 @@ case "$PROVIDER:$MODE" in
   *) DONE_LINE="done: PR $URL" ;;
 esac
 FM_DOD_REFRESH_REMOTES=1
+[ "${FM_PR_CHECK_MERGE:-}" != 1 ] || FM_DOD_REFRESH_REMOTES=0
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2

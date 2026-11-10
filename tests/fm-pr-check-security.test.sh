@@ -377,6 +377,24 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
+# Gives the case's copy the remotes origin and backup, both served by
+# fakebin/git-remote-probe, and a named head that no ref outside the copy holds.
+# Each fetch appends a line to FM_TEST_REMOTE_LOG, sleeps FM_TEST_REMOTE_SLEEP
+# seconds (default 0), and fails.
+add_probe_remotes() {  # <dir>
+  local dir=$1
+  cat > "$dir/fakebin/git-remote-probe" <<'SH'
+#!/bin/sh
+printf 'fetch %s\n' "$1" >> "$FM_TEST_REMOTE_LOG"
+sleep "${FM_TEST_REMOTE_SLEEP:-0}"
+exit 1
+SH
+  chmod +x "$dir/fakebin/git-remote-probe"
+  git -C "$dir/wt" remote add origin probe::origin
+  git -C "$dir/wt" remote add backup probe::backup
+  git -C "$dir/wt" commit -q --allow-empty -m 'named head only in the copy'
+}
+
 # Extra "field=value" arguments are written before pr=, because
 # fm_pr_metadata_identity_parse rejects an unrecognised line after it.
 write_poll_meta() {
@@ -849,6 +867,30 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
 }
 
+# bin/fm-pr-merge.sh re-records through fm-pr-check.sh (FM_PR_CHECK_MERGE=1)
+# while it holds the task's control lock, so that re-record makes no fetch;
+# an ordinary registration of the same unpushed head does refresh first.
+test_merge_rerecord_does_not_refresh_remotes() {
+  local dir sha
+  dir=$(make_case merge-rerecord-no-refresh)
+  write_task_meta "$dir"
+  add_probe_remotes "$dir"
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  FM_PR_CHECK_MERGE=1 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr" \
+    && fail "the merge-time re-record registered an unpushed head"
+  grep -Fq "named head $sha is unreachable outside the worker copy" "$dir/stderr" \
+    || fail "the merge-time refusal did not name the unreachable head: $(cat "$dir/stderr")"
+  [ ! -e "$dir/remote.log" ] || fail "the merge-time re-record fetched a remote: $(cat "$dir/remote.log")"
+  FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 > "$dir/stdout" 2> "$dir/stderr" \
+    && fail "an ordinary registration registered an unpushed head"
+  grep -q '^fetch origin$' "$dir/remote.log" || fail "an ordinary registration did not refresh the copy's remotes"
+  grep -Fq "named head $sha is unreachable outside the worker copy; could not refresh remote: " "$dir/stderr" \
+    || fail "the ordinary refusal did not say the refresh failed: $(cat "$dir/stderr")"
+  pass "the merge-time re-record makes no fetch while an ordinary registration refreshes first"
+}
+
 # A PR a task reported in a done line is recorded by the scan whatever the rest
 # of the line says, so its merge monitoring never waits on the supervisor
 # running this command by hand. A URL without the "PR " prefix is prose, a scout
@@ -955,6 +997,39 @@ test_scan_rotates_past_a_hanging_registration() {
   grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
     || fail "a hanging registration starved a later report on every sweep"
   pass "the scan starts a later sweep at a different task so a hanging registration cannot starve it"
+}
+
+# A scan registration's remote-ref refresh, every remote together, ends inside
+# the scan's own budget, so remotes that hang cannot get the registration cut:
+# the refusal is printed once and marked instead of retried silently on every
+# sweep. When the budget leaves no time for a refresh, none is made.
+test_scan_bounds_the_remote_refresh_by_its_budget() {
+  local dir state sha out
+  dir=$(make_case scan-refresh-hang)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  add_probe_remotes "$dir"
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+
+  out=$(FM_CHECK_TIMEOUT=16 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the scan failed: $(cat "$dir/stderr")"
+  [ -s "$dir/remote.log" ] || fail "the scan's registration did not refresh the copy's remotes"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "a refusal behind hanging remotes did not print one line: $out"
+  case "$out" in
+    "task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy; could not refresh remote: "*) ;;
+    *) fail "the refusal behind hanging remotes was not reported: $out" ;;
+  esac
+  [ "$(cat "$state/task-a.pr-register-refused")" = https://github.com/o/r/pull/9 ] \
+    || fail "the refusal behind hanging remotes was not marked as reported"
+
+  rm -f "$dir/remote.log" "$state/task-a.pr-register-refused"
+  out=$(FM_CHECK_TIMEOUT=10 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the short scan failed: $(cat "$dir/stderr")"
+  [ ! -e "$dir/remote.log" ] || fail "a scan with no time left for a refresh fetched: $(cat "$dir/remote.log")"
+  [ "$out" = "task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy" ] \
+    || fail "the refusal without a refresh was not reported: $out"
+  pass "a scan bounds its registrations' remote refresh by its budget and still reports the refusal"
 }
 
 # A task whose pr= was written but whose poll was never published (the
@@ -5101,10 +5176,12 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_merge_rerecord_does_not_refresh_remotes
 test_scan_records_a_pr_reported_in_a_done_line
 test_scan_reports_a_refusal_once_and_retries
 test_scan_retries_refused_task_behind_a_hanging_registration
 test_scan_rotates_past_a_hanging_registration
+test_scan_bounds_the_remote_refresh_by_its_budget
 test_scan_publishes_a_missing_poll_for_a_recorded_pr
 test_scan_does_not_overwrite_a_pr_recorded_meanwhile
 test_scan_does_not_rearm_a_retired_merged_poll
