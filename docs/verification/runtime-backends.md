@@ -2319,6 +2319,7 @@ ok - Orca recovery waits until the exact Git root is readable and clean
 ok - Orca recovery preserves preexisting allocations and refuses incomplete pre-create inventory
 ok - Orca recovery bounds inventory calls and preserves an unconfirmed allocation at the deadline
 ok - Orca create preserves non-timeout errors
+ok - Orca create parses stdout JSON when a successful create also writes stderr
 ```
 
 ### Orca environment source
