@@ -3638,6 +3638,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ -z "${identity%%$'\t'*}" ] && [ "${FM_HERDR_EXPECTED_HARNESS:-}" = codex ]; then
     printf 'send-failed'; return 0
   fi
+  # A caller that names its expected harness must match the pane's live one:
+  # the daemon's retry hold is keyed to that harness, so a native Codex send
+  # to a differently-expected pane would be resubmittable after a lost reply.
+  if [ "${identity%%$'\t'*}" = codex ] && [ -n "${FM_HERDR_EXPECTED_HARNESS:-}" ] \
+    && [ "$FM_HERDR_EXPECTED_HARNESS" != codex ]; then
+    printf 'send-failed'; return 0
+  fi
   if [ "${identity%%$'\t'*}" = codex ]; then
     fm_backend_herdr_codex_submit "$target" "$text"
     return 0

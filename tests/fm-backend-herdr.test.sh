@@ -5359,6 +5359,18 @@ test_send_text_submit_unknown_when_identity_is_unnamed() {
   pass "fm_backend_herdr_send_text_submit: an unnamed identity on an expected Codex pane returns 'send-failed' without typing"
 }
 
+test_send_text_submit_refuses_codex_pane_when_expected_harness_differs() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-codex-mismatch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_submit_identity_prefix "$resp" codex
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_HERDR_EXPECTED_HARNESS=claude \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "a Codex pane targeted by a non-Codex daemon must be refused, got '$out'"
+  ! grep -q 'agent.prompt\|send-text\|send-keys' "$log" || fail "nothing may be submitted when the expected harness differs from the pane's"
+  pass "fm_backend_herdr_send_text_submit: a Codex pane reached by a non-Codex expected harness returns 'send-failed' without submitting"
+}
+
 test_send_text_submit_unknown_on_capture_failure() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6769,6 +6781,7 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_when_identity_probe_fails
 test_send_text_submit_unknown_when_identity_is_unnamed
+test_send_text_submit_refuses_codex_pane_when_expected_harness_differs
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte
