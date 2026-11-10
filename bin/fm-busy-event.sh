@@ -42,8 +42,10 @@
 #       state or answering the prompt. Duplicate requests share a key derived
 #       from the incarnation, lifecycle sequence, session, tool input, and
 #       transcript byte position. The next apply event of the same incarnation
-#       appends the matching resolved line once. The status log is the durable dedup record;
-#       the existing watcher surfaces it even while the busy record is open.
+#       appends the matching resolved line once; arm and retire close every
+#       open key the same way before they discard the incarnation. The status
+#       log is the durable dedup record; the existing watcher surfaces it even
+#       while the busy record is open.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
