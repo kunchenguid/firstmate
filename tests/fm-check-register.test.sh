@@ -117,29 +117,60 @@ EOF
   pass "normalization refuses a swapped hard-link input"
 }
 
+# Put a perl on PATH that pauses when the normalization worker opens the check
+# for reading, i.e. after File::Temp created the temp and before the copy: it
+# writes $home/paused and waits for $home/go, so a test can act on the
+# generated temp deterministically.
+install_pausing_perl() {
+  local home=$1 fakebin="$1/fakebin"
+  mkdir -p "$fakebin" "$home/fakelib"
+  cat > "$home/fakelib/FmPause.pm" <<'PM'
+package FmPause;
+BEGIN {
+  *CORE::GLOBAL::sysopen = sub (*$$;$) {
+    goto &CORE::sysopen unless defined $ARGV[0] && $_[1] eq $ARGV[0];
+    open(my $mark, '>', "$ENV{FM_PAUSE_DIR}/paused") or die;
+    close $mark;
+    select(undef, undef, undef, 0.01) until -e "$ENV{FM_PAUSE_DIR}/go";
+    return @_ > 3 ? CORE::sysopen($_[0], $_[1], $_[2], $_[3]) : CORE::sysopen($_[0], $_[1], $_[2]);
+  };
+}
+1;
+PM
+  cat > "$fakebin/perl" <<WRAP
+#!/usr/bin/env bash
+printf '%s\n' "\$\$" > "$home/perl.pid.tmp" && mv "$home/perl.pid.tmp" "$home/perl.pid"
+exec "$PERL" -I"$home/fakelib" -MFmPause "\$@"
+WRAP
+  chmod 0700 "$fakebin/perl"
+}
+
+wait_for_file() {
+  local n
+  for n in {1..1000}; do
+    [ -e "$1" ] && return 0
+    sleep 0.01
+  done
+  return 1
+}
+
 test_generated_temp_hardlink_swap_does_not_touch_target() {
-  local home target watcher status
+  local home target temp status pid
   home=$(make_home generated-hardlink-race)
   target="$home/target"
   printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
   printf victim > "$target"
   chmod 0600 "$home/state/poll.check.sh" "$target"
-  dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=256 2>/dev/null
-  (
-    for _ in {1..1000}; do
-      for temp in "$home/state"/.fm-custom-check.*; do
-        [ -f "$temp" ] || continue
-        rm -f -- "$temp"
-        ln "$target" "$temp" || exit 1
-        exit 0
-      done
-      sleep 0.01
-    done
-    exit 1
-  ) &
-  watcher=$!
-  FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1; status=$?
-  wait "$watcher" || fail "generated temporary was not observed"
+  install_pausing_perl "$home"
+  PATH="$home/fakebin:$PATH" FM_PAUSE_DIR="$home" FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1 &
+  pid=$!
+  wait_for_file "$home/paused" || fail "normalization worker did not pause"
+  temp=$(find "$home/state" -name '.fm-custom-check.*' | head -n 1)
+  [ -n "$temp" ] || fail "normalization temp was not created"
+  rm -f -- "$temp"
+  ln "$target" "$temp" || fail "could not hard-link the victim over the temp"
+  : > "$home/go"
+  wait "$pid"; status=$?
   [ "$status" -eq 1 ] || fail "generated-temp hard-link swap was not refused"
   [ "$(cat "$target")" = victim ] || fail "generated-temp hard-link swap changed the target bytes"
   [ "$(fm_pr_file_mode "$target")" = 600 ] || fail "generated-temp hard-link swap changed the target mode"
@@ -150,36 +181,19 @@ test_generated_temp_hardlink_swap_does_not_touch_target() {
 }
 
 test_interrupted_normalization_leaves_no_temporary_copy() {
-  local home fakebin sig status watcher
+  local home sig status pid
   for sig in TERM HUP; do
     home=$(make_home "interrupt-$sig")
-    fakebin="$home/fakebin"
-    mkdir -p "$fakebin"
     printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
     chmod 0600 "$home/state/poll.check.sh"
-    cat > "$fakebin/perl" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' "\$\$" > "$home/perl.pid"
-exec "$PERL" "\$@"
-EOF
-    chmod 0700 "$fakebin/perl"
-    dd if=/dev/zero of="$home/state/poll.check.sh" bs=1048576 count=256 2>/dev/null
-    (
-      for _ in {1..1000}; do
-        [ -s "$home/perl.pid" ] || { sleep 0.01; continue; }
-        for temp in "$home/state"/.fm-custom-check.*; do
-          [ -s "$temp" ] || continue
-          kill -$sig "$(cat "$home/perl.pid")"
-          exit 0
-        done
-        sleep 0.01
-      done
-      exit 1
-    ) &
-    watcher=$!
-    PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1; status=$?
-    wait "$watcher" || fail "$sig was not delivered during the copy"
-    [ "$status" -eq 1 ] || fail "$sig during normalization did not stop registration"
+    install_pausing_perl "$home"
+    PATH="$home/fakebin:$PATH" FM_PAUSE_DIR="$home" FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1 &
+    pid=$!
+    wait_for_file "$home/paused" || fail "normalization worker did not pause ($sig)"
+    wait_for_file "$home/perl.pid" || fail "perl worker did not start ($sig)"
+    kill -"$sig" "$(cat "$home/perl.pid")"
+    wait "$pid"; status=$?
+    [ "$status" -ne 0 ] || fail "$sig during normalization did not stop registration"
     [ -z "$(find "$home/state" -name '.fm-custom-check*' 2>/dev/null)" ] \
       || fail "$sig during normalization left a temporary check copy"
     [ ! -e "$home/state/poll.check-trust" ] || fail "interrupted registration left a trust record"
