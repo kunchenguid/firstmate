@@ -36,9 +36,9 @@
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
-# Only PR registration refreshes remote-tracking refs before it refuses
-# (fm_dod_named_head_reachable_outside_worktree), and not the merge-time
-# re-record bin/fm-pr-merge.sh makes through it; the other callers read the
+# Only PR registration, including the merge-time re-record bin/fm-pr-merge.sh
+# makes through it, refreshes remote-tracking refs before it refuses
+# (fm_dod_named_head_reachable_outside_worktree); the other callers read the
 # refs as that refresh left them.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is

@@ -14,8 +14,8 @@
 # refuses (FM_DOD_REFRESH_REMOTES), because a no-mistakes pipeline pushes from
 # its own gate clone and nothing else fetches that push into the copy; the
 # fetch also leaves the refs that the gate's other callers read. The
-# merge-time re-record (FM_PR_CHECK_MERGE=1) never refreshes, because
-# bin/fm-pr-merge.sh holds the task's control lock around it.
+# merge-time re-record (FM_PR_CHECK_MERGE=1) refreshes the same way, while
+# bin/fm-pr-merge.sh holds that one task's control lock.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
@@ -318,7 +318,6 @@ case "$PROVIDER:$MODE" in
   *) DONE_LINE="done: PR $URL" ;;
 esac
 FM_DOD_REFRESH_REMOTES=1
-[ "${FM_PR_CHECK_MERGE:-}" != 1 ] || FM_DOD_REFRESH_REMOTES=0
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
