@@ -227,7 +227,7 @@ wedge_threshold_fixture() {  # <name> <status-log> <status-age-secs> [<wedge-tim
   back=$(( $(date +%s) - age ))
   set_mtime "$back" "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-wedge_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # Already surfaced once, as it is after the supervision turn that handled the
