@@ -25,7 +25,7 @@ test_mode_0600_check_is_normalized_and_registered() {
   home=$(make_home mode600)
   printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
   chmod 0600 "$home/state/poll.check.sh"
-  out=$(FM_HOME="$home" "$REGISTER" poll 2>&1); status=$?
+  out=$(umask 0700; FM_HOME="$home" "$REGISTER" poll 2>&1); status=$?
   [ "$status" -eq 0 ] || fail "registering a mode 0600 check failed: $out"
   [ "$(fm_pr_file_mode "$home/state/poll.check.sh")" = 700 ] || fail "check was not set to mode 0700"
   fm_custom_check_registered "$home/state" poll || fail "armed check is not registered with a matching trust hash"

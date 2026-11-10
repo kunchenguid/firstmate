@@ -48,6 +48,7 @@ if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
       ".fm-custom-check.XXXXXX", DIR => $ARGV[1], UNLINK => 0, PERMS => 0700,
     );
     $tmp = $name;
+    chmod 0700, $out or exit 1;
     sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;
     my @state = stat($ARGV[1]);
     my @input = stat($in);
