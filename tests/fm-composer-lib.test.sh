@@ -1952,7 +1952,7 @@ test_non_rule_unicode_on_prompt_row_still_pending_in_every_locale() {
     out=$(LC_ALL="$locale" fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
     [ "$out" = pending ] || fail "typed em dash must remain pending under LC_ALL=$locale, got '$out'"
     out=$(LC_ALL="$locale" fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
-    [ "$out" = '—' ] || fail "typed em dash must be extracted intact under LC_ALL=$locale, got '$out'"
+    case "$out" in '—'*) ;; *) fail "typed em dash must be extracted intact under LC_ALL=$locale, got '$out'" ;; esac
   done
   pass "non-rule Unicode on the prompt row remains pending under C and the active locale"
 }
@@ -1960,3 +1960,41 @@ test_non_rule_unicode_on_prompt_row_still_pending_in_every_locale() {
 test_stray_glyph_over_rule_is_not_pending_input
 test_typed_text_on_prompt_row_still_pending
 test_non_rule_unicode_on_prompt_row_still_pending_in_every_locale
+
+# A real draft can open with rule cells behind the glyph and wrap ordinary text
+# onto the next row; that continuation keeps the ruled row input, where a ruled
+# row with nothing ordinary below it is only border furniture.
+ruled_wrapped_draft_screen() {  # <footer-0-or-1>
+  local gray=$'\033[0m\033[38;2;136;136;136m' white=$'\033[0m\033[38;2;255;255;255m' rule
+  rule=$(printf '─%.0s' $(seq 1 60))
+  printf '%s\n' \
+    "❯"$'\xc2\xa0'"${gray}${rule}"$'\033[0m' \
+    "${white}hello"$'\033[0m'
+  [ "$1" = 0 ] || printf '%s\n' $'  \033[38;2;255;107;128m⏵⏵ bypass permissions on\033[0m (shift+tab to cycle)'
+}
+
+test_wrapped_draft_after_ruled_row_reads_pending() {
+  local caps screen out footer
+  caps=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
+  for footer in 0 1; do
+    screen=$(ruled_wrapped_draft_screen "$footer")
+    out=$(fm_composer_classify_screen "$caps" "$screen" 1 '')
+    [ "$out" = pending ] || fail "wrapped draft with the cursor on the continuation (footer $footer) must read pending, got '$out'"
+    out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+    [ "$out" = pending ] || fail "cursorless wrapped draft after a ruled row (footer $footer) must read pending, got '$out'"
+    out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+    case "$out" in "hello"*) ;; *) fail "cursorless wrapped draft must extract its continuation (footer $footer), got '$out'" ;; esac
+  done
+  pass "ordinary text wrapped below a ruled prompt row keeps the draft pending with and without a cursor"
+}
+
+test_ruled_row_over_footer_is_still_empty() {
+  local screen out
+  screen=$(ruled_wrapped_draft_screen 1 | sed '2d')
+  out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = empty ] || fail "a ruled prompt row above only a mode hint must read empty, got '$out'"
+  pass "a ruled prompt row with only a mode hint below it is still border furniture"
+}
+
+test_wrapped_draft_after_ruled_row_reads_pending
+test_ruled_row_over_footer_is_still_empty

@@ -1548,14 +1548,35 @@ _fm_composer_row_is_braille_furniture() {  # <row>
 }
 
 # _fm_composer_bare_row_is_ruled: 0 when the bare agent-glyph <row> of the plain
-# screen is the glyph followed only by rule cells, so the row is its own closing
-# border and owns no wrapped input below it.
+# screen is the glyph followed only by rule cells and no ordinary text wraps onto
+# the row below it, so the row is its own closing border and owns no wrapped
+# input. A ruled row whose next row is ordinary continuation text is the first
+# row of a real wrapped draft and stays input.
 _fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
-  local text glyph
+  local text glyph next
   text=$(_fm_composer_screen_row "$2" "$1")
   fm_composer_normalize_trim_var text
   fm_composer_leading_agent_glyph_var glyph "$text" || return 1
-  _fm_composer_row_is_rule_furniture "${text#*"$glyph"}"
+  _fm_composer_row_is_rule_furniture "${text#*"$glyph"}" || return 1
+  next=$(_fm_composer_screen_row "$(($2 + 1))" "$1")
+  fm_composer_normalize_trim_var next
+  ! _fm_composer_row_is_ordinary_continuation "$next"
+}
+
+# _fm_composer_row_is_ordinary_continuation: 0 when the trimmed <row> is plain
+# text that can continue a wrapped draft: non-blank, no structural edge, not a
+# status, mode-hint or furniture row, and not itself a prompt-glyph or rule row.
+_fm_composer_row_is_ordinary_continuation() {  # <trimmed-row>
+  local row=$1 glyph
+  [ -n "$row" ] || return 1
+  fm_composer_row_has_edge "$row" && return 1
+  _fm_composer_row_is_omp_status "$row" && return 1
+  _fm_composer_row_is_braille_furniture "$row" && return 1
+  _fm_composer_row_is_rule_furniture "$row" && return 1
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 1
+  fm_composer_leading_prompt_glyph_var glyph "$row" && return 1
+  return 0
 }
 
 # _fm_composer_bare_row_strip_furniture_var: on a bare agent-glyph row, reduce
