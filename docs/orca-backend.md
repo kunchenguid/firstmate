@@ -39,7 +39,7 @@ Firstmate does not administer the remote Orca service.
 
 Orca remains the worktree and terminal provider.
 SSH stages task files and runs the existing filesystem-dependent spawn, state, control, and cleanup checks on the host that owns the worktree.
-The staged workspace contains a private code snapshot, selected worker policy files, the brief, and task state; it is not a secondmate home and runs no supervisor.
+The staged workspace contains a private code snapshot, selected worker policy files, the project registry, the brief, and task state; it is not a secondmate home and runs no supervisor.
 For publishing tasks, that snapshot includes full HEAD history and its origin before applying the current script overlay.
 Publishing tasks require a full-history project mirror with the same origin as the coordinator and working git-crypt filters when used.
 Provision and unlock that mirror on the target machine before dispatch; staging never repairs a shared mirror or transfers encryption keys.

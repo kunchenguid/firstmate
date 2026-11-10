@@ -2333,7 +2333,7 @@ Orca retained the closed terminal handle.
 Private host identities and task transcripts are omitted; this is historical live evidence, not a new live run of this port.
 
 `tests/fm-backend-orca.test.sh` invokes the executable transport regressions in `tests/orca-worker-transport.py`.
-They cover machine preference and fallback, runtime-bound endpoint routing, dependency refusal before staging, generated brief paths, selected base refs, immutable steering and acknowledgements, status replay, branch-bundle import, dirty-worktree refusal, landing evidence, lost launch and cleanup replies, and retirement without recreating removed status files.
+They cover machine preference and fallback, runtime-bound endpoint routing, dependency refusal before staging, generated brief paths, selected base refs, immutable steering and acknowledgements, status replay, branch-bundle import, dirty-worktree refusal, landing evidence, lost launch and cleanup replies, archived failed launch routes with per-route status logs, registered project posture, one poll per unreachable host per scan, and retirement without recreating removed status files.
 `tests/fm-project-capacity.test.sh` confirms remote occupants do not consume local places while local admission remains bounded.
 The local Orca spawn/worktree suite remains `tests/fm-spawn-orca-worktree.test.sh`.
 Remote control retains the existing Orca capability refusals; this smoke proves scout spawn, read, steer, completion, and cleanup, not an unsupported lifecycle verb.
