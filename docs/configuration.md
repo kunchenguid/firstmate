@@ -2050,6 +2050,7 @@ The ceiling is **off unless the captain declares it**.
 Without that file there is no ceiling, no reservation, and no change to any dispatch: a home that never opted in behaves exactly as it did before this guard existed.
 A malformed file refuses loudly, naming the file and the problem, rather than guessing a ceiling the captain never wrote.
 A declaration the guard cannot read leaves it unable to know its own scope, so the refusal covers every dispatch through the guard, not only a capped model, and teardown or forced secondmate cleanup refuses the same way instead of releasing occupancy it cannot classify.
+A home whose local root anchor cannot be resolved - an unreadable or malformed `.fm-secondmate-parent` binding - refuses the dispatch the same way, naming the home and its binding, because an unknown anchor means an unknown ceiling.
 
 ```sh
 # config/sol-cap
@@ -2084,6 +2085,7 @@ A fresh launch with `--model default` has no explicit model pin: the sentinel it
 - The count registry is one TSV file per Firstmate home on this machine: `<state>/sol-sessions.tsv`, one row per capped session keyed by task id; the [`fm-sol-cap-lib.sh` header](../bin/fm-sol-cap-lib.sh) owns the row format.
 - The guard counts live rows across every local Firstmate home's state directory on this machine (the same enumeration `bin/fm-project-capacity-lib.sh` counts through), so local homes share one ceiling and remote homes are never walked because their workers run on another machine; a remote secondmate is counted in the dispatching home.
 - Each home's own declaration decides which of its sessions are capped, so a home that declared no ceiling owns no capped occupancy and is never adopted into another home's count; a home that drops its declaration keeps its stored rows as evidence, but those rows stop counting.
+- A dispatch that redirects its state root keeps its registry there and counts it in its own admission, and those rows are judged by the dispatching home's effective declaration (`FM_CONFIG_OVERRIDE` when set, else that home's `config/`) rather than by a declaration inferred from the redirected path.
 - A registered stale row does not count: its recorded positive pid is no longer alive; age never releases a live worker.
 - A fresh spawn claims its row atomically under the local root home's `state/.sol-cap.lock`, with the spawning process's pid until launch delivery begins.
 - Before delivery, the reservation becomes conservative (pid 0), so an uncertain delivery or later spawn error cannot free a running worker's slot.

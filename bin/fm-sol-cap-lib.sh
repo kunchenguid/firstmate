@@ -346,17 +346,12 @@ fm_sol_cap_entry_live() {  # <start> <pid>
   [ "$pid" = 0 ] || fm_pid_alive "$pid"
 }
 
-# fm_sol_cap_active_count <first-state>
-# Count the live capped-session registry rows in every local home's state
-# directory on this machine, applying the pending invalidations of each one
-# first, so this is the admission decision pass and expects the admission lock.
-# Sets FM_SOL_COUNT to the
-# count and FM_SOL_ACTIVE_LIST to a "; "-joined listing "<id> (<model>, age
-# N)"; an entry in a state directory other than <first-state> is qualified
-# with " in <state-dir>". Returns 1 with FM_SOL_COUNT_ERROR when the local
-# homes cannot be enumerated, a registry cannot be read or rewritten, or a row
-# is malformed, because skipping a home could claim a free slot that another
-# home holds.
+# fm_sol_cap_home <state-dir>
+# The home that owns a dispatching state directory. A parent-route state
+# belongs to the parent home it is nested under even when this dispatch
+# redirects its state root, because that home owns and locks the route. Every
+# other state belongs to the dispatching home, and that home's effective
+# configuration governs it.
 fm_sol_cap_home() {
   case "$1" in
     */state/parent-route) printf '%s\n' "${1%/state/parent-route}"; return 0 ;;
@@ -495,6 +490,16 @@ fm_sol_cap_adopt_workers() (
   done
 )
 
+# fm_sol_cap_active_count <first-state>
+# Count the live capped-session registry rows in <first-state> and every local
+# home's state directory on this machine, applying the pending invalidations of
+# each one first, so this is the admission decision pass and expects the
+# admission lock. Sets FM_SOL_COUNT to the count and FM_SOL_ACTIVE_LIST to a
+# "; "-joined listing "<id> (<model>, age N)"; an entry in a state directory
+# other than <first-state> is qualified with " in <state-dir>". Returns 1 with
+# FM_SOL_COUNT_ERROR when the local homes cannot be enumerated, a registry
+# cannot be read or rewritten, or a row is malformed, because skipping a home
+# could claim a free slot that another home holds.
 fm_sol_cap_active_count() {  # <first-state>
   local first=$1 state file id model start pid now age entry home covered
   FM_SOL_COUNT=0
