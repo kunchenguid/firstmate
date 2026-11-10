@@ -6,9 +6,8 @@
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   A repository with no commit yet (unborn HEAD) is refused before a worktree
 #   exists. The "make one commit" hint is only for a clone under the home's
-#   projects directory, or for this firstmate repository passed as the project.
-#   Any other path is named as not a registered project clone, with the clone
-#   names under that projects directory (or none), and the hint suggests no commit.
+#   projects directory. Any other path is named as not a registered project
+#   clone, and the hint suggests no commit.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
