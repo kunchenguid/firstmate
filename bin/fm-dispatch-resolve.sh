@@ -677,7 +677,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
       {profile: $c, provider: $p, eligible: true, unranked: true,
-       reason: (if any($q.providers[]; .provider == $p)
+       reason: ((quota_lane_rows($q; $p; $lane) | length) as $covering |
+                if $covering > 1
+                then "provider \($p) has \($covering) quota rows covering account \($lane); left unmeasured"
+                elif any($q.providers[]; .provider == $p)
                 then "provider \($p) has no quota row for account \(if $lane == "" then "default" else $lane end)"
                 else "provider \($p) not in the quota snapshot" end)}
     else

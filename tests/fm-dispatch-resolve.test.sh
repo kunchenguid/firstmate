@@ -1871,7 +1871,7 @@ jq '
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_CONFLICT" run code out err "$BRIEF"
 expect_code 0 "$code" "conflicting schema 6 snapshot exits 0"
-assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account openai-codex: disclosed uncertainty' "a key matched by two rows stays unmeasured"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has 2 quota rows covering account openai-codex; left unmeasured: disclosed uncertainty' "a key matched by two rows stays unmeasured and names the conflict"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "an unconflicted key keeps its row"
 assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=codex  scope=all_models  remaining=50%  spendPriority=0.5  runway=through_reset  -> eligible' "an unmatched key still falls back to the default row"
 

@@ -27,6 +27,9 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 # Prepend them to a consumer's program:
 #   quota_lane($harness; $model)   the candidate's account key, or "" when none
 #                                  is identified by the contract.
+#   quota_lane_rows($snapshot; $provider; $lane)
+#                                  every provider row whose accountKey or
+#                                  accountKeys covers $lane.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null when none or several rows match;
@@ -38,11 +41,13 @@ FM_QUOTA_ROW_JQ='
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
     else "" end;
+  def quota_lane_rows($snapshot; $provider; $lane):
+    [$snapshot.providers[]? | select(.provider == $provider and (.accountKey == $lane or
+       ((.accountKeys | type) == "array" and any(.accountKeys[]; . == $lane))))];
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
-      ([$rows[] | select(.accountKey == $lane or
-         ((.accountKeys | type) == "array" and any(.accountKeys[]; . == $lane)))]) as $matches |
+      quota_lane_rows($snapshot; $provider; $lane) as $matches |
       if ($matches | length) > 1 then null
       else (($matches | first) //
         ([$rows[] | select(.accountKey == "default")] | first) // null)
