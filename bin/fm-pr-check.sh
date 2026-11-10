@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# The poll also wakes when a ready pull request or merge request degrades
+# after its ready report - a failing check on GitHub, a failed head pipeline
+# on GitLab (the readable trace of a merge train dropping the merge request) -
+# one wake per head/pipeline transition naming the failed jobs, the forge's
+# failure reasons, and the pipeline or check URL, so the worker can be steered
+# to fix it; the merged wake itself is unchanged.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
-# The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
-# live only in a private sidecar and are never interpolated into shell source.
+# The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
+# own registration, so a later repository update does not invalidate it; task and
+# PR data live only in a private sidecar and are never interpolated into shell
+# source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
-# instance.
+# instance and a GitHub Enterprise pull request on a host this home names in
+# config/github-hosts.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -17,15 +26,38 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# That merge-time re-record also skips the degraded baseline read below, so it
+# makes no forge read the merge's own live reads would duplicate.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
+#
+# scan records every task whose status reports a PR that nobody recorded, so
+# merge monitoring never depends on the supervisor remembering this command.
+# bin/fm-watch.sh runs it at the start of each check sweep. A candidate is a
+# task record that is not a secondmate or scout and has no pr= line, or has the
+# reported pr= but no valid published poll; its PR is
+# the first "PR <url>" token in the newest done: line that names a supported PR
+# URL, whatever the rest of the line says. A URL without the "PR " prefix is
+# prose and never counts. Each candidate is recorded through the ordinary
+# path above, so every refusal still applies. A refusal prints one line naming
+# the task, the URL, and the reason, once per task and URL
+# (state/<task>.pr-register-refused), and the scan retries silently on later
+# sweeps, so a draft later marked ready is recorded without help. Each sweep
+# starts just after the last task the previous sweep attempted
+# (state/.pr-check-scan-cursor), so a registration that hangs or is refused
+# cannot take the whole budget on every sweep. Registrations
+# stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
+# registration cut at that bound prints nothing and is retried.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
+#        fm-pr-check.sh scan
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DEGRADED_WATCH_ENABLED=0
+[ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-degraded-watch" ] || DEGRADED_WATCH_ENABLED=1
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -35,6 +67,98 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+pr_check_reported_url() {  # <status-file>
+  local line token found=
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  while IFS= read -r line; do
+    [ "$(status_line_verb "$line")" = "done" ] || continue
+    while IFS= read -r token; do
+      token=${token#*PR }
+      while :; do
+        case "$token" in
+          *[\).,\;:\'\"]) token=${token%?} ;;
+          *) break ;;
+        esac
+      done
+      if fm_pr_url_parse "$token"; then
+        found=$FM_PR_URL
+        break
+      fi
+    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https://[^[:space:]]+' || true)
+  done < <(grep -E '^[[:space:]]*done' "$1" | grep -F 'PR https://' || true)
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line for last-id, wrapping
+  awk -v last="$1" '{ a[NR] = $0; split($0, f, " "); if (f[1] == last) s = NR } END { for (i = 0; i < NR; i++) print a[(i + s) % NR + 1] }'
+}
+
+pr_check_pr_retired() {  # <id> <recorded-url>
+  [ -n "$2" ] && fm_pr_url_parse "$2" || return 1
+  fm_pr_poll_merge_already_notified "$STATE" "$1" "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" && return 0
+  fm_pr_poll_retirement_parse "$STATE/$1.pr-poll-retirement" && [ "$FM_PR_RETIRE_URL" = "$2" ]
+}
+
+pr_check_scan() {
+  local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
+  budget=${FM_CHECK_TIMEOUT:-30}
+  case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+  budget=$((budget - 5))
+  start=$(date +%s)
+  export FM_HOME FM_STATE_OVERRIDE="$STATE"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    fm_pr_task_id_valid "$id" || continue
+    kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+    case "$kind" in secondmate|scout) continue ;; esac
+    url=$(pr_check_reported_url "$STATE/$id.status") || continue
+    recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
+    pr_check_pr_retired "$id" "$recorded" && continue
+    [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
+    candidates="$candidates$id $url"$'\n'
+  done
+  cursor_file="$STATE/.pr-check-scan-cursor"
+  cursor=$(cat "$cursor_file" 2>/dev/null || true)
+  candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
+  while IFS=' ' read -r id url; do
+    [ -n "$id" ] || continue
+    left=$((start + budget - $(date +%s)))
+    [ "$left" -gt 0 ] || break
+    marker="$STATE/$id.pr-register-refused"
+    printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
+    rc=0
+    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -f -- "$marker"
+      continue
+    fi
+    [ "$rc" -ne 124 ] || continue
+    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
+      continue
+    fi
+    tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX") || continue
+    if ! { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
+      rm -f -- "$tmp"
+      continue
+    fi
+    err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+    printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
+  done <<EOF_SCAN
+$candidates
+EOF_SCAN
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = scan ]; then
+  pr_check_scan
+  exit 0
+fi
+
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -51,6 +175,13 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+# gh and gh-axi address github.com unless told otherwise, so a GitHub Enterprise
+# host is exported once here and every forge read this run makes, including the
+# bin/fm-dod-lib.sh children, addresses the host the recorded identity names.
+# A gitlab, gerrit, or forgejo run keeps its own per-call host handling.
+if [ "$PROVIDER" = github ]; then
+  fm_pr_github_host_export "$HOST"
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -87,6 +218,15 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # a change's subject before its status, and a subject is free text.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
+fi
+# The GitLab poll reads the merge request as JSON (glab -F json), the same
+# read the merge path makes, because its head pipeline state - the readable
+# trace of a merge train dropping the merge request - exists only there. A
+# missing jq would leave the poll silent on every read, so arming refuses for
+# the same reason it refuses without glab.
+if [ "$PROVIDER" = gitlab ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires jq on PATH" >&2
   exit 1
 fi
 if [ "$PROVIDER" = gerrit ]; then
@@ -173,16 +313,33 @@ if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
 fi
 
 META_TMP=
+BASELINE_BACKUP=
+BASELINE_BACKUP_COMPLETE=0
 META_LOCK=
 META_LOCK_HELD=0
 PR_POLL_PUBLISH_LOCK=
 PR_POLL_PUBLISH_LOCK_HELD=0
+CONTROL_LOCK=
+CONTROL_LOCK_HELD=0
 pr_check_cleanup() {
+  if [ -n "$BASELINE_BACKUP" ] && [ -d "$BASELINE_BACKUP" ] \
+    && declare -F restore_baselines >/dev/null; then
+    if restore_baselines; then
+      rm -rf -- "$BASELINE_BACKUP"
+      BASELINE_BACKUP=
+    else
+      echo "error: could not restore previous PR poll registration; backup retained at $BASELINE_BACKUP" >&2
+    fi
+  fi
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
   if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
     fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
     PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -194,11 +351,64 @@ trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
+# The degraded dedupe baseline is the poll's own reading at the ready report:
+# a change already degraded is not news, and a merge request already on its
+# merge train arms the wake for its drop. It is read first, under the task's
+# control lock the watcher holds while it reads and dedupes, and before the
+# metadata is rewritten: a stalled or failed read fails registration with the
+# task metadata and the previously published poll unchanged. Lock order is
+# control -> meta -> publish. A merge-time re-record neither takes the lock
+# (bin/fm-pr-merge.sh already holds it) nor reads or rewrites the baseline: it
+# records before any forge call, and the marker it leaves is keyed to the PR
+# identity, so it can only ever match the PR it was written for.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+  CONTROL_LOCK="$STATE/.control-$ID.lock"
+  fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
+  CONTROL_LOCK_HELD=1
+  # The read runs under the control lock the watcher waits on, so it is
+  # bounded by the watcher's own check bound.
+  BASELINE_RC=0
+  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+  if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
+    if [ "$BASELINE_RC" = 124 ]; then
+      echo "error: baseline read of the PR poll timed out" >&2
+    else
+      echo "error: baseline read of the PR poll failed" >&2
+    fi
+    exit 1
+  fi
+  BASELINE_TRAIN=0
+  BASELINE_TRAIN_UNKNOWN=0
+  BASELINE_DEGRADED=
+  while IFS= read -r baseline_line; do
+    case $baseline_line in
+      ontrain) BASELINE_TRAIN=1 ;;
+      train=unknown) BASELINE_TRAIN_UNKNOWN=1 ;;
+      'degraded head='*|'degraded pipeline='*)
+        BASELINE_DEGRADED=${baseline_line#degraded }
+        BASELINE_DEGRADED=${BASELINE_DEGRADED%% *}
+        ;;
+    esac
+  done <<EOF
+$BASELINE
+EOF
+  if [ "$BASELINE_TRAIN_UNKNOWN" = 1 ]; then
+    echo "error: merge-train baseline read was inconclusive" >&2
+    exit 1
+  fi
+fi
+
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+# A scan gathers its candidates before it registers them, so the supervisor may
+# have recorded another PR meanwhile; that choice is never overwritten.
+if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
+  RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] || exit 0
+fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
@@ -218,27 +428,88 @@ fm_pr_metadata_identity_parse "$META_TMP" || exit 1
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
-mv -f -- "$META_TMP" "$META" || exit 1
+
+# Keep the current registration recoverable until all replacement files commit.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+  BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
+  restore_baselines() {
+    local artifact backup
+    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+      "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+      backup="$BASELINE_BACKUP/$(basename "$artifact")"
+      if [ -e "$backup" ]; then
+        rm -f -- "$artifact" || return 1
+        mv -- "$backup" "$artifact" || return 1
+      elif [ "$BASELINE_BACKUP_COMPLETE" = 1 ]; then
+        rm -f -- "$artifact" || return 1
+      fi
+    done
+  }
+  baseline_failure() {
+    exit 1
+  }
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+    "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] \
+      && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
+      && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
+  done
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    mv -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
+  done
+fi
+mv -f -- "$META_TMP" "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 META_TMP=
-fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META" || exit 1
+fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+fm_pr_metadata_identity_parse "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
-
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
-fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK_HELD=1
+if [ -n "${BASELINE_BACKUP:-}" ]; then
+  for artifact in "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    mv -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
+  done
+  BASELINE_BACKUP_COMPLETE=1
+  if [ -n "$BASELINE_DEGRADED" ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED" || baseline_failure
+  else
+    rm -f -- "$STATE/$ID.pr-poll-degraded" || baseline_failure
+  fi
+  if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || baseline_failure
+  else
+    rm -f -- "$STATE/$ID.pr-poll-train" || baseline_failure
+  fi
+fi
 if fm_pr_poll_publish_prepared; then
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
 else
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
+  [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure
   exit 1
+fi
+fm_lock_release "$META_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+META_LOCK_HELD=0
+if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$CONTROL_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+  CONTROL_LOCK_HELD=0
+fi
+if [ -n "${BASELINE_BACKUP:-}" ]; then
+  OBSOLETE_BASELINE_BACKUP=$BASELINE_BACKUP
+  BASELINE_BACKUP=
+  BASELINE_BACKUP_COMPLETE=0
+  rm -rf -- "$OBSOLETE_BASELINE_BACKUP"
 fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
@@ -253,6 +524,29 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
+# Opt-in config/ready-after-green: a no-mistakes PR is ready only once the
+# child's own status holds the checks-green report naming this exact PR, so a
+# PR registered while its checks are pending or failing publishes no ready
+# line. The report is read with the same test bin/fm-crew-state.sh uses, so
+# text around `PR <url> checks green` does not withhold the line.
+# The child's later done line still reaches the parent through
+# bin/fm-inactive-reconcile.sh, and registering again after the report
+# publishes this line. Only the last done line counts, so a later done that
+# does not report green withdraws an earlier one.
+fm_pr_check_ready_line_waits_for_green() {
+  local note
+  [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/ready-after-green" ] || return 1
+  case "$PROVIDER:$PR_MODE" in
+    gerrit:*|*:direct-PR|*:local-only) return 1 ;;
+  esac
+  note=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 | sed -E 's/^done( \[at=[^]]*\])?: //' || true)
+  fm_dod_note_reports_ci_ready "$note" || return 0
+  case " $note " in
+    *"$URL"[^[:alnum:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
@@ -266,7 +560,9 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+if ! fm_pr_check_ready_line_waits_for_green; then
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+fi
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;

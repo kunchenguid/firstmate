@@ -485,9 +485,155 @@ test_remote_secondmate_account_override_refuses_locally() {
   pass "a remote route refuses a primary-side account override instead of silently ignoring it"
 }
 
+test_remote_secondmate_refuses_account() {
+  local out rc id=acct-remote-flag
+  new_case remote-account-flag claude
+  signed_in_claude_root "$CASE/first"
+  declare_accounts "$CASE/first"
+  printf -- '- %s - Remote fixture (host: account-test.invalid; root: /srv/firstmate; home: /srv/mate; scope: tests; projects: none; added 2026-10-17)\n' \
+    "$id" > "$HOME_DIR/data/secondmates.md"
+  out=$(fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "--account on a remote secondmate must refuse"
+  assert_refused_before_launch "$id" "$out" "--account applies to ships and scouts"
+  assert_absent "$CASE/claude-checks" "a refused remote launch must not inspect a local login"
+  pass "a remote secondmate refuses --account instead of launching on the remote home's account"
+}
+
+# declare_accounts <entry>...: the home's config/claude-accounts list.
+declare_accounts() {
+  printf '%s\n' "$@" > "$HOME_DIR/config/claude-accounts"
+}
+
+test_no_account_list_keeps_today_and_refuses_account() {
+  local out rc id=acct-list-off
+  new_case list-off claude
+  signed_in_claude_root "$CASE/work"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "a Claude spawn in a home without a list should succeed: $out"
+  assert_not_contains "$out" "account=" "a home without a list must not report an account"
+  assert_no_grep "account=" "$HOME_DIR/state/$id.meta" "a home without a list must not record an account"
+  assert_absent "$CASE/claude-checks" "a home without a list must not run a sign-in check"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/ambient-claude" "$CASE/claude-worker" \
+    "a home without a list must keep forwarding the invoking process's own Claude root"
+  assert_grep "ANTHROPIC_API_KEY=ambient-pane-key" "$CASE/claude-worker" \
+    "a home without a list must leave the pane's environment credentials alone"
+  out=$(spawn_ship "$id-flag" --account "$CASE/work"); rc=$?
+  expect_code 1 "$rc" "--account without a list must refuse"
+  assert_refused_before_launch "$id-flag" "$out" "--account '$CASE/work' needs config/claude-accounts, which this home does not declare"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  : > "$CASE/claude-checks"
+  out=$(spawn_ship "$id-pin"); rc=$?
+  expect_code 0 "$rc" "the single pin must keep working without a list: $out"
+  assert_contains "$out" "account=$CASE/work" "the single pin must still report its account"
+  pass "without config/claude-accounts the launch, the single pin, and the record are unchanged, and --account refuses"
+}
+
+test_account_list_launches_the_named_entry() {
+  local out rc id=acct-list
+  new_case list claude
+  signed_in_claude_root "$CASE/first"
+  signed_in_claude_root "$CASE/second"
+  declare_accounts "$CASE/first" "$CASE/second"
+  out=$(spawn_ship "$id" --account "$CASE/second"); rc=$?
+  expect_code 0 "$rc" "a spawn naming a declared, signed-in account should succeed: $out"
+  assert_contains "$out" "account=$CASE/second" "the spawn line should name the chosen account"
+  assert_grep "account=$CASE/second" "$HOME_DIR/state/$id.meta" "the task record should carry the chosen account"
+  [ "$(cat "$CASE/claude-checks")" = "$CASE/second" ] \
+    || fail "the sign-in check should ask about the chosen account only: $(cat "$CASE/claude-checks")"
+  assert_contains "$(cat "$CASE/second/.claude.json" 2>/dev/null)" "$WT" \
+    "workspace trust should be registered in the chosen account's store"
+  assert_absent "$CASE/first/.claude.json" "the other declared account must not be touched"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/second" "$CASE/claude-worker" "the worker should run under the chosen account"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "an ambient API key must not outrank the chosen account"
+  assert_grep "CLAUDE_CODE_OAUTH_TOKEN=unset" "$CASE/claude-worker" "an ambient OAuth token must not outrank the chosen account"
+  pass "a declared account named with --account is checked, launched, and recorded like a pin"
+}
+
+test_account_list_refusals() {
+  local out rc id=acct-list-bad n=0 body
+  new_case list-refusals claude
+  signed_in_claude_root "$CASE/first"
+  signed_in_claude_root "$CASE/second"
+  mkdir -p "$CASE/signed-out"
+  declare_accounts "$CASE/first" "$CASE/second" "$CASE/signed-out" ordinary
+  out=$(spawn_ship "$id-none"); rc=$?
+  expect_code 1 "$rc" "a Claude spawn without --account must refuse under a list"
+  assert_refused_before_launch "$id-none" "$out" "config/claude-accounts declares 4 Claude accounts, so a Claude ship or scout launch must name one with --account"
+  out=$(spawn_ship "$id-other" --account "$CASE/elsewhere"); rc=$?
+  expect_code 1 "$rc" "an undeclared account must refuse"
+  assert_refused_before_launch "$id-other" "$out" "account '$CASE/elsewhere' is not declared in config/claude-accounts"
+  signed_in_claude_root "$CASE/elsewhere"$'\n'"$CASE/first"
+  out=$(spawn_ship "$id-newline" --account "$CASE/elsewhere"$'\n'"$CASE/first"); rc=$?
+  expect_code 1 "$rc" "an account holding a newline must refuse even when one of its lines is declared"
+  assert_refused_before_launch "$id-newline" "$out" "--account must name one config/claude-accounts entry exactly, with no control characters"
+  [ ! -e "$CASE/claude-checks" ] || assert_no_grep "$CASE/elsewhere" "$CASE/claude-checks" "a newline account must be refused before its sign-in check"
+  out=$(spawn_ship "$id-out" --account "$CASE/signed-out"); rc=$?
+  expect_code 1 "$rc" "a signed-out declared account must refuse even with an ambient login and key"
+  assert_refused_before_launch "$id-out" "$out" "config/claude-accounts pins Claude workers to $CASE/signed-out, which is not signed in"
+  out=$(spawn_ship "$id-ordinary" --account ordinary); rc=$?
+  expect_code 1 "$rc" "a signed-out ordinary entry must refuse"
+  assert_refused_before_launch "$id-ordinary" "$out" "pins Claude workers to the ordinary account, which is not signed in"
+  out=$(spawn_ship "$id-codex" --harness codex --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "--account on another runner must refuse"
+  assert_refused_before_launch "$id-codex" "$out" "applies to Claude workers only, not codex"
+  out=$(spawn_ship "$id-raw" --account "$CASE/first" --harness "CLAUDE_CONFIG_DIR=$CASE/second claude --print raw"); rc=$?
+  expect_code 1 "$rc" "a raw command overriding the chosen account must refuse"
+  assert_refused_before_launch "$id-raw" "$out" "the raw launch command sets CLAUDE_CONFIG_DIR"
+  printf '%s\n' "$CASE/first" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-both" --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "a list beside a single pin must refuse"
+  assert_refused_before_launch "$id-both" "$out" "config/claude-accounts and config/claude-account are both present"
+  rm "$HOME_DIR/config/claude-account"
+  for body in "$CASE/first"$'\n\n'"$CASE/second" "relative/root" "$CASE/first"$'\r' '' "$CASE/first"$'\n'"$CASE/first" "$CASE/first"$'\n'"$CASE/missing"; do
+    n=$((n + 1))
+    printf '%s' "$body" > "$HOME_DIR/config/claude-accounts"
+    out=$(spawn_ship "$id-$n" --account "$CASE/first"); rc=$?
+    if [ "$n" = 6 ]; then
+      expect_code 0 "$rc" "a missing entry that is not chosen must not block another: $out"
+      out=$(spawn_ship "$id-$n-missing" --account "$CASE/missing"); rc=$?
+      expect_code 1 "$rc" "a missing chosen entry must refuse"
+      assert_refused_before_launch "$id-$n-missing" "$out" "config/claude-accounts must name readable, searchable existing directories"
+      continue
+    fi
+    expect_code 1 "$rc" "malformed list #$n must refuse"
+    assert_refused_before_launch "$id-$n" "$out" "config/claude-accounts"
+  done
+  rm "$HOME_DIR/config/claude-accounts"
+  mkdir "$HOME_DIR/config/claude-accounts"
+  out=$(spawn_ship "$id-dir" --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "a directory in place of the list must refuse"
+  assert_refused_before_launch "$id-dir" "$out" "config/claude-accounts must be a readable regular file"
+  assert_no_grep "$CASE/second" "$CASE/claude-checks" "an account no launch chose must never be sign-in checked"
+  assert_absent "$CASE/claude-worker" "no refused launch may start Claude"
+  pass "a list refuses a missing, undeclared, signed-out, wrong-runner, raw-override, doubled, or malformed choice"
+}
+
+test_account_list_secondmate_needs_its_own_pin() {
+  local out rc id=acct-list-sm
+  new_case list-secondmate claude
+  signed_in_claude_root "$CASE/first"
+  signed_in_claude_root "$CASE/mate"
+  declare_accounts "$CASE/first"
+  out=$(spawn_account_secondmate "$id"); rc=$?
+  expect_code 1 "$rc" "a secondmate without its own pin must refuse under a list: $out"
+  assert_refused_before_launch "$id" "$out" "secondmate $id needs its own pin in config/secondmate-accounts/$id/claude-account"
+  out=$(spawn_account_secondmate "$id" --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "--account on a secondmate must refuse"
+  assert_refused_before_launch "$id" "$out" "--account applies to ships and scouts"
+  mkdir -p "$HOME_DIR/config/secondmate-accounts/$id"
+  printf '%s\n' "$CASE/mate" > "$HOME_DIR/config/secondmate-accounts/$id/claude-account"
+  out=$(spawn_account_secondmate "$id"); rc=$?
+  expect_code 0 "$rc" "a secondmate with its own pin should launch under a list: $out"
+  assert_contains "$out" "account=$CASE/mate" "the secondmate should launch on its own pin"
+  pass "a list never chooses a secondmate's account: it needs its own pin and refuses --account"
+}
+
 test_secondmate_account_override
 test_secondmate_account_refusals
 test_remote_secondmate_account_override_refuses_locally
+test_remote_secondmate_refuses_account
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
@@ -501,5 +647,9 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
+test_no_account_list_keeps_today_and_refuses_account
+test_account_list_launches_the_named_entry
+test_account_list_refusals
+test_account_list_secondmate_needs_its_own_pin
 
 echo "# all fm-worker-account tests passed"

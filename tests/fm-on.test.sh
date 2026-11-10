@@ -68,7 +68,8 @@ case "\${1:-}:\${2:-}" in
 esac
 SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-remote-herdr-identity-lib.sh" \
+  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
@@ -364,8 +365,10 @@ cat > "$DOCTOR_BIN/uname" <<'SH'
 printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
+# These tool-resolution assertions require Herdr specifically; the unqualified
+# doctor accepts either remote backend, covered by fm-remote-doctor.test.sh.
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" --backend herdr 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
@@ -391,7 +394,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/treehouse"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/claude"
 chmod +x "$DOCTOR_BIN/jq" "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" --backend herdr 2>&1)
 rc=$?
 set -e
 assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"

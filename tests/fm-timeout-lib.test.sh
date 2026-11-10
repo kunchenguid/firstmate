@@ -3,9 +3,10 @@
 # TERM to the command's process group at the bound, KILL once the grace has
 # passed, a forwarded signal, the caller replaced rather than wrapped, and a
 # refusal instead of an unbounded run when nothing on the host can enforce the
-# bound. Most cases pin the perl watchdog, the preferred mechanism and the only
-# one a stock macOS host has, under a PATH that holds no timeout variant; the
-# GNU fallback case runs only where a real timeout exists.
+# bound. Most cases pin the preferred perl watchdog under a PATH that holds no
+# timeout variant. Piped stdin exercises every mechanism, with a passthrough
+# timeout stub when the external executable is absent; deadline cases use real
+# watchdogs.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -52,6 +53,54 @@ wait_for_file() {  # <path>
     i=$((i + 1))
     [ "$i" -lt 500 ] || fail "timed out waiting for $1"
     sleep 0.02
+  done
+}
+
+# Cover both inherited pipe input and a function inside a pipeline: stock
+# macOS Bash cannot enable job control in the latter, unlike newer Bash.
+test_run_timed_preserves_piped_stdin() {
+  local mechanism dir tool runner shape out
+  for mechanism in timeout gtimeout perl bash; do
+    dir="$TMP_ROOT/stdin-$mechanism"
+    mkdir -p "$dir/bin"
+    for tool in bash cat mktemp rm sleep; do
+      ln -s "$(command -v "$tool")" "$dir/bin/$tool"
+    done
+    case "$mechanism" in
+      timeout|gtimeout)
+        runner=$(type -P "$mechanism" 2>/dev/null || true)
+        if [ -n "$runner" ]; then
+          ln -s "$runner" "$dir/bin/$mechanism"
+        else
+          printf '#!/bin/sh\nshift 3\nexec "$@"\n' > "$dir/bin/$mechanism"
+          chmod +x "$dir/bin/$mechanism"
+        fi
+        ;;
+      perl)
+        if ! command -v perl >/dev/null 2>&1; then
+          pass 'fm_run_timed piped stdin (skipped: no perl on this host)'
+          continue
+        fi
+        ln -s "$(command -v perl)" "$dir/bin/perl"
+        ;;
+    esac
+    printf 'hello\nsecond line\twith spaces\r\n\000last bytes\n\n' > "$dir/expected"
+    for shape in inherited pipeline; do
+      out=$(cat "$dir/expected" | PATH="$dir/bin" bash -c '
+        unset FM_TIMEOUT_MECHANISM_OVERRIDE
+        . "$1/bin/fm-timeout-lib.sh"
+        read_timed() { fm_run_timed 5 cat; }
+        fm_timeout_mechanism
+        if [ "$3" = pipeline ]; then
+          cat "$2/expected" | read_timed > "$2/actual"
+        else
+          read_timed > "$2/actual"
+        fi
+      ' _ "$ROOT" "$dir" "$shape") || fail "$mechanism failed to read $shape pipe stdin"
+      [ "$out" = "$mechanism" ] || fail "stdin case selected $out instead of $mechanism"
+      cmp -s "$dir/expected" "$dir/actual" || fail "$mechanism lost or changed $shape pipe stdin"
+      pass "fm_run_timed preserves exact $shape pipe stdin through $mechanism"
+    done
   done
 }
 
@@ -394,10 +443,584 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+# An omp shell defines timeout as a builtin, and a function of that name is
+# ahead of both the builtin and the executable. command -v reports the name
+# and a bare call runs the shadow, which drops the command's stdout and
+# replaces its status. gtimeout is shadowed the same way, so a host whose
+# external runner is gtimeout is covered without installing one.
+# A non-interactive bash assigns /dev/null to an async command's stdin. The
+# external timeout and bash mechanisms background their command, so a pipe or
+# file must be restored or a remote steer payload arrives empty. A terminal is
+# not attached, and a closed stdin still runs the command.
+test_run_timed_delivers_piped_stdin_on_every_mechanism() {
+  local payload=piped-stdin-payload out rc mechanism timeout_path perl_bin dir
+  dir="$TMP_ROOT/stdin"
+  perl_bin="$dir/perl-bin"
+  mkdir -p "$perl_bin"
+  for tool in perl bash cat; do
+    ln -s "$(command -v "$tool")" "$perl_bin/$tool" || fail "could not link $tool for the stdin case"
+  done
+  printf '%s' "$payload" > "$dir/file"
+
+  rc=0
+  out=$(printf '%s' "$payload" | bash -c '. "$1"; fm_run_timed 10 cat' _ "$ROOT/bin/fm-timeout-lib.sh") || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_run_timed did not pass cat's status (rc=$rc out=$out)"
+  [ "$out" = "$payload" ] || fail "fm_run_timed lost piped stdin (out=$out)"
+
+  timeout_path=$(. "$ROOT/bin/fm-timeout-lib.sh"; fm_external_timeout_path || true)
+  if [ -n "$timeout_path" ]; then
+    rc=0
+    out=$(printf '%s' "$payload" | bash -c '
+      . "$1"
+      fm_run_external_timeout "$2" 10 cat
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path") || rc=$?
+    [ "$rc" -eq 0 ] || fail "external timeout did not pass cat's status (rc=$rc out=$out)"
+    [ "$out" = "$payload" ] || fail "external timeout lost piped stdin (out=$out)"
+
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      fm_run_external_timeout "$2" 10 cat
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path" < "$dir/file") || rc=$?
+    [ "$rc" -eq 0 ] || fail "external timeout did not pass a file stdin status (rc=$rc out=$out)"
+    [ "$out" = "$payload" ] || fail "external timeout lost file stdin (out=$out)"
+
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      fm_run_external_timeout "$2" 5 bash -c "printf ok"
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path" <&-) || rc=$?
+    [ "$rc" -eq 0 ] || fail "external timeout failed with closed stdin (rc=$rc out=$out)"
+    [ "$out" = ok ] || fail "external timeout did not run with closed stdin (out=$out)"
+  fi
+
+  mechanism=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = bash ] || fail "bash override selected $mechanism"
+  rc=0
+  out=$(printf '%s' "$payload" | FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+    . "$1"
+    fm_run_timed 10 bash -c "cat; exit 9"
+  ' _ "$ROOT/bin/fm-timeout-lib.sh") || rc=$?
+  [ "$rc" -eq 9 ] || fail "bash timeout lost the command status after reading stdin (rc=$rc out=$out)"
+  [ "$out" = "$payload" ] || fail "bash timeout lost piped stdin (out=$out)"
+
+  rc=0
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+    . "$1"
+    fm_run_timed 5 bash -c "printf ok"
+  ' _ "$ROOT/bin/fm-timeout-lib.sh" <&-) || rc=$?
+  [ "$rc" -eq 0 ] || fail "bash timeout failed with closed stdin (rc=$rc out=$out)"
+  [ "$out" = ok ] || fail "bash timeout did not run with closed stdin (out=$out)"
+
+  mechanism=$(PATH="$perl_bin" bash -c '. "$1"; fm_timeout_mechanism' _ "$ROOT/bin/fm-timeout-lib.sh")
+  [ "$mechanism" = perl ] || fail "a PATH without timeout selected $mechanism"
+  rc=0
+  out=$(printf '%s' "$payload" | PATH="$perl_bin" bash -c '
+    . "$1"
+    fm_run_timed 10 cat
+  ' _ "$ROOT/bin/fm-timeout-lib.sh") || rc=$?
+  [ "$rc" -eq 0 ] || fail "perl timeout did not pass cat's status (rc=$rc out=$out)"
+  [ "$out" = "$payload" ] || fail "perl timeout lost piped stdin (out=$out)"
+
+  if ( : </dev/tty ) 2>/dev/null; then
+    rc=0
+    out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c '
+      . "$1"
+      fm_run_timed 5 bash -c "if [ -t 0 ]; then echo tty; else echo notty; fi"
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" </dev/tty) || rc=$?
+    [ "$rc" -eq 0 ] || fail "bash timeout failed with a terminal stdin (rc=$rc out=$out)"
+    [ "$out" = notty ] || fail "bash timeout attached a terminal stdin (out=$out)"
+    if [ -n "$timeout_path" ]; then
+      rc=0
+      out=$(bash -c '
+        . "$1"
+        fm_run_external_timeout "$2" 5 bash -c "if [ -t 0 ]; then echo tty; else echo notty; fi"
+      ' _ "$ROOT/bin/fm-timeout-lib.sh" "$timeout_path" </dev/tty) || rc=$?
+      [ "$rc" -eq 0 ] || fail "external timeout failed with a terminal stdin (rc=$rc out=$out)"
+      [ "$out" = notty ] || fail "external timeout attached a terminal stdin (out=$out)"
+    fi
+  fi
+
+  # The runner and the fd 3 write share one shell, so a mechanism that leaves
+  # the caller's fd 3 pointing at its stdin dup fails the write.
+  local fd3_mechanisms=bash
+  [ -z "$timeout_path" ] || fd3_mechanisms="external bash"
+  for mechanism in $fd3_mechanisms; do
+    rm -f "$dir/fd3" "$dir/out"
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      exec 3>"$2"
+      if [ "$5" = external ]; then
+        fm_run_external_timeout "$6" 10 cat < "$3" > "$4"
+      else
+        FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 10 cat < "$3" > "$4"
+      fi
+      echo still >&3
+    ' _ "$ROOT/bin/fm-timeout-lib.sh" "$dir/fd3" "$dir/file" "$dir/out" "$mechanism" "$timeout_path" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "caller fd 3 was not usable after the $mechanism mechanism (rc=$rc out=$out)"
+    [ "$(cat "$dir/fd3")" = still ] || fail "the $mechanism mechanism disturbed the caller's fd 3"
+    [ "$(cat "$dir/out")" = "$payload" ] || fail "the $mechanism fd 3 case lost file stdin"
+  done
+
+  pass "fm_run_timed delivers piped stdin through every available mechanism"
+}
+
+test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout() {
+  local out rc=0
+  # The functions live in this subshell so they cannot leak into later cases.
+  out=$(
+    unset FM_TIMEOUT_MECHANISM_OVERRIDE
+    # shellcheck disable=SC2329 # Steal a bare timeout invocation; the runner must not call it.
+    timeout() { echo shadowed-timeout; return 0; }
+    # shellcheck disable=SC2329 # Steal a bare gtimeout invocation; the runner must not call it.
+    gtimeout() { echo shadowed-gtimeout; return 0; }
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    fm_run_timed 5 bash -c 'echo hello-stdout; exit 7'
+  ) || rc=$?
+  [ "$rc" -eq 7 ] || fail "a function shadowing timeout changed the command status (rc=$rc out=$out)"
+  [ "$out" = hello-stdout ] || fail "a function shadowing timeout changed the command stdout (rc=$rc out=$out)"
+  pass "fm_run_timed keeps stdout and nonzero status when a function shadows timeout"
+}
+
+test_run_timed_perl_interrupt_cleanup() {
+  local signal target disposition
+  for signal in INT HUP TERM timeout; do
+    for target in caller group; do
+      [ "$signal:$target" != timeout:group ] || continue
+      for disposition in default exit return ignore substitution-default substitution-exit substitution-return substitution-ignore substitution-partial; do
+        [ "$signal" != timeout ] || [ "$disposition" = default ] || [ "$disposition" = substitution-default ] || continue
+        PATH=$PERL_ONLY perl -MPOSIX=setpgid,WNOHANG -MTime::HiRes=time,sleep -MIO::Select -e '
+          my ($root, $dir, $signal, $target, $disposition) = @ARGV;
+          mkdir $dir or die "mkdir $dir: $!";
+          pipe(my $output, my $writer) or die "pipe: $!";
+          my $caller = fork;
+          die "fork: $!" unless defined $caller;
+          if (!$caller) {
+            close $output;
+            setpgid(0, 0) == 0 or die "setpgid: $!";
+            $SIG{$_} = "DEFAULT" for qw(INT HUP TERM);
+            open STDOUT, ">&", $writer or die "stdout: $!";
+            close $writer;
+            exec "/bin/bash", "-c", q{
+              . "$1/bin/fm-timeout-lib.sh"
+              run_fixture() {
+                case ${4#substitution-} in
+                  exit|return)
+                    handler_exit=""
+                    [ "${4#substitution-}" != exit ] || handler_exit="; exit 61"
+                    for caught in INT HUP TERM; do
+                      trap "printf \"handled $caught\\n\"$handler_exit" "$caught"
+                    done
+                    ;;
+                  ignore) trap "" INT HUP TERM ;;
+                  partial) trap "printf \"handled TERM\\n\"" TERM ;;
+                esac
+                printf "%s\n" "$(exec perl -e '\''print getppid()'\'')" > "$2/owner"
+                fm_run_timed "$3" perl -e '\''
+                  my $dir = shift;
+                  $SIG{$_} = "IGNORE" for qw(INT HUP TERM);
+                  my $child = fork;
+                  die "fork: $!" unless defined $child;
+                  if (!$child) {
+                    open my $f, ">", "$dir/descendant" or die $!;
+                    print $f "$$\n";
+                    close $f;
+                    sleep 300;
+                    exit;
+                  }
+                  open my $f, ">", "$dir/command" or die $!;
+                  print $f "$$\n";
+                  close $f;
+                  waitpid $child, 0;
+                '\'' "$2"
+                rc=$?
+                printf "continued %s\n" "$rc"
+                exit "$rc"
+              }
+              case $4 in
+                substitution-*)
+                  for caught in INT HUP TERM; do
+                    trap "printf \"parent $caught\\n\"" "$caught"
+                  done
+                  out=$(run_fixture "$@")
+                  rc=$?
+                  printf "%s" "$out" > "$2/captured"
+                  exit "$rc"
+                  ;;
+                *) run_fixture "$@" ;;
+              esac
+          }, "_", $root, $dir, ($signal eq "timeout" ? 1 : 30), $disposition;
+          die "exec: $!";
+        }
+        close $writer;
+        setpgid($caller, $caller);
+        my ($command, $descendant, $owner, $status, $eof, $error);
+        my $captured = "";
+        eval {
+          my $ready_by = time + 10;
+          for my $entry ([command => \$command], [descendant => \$descendant], [owner => \$owner]) {
+            my ($name, $pid) = @$entry;
+            until (-s "$dir/$name") {
+              die "fixture not ready" if time >= $ready_by;
+              sleep 0.02;
+            }
+            open my $f, "<", "$dir/$name" or die $!;
+            $$pid = <$f>;
+            chomp $$pid;
+            die "invalid fixture pid" unless $$pid =~ /^\d+$/ && $$pid > 1;
+          }
+          if ($signal ne "timeout") {
+            kill $signal, ($target eq "group" ? -$caller : $owner) or die "signal: $!";
+          }
+          my $end = time + 5;
+          my $select = IO::Select->new($output);
+          until (defined $status && $eof) {
+            if (!defined $status && waitpid($caller, WNOHANG) == $caller) { $status = $? }
+            if (!$eof && $select->can_read(0.02)) {
+              my $n = sysread $output, my $buf, 4096;
+              die "read: $!" unless defined $n;
+              $captured .= $buf;
+              $eof = 1 if !$n;
+            }
+            die "caller or captured stdout exceeded interrupt cleanup bound" if time >= $end;
+          }
+          my %number = (HUP => 1, INT => 2, TERM => 15);
+          my $rc = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+          my $substitution = $disposition =~ s/^substitution-//;
+          $disposition = $signal eq "TERM" ? "return" : "default" if $disposition eq "partial";
+          my $expected = $signal eq "timeout" ? 124 : 128 + $number{$signal};
+          $expected = 61 if $disposition eq "exit";
+          die "incorrect status $rc" unless $rc == $expected;
+          my $expected_output = $signal eq "timeout" || $disposition eq "ignore"
+            ? "continued $expected\n" : $disposition eq "exit" ? "handled $signal\n"
+            : $disposition eq "return" ? "handled $signal\ncontinued $expected\n" : "";
+          if ($substitution) {
+            open my $f, "<", "$dir/captured" or die "captured stdout missing: $!";
+            local $/;
+            $captured = <$f> // "";
+            $expected_output =~ s/\n+\z//;
+          }
+          die "incorrect caller behavior: $captured" unless $captured eq $expected_output;
+          # Allow the host init to reap orphaned descendants after KILL.
+          while (kill(0, $command) || kill(0, $descendant) || kill(0, -$command)) {
+            die "owned command or group survived" if time >= $end;
+            sleep 0.02;
+          }
+        };
+        $error = $@;
+        # These groups were created solely by this fixture, never the test runner.
+        kill "KILL", -$command if $command;
+        kill "KILL", -$caller;
+        waitpid $caller, 0 unless defined $status;
+        die "$signal to $target with $disposition disposition: $error" if $error;
+      ' "$ROOT" "$TMP_ROOT/interrupt-$signal-$target-$disposition" "$signal" "$target" "$disposition" \
+        || fail "fm_run_timed perl cleanup for $signal to $target with $disposition disposition"
+      done
+    done
+  done
+  pass "fm_run_timed perl reaps owned groups and preserves caller signal dispositions on INT/HUP/TERM and timeout"
+}
+
+test_run_timed_perl_startup_interrupt_cleanup() {
+  local startup_bin real_perl signal target monitor
+  startup_bin="$TMP_ROOT/perl-startup-bin"
+  real_perl=$(command -v perl)
+  mkdir -p "$startup_bin"
+  ln -s "$(command -v bash)" "$startup_bin/bash"
+  printf '#!%s\n' "$real_perl" > "$startup_bin/perl"
+  cat >> "$startup_bin/perl" <<'PERL'
+use strict;
+use warnings;
+use Time::HiRes qw(sleep);
+my $dir = $ENV{FM_TIMEOUT_STARTUP_DIR};
+if (!-e "$dir/runner") {
+  open my $f, ">", "$dir/runner" or die $!;
+  print $f "$$\n";
+  close $f;
+  sleep 300;
+}
+exec $ENV{FM_TIMEOUT_STARTUP_PERL}, @ARGV;
+die "exec: $!";
+PERL
+  chmod +x "$startup_bin/perl"
+  for monitor in off on; do
+    for signal in INT HUP TERM; do
+      for target in caller group; do
+        "$real_perl" -MPOSIX=setpgid,WNOHANG -MTime::HiRes=time,sleep -MIO::Select -e '
+          my ($root, $bin, $dir, $signal, $target, $monitor, $real_perl) = @ARGV;
+          mkdir $dir or die "mkdir: $!";
+          pipe(my $output, my $writer) or die "pipe: $!";
+          my $caller = fork;
+          die "fork: $!" unless defined $caller;
+          if (!$caller) {
+            close $output;
+            setpgid(0, 0) == 0 or die "setpgid: $!";
+            $SIG{$_} = "DEFAULT" for qw(INT HUP TERM);
+            open STDOUT, ">&", $writer or die "stdout: $!";
+            close $writer;
+            @ENV{qw(PATH FM_TIMEOUT_STARTUP_DIR FM_TIMEOUT_STARTUP_PERL)} = ($bin, $dir, $real_perl);
+            exec "/bin/bash", "-c", q{
+              . "$1/bin/fm-timeout-lib.sh"
+              [ "$4" != on ] || set -m
+              before=$-
+              trap "printf \"handled $3\\n\"" "$3"
+              fm_run_timed 30 bash -c '\''printf launched > "$1"'\'' _ "$2/command"
+              rc=$?
+              [ "$-" = "$before" ] || exit 98
+              exit "$rc"
+            }, "_", $root, $dir, $signal, $monitor;
+            die "exec: $!";
+          }
+          close $writer;
+          setpgid($caller, $caller);
+          my ($runner, $status, $eof);
+          my $captured = "";
+          eval {
+            my $ready_by = time + 5;
+            until (-s "$dir/runner") {
+              die "runner not ready" if time >= $ready_by;
+              sleep 0.01;
+            }
+            open my $f, "<", "$dir/runner" or die $!;
+            $runner = <$f>;
+            chomp $runner;
+            die "invalid runner pid" unless $runner =~ /^\d+$/ && $runner > 1;
+            kill $signal, ($target eq "group" ? -$caller : $caller) or die "signal: $!";
+            my $end = time + 5;
+            my $select = IO::Select->new($output);
+            until (defined $status && $eof) {
+              if (!defined $status && waitpid($caller, WNOHANG) == $caller) { $status = $? }
+              if (!$eof && $select->can_read(0.01)) {
+                my $n = sysread $output, my $buf, 4096;
+                die "read: $!" unless defined $n;
+                $captured .= $buf;
+                $eof = 1 if !$n;
+              }
+              die "startup interrupt exceeded cleanup bound" if time >= $end;
+            }
+            die "command launched despite startup interrupt" if -e "$dir/command";
+            my %number = (HUP => 1, INT => 2, TERM => 15);
+            my $rc = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+            die "incorrect status $rc" unless $rc == 128 + $number{$signal};
+            die "caller handler not preserved: $captured" unless $captured eq "handled $signal\n";
+            die "runner survived startup interrupt" if kill(0, $runner) || kill(0, -$runner);
+          };
+          my $error = $@;
+          if ($runner) {
+            kill "KILL", -$runner;
+            kill "KILL", $runner;
+          }
+          kill "KILL", -$caller;
+          waitpid $caller, 0 unless defined $status;
+          die "$signal to $target with monitor $monitor: $error" if $error;
+        ' "$ROOT" "$startup_bin" "$TMP_ROOT/startup-$monitor-$signal-$target" "$signal" "$target" "$monitor" "$real_perl" \
+          || fail "fm_run_timed perl startup $signal to $target with monitor $monitor"
+      done
+    done
+  done
+  pass "fm_run_timed perl cancels before handler installation and preserves caller job control and signal handlers"
+}
+
+test_run_timed_perl_preserves_completion_and_caller_traps() {
+  local out rc status monitor
+  for monitor in off on; do
+    for status in 0 7 137 143; do
+      rc=0
+      out=$(PATH=$PERL_ONLY /bin/bash -c '
+        . "$1/bin/fm-timeout-lib.sh"
+        [ "$3" != on ] || set -m
+        before_options=$-
+        trap ": original INT" INT
+        trap ": original HUP" HUP
+        trap ": original TERM" TERM
+        before=$(trap -p INT HUP TERM)
+        fm_run_timed 5 bash -c '\''
+          read -r line
+          echo "$line"
+          case $1 in
+            137) kill -KILL $$ ;;
+            143) kill -TERM $$ ;;
+            *) exit "$1" ;;
+          esac
+        '\'' _ "$2"
+        rc=$?
+        [ "$-" = "$before_options" ] || exit 98
+        [ "$(trap -p INT HUP TERM)" = "$before" ] || exit 99
+        exit "$rc"
+      ' _ "$ROOT" "$status" "$monitor" <<< input 2>/dev/null) || rc=$?
+      [ "$rc" -eq "$status" ] || fail "Perl completion status $status became $rc"
+      [ "$out" = input ] || fail "Perl completion lost stdin or stdout: $out"
+    done
+  done
+  pass "fm_run_timed perl preserves stdin, output, completion statuses and caller traps"
+}
+
+run_timed_edge_fixture() {
+  local mode=$1 signal=$2 dir real_perl
+  dir="$TMP_ROOT/edge-$mode-$signal"
+  real_perl=$(command -v perl)
+  mkdir -p "$dir"
+  cat > "$dir/TimeoutClockFixture.pm" <<'PERL'
+package TimeoutClockFixture;
+use Time::HiRes ();
+my $dir = $ENV{FM_TIMEOUT_CLOCK_DIR};
+my $mode = $ENV{FM_TIMEOUT_CLOCK_MODE};
+my $monotonic = \&Time::HiRes::clock_gettime;
+if (!-e "$dir/runner") {
+  open my $f, ">", "$dir/runner" or die $!;
+  print $f "$$\n";
+  close $f;
+}
+if ($mode eq "jump") {
+  my $reads = 0;
+  no warnings 'redefine';
+  *Time::HiRes::time = sub { return $reads++ ? -1e12 : 1e12 };
+  *main::time = \&Time::HiRes::time;
+}
+my $held = 0;
+*CORE::GLOBAL::kill = sub {
+  my ($signal, @pids) = @_;
+  my $sent = CORE::kill($signal, @pids);
+  if ($mode eq "grace" && $signal eq "TERM" && !$held) {
+    $held = 1;
+    my $received = 0;
+    for my $name (qw(INT HUP TERM)) {
+      my $handler = $SIG{$name};
+      die "fixture requires an installed signal handler" unless ref($handler) eq "CODE";
+      $SIG{$name} = sub { $handler->(@_); $received = 1 };
+    }
+    open my $f, ">", "$dir/grace" or die $!;
+    print $f "TERM delivered\n";
+    close $f;
+    my $end = $monotonic->(Time::HiRes::CLOCK_MONOTONIC()) + 10;
+    until ($received) {
+      die "fixture received no interrupt" if $monotonic->(Time::HiRes::CLOCK_MONOTONIC()) >= $end;
+      select undef, undef, undef, 0.01;
+    }
+  }
+  return $sent;
+};
+1;
+PERL
+  "$real_perl" -MPOSIX=setpgid,WNOHANG -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC,sleep -MIO::Select -e '
+    my ($root, $path, $dir, $mode, $signal) = @ARGV;
+    pipe(my $output, my $writer) or die "pipe: $!";
+    my $caller = fork;
+    die "fork: $!" unless defined $caller;
+    if (!$caller) {
+      close $output;
+      setpgid(0, 0) == 0 or die "setpgid: $!";
+      $SIG{$_} = "DEFAULT" for qw(INT HUP TERM);
+      open STDOUT, ">&", $writer or die "stdout: $!";
+      close $writer;
+      open STDERR, ">", "$dir/stderr" or die $!;
+      @ENV{qw(PATH PERL5LIB PERL5OPT FM_TIMEOUT_CLOCK_DIR FM_TIMEOUT_CLOCK_MODE)}
+        = ($path, $dir, "-MTimeoutClockFixture", $dir, $mode);
+      exec "/bin/bash", "-c", q{
+        unset FM_TIMEOUT_MECHANISM_OVERRIDE
+        . "$1/bin/fm-timeout-lib.sh"
+        trap ":" INT HUP TERM
+        rc=0
+        fm_run_timed 1 bash -c '\''
+          trap "" INT HUP TERM
+          printf "%s\n" "$$" > "$1/command"
+          exec sleep 300
+        '\'' _ "$2" || rc=$?
+        printf "result %s\n" "$rc"
+        exit "$rc"
+      }, "_", $root, $dir;
+      die "exec: $!";
+    }
+    close $writer;
+    setpgid($caller, $caller);
+    my ($runner, $command, $status, $eof);
+    my $captured = "";
+    sub read_pid {
+      my $path = shift;
+      open my $f, "<", $path or die $!;
+      my $pid = <$f>;
+      chomp $pid;
+      die "invalid fixture pid" unless $pid =~ /^\d+$/ && $pid > 1;
+      return $pid;
+    }
+    eval {
+      my $ready_by = clock_gettime(CLOCK_MONOTONIC) + 10;
+      for my $entry ([runner => \$runner], [command => \$command]) {
+        my ($name, $pid) = @$entry;
+        until (-s "$dir/$name") {
+          die "fixture not ready: $name" if clock_gettime(CLOCK_MONOTONIC) >= $ready_by;
+          sleep 0.01;
+        }
+        $$pid = read_pid("$dir/$name");
+      }
+      if ($mode eq "grace") {
+        until (-s "$dir/grace") {
+          die "timeout cleanup did not start" if clock_gettime(CLOCK_MONOTONIC) >= $ready_by;
+          sleep 0.01;
+        }
+        kill $signal, $caller or die "signal: $!";
+      }
+      my $end = clock_gettime(CLOCK_MONOTONIC) + 5;
+      my $select = IO::Select->new($output);
+      until (defined $status && $eof) {
+        if (!defined $status && waitpid($caller, WNOHANG) == $caller) { $status = $? }
+        if (!$eof && $select->can_read(0.01)) {
+          my $n = sysread $output, my $buf, 4096;
+          die "read: $!" unless defined $n;
+          $captured .= $buf;
+          $eof = 1 if !$n;
+        }
+        die "caller or stdout exceeded the bound" if clock_gettime(CLOCK_MONOTONIC) >= $end;
+      }
+      my %number = (HUP => 1, INT => 2, TERM => 15);
+      my $expected = $mode eq "jump" ? 124 : 128 + $number{$signal};
+      my $rc = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+      die "expected status $expected, got $rc" unless $rc == $expected;
+      die "incorrect caller output: $captured" unless $captured eq "result $expected\n";
+      while (kill(0, $command) || kill(0, -$command) || kill(0, $runner)) {
+        die "owned process or group survived" if clock_gettime(CLOCK_MONOTONIC) >= $end;
+        sleep 0.01;
+      }
+    };
+    my $error = $@;
+    if ($error) {
+      $command ||= eval { read_pid("$dir/command") } || 0;
+      $runner ||= eval { read_pid("$dir/runner") } || 0;
+      kill "KILL", -$command if $command;
+      kill "KILL", -$runner if $runner;
+      kill "KILL", -$caller;
+      waitpid $caller, 0 unless defined $status;
+      die "$mode/$signal: $error";
+    }
+  ' "$ROOT" "$PERL_ONLY" "$dir" "$mode" "$signal"
+}
+
+test_run_timed_perl_interrupt_wins_during_timeout_cleanup() {
+  local signal
+  for signal in INT HUP TERM; do
+    run_timed_edge_fixture grace "$signal" || fail "Perl $signal during timeout cleanup lost its status"
+  done
+  pass "fm_run_timed perl preserves interruption status during timeout cleanup"
+}
+
+test_run_timed_perl_timeout_ignores_wall_clock_changes() {
+  run_timed_edge_fixture jump TERM || fail "Perl timeout moved with a wall-clock jump"
+  pass "fm_run_timed perl bounds its deadline and cleanup despite wall-clock changes"
+}
+
+test_run_timed_perl_interrupt_wins_during_timeout_cleanup
+test_run_timed_perl_timeout_ignores_wall_clock_changes
+test_run_timed_perl_interrupt_cleanup
+test_run_timed_perl_startup_interrupt_cleanup
+test_run_timed_perl_preserves_completion_and_caller_traps
+test_run_timed_preserves_piped_stdin
 test_passes_the_command_status_and_output_through
 test_system_bash_preserves_completion_and_signal_statuses
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
+test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout
+test_run_timed_delivers_piped_stdin_on_every_mechanism
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell

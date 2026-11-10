@@ -11,6 +11,9 @@
 # Claude session id below matches the id recorded beside a live lock. Neither
 # signal ever fails open: no id, no sidecar, an untrusted id, or a different
 # recorded id leaves the ancestry verdict exactly as it was.
+# A second decision is owned here too: fm_session_lock_pid_blocks_reclaim
+# answers whether a recorded owner may be reclaimed, so recovery callers
+# delegate that question instead of re-deriving liveness from the fields.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -24,16 +27,17 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
-# Known harness command names; extend when a new adapter is verified. omp is
-# anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# Known harness command names; extend when a new adapter is verified. omp and
+# agy are anchored exactly like pi: their process names are the bare words `omp`
+# (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
+# comp.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -53,6 +57,41 @@ fm_harness_path_name() {  # <path>
     esac
   done
   return 1
+}
+
+# Portable single-pid process introspection.
+#
+# procps/BSD `ps -o comm=/args=/ppid=` custom-format columns are the primary
+# path and cover Linux and macOS. Cygwin's ps, which Git for Windows ships, has
+# no -o option at all and exits with "unknown option -- o", so the primary path
+# fails outright there and the ancestry walk aborts on its first hop. The
+# fallbacks parse Cygwin's fixed columns instead:
+#   ps -p PID     PID PPID PGID WINPID TTY UID STIME COMMAND   (executable path)
+#   ps -f -p PID  UID PID PPID TTY STIME COMMAND               (full argv)
+# A genuinely dead or inaccessible pid still fails both paths, so this widens
+# nothing: it only stops a supported platform from failing on ps syntax alone.
+fm_ps_comm() {  # <pid> -> executable name or path
+  local pid=$1 out
+  out=$(ps -o comm= -p "$pid" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(ps -p "$pid" 2>/dev/null | awk 'NR == 2 { for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+fm_ps_args() {  # <pid> -> full command line
+  local pid=$1 out
+  out=$(ps -o args= -p "$pid" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR == 2 { for (i = 6; i <= NF; i++) printf "%s%s", (i > 6 ? " " : ""), $i; exit }')
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+fm_ps_ppid() {  # <pid> -> parent pid
+  local pid=$1 out
+  out=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR == 2 { print $3; exit }')
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
 }
 
 # True when the process described by command name $1 and full argument string $2
@@ -98,6 +137,426 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# --- Windows process-boundary bridge -----------------------------------------
+#
+# On Cygwin (Git for Windows) the harness is a native Windows process, and the
+# parent link from a shell it spawns does NOT cross the Cygwin boundary: Cygwin
+# reports that shell's PPID as 1. So no amount of walking ppid can ever reach the
+# harness, and the contiguous-run model below cannot be satisfied by the Cygwin
+# process table alone. The Windows process table does hold the real parent chain,
+# and `ps -W` lists Windows processes keyed by WINPID, so identity is recovered
+# from there instead.
+#
+# Windows pids live in a DIFFERENT namespace from Cygwin pids: `kill -0` on a
+# Windows pid reports "No such process" even while that process is running, and a
+# Windows pid can collide with an unrelated live Cygwin pid. A bare number is
+# therefore ambiguous and unsafe to store. Every pid resolved through this bridge
+# is tagged, which makes the namespace explicit for readers and makes the value
+# non-numeric so that any consumer treating it as a Cygwin pid - including a
+# future `kill` - refuses it instead of acting on the wrong process.
+FM_WIN_PID_PREFIX='win:'
+
+# True on a Cygwin-family userspace, where the boundary above applies.
+fm_win_boundary_applies() {
+  case "$(uname -s 2>/dev/null)" in
+    CYGWIN*|MINGW*|MSYS*) return 0 ;;
+  esac
+  return 1
+}
+
+# Strip the namespace tag from $1, or return 1 when $1 is not a tagged pid.
+# The tag is only meaningful where the boundary applies; anywhere else it is
+# rejected exactly like any other non-numeric lock value.
+fm_win_untag_pid() {  # <pid>
+  local winpid
+  case "$1" in
+    "$FM_WIN_PID_PREFIX"*) winpid=${1#"$FM_WIN_PID_PREFIX"} ;;
+    *) return 1 ;;
+  esac
+  case "$winpid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_win_boundary_applies || return 1
+  printf '%s' "$winpid"
+}
+
+# True when $1 is a well-formed session-lock identity: a local pid, or a tagged
+# Windows pid. Every reader of state/.lock decides "is this value usable at all"
+# through this one predicate, because the readers are spread across several
+# scripts and a private numeric test in any one of them silently rejects a valid
+# holder - which reads as "startup never completed" and repeats the whole
+# sequence on every clear or compact.
+fm_session_pid_valid() {  # <value>
+  fm_win_untag_pid "$1" >/dev/null && return 0
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Windows command paths are backslash-separated and .exe-suffixed, neither of
+# which the path-component matcher above understands. Normalizing here is what
+# keeps that matcher's whole-component safety intact: without it the harness
+# regex would fall back to matching the entire unsplit path, so an unrelated
+# C:\claude-notes\tool.exe would read as a harness process.
+fm_win_normalize_command() {  # <windows path>
+  local path=${1//\\//}
+  printf '%s' "${path%.exe}"
+}
+
+# Print the normalized executable path of live Windows process $1, or return 1.
+# Presence in `ps -W` is also this bridge's liveness test, because kill -0 cannot
+# answer that question across the namespace boundary.
+fm_win_command() {  # <winpid>
+  local winpid=$1 table out
+  case "$winpid" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  # Return 1 only when a readable table proves the pid absent, and 2 when the
+  # table itself could not be read, so a caller can tell gone from unknown.
+  table=$(ps -W 2>/dev/null) || return 2
+  case "$table" in
+    *WINPID*) ;;
+    *) return 2 ;;
+  esac
+  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '$4 == w { for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')
+  [ -n "$out" ] || return 1
+  fm_win_normalize_command "$out"
+}
+
+# Environment variables through which a verified harness publishes the pid of
+# its own session process. Extend only with a variable confirmed to name the
+# session-long harness process on Windows, because the identity check below is
+# only as narrow as this table.
+#
+# Walking the real Windows parent chain is deliberately NOT the fallback here.
+# Two properties of this platform make it unusable for identity:
+#   - MSYS emulates exec by spawning a fresh Windows process and exiting the old
+#     one, so intermediate shells vanish constantly and a child's recorded parent
+#     is routinely a pid that no longer exists. The chain simply breaks.
+#   - Windows never reparents an orphan, so that dangling parent id stays on the
+#     child and Windows is free to reissue it. Following it can therefore land on
+#     an unrelated live process and bind a home's session lock to it, which is
+#     the wrong-process-binding failure this file exists to prevent.
+# A harness that publishes nothing is reported as unresolved instead, which
+# leaves the session read-only exactly as before - the safe direction.
+#
+# CLAUDE_PID is inherited by every process a Claude pane starts, so it is taken
+# only together with the CLAUDE_CODE_SESSION_ID Claude publishes beside it. That
+# id is then trusted and recorded beside the lock, and a /clear re-key under the
+# same pid refreshes it as on POSIX. A non-Claude primary hand-started from a
+# Claude pane inherits both values and still resolves as that Claude session; no
+# environment signal tells the two apart there.
+FM_WIN_HARNESS_PID_VARS=(CLAUDE_PID)
+
+# Print this session's harness as one tagged Windows pid, or return 1.
+#
+# The published pid is a claim, not evidence, so it is never trusted on its own:
+# it is confirmed against the Windows process table, and accepted only when that
+# pid is still live AND its executable independently identifies a verified
+# harness by the same rules every other platform uses. A value that is absent,
+# malformed, stale, or naming a non-harness process is discarded rather than
+# used, so a wrong or recycled pid fails closed instead of binding the lock.
+fm_win_harness_ancestry_pids() {
+  local var winpid comm
+  for var in "${FM_WIN_HARNESS_PID_VARS[@]}"; do
+    winpid=${!var:-}
+    case "$winpid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$var" = CLAUDE_PID ]; then
+      case "${CLAUDE_CODE_SESSION_ID:-}" in ''|*$'\n'*|*$'\r'*) continue ;; esac
+    fi
+    comm=$(fm_win_command "$winpid") || continue
+    fm_harness_process_matches "$comm" "$comm" || continue
+    printf '%s%s\n' "$FM_WIN_PID_PREFIX" "$winpid"
+    return 0
+  done
+  return 1
+}
+
+# --- one field reader, ps primary, ps-free route as fallback -----------------
+# Every identity read of a live process in THIS FILE (comm, args, ppid)
+# goes through fm_proc_info below, so the denied-ps fallback has exactly
+# one place to apply here. The verdict rules never change: the fallback
+# changes only which route the same kernel facts arrive by, and both
+# routes report the same fields - macOS identity comes from the argv
+# region because that is what `ps -o comm=` and `ps -o args=` report
+# there, and a route that read a different fact would let the two
+# routes hand one process two different verdicts.
+#
+# This guarantee is per-file on purpose. The sibling walkers in
+# bin/fm-harness.sh, bin/fm-backend.sh, bin/fm-sessionstart-nudge.sh,
+# and bin/fm-branch-outcome.sh own their own ancestry reads and still
+# require an executable ps; a denied-ps host stays degraded there
+# until they route through a shared provider (follow-up).
+
+# One stderr line per shell that runs identity reads when the denied-ps
+# route cannot answer. AGENTS.md session-start contract: a lock refusal
+# owes its exact diagnostic - but a 16-hop walk over a dead provider
+# must not print 48 lines, so the first cause wins and the rest stay
+# silent in that shell. The provider is read through a command
+# substitution, so a flag it sets dies with that subshell; fm_proc_info
+# spends this guard in the shell that owns the walk, which is the only
+# place it can persist. A walk that itself runs inside $(...) therefore
+# keeps a private guard, so one run whose reads span several subshells
+# can report the same cause once per such shell.
+FM_OS_PROC_DIAG_SHOWN=''
+fm_os_proc_diag_once() {  # <message>
+  if [ -z "$FM_OS_PROC_DIAG_SHOWN" ]; then
+    FM_OS_PROC_DIAG_SHOWN=1
+    printf 'fm-session-lock: %s\n' "$1" >&2
+  fi
+  return 0
+}
+
+# Parse one Linux "/proc/<pid>/stat" line ($1, format "<pid> (<comm>)
+# <state> <ppid> ...") plus its already-NUL-flattened cmdline ($2) into
+# "<ppid>TAB<comm>TAB<args>". Pure seam: a saved stat line drives it
+# identically on any host, which is why the parsing lives here.
+fm_linux_stat_triple() {  # <stat-line> <cmdline-args>
+  local line=$1 args=$2 rest comm ppid
+  # stat_fields, like the /proc/<pid>/stat readers in
+  # bin/fm-remote-job-lib.sh and bin/fm-teardown.sh: ShellCheck follows
+  # sources, and bin/backends/rex.sh assigns a string to `fields`, so an
+  # array of that name here trips SC2178/SC2128 over there.
+  case $line in
+    *"("*") "*) ;;
+    *) return 1 ;;
+  esac
+  # comm may contain spaces and parentheses, so cut the rest off the
+  # LAST ") ", not the first. TAB/CR/LF are the record's delimiters,
+  # so flatten them out of the field the kernel lets name anything.
+  # Only C0 controls and DEL become '?': procps preserves valid UTF-8,
+  # and a live owner installed under a non-ASCII path (for example
+  # /home/José/.local/bin/agent) must keep the bytes ps reports, or its
+  # identity stops matching and the lock becomes reclaimable.
+  comm=${line#*(}
+  comm=${comm%*) *}
+  comm=$(printf '%s' "$comm" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?')
+  rest=${line##*") "}
+  local -a stat_fields
+  IFS=' ' read -r -a stat_fields <<< "$rest"
+  ppid=${stat_fields[1]:-}
+  case $ppid in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '%s\t%s\t%s\n' "$ppid" "$comm" "$args"
+}
+
+# OS provider for one pid: prints "<ppid>TAB<comm>TAB<args>", or returns 1.
+# Called only when the ps binary itself cannot execute. Tests override this
+# whole function to drive a deterministic table.
+fm_os_proc_triple() {  # <pid>
+  local proc_root stat_line args element count rc=0
+  local -a argv
+  case "$(uname -s 2>/dev/null)" in
+    Linux)
+      # The repo's other /proc readers (bin/fm-cursor-lib.sh,
+      # bin/fm-wake-lib.sh, bin/fm-teardown.sh) all take
+      # FM_PROC_ROOT_OVERRIDE so a fixture tree can drive them; this
+      # reader honors the same hook for the same reason.
+      proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+      [ -r "$proc_root/$1/stat" ] || return 1
+      stat_line=$(cat "$proc_root/$1/stat" 2>/dev/null) || return 1
+      [ -r "$proc_root/$1/cmdline" ] || return 1
+      args=$(
+        argv=()
+        count=0
+        while IFS= read -r -d '' element; do
+          argv[count]=$element
+          count=$((count + 1))
+        done < "$proc_root/$1/cmdline" || exit 1
+        while [ "$count" -gt 0 ] && [ -z "${argv[$((count - 1))]}" ]; do
+          unset 'argv[count - 1]'
+          count=$((count - 1))
+        done
+        if [ "$count" -gt 0 ]; then
+          IFS=' '
+          # Same byte rule as fm_linux_stat_triple: flatten only the
+          # record's control delimiters, keep the bytes ps preserves.
+          printf '%s' "${argv[*]}" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?'
+        fi
+      ) || return 1
+      fm_linux_stat_triple "$stat_line" "$args"
+      ;;
+    Darwin)
+      # bin/fm-procinfo.py reads ppid through a self-verified
+      # KERN_PROC_PID chain and identity (comm/args) through the
+      # KERN_PROCARGS2 argv region - the same region ps reports, which
+      # is what keeps the two routes one fact per field. python3 is an
+      # optional toolchain member (Herdr ordering already depends on
+      # it); without it the denied-ps route degrades to today's
+      # fail-closed refusal rather than to a guess.
+      if ! command -v python3 >/dev/null 2>&1; then
+        fm_os_proc_diag_once 'ps cannot execute and no python3 is available for the ps-free identity provider; identity reads fail closed'
+        return 1
+      fi
+      python3 "$(dirname -- "${BASH_SOURCE[0]}")/fm-procinfo.py" "$1" 2>/dev/null || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        fm_os_proc_diag_once "ps cannot execute and the ps-free identity provider exited $rc; identity reads fail closed. Reproduce with: python3 $(dirname -- "${BASH_SOURCE[0]}")/fm-procinfo.py $1"
+      fi
+      return "$rc"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Confirm once per process run that the ps BINARY cannot execute, the
+# only environment this fallback exists for. A lone call's 126/127 can
+# also come from a sandbox acting on that single call, and an actual
+# binary block refuses every call including `ps -V`; only the second
+# justifies routing identity off ps. The probe result is cached, so a
+# refused walk of 16 pids costs one probe. (Busybox-era ps -V failures
+# would read as "ps works" and keep the stop - the price of requiring
+# positive proof of the denial.)
+_fm_ps_exec_denied() {
+  local rc=0
+  if [ -n "${_FM_PS_EXEC_DENIED+x}" ]; then
+    if [ "$_FM_PS_EXEC_DENIED" = 1 ]; then
+      return 0
+    fi
+    return 1
+  fi
+  ps -V >/dev/null 2>&1 || rc=$?
+  case $rc in
+    126 | 127) _FM_PS_EXEC_DENIED=1 ;;
+    *) _FM_PS_EXEC_DENIED=0 ;;
+  esac
+  if [ "$_FM_PS_EXEC_DENIED" = 1 ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Read the identity fields of pid $1 into FM_PROC_COMM, FM_PROC_ARGS, and
+# FM_PROC_PPID.
+#
+# ps stays primary everywhere it runs: while it executes, its output is
+# used verbatim, so behavior is byte-identical to every session that ever
+# worked. Only a ps that cannot execute at all - bash exits 126 for a
+# refused exec, 127 for a missing binary - routes one read to the OS provider.
+# Status 1 is platform-specific: Linux/macOS mean ps ran and named nothing;
+# on Cygwin-family hosts it means ps refused the unsupported -o option and the
+# fixed-column readers below are used instead. This exists because an
+# EDR-style policy can deny the ps binary's exec itself (observed:
+# /bin/ps refused even for `ps -V`, while kill, head, sysctl, pgrep, and
+# lsof all ran) while every fact the identity walk needs remains readable
+# through /proc or the kernel syscalls.
+#
+# Returning 1 means "no route can read this pid", which stops a walk
+# exactly as a dead pid always has: nothing here ever fabricates a field.
+fm_proc_info() {  # <pid>
+  local pid=$1 rc=0 out comm args ppid
+  FM_PROC_COMM='' FM_PROC_ARGS='' FM_PROC_PPID=''
+  out=$(ps -o comm= -p "$pid" 2>/dev/null) || rc=$?
+  case $rc in
+    0) ;;
+    1)
+      # Linux/macOS: ps ran and named nothing. Cygwin-family: ps refused
+      # -o, so use its fixed-column readers only on that platform route.
+      fm_win_boundary_applies || return 1
+      comm=$(fm_ps_comm "$pid") || return 1
+      args=$(fm_ps_args "$pid") || return 1
+      ppid=$(fm_ps_ppid "$pid") || return 1
+      case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+      FM_PROC_COMM=$comm FM_PROC_ARGS=$args FM_PROC_PPID=$ppid
+      return 0
+      ;;
+    126 | 127)
+      # Confirmed, once per process: only a ps binary that cannot
+      # execute at all justifies the second provider.
+      _fm_ps_exec_denied || return 1
+      local triple f1 f2 f3 rest tab
+      tab=$'\t'
+      # Spend the diagnostic guard for this shell here, not in the
+      # command-substitution subshell that prints it: a cause line lives
+      # only on the provider's failure routes, so a failed read is exactly
+      # where that budget is used up in the shell the walk runs in.
+      triple=$(fm_os_proc_triple "$pid") || {
+        FM_OS_PROC_DIAG_SHOWN=1
+        return 1
+      }
+      # The provider record is one line with exactly three TAB-separated
+      # fields: <ppid> <comm> <args>. The field count is proved by
+      # rebuilding the record from the parsed fields and comparing it to
+      # the original, because a TAB is IFS whitespace: a record with a
+      # MISSING field would otherwise parse exactly like a record whose
+      # field is legitimately empty, and a truncated record would be
+      # half-parsed into a plausible but wrong identity.
+      #
+      # A comm or args field that is legitimately empty is a real answer
+      # and is reported as one. A live process whose comm was emptied, and
+      # a kernel thread with no cmdline, are both PRESENT processes; the
+      # routes must agree about that, because a present pid that reads as
+      # gone is a reclaimable lock.
+      case $triple in
+        *$'\n'*) return 1 ;;
+      esac
+      # The TAB is a literal, so it is matched through a quoted expansion
+      # rather than an unquoted one: an unquoted $tab inside ${...} is a
+      # pattern, and a TAB is a glob character that would match any
+      # character. The record is split on literal TABs, and the rebuild
+      # below compares literal strings.
+      f1=${triple%%"$tab"*}
+      rest=${triple#*"$tab"}
+      f2=${rest%%"$tab"*}
+      f3=${rest#*"$tab"}
+      case $f3 in
+        *"$tab"*) return 1 ;;
+      esac
+      if [ "$triple" = "$f1$tab$f2$tab$f3" ]; then
+        :
+      else
+        return 1
+      fi
+      case $f1 in
+        '' | *[!0-9]*) return 1 ;;
+      esac
+      FM_PROC_PPID=$f1 FM_PROC_COMM=$f2 FM_PROC_ARGS=$f3
+      return 0
+      ;;
+    *)
+      # 126/127 above are the statuses that prove "ps could not
+      # execute at all". Anything else, including signal-killed 137,
+      # means ps gave no answer, and callers read
+      # a non-zero exactly as "this pid cannot be verified".
+      return 1
+      ;;
+  esac
+  # ps ran and named nothing. That is a real answer about a real
+  # process - a live process whose comm was emptied is still a live
+  # process - so it must NOT read as "the pid is gone". The callers
+  # below each need this distinction: the ancestry walk stops either
+  # way, but fm_session_lock_inspect separates "gone" (stale) from
+  # "present but not classifiable" (unknown), and collapsing the two
+  # here would report a live, unreadable pid as reclaimable and let a
+  # fresh process take over a lock whose owner is still running.
+  #
+  # The empty comm is still reported, not invented: FM_PROC_COMM stays
+  # empty and the matcher below rejects it, exactly as it rejects a
+  # comm it does not recognise.
+  comm=$out
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  # The ppid is a walk input, not an identity field. The identity the
+  # matcher reads is comm and args, and both of those are fail-closed
+  # above; a ppid that cannot be read only ends the ancestry walk one
+  # hop early, which is the conservative direction - the walk finds no
+  # harness and the session refuses the lock rather than taking one it
+  # cannot prove.
+  #
+  # The base read the ppid the same tolerant way, and the repository's
+  # grok and kimi harness suites pin that: their stubbed ps answers
+  # comm= and args= and refuses every other question, so a ppid read
+  # that failed had to leave the identity intact.
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$ppid" in ''|*[!0-9]*) ppid='' ;; esac
+  FM_PROC_COMM=$comm FM_PROC_ARGS=$args FM_PROC_PPID=$ppid
+  return 0
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -117,11 +576,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    fm_proc_info "$pid" || break
+    if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -129,7 +587,7 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$FM_PROC_PPID
     # Examine the top of the chain before stopping. Inside a PID namespace the
     # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
     # very process this walk exists to find. A host's real pid 1 (init, systemd,
@@ -137,6 +595,14 @@ fm_harness_ancestry_pids() {
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
   done
+  # A harness living in the same process table is always preferred, so an
+  # ordinary POSIX ancestry keeps resolving to plain pids and nothing about the
+  # existing platforms changes. The Windows bridge is consulted only after that
+  # walk finds nothing, which on Cygwin is what the severed parent link
+  # guarantees it will do.
+  if [ "$printed" -eq 0 ] && fm_win_boundary_applies; then
+    fm_win_harness_ancestry_pids && return 0
+  fi
   [ "$printed" -eq 1 ]
 }
 
@@ -174,13 +640,121 @@ EOF
   return 1
 }
 
+# Classify session-lock pid $1, setting FM_SESSION_LOCK_PID_VERDICT to one of:
+#   readable   - the identity was read into FM_PROC_COMM and FM_PROC_ARGS, plus
+#                FM_PROC_PPID for a numeric pid (a tagged pid has no local parent).
+#   dead       - nothing can see the pid, or the Windows table proves it absent.
+#   unknown    - the process exists but this session cannot signal it.
+#   unreadable - it may well be alive but its identity could not be read; also
+#                the value left for a local pid that never gets classified
+#                (empty, non-numeric, or the literal zero).
+# Only "readable" answers an identity question; the other three carry no
+# identity, and the two rules below own what each one means for ownership and
+# for recovery: fm_harness_pid_alive and fm_session_lock_pid_blocks_reclaim.
+fm_session_lock_pid_verdict() {
+  local pid=$1 winpid rc=0 comm
+  FM_SESSION_LOCK_PID_VERDICT=unreadable
+  if winpid=$(fm_win_untag_pid "$pid"); then
+    comm=$(fm_win_command "$winpid") || rc=$?
+    case $rc in
+      0) FM_PROC_COMM=$comm FM_PROC_ARGS=$comm FM_PROC_PPID=; FM_SESSION_LOCK_PID_VERDICT=readable ;;
+      1) FM_SESSION_LOCK_PID_VERDICT=dead ;;
+    esac
+    return 0
+  fi
+  case "$pid" in ''|*[!0-9]*|0) return 0 ;; esac
+  # Liveness first, identity second. A pid this session cannot signal is
+  # not a live owner it may reclaim over; a pid it CAN signal is alive,
+  # and only then is its identity worth reading. Asking the identity
+  # first would let a stale process-table entry report a dead owner as
+  # live and keep a stale lock from ever being reclaimed - the same
+  # permanent read-only wedge this change exists to remove.
+  if kill -0 "$pid" 2>/dev/null; then
+    # Alive. Its identity may still be unreadable, and that is the case
+    # this verdict exists for: the owner is live, so its lock must not
+    # be reclaimed.
+    if fm_proc_info "$pid"; then
+      FM_SESSION_LOCK_PID_VERDICT=readable
+    fi
+  elif fm_proc_info "$pid"; then
+    # The process exists - this session simply may not signal it - so
+    # it is not a dead owner, but it is not a harness this session can
+    # prove either. The base contract treats that as "no live harness
+    # owner", and the lock stays reclaimable.
+    FM_SESSION_LOCK_PID_VERDICT=unknown
+  else
+    # Nothing can see the pid: it is gone.
+    FM_SESSION_LOCK_PID_VERDICT=dead
+  fi
+  return 0
+}
+
 # True if $1 is a live process that looks like a verified harness.
+# A tagged Windows pid is answered from the Windows process table, because
+# kill -0 cannot see across that boundary and would report a live harness as
+# dead - which would hand a running session's home to a second one.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  fm_session_lock_pid_verdict "$1"
+  [ "$FM_SESSION_LOCK_PID_VERDICT" = readable ] || return 1
+  fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"
+}
+
+# Liveness and identity of a session-lock pid for readers outside this file:
+# the supervision host's main-session key and the Claude auto-arm. A tagged
+# Windows pid is answered from the Windows process table, as above; any other
+# value goes to the generic fm_pid_alive and fm_pid_identity in
+# bin/fm-wake-lib.sh, which those readers already have sourced.
+fm_session_pid_alive() {  # <value>
+  local winpid
+  if winpid=$(fm_win_untag_pid "$1"); then
+    fm_win_command "$winpid" >/dev/null
+    return
+  fi
+  fm_pid_alive "$1"
+}
+
+# A tagged pid's identity is its Windows pid and executable path rather than a
+# start time. Every reader pairs it with the session sidecar id, which a new
+# session always changes, so a reused Windows pid still reads as a different
+# session.
+fm_session_pid_identity() {  # <value>
+  local winpid comm
+  if winpid=$(fm_win_untag_pid "$1"); then
+    comm=$(fm_win_command "$winpid") || return 1
+    printf 'win-pid=%s command=%s\n' "$winpid" "$comm"
+    return 0
+  fi
+  fm_pid_identity "$1"
+}
+
+# True when session-lock pid $1 must not be reclaimed: a readable harness owner
+# that still matches holds the lock, and an unreadable-but-live owner is refused
+# rather than guessed at. A dead record, a reused pid whose readable identity is
+# not a verified harness, a malformed or all-zero record, and an owner this
+# session can read but cannot signal are all reclaimable.
+#
+# The all-zero form is refused here rather than in the shared
+# fm_session_pid_valid, because that predicate answers "is this value usable at
+# all" for readers that must keep accepting any numeric record, and because zero
+# is not a process identity: `kill -0 00` signals process group 0, so treating it
+# as an owner wedges the home read-only instead of reclaiming it. This test is
+# string-only on purpose - arithmetic or numeric normalization would let octal
+# interpretation, integer overflow, or an arbitrarily long digit string change a
+# verdict.
+fm_session_lock_pid_blocks_reclaim() {
+  fm_session_pid_valid "$1" || return 1
+  case "$1" in
+    "$FM_WIN_PID_PREFIX"*) ;;
+    *[1-9]*) ;;
+    *) return 1 ;;
+  esac
+  fm_session_lock_pid_verdict "$1"
+  case "$FM_SESSION_LOCK_PID_VERDICT" in
+    dead) return 1 ;;
+    unreadable) return 0 ;;
+    unknown) return 1 ;;
+    readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" ;;
+  esac
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -198,8 +772,10 @@ fm_harness_pid_alive() {
 # contiguous harness ancestry. An id merely retained in a helper environment
 # fails that membership and is ignored: a hand-started Pi or codex primary under
 # a Claude pane still carries the pane's CLAUDE_CODE_SESSION_ID and CLAUDE_PID,
-# and must never own a lock with them. Ids are read from the environment only,
-# never from ps argv, where prompts and briefs are visible.
+# and must never own a lock with them. On Windows the ancestry is that tagged
+# CLAUDE_PID itself, so this membership is no secondary check there; the
+# FM_WIN_HARNESS_PID_VARS comment owns that limitation. Ids are read from the
+# environment only, never from ps argv, where prompts and briefs are visible.
 #
 # A --fork-session successor mints a new id, so it stays a foreign live owner
 # until the pre-fork process exits; that is the safe direction and a documented
@@ -210,7 +786,7 @@ fm_harness_pid_alive() {
 # ancestry list an earlier walk already produced, so a caller that walked once
 # need not walk again.
 fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
-  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm args
+  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid
   [ -n "$id" ] || return 1
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -218,10 +794,18 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
     pids=$(fm_harness_ancestry_pids) || return 1
   fi
   while IFS= read -r pid; do
-    [ "$pid" = "$claude_pid" ] || continue
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    # On Windows the ancestry is the tagged pid the bridge already confirmed
+    # from CLAUDE_PID and this same id, so it is matched in that form.
+    case "$pid" in
+      "$claude_pid")
+        fm_proc_info "$pid" || return 1
+        fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" || return 1
+        ;;
+      "$FM_WIN_PID_PREFIX$claude_pid")
+        fm_harness_pid_alive "$pid" || return 1
+        ;;
+      *) continue ;;
+    esac
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0
@@ -261,11 +845,13 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # wedging a home behind a live daemon whose session died. A replaced background
 # helper leaves a dead pid that its own session's next hook reclaims, because
 # the sidecar still names that session. Every other session records the
-# outermost pid of its contiguous run, exactly as before.
+# outermost pid of its contiguous run, exactly as before; a trusted Windows
+# session's run is its tagged CLAUDE_PID alone, so it records that tagged pid.
 fm_session_lock_anchor_pid() {
   local pids
   pids=$(fm_harness_ancestry_pids) || return 1
-  if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
+  if fm_session_lock_trusted_session_id "$pids" >/dev/null \
+    && fm_harness_pid_listed "$CLAUDE_PID" "$pids"; then
     printf '%s\n' "$CLAUDE_PID"
     return 0
   fi
@@ -287,18 +873,18 @@ fm_session_lock_anchor_pid() {
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  fm_session_pid_valid "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   fm_harness_pid_listed "$lock_pid" "$pids" && return 0
   fm_session_lock_same_session "$state" "$pids" || return 1
   fm_harness_pid_alive "$lock_pid"
 }
 
-# True when state dir $1 records a live verified harness outside this process's
-# contiguous harness ancestry that was not recorded by this same trusted Claude
-# session. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a diagnostic caller.
+# True when state dir $1 records a lock owner outside this process's contiguous
+# harness ancestry that this session must not reclaim and did not record under
+# its own trusted Claude session id - a live verified harness, or a live owner
+# whose identity cannot be read. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a
+# diagnostic caller.
 # Malformed, missing, dead, and ancestry-uncertain locks are not foreign-owner
 # evidence.
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
@@ -308,10 +894,8 @@ fm_session_lock_foreign_owner_live() {
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  fm_harness_pid_alive "$lock_pid" || return 1
+  fm_session_pid_valid "$lock_pid" || return 1
+  fm_session_lock_pid_blocks_reclaim "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   fm_harness_pid_listed "$lock_pid" "$pids" && return 1
   fm_session_lock_same_session "$state" "$pids" && return 1
@@ -363,28 +947,29 @@ fm_session_lock_inspect() {  # <state>
   pid=${pid%%$'\n'*}
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_PID=$pid
-  case "$pid" in
-    ''|*[!0-9]*)
-      FM_LOCK_INSPECT_STATE=unknown
-      return 0
+  fm_session_pid_valid "$pid" || return 0
+  # One verdict for every identity form. A tagged Windows pid is resolved by
+  # this same call through the Windows table, so the match below is the single
+  # place "live verified harness" is decided; deciding it a second time ahead
+  # of this one is what let a holder read as held there and unknown here.
+  fm_session_lock_pid_verdict "$pid"
+  case "$FM_SESSION_LOCK_PID_VERDICT" in
+    dead)
+      # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+      FM_LOCK_INSPECT_STATE=stale
+      # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+      ;;
+    readable)
+      if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+        # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_STATE=held
+        # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_LIVE_HARNESS=true
+      else
+        # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_LIVE_HARNESS=false
+      fi
       ;;
   esac
-  if kill -0 "$pid" 2>/dev/null; then
-    if fm_harness_pid_alive "$pid"; then
-      FM_LOCK_INSPECT_STATE=held
-      FM_LOCK_INSPECT_LIVE_HARNESS=true
-    else
-      FM_LOCK_INSPECT_STATE=unknown
-      FM_LOCK_INSPECT_LIVE_HARNESS=false
-    fi
-    return 0
-  fi
-  if ps -o comm= -p "$pid" >/dev/null 2>&1; then
-    FM_LOCK_INSPECT_STATE=unknown
-    return 0
-  fi
-  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
-  FM_LOCK_INSPECT_STATE=stale
-  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
-  FM_LOCK_INSPECT_LIVE_HARNESS=false
 }

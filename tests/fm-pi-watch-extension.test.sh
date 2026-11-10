@@ -12,6 +12,72 @@ EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 # unrelated to plugin output, which the assertions intentionally require empty.
 export NODE_NO_WARNINGS=1
 
+# Every case drives a plugin through node, and the plugin starts arm stubs that
+# can leave background pollers behind when a case fails or is interrupted. Those
+# pollers reparent to init, so removing TMP_ROOT alone never stops them: a
+# poller waiting for a file under the removed root then spins forever. Each node
+# run therefore gets its own process group, led by a perl wrapper whose argv
+# names TMP_ROOT, and teardown signals every recorded group that still has a
+# member naming TMP_ROOT before the root is removed. That membership test keeps
+# a group number the kernel reused for an unrelated process out of reach.
+# Every blocking stub loop also ends once its own script ("$0") is gone, so a
+# poller that escapes the reap (a runner killed with SIGKILL) stops within one
+# sleep of the root's later removal by fm_test_reap_orphans.
+PI_PROCESS_GROUPS="$TMP_ROOT/.pi-process-groups"
+
+node() {
+  local leader
+  perl -e '
+    setpgrp(0, 0) or exit 125;
+    shift;
+    my $pid = fork() // exit 125;
+    if (!$pid) { exec { $ARGV[0] } @ARGV or exit 127; }
+    waitpid($pid, 0);
+    exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+  ' "$TMP_ROOT/" node "$@" <&0 &
+  leader=$!
+  printf '%s\n' "$leader" >> "$PI_PROCESS_GROUPS"
+  wait "$leader"
+}
+
+pi_owned_group_live() {  # <pgid>
+  ps -eo pgid=,args= 2>/dev/null \
+    | awk -v group="$1" -v root="$TMP_ROOT/" '$1 == group && index($0, root) { found = 1 } END { exit !found }'
+}
+
+pi_reap_process_groups() {
+  local signal pgid i live
+  [ -f "$PI_PROCESS_GROUPS" ] || return 0
+  for signal in TERM KILL; do
+    while IFS= read -r pgid; do
+      case "$pgid" in ''|*[!0-9]*) continue ;; esac
+      pi_owned_group_live "$pgid" && kill -s "$signal" -- "-$pgid" 2>/dev/null
+    done < "$PI_PROCESS_GROUPS"
+    i=0
+    while [ "$i" -lt 20 ]; do
+      live=0
+      while IFS= read -r pgid; do
+        case "$pgid" in ''|*[!0-9]*) continue ;; esac
+        pi_owned_group_live "$pgid" && live=1 && break
+      done < "$PI_PROCESS_GROUPS"
+      [ "$live" -eq 1 ] || return 0
+      sleep 0.1
+      i=$((i + 1))
+    done
+  done
+}
+
+pi_teardown() {
+  pi_reap_process_groups
+  fm_test_cleanup
+}
+
+trap pi_teardown EXIT
+trap 'pi_teardown; exit 130' INT
+trap 'pi_teardown; exit 143' TERM
+trap 'pi_teardown; exit 129' HUP
+trap 'pi_teardown; exit 131' QUIT
+
 # One owner for the readiness budget every unready-successor test below spends
 # on purpose. Both plugins start a successor arm through a login shell and
 # SIGTERM it when it stays silent past this budget, so the budget has to outlast
@@ -228,7 +294,7 @@ test_pi_redundant_tool_call_is_owned_noop() {
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -358,7 +424,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -455,7 +521,7 @@ if [ "$count" -eq 1 ]; then
   exit 0
 fi
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -509,6 +575,259 @@ EOF
   pass "Pi actionable output waits for predecessor close before successor restoration"
 }
 
+# A successor can print readiness after its arm process has already exited when
+# a descendant retains the stdout pipe and emits the line. Readiness alone must
+# not let the original wake reach Pi while no arm child is alive: restoration
+# has to start a live successor inside its existing retry bound first.
+test_pi_dead_ready_successor_is_retried_before_delivery() {
+  local repo home plugin log stop release holder out status
+  repo="$TMP_ROOT/pi-dead-ready-successor-root"
+  home="$TMP_ROOT/pi-dead-ready-successor-home"
+  log="$TMP_ROOT/pi-dead-ready-successor.log"
+  stop="$TMP_ROOT/pi-dead-ready-successor.stop"
+  release="$TMP_ROOT/pi-dead-ready-successor.release"
+  holder="$TMP_ROOT/pi-dead-ready-successor-holder.sh"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$holder" <<'SH'
+#!/usr/bin/env bash
+parent=$1
+release=$2
+while kill -0 "$parent" 2>/dev/null; do sleep 0.01; done
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=dead-ready\n' "$parent"
+while [ ! -e "$release" ]; do sleep 0.02; done
+SH
+  chmod +x "$holder"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: wake before dead-ready successor\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  ("${FM_HOLDER:?}" "$$" "${FM_RELEASE_FILE:?}" >&1 2>/dev/null &)
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=live-successor\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_HOLDER="$holder" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+let armsAtDelivery = 0;
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    armsAtDelivery = armRows().length;
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-dead-ready-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: wake before dead-ready successor")) {
+  failure = `original wake was not delivered: ${prompt}`;
+} else if (armsAtDelivery < 3) {
+  failure = `wake reached Pi with no live successor; arms at delivery=${armsAtDelivery}: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi restoration must retry a dead-but-ready successor before delivering the wake: $out"
+  [ -z "$out" ] || fail "Pi dead-ready successor test printed output: $out"
+  pass "Pi restoration retries a dead-but-ready successor before delivering the wake"
+}
+
+# A verified successor can die just after restoration accepts it while a
+# descendant still holds its stdio pipes, so Node never reports close. The
+# arm's exit alone must still route into the bounded retry instead of leaving
+# the home unwatched until the descendant lets go.
+test_pi_successor_exit_with_held_pipe_schedules_retry() {
+  local repo home plugin log stop release delivered out status
+  repo="$TMP_ROOT/pi-held-pipe-successor-root"
+  home="$TMP_ROOT/pi-held-pipe-successor-home"
+  log="$TMP_ROOT/pi-held-pipe-successor.log"
+  stop="$TMP_ROOT/pi-held-pipe-successor.stop"
+  release="$TMP_ROOT/pi-held-pipe-successor.release"
+  delivered="$TMP_ROOT/pi-held-pipe-successor.delivered"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: wake before held-pipe successor\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=held-pipe\n' "$$"
+  (while [ ! -e "${FM_RELEASE_FILE:?}" ]; do sleep 0.02; done &)
+  while [ ! -e "${FM_DELIVERED_FILE:?}" ]; do sleep 0.02; done
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=retry-successor\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_DELIVERED_FILE="$delivered" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+    writeFileSync(process.env.FM_DELIVERED_FILE, "delivered\n");
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-held-pipe-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && armRows().length < 3; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: wake before held-pipe successor")) {
+  failure = `original wake was not delivered: ${prompt}`;
+} else if (armRows().length < 3) {
+  failure = `successor exit with a held pipe left no retry: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi successor exit with a held pipe must schedule the bounded retry: $out"
+  [ -z "$out" ] || fail "Pi held-pipe successor test printed output: $out"
+  pass "Pi successor exit with a held pipe schedules the bounded retry"
+}
+
+# Node can report the arm process exit before its stdout pipe drains. Delay the
+# arm's own final output behind a descendant-held FIFO so the actionable line
+# reaches the extension after exit; it must still become the wake, not a retry.
+test_pi_actionable_line_draining_after_exit_stays_actionable() {
+  local repo home plugin log fifo stop out status
+  repo="$TMP_ROOT/pi-actionable-after-exit-root"
+  home="$TMP_ROOT/pi-actionable-after-exit-home"
+  log="$TMP_ROOT/pi-actionable-after-exit.log"
+  fifo="$TMP_ROOT/pi-actionable-after-exit.fifo"
+  stop="$TMP_ROOT/pi-actionable-after-exit.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  mkfifo "${FM_DELAY_FIFO:?}"
+  exec 3>&1
+  (
+    exec 4<"$FM_DELAY_FIFO"
+    sleep 0.1
+    cat <&4 >&3
+  ) &
+  exec 3>&-
+  exec >"$FM_DELAY_FIFO"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: actionable output drained after exit\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=drained-actionable\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELAY_FIFO="$fifo" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=2000 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-delayed-drain-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 100 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+let failure = "";
+if (!prompt.includes("signal: actionable output drained after exit")) {
+  failure = `late actionable line was lost: ${prompt || "no wake delivered"}`;
+} else if (armRows().length !== 2) {
+  failure = `late actionable line started the wrong number of successors: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi actionable output draining after exit must stay actionable: $out"
+  [ -z "$out" ] || fail "Pi actionable-after-exit test printed output: $out"
+  pass "Pi actionable output draining after exit stays actionable"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -533,7 +852,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -645,7 +964,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   # A bare heartbeat is the real wake emitted after the cheap bash scan flags
@@ -727,7 +1046,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -820,7 +1139,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   while IFS='|' read -r label reason; do
@@ -920,7 +1239,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
@@ -1010,7 +1329,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
@@ -1108,7 +1427,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
@@ -1200,7 +1519,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -1440,7 +1759,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   while IFS='|' read -r label expect reason queue; do
@@ -1611,7 +1930,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -1687,7 +2006,7 @@ sleep 0.02 & dead=$!; wait "$dead" 2>/dev/null || true
 if [ "$dead" = "$$" ]; then dead=1; fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-distinct\n' "$dead"
 trap 'printf "retired\n" > "${FM_RETIRED_FILE:?}"; exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RETIRED_FILE="$retired" node --input-type=module 2>&1 <<'EOF'
@@ -1777,15 +2096,15 @@ fi
 if [ "$count" -eq 2 ]; then
   sleep 0 & dead=$!; wait "$dead" 2>/dev/null || true
   (
-    while [ ! -e "${FM_GO_FILE:?}" ]; do sleep 0.02; done
+    while [ ! -e "${FM_GO_FILE:?}" ] && [ -e "$0" ]; do sleep 0.02; done
     printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-stale\n' "$dead"
-    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.05; done
+    while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.05; done
   ) &
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-newer\n' "$$"
 trap 'printf "retired\n" > "${FM_RETIRED_FILE:?}"; exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_GO_FILE="$go" FM_RETIRED_FILE="$retired" node --input-type=module 2>&1 <<'EOF'
@@ -1884,7 +2203,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_EXTENSION_LOG_KEEP_LINES=50 node --input-type=module 2>&1 <<'EOF'
@@ -1966,7 +2285,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
@@ -2072,7 +2391,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   cat > "$driver" <<'EOF'
@@ -2137,8 +2456,8 @@ EOF
 # A repair call must not no-op on an arm child whose process is already dead
 # while its close event is still pending (stdio pipe held): the first arm
 # below exits at once but leaves a pipe holder behind, so the extension still
-# holds the handle with no close fired. The repair must start a fresh arm
-# rather than answer unchanged.
+# holds the handle with no close fired. The repair must not fail over the dead
+# arm, and a second arm follows without another call.
 test_pi_repair_starts_fresh_arm_over_dead_child() {
   local repo home plugin log stop holder out status
   repo="$TMP_ROOT/pi-stale-child-root"
@@ -2151,7 +2470,7 @@ test_pi_repair_starts_fresh_arm_over_dead_child() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$holder" <<'SH'
 #!/usr/bin/env bash
-while [ ! -e "${1:?}" ]; do sleep 0.05; done
+while [ ! -e "${1:?}" ] && [ -e "$0" ]; do sleep 0.05; done
 SH
   chmod +x "$holder"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -2165,7 +2484,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_HOLDER="$holder" node --input-type=module 2>&1 <<'EOF'
@@ -2210,11 +2529,8 @@ for (let i = 0; i < 250 && !dead; i += 1) {
 if (!dead) throw new Error(`first arm pid ${armPid} never exited`);
 const second = await tool.execute("tool-call-repair", {}, undefined, undefined, {});
 const text = second.content[0].text;
-if (!text.includes("started Pi extension arm child")) {
-  throw new Error(`repair did not start a fresh arm: ${text}`);
-}
-if (text.includes("unchanged")) {
-  throw new Error(`repair no-opped on a dead child: ${text}`);
+if (text.includes("FAILED")) {
+  throw new Error(`repair failed over a dead child: ${text}`);
 }
 let rearmed = false;
 for (let i = 0; i < 250 && !rearmed; i += 1) {
@@ -2235,10 +2551,9 @@ EOF
 }
 
 # A scheduled continuity retry must not stall behind a dead-but-unclosed arm
-# child. The first arm exits with its stdout held open, a manual repair starts
-# a second arm that does the same, and then the first arm's close finally
-# fires: its retry must see the dead second arm as an empty slot and start a
-# fresh arm.
+# child. The first arm exits with its stdout held open, the next arm (from the
+# exit's retry or a manual repair) does the same, and then the first arm's
+# close finally fires: continuity must still reach a fresh live arm.
 test_pi_scheduled_retry_starts_fresh_arm_over_dead_child() {
   local repo home plugin log stop release out status
   repo="$TMP_ROOT/pi-retry-dead-root"
@@ -2255,15 +2570,15 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 if [ "$count" -eq 1 ]; then
-  (while [ ! -e "${FM_RELEASE_FILE:?}" ]; do sleep 0.02; done) &
+  (while [ ! -e "${FM_RELEASE_FILE:?}" ] && [ -e "$0" ]; do sleep 0.02; done) &
   exit 0
 fi
 if [ "$count" -eq 2 ]; then
-  (while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.05; done) &
+  (while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.05; done) &
   exit 0
 fi
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_WATCH_REARM_RETRY_BASE_MS=20 node --input-type=module 2>&1 <<'EOF'
@@ -2305,8 +2620,8 @@ mod.default(pi);
 await tool.execute("tool-call-retry-dead-first", {}, undefined, undefined, {});
 await waitForExit(await waitForArms(1));
 const repair = await tool.execute("tool-call-retry-dead-repair", {}, undefined, undefined, {});
-if (!repair.content[0].text.includes("started Pi extension arm child")) {
-  throw new Error(`repair did not start a second arm: ${repair.content[0].text}`);
+if (repair.content[0].text.includes("FAILED")) {
+  throw new Error(`repair failed over the dead first arm: ${repair.content[0].text}`);
 }
 await waitForExit(await waitForArms(2));
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
@@ -2352,16 +2667,16 @@ if [ "$count" -eq 1 ]; then
 fi
 if [ "$count" -eq 2 ]; then
   printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
-  while [ ! -e "${FM_RELEASE_FILE:?}" ]; do sleep 0.02; done
+  while [ ! -e "${FM_RELEASE_FILE:?}" ] && [ -e "$0" ]; do sleep 0.02; done
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 if [ "$count" -eq 3 ]; then
-  (while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.05; done) &
+  (while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.05; done) &
   exit 0
 fi
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RELEASE_FILE="$release" FM_WATCH_REARM_RETRY_BASE_MS=20 node --input-type=module 2>&1 <<'EOF'
@@ -2453,7 +2768,7 @@ if [ "$count" -eq 1 ]; then
   exit 0
 fi
 trap 'exit 0' TERM INT
-while :; do sleep 0.02; done
+while [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -2527,7 +2842,7 @@ if [ "$count" -eq 0 ]; then
 fi
 trap '' TERM INT
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.1; done
+while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -2599,13 +2914,13 @@ fi
 if [ "$count" -eq 2 ]; then
   trap 'printf "retired\\n" > "${FM_UNRETIRED_RETIRE_FILE:?}"' TERM INT
   printf 'ready\n' > "${FM_UNRETIRED_READY_FILE:?}"
-  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
   [ "$FM_LATE_KIND" = actionable ] && printf 'signal: late wake\n'
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_UNRETIRED_READY_FILE="$ready" FM_UNRETIRED_RETIRE_FILE="$retired" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_LATE_KIND="$kind" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -2691,7 +3006,7 @@ count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then exit 0; fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -2797,7 +3112,7 @@ test_pi_actionable_close_rechecks_session_lock() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 printf 'signal: lock handoff\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -2894,6 +3209,13 @@ if (existsSync(lock)) unlinkSync(lock);
 assertMissingLock(await callArm(), "absent lock");
 writeFileSync(lock, "999999\n");
 assertMissingLock(await callArm(), "dead lock holder");
+for (const value of ["unknown\n", "1\n", "2\n3\n"]) {
+  writeFileSync(lock, value);
+  const unknown = await callArm();
+  if (unknown.details?.ok !== false || !unknown.details.message.includes("read-only")) {
+    throw new Error(`unknown ownership unexpectedly armed: ${JSON.stringify(unknown.details)}`);
+  }
+}
 
 const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
 try {
@@ -2923,6 +3245,88 @@ EOF
   expect_code 0 "$status" "Pi watcher arm must distinguish owned, live-other, and missing or dead session locks"
   [ -z "$out" ] || fail "Pi lock-ownership arm test printed output: $out"
   pass "Pi watcher arm distinguishes all session lock ownership states"
+}
+
+# On Windows the session lock may hold a tagged win:<pid> (bin/fm-session-lock-lib.sh),
+# and native Node sees that Windows pid directly, so the arm reads a tagged holder
+# by its digits. A malformed tag, and any tag off Windows, stays no identity. The
+# platform is set per call so every host exercises both sides.
+test_pi_arm_reads_a_windows_tagged_session_lock() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-tagged-lock-root"
+  home="$TMP_ROOT/pi-tagged-lock-home"
+  log="$TMP_ROOT/pi-tagged-lock.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const platform = Object.getOwnPropertyDescriptor(process, "platform");
+async function armOn(name, value) {
+  writeFileSync(lock, `${value}\n`);
+  Object.defineProperty(process, "platform", { ...platform, value: name });
+  try {
+    return await tool.execute("tool-call-tagged-lock", {}, undefined, undefined, {});
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+}
+const otherHolder = "watcher: read-only - session lock is held by another firstmate session";
+const expectRefused = (result, label, message) => {
+  if (result.details?.ok !== false) throw new Error(`${label} unexpectedly armed: ${JSON.stringify(result.details)}`);
+  if (!result.details.message.includes(message)) throw new Error(`${label} gave the wrong refusal: ${result.details.message}`);
+};
+
+const dead = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" }).pid;
+expectRefused(await armOn("win32", `win:${dead}`), "a dead tagged holder", "no live session holds the lock");
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  expectRefused(await armOn("win32", `win:${other.pid}`), "a live other tagged holder", otherHolder);
+} finally {
+  other.kill("SIGTERM");
+}
+for (const value of ["win:", `win:${process.pid}x`, `WIN:${process.pid}`, "win:1"]) {
+  expectRefused(await armOn("win32", value), `the malformed tagged lock ${value}`, otherHolder);
+}
+expectRefused(await armOn("linux", `win:${process.pid}`), "a tagged lock off Windows", otherHolder);
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without owning the tagged lock");
+
+const owned = await armOn("win32", `win:${process.pid}`);
+if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
+  throw new Error(`an owned tagged lock did not arm: ${JSON.stringify(owned.details)}`);
+}
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("an owned tagged lock did not run the watcher arm");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher arm must read a Windows-tagged session lock only on Windows"
+  [ -z "$out" ] || fail "Pi tagged-lock arm test printed output: $out"
+  pass "Pi watcher arm reads a Windows-tagged session lock only on Windows"
 }
 
 # A Pi command started from inside the live session, such as the `pi --help`
@@ -3062,7 +3466,7 @@ printf 'watcher: started pid=%s\n' "$$"
 printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
 printf '%s\n' "$marker" > "${FM_CHILD_MARKER_FILE:?}"
 printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
-while :; do sleep 0.2; done
+while [ -e "$0" ]; do sleep 0.2; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_FAIL_ONCE="$fail_once" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -3306,6 +3710,13 @@ trap cleanup EXIT
 trap 'exit 0' TERM INT
 printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replacement-fixture\n' "$$"
+# Model --restart taking over the retained predecessor after successor commit.
+previous=$(sed -n '1p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+previous_marker=$(sed -n '2p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+printf '%s\n%s\n' "$$" "$marker" > "$FM_ARM_LOG.pid"
+if [ -n "$previous" ] && [ -f "$previous_marker" ]; then
+  kill -TERM "$previous" 2>/dev/null || true
+fi
 while :; do
   if [ -e "$FM_TRIGGER_FILE" ]; then
     outcome=$(cat "$FM_TRIGGER_FILE")
@@ -3414,10 +3825,13 @@ if (previous.prompts.length !== 0) {
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
 writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
-await waitFor(() => liveArms().length === 0, "mid-delivery successor actionable close");
+await waitFor(() => liveArms().length === 1 && armRows().length === 3, "mid-delivery successor restored before replacement");
+const handoffArm = liveArms()[0];
 
 await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
-await waitFor(() => liveArms().length === 0, "retired old-session successor");
+if (!existsSync(handoffArm.marker) || !pidAlive(handoffArm.pid)) {
+  throw new Error("replacement shutdown retired the restored predecessor before the new owner committed");
+}
 
 const replacement = makePi(false);
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=durable-handoff`);
@@ -3428,7 +3842,7 @@ const replacementStart = replacement.handlers.get("session_start")?.({
   previousSessionFile: "/tmp/previous.jsonl",
 }, {});
 await new Promise((resolve) => setTimeout(resolve, 50));
-await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement arm before old delivery settlement");
+await waitFor(() => liveArms().length === 1 && armRows().length === 4 && !existsSync(handoffArm.marker), "replacement arm before old delivery settlement");
 if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
   throw new Error(`replacement raced the accepted old-session delivery: ${replacement.prompts.join(" | ")}`);
 }
@@ -3470,7 +3884,7 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close"
+  expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close: $out"
   [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
@@ -3617,7 +4031,7 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=chain-%s\n' "$$" "$count"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
+while [ ! -e "$FM_TRIGGER_FILE.$count" ] && [ -e "$0" ]; do sleep 0.02; done
 printf 'signal: streaming chain wake %s\n' "$count"
 exit 0
 SH
@@ -3723,6 +4137,286 @@ EOF
 # while the pipeline is busy, so the ordinary retry path must be deferred to
 # the end of that delivery rather than skipped, or the live generation is left
 # with no watcher and no retry.
+# Issue 7032 restores per-close succession while keeping branch settlement
+# serialized. Real arm processes expose the ordering; Pi callbacks are mocked.
+test_pi_actionable_closes_restore_while_branch_delivery_is_held() {
+  local repo home plugin log trigger out status mode
+  mode=${1:-serial}
+  repo="$TMP_ROOT/pi-held-branch-$mode-root"
+  home="$TMP_ROOT/pi-held-branch-$mode-home"
+  log="$TMP_ROOT/pi-held-branch-$mode.log"
+  trigger="$TMP_ROOT/pi-held-branch-$mode.close"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+live="$FM_CLOSE_PREFIX.live.$$"
+touch "$live"
+trap 'rm -f "$live"' EXIT
+trap 'exit 0' TERM INT
+previous=$(sed -n '1p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+previous_marker=$(sed -n '2p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+printf '%s\n%s\n' "$$" "$live" > "$FM_ARM_LOG.pid"
+if [ -n "$previous" ] && [ -f "$previous_marker" ]; then kill -TERM "$previous" 2>/dev/null || true; fi
+if [ "$FM_HELD_CLOSE_CASE" = replacement ] && [ "$count" -eq 3 ]; then
+  printf 'waiting=3\n' >> "$FM_ARM_LOG"
+  while :; do sleep 0.02; done
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'ready=%s\n' "$count" >> "$FM_ARM_LOG"
+while [ "$count" -ne 1 ] && [ ! -e "$FM_CLOSE_PREFIX.$count" ]; do sleep 0.02; done
+printf 'signal: held branch close %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_CLOSE_PREFIX="$trigger" FM_HELD_CLOSE_CASE="$mode" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const offers = [];
+const releases = [];
+let tool;
+let activeDeliveries = 0;
+let maxDeliveries = 0;
+let firstSettled = false;
+const rows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+const arms = () => rows().filter((row) => row.startsWith("arm="));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}; arms=${arms().length} offers=${offers.length}`);
+}
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async () => { throw new Error("eligible branch wake unexpectedly fell back to main"); },
+  events: {
+    on() {},
+    emit(event, offer) {
+      if (event !== "fm-branch-supervision:dispatch") return;
+      offers.push(offer.message);
+      activeDeliveries += 1;
+      maxDeliveries = Math.max(maxDeliveries, activeDeliveries);
+      const index = offers.length;
+      const held = new Promise((resolve) => releases.push(resolve));
+      offer.accept(held.then(() => {
+        activeDeliveries -= 1;
+        if (index === 1) firstSettled = true;
+      }));
+    },
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/held.meta`, "project=/projects/held\nwindow=fm-held\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\theld.status\tsignal: held branch close 1\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const mode = process.env.FM_HELD_CLOSE_CASE;
+const expectedOffers = mode === "quit" ? 1 : mode === "replacement" ? 2 : 3;
+try {
+  await tool.execute("held-initial", {}, undefined, undefined, {});
+  await waitFor(() => offers.length === 1 && rows().includes("ready=2"), "delivery A behind ready B");
+  writeFileSync(`${process.env.FM_CLOSE_PREFIX}.2`, "close\n");
+  if (mode === "replacement") {
+    await waitFor(() => rows().includes("waiting=3"), "restoration held on C readiness");
+    const predecessor = Number(arms()[2].slice(4));
+    await handlers.get("session_shutdown")({ type: "session_shutdown", reason: "new" }, {});
+    if (!alive(predecessor)) throw new Error("replacement retired the predecessor before successor commit");
+    await handlers.get("session_start")({ type: "session_start", reason: "new" }, {});
+    await waitFor(() => !alive(predecessor), "replacement committed before retained C retirement");
+  } else {
+    await waitFor(() => rows().includes("ready=3"), "ready C while A remains held");
+    writeFileSync(`${process.env.FM_CLOSE_PREFIX}.3`, "close\n");
+  }
+  await waitFor(() => rows().includes("ready=4"), "further successor while A remains held");
+  if (firstSettled || offers.length !== 1 || maxDeliveries !== 1) {
+    throw new Error(`delivery escaped its hold/serialization: ${JSON.stringify({ firstSettled, offers, maxDeliveries })}`);
+  }
+  const redundant = await tool.execute("held-manual", {}, undefined, undefined, {});
+  if (!redundant.details.ok || !redundant.details.message.includes("unchanged") || arms().length !== 4) {
+    throw new Error("manual arm duplicated the held-delivery successor");
+  }
+  if (mode === "quit") await handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, {});
+  for (let index = 0; index < expectedOffers; index += 1) {
+    await waitFor(() => offers.length === index + 1, `serialized delivery ${index + 1}`);
+    if (offers[index] !== `signal: held branch close ${index + 1}`) throw new Error(`lost/reordered close: ${offers}`);
+    releases[index]();
+  }
+  await waitFor(() => activeDeliveries === 0, "all admitted deliveries settled");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (offers.length !== expectedOffers || maxDeliveries !== 1 || arms().length !== 4) throw new Error("duplicate delivery or arm after settlement");
+} finally {
+  await handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, {});
+  for (const release of releases) release();
+  await waitFor(() => arms().every((row) => !alive(Number(row.slice(4)))), "all owned arm PIDs stopped");
+}
+const afterQuit = await tool.execute("held-after-quit", {}, undefined, undefined, {});
+if (afterQuit.details.ok || arms().length !== 4 || offers.length !== expectedOffers) throw new Error("terminal callbacks rearmed or replayed");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must restore every actionable close while branch delivery remains held: $out"
+  [ -z "$out" ] || fail "Pi held-branch test printed output: $out"
+  pass "Pi restores successors during held branch delivery with serialized settlement ($mode)"
+}
+
+# A close whose delivery waits behind an earlier held delivery must not be
+# confirmed against a successor that a later close already replaced. The
+# handoff is confirmed inside the continuity operation, while that successor is
+# still the live arm, and the delivery reads the cached outcome. Without that,
+# the queued close is confirmed against a dead watcher pid and the healthy
+# newer successor is reported to main as a restoration failure.
+test_pi_repeated_close_under_a_held_delivery_keeps_its_confirmed_handoff() {
+  local repo home plugin log trigger out status
+  repo="$TMP_ROOT/pi-repeated-close-root"
+  home="$TMP_ROOT/pi-repeated-close-home"
+  log="$TMP_ROOT/pi-repeated-close.log"
+  trigger="$TMP_ROOT/pi-repeated-close.close"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  gen=${2:-} pid=${4:-}
+  # The real script checks the named watcher pid before the episode
+  # generation, so a successor that a later close already replaced is
+  # rejected rather than reported as superseded. A confirmation of a token
+  # whose generation no longer matches the current one is superseded.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    printf 'rejected-dead generation=%s watcher=%s\n' "$gen" "$pid" >> "${FM_ARM_LOG:?}"
+    exit 1
+  fi
+  current=$(cat "${FM_ARM_LOG}.gen" 2>/dev/null || true)
+  if [ -n "$current" ] && [ "$current" != "$gen" ]; then
+    printf 'superseded generation=%s watcher=%s current=%s\n' "$gen" "$pid" "$current" >> "${FM_ARM_LOG:?}"
+    exit 3
+  fi
+  printf 'confirmed generation=%s watcher=%s\n' "$gen" "$pid" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+live="$FM_CLOSE_PREFIX.live.$$"
+touch "$live"
+trap 'rm -f "$live"' EXIT
+trap 'exit 0' TERM INT
+# Each arm carries its own recovery generation and records it as the current
+# one, so a confirmation of a token from an earlier arm is a generation
+# mismatch rather than an accidental match.
+printf 'gen-%s\n' "$count" > "${FM_ARM_LOG}.gen"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+printf 'ready=%s\n' "$count" >> "$FM_ARM_LOG"
+while [ "$count" -ne 1 ] && [ ! -e "$FM_CLOSE_PREFIX.$count" ]; do sleep 0.02; done
+printf 'signal: repeated close %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_CLOSE_PREFIX="$trigger" FM_WATCH_EXTENSION_LOG_KEEP_LINES=200 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const offers = [];
+const releases = [];
+const prompts = [];
+let tool;
+let activeDeliveries = 0;
+let maxDeliveries = 0;
+const rows = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+const arms = () => rows().filter((row) => row.startsWith("arm="));
+const confirmations = () => rows().filter((row) => row.startsWith("confirmed generation="));
+const rejections = () => rows().filter((row) => row.startsWith("rejected-dead"));
+const supersessions = () => rows().filter((row) => row.startsWith("superseded generation="));
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 1000; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}; rows=${rows().join(" | ")}; extlog=${existsSync(`${process.env.FM_HOME}/state/.watch-extension.log`) ? readFileSync(`${process.env.FM_HOME}/state/.watch-extension.log`, "utf8").replace(/\n/g, " | ") : "none"}`);
+}
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+  events: {
+    on() {},
+    emit(event, offer) {
+      if (event !== "fm-branch-supervision:dispatch") return;
+      offers.push(offer.message);
+      activeDeliveries += 1;
+      maxDeliveries = Math.max(maxDeliveries, activeDeliveries);
+      const index = offers.length;
+      const held = new Promise((resolve) => releases.push(resolve));
+      offer.accept(held.then(() => { activeDeliveries -= 1; }));
+    },
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/held.meta`, "project=/projects/held\nwindow=fm-held\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\theld.status\tsignal: repeated close 1\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+try {
+  await tool.execute("repeated-initial", {}, undefined, undefined, {});
+  await waitFor(() => offers.length === 1 && confirmations().length === 1, "first handoff confirmed");
+  // The successor closes while the first delivery is still held, and so does
+  // its own successor: each queued close replaces the arm the previous one
+  // confirmed.
+  writeFileSync(`${process.env.FM_CLOSE_PREFIX}.2`, "close\n");
+  await waitFor(() => arms().length === 3 && confirmations().length === 2, "second handoff confirmed");
+  writeFileSync(`${process.env.FM_CLOSE_PREFIX}.3`, "close\n");
+  await waitFor(() => arms().length === 4 && confirmations().length === 3, "third handoff confirmed");
+  // Let the held first delivery settle: the queued closes deliver in order,
+  // and each of them releases the next one.
+  for (let index = 0; index < 3; index += 1) {
+    await waitFor(() => offers.length === index + 1, `serialized delivery ${index + 1}`);
+    releases[index]();
+  }
+  await waitFor(() => offers.length === 3, "every queued close delivered");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  if (prompts.length !== 0) {
+    throw new Error(`a queued close reached main instead of the branch: ${prompts.join(" | ")}`);
+  }
+  if (maxDeliveries !== 1) throw new Error(`delivery escaped its serialization: ${maxDeliveries}`);
+  if (rejections().length !== 0) {
+    throw new Error(`a live handoff was rejected: ${rows().join(" | ")}`);
+  }
+  if (supersessions().length !== 0) {
+    throw new Error(`a live handoff was reported as superseded: ${rows().join(" | ")}`);
+  }
+  const generations = confirmations().map((row) => row.split(" ")[1]);
+  if (generations.join(",") !== "generation=gen-2,generation=gen-3,generation=gen-4") {
+    throw new Error(`each close was confirmed against its own successor: ${generations.join(" | ")}`);
+  }
+  const order = offers.map((message) => message.trim());
+  const expected = ["signal: repeated close 1", "signal: repeated close 2", "signal: repeated close 3"];
+  if (order.join("|") !== expected.join("|")) {
+    throw new Error(`queued closes lost or changed their order: ${order.join(" | ")}`);
+  }
+} finally {
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+  for (const release of releases) release();
+  await waitFor(() => arms().every((row) => !alive(Number(row.slice(4)))), "all owned arm PIDs stopped");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must confirm a queued close's handoff while its own successor is still live: $out"
+  [ -z "$out" ] || fail "Pi repeated-close test printed output: $out"
+  pass "Pi confirms a queued close's handoff inside the continuity operation"
+}
+
+# The former after-delivery expectation conflicts with the approved restore
+# contract: a verified failure keeps its bounded retry during held delivery.
 test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
@@ -3747,7 +4441,7 @@ if [ "$count" -eq 2 ]; then
   exit 3
 fi
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
@@ -3840,7 +4534,7 @@ late_close() {
 }
 trap late_close TERM INT
 printf 'watcher: started pid=%s\n' "$$"
-while :; do sleep 0.02; done
+while [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 node --input-type=module 2>&1 <<'EOF'
@@ -3948,7 +4642,7 @@ late_close() {
 }
 trap late_close TERM INT
 printf 'watcher: started pid=%s\n' "$$"
-while :; do sleep 0.02; done
+while [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=10 node --input-type=module 2>&1 <<'EOF'
@@ -4058,7 +4752,7 @@ trap cleanup EXIT
 trap 'exit 0' TERM INT
 printf '%s\n' "$$" > "$FM_CHILD_MARKER"
 printf 'watcher: started pid=%s\n' "$$"
-while :; do sleep 0.02; done
+while [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_CHILD_MARKER="$marker" node --input-type=module 2>&1 <<'EOF'
@@ -4168,6 +4862,59 @@ EOF
   pass "Pi process-exit cleanup listener remains singular across session replacement"
 }
 
+# A case that fails before writing its stop file leaves its arm stub's poller
+# behind, reparented away from the case. The stub here is the unguarded shape of
+# the pollers that once outlived this suite: only the process-group reap that
+# teardown runs can stop it, and once reaped nothing from its root survives.
+test_pi_failed_case_poller_is_reaped_as_a_group() {
+  local repo stop pid_file out status poller i
+  repo="$TMP_ROOT/pi-failed-case-root"
+  stop="$TMP_ROOT/pi-failed-case.stop"
+  pid_file="$TMP_ROOT/pi-failed-case.poller"
+  mkdir -p "$repo/bin"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+(while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.05; done) &
+printf '%s\n' "$!" > "$FM_POLLER_PID_FILE"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_ARM="$repo/bin/fm-watch-arm.sh" FM_STOP_FILE="$stop" FM_POLLER_PID_FILE="$pid_file" node --input-type=module 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+spawnSync("bash", [process.env.FM_ARM], { stdio: "ignore" });
+throw new Error("injected case failure before the stop file");
+EOF
+)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the injected case failure did not fail: $out"
+  poller=$(cat "$pid_file" 2>/dev/null || true)
+  if [ -z "$poller" ] || ! kill -0 "$poller" 2>/dev/null; then
+    fail "the failed case left no live poller, so the reap below would prove nothing"
+  fi
+  pi_reap_process_groups
+  i=0
+  while [ "$i" -lt 20 ] && kill -0 "$poller" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$poller" 2>/dev/null; then
+    kill -KILL "$poller" 2>/dev/null || true
+    fail "the process-group reap left the failed case's poller pid $poller running"
+  fi
+  out=$(ps -eo ppid=,args= 2>/dev/null | awk -v root="$repo/" '$1 == 1 && index($0, root)')
+  [ -z "$out" ] || fail "orphans from the failed case survived the reap: $out"
+  pass "Pi teardown reaps a failed case's orphaned poller as a process group"
+}
+
+# Run last: after the teardown reap, nothing this suite started may be left
+# running under init from its temporary root.
+test_pi_suite_leaves_no_orphaned_processes() {
+  local out
+  pi_reap_process_groups
+  out=$(ps -eo ppid=,args= 2>/dev/null | awk -v root="$TMP_ROOT/" '$1 == 1 && index($0, root)')
+  [ -z "$out" ] || fail "processes from this suite's temporary root outlived the teardown reap: $out"
+  pass "Pi suite leaves no orphaned process from its temporary root"
+}
+
 test_pi_process_exit_cleanup_stops_arm_child() {
   local repo home plugin cleanup_log pid_file out status pid i
   repo="$TMP_ROOT/pi-process-exit-root"
@@ -4181,7 +4928,7 @@ test_pi_process_exit_cleanup_stops_arm_child() {
 #!/usr/bin/env bash
 trap 'printf "%s\n" "$$" >> "$FM_CLEANUP_LOG"; exit 0' TERM
 printf '%s\n' "$$" > "$FM_CHILD_PID_FILE"
-while :; do sleep 1; done
+while [ -e "$0" ]; do sleep 1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CLEANUP_LOG="$cleanup_log" FM_CHILD_PID_FILE="$pid_file" node --input-type=module 2>&1 <<'EOF'
@@ -4249,6 +4996,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm() {
   cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
   cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
+  cp "$ROOT/.opencode/plugins/lib/fm-opencode2.js" "$fixture/plugins/lib/fm-opencode2.js"
   out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 await import(pathToFileURL(process.env.PLUGIN).href);
@@ -4309,6 +5057,193 @@ EOF
   expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
+}
+
+test_opencode2_watch_plugin_arms_on_interrupted_turn_but_not_shutdown() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode2-terminal-root"
+  home="$TMP_ROOT/opencode2-terminal-home"
+  log="$TMP_ROOT/opencode2-terminal.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'armed\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # The OpenCode 2.0.x plugin context carries the project only as
+  # ctx.location.project.directory, so this fixture deliberately omits every
+  # other directory field.
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const queue = [];
+let wake = null;
+const push = (event) => { queue.push(event); if (wake) { wake(); wake = null; } };
+async function* stream() {
+  for (;;) {
+    while (queue.length) yield queue.shift();
+    await new Promise((resolve) => { wake = resolve; });
+  }
+}
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  event: { subscribe: () => stream() },
+  session: { prompt: async () => {} },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default.setup(ctx);
+push({ type: "session.execution.interrupted", data: { sessionID: "ses-shutdown", reason: "shutdown" } });
+await sleep(1000);
+if (existsSync(process.env.FM_ARM_LOG)) {
+  console.error("a shutdown terminal event armed the watcher");
+  process.exit(1);
+}
+push({ type: "session.execution.interrupted", data: { sessionID: "ses-root" } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) await sleep(20);
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("an interrupted turn did not arm the watcher");
+  process.exit(1);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode 2 watch plugin must arm on an interrupted turn and ignore shutdown: $out"
+  [ -z "$out" ] || fail "OpenCode 2 terminal-event test printed output: $out"
+  pass "OpenCode 2 watch plugin arms on an interrupted turn from the project location and ignores shutdown"
+}
+
+test_opencode2_sessionstart_nudge_prompts_with_flat_session_shape() {
+  local plugin repo home out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js"
+  repo="$TMP_ROOT/opencode2-nudge-root"
+  home="$TMP_ROOT/opencode2-nudge-home"
+  mkdir -p "$repo/bin" "$home/state"
+  git init -q "$repo"
+  cat > "$repo/bin/fm-sessionstart-nudge.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'NUDGE_TEXT\n'
+SH
+  chmod +x "$repo/bin/fm-sessionstart-nudge.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const calls = [];
+async function* stream() {
+  yield { type: "session.created", data: { sessionID: "ses-1" } };
+  await new Promise(() => {});
+}
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  event: { subscribe: () => stream() },
+  session: { prompt: async (arg) => { calls.push(arg); } },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default.setup(ctx);
+for (let i = 0; i < 250 && calls.length === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+const first = calls[0];
+if (!first || first.sessionID !== "ses-1" || first.text !== "NUDGE_TEXT") {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode 2 session-start nudge must prompt with { sessionID, text }: $out"
+  pass "OpenCode 2 session-start nudge resolves the project location and prompts with the flat session shape"
+}
+
+test_opencode2_seatbelts_block_only_the_shell_tool() {
+  local repo out status plugin owner
+  repo="$TMP_ROOT/opencode2-seatbelt-root"
+  mkdir -p "$repo/bin"
+  git init -q "$repo"
+  for owner in fm-cd-pretool-check.sh fm-arm-pretool-check.sh; do
+    cat > "$repo/bin/$owner" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --command ] || exit 0
+case "${2:-}" in
+  *DENY_ME*) printf 'seatbelt denied\n' >&2; exit 2 ;;
+esac
+exit 0
+SH
+    chmod +x "$repo/bin/$owner"
+  done
+  for plugin in fm-primary-cd-check.js fm-primary-pretool-check.js; do
+    out=$(PLUGIN="$ROOT/.opencode/plugins/$plugin" WORKTREE="$repo" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+let hook = null;
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  tool: { hook: (name, fn) => { if (name === "execute.before") hook = fn; } },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default.setup(ctx);
+const call = (tool, command) => hook({ tool, sessionID: "ses-1", id: "call-1", input: { command } });
+let blocked = false;
+try {
+  await call("shell", "echo DENY_ME");
+} catch (error) {
+  blocked = String(error.message).includes("seatbelt denied");
+}
+if (!blocked) {
+  console.error("the shell tool was not blocked");
+  process.exit(1);
+}
+await call("shell", "echo allowed");
+await call("mcp_runner", "echo DENY_ME");
+await call("read", "echo DENY_ME");
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "OpenCode 2 $plugin must block the shell tool and never a non-shell tool carrying a command: $out"
+  done
+  pass "OpenCode 2 seatbelts block only the shell tool, never a non-shell or MCP tool carrying a command"
+}
+
+test_opencode2_prompt_session_never_resends_after_a_failed_attempt() {
+  local out status
+  out=$(LIB="$ROOT/.opencode/plugins/lib/fm-opencode2.js" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const { promptSession } = await import(pathToFileURL(process.env.LIB).href);
+const calls = [];
+const ctx = { session: { prompt: async (arg) => { calls.push(["prompt", arg]); throw new Error("timeout after delivery"); } } };
+const client = { session: { promptAsync: async (arg) => { calls.push(["promptAsync", arg]); } } };
+let threw = false;
+try {
+  await promptSession(ctx, client, "ses-1", "wake");
+} catch {
+  threw = true;
+}
+if (!threw || calls.length !== 1 || calls[0][1].sessionID !== "ses-1" || calls[0][1].text !== "wake") {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+calls.length = 0;
+await promptSession(null, client, "ses-2", "wake");
+if (calls.length !== 1 || calls[0][1].path.id !== "ses-2" || calls[0][1].body.parts[0].text !== "wake") {
+  console.error(JSON.stringify(calls));
+  process.exit(1);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode promptSession must send once and never retry another shape: $out"
+  pass "OpenCode promptSession sends one prompt shape and never resends after a failed attempt"
 }
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
@@ -4496,7 +5431,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
@@ -4612,7 +5547,7 @@ if [ "$count" -eq 1 ]; then
 fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" RECORD_KIND="$kind" node 2>&1 <<'EOF'
@@ -4682,12 +5617,12 @@ fi
 if [ "$count" -eq 2 ]; then
   printf 'signal: pre-ready successor wake\n'
   trap 'printf "retired\\n" > "${FM_PRE_READY_RETIRED_FILE:?}"; exit 0' TERM INT
-  while [ ! -e "$FM_PRE_READY_RELEASE_FILE" ]; do sleep 0.02; done
+  while [ ! -e "$FM_PRE_READY_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_PRE_READY_RELEASE_FILE="$release" FM_PRE_READY_RETIRED_FILE="$retired" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
@@ -4761,7 +5696,7 @@ if [ "$count" -eq 1 ]; then
   exit 0
 fi
 trap 'exit 0' TERM INT
-while :; do sleep 0.02; done
+while [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
@@ -4838,7 +5773,7 @@ if [ "$count" -eq 0 ]; then
 fi
 trap '' TERM INT
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.1; done
+while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
@@ -4913,13 +5848,13 @@ fi
 if [ "$count" -eq 2 ]; then
   trap 'printf "retired\\n" > "${FM_UNRETIRED_RETIRE_FILE:?}"' TERM INT
   printf 'ready\n' > "${FM_UNRETIRED_READY_FILE:?}"
-  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
   [ "$FM_LATE_KIND" = actionable ] && printf 'signal: late wake\n'
   exit 0
 fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_UNRETIRED_READY_FILE="$ready" FM_UNRETIRED_RETIRE_FILE="$retired" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_LATE_KIND="$kind" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
@@ -5004,7 +5939,7 @@ count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
 if [ "$count" -eq 1 ]; then exit 0; fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 trap 'exit 0' TERM INT
-while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
@@ -5115,7 +6050,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
 printf 'signal: lock handoff\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -5377,6 +6312,9 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_actionable_output_waits_for_predecessor_close
+test_pi_dead_ready_successor_is_retried_before_delivery
+test_pi_successor_exit_with_held_pipe_schedules_retry
+test_pi_actionable_line_draining_after_exit_stays_actionable
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
@@ -5397,6 +6335,7 @@ test_pi_extension_log_stays_off_unless_opted_in
 test_pi_repair_starts_fresh_arm_over_dead_child
 test_pi_scheduled_retry_starts_fresh_arm_over_dead_child
 test_pi_deferred_close_starts_fresh_arm_over_dead_child
+test_pi_failed_case_poller_is_reaped_as_a_group
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -5404,11 +6343,16 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_arm_reads_a_windows_tagged_session_lock
 test_pi_extension_keeps_marker_of_live_ancestor_session
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
 test_pi_streaming_time_delivery_keeps_the_successor_chain
+test_pi_actionable_closes_restore_while_branch_delivery_is_held
+test_pi_actionable_closes_restore_while_branch_delivery_is_held replacement
+test_pi_actionable_closes_restore_while_branch_delivery_is_held quit
+test_pi_repeated_close_under_a_held_delivery_keeps_its_confirmed_handoff
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
@@ -5417,6 +6361,10 @@ test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
+test_opencode2_watch_plugin_arms_on_interrupted_turn_but_not_shutdown
+test_opencode2_sessionstart_nudge_prompts_with_flat_session_shape
+test_opencode2_seatbelts_block_only_the_shell_tool
+test_opencode2_prompt_session_never_resends_after_a_failed_attempt
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
@@ -5433,3 +6381,4 @@ test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
 test_opencode_turnend_guard_survives_an_encoder_that_never_reads_stdin
+test_pi_suite_leaves_no_orphaned_processes

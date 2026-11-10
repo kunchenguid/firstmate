@@ -188,6 +188,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-hermes-process-lib.sh" "$dir/bin/fm-hermes-process-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
@@ -895,7 +896,8 @@ test_tracked_claude_entries_inert_under_grok() {
   dir="$TMP_ROOT/claude-entries-grok-inert"
   mkdir -p "$dir/bin"
   for script in fm-turnend-guard.sh fm-claude-stop-autoarm.sh fm-sessionstart-run.sh \
-    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh fm-host-mirror.sh; do
+    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh fm-host-mirror.sh \
+    fm-stow-guard.sh; do
     printf '#!/usr/bin/env bash\nprintf ran >> %q\n' "$dir/invoked" > "$dir/bin/$script"
     chmod +x "$dir/bin/$script"
   done
@@ -936,13 +938,13 @@ test_tracked_claude_entries_inert_under_grok() {
       || fail "tracked entry for $target ran under a legacy GROK_AGENT environment"
   done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
 
-  [ "$guarded" -eq 7 ] || fail "expected 7 grok-guarded tracked entries, saw $guarded"
+  [ "$guarded" -eq 9 ] || fail "expected 9 grok-guarded tracked entries, saw $guarded"
   [ "$unguarded" -eq 1 ] || fail "expected 1 documented unguarded tracked entry, saw $unguarded"
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
-  local settings command dir expected_root outside payload out status
+  local settings command dir expected_root outside payload out status log
   settings="$ROOT/.codex/hooks.json"
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
@@ -952,22 +954,23 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   expected_root=$(cd "$dir" && pwd -P)
   outside="$TMP_ROOT/codex-hook-outside"
   mkdir -p "$outside"
+  log="$TMP_ROOT/codex-hook-root.log"
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'guard=%s\n' "$0"
-cat
+{ printf 'guard=%s\n' "$0"; cat; } > "${FM_CODEX_GUARD_LOG:?}"
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
   payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  out=$(printf '%s' "$payload" | (cd "$dir" && FM_CODEX_GUARD_LOG="$log" bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
-  assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
+  [ "$out" = '{}' ] || fail "codex hook must return a single success object: $out"
+  assert_contains "$(cat "$log")" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
+  assert_contains "$(cat "$log")" "$payload" "codex hook must pass the original payload to the guard"
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
 
 test_codex_hook_ignores_nested_git_root_guard() {
-  local settings command dir nested subdir expected_root payload out status
+  local settings command dir nested subdir expected_root payload out status log
   settings="$ROOT/.codex/hooks.json"
   [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
   command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
@@ -975,6 +978,7 @@ test_codex_hook_ignores_nested_git_root_guard() {
   dir=$(make_primary_dir "$TMP_ROOT/codex-hook-outer")
   mark_codex_hook_root "$dir"
   expected_root=$(cd "$dir" && pwd -P)
+  log="$TMP_ROOT/codex-hook-outer.log"
   nested="$dir/projects/other"
   mkdir -p "$nested"
   git init -q "$nested"
@@ -990,18 +994,117 @@ EOF
   chmod +x "$nested/bin/fm-turnend-guard.sh"
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
-printf 'guard=%s\n' "$0"
-cat
+{ printf 'guard=%s\n' "$0"; cat; } > "${FM_CODEX_GUARD_LOG:?}"
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
   subdir="$nested/deep/path"
   mkdir -p "$subdir"
   payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
-  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  out=$(printf '%s' "$payload" | (cd "$dir" && FM_CODEX_GUARD_LOG="$log" bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must not execute a nested project guard"
-  assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
+  [ "$out" = '{}' ] || fail "codex hook must return a single success object: $out"
+  assert_contains "$(cat "$log")" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
   assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
+}
+
+test_codex_hook_preserves_streams_without_login_logout_output() {
+  local dir command fixture_login other child stdout stderr expected payload status fakebin tool
+  dir=$(make_primary_dir "$TMP_ROOT/codex-output-primary")
+  mark_codex_hook_root "$dir"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command' "$ROOT/.codex/hooks.json")
+  fixture_login="$TMP_ROOT/codex-output-login"
+  other="$TMP_ROOT/codex-output-other"
+  mkdir -p "$fixture_login" "$other"
+  printf ':\n' > "$fixture_login/.bash_profile"
+  printf "printf '\\033[H\\033[2J\\033[3J'\n" > "$fixture_login/.bash_logout"
+  stdout="$TMP_ROOT/codex-output.stdout"
+  stderr="$TMP_ROOT/codex-output.stderr"
+  expected="$TMP_ROOT/codex-output.expected"
+  printf '{}\n' > "$expected"
+  payload='{"stop_hook_active":false}'
+
+  # Assert the logout fixture is effective, so a green test cannot come from
+  # a host that happens to have a quiet login shell.
+  HOME="$fixture_login" BASH_ENV='' bash -lc 'exit 0' > "$stdout" 2> "$stderr"
+  [ -s "$stdout" ] || fail "the Codex noisy logout fixture did not emit anything"
+
+  codex_output_case() {
+    local label=$1 cwd=$2 input=$3 want=$4
+    shift 4
+    printf '%s' "$input" | (cd "$cwd" && env HOME="$fixture_login" BASH_ENV='' ENV='' \
+      FM_HOME="$dir" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE="$dir/state" \
+      FM_CONFIG_OVERRIDE="$dir/config" "$@" bash -c "$command") > "$stdout" 2> "$stderr"
+    status=$?
+    expect_code "$want" "$status" "Codex Stop wrapper $label must preserve its exit status"
+    if [ "$want" -eq 0 ]; then
+      cmp -s "$expected" "$stdout" || fail "Codex Stop wrapper $label emitted something other than one success object"
+    else
+      [ ! -s "$stdout" ] || fail "Codex Stop wrapper $label contaminated nonzero stdout"
+    fi
+  }
+
+  codex_output_case idle "$dir" "$payload" 0
+  [ ! -s "$stderr" ] || fail "idle Codex Stop wrapper emitted a diagnostic"
+  : > "$dir/state/task1.meta"
+  codex_output_case supervision-down "$dir" "$payload" 2
+  assert_contains "$(cat "$stderr")" 'TURN WOULD END BLIND' "Codex Stop wrapper lost its continuation reason"
+  codex_output_case already-active "$dir" '{"stop_hook_active":true}' 0
+  codex_output_case empty-input "$dir" '' 0
+  codex_output_case non-firstmate "$other" "$payload" 0
+  child=$(make_crewmate_worktree_dir "$TMP_ROOT/codex-output-parent" "$TMP_ROOT/codex-output-child")
+  mark_codex_hook_root "$child"
+  codex_output_case child-worktree "$child" "$payload" 0
+  printf '{' > "$dir/.codex/hooks.json"
+  codex_output_case malformed-registration "$dir" "$payload" 0
+  mark_codex_hook_root "$dir"
+  chmod -x "$dir/bin/fm-turnend-guard.sh"
+  codex_output_case nonexecutable-guard "$dir" "$payload" 0
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-output-nojq")
+  for tool in bash cat; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  codex_output_case missing-jq "$dir" "$payload" 0 PATH="$fakebin"
+
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'fixture guard failed\n' >&2
+exit 7
+EOF
+  codex_output_case runtime-error "$dir" "$payload" 7
+  [ "$(cat "$stderr")" = 'fixture guard failed' ] || fail "Codex Stop wrapper changed runtime-error stderr"
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/codex-output-inherited-path")
+  printf '#!/usr/bin/env bash\nprintf "inherited PATH used\\n"\n' > "$fakebin/codex-path-probe"
+  chmod +x "$fakebin/codex-path-probe"
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+codex-path-probe >&2
+EOF
+  codex_output_case inherited-path "$dir" "$payload" 0 PATH="$fakebin:$PATH"
+  [ "$(cat "$stderr")" = 'inherited PATH used' ] || fail "Codex Stop wrapper lost its inherited PATH"
+
+  # Current primaries route through the optional park's synchronous guard.
+  # Exercise that dispatch without registering or running a native park.
+  cat > "$dir/bin/fm-codex-stop-park.sh" <<'EOF'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = --guard ] || exit 99
+cat > "${FM_HOME:?}/park-payload"
+printf 'fixture park guard\n' >&2
+exit "${FM_TEST_PARK_CODE:-0}"
+EOF
+  chmod +x "$dir/bin/fm-codex-stop-park.sh"
+  codex_output_case park-guard-allow "$dir" "$payload" 0
+  [ "$(cat "$dir/park-payload")" = "$payload" ] || fail "Codex Stop wrapper changed the park guard payload"
+  [ "$(cat "$stderr")" = 'fixture park guard' ] || fail "Codex Stop wrapper changed park guard stderr"
+  codex_output_case park-guard-block "$dir" "$payload" 2 FM_TEST_PARK_CODE=2
+  [ "$(cat "$stderr")" = 'fixture park guard' ] || fail "Codex Stop wrapper lost park guard continuation stderr"
+  unset -f codex_output_case
+  pass ".codex Stop wrapper: clean success JSON, inherited PATH, unchanged errors and continuation without logout output"
 }
 
 test_opencode_plugin_anchors_guard_to_worktree() {
@@ -1278,6 +1381,80 @@ EOF
     [ -z "$out" ] || fail "Pi turn-end marker guard '$marker_case' case printed output: $out"
   done
   pass ".pi primary extension: a nested load keeps the live session's turn-end marker"
+}
+
+# On Windows the session lock may hold a tagged win:<pid> (bin/fm-session-lock-lib.sh),
+# and native Node sees that Windows pid directly. The extension records its marker
+# for an owned or dead tagged holder and never for a live other one, while a
+# malformed tag, and any tag off Windows, stays no identity at all. The platform is
+# set per case so every host exercises both sides.
+test_pi_extension_reads_a_windows_tagged_session_lock() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-tagged-lock-root"
+  home="$TMP_ROOT/pi-tagged-lock-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
+const platform = Object.getOwnPropertyDescriptor(process, "platform");
+let loads = 0;
+async function loadOn(name) {
+  rmSync(marker, { force: true });
+  Object.defineProperty(process, "platform", { ...platform, value: name });
+  try {
+    const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?tagged=${(loads += 1)}`);
+    mod.default({ on() {}, async sendUserMessage() {} });
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+}
+
+const dead = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" }).pid;
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  const cases = [
+    ["win32", `win:${process.pid}`, true, "an owned tagged lock"],
+    ["win32", `win:${dead}`, true, "a dead tagged holder"],
+    ["win32", `win:${other.pid}`, false, "a live other tagged holder"],
+    ["win32", `${process.pid}`, true, "an owned local lock"],
+    ["win32", "win:", false, "a bare tag"],
+    ["win32", `win:${process.pid}x`, false, "a tag with trailing junk"],
+    ["win32", `WIN:${process.pid}`, false, "a differently cased tag"],
+    ["win32", "win:1", false, "a tagged pid 1"],
+    ["linux", `win:${process.pid}`, false, "a tagged lock off Windows"],
+    ["linux", `${process.pid}`, true, "an owned local lock off Windows"],
+  ];
+  for (const [name, value, expectMarker, label] of cases) {
+    writeFileSync(lock, `${value}\n`);
+    await loadOn(name);
+    if (!expectMarker) {
+      if (existsSync(marker)) throw new Error(`${label} (${name}) recorded a marker: ${readFileSync(marker, "utf8")}`);
+      continue;
+    }
+    const content = existsSync(marker) ? readFileSync(marker, "utf8") : "";
+    if (content !== `${version}\n${process.pid}\n`) {
+      throw new Error(`${label} (${name}) did not record this process's marker: ${JSON.stringify(content)}`);
+    }
+  }
+} finally {
+  other.kill("SIGTERM");
+}
+EOF
+)
+  status=$?
+  [ "$status" = 0 ] || fail "Pi turn-end guard misread a Windows-tagged session lock (exit $status): $out"
+  [ -z "$out" ] || fail "Pi turn-end tagged-lock case printed output: $out"
+  pass ".pi primary extension: the turn-end guard reads a Windows-tagged session lock only on Windows"
 }
 
 # --- --claude cooperative mode -----------------------------------------------
@@ -1704,7 +1881,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   for i in 1 2 3 4; do
     out=$(run_integrated_autoarm "$dir"); status=$?
     expect_code 2 "$status" "failed epoch $i must retain the automatic retry handoff"
-    [ -z "$out" ] || fail "failed epoch $i repeated the operator notice: $out"
+    assert_contains "$out" "suppressed continuation" "failed epoch $i did not carry its one-line reason: $out"
+    assert_not_contains "$out" "automatic supervision mechanism is broken" "failed epoch $i repeated the operator notice: $out"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
     if [ "$i" -lt 4 ]; then
       expect_code 2 "$guard_status" "failed epoch $i must consume a bounded blind-stop block"
@@ -1718,7 +1896,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
 
   out=$(run_integrated_autoarm "$dir"); status=$?
   expect_code 0 "$status" "the auto-arm must not re-trigger continuation after the final fail-open"
-  [ -z "$out" ] || fail "post-fail-open auto-arm produced continuation output: $out"
+  assert_contains "$out" "suppressed continuation" "post-fail-open auto-arm did not carry its one-line reason: $out"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" "post-fail-open auto-arm repeated the operator notice: $out"
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
   expect_code 2 "$guard_status" "a later unhealthy stop in the same episode must remain attended"
   assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated in the same episode"
@@ -1913,6 +2092,186 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   assert_absent "$dir/state/.claude-autoarm.lock" "concurrent recovery left the owner lock"
   assert_absent "$dir/state/.turnend-claude-blocks.lock" "concurrent recovery left the budget lock"
   pass "fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free"
+}
+
+# The production failure shape: the same-Stop auto-arm's open generation claim
+# makes the synchronous guard step aside on every firing, so terminal_fail_open
+# is never reached while the automatic continuation keeps exhausting. The
+# exhausted auto-arm is then the only participant that knows no automatic
+# continuation remains, so it commits the attended alarm itself - whichever
+# terminal failure path the continuation takes. Both hooks fire per Stop here -
+# the slow fixture keeps each generation claim open while the guard runs, so the
+# guard deterministically takes its step-aside observe branch: one failure
+# notice, then reasoned suppressed continuations, then exactly one loud final
+# rewake carrying the alarm the auto-arm wrote, and quiet suppressed
+# generations after it. <variant> picks the terminal path: arm (the watcher
+# arm keeps failing), lost-handback / lost-announced-handback (the supervision
+# host hands back a wake but leaves a pending or announced handling marker, so
+# no rewake can commit), or signal (the hook is TERMed mid-arm).
+assert_autoarm_commits_attended_alarm_on_exhausted_continuation() {
+  local variant=$1 dir i guard_status auto_status pid identity
+  local alarmed=-1 loud=0 suppressed_reasons=0 empty=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-autoarm-alarm-$variant")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  case "$variant" in
+    arm|alarm-signal)
+      printf '#!/usr/bin/env bash\nsleep 1\nprintf '"'"'watcher: FAILED - persistent fixture failure\\n'"'"'\nexit 1\n' > "$dir/bin/fm-watch-arm.sh"
+      ;;
+    signal)
+      printf '#!/usr/bin/env bash\nexec sleep 30\n' > "$dir/bin/fm-watch-arm.sh"
+      ;;
+    lost-handback|lost-announced-handback)
+      local marker=pending
+      [ "$variant" = lost-handback ] || marker=announced
+      rm -f "$dir/config/supervision-host-off"
+      {
+        printf '#!/usr/bin/env bash\nsleep 1\n'
+        printf "printf '%s:handling:fixture-generation\\\\n' > \"\$FM_HOME/state/.watcher-down\"\n" "$marker"
+        cat <<'SH'
+printf 'signal: fixture.status\n'
+printf 'supervision-host: watcher downtime could not be restored for the main hand-back\n'
+exit 1
+SH
+      } > "$dir/bin/fm-supervision-host.sh"
+      chmod +x "$dir/bin/fm-supervision-host.sh"
+      ;;
+  esac
+  if [ "$variant" = alarm-signal ]; then
+    # Deterministically TERM after the alarm commit, at budget-lock release.
+    # The final-rewake contract requires exit 2 with the banner, not the quiet
+    # exit used when some earlier invocation committed the episode's alarm.
+    cat >> "$dir/bin/fm-wake-lib.sh" <<'SH'
+fixture_alarm_present=0
+[ ! -e "$FM_HOME/state/.claude-autoarm-failure-alarmed" ] || fixture_alarm_present=1
+eval "$(declare -f fm_lock_release | sed '1s/fm_lock_release/fixture_lock_release/')"
+fm_lock_release() {
+  fixture_lock_release "$@"
+  if [ "$fixture_alarm_present" -eq 0 ] \
+    && [ "$1" = "$FM_HOME/state/.turnend-claude-blocks.lock" ] \
+    && [ -e "$FM_HOME/state/.claude-autoarm-failure-alarmed" ]; then
+    kill -TERM "${BASHPID:-$$}"
+  fi
+}
+SH
+  fi
+  chmod +x "$dir/bin/fm-watch-arm.sh" 2>/dev/null || true
+  # Each Stop fires both hooks as children of one fake Claude session process
+  # that holds state/.lock, as the harness does: the guard then recognizes the
+  # lock as its own session's however the test itself is launched.
+  cat > "$dir/stop-driver.sh" <<'SH'
+i=$1 variant=$2
+# Each Stop is a new fake-claude pid, as a real Stop is a new hook process.
+# The session lock sidecar is what makes those Stops the same session, so an
+# interrupted episode can still exhaust its budget instead of resetting.
+export CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sess-claude-mode CLAUDE_PID=$$
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+printf '%s\n' "$CLAUDE_CODE_SESSION_ID" > "$FM_HOME/state/.lock-session"
+printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
+  | FM_CLAUDE_AUTOARM_ATTEMPTS=1 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/auto-$i.out" 2>&1 &
+auto_pid=$!
+# Fire the guard only once this generation's claim is observed open, so the
+# guard deterministically takes its step-aside observe branch instead of racing
+# the pre-claim ledger (the fixture still runs for ~1s).
+waited=0
+while [ "$waited" -lt 100 ]; do
+  [ "$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null)" = arming ] && break
+  sleep 0.05
+  waited=$((waited + 1))
+done
+[ "$waited" -lt 100 ] || : > "$FM_HOME/noclaim-$i"
+printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
+  | CLAUDECODE=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$FM_HOME/guard-$i.out" 2>&1
+printf '%s' "$?" > "$FM_HOME/guard-$i.status"
+[ "$variant" != signal ] || kill -TERM "$auto_pid" 2>/dev/null || : > "$FM_HOME/nokill-$i"
+wait "$auto_pid"
+printf '%s' "$?" > "$FM_HOME/auto-$i.status"
+SH
+  for i in 1 2 3 4 5 6 7; do
+    FM_HOME="$(cd "$dir" && pwd)" "$dir/fake-claude" "$dir/stop-driver.sh" "$i" "$variant"
+    assert_absent "$dir/noclaim-$i" "the auto-arm never opened its generation claim ($variant, stop $i)"
+    assert_absent "$dir/nokill-$i" "could not TERM the auto-arm generation owner ($variant, stop $i)"
+    guard_status=$(cat "$dir/guard-$i.status")
+    auto_status=$(cat "$dir/auto-$i.status")
+    # The guard either steps aside for the open claim (0) or, on a transient
+    # probe failure, takes its bounded re-block (2) - both paths charge this
+    # new generation exactly once, and neither can alarm mid-claim because the
+    # verified-failure gate reads outcome=arming.
+    case "$guard_status" in
+      0|2) : ;;
+      *) fail "the guard returned an unsafe status $guard_status while the auto-arm's claim was open ($variant, stop $i)" ;;
+    esac
+    case "$auto_status" in
+      0|2) : ;;
+      *) fail "the auto-arm returned an unsafe status $auto_status ($variant, stop $i): $(cat "$dir/auto-$i.out")" ;;
+    esac
+    if [ -e "$dir/state/.claude-autoarm-failure-alarmed" ] && [ "$alarmed" -lt 0 ]; then
+      alarmed=$i
+    fi
+    grep -q 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "$dir/auto-$i.out" && loud=$((loud + 1))
+    grep -q 'suppressed continuation' "$dir/auto-$i.out" && suppressed_reasons=$((suppressed_reasons + 1))
+    { [ "$auto_status" -eq 2 ] && [ ! -s "$dir/auto-$i.out" ]; } && empty=$((empty + 1))
+    case "$variant" in
+      lost-handback|lost-announced-handback)
+        # The host's actionable wake lines ride every hand-back that rewakes.
+        if [ "$auto_status" -eq 2 ]; then
+          assert_contains "$(cat "$dir/auto-$i.out")" "supervision-host: watcher downtime could not be restored" \
+            "a lost hand-back rewake dropped the host's actionable output ($variant, stop $i)"
+        fi
+        ;;
+    esac
+  done
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the failure episode notice was never consumed ($variant)"
+  [ "$alarmed" -ge 0 ] || fail "the auto-arm never committed the attended alarm ($variant)"
+  expect_code 2 "$(cat "$dir/auto-$alarmed.status")" "the committing invocation must deliver its final rewake ($variant)"
+  [ "$loud" -eq 1 ] || fail "the final supervision-down rewake fired $loud times instead of once ($variant)"
+  [ "$suppressed_reasons" -ge 1 ] || fail "no suppressed continuation carried its one-line reason ($variant)"
+  [ "$empty" -eq 0 ] || fail "$empty rewake-triggering continuations carried an empty body ($variant)"
+  expect_code 2 "$(cat "$dir/auto-1.status")" "the first exhausted failure must still notify ($variant)"
+  case "$variant" in
+    arm|alarm-signal) assert_contains "$(cat "$dir/auto-1.out")" "automatic supervision mechanism is broken" "the first failure omitted its notice" ;;
+    signal) assert_contains "$(cat "$dir/auto-1.out")" "firstmate watcher auto-arm INTERRUPTED" "the first interruption omitted its notice" ;;
+    *) assert_contains "$(cat "$dir/auto-1.out")" "auto-arm FAILED - the supervision host returned an actionable wake" "the first lost hand-back omitted its notice" ;;
+  esac
+  [ "$alarmed" -ge 2 ] || fail "the alarm cannot precede the consumed failure notice, it fired at stop $alarmed ($variant)"
+  for i in $(seq $((alarmed + 1)) 7); do
+    expect_code 0 "$(cat "$dir/auto-$i.status")" "a post-alarm generation must stay suppressed, not rewake ($variant, stop $i)"
+    assert_not_contains "$(cat "$dir/auto-$i.out")" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated after commit ($variant, stop $i)"
+  done
+  # Positive recovery clears the whole episode - notice, alarm, and budget - so
+  # the next failure episode restarts its own attended budget. The recovery
+  # cycle closes non-actionably beside the verified healthy watcher.
+  : > "$dir/config/supervision-host-off"
+  printf '#!/usr/bin/env bash\nprintf '"'"'watcher: FAILED - persistent fixture failure\\n'"'"'\nexit 1\n' > "$dir/bin/fm-watch-arm.sh"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify recovery watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  auto_status=$(FM_CLAUDE_AUTOARM_ATTEMPTS=1 run_integrated_autoarm "$dir" > "$dir/auto-recovery.out"; printf '%s' "$?")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$auto_status" "a healthy watcher must close the alarmed episode cleanly ($variant)"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive recovery left the failure notice ($variant)"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "positive recovery left the attended alarm ($variant)"
+  assert_absent "$dir/state/.turnend-claude-blocks" "positive recovery left the block budget ($variant)"
+}
+
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_exhausted_continuation() {
+  assert_autoarm_commits_attended_alarm_on_exhausted_continuation arm
+  pass "fm-turnend-guard --claude: the exhausted auto-arm commits the attended alarm once, then stays suppressed until recovery"
+}
+
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_lost_handback() {
+  assert_autoarm_commits_attended_alarm_on_exhausted_continuation lost-handback
+  assert_autoarm_commits_attended_alarm_on_exhausted_continuation lost-announced-handback
+  pass "fm-turnend-guard --claude: a repeatedly lost host hand-back on a pending or announced handling marker reaches the attended alarm"
+}
+
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_interruption() {
+  assert_autoarm_commits_attended_alarm_on_exhausted_continuation signal
+  assert_autoarm_commits_attended_alarm_on_exhausted_continuation alarm-signal
+  pass "fm-turnend-guard --claude: interruption reaches the attended alarm and preserves its final rewake after commit"
 }
 
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
@@ -2351,10 +2710,12 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
+test_codex_hook_preserves_streams_without_login_logout_output
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_pi_extension_keeps_marker_of_live_ancestor_session
+test_pi_extension_reads_a_windows_tagged_session_lock
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
@@ -2373,6 +2734,9 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open
 test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_exhausted_continuation
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_lost_handback
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_interruption
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once

@@ -951,7 +951,8 @@ async function sleep(milliseconds) {
 
 async function capturedProcessOutput(command, args, maxBytes = 8192) {
   const child = spawn(command, args, {
-    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C" },
+    // TZ matches fm_pid_identity in bin/fm-wake-lib.sh, whose identities pidIdentity reads.
+    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C", TZ: "UTC0" },
     shell: false,
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -1353,6 +1354,27 @@ async function cleanupRecordedInvocations(home, { sourceId = null, bindingDigest
     const invocation = { ...paths, token: owner.token, pid: groupPid, groupIdentity, trustedChild: false, cleanupPromise: null };
     await cleanupExactProcessGroup(invocation);
     await clearInvocationFiles(invocation);
+    cleaned += 1;
+  }
+  // A readiness record can outlive its owner after interrupted finalization.
+  // It carries no source/binding authority and must never authorize signalling.
+  // Reclaim only the core barrier's exact token after both PID and group are gone.
+  for (const name of (await readdir(root)).filter((entry) => /^[0-9a-f]{64}\.ready\.json$/u.test(entry)).sort()) {
+    const token = `sha256:${name.slice(0, -".ready.json".length)}`;
+    const paths = invocationPaths(root, token);
+    if (await maybeLstat(paths.ownerFile)) continue;
+    const readyValue = await readPrivateJson(paths.readyFile, "extension invocation readiness");
+    if (!readyValue) continue;
+    const ready = validateInvocationReady(readyValue, token);
+    if (ready.group_identity !== `barrier-token:${token}`
+        || await processGroupState(ready.group_pid, ready.group_identity) !== 1) {
+      fail("process-cleanup-failed", "ownerless extension readiness process group cannot be proved gone");
+    }
+    const rechecked = await readPrivateJson(paths.readyFile, "extension invocation readiness");
+    if (canonicalJson(rechecked) !== canonicalJson(ready) || await maybeLstat(paths.ownerFile)) {
+      fail("process-cleanup-failed", "ownerless extension readiness changed before cleanup");
+    }
+    await unlink(paths.readyFile);
     cleaned += 1;
   }
   const remaining = await readdir(root);
@@ -2097,6 +2119,8 @@ async function releaseLifecycleLock() {
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
   await unlink(path.join(ownerPath, "pid"));
+  // The holder's start time, which fm_lock_prepare_owner records beside the pid.
+  await unlink(path.join(ownerPath, "pid-start")).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }
