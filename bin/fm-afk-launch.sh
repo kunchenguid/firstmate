@@ -23,11 +23,12 @@
 # Claude, by config/supervision-host elsewhere), where the host runs the away
 # session; `enter` there adds one line when the host has no
 # engine, because every away wake then reaches main. Because the away daemon
-# is never launched on such a home, an away `enter` that finds daemon-lifecycle
-# state there - a running quiet daemon from an unready-host fallback, or a
-# stale flag or recorded terminal a dead daemon left - sends it through the
-# same guarded teardown `stop` uses before the record changes mode, so the
-# flag cannot outlive the record as quiet and split the readers. Every other
+# is never launched on such a home, an away `enter` that publishes the away
+# record and finds daemon-lifecycle state there - a running quiet daemon from
+# an unready-host fallback, or a stale flag or recorded terminal a dead daemon
+# left - sends it through the same guarded teardown `stop` uses, so no daemon
+# outlives the quiet mode it served; a refused entry leaves both untouched.
+# Every other
 # harness still runs the daemon for now, so `start` and `start-native` require
 # the record `enter` wrote before they launch the daemon.
 # QUIET MODE on a home that runs the supervision host needs nothing
@@ -48,7 +49,7 @@
 # through the daemon as it does without the host. A quiet `enter` records its
 # mode, so `start` and `start-native` launch the quiet daemon without
 # FM_AFK_MODE; a running quiet daemon is refreshed by a later `/quiet` and runs
-# until `/quiet off` or an away `enter` tears it down (above). A quiet `start`
+# until `/quiet off` or a published away `enter` tears it down (above). A quiet `start`
 # or `start-native` that fails while no
 # daemon runs ends quiet mode as `stop` does, so no quiet record outlives its
 # daemon to park a present captain's main.
@@ -383,14 +384,16 @@ fm_afk_launch_record_require() {
 # behind: the host is that home's away session and the away daemon is never
 # launched there, so a live daemon can only be the quiet one an unready-host
 # fallback launched - plus any stale flag or recorded terminal a dead daemon
-# left. The entry sends it through the same guarded teardown `stop` uses
-# (SIGTERM, exact-id terminal close, flag clear) BEFORE the record changes
-# mode, so the flag cannot outlive the record as quiet and split the readers.
-# Nothing runs where no daemon-lifecycle state exists, and a failed teardown
-# is reported without blocking the entry: the record is the posture readers
-# now follow, and ENTRY IS THE GO never waits.
+# left. Once the record reads away, the entry sends it through the same
+# guarded teardown `stop` uses (SIGTERM, exact-id terminal close, flag clear);
+# readers already follow the record, so the brief flag-under-away-record
+# window reads away. An entry the record owner refused leaves a quiet record
+# standing, and its daemon stays with it. Nothing runs where no
+# daemon-lifecycle state exists, and a failed teardown is reported without
+# undoing the entry: ENTRY IS THE GO never waits.
 fm_afk_launch_host_daemon_stop() {
   local harness
+  fm_afk_contract_away_present "$FM_AFK_LAUNCH_STATE" || return 0
   harness=$(fm_afk_launch_primary_harness)
   fm_afk_launch_host_primary "$harness" || return 0
   fm_supervision_host_enabled "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$harness" || return 0
@@ -398,13 +401,14 @@ fm_afk_launch_host_daemon_stop() {
     && [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] && [ ! -e "$FM_AFK_LAUNCH_RECORD" ]; then
     return 0
   fi
-  fm_afk_launch_log "this home runs the supervision host, so the away entry ends daemon-mode here: stopping the daemon and clearing its flag by exact id before the record changes"
+  fm_afk_launch_log "this home runs the supervision host, so the away entry ends daemon-mode here: stopping the daemon and clearing its flag by exact id under the away record"
   fm_afk_launch_daemon_teardown \
-    || fm_afk_launch_log "the daemon teardown did not complete; the away record still enters, and the leftover daemon state remains for retry"
+    || fm_afk_launch_log "the daemon teardown did not complete; the away record stands, and the leftover daemon state remains for retry"
   return 0
 }
 
 fm_afk_launch_enter() {
+  local rc=0
   fm_afk_launch_catchup_pending && return 1
   if [ "${FM_AFK_MODE:-}" = quiet ]; then
     fm_afk_launch_quiet_needs_nothing
@@ -416,10 +420,10 @@ fm_afk_launch_enter() {
         fm_afk_launch_log "quiet mode refuses while this home's away record (state/.afk-contract) is live; run the /afk return (bin/fm-afk-return.sh) and pass its catch-up gate, then run bin/fm-afk-launch.sh quiet-check"
         return 3 ;;
     esac
-  else
-    fm_afk_launch_host_daemon_stop
   fi
-  "$FM_AFK_CONTRACT_CMD" enter "$@" || return
+  "$FM_AFK_CONTRACT_CMD" enter "$@" || rc=$?
+  [ "${FM_AFK_MODE:-}" = quiet ] || fm_afk_launch_host_daemon_stop
+  [ "$rc" -eq 0 ] || return "$rc"
   fm_afk_launch_host_engine_note
 }
 
