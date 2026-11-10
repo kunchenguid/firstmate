@@ -576,7 +576,7 @@ test_backend_rex_autodetect() {
 # undetected however the app home and spawn core look.
 test_backend_detect_herdr_app() {
   local dir fb cfg cfg_tmux out errfile sockdir sock run other apphome lpid opid
-  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the herdr-app probes need its unix connect"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; these cases park their unix sockets with it"; return; }
   command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
 
   dir="$TMP_ROOT/herdr-app-detect"; fb="$dir/fakebin"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
@@ -657,7 +657,8 @@ SH
     FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
     HC_TERMINAL_ID=t2 fm_backend_detect) \
     && fail "HC_TERMINAL_ID without a socket never reaches the record check, got '$out'"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$run" \
+  # node stays reachable: the socket probe runs on it, as on every home.
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$(dirname "$(command -v node)"):/usr/bin:/bin" XDG_RUNTIME_DIR="$run" \
     HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" FM_HC_BIN=/nonexistent/hc fm_backend_detect && exit 9; \
     [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
     || fail "a live terminal with no usable hc must stay undetected with signal app-terminal-unusable, got '$out'"
@@ -759,7 +760,7 @@ SH
 # toolchain prints the missing piece instead of switching.
 test_backend_name_herdr_app() {
   local dir fb cfg cfg_tmux out errfile apphome lpid cpid sockdir run
-  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the herdr-app probes need its unix connect"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; these cases park their unix sockets with it"; return; }
   command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
 
   dir="$TMP_ROOT/herdr-app-name"; fb="$dir/fakebin"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
@@ -809,7 +810,7 @@ SH
 
   # A live hc terminal with no usable toolchain: no switch, notice names the gap.
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HERDR_APP_HOME; PATH="/usr/bin:/bin" \
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HERDR_APP_HOME; PATH="$(dirname "$(command -v node)"):/usr/bin:/bin" \
     XDG_RUNTIME_DIR="$run" HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$run/herdr-core/default.sock" \
     FM_HC_BIN=/nonexistent/hc FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "a live hc terminal with an unusable toolchain must keep the default backend, got '$out'"

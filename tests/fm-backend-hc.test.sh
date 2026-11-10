@@ -213,20 +213,25 @@ test_agent_state_classifies_foreground_and_absence() {
 # hc starts a fresh, empty core for a socket that is not live, and that core
 # reports every address not_found; reading that as `missing` would let recovery
 # respawn a second agent beside the live one, so no socket and a stale socket
-# file both read unreadable and hc is never asked.
+# file both read unreadable and hc is never asked. The gate runs on the
+# universal toolchain alone, so a host without python3 still reads the live
+# core normally.
 test_dead_core_socket_reads_unreadable_without_calling_hc() {
-  local tag out
+  local tag out no_python
   setup_case deadcore
   tag=$(hometag_of)
   write_terminal "$D" t1 finished fm-a1 "$tag" "" ""
   python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$HC_RUN/herdr-core/stale.sock" \
     || fail "could not leave a stale socket file"
+  no_python=$(fm_test_base_path_sans "$PATH" python3) || fail "could not build a PATH without python3"
   # shellcheck disable=SC2016 # the inner shell expands it
-  out=$(hc_shell 'for s in gone stale; do printf "%s=%s/%s " $s "$(fm_backend_agent_state hc $s:t1)" "$(fm_backend_hc_endpoint_state $s:t1)"; done')
-  assert_equals "$out" "gone=unreadable/unreadable stale=unreadable/unreadable " \
-    "a core with no socket or a dead one must read unreadable, never missing or absent"
-  assert_not_contains "$(cat "$D/log" 2>/dev/null)" $'\x1fget\x1f' "hc must never be asked about a core whose socket is not live"
-  pass "hc: a dead or absent core socket reads unreadable and never reaches hc get"
+  out=$(PATH=$no_python hc_shell 'command -v python3 >/dev/null && echo "python3 still on PATH"
+    for s in gone stale fmtest; do printf "%s=%s/%s " $s "$(fm_backend_agent_state hc $s:t1)" "$(fm_backend_hc_endpoint_state $s:t1)"; done')
+  assert_equals "$out" "gone=unreadable/unreadable stale=unreadable/unreadable fmtest=missing/finished " \
+    "with no python3, a core with no socket or a dead one must read unreadable while the live core is still read"
+  [ "$(grep -c $'\x1fget\x1f' "$D/log")" -eq 2 ] \
+    || fail "hc must be asked only about the live core, got: $(grep $'\x1fget\x1f' "$D/log")"
+  pass "hc: a dead or absent core socket reads unreadable and never reaches hc get, with no python3 needed"
 }
 
 test_agent_state_reads_a_shell_wrappers_group() {
