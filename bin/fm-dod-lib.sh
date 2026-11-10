@@ -981,33 +981,48 @@ fm_dod_nm_custody_returned() {  # <worktree>
 
 # Refreshes <repo>'s remote-tracking refs from every remote except the local
 # no-mistakes gate, which is a validation copy on this machine: fetching it
-# would count work that no real remote holds. Each fetch is bounded to
-# <seconds> (default 30), and to the time left before <deadline> (epoch
-# seconds) when one is given, and is non-interactive; a remote whose turn comes
-# after <deadline> is not fetched. --no-prune keeps a branch a remote has
-# dropped visible whatever fetch.prune says, and the explicit refspec covers
-# every branch even when a clone tracks only some of them.
+# would count work that no real remote holds. origin, when there is one, is
+# fetched first, then the other remotes. Each fetch is bounded to <seconds>
+# (default 30) and is non-interactive. When <deadline> (epoch seconds) is given,
+# each fetch is also bounded to an even share of the time left before it among
+# the remotes still to fetch, so one remote that hangs cannot take the time of
+# the ones after it; a remote whose turn comes after <deadline> is not fetched.
+# --no-prune keeps a branch a remote has dropped visible whatever fetch.prune
+# says, and the explicit refspec covers every branch even when a clone tracks
+# only some of them.
 # A fetch that fails, times out, or is not made only leaves the last-known refs
 # in place; its remote is appended to FM_DOD_REFRESH_FAILED (", "-separated) so
 # a refusal can say its verdict used those refs. Always returns 0.
 # bin/fm-teardown.sh and the named-head gate below share this one refresh.
 FM_DOD_REFRESH_FAILED=
 fm_dod_refresh_remote_refs() {  # <repo> [<seconds>] [<deadline>]
-  local repo=$1 seconds=${2:-30} deadline=${3:-} remote bound left
+  local repo=$1 seconds=${2:-30} deadline=${3:-} remote remotes='' pending=0 bound left
   [ -n "$repo" ] && [ -d "$repo" ] || return 0
   while IFS= read -r remote; do
-    case "$remote" in ''|no-mistakes) continue ;; esac
+    case "$remote" in
+      ''|no-mistakes) continue ;;
+      origin) remotes="origin"$'\n'"$remotes" ;;
+      *) remotes="$remotes$remote"$'\n' ;;
+    esac
+    pending=$((pending + 1))
+  done <<EOF
+$(git -C "$repo" remote 2>/dev/null)
+EOF
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
     bound=$seconds
     if [ -n "$deadline" ]; then
       left=$((deadline - $(date +%s)))
+      [ "$left" -le 0 ] || left=$(((left + pending - 1) / pending))
       [ "$left" -ge "$bound" ] || bound=$left
     fi
+    pending=$((pending - 1))
     [ "$bound" -gt 0 ] \
       && GIT_TERMINAL_PROMPT=0 fm_run_timed "$bound" git -C "$repo" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
         "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
       || FM_DOD_REFRESH_FAILED="$FM_DOD_REFRESH_FAILED${FM_DOD_REFRESH_FAILED:+, }$remote"
   done <<EOF
-$(git -C "$repo" remote 2>/dev/null)
+$remotes
 EOF
   return 0
 }

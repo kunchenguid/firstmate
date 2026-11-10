@@ -202,6 +202,36 @@ test_failed_refresh_refuses_with_last_known_refs() {
   pass "a failed refresh still refuses and says the verdict used the last-known refs"
 }
 
+test_remote_hanging_before_origin_leaves_origin_its_refresh() {
+  local repo wt origin fakebin sha start
+  repo="$TMP_ROOT/hang-first-repo"
+  wt="$TMP_ROOT/hang-first-wt"
+  origin="$repo.origin.git"
+  fakebin="$TMP_ROOT/hang-first-bin"
+  fm_git_worktree "$repo" "$wt" fm/hang-first
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/hang-first:refs/heads/fm/hang-first"
+  # backup sorts before origin and never answers a fetch.
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "$fakebin/git-remote-hang"
+  chmod +x "$fakebin/git-remote-hang"
+  git -C "$repo" remote add backup hang::backup
+  [ "$(git -C "$wt" remote | head -1)" = backup ] \
+    || fail "fixture: the hanging remote is not listed before origin"
+  FM_DOD_REFRESH_FAILED=
+  start=$(date +%s)
+  PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 4)) \
+    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/9 checks green" >/dev/null \
+    || fail "a remote hanging before origin under a short refresh deadline kept origin's head from being accepted"
+  [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/hang-first)" = "$sha" ] \
+    || fail "origin was not fetched behind a remote that hangs"
+  [ "$FM_DOD_REFRESH_FAILED" = backup ] \
+    || fail "the hanging remote was not named as not refreshed: '$FM_DOD_REFRESH_FAILED'"
+  [ "$(date +%s)" -le $((start + 6)) ] || fail "the refresh outlived its deadline"
+  pass "a remote that hangs and sorts before origin cannot take origin's refresh; origin's head is accepted and the hanging remote is named"
+}
+
 test_local_only_branch_beside_gate_mirror_is_accepted() {
   local repo wt sha
   repo="$TMP_ROOT/mirror-local-repo"
@@ -610,6 +640,7 @@ test_head_pushed_from_gate_clone_is_accepted_after_refresh
 test_separate_project_clone_is_refreshed
 test_passed_refresh_deadline_refuses_with_last_known_refs
 test_failed_refresh_refuses_with_last_known_refs
+test_remote_hanging_before_origin_leaves_origin_its_refresh
 test_local_only_branch_beside_gate_mirror_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
