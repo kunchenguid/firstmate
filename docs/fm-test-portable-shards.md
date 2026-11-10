@@ -21,6 +21,7 @@ Measure that script through the focused Git Bash runner rather than a portable s
 A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
 The 2026-11-13 `tests/fm-pi-bash-timeout.test.sh` serial hint is a provisional local measurement of 1486 ms, the slowest of five successful `bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` samples (1288-1486 ms) on a macOS arm64 host, collected separately from coverage and lint checks.
+The 2026-11-10 `tests/fm-claude-permission.test.sh` (5500 ms, above the slowest of three local `bin/fm-test-run.sh` samples, 4527-4964 ms) and `tests/fm-claude-permission-live-e2e.test.sh` (200 ms, above three local live-guard skip samples, 136-147 ms) serial hints are provisional local measurements on a macOS host, until the next CI refresh replaces them with Ubuntu timing-artifact maxima.
 Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
 
 ## Parallel lanes
