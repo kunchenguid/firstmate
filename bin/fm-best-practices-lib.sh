@@ -674,29 +674,29 @@ fm_bp_skills_dir_absent() {  # <project|user> <checkout> <dir> <skills-json>
   fi
 }
 
-# A skills directory: installed means at least one of the pack's skills is
-# where the harness loads them, at user level or committed in the project, and
-# the first directory holding every one of them is preferred over the first
-# holding some, whose absent skills the fingerprint check then reports as
-# unreviewed; enabled is presence, unless the harness's switch (the manifest's
-# `switch`: a list of disabled skill names at one key path in a user settings
-# file and the project's committed one) names any of the pack's skills; the
-# version is a plugin.json the copy carries, never inferred.
-fm_bp_read_skills_dir() {  # <repo> <plugin> <checkout> <harness-entry-json> <skills-json>
-  local repo=$1 plugin=$2 checkout=$3 entry=$4 skills=$5 d dir absent total n ver switch scope found='' disabled path user_file copy=null
+# A skills directory: installed means at least one of the skills the adapter
+# depends on (<named-json>, the manifest's fingerprints.skills) is where the
+# harness loads them, at user level or committed in the project; the first
+# directory holding every one of the pack's skills is preferred over the first
+# holding some of the depended-on ones, whose absent skills the fingerprint
+# check then reports as unreviewed, and a directory holding only skills the
+# adapter does not name is passed over; enabled is presence, unless the
+# harness's switch (the manifest's `switch`: a list of disabled skill names at
+# one key path in a user settings file and the project's committed one) names
+# any of the pack's skills; the version is a plugin.json the copy carries,
+# never inferred.
+fm_bp_read_skills_dir() {  # <repo> <plugin> <checkout> <harness-entry-json> <skills-json> <named-json>
+  local repo=$1 plugin=$2 checkout=$3 entry=$4 skills=$5 named=$6 d dir absent ver switch scope found='' disabled path user_file copy=null
   local pick_scope='' pick_dir='' pick_absent=''
-  total=$(jq 'length' <<<"$skills")
   for scope in project user; do
     while IFS= read -r d; do
       [ -n "$d" ] || continue
       absent=$(fm_bp_skills_dir_absent "$scope" "$checkout" "$d" "$skills")
-      n=0
-      [ -z "$absent" ] || n=$(printf '%s\n' "$absent" | wc -l | tr -d ' ')
-      if [ "$n" -eq 0 ]; then
+      if [ -z "$absent" ]; then
         pick_scope=$scope pick_dir=$d pick_absent=
         break 2
       fi
-      if [ -z "$pick_dir" ] && [ "$n" -lt "$total" ]; then
+      if [ -z "$pick_dir" ] && jq -e --arg a "$absent" '($a | split("\n")) as $gone | any(.[]; . as $s | $gone | index($s) == null)' <<<"$named" >/dev/null; then
         pick_scope=$scope pick_dir=$d pick_absent=$absent
       fi
     done < <(jq -r --arg k "${scope}_dirs" '.[$k] // [] | .[]' <<<"$entry")
@@ -717,7 +717,7 @@ fm_bp_read_skills_dir() {  # <repo> <plugin> <checkout> <harness-entry-json> <sk
     [ -z "$pick_absent" ] || found="$found, without $(printf '%s\n' "$pick_absent" | paste -sd ',' - | sed 's/,/, /g')"
   fi
   if [ -z "$found" ]; then
-    fm_bp_result false false "" "" "" "no directory this harness loads skills from holds any of the pack's skills"
+    fm_bp_result false false "" "" "" "no directory this harness loads skills from holds any of the pack's skills the adapter depends on"
     return 0
   fi
   switch=$(jq -c '.switch // null' <<<"$entry")
@@ -858,7 +858,7 @@ fm_bp_read() {  # <owner/repo> <harness> <project-dir>
     omp-plugin) r=$(fm_bp_read_omp "$repo" "$plugin" "$checkout") ;;
     codex-config) r=$(fm_bp_read_codex "$repo" "$plugin") ;;
     agy-plugin-list) r=$(fm_bp_read_agy "$repo" "$plugin") ;;
-    skills-dir) r=$(fm_bp_read_skills_dir "$repo" "$plugin" "$checkout" "$entry" "$(jq -c '.skills' "$manifest")") ;;
+    skills-dir) r=$(fm_bp_read_skills_dir "$repo" "$plugin" "$checkout" "$entry" "$(jq -c '.skills' "$manifest")" "$(jq -c '.fingerprints.skills // []' "$manifest")") ;;
     *) r=$(fm_bp_result false false "" "" "" "no read is implemented for $harness") ;;
   esac
   # The version is the pack's content, not the runtime's label: the files the

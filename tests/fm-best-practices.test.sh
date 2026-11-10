@@ -429,6 +429,15 @@ SH
   assert_equals 0.6.14 "$(field "$r" version)" "a complete skills copy in a later directory was not preferred over a partial one"
   assert_contains "$(field "$r" where)" "$home/.agents/skills" "the read does not name the complete copy it took"
   rm -rf "$home/.agents/skills" "$home/.gemini/skills"
+  mkdir -p "$home/.claude/skills"
+  cp -R "$FIX_PACK/skills/test-driven-development" "$home/.claude/skills/"
+  pack_copy "$home/.agents/skills" skills
+  rm -rf "$home/.agents/skills/interview-me"
+  r=$(run_bp "$home" read "$PACK" --harness opencode --project "$proj")
+  assert_equals "true true unreviewed" "$(jq -r '"\(.installed) \(.enabled) \(.version)"' <<<"$r")" \
+    "a directory holding only a skill the adapter does not name hid a later partial copy"
+  assert_contains "$(field "$r" where)" "$home/.agents/skills, without interview-me" "the read did not take the later partial copy naming the absent skill"
+  rm -rf "$home/.agents/skills" "$home/.claude/skills"
   mkdir -p "$home/.gemini/skills/unrelated-skill"
   printf '# not a pack skill\n' > "$home/.gemini/skills/unrelated-skill/SKILL.md"
   assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")" installed)" \
