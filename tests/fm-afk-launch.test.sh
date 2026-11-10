@@ -1426,6 +1426,13 @@ unit_supervision_host_away_enter_stops_quiet_daemon() {
   # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
 
+  out=$(quiet_in "$st" "$LAUNCH" enter --words-file "$st/no-such-words" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] || [ "$(quiet_in "$st" "$CONTRACT" mode)" != quiet ] \
+    || [ "$(head -n 1 "$st/state/.afk" 2>/dev/null)" != quiet ] || [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    || ! kill -0 "$sleep_pid" 2>/dev/null; then
+    fail "a refused away entry must leave the quiet record, flag, terminal record, and daemon untouched (rc=$rc): $out"
+  fi
+
   out=$(quiet_in "$st" "$LAUNCH" enter --words "merge anything green"); rc=$?
   if [ "$rc" -eq 0 ] && [ "$(quiet_in "$st" "$CONTRACT" mode)" = away ] \
     && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
