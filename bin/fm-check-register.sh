@@ -32,7 +32,10 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$(fm_pr_file_device "$CHECK")" = "$STATE_DEVICE" ] && [ "$(fm_pr_file_link_count "$CHECK")" = 1 ] \
   || { echo "error: custom check state/$ID.check.sh must be a single-link file on the state device; not registered, the watcher will refuse it" >&2; exit 1; }
 if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
-  chmod 0700 "$CHECK" || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
+  perl -MFcntl=O_RDONLY,O_NOFOLLOW -e '
+    sysopen(my $check, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
+    chmod 0700, $check or exit 1;
+  ' "$CHECK" || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
 fi
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
   || { echo "error: custom check state/$ID.check.sh is not a private mode-0700 file; not registered, the watcher will refuse it" >&2; exit 1; }

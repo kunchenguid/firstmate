@@ -12,6 +12,7 @@ set -u
 
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-check-register)
+PERL=$(command -v perl) || fail "fm-check-register requires perl"
 
 make_home() {
   local home="$TMP_ROOT/$1"
@@ -47,5 +48,29 @@ test_unsafe_check_is_refused_naming_the_check() {
   pass "unsafe check is refused loudly and names the check"
 }
 
+test_check_swapped_to_symlink_during_normalization_does_not_touch_target() {
+  local home target fakebin err status
+  home=$(make_home symlink-race)
+  target="$home/target"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
+  printf target > "$target"
+  chmod 0600 "$home/state/poll.check.sh" "$target"
+  cat > "$fakebin/perl" <<EOF
+#!/usr/bin/env bash
+mv "$home/state/poll.check.sh" "$home/state/original.check.sh"
+ln -s "$target" "$home/state/poll.check.sh"
+exec "$PERL" "\$@"
+EOF
+  chmod 0700 "$fakebin/perl"
+  err=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1 >/dev/null); status=$?
+  [ "$status" -eq 1 ] || fail "symlink swap during normalization was not refused (status $status)"
+  [ "$(fm_pr_file_mode "$target")" = 600 ] || fail "symlink swap changed the target mode"
+  [ ! -e "$home/state/poll.check-trust" ] || fail "refused symlink swap left a trust record"
+  pass "normalization does not follow a swapped check symlink"
+}
+
 test_mode_0600_check_is_normalized_and_registered
 test_unsafe_check_is_refused_naming_the_check
+test_check_swapped_to_symlink_during_normalization_does_not_touch_target
