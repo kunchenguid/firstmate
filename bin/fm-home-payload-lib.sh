@@ -11,8 +11,7 @@
 # fm_home_payload_return stages the same paths first so a failed or interrupted
 # return can put them back: a handled INT/TERM/HUP restores the staging it
 # moved, and a return that is killed outright leaves a record naming the home in
-# that staging directory so fm_home_payload_recover puts the payload back before
-# the next retirement entry decides anything about the home.
+# that staging directory.
 # Without that, an interruption leaves the home stripped of its identity, and
 # every later teardown refuses it as "not a seeded secondmate home" while its
 # records stay stranded in the parent's staging directory.
@@ -56,6 +55,91 @@ fm_home_payload_committed() {  # <record>
   [ -f "$1" ] && grep -Fxq -- 'committed=1' "$1"
 }
 
+fm_home_payload_pool_state() {
+  python3 - "$1" "$2" "$3" <<'PYPOOL'
+import json
+import os
+import subprocess
+import sys
+
+mode, home, staging = sys.argv[1:]
+snapshot = os.path.join(staging, "pool-entry")
+try:
+    if mode == "save":
+        state = os.path.join(os.path.dirname(os.path.dirname(home)), "treehouse-state.json")
+        if os.path.exists(state):
+            with open(state) as stream:
+                entries = json.load(stream)["worktrees"]
+            matches = [entry for entry in entries if os.path.realpath(entry["path"]) == home]
+            if len(matches) != 1:
+                raise ValueError("pool slot is missing or ambiguous")
+            entry = matches[0]
+            if entry.get("leased") is True and not (entry.get("lease_id") or entry.get("leased_at")):
+                raise ValueError("pool lease has no acquisition identity")
+            saved = {"state": state, "entry": entry}
+        else:
+            gitdir = subprocess.check_output(
+                ["git", "-C", home, "rev-parse", "--absolute-git-dir"], text=True
+            ).strip()
+            saved = {"state": None, "gitdir": gitdir}
+        with open(snapshot, "x") as stream:
+            json.dump(saved, stream)
+    else:
+        with open(snapshot) as stream:
+            saved = json.load(stream)
+        if saved["state"] is None:
+            sys.exit(0 if os.path.isdir(home) and os.path.isdir(saved["gitdir"]) else 2)
+        with open(saved["state"]) as stream:
+            entries = json.load(stream)["worktrees"]
+        matches = [entry for entry in entries if os.path.realpath(entry["path"]) == home]
+        if len(matches) > 1:
+            raise ValueError("ambiguous pool slot")
+        if not matches:
+            sys.exit(2)
+        old, current = saved["entry"], matches[0]
+        if current.get("destroying", False):
+            raise ValueError("pool slot is being destroyed")
+        if not isinstance(current.get("leased", False), bool):
+            raise ValueError("invalid pool lease")
+        fields = ("leased", "lease_id", "lease_holder", "leased_at", "owner_pid", "owner_started_at")
+        if old.get("leased") is True and all(old.get(key) == current.get(key) for key in fields):
+            sys.exit(0)
+        if current.get("leased", False) is False or current.get("leased_at") != old.get("leased_at") or current.get("lease_holder") != old.get("lease_holder") or current.get("lease_id") != old.get("lease_id"):
+            sys.exit(2)
+        raise ValueError("pool ownership cannot be reconciled")
+except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+    print(f"error: cannot reconcile durable home {home}: {error}", file=sys.stderr)
+    sys.exit(1)
+PYPOOL
+}
+
+fm_home_payload_reconcile() {
+  local home=$1 staging=$2 rc=0
+  fm_home_payload_committed "$staging/$FM_HOME_PAYLOAD_RECORD" && return 0
+  grep -Fxq 'returning=1' "$staging/$FM_HOME_PAYLOAD_RECORD" || return 2
+  fm_home_payload_pool_state check "$home" "$staging" || rc=$?
+  case "$rc" in
+    0) return 2 ;;
+    2) printf 'committed=1\n' >> "$staging/$FM_HOME_PAYLOAD_RECORD"; return $? ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_home_payload_finalize() {
+  local home=$1 parent=$2 id=$3 staging record
+  if [ -d "$home" ]; then
+    home=$(cd "$home" && pwd -P) || return 1
+  fi
+  for staging in "$parent"/state/.home-return.*; do
+    [ -d "$staging" ] && [ ! -L "$staging" ] || continue
+    record=$staging/$FM_HOME_PAYLOAD_RECORD
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    grep -Fxq "home=$home" "$record" && grep -Fxq "id=$id" "$record" || continue
+    fm_home_payload_committed "$record" || continue
+    rm -rf -- "$staging" || return 1
+  done
+}
+
 fm_home_payload_restore() {  # <home> <staging> [<lock-receipt>]
   local home=$1 staging=$2 receipt=${3:-} path
   for path in "${FM_HOME_PAYLOAD_PATHS[@]}"; do
@@ -67,7 +151,7 @@ fm_home_payload_restore() {  # <home> <staging> [<lock-receipt>]
       mv -- "$staging/$path" "$home/$path" || return 1
     fi
   done
-  if [ -n "$receipt" ]; then
+  if [ -n "$receipt" ] && [ -f "$staging/receipt" ]; then
     cp -p "$staging/receipt" "$receipt" || return 1
   fi
 }
@@ -82,44 +166,38 @@ fm_home_payload_abort() {  # <home> <id> <parent> <staging> [<lock-receipt>]
   rm -rf -- "$staging"
 }
 
-fm_home_payload_interrupted() {  # <exit-status> <home> <id> <parent> <staging> [<lock-receipt>]
-  local status=$1 home=$2 id=$3 parent=$4 staging=$5 receipt=${6:-}
+fm_home_payload_interrupted() {  # <exit-status> <home> <id> <parent> <staging>
+  local status=$1 home=$2 id=$3 parent=$4 staging=$5
   trap - INT TERM HUP
-  if fm_home_payload_committed "$staging/$FM_HOME_PAYLOAD_RECORD"; then
-    rm -rf -- "$staging" || echo "warning: retired payload staging remains at $staging" >&2
-  else
-    fm_home_payload_abort "$home" "$id" "$parent" "$staging" "$receipt" \
-      || echo "error: interrupted return of durable home $home could not restore its payload and protection; its staged payload remains at $staging" >&2
-  fi
+  fm_home_payload_recover "$home" "$parent" "$id" \
+    || echo "error: interrupted return of durable home $home needs recovery from $staging" >&2
   exit "$status"
 }
 
-# A return that is killed outright - SIGKILL, a crash, a lost terminal - cannot
-# restore its own staging. The record it wrote before moving anything names the
-# home, so the next entry for that home puts the staged payload and its lock
-# ownership back before deciding anything about the slot.
-fm_home_payload_recover() {  # <home> <parent>
-  local home=$1 parent=$2 abs_home staging record id
-  [ -d "$home" ] || return 0
-  abs_home=$(cd "$home" && pwd -P) || return 1
+fm_home_payload_recover() {  # <home> <parent> [<id>]
+  local home=$1 parent=$2 expected_id=${3:-} abs_home staging record id rc
+  FM_HOME_PAYLOAD_RETIRED=0
+  if [ -d "$home" ]; then
+    abs_home=$(cd "$home" && pwd -P) || return 1
+  else
+    abs_home=$home
+  fi
   for staging in "$parent"/state/.home-return.*; do
     [ -d "$staging" ] && [ ! -L "$staging" ] || continue
     record=$staging/$FM_HOME_PAYLOAD_RECORD
     [ -f "$record" ] && [ ! -L "$record" ] || continue
-    grep -Fx -- "home=$abs_home" "$record" >/dev/null 2>&1 || continue
-    if fm_home_payload_committed "$record"; then
-      echo "warning: discarding the retired payload of an interrupted return for durable home $home" >&2
-      rm -rf -- "$staging" || return 1
-      continue
-    fi
+    grep -Fxq "home=$abs_home" "$record" || continue
     id=$(sed -n 's/^id=//p' "$record") || return 1
-    [ -n "$id" ] || continue
-    fm_home_worktree_lock_context "$home" "$parent" || return 1
-    if [ "$FM_HOME_LOCK_LINKED" = 1 ] && [ -f "$FM_HOME_LOCK_RECEIPT" ] \
-      && ! grep -Fxq -- "id=$id" "$FM_HOME_LOCK_RECEIPT"; then
-      echo "warning: leaving the interrupted return staging for durable home $home at $staging; the home is locked for another mate" >&2
-      continue
-    fi
+    [ -n "$id" ] || return 1
+    [ -z "$expected_id" ] || [ "$id" = "$expected_id" ] || continue
+    rc=0
+    fm_home_payload_reconcile "$abs_home" "$staging" || rc=$?
+    case "$rc" in
+      0) FM_HOME_PAYLOAD_RETIRED=1; continue ;;
+      2) ;;
+      *) return 1 ;;
+    esac
+    fm_home_worktree_lock_check "$home" "$id" "$parent" || return 1
     echo "warning: recovering the interrupted return of durable home $home" >&2
     fm_home_payload_abort "$home" "$id" "$parent" "$staging" "$FM_HOME_LOCK_RECEIPT" || return 1
   done
@@ -128,7 +206,8 @@ fm_home_payload_recover() {  # <home> <parent>
 fm_home_payload_return() (
   local home=$1 id=$2 parent=$3 staging path receipt='' rc=0
   shift 3
-  fm_home_payload_recover "$home" "$parent" || return 1
+  fm_home_payload_recover "$home" "$parent" "$id" || return 1
+  [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || return 0
   fm_home_payload_check "$home" || return 1
   fm_home_worktree_lock_check "$home" "$id" "$parent" || return 1
   staging=$(mktemp -d "$parent/state/.home-return.XXXXXX") || return 1
@@ -136,11 +215,12 @@ fm_home_payload_return() (
     receipt=$FM_HOME_LOCK_RECEIPT
     cp -p "$receipt" "$staging/receipt" || { rmdir "$staging"; return 1; }
   fi
-  trap 'fm_home_payload_interrupted 130 "$home" "$id" "$parent" "$staging" "$receipt"' INT
-  trap 'fm_home_payload_interrupted 143 "$home" "$id" "$parent" "$staging" "$receipt"' TERM
-  trap 'fm_home_payload_interrupted 129 "$home" "$id" "$parent" "$staging" "$receipt"' HUP
+  trap 'fm_home_payload_interrupted 130 "$home" "$id" "$parent" "$staging"' INT
+  trap 'fm_home_payload_interrupted 143 "$home" "$id" "$parent" "$staging"' TERM
+  trap 'fm_home_payload_interrupted 129 "$home" "$id" "$parent" "$staging"' HUP
   printf 'schema=fm-home-return.v1\nid=%s\nhome=%s\n' "$id" "$FM_HOME_LOCK_HOME" \
     > "$staging/$FM_HOME_PAYLOAD_RECORD" || { rm -rf -- "$staging"; return 1; }
+  fm_home_payload_pool_state save "$FM_HOME_LOCK_HOME" "$staging" || { rm -rf -- "$staging"; return 1; }
   for path in "${FM_HOME_PAYLOAD_PATHS[@]}"; do
     if [ -e "$home/$path" ] || [ -L "$home/$path" ]; then
       mv -- "$home/$path" "$staging/$path" || { rc=1; break; }
@@ -149,16 +229,18 @@ fm_home_payload_return() (
   if [ "$rc" = 0 ]; then
     fm_home_worktree_lock_release "$home" "$id" "$parent" \
       && fm_home_worktree_lock_forget "$home" "$id" "$parent" \
+      && printf 'returning=1\n' >> "$staging/$FM_HOME_PAYLOAD_RECORD" \
       && "$@" || rc=1
   fi
   if [ "$rc" = 0 ]; then
-    printf 'committed=1\n' >> "$staging/$FM_HOME_PAYLOAD_RECORD" || rc=1
+    printf 'committed=1\n' >> "$staging/$FM_HOME_PAYLOAD_RECORD" \
+      || echo "warning: return committed; pool reconciliation is required for $home" >&2
   fi
   trap - INT TERM HUP
   if [ "$rc" != 0 ]; then
-    fm_home_payload_abort "$home" "$id" "$parent" "$staging" "$receipt" || return 1
+    fm_home_payload_recover "$home" "$parent" "$id" || return 1
+    [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || return 0
     return "$rc"
   fi
-  rm -rf -- "$staging" || echo "warning: retired payload backup remains at $staging" >&2
   return 0
 )
