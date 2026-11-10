@@ -71,6 +71,31 @@ EOF
   pass "normalization does not follow a swapped check symlink"
 }
 
+test_check_swapped_to_hardlink_during_normalization_does_not_touch_target() {
+  local home target fakebin out status
+  home=$(make_home hardlink-race)
+  target="$home/target"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
+  printf '#!/usr/bin/env bash\nprintf target\\n\n' > "$target"
+  chmod 0600 "$home/state/poll.check.sh" "$target"
+  cat > "$fakebin/perl" <<EOF
+#!/usr/bin/env bash
+mv "$home/state/poll.check.sh" "$home/state/original.check.sh"
+ln "$target" "$home/state/poll.check.sh"
+exec "$PERL" "\$@"
+EOF
+  chmod 0700 "$fakebin/perl"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1); status=$?
+  [ "$(fm_pr_file_mode "$target")" = 600 ] || fail "hard-link swap changed the target mode"
+  [ "$status" -eq 0 ] || fail "hard-link swap during normalization was not recovered: $out"
+  [ "$(fm_pr_file_mode "$home/state/poll.check.sh")" = 700 ] || fail "published check was not set to mode 0700"
+  fm_custom_check_registered "$home/state" poll || fail "published check was not registered"
+  pass "normalization does not chmod a swapped hard-link target"
+}
+
 test_mode_0600_check_is_normalized_and_registered
 test_unsafe_check_is_refused_naming_the_check
 test_check_swapped_to_symlink_during_normalization_does_not_touch_target
+test_check_swapped_to_hardlink_during_normalization_does_not_touch_target

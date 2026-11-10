@@ -32,10 +32,33 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$(fm_pr_file_device "$CHECK")" = "$STATE_DEVICE" ] && [ "$(fm_pr_file_link_count "$CHECK")" = 1 ] \
   || { echo "error: custom check state/$ID.check.sh must be a single-link file on the state device; not registered, the watcher will refuse it" >&2; exit 1; }
 if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
-  perl -MFcntl=O_RDONLY,O_NOFOLLOW -e '
-    sysopen(my $check, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
-    chmod 0700, $check or exit 1;
-  ' "$CHECK" || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
+  TMP=$(perl -MFile::Temp=tempfile -MFcntl=O_RDONLY,O_NOFOLLOW -e '
+    my ($tmp, $ok);
+    END { unlink $tmp if defined $tmp && !$ok; }
+    my ($out, $path) = tempfile(".fm-custom-check.XXXXXX", DIR => $ARGV[1], UNLINK => 0);
+    $tmp = $path;
+    chmod 0700, $out or exit 1;
+    sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
+    binmode $in or exit 1;
+    binmode $out or exit 1;
+    while (1) {
+      my $length = read($in, my $bytes, 8192);
+      defined $length or exit 1;
+      last if !$length;
+      print {$out} $bytes or exit 1;
+    }
+    close $in or exit 1;
+    close $out or exit 1;
+    $ok = 1;
+    print $path;
+  ' "$CHECK" "$STATE") || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
+  if ! fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" \
+    || ! mv -f -- "$TMP" "$CHECK"; then
+    rm -f -- "$TMP"
+    echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2
+    exit 1
+  fi
+  TMP=
 fi
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
   || { echo "error: custom check state/$ID.check.sh is not a private mode-0700 file; not registered, the watcher will refuse it" >&2; exit 1; }
