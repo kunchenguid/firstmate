@@ -377,6 +377,8 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 # (bin/fm-pr-merge.sh already holds it) nor reads or rewrites the baseline: it
 # records before any forge call, and the marker it leaves is keyed to the PR
 # identity, so it can only ever match the PR it was written for.
+BASELINE_TRAIN=0
+BASELINE_DEGRADED=
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   CONTROL_LOCK="$STATE/.control-$ID.lock"
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
@@ -393,9 +395,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
     fi
     exit 1
   fi
-  BASELINE_TRAIN=0
   BASELINE_TRAIN_UNKNOWN=0
-  BASELINE_DEGRADED=
   while IFS= read -r baseline_line; do
     case $baseline_line in
       ontrain) BASELINE_TRAIN=1 ;;

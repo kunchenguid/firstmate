@@ -1106,16 +1106,27 @@ test_scan_failed_replacement_restores_previous_watch() {
   local dir state before
   dir=$(make_case scan-failed-replacement)
   state="$dir/home/state"
-  : > "$dir/home/config/pr-register-scan"
-  write_poll_meta "$state" task-a https://github.com/o/r/pull/7 'kind=ship' 'mode=no-mistakes'
-  printf '%s\\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$PR_CHECK" --scan >/dev/null 2>&1 || true
+  rm -f "$dir/home/config/pr-degraded-watch"
+  write_task_meta "$dir"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/7 checks green' > "$state/task-a.status"
+  run_check_entry "$dir" scan > /dev/null 2> "$dir/stderr" || fail "the first scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "the first PR was not recorded"
   before=$(poll_artifact_snapshot "$state" task-a)
-  printf '%s\\n' 'working [at=3]: PR 7 closed' 'done [at=4]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
-  FM_TEST_FAIL_REG_DEST="$state/task-a.pr-poll-registration" \\
-    FM_TEST_FAIL_REG_ONCE="$dir/fail-once" FM_TEST_REAL_MV="$REAL_MV" \\
-    run_check_entry "$dir" scan >/dev/null 2>&1 && fail "forced publication failure succeeded"
-  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "failed replacement lost prior pr="
+  printf '%s\n' 'working [at=3]: PR 7 closed, reopening' 'done [at=4]: PR https://github.com/o/r/pull/8 checks green' >> "$state/task-a.status"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${!#}" = "$FM_TEST_FAIL_REG_DEST" ] && [ ! -e "$FM_TEST_FAIL_REG_ONCE" ]; then
+  : > "$FM_TEST_FAIL_REG_ONCE"
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  FM_TEST_FAIL_REG_DEST="$state/task-a.pr-poll-registration" \
+    FM_TEST_FAIL_REG_ONCE="$dir/fail-once" FM_TEST_REAL_MV="$REAL_MV" \
+    run_check_entry "$dir" scan > "$dir/scan.out" 2> "$dir/scan.err"
+  [ -e "$dir/fail-once" ] || fail "the publication failure was not forced"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" || fail "failed replacement lost prior pr=: $(grep '^pr=' "$state/task-a.meta")"
   [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "failed replacement changed prior poll"
   pass "a failed scan replacement restores the previous watch without degraded watching"
 }
