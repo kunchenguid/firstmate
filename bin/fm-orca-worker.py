@@ -473,7 +473,7 @@ def sync(state, task):
         content = decode(data)
         target = state / f"{task}.{suffix}"
         if suffix == "status":
-            source_log = Path(route["data"]) / task / "remote" / "status.raw"
+            source_log = Path(route["data"]) / task / "remote" / f"status-{route['token']}.raw"
             previous = regular(source_log) if source_log.exists() else b""
             if not content.startswith(previous):
                 raise ValueError("remote status log was truncated or rewritten")

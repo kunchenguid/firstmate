@@ -345,6 +345,7 @@ fm_role_gate_self_publish "$2" "$2/config" "$1" "$1"
 rc=0
 python3 BRIDGE sync STATE task --poll 2>/dev/null || rc=$?
 echo "$rc" > ROOT/poll-rc
+printf 'failed [at=124]: launch was not consumed\\n' >> "$FM_HOME/state/$id.status"
 rm "$FM_HOME/state/$id.meta"
 exit 1
 """.replace("BRIDGE", str(BRIDGE)).replace("STATE", str(self.state)).replace("ROOT", str(self.root)))
@@ -354,6 +355,12 @@ exit 1
         self.assertFalse((self.state / "task.orca-route.json").exists())
         (self.code / "bin/fm-spawn.sh").write_text(spawn.read_text().split("\nrc=0\n")[0] + "\n")
         self.spawn()
+        with (Path(self.route()["workspace"]) / "home/state/task.status").open("a") as stream:
+            stream.write("done [at=125]: second attempt complete\n")
+        self.run_cli(BRIDGE, "sync", self.state, "task")
+        status = (self.state / "task.status").read_text()
+        self.assertIn("launch was not consumed", status)
+        self.assertIn("second attempt complete", status)
 
     def test_watcher_polls_an_unreachable_host_once_per_scan(self):
         if (self.fakebin / "jq").exists():
