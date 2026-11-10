@@ -858,14 +858,14 @@ cmd_ready() {
   lock_pid=$FM_LOCK_INSPECT_PID
   live_harness=$FM_LOCK_INSPECT_LIVE_HARNESS
 
-  if [ -e "$STATE/.afk" ]; then
+  # The record's mode is the mode wherever a record stands; the flag's own
+  # word answers only without one. fm_afk_mode owns that reading.
+  if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-contract" ]; then
     if command -v fm_afk_mode >/dev/null 2>&1; then
       posture=$(fm_afk_mode "$STATE")
     else
       posture=unknown
     fi
-  elif [ -e "$STATE/.afk-contract" ]; then
-    posture=away
   else
     posture=present
   fi

@@ -522,6 +522,40 @@ unit_mode_garbage_and_legacy_content_reads_away() {
   rm -rf "$st"
 }
 
+# The record's mode is the mode wherever a record stands (the audit's
+# record-wins fix): a quiet flag under an away record reads away, an away flag
+# under a quiet record reads quiet, and the flag's own word answers only on
+# flag-without-record homes.
+unit_mode_record_wins_over_flag() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-mode-record.XXXXXX")
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" enter >/dev/null 2>&1 \
+    || fail "mode record: could not enter the away fixture record"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  if [ "$(read_mode "$st/state")" != away ]; then
+    fail "mode record: a quiet flag under an away record must read away"
+  fi
+  rm -f "$st/state/.afk-contract"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$CONTRACT" enter >/dev/null 2>&1 \
+    || fail "mode record: could not enter the quiet fixture record"
+  printf 'away\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  if [ "$(read_mode "$st/state")" != quiet ]; then
+    fail "mode record: an away flag under a quiet record must read quiet"
+  fi
+  rm -f "$st/state/.afk"
+  if [ "$(read_mode "$st/state")" != quiet ]; then
+    fail "mode record: a quiet record with no flag must read quiet"
+  fi
+  rm -f "$st/state/.afk-contract"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  if [ "$(read_mode "$st/state")" != quiet ]; then
+    fail "mode record: a quiet flag with no record must keep its own word"
+  fi
+  pass "mode record: the record's mode wins over the flag; the flag answers only without a record"
+  rm -rf "$st"
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 3: exit ordering - fm_afk_launch_stop SIGTERMs the daemon WHILE .afk is
 # still present (so its flush is not a no-op), and clears .afk last.
@@ -1244,14 +1278,54 @@ unit_supervision_host_quiet_after_afk() {
     && quiet_in "$st" "$LAUNCH" start-native >/dev/null && [ "$(head -n 1 "$st/state/.afk")" = quiet ] \
     || fail "a quiet entry without the dialog mirror must prepare the quiet daemon"
   out=$(quiet_in "$st" "$LAUNCH" enter --words "back after lunch"); rc=$?
-  [ "$rc" -eq 0 ] && [ -z "$(quiet_in "$st" "$CONTRACT" field mode)" ] && [ "$(head -n 1 "$st/state/.afk")" = quiet ] \
-    || fail "/afk over the quiet daemon must record away words and leave the quiet flag (rc=$rc): $out"
-  refuses_under_away_record "over a quiet daemon"
-  quiet_in "$st" "$LAUNCH" stop >/dev/null || fail "the return's stop must stop the quiet daemon and archive the record"
+  [ "$rc" -eq 0 ] && [ -z "$(quiet_in "$st" "$CONTRACT" field mode)" ] && [ ! -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    || fail "/afk over the quiet daemon must record away words and tear down the quiet daemon's flag and terminal record (rc=$rc): $out"
+  refuses_under_away_record "over a stopped quiet daemon"
+  quiet_in "$st" "$LAUNCH" stop >/dev/null || fail "the return's stop must archive the record"
   [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] || fail "the return must leave no flag or record"
   out=$(quiet_in "$st" "$LAUNCH" quiet-check); rc=$?
   quiet_expect 1 'the dialog mirror is missing or could not be read' "quiet-check after the return must again send quiet mode to the daemon"
-  pass "supervision host: /quiet under a live away record over a fallback quiet daemon refuses until the return"
+  pass "supervision host: /quiet under a live away record after the quiet daemon's teardown refuses until the return"
+  rm -rf "$st"
+}
+
+# An away entry on a supervision-host home stops a RUNNING quiet daemon through
+# the same guarded teardown `stop` uses: the record becomes the away posture
+# and no live quiet daemon, quiet flag, or recorded terminal survives the mode
+# change. Without it the flag outlived the record as quiet and every reader
+# that follows the flag kept reporting a present captain who had gone away.
+unit_supervision_host_away_enter_stops_quiet_daemon() {
+  local st out rc sleep_pid lock
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-away-over-quiet.XXXXXX")
+  quiet_home "$st"
+  # The unready host sends quiet mode through the daemon.
+  rm -f "$st/state/.host-mirror.jsonl"
+  quiet_in "$st" env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet" >/dev/null \
+    || fail "quiet fixture: could not record quiet mode"
+  quiet_in "$st" "$LAUNCH" start-native >/dev/null \
+    || fail "quiet fixture: could not prepare the quiet daemon"
+  [ "$(head -n 1 "$st/state/.afk")" = quiet ] || fail "quiet fixture: no quiet flag prepared"
+  # A live quiet daemon, exactly as the prepared native entry then spawns.
+  sleep 600 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  sleep_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleep_pid" > "$lock/pid"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+
+  out=$(quiet_in "$st" "$LAUNCH" enter --words "merge anything green"); rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(quiet_in "$st" "$CONTRACT" mode)" = away ] \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && ! kill -0 "$sleep_pid" 2>/dev/null; then
+    pass "away enter on a supervision-host home stops the quiet daemon and records away with no flag left"
+  else
+    fail "away enter left the quiet daemon's state behind (rc=$rc record=$(quiet_in "$st" "$CONTRACT" mode 2>/dev/null || echo none) flag=$(head -n 1 "$st/state/.afk" 2>/dev/null || echo absent) daemon=$(kill -0 "$sleep_pid" 2>/dev/null && echo live || echo dead) terminal=$( [ -e "$st/state/.afk-daemon-terminal" ] && echo present || echo absent)): $out"
+  fi
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
   rm -rf "$st"
 }
 
@@ -1802,6 +1876,7 @@ unit_mode_fresh_defaults_away
 unit_mode_refresh_preserves_quiet
 unit_mode_quiet_daemon_to_away
 unit_mode_garbage_and_legacy_content_reads_away
+unit_mode_record_wins_over_flag
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
@@ -1823,6 +1898,7 @@ unit_daemon_quiet_entry_holds_nothing_for_a_return
 unit_supervision_host_quiet_statement
 unit_supervision_host_quiet_fallback
 unit_supervision_host_quiet_after_afk
+unit_supervision_host_away_enter_stops_quiet_daemon
 unit_supervision_host_quiet_failed_start
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
