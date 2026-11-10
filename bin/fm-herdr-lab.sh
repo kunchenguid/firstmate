@@ -15,6 +15,14 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
+# A session whose <herdr config>/sessions/<session>/herdr-client.sock path
+# would exceed the 103-byte sun_path limit is refused by name, prepare and
+# provision.
+# The herdr config root is FM_HERDR_LAB_CONFIG_DIR when set, otherwise
+# ${XDG_CONFIG_HOME:-$HOME/.config}/herdr.
+# Provision keeps the lab server output in <session>.server.log in the state
+# directory, truncated on every provision and shown only as a bounded tail, stops waiting as soon as the server process exits, and
+# prints the log tail when the session never reports running.
 # Every Herdr call made here carries --session <session>: trailing, or
 # immediately before the first -- delimiter so it stays a Herdr option instead
 # of becoming a passthrough argument such as an agent start argument.
@@ -59,6 +67,21 @@ fm_herdr_lab_validate_name() { # <session>
     *) fm_herdr_lab_error "session name must start with 'fm-lab-' and contain only letters, digits, underscores, or dashes: $name" ;;
   esac
   return 1
+}
+
+fm_herdr_lab_sun_path_limit=103
+
+fm_herdr_lab_config_dir() {
+  printf '%s' "${FM_HERDR_LAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/herdr}"
+}
+
+fm_herdr_lab_check_socket_path() { # <session>
+  local name=$1 path
+  path="$(fm_herdr_lab_config_dir)/sessions/$name/herdr-client.sock"
+  if [ "${#path}" -gt "$fm_herdr_lab_sun_path_limit" ]; then
+    fm_herdr_lab_error "session '$name' would bind a ${#path}-byte socket path, over the $fm_herdr_lab_sun_path_limit-byte sun_path limit: $path"
+    return 1
+  fi
 }
 
 fm_herdr_lab_state_dir() {
@@ -128,6 +151,7 @@ fm_herdr_lab_fleet_state() { # <session>
 fm_herdr_lab_prepare() { # <session>
   local name=$1 sessions state_dir tripwire
   fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_check_socket_path "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -436,8 +460,19 @@ fm_herdr_lab_cancel_provision() { # <pid>
   wait "$pid" 2>/dev/null || true
 }
 
+fm_herdr_lab_server_log_path() { # <session>
+  printf '%s/%s.server.log' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_server_log_tail() { # <log>
+  local log=$1
+  [ -s "$log" ] || return 0
+  fm_herdr_lab_error "server output (last 20 lines of $log):"
+  tail -n 20 "$log" | tail -c 4096 | sed 's/^/fm-herdr-lab:   /' >&2
+}
+
 fm_herdr_lab_provision() { # <session>
-  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds
+  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds server_log
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -463,7 +498,10 @@ fm_herdr_lab_provision() { # <session>
   else
     fm_herdr_lab_prepare "$name" || return 1
   fi
-  fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
+  server_log=$(fm_herdr_lab_server_log_path "$name")
+  mkdir -p "$(dirname "$server_log")"
+  : > "$server_log"
+  fm_herdr_lab_raw "$name" server > "$server_log" 2>&1 &
   server_pid=$!
   attempt=0
   max_attempts=300
@@ -477,11 +515,18 @@ fm_herdr_lab_provision() { # <session>
       }
       return 0
     fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      wait "$server_pid" 2>/dev/null || true
+      fm_herdr_lab_error "lab server for '$name' exited before reporting running"
+      fm_herdr_lab_server_log_tail "$server_log"
+      return 1
+    fi
     sleep 0.2
     attempt=$((attempt + 1))
   done
   fm_herdr_lab_cancel_provision "$server_pid"
   fm_herdr_lab_error "lab session '$name' did not report running within $timeout_seconds seconds"
+  fm_herdr_lab_server_log_tail "$server_log"
   return 1
 }
 
@@ -568,7 +613,10 @@ fm_herdr_lab_name() { # <label>
   label=${label:0:16}
   label=${label%-}
   [ -n "$label" ] || label=lab
-  printf 'fm-lab-%s-%s-%s\n' "$label" "$$" "$RANDOM"
+  local name
+  name=$(printf 'fm-lab-%s-%s-%s' "$label" "$$" "$RANDOM")
+  fm_herdr_lab_check_socket_path "$name" || return 1
+  printf '%s\n' "$name"
 }
 
 fm_herdr_lab_usage() {

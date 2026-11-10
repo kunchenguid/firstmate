@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 unset FM_HERDR_LAB_FLEET_SESSION
+export FM_HERDR_LAB_CONFIG_DIR=/home/test/.config/herdr
 
 TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
@@ -57,6 +58,10 @@ case "$1 ${2:-}" in
     fi
     ;;
   "server --session")
+    if [ -n "${FM_FAKE_HERDR_SERVER_FAIL:-}" ]; then
+      printf '%s\n' "$FM_FAKE_HERDR_SERVER_FAIL" >&2
+      exit 1
+    fi
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
@@ -104,6 +109,7 @@ run_with_fake() {
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
     FM_FAKE_HERDR_FLEET="${FM_FAKE_HERDR_FLEET:-}" \
+    FM_FAKE_HERDR_SERVER_FAIL="${FM_FAKE_HERDR_SERVER_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -120,6 +126,36 @@ test_refuses_unsafe_names() {
   fm_herdr_lab_validate_name "$generated" || fail "generated lab session name was refused"
   [ "${#generated}" -le 40 ] || fail "generated lab session name is too long for Herdr socket paths: $generated"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
+}
+
+test_refuses_names_over_the_socket_path_limit() {
+  local err="$TMP_ROOT/sun-path.err" status=0 name fixed
+  fixed="$FM_HERDR_LAB_CONFIG_DIR/sessions//herdr-client.sock"
+  name=fm-lab-$(printf 'a%.0s' $(seq 1 $((103 - ${#fixed} - 7))))
+  fm_herdr_lab_check_socket_path "$name" || fail "a name exactly at the sun_path limit was refused"
+  fm_herdr_lab_check_socket_path "${name}a" 2>"$err" && fail "a name over the sun_path limit was accepted"
+  assert_contains "$(cat "$err")" "103-byte sun_path limit" "the refusal must name the limit"
+  FM_HERDR_LAB_CONFIG_DIR=/home/test/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_name long-label >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "name must refuse a label that overflows the socket path"
+  status=0
+  run_with_fake fm_herdr_lab_prepare "${name}a" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "prepare must refuse an over-limit name"
+  pass "fm-herdr-lab: names whose client socket path exceeds sun_path are refused"
+}
+
+test_failed_server_start_reports_its_error_quickly() {
+  local name="fm-lab-server-fails-$$" err="$TMP_ROOT/server-fail.err" status=0 started elapsed
+  started=$(date +%s)
+  FM_FAKE_HERDR_SERVER_FAIL="Error: local socket name length exceeds capacity" \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>"$err" || status=$?
+  elapsed=$(($(date +%s) - started))
+  expect_code 1 "$status" "provision must fail when the server exits"
+  [ "$elapsed" -lt 10 ] || fail "provision waited ${elapsed}s for a server that had already exited"
+  assert_contains "$(cat "$err")" "exited before reporting running" "the failure must say the server exited"
+  assert_contains "$(cat "$err")" "local socket name length exceeds capacity" "the failure must show the server's own error"
+  assert_present "$TRIPWIRES/$name.server.log" "the server output was not kept in the state directory"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: a server that fails at startup reports its error without the full wait"
 }
 
 test_provision_run_and_guarded_teardown() {
@@ -633,6 +669,8 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 }
 
 test_refuses_unsafe_names
+test_refuses_names_over_the_socket_path_limit
+test_failed_server_start_reports_its_error_quickly
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction
