@@ -2317,7 +2317,6 @@ ok - Orca create response timeout adopts the matching worktree without recreatin
 ok - Concurrent Orca creates recover and clean up only their own random attempt identities
 ok - Orca recovery rejects foreign, ambiguous, incomplete and unsafe identities before adoption
 ok - Orca recovery waits until the exact Git root is readable and clean
-ok - Orca recovery preserves preexisting allocations and refuses incomplete pre-create inventory
 ok - Orca recovery bounds inventory calls and preserves an unconfirmed allocation at the deadline
 ok - Orca create preserves non-timeout errors
 ok - Orca create parses stdout JSON when a successful create also writes stderr

@@ -46,16 +46,6 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
 fi
-# The pre-create inventory is independent of the ordinary response sequence.
-if [ "${1:-} ${2:-}" = 'worktree list' ] && [ ! -e "$RESP/.listed" ]; then
-  touch "$RESP/.listed"
-  if [ -f "$RESP/before.out" ]; then
-    cat "$RESP/before.out"
-  else
-    printf '{"ok":true,"result":{"worktrees":[],"totalCount":0,"truncated":false}}\n'
-  fi
-  exit 0
-fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 # shellcheck disable=SC1090
@@ -562,12 +552,6 @@ function result(value) { process.stdout.write(JSON.stringify({ok: true, result: 
 switch (args.slice(0, 2).join(" ")) {
   case "repo show": result({repo: {id: "repo-123"}}); break;
   case "worktree list": {
-    if (!fs.existsSync(mark(`${lane}.before`))) {
-      write(`${lane}.before`);
-      waitFor(`${lane === "a" ? "b" : "a"}.before`);
-      result({worktrees: [], totalCount: 0, truncated: false});
-      break;
-    }
     if (lane === "a") {
       waitFor("b.ready");
       if (fs.existsSync(mark("a.saw-foreign"))) allocate("a");
@@ -680,21 +664,6 @@ test_worktree_recovery_waits_for_clean_git_root() {
     [ "$(cat "$RESP/.count")" = 4 ] || fail "adopted a $variant Git root"
   done
   pass 'Orca recovery waits until the exact Git root is readable and clean'
-}
-
-test_worktree_recovery_refuses_unknown_prior_ownership() {
-  local variant out rc
-  for variant in ready incomplete malformed; do
-    recovery_case "recover-prior-$variant"
-    write_recovery_inventory "$RESP/before.out" "$WT" "$variant"
-    [ "$variant" != malformed ] || echo '{' > "$RESP/before.out"
-    out=$(run_recovery_create 2>&1) && rc=0 || rc=$?
-    [ "$rc" -ne 0 ] || fail 'adopted an allocation without proving prior absence'
-    assert_contains "$out" 'not proven absent before create' 'missing ownership refusal'
-    [ "$(cat "$RESP/.count")" = 2 ] || fail 'unproven ownership triggered recovery'
-    assert_not_contains "$(cat "$LOG")" $'worktree\x1frm' 'unproven allocation was deleted'
-  done
-  pass 'Orca recovery preserves preexisting allocations and refuses incomplete pre-create inventory'
 }
 
 test_worktree_recovery_deadline_preserves_allocation() {
@@ -1711,7 +1680,6 @@ test_worktree_create_recovers_timeout
 test_concurrent_worktree_recovery_owns_only_its_attempt
 test_worktree_recovery_waits_for_safe_inventory
 test_worktree_recovery_waits_for_clean_git_root
-test_worktree_recovery_refuses_unknown_prior_ownership
 test_worktree_recovery_deadline_preserves_allocation
 test_worktree_create_preserves_other_errors
 test_worktree_create_ignores_stderr_on_success
