@@ -161,6 +161,7 @@ Delivery to the branch stays serialized: one wake is delivered at a time, each w
 The handling handoff is confirmed inside the successor start, while that successor is still the live arm, and the delivery reads the confirmed outcome.
 A successor that a later close already replaced is therefore never confirmed as a failed handoff, and a healthy newer successor is never reported to main as a restoration failure.
 A verified successor that fails while a successor start or a wake delivery is in flight keeps its bounded retry for the end of that operation, and the operation that held the guard settles it.
+A wake delivery in flight also defers any failed arm that was not deliberately retired, so a health replacement that fails before readiness keeps the same bounded retry instead of being dropped; an unready child that fails during a successor start belongs to the restoration that started it.
 
 If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
@@ -480,6 +481,7 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 - Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
 - Lets a verified Pi successor exit after delivery while a descendant holds its pipes to prove the exit alone schedules the bounded retry.
+- Fails an unready health replacement while a branch delivery is held to prove its bounded retry still starts, once, when that delivery settles.
 - Delays a Pi arm's actionable line behind a descendant-held pipe until after its exit to prove that line still becomes the wake instead of a retry.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:

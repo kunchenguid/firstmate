@@ -132,12 +132,14 @@ type SessionGeneration = {
   // replacement began reads it to tell a main-queued wake (replayed) from a
   // branch-handled one (finished).
   unconsumedWakes: Map<string, UnconsumedWake>;
-  // A verified successor's failure during restoration keeps its bounded retry
-  // once that continuity operation finishes, independently of wake delivery.
-  // The guard names the operation that held the close: the retry belongs to
-  // the operation that was in flight when the close arrived, so the
-  // restoration settles it and the delivery settles it, and neither takes the
-  // other's.
+  // A failed arm's close while a continuity operation holds the guard keeps
+  // its bounded retry until that operation finishes. A restoration defers only
+  // a verified successor, because an unready child's close belongs to the
+  // restore that started it and retired it; a wake delivery defers any arm
+  // that was not deliberately retired, including a health replacement that
+  // never reported readiness. The guard names the operation that held the
+  // close: the retry belongs to that operation, so the restoration settles it
+  // or the delivery settles it, and neither takes the other's.
   deferredClose: { message: string; predecessorArmPid: string; guard: "restore" | "delivery" } | null;
 };
 
