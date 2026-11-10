@@ -4,6 +4,11 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   A repository with no commit yet (unborn HEAD) is refused before a worktree
+#   exists. The "make one commit" hint is only for a clone under the home's
+#   projects directory, or for this firstmate repository passed as the project.
+#   Any other path is named as not a registered project clone, with the clone
+#   names under that projects directory (or none), and the hint suggests no commit.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -4044,6 +4049,39 @@ resolve_project_dir_arg() {
   esac
 }
 
+spawn_physical_dir() {
+  (CDPATH='' cd -- "$1" && pwd -P)
+}
+
+spawn_unborn_commit_hint_applies() {
+  local proj=$1 proj_phys projects_phys root_phys
+  proj_phys=$(spawn_physical_dir "$proj") || return 1
+  if [ -d "$PROJECTS" ]; then
+    projects_phys=$(spawn_physical_dir "$PROJECTS") || return 1
+    [ "${proj_phys#"$projects_phys"/}" != "$proj_phys" ] && return 0
+  fi
+  root_phys=$(spawn_physical_dir "$FM_ROOT") || return 1
+  [ "$proj_phys" = "$root_phys" ]
+}
+
+spawn_registered_clone_names() {
+  local dir name joined='' sorted
+  local -a names=()
+  [ -d "$PROJECTS" ] || return 0
+  for dir in "$PROJECTS"/*; do
+    [ -d "$dir" ] || continue
+    name=${dir##*/}
+    names+=("$name")
+  done
+  [ "${#names[@]}" -gt 0 ] || return 0
+  sorted=$(printf '%s\n' "${names[@]}" | sort)
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    joined="${joined:+$joined, }$name"
+  done <<< "$sorted"
+  printf '%s\n' "$joined"
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -4227,7 +4265,13 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 &&
   ! git -C "$PROJ_ABS" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
-  echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
+  if spawn_unborn_commit_hint_applies "$PROJ_ABS"; then
+    echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
+  else
+    unborn_clone_names=$(spawn_registered_clone_names)
+    [ -n "$unborn_clone_names" ] || unborn_clone_names=none
+    echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; $PROJ_ABS is not a registered project clone. Registered clones under $PROJECTS: $unborn_clone_names" >&2
+  fi
   exit 1
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
