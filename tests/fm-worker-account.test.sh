@@ -766,13 +766,13 @@ test_claude_pin_keeps_the_token_out_of_an_inherited_xtrace() {
 }
 
 test_claude_pin_does_not_fall_back_when_its_keychain_token_vanishes_after_the_check() {
-  local rc
   new_case keychain-token-vanished claude
   keychain_token_ship acct-claude-token-vanished
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$CASE/security-argv'" 'exit 44' \
     > "$FAKEBIN/security"
-  pane 2> "$CASE/pane-stderr"; rc=$?
-  expect_code 3 "$rc" "a launch whose token read fails must stop: $(cat "$CASE/pane-stderr")"
+  # The launch ends with a disarm `|| true`, so its status cannot show the
+  # refusal; the diagnostic and the missing worker do.
+  pane 2> "$CASE/pane-stderr"
   assert_contains "$(cat "$CASE/pane-stderr")" 'is unavailable' "the pane says the token source is unavailable"
   assert_absent "$CASE/claude-worker" "Claude must never start on its stored login or the pane's credentials"
   assert_equals $'find-generic-password -s fm-claude-token -a worker -w\nfind-generic-password -s fm-claude-token -a worker -w' \
