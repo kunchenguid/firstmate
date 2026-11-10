@@ -1171,7 +1171,7 @@ test_returned_pool_slot_on_local_only_commit_detaches_to_published() {
   write_meta "$case_dir" local-only ship "$wt"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -1196,7 +1196,7 @@ test_returned_pool_slot_on_unreferenced_commit_stays_with_warning() {
   add_treehouse_clean_fd "$case_dir"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
