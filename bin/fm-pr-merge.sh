@@ -696,7 +696,6 @@ note_expected_head() {
 # omits it below the tier that offers trains); any other non-boolean value, or
 # an unreadable project, refuses rather than guessing which path applies.
 FM_PR_GITLAB_TRAIN=false
-FM_PR_GITLAB_MERGE_METHOD=
 GITLAB_PROJECT_API=
 gitlab_project_api() {
   GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" "$@"
@@ -719,7 +718,6 @@ gitlab_read_project_settings() {
     return 1
   fi
   FM_PR_GITLAB_TRAIN=${fields%% *}
-  FM_PR_GITLAB_MERGE_METHOD=${fields#* }
 }
 
 # A project that runs merged results pipelines (which merge trains require)
@@ -2051,7 +2049,7 @@ $fields
 FIELDS
       case "$state" in
         merged)
-          if [ -n "$("$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" ]; then
+          if [ "$("$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" = merged ]; then
             printf 'verified: %s was merged by the merge train\n' "$URL"
             return 0
           fi

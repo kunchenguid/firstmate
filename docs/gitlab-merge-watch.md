@@ -54,6 +54,7 @@ First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 The merged check therefore reads glab's own field output, which needs no JSON processor; the poll's degraded read (head pipeline, merge-train car) is JSON-only and needs `jq`, and without `jq` the poll falls back to this field read so merged wakes keep working.
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+With `jq` available, a merged reading on a project whose live settings enable merge trains also needs the landed merge, squash, or fast-forward commit recorded; until then the poll stays silent and armed, and the bounded train wait in `bin/fm-pr-merge.sh` reads this same check.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
