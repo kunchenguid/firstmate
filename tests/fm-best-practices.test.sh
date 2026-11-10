@@ -650,6 +650,44 @@ test_route_narrows_through_the_shared_provider_code() {
   pass "route: one request through the resolver's provider code narrows only on confidence, reads facts and words in code, and falls back on no key, never-send, or error"
 }
 
+test_route_reads_the_declared_credential_source() {
+  local b out err rc keybin="$TMP_ROOT/keychain-bin" resp="$TMP_ROOT/declared-response.json"
+  local decl="$TMP_ROOT/route-fm-home/config/dispatch-credential-sources.json"
+  mkdir -p "$keybin" "$TMP_ROOT/route-fm-home/config"
+  printf '#!/usr/bin/env bash\nprintf "Darwin\\n"\n' > "$keybin/uname"
+  cat > "$keybin/security" <<'SH'
+#!/usr/bin/env bash
+# Fake security: the Keychain stand-in, holding one item unless FAKE_SECURITY_EMPTY is set.
+[ -z "${FAKE_SECURITY_EMPTY:-}" ] || exit 44
+printf 'ts-declared-key\n'
+SH
+  chmod +x "$keybin/uname" "$keybin/security"
+  narrowing_response "$resp"
+  b=$(route_case r-declared --mode no-mistakes)
+  fill "$b" "The pager skips a page when the count is exact." "Fix the off-by-one in pager.sh."
+  printf '{"typesafe": {"source": "macos-keychain", "service": "typesafe-svc"}}\n' > "$decl"
+
+  out=$(PATH="$keybin:$PATH" run_route "$resp" 200 route "$b" 2>/dev/null)
+  assert_contains "$out" "status: routed" "a declared source's key did not turn routing on"
+  assert_equals "Authorization: Bearer ts-declared-key" "$(cat "$CURL_LOG/header")" "the declared key did not reach curl on fd 3"
+  assert_no_grep "ts-declared-key" "$CURL_LOG/argv" "the declared key reached curl's argv"
+
+  out=$(FAKE_SECURITY_EMPTY=1 PATH="$keybin:$PATH" run_route "$resp" 200 route "$b" 2>/dev/null)
+  assert_contains "$out" "status: error" "a declared source with no key was not an error outcome"
+  assert_contains "$out" "reason: credential source macos-keychain declared for typesafe is unavailable; nothing sent" "the error does not name the source"
+  [ ! -e "$CURL_LOG/argv" ] || fail "a declared source with no key reached curl"
+  assert_grep "security-and-hardening" "$b" "an unavailable source did not fall back to the full table"
+
+  printf '{"typesafe": {"source": "macos-keychain", "service": "typesafe-svc", "key": "no-place-for-this"}}\n' > "$decl"
+  rc=0
+  err=$(PATH="$keybin:$PATH" run_route "$resp" 200 route "$b" 2>&1 >/dev/null) || rc=$?
+  rm -f "$decl"
+  assert_equals 2 "$rc" "a malformed declaration was selected around"
+  assert_contains "$err" "malformed credential source declaration" "the configuration error does not name the problem"
+  assert_not_contains "$err" "no-place-for-this" "the configuration error printed a declared value"
+  pass "route: a declared credential source supplies the key on fd 3, an unavailable one is an error that keeps the fallback, and a malformed declaration exits 2"
+}
+
 test_route_rewrites_the_real_section_past_fenced_examples() {
   local b out resp="$TMP_ROOT/fence-response.json" head="# Best practices: $PACK" spec
   mkdir -p "$TMP_ROOT/route-fm-home/config"
@@ -911,6 +949,7 @@ fm_test_run \
   test_propose_reads_only_what_the_project_commits \
   test_brief_composes_the_practice_section_after_the_include \
   test_route_narrows_through_the_shared_provider_code \
+  test_route_reads_the_declared_credential_source \
   test_route_rewrites_the_real_section_past_fenced_examples \
   test_intake_tier_routing \
   test_row_floor_and_runner_up \
