@@ -32,6 +32,7 @@ record_hygiene_report() {
             file_mtime=$(_fm_status_file_mtime "$file" 2>/dev/null) || file_mtime=
             case "$file_mtime" in ''|*[!0-9]*) file_mtime= ;; esac
             if [ -n "$file_mtime" ] && [ "$file_mtime" -lt "$cutoff" ]; then
+              # shellcheck disable=SC2153 # DATA is set by the sourcing script (fm-bootstrap.sh).
               mkdir -p -- "$DATA" || { fm_lock_release "$lock"; continue; }
               dir=$(CDPATH='' cd -- "$DATA" && pwd -P) || { fm_lock_release "$lock"; continue; }
               dir="$dir/$id"
@@ -46,10 +47,7 @@ record_hygiene_report() {
                 if mv -- "$file" "$archive"; then
                   # Start status-archive retention at archive time, not at the
                   # orphan's last write, so teardown's 30-day prune keeps it.
-                  if ! touch -- "$archive"; then
-                    mv -- "$archive" "$file" || echo "RECORD_HYGIENE: could not restore orphan status log: $id" >&2
-                    echo "RECORD_HYGIENE: could not refresh archived status log time: $id" >&2
-                  fi
+                  touch -- "$archive" || echo "RECORD_HYGIENE: could not refresh archived status log time: $id" >&2
                 else
                   echo "RECORD_HYGIENE: could not archive orphan status log: $id" >&2
                 fi
