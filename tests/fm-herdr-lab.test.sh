@@ -71,6 +71,11 @@ case "$1 ${2:-}" in
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
     printf '%s\n' running > "$state/$session"
+    if [ -n "${FM_FAKE_HERDR_SERVER_STAY:-}" ]; then
+      # Stay alive after reporting running, like a real server.
+      printf '%s\n' "$$" > "$state/$session.pid"
+      exec "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_STAY"
+    fi
     ;;
   "status --json")
     if [ "$lab_state" = running ]; then
@@ -115,6 +120,7 @@ run_with_fake() {
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
     FM_FAKE_HERDR_FLEET="${FM_FAKE_HERDR_FLEET:-}" \
     FM_FAKE_HERDR_SERVER_FAIL="${FM_FAKE_HERDR_SERVER_FAIL:-}" \
+    FM_FAKE_HERDR_SERVER_STAY="${FM_FAKE_HERDR_SERVER_STAY:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -177,11 +183,15 @@ test_noisy_server_log_is_bounded() {
 }
 
 test_captured_provision_returns_promptly() {
-  local name="fm-lab-captured-$$" started elapsed
+  local name="fm-lab-captured-$$" started elapsed pid
   started=$(date +%s)
-  # Command substitution waits for every holder of the pipe to close it.
-  : "$(FM_FAKE_HERDR_SERVER_DELAY=0 run_with_fake fm_herdr_lab_provision "$name" 2>&1)"
+  # The server outlives provision. Command substitution waits for every
+  # holder of the pipe to close it, so a collector that kept the caller's
+  # stdout open would block until the server exits.
+  : "$(FM_FAKE_HERDR_SERVER_STAY=20 run_with_fake fm_herdr_lab_provision "$name" 2>&1)"
   elapsed=$(($(date +%s) - started))
+  pid=$(cat "$FAKE_STATE/$name.pid" 2>/dev/null || true)
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
   [ "$elapsed" -lt 10 ] || fail "captured provision held its output pipe open for ${elapsed}s"
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
   pass "fm-herdr-lab: provision does not hold a captured output pipe open"
