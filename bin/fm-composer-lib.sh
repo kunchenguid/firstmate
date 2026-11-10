@@ -1490,7 +1490,18 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
 # be the harness's own idle suggestion (claude's rotating dim hint, codex's
 # `Use /skills ...`), so it must read `unknown` rather than a false `pending`.
 _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
-  local screen=$1 styled=$2 row=$3 raw content plain state
+  local screen=$1 styled=$2 row=$3 raw content plain next state
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  content=$(_fm_composer_row_content "$raw" 0)
+  next=$(_fm_composer_row_content "$(_fm_composer_screen_row "$((row + 1))" "$screen")" 0)
+  fm_composer_normalize_trim_var content
+  fm_composer_normalize_trim_var next
+  if fm_composer_leading_agent_glyph_var plain "$content" \
+     && _fm_composer_row_is_rule_furniture "${content#*"$plain"}" \
+     && _fm_composer_row_is_ordinary_continuation "$next"; then
+    _fm_composer_classify_bare_wrap "$screen" "$styled" "$row" "$((row + 1))"
+    return 0
+  fi
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
@@ -2141,6 +2152,8 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
+      fm_composer_idle_matches "$trimmed" \
+        "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
