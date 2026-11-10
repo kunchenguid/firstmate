@@ -2575,6 +2575,32 @@ SH
   pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
 }
 
+test_failed_silent_custom_check_surfaces_its_exit_code() {
+  local backend dir state rc force_fallback
+  for backend in installed-timeout fallback-timeout; do
+    dir=$(make_case "failed-silent-custom-check-$backend")
+    state="$dir/home/state"
+    cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'private detail\n' >&2
+exit 3
+SH
+    chmod 0700 "$state/custom.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null || fail "could not register $backend failing check"
+    force_fallback=0
+    [ "$backend" = installed-timeout ] || force_fallback=1
+
+    rc=0
+    FM_CHECK_FORCE_FALLBACK="$force_fallback" FM_TEST_WATCH_BOUND=20 \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$backend watcher did not wake on the failed silent check (rc=$rc): $(cat "$dir/watch.out" "$dir/watch.err")"
+    grep -qxF "check: $state/custom.check.sh: check failed with exit 3" "$dir/watch.out" \
+      || fail "$backend watcher did not report the failed check and its exit code: $(cat "$dir/watch.out")"
+    ! grep -qF 'private detail' "$dir/watch.out" "$dir/watch.err" || fail "$backend watcher printed the check's stderr"
+  done
+  pass "a custom check that exits non-zero with no output surfaces its exit code on installed and fallback timeout paths"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -5135,4 +5161,5 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_timed_out_custom_check_surfaces_with_partial_output
+test_failed_silent_custom_check_surfaces_its_exit_code
 test_teardown_removes_poll_artifacts
