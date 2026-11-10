@@ -1,0 +1,83 @@
+// Orca create-response recovery; called only by orca.sh.
+// Usage: node orca-worktree-recover.js available|recover <repo-id> <name>
+// `available` proves no same-named allocation existed before create.
+// `recover` polls complete inventories without allocating or deleting anything,
+// adopting only one exact local identity after Git can read its clean root.
+// FM_ORCA_WORKTREE_RECOVER_TIMEOUT_MS sets the recovery deadline (default 180s);
+// every CLI/Git call is capped at 30s and the remaining recovery budget.
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const { spawnSync } = require("child_process");
+const [mode, repoId, name] = process.argv.slice(2);
+const budget = Number(process.env.FM_ORCA_WORKTREE_RECOVER_TIMEOUT_MS || 180000);
+if (!["available", "recover"].includes(mode) || !repoId || !name ||
+    name !== path.basename(name) || !Number.isSafeInteger(budget) || budget <= 0) {
+  console.error("error: invalid Orca worktree recovery arguments or timeout");
+  process.exit(1);
+}
+const deadline = Date.now() + (mode === "available" ? 30000 : budget);
+const root = path.join(os.homedir(), "orca", "workspaces");
+function run(command, args) {
+  return spawnSync(command, args, {
+    encoding: "utf8", timeout: Math.max(1, Math.min(30000, deadline - Date.now())),
+    maxBuffer: 16 * 1024 * 1024,
+  });
+}
+function inventory() {
+  const listed = run("orca", ["worktree", "list", "--repo", `id:${repoId}`, "--limit", "10000", "--json"]);
+  if (listed.error || listed.status !== 0) return null;
+  try {
+    const data = JSON.parse(listed.stdout);
+    const r = data.result;
+    if (data.ok !== true || !r || !Array.isArray(r.worktrees) || r.truncated !== false ||
+        r.totalCount !== r.worktrees.length ||
+        (r.hostScope && (!Array.isArray(r.hostScope.omittedHostIds) || r.hostScope.omittedHostIds.length))) return null;
+    if (r.worktrees.some(w => !w || typeof w.id !== "string" || !w.id ||
+        typeof w.repoId !== "string" || typeof w.path !== "string" || !path.isAbsolute(w.path) ||
+        typeof w.displayName !== "string")) return null;
+    return r.worktrees;
+  } catch (_) { return null; }
+}
+function named(w) {
+  return w.displayName === name || path.basename(w.path) === name;
+}
+function candidate(w) {
+  if (w.repoId !== repoId || w.displayName !== name || path.basename(w.path) !== name ||
+      w.id !== `${repoId}::${w.path}` || w.isMainWorktree !== false || /[\t\r\n]/.test(w.path)) return false;
+  try {
+    const relative = path.relative(fs.realpathSync(root), fs.realpathSync(w.path));
+    return relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  } catch (_) { return false; }
+}
+function ready(w) {
+  const top = run("git", ["-C", w.path, "rev-parse", "--show-toplevel"]);
+  if (top.error || top.status !== 0 || Date.now() >= deadline) return false;
+  try {
+    if (fs.realpathSync(top.stdout.trim()) !== fs.realpathSync(w.path)) return false;
+  } catch (_) { return false; }
+  const status = run("git", ["-C", w.path, "status", "--porcelain"]);
+  return !status.error && status.status === 0 && !status.stdout.trim() && Date.now() < deadline;
+}
+(async () => {
+  if (mode === "available") {
+    const rows = inventory();
+    process.exitCode = rows && !rows.some(named) ? 0 : 1;
+    return;
+  }
+  let delay = 2000;
+  while (Date.now() < deadline) {
+    const rows = inventory();
+    // Count all name collisions before validating a candidate, so an unsafe
+    // duplicate cannot disappear through filtering and make a match unique.
+    const matches = rows && rows.filter(named);
+    if (matches && matches.length === 1 && candidate(matches[0]) && Date.now() < deadline && ready(matches[0])) {
+      process.stdout.write(JSON.stringify({ok: true, result: {worktree: matches[0]}}));
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(delay, deadline - Date.now()))));
+    delay = Math.min(delay * 2, 10000);
+  }
+  console.error(`error: Orca worktree ${name} is still unconfirmed after ${budget}ms; create was not retried; reconcile the in-flight worktree before retrying spawn`);
+  process.exitCode = 1;
+})();

@@ -46,12 +46,25 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
 fi
+# The pre-create inventory is independent of the ordinary response sequence.
+if [ "${1:-} ${2:-}" = 'worktree list' ] && [ ! -e "$RESP/.listed" ]; then
+  touch "$RESP/.listed"
+  if [ -f "$RESP/before.out" ]; then
+    cat "$RESP/before.out"
+  else
+    printf '{"ok":true,"result":{"worktrees":[],"totalCount":0,"truncated":false}}\n'
+  fi
+  exit 0
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+# shellcheck disable=SC1090
+[ ! -f "$RESP/$n.hook" ] || . "$RESP/$n.hook"
+[ ! -f "$RESP/$n.err" ] || cat "$RESP/$n.err" >&2
+[ ! -f "$RESP/$n.out" ] || cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -446,6 +459,163 @@ test_json_get_ignores_undocumented_terminal_id_shapes() {
   pass "fm_backend_orca_json_get: ignores undocumented terminal id shapes"
 }
 
+# Recovery fixtures describe the measured composite worktree identity and
+# complete inventory shape, with real Git repositories for the readiness gate.
+write_recovery_inventory() {  # <file> <path> [variant] [name]
+  node - "$1" "$2" "${3:-ready}" "${4:-fm-task}" <<'JS'
+const fs = require("fs");
+const [file, wt, variant, name] = process.argv.slice(2);
+const w = {id: `repo-123::${wt}`, repoId: "repo-123", displayName: name, path: wt, isMainWorktree: false};
+const r = {worktrees: [w], totalCount: 1, truncated: false, hostScope: {omittedHostIds: []}};
+switch (variant) {
+  case "repo": w.repoId = "other"; break;
+  case "name": w.displayName = `${name}-1`; break;
+  case "id": w.id = `other::${wt}`; break;
+  case "main": w.isMainWorktree = true; break;
+  case "incomplete": r.truncated = true; break;
+  case "count": r.totalCount = 2; break;
+  case "omitted": r.hostScope.omittedHostIds = ["worker-mac"]; break;
+  case "duplicate": r.worktrees.push({...w, id: `other::${wt}`}); r.totalCount = 2; break;
+}
+fs.writeFileSync(file, JSON.stringify({ok: true, result: r}));
+JS
+}
+
+recovery_case() {  # <name> -> sets RECOVER_HOME WT and standard create timeout
+  orca_case "$1"
+  RECOVER_HOME="$CASE_DIR/home"
+  WT="$RECOVER_HOME/orca/workspaces/project/fm-task"
+  fm_git_init_commit "$WT"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/1.out"
+  echo 'request timed out' > "$RESP/2.err"
+  echo 1 > "$RESP/2.exit"
+}
+
+run_recovery_create() {
+  HOME="$RECOVER_HOME" PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_WORKTREE_RECOVER_TIMEOUT_MS=8000 \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT"
+}
+
+assert_recovered_once() {  # <stdout>
+  [ "$1" = "$(printf 'repo-123::%s\t%s' "$WT" "$WT")" ] || fail "wrong recovered identity: $1"
+  [ "$(grep -c $'worktree\x1fcreate' "$LOG")" = 1 ] || fail 'create was retried'
+  assert_not_contains "$(cat "$LOG")" $'worktree\x1frm' 'recovery removed an allocation'
+}
+
+test_worktree_create_recovers_timeout() {
+  local message out
+  for message in 'The Orca runtime closed the connection before responding' 'request timed out' 'Timeout'; do
+    recovery_case "recover-${message// /-}"
+    printf '%s\n' "$message" > "$RESP/2.err"
+    write_recovery_inventory "$RESP/3.out" "$WT"
+    out=$(run_recovery_create) || fail 'timeout recovery failed'
+    assert_recovered_once "$out"
+  done
+  pass 'Orca create response timeout adopts the matching worktree without recreating'
+}
+
+test_worktree_recovery_waits_for_safe_inventory() {
+  local variant out rejected
+  for variant in repo name id main incomplete count omitted duplicate malformed cli-failure outside symlink basename; do
+    recovery_case "recover-$variant"
+    rejected=$WT
+    case "$variant" in
+      outside) rejected="$CASE_DIR/outside/fm-task"; fm_git_init_commit "$rejected" ;;
+      symlink)
+        rejected="$RECOVER_HOME/orca/workspaces/linked/fm-task"
+        fm_git_init_commit "$CASE_DIR/outside/fm-task"
+        mkdir -p "$(dirname "$rejected")"
+        ln -s "$CASE_DIR/outside/fm-task" "$rejected"
+        ;;
+      basename) rejected="$(dirname "$WT")/fm-task-1"; fm_git_init_commit "$rejected" ;;
+    esac
+    write_recovery_inventory "$RESP/3.out" "$rejected" "$variant"
+    case "$variant" in
+      malformed) echo '{' > "$RESP/3.out" ;;
+      cli-failure) echo 1 > "$RESP/3.exit" ;;
+    esac
+    write_recovery_inventory "$RESP/4.out" "$WT"
+    out=$(run_recovery_create) || fail "recovery failed after $variant inventory"
+    assert_recovered_once "$out"
+    [ "$(cat "$RESP/.count")" = 4 ] || fail "adopted $variant inventory"
+  done
+  pass 'Orca recovery rejects foreign, ambiguous, incomplete and unsafe identities before adoption'
+}
+
+test_worktree_recovery_waits_for_clean_git_root() {
+  local variant out
+  for variant in not-git dirty nested; do
+    recovery_case "recover-git-$variant"
+    case "$variant" in
+      not-git)
+        # This is a standalone fixture repository, never a real Orca worktree.
+        mv "$WT/.git" "$CASE_DIR/saved-git"
+        printf 'mv %q %q\n' "$CASE_DIR/saved-git" "$WT/.git" > "$RESP/4.hook"
+        ;;
+      dirty)
+        touch "$WT/in-flight"
+        printf 'rm %q\n' "$WT/in-flight" > "$RESP/4.hook"
+        ;;
+      nested)
+        fm_git_init_commit "$(dirname "$WT")"
+        mv "$WT/.git" "$CASE_DIR/saved-git"
+        printf 'mv %q %q\n' "$CASE_DIR/saved-git" "$WT/.git" > "$RESP/4.hook"
+        ;;
+    esac
+    write_recovery_inventory "$RESP/3.out" "$WT"
+    cp "$RESP/3.out" "$RESP/4.out"
+    out=$(run_recovery_create) || fail "recovery failed after Git became ready ($variant)"
+    assert_recovered_once "$out"
+    [ "$(cat "$RESP/.count")" = 4 ] || fail "adopted a $variant Git root"
+  done
+  pass 'Orca recovery waits until the exact Git root is readable and clean'
+}
+
+test_worktree_recovery_refuses_unknown_prior_ownership() {
+  local variant out rc
+  for variant in ready incomplete malformed; do
+    recovery_case "recover-prior-$variant"
+    write_recovery_inventory "$RESP/before.out" "$WT" "$variant"
+    [ "$variant" != malformed ] || echo '{' > "$RESP/before.out"
+    out=$(run_recovery_create 2>&1) && rc=0 || rc=$?
+    [ "$rc" -ne 0 ] || fail 'adopted an allocation without proving prior absence'
+    assert_contains "$out" 'not proven absent before create' 'missing ownership refusal'
+    [ "$(cat "$RESP/.count")" = 2 ] || fail 'unproven ownership triggered recovery'
+    assert_not_contains "$(cat "$LOG")" $'worktree\x1frm' 'unproven allocation was deleted'
+  done
+  pass 'Orca recovery preserves preexisting allocations and refuses incomplete pre-create inventory'
+}
+
+test_worktree_recovery_deadline_preserves_allocation() {
+  local out rc
+  recovery_case recover-deadline
+  write_recovery_inventory "$RESP/3.out" "$WT"
+  # Block the inventory beyond the budget, proving the CLI call is bounded too.
+  printf 'exec sleep 10\n' > "$RESP/3.hook"
+  out=$(HOME="$RECOVER_HOME" PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_WORKTREE_RECOVER_TIMEOUT_MS=2000 \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'recovery ignored its deadline'
+  assert_contains "$out" 'still unconfirmed after 2000ms' 'missing reconciliation diagnostic'
+  assert_contains "$out" 'reconcile the in-flight worktree before retrying spawn' 'missing operator recovery instruction'
+  [ "$(grep -c $'worktree\x1fcreate' "$LOG")" = 1 ] || fail 'deadline retried create'
+  assert_not_contains "$(cat "$LOG")" $'worktree\x1frm' 'deadline deleted an unconfirmed allocation'
+  assert_present "$WT/.git" 'deadline lost the allocation'
+  pass 'Orca recovery bounds inventory calls and preserves an unconfirmed allocation at the deadline'
+}
+
+test_worktree_create_preserves_other_errors() {
+  local out rc
+  recovery_case create-denied
+  echo 'permission denied' > "$RESP/2.err"
+  out=$(run_recovery_create 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'non-timeout create failure was accepted'
+  assert_contains "$out" 'permission denied' 'create error lost'
+  [ "$(cat "$RESP/.count")" = 2 ] || fail 'non-timeout failure triggered recovery'
+  pass 'Orca create preserves non-timeout errors'
+}
+
 test_worktree_and_terminal_helpers_parse_json() {
   local out wt_id wt_path term
   orca_case lifecycle-helpers
@@ -661,36 +831,47 @@ test_spawn_refuses_orca_nonisolated_worktree() {
 }
 
 test_spawn_removes_orca_worktree_when_terminal_create_fails() {
-  local proj wt data state config id out status
-  id="orcatermfailz8"
-  proj="$TMP_ROOT/terminal-fail-project"
-  wt="$TMP_ROOT/terminal-fail-wt"
-  data="$TMP_ROOT/terminal-fail-data"
-  state="$TMP_ROOT/terminal-fail-state"
-  config="$TMP_ROOT/terminal-fail-config"
+  local proj wt data state config id out status recovered=${1:-0} worktree_id
+  id="orcatermfailz8-$recovered"
+  proj="$TMP_ROOT/terminal-fail-project-$recovered"
+  wt="$TMP_ROOT/terminal-fail-wt-$recovered"
+  data="$TMP_ROOT/terminal-fail-data-$recovered"
+  state="$TMP_ROOT/terminal-fail-state-$recovered"
+  config="$TMP_ROOT/terminal-fail-config-$recovered"
+  [ "$recovered" != 1 ] || wt="$SPAWN_HOME/orca/workspaces/terminal-fail/fm-$id"
+  worktree_id="wt-terminal-fail::/orca/wt-terminal-fail"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
   write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
-  orca_case terminal-fail
+  orca_case "terminal-fail-$recovered"
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-terminal-fail"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-terminal-fail::/orca/wt-terminal-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
+  if [ "$recovered" = 1 ]; then
+    worktree_id="repo-123::$wt"
+    printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
+    : > "$RESP/3.out"
+    echo 'request timed out' > "$RESP/3.err"
+    echo 1 > "$RESP/3.exit"
+    rm "$RESP/4.exit"
+    write_recovery_inventory "$RESP/4.out" "$wt" ready "fm-$id"
+    echo 1 > "$RESP/5.exit"
+  fi
   out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
-  status=$?
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 ) && status=0 || status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation fails"
   assert_absent "$state/$id.meta" "terminal-create abort should not record metadata after successful cleanup"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail::/orca/wt-terminal-fail'$'\x1f''--title'$'\x1f'"fm-$id"$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--title'$'\x1f'"fm-$id"$'\x1f''--json' \
     "Orca spawn should attempt terminal creation before abort cleanup"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail::/orca/wt-terminal-fail'$'\x1f''--force'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the worktree when terminal creation fails"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "Orca spawn should not close a terminal when no handle was recorded"
-  pass "fm-spawn.sh --backend orca: removes worktree when terminal creation fails"
+  pass "fm-spawn.sh --backend orca: removes worktree when terminal creation fails (recovered=$recovered)"
 }
 
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
@@ -1401,3 +1582,11 @@ test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
+
+test_worktree_create_recovers_timeout
+test_worktree_recovery_waits_for_safe_inventory
+test_worktree_recovery_waits_for_clean_git_root
+test_worktree_recovery_refuses_unknown_prior_ownership
+test_worktree_recovery_deadline_preserves_allocation
+test_worktree_create_preserves_other_errors
+test_spawn_removes_orca_worktree_when_terminal_create_fails 1
