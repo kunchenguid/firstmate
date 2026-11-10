@@ -13,7 +13,8 @@
 #
 # Snapshot schemas: fm_quota_json_valid accepts quota-axi schema 5 (one row per
 # provider, no accountKey) and schema 6 (every row carries accountKey, unique on
-# provider + accountKey; quota-axi emits it once any provider expands to more
+# provider + accountKey, plus an optional accountKeys array of the credential
+# keys the row covers; quota-axi emits it once any provider expands to more
 # than one account). Schema 5 keeps its exact pre-schema-6 rules so an older
 # quota-axi keeps working unchanged. FM_QUOTA_ROW_JQ is the one join used to
 # bind a candidate to its row under either schema.
@@ -28,7 +29,8 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #                                  is identified by the contract.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
-#                                  or null; schema 5 ignores $lane.
+#                                  or null when none or several rows match;
+#                                  schema 5 ignores $lane.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
@@ -39,8 +41,12 @@ FM_QUOTA_ROW_JQ='
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
-      (([$rows[] | select(.accountKey == $lane)] | first) //
-       ([$rows[] | select(.accountKey == "default")] | first) // null)
+      ([$rows[] | select(.accountKey == $lane or
+         ((.accountKeys | type) == "array" and any(.accountKeys[]; . == $lane)))]) as $matches |
+      if ($matches | length) > 1 then null
+      else (($matches | first) //
+        ([$rows[] | select(.accountKey == "default")] | first) // null)
+      end
     else ($rows | first) // null
     end;
 '
@@ -96,7 +102,11 @@ fm_quota_json_valid() {
          all(.providers[];
            (.accountKey | type) == "string" and
            (.accountKey | length) > 0 and
-           ((.accountKey | test("\\s")) | not)) and
+           ((.accountKey | test("\\s")) | not) and
+           ((has("accountKeys") | not) or
+            ((.accountKeys | type) == "array" and
+             all(.accountKeys[];
+               type == "string" and length > 0 and (test("\\s") | not))))) and
          (([.providers[] | [.provider, .accountKey]] | length) ==
           ([.providers[] | [.provider, .accountKey]] | unique | length))
        else false

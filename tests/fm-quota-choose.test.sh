@@ -709,6 +709,59 @@ fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "duplicate schema 6 key returned: $err"
 ok "schema 6 requires accountKey on every row and uniqueness on provider + accountKey"
 
+# Schema 6 coverage: quota-axi lists every credential key a merged account row
+# covers in accountKeys. Native Codex (codex-home) is covered here only by the
+# openai-codex row, which has headroom while the other codex row is exhausted.
+SCHEMA6_COVERED="$LAB/schema6-covered.json"
+jq '
+  .providers |= map(if .accountKey == "openai-codex" then
+      .accountKeys = ["openai-codex", "codex-home"] |
+      .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 80 | .runway.status = "through_reset")
+    elif .accountKey == "openai-codex-work" then
+      .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")
+    else . end)
+' "$SCHEMA6" > "$SCHEMA6_COVERED"
+out=$(call_choose --snapshot "$SCHEMA6_COVERED" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "native Codex did not bind to the row whose accountKeys covers codex-home: $out"
+jq '.providers |= reverse' "$SCHEMA6_COVERED" > "$LAB/schema6-covered-reversed.json"
+out=$(call_choose --snapshot "$LAB/schema6-covered-reversed.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "covered-key selection depended on row order: $out"
+ok "a schema 6 row whose accountKeys covers the candidate key supplies its quota"
+
+# Two rows matching one key conflict, so the candidate stays unmeasured instead
+# of reading either row or falling back to the default row.
+SCHEMA6_CONFLICT="$LAB/schema6-conflict.json"
+jq '
+  (.providers[] | select(.accountKey == "openai-codex")) as $covered |
+  .providers += [($covered | del(.accountKeys) | .accountKey = "codex-home"),
+    ($covered | del(.accountKeys) | .accountKey = "default")]
+' "$SCHEMA6_COVERED" > "$SCHEMA6_CONFLICT"
+out=$(call_choose --snapshot "$SCHEMA6_CONFLICT" --candidate codex:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "conflicting rows for codex-home were not left unmeasured: $out"
+jq '.providers |= map(select(.accountKey != "codex-home")) |
+  .providers |= map(if .accountKey == "openai-codex-work" then .accountKeys = ["openai-codex-work", "codex-home"] else . end)' \
+  "$SCHEMA6_CONFLICT" > "$LAB/schema6-conflict-aliases.json"
+out=$(call_choose --snapshot "$LAB/schema6-conflict-aliases.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "two rows covering codex-home in accountKeys were not left unmeasured: $out"
+ok "more than one row matching the candidate key leaves it unmeasured, with no default fallback"
+
+for malformed in '"codex-home"' '["codex-home", 1]' '[""]' '["codex home"]' 'null'; do
+  jq --argjson keys "$malformed" '.providers[1].accountKeys = $keys' "$SCHEMA6" > "$LAB/schema6-malformed-keys.json"
+  if err=$(call_choose --snapshot "$LAB/schema6-malformed-keys.json" --candidate cursor:default 2>&1); then
+    fail "schema 6 accountKeys $malformed unexpectedly dispatched"
+  fi
+  [ "$err" = "error: invalid quota-axi provider data" ] || fail "schema 6 accountKeys $malformed returned: $err"
+done
+jq '.providers[1].accountKeys = []' "$SCHEMA6" > "$LAB/schema6-empty-keys.json"
+out=$(call_choose --snapshot "$LAB/schema6-empty-keys.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "schema 6 empty accountKeys returned: $out"
+ok "schema 6 accountKeys must be an array of non-empty, whitespace-free strings"
+
+jq '.providers[1].accountKeys = "codex-home"' "$SCHEMA5_PAIR" > "$LAB/schema5-account-keys.json"
+out=$(call_choose --snapshot "$LAB/schema5-account-keys.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "schema 5 with accountKeys returned: $out"
+ok "schema 5 ignores accountKeys entirely"
+
 cat > "$SCHEMA6_TOON" <<'TOON'
 bin: ~/.local/bin/quota-axi
 description: Report local agent-provider quota windows for routing-aware agents
