@@ -21,6 +21,8 @@
 # and preserve the wrapper's inherited PATH without loading operator config.
 # The native park guard also drives the real embedded TUI, project startup,
 # asynchronous Stop and queue with a loopback provider in private homes.
+# Verified releases exercise parking; other releases must retain foreground
+# supervision and complete the real asynchronous Stop without creating a park.
 # None of these layers spends model tokens, so the guard runs by default
 # wherever its tools are installed.
 set -u
@@ -300,12 +302,12 @@ PY
   [ "$status" -eq 0 ] || fail "codex $CODEX_VERSION: installed Stop parser regression failed"
 }
 
-test_installed_codex_native_park_delivers_rearms_and_reports_failure() {
+test_installed_codex_native_supervision_matches_verified_release() {
   python3 "$ROOT/tests/codex-stop-park-live.py" "$ROOT" "$TMP_ROOT/native-park" "$CODEX_VERSION" \
-    || fail "codex $CODEX_VERSION: native park lifecycle regression failed"
+    || fail "codex $CODEX_VERSION: native supervision lifecycle regression failed"
 }
 
-test_installed_codex_native_park_delivers_rearms_and_reports_failure
+test_installed_codex_native_supervision_matches_verified_release
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
 test_installed_codex_accepts_the_stop_wrapper_and_rejects_invalid_output

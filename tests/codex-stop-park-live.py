@@ -22,6 +22,7 @@ import threading
 import time
 
 ROOT, LAB, VERSION = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+VERIFIED = VERSION in {"codex-cli 0.163.0", "codex-cli 0.167.0"}
 
 
 def alive(pid):
@@ -44,6 +45,15 @@ def run_case(name, fail_arm=False):
     for directory in [".codex", "state", "config", "data", "projects"]:
         (home / directory).mkdir(exist_ok=True)
     shutil.copy2(ROOT / ".codex/hooks.json", home / ".codex/hooks.json")
+    if not VERIFIED:
+        # Observe completion of the real asynchronous hook, not just absence
+        # of a park before Stop has had a chance to run.
+        hooks = json.loads((home / ".codex/hooks.json").read_text())
+        for group in hooks["hooks"]["Stop"]:
+            for hook in group["hooks"]:
+                if hook.get("async"):
+                    hook["command"] += '; rc=$?; printf "%s\\n" "$rc" >> stop-exits; exit "$rc"'
+        (home / ".codex/hooks.json").write_text(json.dumps(hooks))
     (home / "AGENTS.md").write_text("Isolated native supervision transport fixture.\n")
     subprocess.run(["git", "init", "-q", str(home)], check=True)
     (home / "config/backlog-backend").write_text("manual\n")
@@ -161,6 +171,7 @@ enabled=false
     consent_sends = 0
     consent_last = 0
     park_pids = set()
+    owned_pids = set()
     closed = False
     native_reaped = False
     log = (case / "terminal.log").open("wb")
@@ -218,6 +229,33 @@ enabled=false
             park_pids.add(data["pid"])
         return data
 
+    def parked_tree():
+        data = record()
+        if data.get("outcome") != "waiting":
+            return False
+        try:
+            watcher = int((home / "state/.watch.lock/pid").read_text())
+        except (FileNotFoundError, ValueError):
+            return False
+        # Walk only this private home's locked watcher ancestors. The path to
+        # the recorded hook includes the arm and its timeout even when they
+        # use separate process groups; never select processes by name.
+        chain = set()
+        child = watcher
+        while child > 1 and child not in chain:
+            chain.add(child)
+            if child == data["pid"]:
+                assert len(chain) >= 4, f"missing watcher/arm/timeout ownership: {chain}"
+                owned_pids.update(chain)
+                (case / "owned-pids.json").write_text(json.dumps(sorted(owned_pids)))
+                return True
+            parent = subprocess.run(["ps", "-o", "ppid=", "-p", str(child)],
+                                    capture_output=True, text=True, check=False)
+            if not parent.stdout.strip():
+                return False
+            child = int(parent.stdout.strip())
+        return False
+
     def consumed():
         path = home / "consumed.log"
         return len(path.read_text().splitlines()) if path.exists() else 0
@@ -226,17 +264,30 @@ enabled=false
         wait_for(lambda: requests, "native SessionStart did not reach the provider")
         context = json.dumps(requests[0])
         assert "primary harness: codex" in context, "native startup selected the wrong harness"
-        assert "Mode: Codex asynchronous Stop-hook-owned supervision." in context, \
-            f"{VERSION}: native session did not select the verified park"
-        assert (home / "state/.codex-park-session").exists(), "native session was not registered"
-        if fail_arm:
+        if VERIFIED:
+            assert "Mode: Codex asynchronous Stop-hook-owned supervision." in context, \
+                f"{VERSION}: native session did not select the verified park"
+            assert (home / "state/.codex-park-session").exists(), "native session was not registered"
+        if not VERIFIED:
+            assert "Mode: Codex foreground checkpoint." in context, \
+                "unverified native session did not retain foreground supervision"
+            wait_for(lambda: (home / "stop-exits").exists()
+                     and (home / "stop-exits").stat().st_size,
+                     "native asynchronous Stop did not finish")
+            assert set((home / "stop-exits").read_text().splitlines()) == {"0"}, \
+                "unsupported asynchronous Stop failed instead of remaining inert"
+            for artifact in [".codex-park-session", ".codex-park.lock", ".codex-park.json",
+                             ".codex-park-fallback", ".watch.lock"]:
+                assert not (home / "state" / artifact).exists(), \
+                    f"unverified native session created {artifact}"
+        elif fail_arm:
             wait_for(lambda: (home / "state/.codex-park-fallback").exists()
                      and "attempt 2/2" in json.dumps(requests)
                      and "foreground fallback" in json.dumps(requests),
                      "arm failures were not delivered with visible fallback")
             assert record().get("outcome") == "failed", "repeated arm failure was not recorded"
         else:
-            wait_for(lambda: record().get("outcome") == "waiting", "async Stop did not park")
+            wait_for(parked_tree, "async Stop did not establish its owned watcher/arm/timeout")
             owner = record()["pid"]
             before = len(requests)
             deadline = time.monotonic() + 3
@@ -245,8 +296,8 @@ enabled=false
             assert len(requests) == before, "a quiet native park called the provider"
             for event in [1, 2]:
                 (home / "trigger").write_text(f"LAB_ACTIONABLE_WAKE_{event}\n")
-                wait_for(lambda: consumed() >= event and record().get("outcome") == "waiting"
-                         and record().get("pid") != owner,
+                wait_for(lambda: consumed() >= event and record().get("pid") != owner
+                         and parked_tree(),
                          f"actionable wake {event} was not consumed and rearmed")
                 assert not (home / "state/.wake-queue").read_text(), "wake was not acknowledged"
                 assert f"LAB_ACTIONABLE_WAKE_{event}" in (home / "drains.log").read_text()
@@ -264,16 +315,24 @@ enabled=false
         while time.monotonic() < deadline:
             if not native_reaped:
                 native_reaped = os.waitpid(pid, os.WNOHANG)[0] == pid
-            if native_reaped and not any(alive(owner) for owner in park_pids):
+            if native_reaped and not any(alive(owner) for owner in park_pids | owned_pids):
                 break
             time.sleep(0.1)
         assert native_reaped, f"native child survived /quit: {case}"
-        assert not any(alive(owner) for owner in park_pids), f"native park survived exit: {case}"
+        survivors = [owner for owner in park_pids | owned_pids if alive(owner)]
+        assert not survivors, f"native park/watcher/arm/timeout survived exit: {survivors}; {case}"
     finally:
         try:
             os.killpg(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        # Emergency cleanup also covers the captured children that used a
+        # separate process group. This runs only after the natural-exit verdict.
+        for owner in owned_pids:
+            try:
+                os.kill(owner, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         if not native_reaped:
             os.waitpid(pid, 0)
         os.close(fd)
@@ -286,7 +345,10 @@ enabled=false
 
 
 try:
-    run_case("delivery-rearm")
-    run_case("failure-fallback", fail_arm=True)
+    if VERIFIED:
+        run_case("delivery-rearm")
+        run_case("failure-fallback", fail_arm=True)
+    else:
+        run_case("unsupported-foreground")
 except Exception as error:
     raise SystemExit(f"not ok - {VERSION}: native park lifecycle: {error}") from error
