@@ -373,7 +373,9 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   BASELINE_RC=0
   BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$EXPECTED_BASE" 2>/dev/null) || BASELINE_RC=$?
   if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
-    if [ "$BASELINE_RC" = 124 ]; then
+    if [ "$BASELINE_RC" = 4 ]; then
+      echo "error: baseline read could not verify the expected PR destination" >&2
+    elif [ "$BASELINE_RC" = 124 ]; then
       echo "error: baseline read of the PR poll timed out" >&2
     else
       echo "error: baseline read of the PR poll failed" >&2

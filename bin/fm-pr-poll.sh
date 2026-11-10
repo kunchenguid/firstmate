@@ -65,9 +65,10 @@ matching_destination() { # <base-and-state TSV record>
 
 meta=
 retirement_only=0
-# A baseline read distinguishes an unreadable forge response from a known
-# non-degraded state; ordinary watcher errors remain silent success.
+# A baseline read returns 3 for unknown checks and 4 for refused destination
+# proof; ordinary watcher errors remain silent success.
 unknown=0
+destination_refused=0
 degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
@@ -75,7 +76,10 @@ if [ "$#" -eq 2 ] && [ "$1" = --base-unavailable ]; then
   base_unavailable_notice "$2" pr-base-parent-notified
   exit "$?"
 elif { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
-  [ "$1" != --baseline ] || unknown=3
+  if [ "$1" = --baseline ]; then
+    unknown=3
+    destination_refused=4
+  fi
   provider=$2
   url=$3
   host=$4
@@ -134,7 +138,7 @@ fi
 case "$expected_base" in ''|-*|*$'\n'*) expected_base= ;; esac
 if [ "$retirement_only" -eq 0 ] && { [ -z "$expected_base" ] || ! git check-ref-format "refs/heads/$expected_base" >/dev/null 2>&1; }; then
   [ -z "$meta" ] || base_unavailable_notice "$meta"
-  exit 0
+  exit "$destination_refused"
 fi
 
 case "$number" in
@@ -172,7 +176,7 @@ case "$provider" in
     if [ "$degraded_enabled" != 1 ] || [ "$retirement_only" -eq 1 ]; then
       record=$(GH_HOST=$host gh pr view "$url" --json state,baseRefName \
         -q '[.baseRefName, .state] | @tsv' 2>/dev/null) || exit $unknown
-      matching_destination "$record" || exit $unknown
+      matching_destination "$record" || exit "$destination_refused"
       [ "${record#*$'\t'}" = MERGED ] && printf '%s\n' merged
       exit 0
     fi
@@ -214,7 +218,7 @@ case "$provider" in
       else
         ""
       end)] | @tsv' 2>/dev/null) || exit $unknown
-    matching_destination "$record" || exit $unknown
+    matching_destination "$record" || exit "$destination_refused"
     result=${record#*$'\t'}
     case $result in
       merged)
@@ -274,9 +278,9 @@ case "$provider" in
       | jq -er --argjson retirement "$retirement_only" '
         select((.state | type) == "string")
         | if $retirement == 1 then ["", .state]
-          else select((.target_branch | type) == "string") | [.target_branch, .state]
+          else [(.target_branch | if type == "string" then . else "" end), .state]
           end | @tsv' 2>/dev/null) || exit $unknown
-      matching_destination "$record" || exit $unknown
+      matching_destination "$record" || exit "$destination_refused"
       [ "${record#*$'\t'}" = merged ] && printf '%s\n' merged
       exit 0
     fi
@@ -376,9 +380,9 @@ case "$provider" in
     raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit $unknown
     [ -n "$raw" ] || exit $unknown
     record=$(printf '%s' "$raw" | jq -er '
-      select((.target_branch | type) == "string" and (.state | type) == "string")
-      | [.target_branch, .state] | @tsv' 2>/dev/null) || exit $unknown
-    matching_destination "$record" || exit $unknown
+      select((.state | type) == "string")
+      | [(.target_branch | if type == "string" then . else "" end), .state] | @tsv' 2>/dev/null) || exit $unknown
+    matching_destination "$record" || exit "$destination_refused"
     result=$(printf '%s' "$raw" | jq -r '
       if type == "object"
          and (.state | type) == "string"
@@ -446,12 +450,12 @@ case "$provider" in
           current=$(gitlab_detail_read "projects/$enc/merge_requests/$number" 2>/dev/null) || current=
           current_record=$(printf '%s' "$current" | jq -er '
             if type == "object" and (.state | type) == "string"
-               and (.target_branch | type) == "string" then [.target_branch, .state] | @tsv
+            then [(.target_branch | if type == "string" then . else "" end), .state] | @tsv
             else error("invalid merge request record")
             end' 2>/dev/null) || current_record=
           current_state=unknown
           if [ -n "$current_record" ]; then
-            matching_destination "$current_record" || exit $unknown
+            matching_destination "$current_record" || exit "$destination_refused"
             current_state=${current_record#*$'\t'}
           fi
           case $current_state in
@@ -573,14 +577,13 @@ case "$provider" in
         [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
         | if ($match | length) == 1
               and ($match[0].status | type) == "string"
-              and ($retirement == 1 or ($match[0].branch | type) == "string")
-          then [(if $retirement == 1 then "" else $match[0].branch end), $match[0].status] | @tsv
+          then [(if $retirement == 1 then "" else ($match[0].branch | if type == "string" then . else "" end) end), $match[0].status] | @tsv
           else error("no exact change record")
           end
       else
         error("invalid gerrit record")
       end' 2>/dev/null) || exit $unknown
-    matching_destination "$record" || exit $unknown
+    matching_destination "$record" || exit "$destination_refused"
     [ "${record#*$'\t'}" = MERGED ] && printf '%s\n' merged
     ;;
   forgejo)
@@ -638,11 +641,10 @@ case "$provider" in
     record=$(tea api --login "$login" --repo "$owner/$repo" \
       "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r --argjson retirement "$retirement_only" '
         if type == "object" and (.merged | type) == "boolean"
-            and ($retirement == 1 or (.base.ref | type) == "string")
-        then [(if $retirement == 1 then "" else .base.ref end), (.merged | tostring)] | @tsv
+        then [(if $retirement == 1 then "" else (.base.ref | if type == "string" then . else "" end) end), (.merged | tostring)] | @tsv
         else error("invalid pull request record")
         end' 2>/dev/null) || exit $unknown
-    matching_destination "$record" || exit $unknown
+    matching_destination "$record" || exit "$destination_refused"
     [ "${record#*$'\t'}" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
