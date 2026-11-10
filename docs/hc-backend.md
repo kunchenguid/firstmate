@@ -42,7 +42,7 @@ A captain who wants a shell outside the app to spawn hc workers sets `config/bac
 
 The signal binds the core a spawn would actually reach, the `HC_SESSION` (else `default`) session, and requires it to be running already, because the adapter's container ensure starts a missing core and detection must never start one.
 `bin/fm-backend.sh` resolves that core's socket without calling `hc`: an `FM_HC_SOCKET` pin, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` when `XDG_RUNTIME_DIR` is set, else `${XDG_STATE_HOME:-~/.local/state}/herdr-core/<session>/<session>.sock`, the layout measured on hc 0.1.14.
-The same resolver also gates every passive `hc get` the adapter makes (`fm_backend_hc_get`, behind endpoint, agent, busy, and path reads for every hc task), so a layout it misses reads those as `unreadable`, not only as a detection miss; see [Second mates](#second-mates).
+The resolver's header in [`bin/fm-backend.sh`](../bin/fm-backend.sh) owns its effect on every hc task's passive reads, including when the socket layout cannot be resolved.
 `app-terminal` additionally requires `HC_TERMINAL_SOCKET` to be that same socket, so a labeled terminal on some other core never steers a spawn.
 The app shows the session it bound at launch, so a captain whose app runs a session other than `default` sets the same `HC_SESSION` for Firstmate or selects hc explicitly.
 

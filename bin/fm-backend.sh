@@ -319,8 +319,9 @@ fm_backend_detect_hc_usable() {
 # else ${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core/<session>/<session>.sock.
 # fm_backend_hc_get (bin/backends/hc.sh) gates every passive hc read on this
 # same socket, so a layout this misses fails detection's liveness probe (no
-# switch, never a wrong or newly started core) and also reads every hc task's
-# endpoint, agent, busy, and path state as unreadable.
+# switch, never a wrong or newly started core) and blocks every hc task's
+# passive reads: endpoint and agent state are unreadable, busy state is
+# unknown, and current_path returns no path.
 fm_backend_detect_hc_core_sock() {
   local session=${HC_SESSION:-default}
   if [ -n "${FM_HC_SOCKET:-}" ]; then
