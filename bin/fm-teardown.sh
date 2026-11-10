@@ -2896,6 +2896,11 @@ validate_firstmate_home_for_removal() {
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
+  # A return that was killed outright leaves this home's payload staged in the
+  # parent's state directory. Recover it before the seeded-home check below, so
+  # an interrupted retirement retries instead of refusing a home whose identity
+  # is still sitting in that staging directory.
+  fm_home_payload_recover "$abs_home_path" "$lock_parent" || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
