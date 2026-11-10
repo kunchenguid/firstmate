@@ -4643,7 +4643,17 @@ try {
   if (firstSettled || offers.length !== 1 || maxDeliveries !== 1) {
     throw new Error(`delivery escaped its hold/serialization: ${JSON.stringify({ firstSettled, offers, maxDeliveries })}`);
   }
-  const redundant = await tool.execute("held-manual", {}, undefined, undefined, {});
+  // ready=4 is written by the stub before this plugin's stdout data event
+  // records the child as established, so a redundant call can briefly answer
+  // "starting". Wait for the established arm to answer, while still failing
+  // if any redundant call spawns an extra arm.
+  let redundant;
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    redundant = await tool.execute("held-manual", {}, undefined, undefined, {});
+    if (redundant.details.ok && redundant.details.message.includes("unchanged") && arms().length === 4) break;
+    if (arms().length !== 4) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   if (!redundant.details.ok || !redundant.details.message.includes("unchanged") || arms().length !== 4) {
     throw new Error("manual arm duplicated the held-delivery successor");
   }
