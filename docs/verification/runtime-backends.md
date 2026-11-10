@@ -3749,6 +3749,7 @@ Measured on 2026-11-02 with `hc 0.1.16` on macOS, inside a `bin/fm-hc-lab.sh` se
 | --- | --- |
 | `hc ls` and `hc ls --label <k=v>` after `hc kill` of a labeled terminal | Listed live terminals only; the finished terminal appeared under `hc ls --all` and kept every label on `hc get` (`state: finished`, `reason: killed`) until `hc rm`, after which `hc get` exited 3. |
 | `hc run --name <name>` (0.1.16) | Accepted; `hc get` reported the name. The adapter does not pass one on this version floor. |
+| `fm_backend_agent_state hc <session>:<address>` from an environment whose `XDG_RUNTIME_DIR` and `XDG_STATE_HOME` resolve no running core for that session (0.1.19, 2026-11-10) | Before the live-socket check, `hc get` started an empty core at the resolved socket and the mate's dead terminal read `missing`; with the check it reads `unreadable` and no core starts, while the recording environment still reads `dead`. `tests/fm-backend-hc.test.sh` pins the check against the fake core. |
 
 Refresh the second-mate proof with:
 
@@ -3766,6 +3767,8 @@ ok - hc secondmate smoke: a finished terminal is removed as a husk before the ma
 ok - hc secondmate smoke: an alive mate is left exactly as it is
 FM_TEST_COMPLETE
 ```
+
+The same four lines were observed again on 2026-11-10 with `hc 0.1.19`.
 
 The mate's terminal carried `herdr.space=fm-2ndmate-<id>-<hash of the mate home>`, `herdr.tab=<launching hometag>-fm-<id>`, and the launching home's `firstmate.*` labels; each respawn bound a fresh address with the same labels, and the dead and finished terminals answered not found afterwards.
 On this host the lab teardown's fleet-state tripwire refused, because the live `default` core rewrote its own `terminals.json` during the run; the same file changed between two passive reads taken with no lab activity at all, no lab process survived the sweep, and the retained lab directory was removed by hand.
