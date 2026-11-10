@@ -343,7 +343,7 @@ fm_worker_account_check() {
       elif fm_timed_out "$rc"; then
         echo "error: $source_file sign-in check timed out; the launch never falls back to the stored login" >&2
       else
-        echo "error: $source_file token was not accepted by claude auth status (exit $rc); the launch never falls back to the stored login" >&2
+        echo "error: $source_file token did not load as Claude's auth method (claude auth status exit $rc); the launch never falls back to the stored login" >&2
       fi
       return 1
     fi

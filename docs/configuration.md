@@ -1646,9 +1646,11 @@ For a local secondmate, place the same file beside its pin in `config/secondmate
 This mapping applies only to a single `config/claude-account` pin, not `config/claude-accounts`.
 
 Before launch or relaunch, Firstmate loads the token through the shared credential-source adapter and requires `claude auth status` to report `authMethod` as `oauth_token`.
+The check proves only that the token loads and is the auth method Claude will use; an expired or revoked token is not detected before launch.
 The launch loads the token again into `CLAUDE_CODE_OAUTH_TOKEN`; it exists only in process memory and the worker's environment, never in arguments, files, or logs.
-A missing, unreadable, unsupported, malformed, or rejected source refuses the launch without falling back to the config directory's stored login.
+A missing, unreadable, unsupported, or malformed source, or a check that does not report `authMethod` as `oauth_token`, refuses the launch without falling back to the config directory's stored login.
 The source file without its matching pin also refuses.
+On relaunch with an expired token, the check passes, the running worker is stopped, and the replacement fails on its first request; the local copy and its commits are kept, so store a fresh token and relaunch.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns how the source is bound to a pin, and [`bin/fm-claude-token.sh`](../bin/fm-claude-token.sh) loads it for the command; [`bin/fm-credential-source-lib.sh`](../bin/fm-credential-source-lib.sh) owns the shared source schema and adapters.
 
