@@ -18,11 +18,11 @@
 # A session whose <herdr config>/sessions/<session>/herdr-client.sock path
 # would exceed the 103-byte sun_path limit is refused by name, prepare and
 # provision.
-# The herdr config root is $HOME/.config/herdr, herdr's documented default on
-# Linux and macOS; the check assumes herdr does not relocate it.
+# The herdr config root is $XDG_CONFIG_HOME/herdr when XDG_CONFIG_HOME is set,
+# otherwise $HOME/.config/herdr, the same root herdr resolves.
 # The length is counted in bytes, not characters.
 # Provision keeps the lab server output in <session>.server.log in the state
-# directory, truncated on every provision and capped at 64 KiB (later output
+# directory, truncated on every provision and capped at 4096 bytes (later output
 # is discarded), and shown only as a bounded tail.
 # Provision also stops waiting as soon as the server process exits, and prints
 # the log tail when the session never reports running.
@@ -75,7 +75,7 @@ fm_herdr_lab_validate_name() { # <session>
 fm_herdr_lab_sun_path_limit=103
 
 fm_herdr_lab_config_dir() {
-  printf '%s' "${HOME:-}/.config/herdr"
+  printf '%s/herdr' "${XDG_CONFIG_HOME:-${HOME:-}/.config}"
 }
 
 fm_herdr_lab_check_socket_path() { # <session>
@@ -464,6 +464,8 @@ fm_herdr_lab_cancel_provision() { # <pid>
   wait "$pid" 2>/dev/null || true
 }
 
+fm_herdr_lab_server_log_cap=4096
+
 fm_herdr_lab_server_log_path() { # <session>
   printf '%s/%s.server.log' "$(fm_herdr_lab_state_dir)" "$1"
 }
@@ -472,7 +474,7 @@ fm_herdr_lab_server_log_tail() { # <log>
   local log=$1
   [ -s "$log" ] || return 0
   fm_herdr_lab_error "server output (last 20 lines of $log):"
-  tail -n 20 "$log" | tail -c 4096 | sed 's/^/fm-herdr-lab:   /' >&2
+  tail -n 20 "$log" | tail -c "$fm_herdr_lab_server_log_cap" | sed 's/^/fm-herdr-lab:   /' >&2
 }
 
 fm_herdr_lab_provision() { # <session>
@@ -506,7 +508,7 @@ fm_herdr_lab_provision() { # <session>
   server_log=$(fm_herdr_lab_server_log_path "$name")
   mkdir -p "$(dirname "$server_log")"
   : > "$server_log"
-  fm_herdr_lab_raw "$name" server > >(head -c 65536 > "$server_log"; cat > /dev/null) 2>&1 &
+  fm_herdr_lab_raw "$name" server > >({ head -c "$fm_herdr_lab_server_log_cap" > "$server_log"; cat; } >/dev/null 2>&1) 2>&1 &
   server_pid=$!
   attempt=0
   max_attempts=300

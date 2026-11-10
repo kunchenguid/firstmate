@@ -7,6 +7,7 @@ set -u
 
 unset FM_HERDR_LAB_FLEET_SESSION
 export HOME=/home/test
+unset XDG_CONFIG_HOME
 
 TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
@@ -148,6 +149,12 @@ test_refuses_names_over_the_socket_path_limit() {
   [ "$chars" -lt 103 ] || fail "multibyte fixture is not under 103 characters: $chars"
   HOME=$wide fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
     && fail "a path under 103 characters but over 103 bytes was accepted"
+  # XDG_CONFIG_HOME relocates the config root: long HOME + short XDG is accepted,
+  # short HOME + long XDG is refused.
+  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) XDG_CONFIG_HOME=/x fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    || fail "a short XDG_CONFIG_HOME was refused because of a long HOME"
+  XDG_CONFIG_HOME=/x/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    && fail "a long XDG_CONFIG_HOME was accepted"
   status=0
   run_with_fake fm_herdr_lab_prepare "${name}a" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "prepare must refuse an over-limit name"
@@ -163,10 +170,21 @@ test_noisy_server_log_is_bounded() {
   FM_FAKE_HERDR_SERVER_NOISE=300000 \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || true
   size=$(wc -c < "$TRIPWIRES/$name.server.log" | tr -d ' ')
-  [ "$size" -le 65536 ] || fail "server log grew to $size bytes, over the 64 KiB cap"
+  [ "$size" -le 4096 ] || fail "server log grew to $size bytes, over the 4096-byte cap"
   [ "$size" -gt 0 ] || fail "server output was not captured"
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
   pass "fm-herdr-lab: a noisy server leaves a bounded log"
+}
+
+test_captured_provision_returns_promptly() {
+  local name="fm-lab-captured-$$" started elapsed
+  started=$(date +%s)
+  # Command substitution waits for every holder of the pipe to close it.
+  : "$(FM_FAKE_HERDR_SERVER_DELAY=0 run_with_fake fm_herdr_lab_provision "$name" 2>&1)"
+  elapsed=$(($(date +%s) - started))
+  [ "$elapsed" -lt 10 ] || fail "captured provision held its output pipe open for ${elapsed}s"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: provision does not hold a captured output pipe open"
 }
 
 test_failed_server_start_reports_its_error_quickly() {
@@ -698,6 +716,7 @@ test_refuses_unsafe_names
 test_refuses_names_over_the_socket_path_limit
 test_failed_server_start_reports_its_error_quickly
 test_noisy_server_log_is_bounded
+test_captured_provision_returns_promptly
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction
