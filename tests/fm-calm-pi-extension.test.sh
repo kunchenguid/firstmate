@@ -588,6 +588,7 @@ function makeHost(session) {
     // Pi reads its session through runtimeHost, which a session replacement swaps.
     runtimeHost: { session },
     compactionQueuedMessages: [],
+    pendingBashComponents: [],
     statuses: [],
     warnings: [],
     editorText: "",
