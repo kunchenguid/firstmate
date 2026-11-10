@@ -19,10 +19,12 @@
 # would exceed the 103-byte sun_path limit is refused by name, prepare and
 # provision.
 # The herdr config root is FM_HERDR_LAB_CONFIG_DIR when set, otherwise
-# ${XDG_CONFIG_HOME:-$HOME/.config}/herdr.
+# $HOME/.config/herdr, the documented default on Linux and macOS.
+# The length is counted in bytes, not characters.
 # Provision keeps the lab server output in <session>.server.log in the state
-# directory, truncated on every provision and shown only as a bounded tail, stops waiting as soon as the server process exits, and
-# prints the log tail when the session never reports running.
+# directory, truncated on every provision and shown only as a bounded tail.
+# Provision also stops waiting as soon as the server process exits, and prints
+# the log tail when the session never reports running.
 # Every Herdr call made here carries --session <session>: trailing, or
 # immediately before the first -- delimiter so it stays a Herdr option instead
 # of becoming a passthrough argument such as an agent start argument.
@@ -72,14 +74,15 @@ fm_herdr_lab_validate_name() { # <session>
 fm_herdr_lab_sun_path_limit=103
 
 fm_herdr_lab_config_dir() {
-  printf '%s' "${FM_HERDR_LAB_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/herdr}"
+  printf '%s' "${FM_HERDR_LAB_CONFIG_DIR:-${HOME:-}/.config/herdr}"
 }
 
 fm_herdr_lab_check_socket_path() { # <session>
-  local name=$1 path
+  local name=$1 path bytes
   path="$(fm_herdr_lab_config_dir)/sessions/$name/herdr-client.sock"
-  if [ "${#path}" -gt "$fm_herdr_lab_sun_path_limit" ]; then
-    fm_herdr_lab_error "session '$name' would bind a ${#path}-byte socket path, over the $fm_herdr_lab_sun_path_limit-byte sun_path limit: $path"
+  bytes=$(printf '%s' "$path" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -gt "$fm_herdr_lab_sun_path_limit" ]; then
+    fm_herdr_lab_error "session '$name' would bind a ${bytes}-byte socket path, over the $fm_herdr_lab_sun_path_limit-byte sun_path limit: $path"
     return 1
   fi
 }
@@ -474,6 +477,7 @@ fm_herdr_lab_server_log_tail() { # <log>
 fm_herdr_lab_provision() { # <session>
   local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds server_log
   fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_check_socket_path "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -517,6 +521,8 @@ fm_herdr_lab_provision() { # <session>
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
       wait "$server_pid" 2>/dev/null || true
+      running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
+      [ "$running" = true ] && continue
       fm_herdr_lab_error "lab server for '$name' exited before reporting running"
       fm_herdr_lab_server_log_tail "$server_log"
       return 1

@@ -137,9 +137,20 @@ test_refuses_names_over_the_socket_path_limit() {
   assert_contains "$(cat "$err")" "103-byte sun_path limit" "the refusal must name the limit"
   FM_HERDR_LAB_CONFIG_DIR=/home/test/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_name long-label >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "name must refuse a label that overflows the socket path"
+  # Multibyte config root: fewer than 103 characters but more than 103 bytes.
+  local wide chars
+  wide=/home/test/$(printf 'é%.0s' $(seq 1 40))
+  chars=$(LC_ALL=C.UTF-8 bash -c 'p=$1/sessions/fm-lab-x/herdr-client.sock; echo ${#p}' _ "$wide")
+  [ "$chars" -lt 103 ] || fail "multibyte fixture is not under 103 characters: $chars"
+  FM_HERDR_LAB_CONFIG_DIR=$wide fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    && fail "a path under 103 characters but over 103 bytes was accepted"
   status=0
   run_with_fake fm_herdr_lab_prepare "${name}a" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "prepare must refuse an over-limit name"
+  status=0
+  run_with_fake fm_herdr_lab_provision "${name}a" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "provision must refuse an over-limit name"
+  [ ! -f "$FAKE_STATE/${name}a" ] || fail "provision started a server for an over-limit name"
   pass "fm-herdr-lab: names whose client socket path exceeds sun_path are refused"
 }
 
