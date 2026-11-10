@@ -25,8 +25,10 @@
 # Neither path refreshes remote-tracking refs before that gate: it runs under
 # the child's meta lock inside a scan budget of at most 30 seconds, which a
 # fetch bounded at 30 seconds per remote does not fit. The home's own
-# bin/fm-pr-check.sh registration refreshes the child's copy before it refuses,
-# and a later scan publishes the done once that fetch shows its head.
+# bin/fm-pr-check.sh, which runs when the child's ready report is registered,
+# and on each watcher sweep when config/pr-register-scan is on, refreshes the
+# child's copy before it refuses, and a later scan publishes the done once that
+# fetch shows its head.
 # A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them

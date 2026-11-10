@@ -326,8 +326,9 @@ fi
 # This read never refreshes remote-tracking refs: a fetch bounded at 30 seconds
 # per remote does not fit a caller's per-task bound (bin/fm-fleet-snapshot.sh
 # defaults to 10 seconds) and would repeat on every read. bin/fm-pr-check.sh,
-# which runs on each ready report and each watcher sweep, refreshes the same
-# copy before it refuses, so a read after it sees the fetched head.
+# which runs when a ready report is registered, and on each watcher sweep when
+# config/pr-register-scan is on, refreshes the same copy before it refuses, so
+# a read after it sees the fetched head.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
   if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
