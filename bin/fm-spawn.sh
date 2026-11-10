@@ -111,9 +111,9 @@
 #   must still exist, read cleanly and be open work (a Done or unknown item
 #   still refuses), and no backlog transition runs, so holds and rows stay
 #   exactly as they were. A captain-kind hold is never bypassed: authority is
-#   explicit, so a grant never stands in for the captain's word. The grant file itself is left for
-#   its consumer, the native launch dispatcher. Without the flag nothing about
-#   relaunch changes and the gate applies as before.
+#   explicit, so a grant never stands in for the captain's word. The grant file
+#   itself is left for its consumer, the native launch dispatcher. Without the
+#   flag nothing about relaunch changes and the gate applies as before.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell

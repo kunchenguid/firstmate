@@ -3291,6 +3291,7 @@ test_native_grant_refuses_a_home_without_a_readable_backlog() {
     return 0
   }
   dir=$GRANT_CASE_DIR
+  mkdir -p "$dir/home/config"
   printf 'manual\n' > "$dir/home/config/backlog-backend"
   grant=$(write_grant "$dir" ng9)
   tasks-axi "done" ng9 --file "$dir/home/data/backlog.md" >/dev/null
@@ -3314,6 +3315,7 @@ test_native_grant_recovers_a_held_item_in_a_manual_backlog_home() {
     return 0
   }
   dir=$GRANT_CASE_DIR
+  mkdir -p "$dir/home/config"
   printf 'manual\n' > "$dir/home/config/backlog-backend"
   grant=$(write_grant "$dir" ng11)
   out=$(run_spawn "$dir" ng11 --relaunch --native-grant "$grant"); rc=$?
