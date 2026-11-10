@@ -278,11 +278,30 @@ test_registered_unborn_clone_gets_commit_hint() {
   pass "a registered clone with an unborn HEAD still gets the commit hint"
 }
 
+test_symlinked_unborn_clone_gets_commit_hint() {
+  local rec id out status
+  id=settle-unborn-symlink-z7
+  rec=$(make_settle_case settle-unborn-symlink "$id" 0)
+  read_settle_record "$rec"
+  PROJ_DIR="$TMP_ROOT/settle-unborn-symlink/linked-target"
+  git init -q "$PROJ_DIR"
+  ln -s "$PROJ_DIR" "$HOME_DIR/projects/widget"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn into a symlinked clone with no commit should be refused"
+  assert_contains "$out" "make one commit" "a symlinked clone did not get the commit hint"
+  assert_not_contains "$out" "not a registered project clone" \
+    "a symlinked clone was described as unregistered"
+  pass "a symlinked clone with an unborn HEAD still gets the commit hint"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
 test_registered_unborn_clone_gets_commit_hint
+test_symlinked_unborn_clone_gets_commit_hint
 
 echo "# all fm-spawn-worktree-settle tests passed"

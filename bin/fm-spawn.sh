@@ -4053,11 +4053,13 @@ spawn_physical_dir() {
 }
 
 spawn_unborn_commit_hint_applies() {
-  local proj=$1 proj_phys projects_phys
+  local proj=$1 proj_phys entry
   [ -d "$PROJECTS" ] || return 1
   proj_phys=$(spawn_physical_dir "$proj") || return 1
-  projects_phys=$(spawn_physical_dir "$PROJECTS") || return 1
-  [ "${proj_phys#"$projects_phys"/}" != "$proj_phys" ]
+  for entry in "$PROJECTS"/*/; do
+    [ "$(spawn_physical_dir "$entry" 2>/dev/null)" = "$proj_phys" ] && return 0
+  done
+  return 1
 }
 
 path_is_ancestor_of() {
