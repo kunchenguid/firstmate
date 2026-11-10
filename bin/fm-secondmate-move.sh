@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # fm-secondmate-move.sh - move a LOCAL persistent second mate onto another
-# runtime backend, keeping its home, records, and backlog exactly as they are.
+# runtime backend, keeping its records and backlog exactly as they are.
 #
 # Usage: fm-secondmate-move.sh <secondmate-id> --backend <name>
 #
 # A second mate's home holds its state, backlog, charter, and projects; this
 # home's state/<id>.meta only names the endpoint its agent runs in. A move
-# therefore never touches the home. It stops the agent, closes the old
-# endpoint, and respawns the mate through the one owner every recovery already
-# uses - `bin/fm-spawn.sh <id> --secondmate` - with the target backend passed
-# explicitly. The record that spawn republishes IS the move; nothing is
-# hand-edited.
+# therefore leaves the home as it is, except that a move off t3code removes
+# the T3 environment that launch wrote into it (step 3). It stops the agent,
+# closes the old endpoint, and respawns the mate through the one owner every
+# recovery already uses - `bin/fm-spawn.sh <id> --secondmate` - with the
+# target backend passed explicitly. The record that spawn republishes IS the
+# move; nothing is hand-edited.
 #
 # The whole sequence runs under the mate's liveness lock
 # (bin/fm-secondmate-liveness-lib.sh), so neither the session-start sweep nor
@@ -22,9 +23,12 @@
 #      prove absent, a backend with no recovery-grade classifier), and the
 #      mate is probed again;
 #   3. only a dead or confidently missing endpoint proceeds: a dead one is
-#      closed, and the respawn lands on the target backend through
-#      fm_secondmate_liveness_relaunch with that backend named, which records
-#      the attempt and its outcome in the ordinary relaunch ledger.
+#      closed (a t3code thread must read back archived, and its T3
+#      environment is then removed from the home so the replacement does not
+#      follow the archived thread), and the respawn lands on the target
+#      backend through fm_secondmate_liveness_relaunch with that backend
+#      named, which records the attempt and its outcome in the ordinary
+#      relaunch ledger.
 # An ambiguous, unreadable, or unverified endpoint refuses before anything is
 # stopped. A mate recorded with no endpoint at all is simply launched on the
 # target backend. A remote mate is refused before any lock or probe: its
