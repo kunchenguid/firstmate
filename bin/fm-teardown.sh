@@ -45,7 +45,9 @@
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch other than the local no-mistakes
 # mirror (a fork counts as a remote, so upstream-contribution PRs pushed to a
-# fork satisfy this in any mode; the mirror is not a forge), OR - for a
+# fork satisfy this in any mode; the mirror is not a forge), after
+# refresh_remote_refs has updated those refs from each remote when the local ones
+# do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -464,13 +466,15 @@ teardown_prune_status_archives() {  # <task-directory>
 teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   local state=$1 task=$2 relative=${3:-$2} dir part archive n=0 entry
   if [ ! -e "$CONFIG/status-archive" ]; then
-    status_retire_presentation_task "$state" "$task"
-    return $?
+    status_retire_presentation_task "$state" "$task" || return $?
+    rm -f -- "$state/.paused-overdue-$task" || return 1
+    return 0
   fi
   # Preserve the remote-home no-op, including its lock-free fast path.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ]; then
-    status_retire_presentation_task "$state" "$task"
-    return $?
+    status_retire_presentation_task "$state" "$task" || return $?
+    rm -f -- "$state/.paused-overdue-$task" || return 1
+    return 0
   fi
   if [ -L "$state/$task.status" ] || [ ! -f "$state/$task.status" ]; then
     echo "error: unsafe status archive source: $state/$task.status" >&2
@@ -499,6 +503,7 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
     echo "error: status archival failed for $task; retaining live status for retry" >&2
     return 1
   }
+  rm -f -- "$state/.paused-overdue-$task" || return 1
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
@@ -1600,7 +1605,8 @@ validate_pr_poll_cleanup() {
   fm_task_id_path_safe "$id" || return 0
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1609,7 +1615,8 @@ validate_pr_poll_cleanup() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
@@ -1634,6 +1641,7 @@ remove_pr_poll_artifacts() {
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
+  fm_pr_poll_degraded_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
@@ -2121,14 +2129,41 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
-validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || return 0
-  [ "$FORCE" != "--force" ] || return 0
-  case "$KIND" in
-    secondmate|scout) return 0 ;;
-  esac
+# A worker may have pushed from another checkout, so tracking refs that do not
+# show the work prove nothing until they are refreshed. Runs at most once per
+# teardown. Each fetch is bounded to 30 seconds and non-interactive, and
+# --no-prune keeps a branch a remote has dropped visible, whatever fetch.prune
+# says. The explicit
+# refspec covers every branch even when a clone tracks only some of them. A failed
+# fetch only leaves the last-known refs in place, so the unchanged checks below
+# still refuse work those refs do not show; REMOTE_REFRESH_FAILED names it for the
+# refusal. The no-mistakes gate is skipped: it is a local validation copy, and
+# fetching it would count work as landed that no real remote holds.
+REMOTE_REFS_REFRESHED=0
+REMOTE_REFRESH_FAILED=
+refresh_remote_refs() {
+  local remote
+  [ "$REMOTE_REFS_REFRESHED" = 0 ] || return 0
+  REMOTE_REFS_REFRESHED=1
+  while IFS= read -r remote; do
+    case "$remote" in ''|no-mistakes) continue ;; esac
+    GIT_TERMINAL_PROMPT=0 fm_run_timed 30 git -C "$WT" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
+      "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
+      || REMOTE_REFRESH_FAILED="$REMOTE_REFRESH_FAILED${REMOTE_REFRESH_FAILED:+, }$remote"
+  done <<EOF
+$(git -C "$WT" remote 2>/dev/null)
+EOF
+}
 
+report_remote_refresh_failure() {
+  [ -n "$REMOTE_REFRESH_FAILED" ] || return 0
+  echo "Could not refresh remote: $REMOTE_REFRESH_FAILED. This verdict used the last-known refs, so the work may be there; retry once the remote is reachable." >&2
+}
+
+# Sets the caller's $dirty from a fresh status read, or refuses when the copy
+# cannot be inspected.
+read_worktree_dirt() {
+  local dirty_raw
   if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
@@ -2138,6 +2173,17 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+}
+
+validate_worktree_teardown_safety() {
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  [ -d "$WT" ] || return 0
+  [ "$FORCE" != "--force" ] || return 0
+  case "$KIND" in
+    secondmate|scout) return 0 ;;
+  esac
+
+  read_worktree_dirt || return
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2146,6 +2192,21 @@ validate_worktree_teardown_safety() {
     echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
+  fi
+  # Dirty work refuses either way, so only a clean copy is worth the network.
+  if [ -n "$unpushed_raw" ] && [ -z "$dirty" ] && [ "$REMOTE_REFS_REFRESHED" = 0 ]; then
+    refresh_remote_refs
+    # The task's processes are still running, so edits may have arrived during
+    # the wait; the refusals below act on this fresh read.
+    read_worktree_dirt || return
+    if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on a remote"; then
+        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+      fi
+      echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
@@ -2164,6 +2225,7 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      report_remote_refresh_failure
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -2186,6 +2248,7 @@ validate_worktree_teardown_safety() {
         echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      report_remote_refresh_failure
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
