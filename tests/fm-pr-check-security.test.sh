@@ -273,7 +273,7 @@ case " $* " in
       printf '%s\n' "$probe" >> "$FM_TEST_GLAB_LOG.probe"
     fi
     [ -z "${FM_TEST_GLAB_STATE_AFTER:-}" ] || [ ! -e "$FM_TEST_GLAB_LOG.train" ] || FM_TEST_GLAB_STATE=$FM_TEST_GLAB_STATE_AFTER
-    printf '%s\n' "{\"target_branch\":\"${FM_TEST_BASE-main}\",\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"detailed_merge_status\":\"${FM_TEST_GLAB_DETAIL:-mergeable}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
+    printf '%s\n' "{\"target_branch\":\"${FM_TEST_BASE-main}\",\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"detailed_merge_status\":\"${FM_TEST_GLAB_DETAIL:-mergeable}\",\"sha\":\"${FM_TEST_GLAB_HEAD-11568153bd75a30fd956da9ba7c1172ae556ada7}\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
     ;;
   *" api "*)
     [ "${FM_TEST_GLAB_API_FAIL:-0}" = 0 ] || exit 1
@@ -3690,12 +3690,12 @@ EOF
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
   # The merge path addresses the forge the URL names, and never the other one.
-  # The fixture's glab read fails, so the merge's JSON read cannot parse the
-  # state, which must refuse rather than merge on a state it could not read.
+  # Supply destination proof but no head, so this case reaches the head guard
+  # rather than refusing earlier on an unreadable destination.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
   set +e
-  FM_TEST_GLAB_FAIL=1 run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  FM_TEST_GLAB_HEAD='' run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
