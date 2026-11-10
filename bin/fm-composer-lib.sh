@@ -2218,11 +2218,11 @@ EOF
 }
 
 # fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
-# Prints the name and returns 0 only for the recorded structure of one dialog:
-# the heading on its own line, then its selected row alone on a row, closed by
-# the recorded footer. What closes the dialog after that footer differs per
-# entry, and each entry below states its own. A heading buried in a sentence,
-# or a last line that only starts with the same words, is not that dialog.
+# Prints the name and returns 0 only for the recorded structure of one dialog,
+# and every part of that structure - the anchors, the selected row, and what
+# closes the dialog after the recorded footer - comes from the entry below for
+# that harness. A heading buried in a sentence, or a last line that only starts
+# with the same words, is not that dialog.
 # The strings alone are not enough, because a diff, a note, or a test fixture
 # on the pane can quote all of them above a normal composer. A miss returns 1
 # and prints nothing.
@@ -2268,14 +2268,15 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   # one is present, and it counts only when it is as wide as the widest row of
   # the screen: that is what a rule spanning the whole pane is, and what a rule
   # quoted above a bordered composer is not. Rows below it are the harness's
-  # status bar, which carries no box glyph and no prompt glyph, so either under
-  # the rule means the cursor sits below a dialog-shaped fragment of ordinary
-  # content: the quoted selector was scrolled above a live composer, and the
-  # next Enter would go to that composer rather than to the quoted rows. A bare
-  # composer of any harness is caught below the rule and not only a bordered
-  # one: the agent glyphs are the declared list, and the shell prompt is the
-  # single literal >. That is deliberately narrower than the declared SHELL set,
-  # because each extra rejection can only make this guard miss a real selector.
+  # status bar, which carries no box glyph and never opens with a prompt glyph,
+  # so either under the rule means the cursor sits below a dialog-shaped
+  # fragment of ordinary content: the quoted selector was scrolled above a
+  # live composer, and the next Enter would go to that composer rather than to
+  # the quoted rows. A bare composer of any harness is caught below the rule
+  # and not only a bordered one: the agent glyphs are the declared list, and the
+  # shell prompt is the single literal >. That is deliberately narrower than the
+  # declared SHELL set, because each extra rejection can only make this guard
+  # miss a real selector.
   if printf '%s\n' "$screen" | fm_composer_strip_ansi \
     | LC_ALL=C awk -v glyphs="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
 >" '
