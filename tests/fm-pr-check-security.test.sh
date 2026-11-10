@@ -1574,6 +1574,7 @@ test_degraded_watch_opt_in_absent_preserves_merged_only_behavior() {
   dir=$(make_case degraded-opt-in-absent-github)
   state="$dir/home/state"
   rm -f "$dir/home/config/pr-degraded-watch"
+  write_task_meta "$dir"
   make_poll_fixture "$dir"
   : > "$dir/gh.log"
   out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
@@ -1703,6 +1704,7 @@ test_degraded_watch_flag_in_an_overridden_home() {
 test_github_degraded_poll() {
   local dir out
   dir=$(make_case github-degraded-poll)
+  write_task_meta "$dir"
   make_poll_fixture "$dir"
 
   # A failing check after the ready report emits exactly one degraded line
