@@ -1789,7 +1789,7 @@ launch_aged_pause_recheck() { # <name> <mergeable>
   printf 'paused: waiting on the maintainer\n' > "$state/conflict.status"
   set_mtime "$(( $(date +%s) - 500 ))" "$state/conflict.status"
   sig=$(seen_sig "$state/conflict.status"); printf '%s' "$sig" > "$state/.seen-conflict_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf '%s' "$(hash_text "idle, waiting on the maintainer")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   install_pr_state_gh "$fakebin"
