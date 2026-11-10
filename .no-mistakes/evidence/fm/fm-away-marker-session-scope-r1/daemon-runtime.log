@@ -1,0 +1,2 @@
+[2026-11-09T16:03:31-0800] daemon starting (pid 9481); target=%0; target_source=FM_SUPERVISOR_TARGET; backend=tmux; backend_source=FM_SUPERVISOR_BACKEND; afk=on; inject_skip='heartbeat'; stale_escalate=240s; batch=3600s
+[2026-11-09T16:03:38-0800] daemon shutting down

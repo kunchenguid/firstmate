@@ -1,0 +1,143 @@
+{run-worktree}/.lab.ZCo37r
+=== SCENARIO 1: return without a running daemon clears ten session markers ===
+.subsuper-dialog-done-worker: '1794096208\n'
+.subsuper-dialog-wait-worker: '1794096208\n'
+.subsuper-pause-until-due-done-worker: '1794096208\n'
+.subsuper-pause-until-due-wait-worker: '1794096208\n'
+.subsuper-paused-done-worker: '1794096208\n'
+.subsuper-paused-wait-worker: '1794096208\n'
+.subsuper-reported-stale-done-worker: '1794096208\n'
+.subsuper-reported-stale-wait-worker: '1794096208\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.subsuper-stale-done-worker: '1794096208\n'
+.subsuper-stale-wait-worker: '1794096208\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+Away posture recorded at 2026-11-10T00:03:30Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-10T00:03:30Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    Supervise the disposable lab only
+fm-afk-launch: away-posture record archived at {run-worktree}/.lab.ZCo37r/state/afk-contracts/1794269010.afk-contract
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+RESULT: no-daemon return cleared all five families for both workers; durable state kept; posture archived
+=== SCENARIO 2: crash leftovers cleared before a real daemon first housekeeping ===
+.subsuper-dialog-wait-worker: '1794096209\n'
+.subsuper-last-scan: '1794269010\n'
+.subsuper-pause-until-due-wait-worker: '1794096209\n'
+.subsuper-paused-wait-worker: '1794096209\n'
+.subsuper-reported-stale-wait-worker: '1794096209\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.subsuper-stale-done-worker: '1794096209\n'
+.subsuper-stale-wait-worker: '1794096209\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+Away posture recorded at 2026-11-10T00:03:30Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-10T00:03:30Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    Supervise the disposable lab only
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-4008737758-9285-30822-1794269010', supervising %0
+.afk: 'away\n1794269011\n'
+.subsuper-last-housekeep: '1794269017\n'
+.subsuper-last-scan: '1794269010\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+RESULT: real daemon pid=9481 alive; housekeeping ran; old 172801-second clock absent and no false wedge buffered
+=== SCENARIO 3: refresh preserves current session markers byte-for-byte ===
+fm-afk-launch: daemon already running; refreshed away-mode flag (no new terminal)
+All ten current-session marker contents unchanged by refresh
+.afk: 'away\n1794269018\n'
+.subsuper-dialog-done-worker: '1794096216\n'
+.subsuper-dialog-wait-worker: '1794096216\n'
+.subsuper-last-housekeep: '1794269017\n'
+.subsuper-last-scan: '1794269010\n'
+.subsuper-pause-until-due-done-worker: '1794096216\n'
+.subsuper-pause-until-due-wait-worker: '1794096216\n'
+.subsuper-paused-done-worker: '1794096216\n'
+.subsuper-paused-wait-worker: '1794096216\n'
+.subsuper-reported-stale-done-worker: '1794096216\n'
+.subsuper-reported-stale-wait-worker: '1794096216\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.subsuper-stale-done-worker: '1794096216\n'
+.subsuper-stale-wait-worker: '1794096216\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+fm-afk-launch: away-posture record archived at {run-worktree}/.lab.ZCo37r/state/afk-contracts/1794269010.afk-contract
+fm-afk-launch: away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived
+.subsuper-last-housekeep: '1794269017\n'
+.subsuper-last-scan: '1794269010\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+RESULT: refresh retained all five families; return with a real daemon stopped it and cleared all families
+=== SCENARIO 4: failed launch restores clocks and delivery artifacts ===
+Away posture recorded at 2026-11-10T00:03:39Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-10T00:03:39Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    Supervise the disposable lab only
+fm-afk-launch: no non-visible daemon-launch primitive for backend 'zellij' yet (supported: herdr, tmux, rex)
+Failed unsupported-backend launch restored every saved marker, delivery buffer, and away flag byte-for-byte
+.afk: 'prior flag\n'
+.subsuper-dialog-done-worker: '1794096218\n'
+.subsuper-dialog-wait-worker: '1794096218\n'
+.subsuper-escalations: 'pending lab escalation\n'
+.subsuper-last-housekeep: '1794269017\n'
+.subsuper-last-scan: '1794269010\n'
+.subsuper-pause-until-due-done-worker: '1794096218\n'
+.subsuper-pause-until-due-wait-worker: '1794096218\n'
+.subsuper-paused-done-worker: '1794096218\n'
+.subsuper-paused-wait-worker: '1794096218\n'
+.subsuper-reported-stale-done-worker: '1794096218\n'
+.subsuper-reported-stale-wait-worker: '1794096218\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.subsuper-stale-done-worker: '1794096218\n'
+.subsuper-stale-wait-worker: '1794096218\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+RESULT: launch refused with exit=1 and restored pre-launch episode state
+fm-afk-launch: away-posture record archived at {run-worktree}/.lab.ZCo37r/state/afk-contracts/1794269019.afk-contract
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
+=== SCENARIO 5: fresh native preparation clears prior episode state ===
+Away posture recorded at 2026-11-10T00:03:41Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-10T00:03:41Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    Supervise the disposable lab only
+.afk: 'away\n1794269022\n'
+.subsuper-last-housekeep: '1794269017\n'
+.subsuper-last-scan: '1794269010\n'
+.subsuper-seen-status-sentinel: 'classification-position\n'
+.wake-queue: ''
+done-worker.meta: 'window=primary:0\nbackend=tmux\nharness=codex\n'
+done-worker.status: 'done [at=1794269009]: PR https://example.test/o/r/pull/1 checks green\n'
+RESULT: native preparation removed prior clocks and report/pause/dialog markers, kept durable worker state
+fm-afk-launch: away-posture record archived at {run-worktree}/.lab.ZCo37r/state/afk-contracts/1794269021.afk-contract
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
+ALL SCENARIOS COMPLETED
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
