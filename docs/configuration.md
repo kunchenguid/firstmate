@@ -2241,6 +2241,8 @@ Three outcomes stay distinct:
   The reason says whether the host cannot run the source, the source holds no readable key, or it did not answer in time, and it never relays the tool's own output.
   A source that does not answer within 5 seconds ends the same way, so an unanswered Keychain access prompt cannot hold an intake.
 
+`bin/fm-best-practices.sh route` and `intake` read the same declaration through the same gate, so a configuration error also exits 2 there, and an unavailable source ends that routing as its `error` outcome, with every row keeping its fallback.
+
 A configuration installer can check a source before it writes anything:
 
 ```sh
