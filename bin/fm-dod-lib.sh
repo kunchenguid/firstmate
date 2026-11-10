@@ -36,6 +36,9 @@
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
 # accepted while the named head exists only in the worker's disposable copy.
+# Only PR registration refreshes remote-tracking refs before it refuses
+# (fm_dod_named_head_reachable_outside_worktree); the other callers read the
+# refs as that refresh left them.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
 # not gated; only the later CI-ready `done: PR <url> checks green` is, or on a
@@ -975,18 +978,68 @@ fm_dod_nm_custody_returned() {  # <worktree>
   return 0
 }
 
-# 0 when <sha> is reachable from a ref that survives the disposable worktree:
-# any remote-tracking ref except the local no-mistakes gate mirror
-# (refs/remotes/no-mistakes/*, which never leaves this machine), or - for
-# local-only - heads in the project clone. Because the gate mirror does not
-# count, a head that reached origin only through the pipeline's gate clone,
-# and that neither this copy nor the project clone has fetched, is refused
-# until its remote-tracking ref is fetched.
-fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
+# Refreshes <repo>'s remote-tracking refs from every remote except the local
+# no-mistakes gate, which is a validation copy on this machine: fetching it
+# would count work that no real remote holds. Each fetch is bounded to
+# <seconds> (default 30) and non-interactive, --no-prune keeps a branch a
+# remote has dropped visible whatever fetch.prune says, and the explicit
+# refspec covers every branch even when a clone tracks only some of them.
+# A fetch that fails or times out only leaves the last-known refs in place; its
+# remote is appended to FM_DOD_REFRESH_FAILED (", "-separated) so a refusal can
+# say its verdict used those refs. Always returns 0. bin/fm-teardown.sh and the
+# named-head gate below share this one refresh.
+FM_DOD_REFRESH_FAILED=
+fm_dod_refresh_remote_refs() {  # <repo> [<seconds>]
+  local repo=$1 seconds=${2:-30} remote
+  [ -n "$repo" ] && [ -d "$repo" ] || return 0
+  while IFS= read -r remote; do
+    case "$remote" in ''|no-mistakes) continue ;; esac
+    GIT_TERMINAL_PROMPT=0 fm_run_timed "$seconds" git -C "$repo" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
+      "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
+      || FM_DOD_REFRESH_FAILED="$FM_DOD_REFRESH_FAILED${FM_DOD_REFRESH_FAILED:+, }$remote"
+  done <<EOF
+$(git -C "$repo" remote 2>/dev/null)
+EOF
+  return 0
+}
+
+# 0 when <sha> is on a ref that survives the disposable worktree, read from the
+# refs as they are now.
+fm_dod_named_head_on_surviving_ref() {  # <worktree> <project> <mode> <sha>
   local wt=$1 project=$2 mode=$3 sha=$4 gate_mirror='refs/remotes/no-mistakes/*'
   fm_dod_ref_contains "$wt" refs/remotes "$sha" "$gate_mirror" && return 0
   fm_dod_ref_contains "$project" refs/remotes "$sha" "$gate_mirror" && return 0
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
+}
+
+# 0 when <sha> is reachable from a ref that survives the disposable worktree:
+# any remote-tracking ref except the local no-mistakes gate mirror
+# (refs/remotes/no-mistakes/*, which never leaves this machine), or - for
+# local-only - heads in the project clone. The gate mirror does not count even
+# after a refresh.
+# In no-mistakes mode the pipeline pushes from its own gate clone, so origin
+# can hold a head that neither this copy nor the project clone has fetched.
+# When the caller sets FM_DOD_REFRESH_REMOTES=1, a head those refs do not show
+# triggers one fm_dod_refresh_remote_refs of the copy, and of the project clone
+# when its git directory differs, bounded per fetch by FM_DOD_REFRESH_SECS
+# (default 30), and is then checked again. Without it the check reads the refs
+# as they are and makes no network call. FM_DOD_REFRESH_FAILED names any remote
+# that could not be refreshed.
+fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
+  local wt=$1 project=$2 seconds=${FM_DOD_REFRESH_SECS:-30} wt_common project_common
+  FM_DOD_REFRESH_FAILED=
+  fm_dod_named_head_on_surviving_ref "$@" && return 0
+  [ "${FM_DOD_REFRESH_REMOTES:-0}" = 1 ] || return 1
+  case "$seconds" in ''|*[!0-9]*|0) seconds=30 ;; esac
+  fm_dod_refresh_remote_refs "$wt" "$seconds"
+  if [ -n "$project" ] && [ -d "$project" ]; then
+    wt_common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || wt_common=
+    project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || project_common=
+    if [ -n "$project_common" ] && [ "$project_common" != "$wt_common" ]; then
+      fm_dod_refresh_remote_refs "$project" "$seconds"
+    fi
+  fi
+  fm_dod_named_head_on_surviving_ref "$@"
 }
 
 # 0 when <line> is not a ship done: to gate, when the task's meta records
@@ -1058,6 +1111,10 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       fi
     fi
     return 0
+  fi
+  if [ -n "$FM_DOD_REFRESH_FAILED" ]; then
+    printf '%s\n' "named head $sha is unreachable outside the worker copy; could not refresh remote: $FM_DOD_REFRESH_FAILED, so this verdict used the last-known refs and the work may be there; retry once the remote is reachable"
+    return 1
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
   return 1

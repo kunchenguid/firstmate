@@ -9,7 +9,11 @@
 # to fix it; the merged wake itself is unchanged.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
-# head is that named head and is already stored on the forge.
+# head is that named head and is already stored on the forge. Registration is
+# the gate caller that refreshes the copy's remote-tracking refs before it
+# refuses (FM_DOD_REFRESH_REMOTES), because a no-mistakes pipeline pushes from
+# its own gate clone and nothing else fetches that push into the copy; the
+# fetch also leaves the refs that the gate's other callers read.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
@@ -306,6 +310,7 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
+FM_DOD_REFRESH_REMOTES=1
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
