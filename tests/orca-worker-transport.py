@@ -69,9 +69,12 @@ if shlex.split(sys.argv[-1])[3] == '--fm-orca-load-probe':
     print(json.dumps(dict(load=20 if host == 'busy' else 1, cores=10, runtime_id='runtime-test',
                          head=None if host == 'missing' else head)))
 else:
+    if sys.argv[-2] == 'offline': sys.exit(255)
     payload = sys.stdin.buffer.read()
-    result = subprocess.run(sys.argv[-1], shell=True, input=payload, capture_output=True)
     request = json.loads(payload)
+    if request['op'] == 'stage' and (root/'fail-stage').exists():
+        print('error: remote Orca worker: cannot create workspace', file=sys.stderr); sys.exit(1)
+    result = subprocess.run(sys.argv[-1], shell=True, input=payload, capture_output=True)
     lost = root/'lose-launch-reply'
     if lost.exists() and request['op'] == 'run' and request['script'] == 'fm-spawn.sh':
         lost.unlink(); sys.exit(255)
@@ -327,6 +330,46 @@ fm_role_gate_self_publish "$2" "$2/config" "$1" "$1"
         self.assertIn("terminal=term-1", (self.state / "task.meta").read_text())
         self.spawn(ok=False)
 
+    def test_definite_stage_failure_archives_route_for_redispatch(self):
+        (self.root / "fail-stage").touch()
+        self.spawn(ok=False)
+        self.assertFalse((self.state / "task.orca-route.json").exists())
+        self.assertEqual(len(list((self.data / "task/remote").glob("orca-route-*.failed.json"))), 1)
+        (self.root / "fail-stage").unlink()
+        self.spawn()
+        self.assertIn("orca_environment=worker-mac", (self.state / "task.meta").read_text())
+
+    def test_spawn_holds_route_lock_and_archives_unwound_launch(self):
+        spawn = self.code / "bin/fm-spawn.sh"
+        spawn.write_text(spawn.read_text() + """
+rc=0
+python3 BRIDGE sync STATE task --poll 2>/dev/null || rc=$?
+echo "$rc" > ROOT/poll-rc
+rm "$FM_HOME/state/$id.meta"
+exit 1
+""".replace("BRIDGE", str(BRIDGE)).replace("STATE", str(self.state)).replace("ROOT", str(self.root)))
+        self.spawn(ok=False)
+        self.assertNotEqual((self.root / "poll-rc").read_text().strip(), "0")
+        self.assertFalse((self.state / "task.meta").exists())
+        self.assertFalse((self.state / "task.orca-route.json").exists())
+        (self.code / "bin/fm-spawn.sh").write_text(spawn.read_text().split("\nrc=0\n")[0] + "\n")
+        self.spawn()
+
+    def test_watcher_polls_an_unreachable_host_once_per_scan(self):
+        if (self.fakebin / "jq").exists():
+            self.skipTest("jq unavailable")
+        for task in ("a", "b"):
+            (self.state / (task + ".orca-route.json")).write_text(json.dumps(dict(
+                id=task, ssh="offline", environment="worker-mac", runtime_id="runtime-test",
+                workspace="/nonexistent/orca-x", token="x")))
+        env = self.env.copy()
+        env.update(FM_HOME=str(self.home), FM_STATE_OVERRIDE=str(self.state))
+        result = subprocess.run(["bash", "-c", '. "$1"; STATE=$2; scan_signals', "watch",
+                                 str(ROOT / "bin/fm-watch.sh"), str(self.state)],
+                                env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "ssh-calls").read_text().splitlines(), ["offline"])
+
     def test_landing_requires_parent_main_and_unchanged_remote_head(self):
         self.spawn()
         self.git("-C", str(self.remote_project), "checkout", "-q", "fm/task")
@@ -386,12 +429,17 @@ fm_dod_accept_ship_done ship local-only "$2" "$2" 'done: ready in branch fm/task
     def test_real_spawn_preserves_dispatch_override(self):
         self.real_spawn(mode="direct-PR", override="Use the explicit task profile")
 
+    def test_real_spawn_carries_registered_project_posture(self):
+        (self.data / "projects.md").write_text(
+            "- project [direct-PR forge=forgejo] - fixture (added 2026-01-01)\n")
+        self.real_spawn(mode="direct-PR", contract="Delivery contract: mode=direct-PR forge=forgejo\n")
+
     def test_full_coordinator_can_route_remote(self):
         (self.config / "lane-capacity").write_text("1\nadmit-spawns\n")
         (self.state / "existing-local.meta").write_text("kind=ship\n")
         self.real_spawn(mode="direct-PR")
 
-    def real_spawn(self, mode=None, override=None):
+    def real_spawn(self, mode=None, override=None, contract=""):
         (self.config / "backlog-backend").write_text("manual\n")
         profile = dict(harness="codex", model="gpt-5" if override else None, effort=None)
         (self.config / "crew-dispatch.json").write_text(json.dumps(dict(default=profile)))
@@ -400,7 +448,7 @@ fm_dod_accept_ship_done ship local-only "$2" "$2" 'done: ready in branch fm/task
         (self.config / "orca-machines").write_text(json.dumps([
             dict(environment="worker-mac", ssh="idle", max_load_per_core=0.8)]))
         (self.data / "task/brief.md").write_text(
-            "# Task\n## Captain's intent\nExercise remote dispatch.\n\n"
+            "# Task\n" + contract + "## Captain's intent\nExercise remote dispatch.\n\n"
             "## Firstmate spec\nCheck the task endpoint and isolated worktree.\n")
         codex = self.fakebin / "codex"
         codex.write_text("#!/bin/sh\nprintf 'codex-cli 0.999.0\\n'\n")
@@ -437,11 +485,11 @@ print(json.dumps(dict(ok=True,result=result)))
         env.update(FM_HOME=str(self.home), FM_ROOT_OVERRIDE="", FM_STATE_OVERRIDE=str(self.state),
                    FM_CONFIG_OVERRIDE=str(self.config), FM_DATA_OVERRIDE=str(self.data),
                    FM_PROJECTS_OVERRIDE=str(self.home / "projects"), FM_SPAWN_NO_GUARD="1")
-        contract = ["--mode", mode, "--yolo", "off"] if mode else ["--scout"]
+        flags = ["--mode", mode, "--yolo", "off"] if mode else ["--scout"]
         if override:
-            contract += ["--dispatch-override", override]
+            flags += ["--dispatch-override", override]
         result = subprocess.run(["bash", str(ROOT / "bin/fm-spawn.sh"), "task", str(self.local),
-                                 "--backend", "orca", "--harness", "codex", *contract],
+                                 "--backend", "orca", "--harness", "codex", *flags],
                                 capture_output=True, text=True, env=env, timeout=180)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         fields = (self.state / "task.meta").read_text()

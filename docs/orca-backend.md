@@ -51,6 +51,8 @@ The watcher imports remote status, reports, and inbox acknowledgements, and `fm-
 A failed transfer retains the queued message and reports delivery as unconfirmed; do not enqueue another copy.
 Handled message records are checked against the original content and are never recreated as pending messages.
 A lost spawn reply retains its route for reconciliation instead of launching another worker.
+A failed staging step, or a remote spawn that returns without a worker record, archives the route under the task's `remote/` data, so the task can be dispatched again.
+When one host is unreachable, the watcher skips that host's other routes until its next scan.
 Transport failures report unknown remote state and preserve the task.
 
 For local-only work, readiness imports a Git bundle into the parent's named task branch without forcing a ref and records the accepted head through the ordinary readiness gate.

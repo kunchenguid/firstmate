@@ -53,6 +53,7 @@ CONFIG_FILES = {
     "herdr-lifecycle-spawn-guard", "project-capacity", "task-tmp-root",
     "claude-permission-mode", "codex-approval-mode", "codex-permission-mode",
     "spawn-base-primary-checkout", "lavish-axi-host",
+    "external-review.md", "external-review-url", "external-review-backup",
 }
 STATE_FILES = ("status", "busy-state", "busy-gen", "progress", "turn-ended",
                "model-stream", "model-stream-order", "model-progress")
@@ -112,15 +113,25 @@ def command(args, **kwargs):
                           timeout=kwargs.pop("timeout", 30), **kwargs).stdout
 
 
+class Unreachable(RuntimeError):
+    pass
+
+
 def remote(route, request, timeout=60):
     # The program is code, never task input. Everything variable rides stdin.
     program = PROGRAM_SOURCE
     argv = ["python3", "-c", program, "worker"]
-    result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-         route["ssh"], shlex.join(argv)],
-        input=json.dumps({"route": route, **request}).encode(),
-        capture_output=True, timeout=min(timeout, 5) if "--poll" in sys.argv else timeout)
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+             route["ssh"], shlex.join(argv)],
+            input=json.dumps({"route": route, **request}).encode(),
+            capture_output=True, timeout=min(timeout, 5) if "--poll" in sys.argv else timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise Unreachable(f"no reply from {route['ssh']}; completion may be unknown") from exc
+    if result.returncode == 255:
+        raise Unreachable(result.stderr.decode(errors="replace").strip()
+                          or f"{route['ssh']} unreachable; completion may be unknown")
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip()
                            or "remote operation failed; completion may be unknown")
@@ -551,6 +562,10 @@ def spawn(home, code, state, data, config, task, project, machine, args):
     dispatch = Path(data) / task / "dispatch-resolution.json"
     if dispatch.exists():
         files[f"home/data/{task}/dispatch-resolution.json"] = [encode(regular(dispatch)), 0o600]
+    # The remote spawn re-checks registered delivery posture against this brief.
+    registry = Path(data) / "projects.md"
+    if registry.exists():
+        files["home/data/projects.md"] = [encode(regular(registry)), 0o600]
     harness = args[args.index("--harness") + 1] if "--harness" in args else None
     mode = args[args.index("--mode") + 1] if "--mode" in args else "local-only"
     project_origin = git_context(project) if mode in ("no-mistakes", "direct-PR") else None
@@ -563,12 +578,25 @@ def spawn(home, code, state, data, config, task, project, machine, args):
         stream.write(json.dumps(route).encode())
         stream.flush()
         os.fsync(stream.fileno())
-    remote(route, {"op": "stage", "files": files, "code_context": context}, timeout=260)
+    # Staging never launches a worker, and a returned spawn status without a
+    # remote record is a completed refusal. Only an unknown outcome keeps the
+    # route as a fence against a second launch.
+    retired = Path(data) / task / "remote" / f"orca-route-{token}.failed.json"
+    try:
+        remote(route, {"op": "stage", "files": files, "code_context": context}, timeout=260)
+    except Exception:
+        retired.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.replace(route_path, retired)
+        raise
     result = remote(route, {"op": "run", "script": "fm-spawn.sh", "args": args}, timeout=260)
     snap = sync(state, task)
     sys.stdout.buffer.write(decode(result["stdout"]))
     sys.stderr.buffer.write(decode(result["stderr"]))
-    if result["status"] or not snap["meta"]:
+    if not snap["meta"]:
+        retired.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.replace(route_path, retired)
+        raise RuntimeError(f"remote spawn failed without a worker; route archived at {retired}")
+    if result["status"]:
         raise RuntimeError("remote spawn did not complete; route retained for reconciliation")
 
 
@@ -634,7 +662,8 @@ def main():
     if op == "worker":
         print(json.dumps(worker(json.load(sys.stdin))))
     elif op == "spawn":
-        spawn(*args[:8], args[8:])
+        with route_lock(args[2], args[5]):
+            spawn(*args[:8], args[8:])
     elif op in ("sync", "head", "run", "landing", "done", "complete-empty", "receipt"):
         state, task, *rest = args
         with route_lock(state, task):
@@ -677,6 +706,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except Unreachable as exc:
+        print(f"error: remote Orca worker: {exc}", file=sys.stderr)
+        sys.exit(3 if "--poll" in sys.argv else 1)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"error: remote Orca worker: {exc}", file=sys.stderr)
         sys.exit(1)

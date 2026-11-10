@@ -3147,13 +3147,18 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
-  local f sig sf exclude orca_task
+  local f sig sf exclude orca_task orca_host orca_down=' ' orca_rc
   # Remote worker status/report/inbox files belong to their task workspace.
   # Import before classifying events; an unreachable host never means dead.
+  # After one unreachable reply, that host's other routes wait for next cycle.
   for f in "$STATE"/*.orca-route.json; do
     [ -f "$f" ] || continue
     orca_task=${f##*/}
-    python3 "$SCRIPT_DIR/fm-orca-worker.py" sync "$STATE" "${orca_task%.orca-route.json}" --poll 2>/dev/null || true
+    orca_host=$(jq -r '.ssh // empty' "$f" 2>/dev/null) || orca_host=
+    case $orca_down in *" $orca_host "*) [ -z "$orca_host" ] || continue ;; esac
+    orca_rc=0
+    python3 "$SCRIPT_DIR/fm-orca-worker.py" sync "$STATE" "${orca_task%.orca-route.json}" --poll 2>/dev/null || orca_rc=$?
+    [ "$orca_rc" != 3 ] || [ -z "$orca_host" ] || orca_down="$orca_down$orca_host "
   done
   # A remote mate's own parent channel is not a self-home task status log; the
   # home-shape-aware exclusion and its precedent live in
