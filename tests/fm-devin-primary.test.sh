@@ -10,6 +10,7 @@
 # identity in the daemon lock and then sleeps - the launch and lock mechanics
 # are real, only the watcher is absent, which is also what keeps the turn-end
 # guard blocking in the Stop cases.
+# shellcheck disable=SC2016 # single quotes are deliberate: $$ and $FM_HOME expand inside the fixture child
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -123,6 +124,7 @@ test_session_start_blocks_without_a_pane() {
   expect_code 0 "$rc" "session-start must report a missing pane as a JSON block with exit 0"
   assert_contains "$out" '"decision":"block"' "session-start did not block a pane-less launch: $out"
   assert_contains "$out" "tmux or Herdr" "session-start block reason did not name the pane requirement: $out"
+  [ ! -e "$dir/state/.lock" ] || fail "a pane-less session-start still took the session lock"
   [ ! -e "$dir/state/.afk" ] || fail "a pane-less session-start still entered quiet mode"
   pass "fm-devin-primary session-start: no addressable pane blocks the session"
 }

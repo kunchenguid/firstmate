@@ -215,12 +215,13 @@ cmd_session_start() {
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-  if ! lock_diag=$("$SCRIPT_DIR/fm-lock.sh" 2>&1); then
-    emit_block "Firstmate on Devin: this home's session lock is held by another live session ($lock_diag). Exit that session first."
-  fi
-
+  # The pane check comes first so a refused launch never leaves a lock behind.
   if ! supervisor_pane_addressable; then
     emit_block "Firstmate on Devin: this primary is not inside a tmux or Herdr pane the daemon can supervise (no TMUX_PANE, no Herdr pane id, no FM_SUPERVISOR_TARGET). Relaunch it inside tmux or Herdr, for example through config/devin-firstmate.sh."
+  fi
+
+  if ! lock_diag=$("$SCRIPT_DIR/fm-lock.sh" 2>&1); then
+    emit_block "Firstmate on Devin: this session could not take this home's session lock ($lock_diag). If another firstmate session owns this home, exit it first."
   fi
 
   if ! ensure_out=$(cmd_ensure 2>&1); then
