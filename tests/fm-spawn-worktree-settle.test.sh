@@ -238,6 +238,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 # pane in the project. The deadline refusal must name those slots.
 test_dirty_pool_slots_are_named_at_the_deadline() {
   local rec id out status
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (dirty pool slot names)"; return 0; }
   id=settle-dirty-slots-z6
   rec=$(make_settle_case settle-dirty-slots "$id" 0)
   read_settle_record "$rec"
