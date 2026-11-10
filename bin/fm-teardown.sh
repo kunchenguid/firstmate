@@ -62,6 +62,14 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A task migrated from the Mac-era Orca backend keeps only
+# orca_worktree_id_prior (a /Users/<user>/orca/workspaces/... path) and no
+# orca_worktree_id, so its backend reads as tmux and its worktree is not in
+# treehouse's pool. After the same landed-work gates pass, teardown resolves the
+# worktree Orca still records at that prior path, requires it to canonicalize to
+# the very directory the gates inspected, and removes it through Orca; when Orca
+# no longer tracks it, teardown removes it as a plain git worktree. Neither path
+# relaxes the dirty, unlanded, or force gates.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -1972,6 +1980,86 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
+# --- migrated Orca worktrees -------------------------------------------------
+#
+# A task spawned on the Mac-era Orca backend and later migrated to this host
+# keeps only orca_worktree_id_prior - a /Users/<user>/... path - and no
+# orca_worktree_id, so its backend reads as tmux and its worktree is not in
+# treehouse's pool. The worktree is still an Orca-managed worktree: Orca's own
+# registry still names it by that prior path. These helpers resolve it there and
+# remove it through Orca, falling back to a plain git worktree removal when Orca
+# no longer tracks it. They run only after every landed-work gate above has
+# passed and never decide whether work landed.
+
+# migrated_orca_prior_path <meta>: print the recorded prior worktree path.
+migrated_orca_prior_path() {
+  local prior
+  prior=$(meta_value "$1" orca_worktree_id_prior)
+  [ -n "$prior" ] || return 1
+  case "$prior" in
+    *::/*) printf '%s\n' "${prior#*::}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# migrated_orca_worktree_path <meta> <worktree>: succeed only for the migrated
+# Orca shape, printing the recorded prior path. The record must carry a prior
+# path and no current orca_worktree_id, the prior path must be a Mac-era
+# /Users/<user>/orca/workspaces/... path, and the inspected worktree must end
+# with that exact tail after the Mac home component. That whole-tail equality is
+# the identity proof: it maps one recorded worktree onto one live directory
+# instead of guessing by basename.
+migrated_orca_worktree_path() {
+  local meta=$1 wt=$2 prior prior_tail
+  [ -n "$wt" ] || return 1
+  [ -z "$(meta_value "$meta" orca_worktree_id)" ] || return 1
+  prior=$(migrated_orca_prior_path "$meta") || return 1
+  case "$prior" in
+    /Users/*/orca/workspaces/?*) ;;
+    *) return 1 ;;
+  esac
+  prior_tail=${prior#/Users/*/}
+  case "$wt" in
+    */"$prior_tail") ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$prior"
+}
+
+# teardown_migrated_orca_worktree <meta> <worktree> <project>: remove a migrated
+# Orca worktree. Returns 0 when it removed it, 3 when this is not a migrated
+# Orca worktree (the caller then uses the treehouse path), and 1 on a real
+# failure. Orca is asked for the worktree it still records at the prior path;
+# the answer must canonicalize to the very directory the safety gates inspected,
+# so a stale or wrong registry row can never authorize a removal of a different
+# directory.
+teardown_migrated_orca_worktree() {
+  local meta=$1 wt=$2 proj=$3 prior out id resolved resolved_abs wt_abs
+  prior=$(migrated_orca_worktree_path "$meta" "$wt") || return 3
+  if fm_backend_source orca 2>/dev/null && command -v orca >/dev/null 2>&1 \
+     && out=$(orca worktree show --worktree "path:$prior" --json 2>/dev/null) \
+     && id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null) \
+     && [ -n "$id" ] \
+     && resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null) \
+     && resolved_abs=$(canonical_existing_dir "$resolved") \
+     && wt_abs=$(canonical_existing_dir "$wt") \
+     && [ "$resolved_abs" = "$wt_abs" ]; then
+    if fm_backend_remove_worktree orca "$id"; then
+      echo "teardown: removed migrated Orca worktree $wt through Orca ($id)"
+      return 0
+    fi
+    echo "error: Orca worktree removal failed for $id ($wt); teardown aborted" >&2
+    return 1
+  fi
+  # Orca no longer tracks this worktree: remove it as a plain git worktree.
+  if git -C "$proj" worktree remove --force "$wt" 2>/dev/null; then
+    echo "teardown: removed migrated Orca worktree $wt as a plain git worktree (Orca no longer tracks it)"
+    return 0
+  fi
+  echo "error: could not remove migrated Orca worktree $wt through Orca or git; teardown aborted" >&2
+  return 1
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -2981,10 +3069,18 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+  # A migrated Orca worktree is not in treehouse's pool, so it is removed
+  # through Orca (or as a plain git worktree) instead of being returned.
+  migrated_orca_rc=0
+  teardown_migrated_orca_worktree "$META" "$WT" "$PROJ" || migrated_orca_rc=$?
+  if [ "$migrated_orca_rc" -eq 3 ]; then
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  elif [ "$migrated_orca_rc" -ne 0 ]; then
     exit 1
-  }
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
