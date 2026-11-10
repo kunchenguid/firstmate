@@ -3111,8 +3111,8 @@ write_grant() {  # <case-dir> <id> [json]
   printf '%s\n' "$dir/grants/$id.json"
 }
 
-hold_backlog_item() {  # <case-dir> <id>
-  tasks-axi hold "$2" --reason "captain decision pending" --kind captain \
+hold_backlog_item() {  # <case-dir> <id> [kind]
+  tasks-axi hold "$2" --reason "waiting on ${3:-external} dependency" --kind "${3:-external}" \
     --file "$1/home/data/backlog.md" >/dev/null
 }
 
@@ -3121,17 +3121,18 @@ backlog_held() {  # <case-dir> <id>
     sed -n 's/^  held: *//p' | head -1
 }
 
-# Sets GRANT_CASE_DIR: a herdr ship task whose backlog item is held, or returns
-# 1 when the fixture's tools are missing.
+# Sets GRANT_CASE_DIR: a herdr ship task whose backlog item is held (an
+# external-kind hold unless a kind is named), or returns 1 when the fixture's
+# tools are missing.
 GRANT_CASE_DIR=
-grant_case_or_skip() {  # <name> <id>
+grant_case_or_skip() {  # <name> <id> [hold-kind]
   GRANT_CASE_DIR=
   command -v tasks-axi >/dev/null 2>&1 || return 1
   fm_tasks_axi_compatible || return 1
   herdr_case_or_skip "$1" "$2" || return 1
   GRANT_CASE_DIR=$HERDR_CASE_DIR
   seed_backlog "$GRANT_CASE_DIR" "$2" in_flight
-  hold_backlog_item "$GRANT_CASE_DIR" "$2"
+  hold_backlog_item "$GRANT_CASE_DIR" "$2" "${3:-}"
   return 0
 }
 
@@ -3172,6 +3173,25 @@ test_native_grant_recovers_a_held_task_without_touching_its_item() {
   assert_contains "$out" "already used" "the refusal should name the spent grant"
   assert_absent "$dir/fake/launched-command" "a spent grant must launch nothing"
   pass "granted recovery: a matching grant recovers a held task once, launches its recorded profile, and leaves the item untouched"
+}
+
+test_native_grant_never_bypasses_a_captain_hold() {
+  local dir out rc grant before after
+  grant_case_or_skip grant-captain ng12 captain || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  grant=$(write_grant "$dir" ng12)
+  before=$(cat "$dir/home/data/backlog.md")
+  out=$(run_spawn "$dir" ng12 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover an item under a captain hold"$'\n'"$out"
+  assert_contains "$out" "captain hold" "the refusal should name the captain hold"
+  assert_absent "$dir/fake/launched-command" "a captain hold refusal must launch nothing"
+  after=$(cat "$dir/home/data/backlog.md")
+  [ "$before" = "$after" ] || fail "a refused recovery changed the backlog"
+  [ "$(backlog_held "$dir" ng12)" = yes ] || fail "a refused recovery released the captain hold"
+  pass "granted recovery: a captain hold is never bypassed, and the item stays untouched"
 }
 
 test_native_grant_refuses_a_live_agent() {
@@ -3579,6 +3599,7 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
 test_native_grant_recovers_a_held_task_without_touching_its_item
+test_native_grant_never_bypasses_a_captain_hold
 test_native_grant_refuses_a_live_agent
 test_native_grant_refuses_malformed_expired_and_mismatched_grants
 test_native_grant_is_required_to_bypass_the_dispatchability_gate

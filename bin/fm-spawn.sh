@@ -110,7 +110,8 @@
 #   so a held or blocked Queued or In flight item may be recovered. The item
 #   must still exist, read cleanly and be open work (a Done or unknown item
 #   still refuses), and no backlog transition runs, so holds and rows stay
-#   exactly as they were. The grant file itself is left for
+#   exactly as they were. A captain-kind hold is never bypassed: authority is
+#   explicit, so a grant never stands in for the captain's word. The grant file itself is left for
 #   its consumer, the native launch dispatcher. Without the flag nothing about
 #   relaunch changes and the gate applies as before.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
@@ -4990,6 +4991,22 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# Refuse a granted recovery unless the probed item is open work under no
+# captain-kind hold (header). Reads FM_BACKLOG_ROW_HOLD_KIND from the probe.
+native_grant_require_recoverable_row() {  # <row-state>
+  case "$1" in
+  queued\ * | in_flight\ *) ;;
+  *)
+    echo "error: this home's backlog item $ID is in state $1, which is not open work a native grant may recover; refusing" >&2
+    exit 1
+    ;;
+  esac
+  if [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+    echo "error: this home's backlog item $ID is under a captain hold, which a native grant never bypasses; refusing" >&2
+    exit 1
+  fi
+}
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -5017,13 +5034,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   elif [ "$NATIVE_GRANT_VALID" -eq 1 ]; then
     # Granted recovery bypasses only the hold and dependency gate on open work,
     # and changes no row (header). A closed or unknown item stays refused.
-    case "$BACKLOG_ROW_STATE" in
-    queued\ * | in_flight\ *) ;;
-    *)
-      echo "error: this home's backlog item $ID is in state $BACKLOG_ROW_STATE, which is not open work a native grant may recover; refusing" >&2
-      exit 1
-      ;;
-    esac
+    native_grant_require_recoverable_row "$BACKLOG_ROW_STATE"
     BACKLOG_TRANSITION=0
     fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE" \
       || echo "notice: recovering task $ID under its native grant; backlog item stays in state $BACKLOG_ROW_STATE" >&2
@@ -5042,13 +5053,7 @@ else
       echo "error: a native grant recovers only an existing open backlog item, and task $ID's item could not be read here (${FM_BACKLOG_ROW_ERROR:-${FM_BACKLOG_ROW_RESULT:-no item}}); refusing" >&2
       exit 1
     fi
-    case "$FM_BACKLOG_ROW_STATE" in
-    queued\ * | in_flight\ *) ;;
-    *)
-      echo "error: this home's backlog item $ID is in state $FM_BACKLOG_ROW_STATE, which is not open work a native grant may recover; refusing" >&2
-      exit 1
-      ;;
-    esac
+    native_grant_require_recoverable_row "$FM_BACKLOG_ROW_STATE"
   fi
 fi
 
