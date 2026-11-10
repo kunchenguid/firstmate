@@ -468,8 +468,8 @@ fm_afk_daemon_owns_supervision() {
 # existed, all read as "away". Only a record the owner reads quiet, or an
 # exact first-line "quiet" in a recordless flag, ever reads as "quiet" -
 # kunchenguid/firstmate#2356's standing captain-present quiet mode, entered
-# only through /quiet and exited only through an explicit /quiet off
-# (AGENTS.md section 8's away-mode stub).
+# only through /quiet; ordinary chat does not exit it.
+# bin/fm-afk-launch.sh owns entry and exit, including quiet-to-away transitions.
 fm_afk_mode() {
   local state=$1 mode
   if ! command -v fm_afk_contract_mode >/dev/null 2>&1; then
