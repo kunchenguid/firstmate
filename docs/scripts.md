@@ -139,7 +139,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-merge-queue.sh`      | Run a home's merge queue on a timer: decide each queued pull request from the live forge, merge what is provably ready through `fm-pr-merge.sh`, retire only terminal rows, and append one daily summary line |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub or GitLab URL, then refuse an outcome it cannot prove landed or queued |
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
-| `fm-change-watch.sh`     | Watch a merged change by effect: derive its targets (Deployments, Sentry project, deploy workflow), baseline them, sample on a bounded schedule behind a deploy-landing gate, and report the first regression as a wake and a steer |
+| `fm-change-watch.sh`     | Watch a merged change by effect: derive its targets (Deployments, Sentry project, deploy workflow), baseline them, sample on a bounded schedule behind a deploy-landing gate, report the first regression as a wake and a steer, and write one durable terminal-verdict row per merge (`gate` blocks a done claim, `audit` measures the 7-day acceptance) |
 | `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode, and write the ship instructions carrying that mode's definition of done |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |

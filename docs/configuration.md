@@ -944,6 +944,9 @@ Precedence is `FM_CW_KUBECONFIG`, then this file, then an operator's own `KUBECO
 The order exists because a watch once inherited an ambient context pointed at an unreachable cluster and every watch for months completed `unmeasured` while its record looked normal, so a home that reads production should name its reader here rather than rely on whatever `kubectl` was last configured with.
 A kubeconfig named here that cannot be read is reported, never silently replaced by another cluster.
 
+Every merge writes one durable row at `state/change-watch/rows/<watch-id>.json` with its +15m, +1h and +6h readings, its real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason`; `state/change-watch/` is not a task record, so teardown never removes it.
+`bin/fm-change-watch.sh gate <task-id>` exits non-zero while a task's watch is still running or ended unmeasurable, and `bin/fm-change-watch.sh audit [<days>]` fails on any `change-watch completed unmeasured` status line or any unmeasurable row inside the window; the schema and the acceptance are owned by [`docs/architecture.md`](architecture.md) "Post-merge change watch".
+
 `config/change-watch-repos` maps a repository to the things a watch should sample, one repository per line, `<repo> <spec>...`, where `<repo>` is the GitHub repository name and each spec is one of:
 
 ```
