@@ -1498,7 +1498,7 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   fm_composer_normalize_trim_var next
   if fm_composer_leading_agent_glyph_var plain "$content" \
      && _fm_composer_row_is_rule_furniture "${content#*"$plain"}" \
-     && _fm_composer_row_is_ordinary_continuation "$next"; then
+     && _fm_composer_row_is_ordinary_continuation "$next" "$screen" "$((row + 1))"; then
     _fm_composer_classify_bare_wrap "$screen" "$styled" "$row" "$((row + 1))"
     return 0
   fi
@@ -1558,12 +1558,84 @@ _fm_composer_row_is_braille_furniture() {  # <row>
   [ -z "$rest" ]
 }
 
+# _fm_composer_row_leads_with_chromatic_paint: 0 when the first visible cell of
+# the raw styled <row> is painted with an explicit chromatic foreground: a
+# truecolor run whose channels spread by more than 12, or a base colour
+# (31-36, 91-96). Typed text is drawn in the default or a white/grey foreground,
+# so this is paint a typed row does not carry. A palette (38;5) foreground is
+# not read, and an unstyled row never qualifies.
+_fm_composer_row_leads_with_chromatic_paint() {  # <raw-row>
+  local rest=$1 seq params color=0 part hi lo i n r g b
+  local -a parts
+  while :; do
+    case "$rest" in
+      $'\033['*)
+        seq=${rest#$'\033['}
+        case "$seq" in *m*) ;; *) return 1 ;; esac
+        params=${seq%%m*}
+        rest=${seq#*m}
+        [ -n "$params" ] || params=0
+        IFS=';' read -r -a parts <<<"$params"
+        n=${#parts[@]}
+        i=0
+        while [ "$i" -lt "$n" ]; do
+          part=${parts[$i]}
+          case "$part" in
+            0|39) color=0 ;;
+            3[1-6]|9[1-6]) color=1 ;;
+            38)
+              color=0
+              if [ "${parts[$((i + 1))]:-}" = 2 ] && [ "$((i + 4))" -lt "$n" ]; then
+                r=${parts[$((i + 2))]}; g=${parts[$((i + 3))]}; b=${parts[$((i + 4))]}
+                hi=$r; lo=$r
+                [ "$g" -gt "$hi" ] && hi=$g; [ "$b" -gt "$hi" ] && hi=$b
+                [ "$g" -lt "$lo" ] && lo=$g; [ "$b" -lt "$lo" ] && lo=$b
+                [ "$((hi - lo))" -gt 12 ] && color=1
+                i=$((i + 4))
+              elif [ "${parts[$((i + 1))]:-}" = 5 ]; then
+                i=$((i + 2))
+              fi
+              ;;
+          esac
+          i=$((i + 1))
+        done
+        ;;
+      ' '*|$'\t'*) rest=${rest#?} ;;
+      *) break ;;
+    esac
+  done
+  [ "$color" = 1 ] && [ -n "$rest" ]
+}
+
+# _fm_composer_row_is_mode_footer: 0 only when row <row> of the raw <screen> is
+# claude's permission-mode hint PROVEN to be the footer drawn under the
+# composer, not a typed continuation that happens to open with a mode glyph.
+# Three independent facts must all hold: the row opens with the mode marker
+# (FM_COMPOSER_MODE_HINT_RE_DEFAULT), it is the bottom-most non-blank row of the
+# capture (the footer is the last thing claude draws), and its marker is painted
+# in a chromatic colour that typed text never carries
+# (_fm_composer_row_leads_with_chromatic_paint). A capture without styling can
+# prove none of that, so the row is then treated as typed text: the safe side,
+# since it can only keep a draft pending and never read it empty.
+_fm_composer_row_is_mode_footer() {  # <raw-screen> <row>
+  local screen=$1 row=$2 raw trimmed below
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  trimmed=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var trimmed
+  fm_composer_idle_matches "$trimmed" \
+    "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive || return 1
+  below=$(printf '%s\n' "$screen" | sed -n "$((row + 2)),\$p" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var below
+  [ -z "$below" ] || return 1
+  _fm_composer_row_leads_with_chromatic_paint "$raw"
+}
+
 # _fm_composer_bare_row_is_ruled: 0 when the bare agent-glyph <row> of the plain
 # screen is the glyph followed only by rule cells and no ordinary text wraps onto
 # the row below it, so the row is its own closing border and owns no wrapped
 # input. A ruled row whose next row is ordinary continuation text is the first
 # row of a real wrapped draft and stays input.
-_fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
+_fm_composer_bare_row_is_ruled() {  # <plain-screen> <row> <raw-screen>
   local text glyph next
   text=$(_fm_composer_screen_row "$2" "$1")
   fm_composer_normalize_trim_var text
@@ -1571,21 +1643,22 @@ _fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
   _fm_composer_row_is_rule_furniture "${text#*"$glyph"}" || return 1
   next=$(_fm_composer_screen_row "$(($2 + 1))" "$1")
   fm_composer_normalize_trim_var next
-  ! _fm_composer_row_is_ordinary_continuation "$next"
+  ! _fm_composer_row_is_ordinary_continuation "$next" "$3" "$(($2 + 1))"
 }
 
 # _fm_composer_row_is_ordinary_continuation: 0 when the trimmed <row> is plain
 # text that can continue a wrapped draft: non-blank, no structural edge, not a
-# status, mode-hint or furniture row, and not itself a prompt-glyph or rule row.
-_fm_composer_row_is_ordinary_continuation() {  # <trimmed-row>
+# status, proven mode-hint footer or furniture row, and not itself a
+# prompt-glyph or rule row. A row that merely opens with a mode glyph is typed
+# text unless _fm_composer_row_is_mode_footer proves it is the footer.
+_fm_composer_row_is_ordinary_continuation() {  # <trimmed-row> <raw-screen> <row>
   local row=$1 glyph
   [ -n "$row" ] || return 1
   fm_composer_row_has_edge "$row" && return 1
   _fm_composer_row_is_omp_status "$row" && return 1
   _fm_composer_row_is_braille_furniture "$row" && return 1
   _fm_composer_row_is_rule_furniture "$row" && return 1
-  fm_composer_idle_matches "$row" \
-    "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 1
+  _fm_composer_row_is_mode_footer "$2" "$3" && return 1
   fm_composer_leading_prompt_glyph_var glyph "$row" && return 1
   return 0
 }
@@ -1625,9 +1698,9 @@ _fm_composer_row_is_rule_furniture() {  # <text>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
 # rather than unrelated screen content.
-_fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
+_fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row> <raw-screen>
   local plain=$1 g=$2 cy=$3 row line trimmed glyph
-  _fm_composer_bare_row_is_ruled "$plain" "$g" && return 1
+  _fm_composer_bare_row_is_ruled "$plain" "$g" "$4" && return 1
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
@@ -2143,7 +2216,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
           && next=-1
       fi
     fi
-    _fm_composer_bare_row_is_ruled "$plain" "$FM_COMPOSER_SELECTED_FIRST" && next=-1
+    _fm_composer_bare_row_is_ruled "$plain" "$FM_COMPOSER_SELECTED_FIRST" "$screen" && next=-1
     while [ "$next" -ge 0 ]; do
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
@@ -2152,6 +2225,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
+      _fm_composer_row_is_mode_footer "$screen" "$next" && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
@@ -2454,7 +2528,7 @@ EOF
     # not apply and a swallowed Enter on a long message still reads pending
     # and earns its retry.
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -gt "$FM_COMPOSER_SCAN_BARE_ROW" ] \
-       && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"; then
+       && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy" "$screen"; then
       _fm_composer_classify_bare_wrap "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"
       return 0
     fi
