@@ -2,8 +2,7 @@
 # Regression test for the spawn project-match gate (bin/fm-spawn.sh backlog
 # preflight): a fresh spawn on a home whose backlog tracks the task must target
 # the project the item records as its repo, so an isolated worktree of the wrong
-# repository cannot pass the isolation checks. An item with no recorded repo is
-# refused unless --repo-unrecorded-ok acknowledges the target.
+# repository cannot pass the isolation checks.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -69,31 +68,14 @@ test_mismatched_repo_is_refused_naming_both() {
   pass "a project disagreeing with the recorded repo is refused naming both"
 }
 
-test_unrecorded_repo_requires_acknowledgement() {
+test_unrecorded_repo_spawns() {
   local id=match-none-z3 out status
   make_match_case match-none "$id"
   out=$(run_match_spawn "$id" "$CASE_PROJ")
   status=$?
-  expect_code 1 "$status" "an item with no recorded repo should be refused"$'\n'"$out"
-  assert_contains "$out" "records no repo" "refusal did not explain the missing repo"
-  assert_contains "$out" "--repo-unrecorded-ok" "refusal did not name the acknowledgement flag"
-  assert_absent "$CASE_HOME/state/$id.meta" "a refused spawn must not publish a task record"
-
-  out=$(run_match_spawn "$id" "$CASE_PROJ" --repo-unrecorded-ok)
-  status=$?
-  expect_code 0 "$status" "the acknowledgement flag should allow an unrecorded repo"$'\n'"$out"
-  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" "acknowledged spawn did not record its worktree"
-  pass "an item with no recorded repo needs --repo-unrecorded-ok"
-}
-
-test_acknowledgement_does_not_waive_a_mismatch() {
-  local id=match-ack-z4 out status
-  make_match_case match-ack "$id" alpha
-  out=$(run_match_spawn "$id" "$CASE_OTHER" --repo-unrecorded-ok)
-  status=$?
-  expect_code 1 "$status" "the acknowledgement must not waive a recorded mismatch"$'\n'"$out"
-  assert_contains "$out" "project mismatch for $id" "refusal did not name the mismatch"
-  pass "--repo-unrecorded-ok does not waive a recorded repo mismatch"
+  expect_code 0 "$status" "an item with no recorded repo should retain ordinary admission"$'\n'"$out"
+  assert_grep "worktree=$CASE_WT" "$CASE_HOME/state/$id.meta" "unrecorded spawn did not record its worktree"
+  pass "an item with no recorded repo spawns"
 }
 
 test_missing_item_hint_records_the_target_repo() {
@@ -115,7 +97,6 @@ test_missing_item_hint_records_the_target_repo() {
 test_matching_repo_spawns
 test_missing_item_hint_records_the_target_repo
 test_mismatched_repo_is_refused_naming_both
-test_unrecorded_repo_requires_acknowledgement
-test_acknowledgement_does_not_waive_a_mismatch
+test_unrecorded_repo_spawns
 
 echo "# all fm-spawn-project-match tests passed"

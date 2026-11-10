@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--repo-unrecorded-ok] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -44,9 +44,7 @@
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   A fresh spawn on a home whose backlog tracks the task also REFUSES a project
-#   directory whose name differs from the item's recorded `repo`, naming both. An
-#   item with no recorded repo is refused too, unless --repo-unrecorded-ok
-#   acknowledges the target; the flag is refused on a relaunch.
+#   directory whose name differs from the item's recorded `repo`, naming both.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
 #   in the brief, and is refused on scouts, secondmates, and relaunches. When the
@@ -1020,7 +1018,6 @@ UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
-REPO_UNRECORDED_OK=0
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -1153,7 +1150,6 @@ for a in "$@"; do
     UPSTREAM_CONSENT=${a#--upstream-consent=}
     UPSTREAM_CONSENT_SET=1
     ;;
-  --repo-unrecorded-ok) REPO_UNRECORDED_OK=1 ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -1273,10 +1269,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
-    exit 1
-  }
-  [ "$REPO_UNRECORDED_OK" -eq 0 ] || {
-    echo "error: --relaunch reuses the task's recorded project; --repo-unrecorded-ok cannot apply" >&2
     exit 1
   }
 else
@@ -2186,7 +2178,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
-  [ "$REPO_UNRECORDED_OK" -eq 0 ] || shared_args+=(--repo-unrecorded-ok)
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -4954,12 +4945,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   # isolated worktree of the wrong repository cannot pass the isolation checks.
   if [ "$RELAUNCH" -eq 0 ]; then
     SPAWN_TARGET_REPO=$(basename "$PROJ_ABS")
-    if [ -z "$FM_BACKLOG_ROW_REPO" ]; then
-      if [ "$REPO_UNRECORDED_OK" -ne 1 ]; then
-        echo "error: task $ID's backlog item records no repo, so the project $SPAWN_TARGET_REPO cannot be confirmed as the one this work belongs to; record it (bin/fm-tasks-axi.sh update $ID --repo <repo>) or pass --repo-unrecorded-ok to acknowledge the target" >&2
-        exit 1
-      fi
-    elif [ "$FM_BACKLOG_ROW_REPO" != "$SPAWN_TARGET_REPO" ]; then
+    if [ -n "$FM_BACKLOG_ROW_REPO" ] && [ "$FM_BACKLOG_ROW_REPO" != "$SPAWN_TARGET_REPO" ]; then
       echo "error: project mismatch for $ID: its backlog item records repo $FM_BACKLOG_ROW_REPO but the spawn targets project $SPAWN_TARGET_REPO ($PROJ_ABS); pass the $FM_BACKLOG_ROW_REPO project directory, or correct the item's repo if the item is wrong" >&2
       exit 1
     fi
