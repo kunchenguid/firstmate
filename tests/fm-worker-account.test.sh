@@ -139,14 +139,20 @@ spawn_ship() {
     fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$PROJ" --mode no-mistakes --yolo off "$@"
 }
 
-# run_pane: execute the recorded launch in a pane whose ambient environment
-# names another account for every runner.
-run_pane() {
+# pane [VAR=value...]: execute the recorded launch in a pane whose ambient
+# environment names another account for every runner, plus any extra
+# assignments, and return the launch's status.
+pane() {
   env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN:$PATH" TERM=xterm \
     CLAUDE_CONFIG_DIR="$CASE/ambient-claude" ANTHROPIC_API_KEY=ambient-pane-key \
     CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token CLAUDE_CODE_USE_BEDROCK=1 \
     PI_CODING_AGENT_DIR="$CASE/ambient-pi" OPENAI_API_KEY=ambient-pane-openai \
-    bash -c "$(cat "$CASE/launch.log")" || fail "the recorded launch failed in the synthetic pane"
+    "$@" bash -c "$(cat "$CASE/launch.log")"
+}
+
+# run_pane: a pane launch that must succeed.
+run_pane() {
+  pane || fail "the recorded launch failed in the synthetic pane"
 }
 
 # assert_refused_before_launch <id> <out> <needle>
@@ -732,6 +738,48 @@ test_claude_pin_uses_a_keychain_oauth_token() {
   pass "a Claude pin uses its declared Keychain OAuth token without logging or passing the token as an argument"
 }
 
+# keychain_token_ship <id>: a ship spawn whose Claude pin maps to the fake
+# Keychain item, after the pre-launch check has read the token once.
+keychain_token_ship() {
+  local out rc
+  fake_macos_host
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source.json"
+  out=$(spawn_ship "$1"); rc=$?
+  expect_code 0 "$rc" "a Claude pin with a readable Keychain OAuth token should launch: $out"
+}
+
+test_claude_pin_keeps_the_token_out_of_an_inherited_xtrace() {
+  new_case keychain-token-xtrace claude
+  keychain_token_ship acct-claude-token-xtrace
+  pane SHELLOPTS=xtrace 2> "$CASE/pane-stderr" ||
+    fail "the traced launch failed in the synthetic pane: $(cat "$CASE/pane-stderr")"
+  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=expected' "$CASE/claude-worker" \
+    "the traced worker still receives the synthetic token"
+  assert_grep 'fm-claude-token.sh exec' "$CASE/pane-stderr" \
+    "the pane really traced the launch"
+  assert_not_contains "$(cat "$CASE/pane-stderr")" 'fm-synthetic-oauth-token' \
+    "an inherited xtrace never prints the token"
+  pass "an inherited bash xtrace in the pane never prints the Keychain token"
+}
+
+test_claude_pin_does_not_fall_back_when_its_keychain_token_vanishes_after_the_check() {
+  local rc
+  new_case keychain-token-vanished claude
+  keychain_token_ship acct-claude-token-vanished
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$CASE/security-argv'" 'exit 44' \
+    > "$FAKEBIN/security"
+  pane 2> "$CASE/pane-stderr"; rc=$?
+  expect_code 3 "$rc" "a launch whose token read fails must stop: $(cat "$CASE/pane-stderr")"
+  assert_contains "$(cat "$CASE/pane-stderr")" 'is unavailable' "the pane says the token source is unavailable"
+  assert_absent "$CASE/claude-worker" "Claude must never start on its stored login or the pane's credentials"
+  assert_equals $'find-generic-password -s fm-claude-token -a worker -w\nfind-generic-password -s fm-claude-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "the launch read the declared item a second time"
+  pass "a token that vanishes after the pre-launch check stops the launch without falling back"
+}
+
 test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable() {
   local out rc id=acct-claude-token-missing
   new_case keychain-token-missing claude
@@ -754,6 +802,8 @@ test_local_secondmate_pin_uses_its_keychain_oauth_token
 test_claude_credential_source_requires_a_single_pin
 test_claude_pin_uses_a_keychain_oauth_token
 test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable
+test_claude_pin_keeps_the_token_out_of_an_inherited_xtrace
+test_claude_pin_does_not_fall_back_when_its_keychain_token_vanishes_after_the_check
 test_remote_secondmate_account_override_refuses_locally
 test_remote_secondmate_refuses_account
 test_absent_pin_keeps_the_launch_unchanged

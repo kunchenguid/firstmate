@@ -36,6 +36,10 @@ case "$1" in -*) usage ;; esac
 problem=$(fm_credsrc_check "$SOURCE_FILE" claude) || refuse "$SOURCE_FILE" "malformed declaration: $problem"
 source=$(fm_credsrc_field "$SOURCE_FILE" claude source)
 fm_credsrc_supported "$source" || refuse "$SOURCE_FILE" "source $source is not supported on this host"
+# An inherited xtrace (SHELLOPTS or set -x) would print every expansion of the
+# token, so tracing stays off while it is handled and is restored before exec.
+case $- in *x*) xtrace=1 ;; *) xtrace= ;; esac
+set +x
 TOKEN=$(fm_credsrc_read "$SOURCE_FILE" claude)
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -48,4 +52,5 @@ fi
   refuse "$SOURCE_FILE" "does not contain one valid OAuth token"
 export CLAUDE_CODE_OAUTH_TOKEN=$TOKEN
 unset TOKEN
+[ -z "$xtrace" ] || set -x
 exec env "$@"
