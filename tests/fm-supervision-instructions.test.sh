@@ -310,6 +310,33 @@ SH
   pass "a parked codex session's ordinary-wake line names the Stop hook and never the foreground checkpoint"
 }
 
+test_devin_quiet_daemon_block() {
+  local home out ordinary
+  home="$TMP_ROOT/devin-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" "$RENDER" --harness devin)
+  assert_contains "$out" "primary harness: devin" "devin heading missing"
+  assert_contains "$out" "Mode: Devin quiet-daemon supervision." "devin snippet missing"
+  assert_contains "$out" "bin/fm-devin-primary.sh" "devin block lost the ensure repair command"
+  assert_not_contains "$out" "re-arm" "devin block must not offer a model re-arm"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "quiet daemon" "devin ordinary-wake line lost the daemon owner"
+  assert_contains "$ordinary" "never arm a watcher yourself" "devin ordinary-wake line must forbid a model arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "devin ordinary-wake line must not call the manual arm"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness devin --repair-line)
+  assert_contains "$out" "bin/fm-devin-primary.sh ensure" "devin repair line lost the ensure command"
+  assert_contains "$out" "never run fm-watch.sh or fm-watch-arm.sh yourself" "devin repair line must forbid manual watcher supervision"
+  assert_not_contains "$out" "load /afk" "devin repair line must not defer to the generic away text"
+
+  # The devin line wins over the generic away-mode repair text: a Devin primary
+  # is always in quiet or away posture, and the daemon is still the owner.
+  out=$(FM_HOME="$home" "$RENDER" --harness devin --afk 1 --repair-line)
+  assert_contains "$out" "bin/fm-devin-primary.sh ensure" "devin away-mode repair line lost the ensure command"
+  assert_not_contains "$out" "load /afk" "devin away-mode repair line used the generic away text"
+  pass "devin renders the quiet-daemon protocol, ordinary wake line, and ensure repair line"
+}
+
 test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
   local out ordinary
   out=$("$RENDER" --harness pi-signed)
@@ -407,6 +434,7 @@ test_repair_lines
 test_omp_restart_guidance_depends_on_home_vs_checkout
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_codex_park_ordinary_wake_line_leaves_continuity_to_the_stop_hook
+test_devin_quiet_daemon_block
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config

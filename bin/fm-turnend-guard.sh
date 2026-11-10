@@ -18,7 +18,15 @@
 # this guard back with --cursor from bin/fm-turnend-guard-cursor.sh and renders
 # exit 2 as one bounded follow-up, because exit 2 is a silent no-op on Cursor's
 # stop step; without that flag a Cursor-shaped payload is the Claude-settings
-# duplicate Cursor also loads, and this guard stands down.
+# duplicate Cursor also loads, and this guard stands down. Devin calls it with
+# --devin from bin/fm-devin-primary.sh's Stop hook: Devin blocks a turn end
+# through a printed {"decision":"block","reason":...} object on stdout (exit 2
+# blocks too, but the JSON form carries the reason identically), the caller
+# bounds the loop with its own per-turn block counter, so this mode ignores
+# stop_hook_active, allows by exiting 0 with no output, and prints the block
+# object with exit 0. A Devin primary is always daemon-supervised, so the
+# shared away/quiet daemon predicate below (fm_afk_daemon_owns_supervision plus
+# a beacon inside AFK_GRACE) is its supervision proof.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -101,6 +109,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
 AGY_MODE=0
+DEVIN_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -113,7 +122,8 @@ for arg in "$@"; do
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
     --agy) AGY_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor|--agy]" >&2; exit 2 ;;
+    --devin) DEVIN_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--agy|--devin]" >&2; exit 2 ;;
   esac
 done
 
@@ -184,7 +194,7 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || allow_exit
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && [ "$DEVIN_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   allow_exit
 fi
 
@@ -284,6 +294,9 @@ block_stop() {
     printf '%s\n' "$cur_blocks" > "$STATE/.turnend-blocks"
     reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --harness agy --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
       || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  elif [ "$DEVIN_MODE" -eq 1 ]; then
+    reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --harness devin --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+      || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   else
     reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
       || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
@@ -309,6 +322,10 @@ block_stop() {
   )
   if [ "$AGY_MODE" -eq 1 ]; then
     jq -cn --arg r "$msg" '{decision:"continue",reason:$r}'
+    exit 0
+  fi
+  if [ "$DEVIN_MODE" -eq 1 ]; then
+    jq -cn --arg r "$msg" '{decision:"block",reason:$r}'
     exit 0
   fi
   printf '%s\n' "$msg" >&2

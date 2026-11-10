@@ -44,6 +44,7 @@ Codex's interactive TUI has verified session-open delivery only on the native ve
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
 | Antigravity (agy) | Run | [Antigravity (agy)](#antigravity-agy) |
+| Devin | Nudge | [Devin](#devin) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
 ### Why the run tier exists
@@ -379,6 +380,14 @@ The wrapper drains stdin for the payload's `source` and delegates to `bin/fm-ses
 In linked crewmate worktrees or foreign checkouts, `bin/fm-sessionstart-run.sh` stands down silently and the wrapper emits `{}`.
 In primary or secondmate homes, the wrapper emits the captured digest as `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
 Native stdout context injection gates the ordered digest into model context before the first agent turn.
+
+### Devin
+
+Devin is a nudge-tier harness.
+Its primary registers a `SessionStart` hook in its own Devin config (captain-private; the repo ships no tracked Devin hook files), invoking `bin/fm-devin-primary.sh session-start`.
+That hook takes the session lock, ensures the quiet daemon, warns on a missing wedge-alarm channel, and returns `additionalContext` that ends with "Run bin/fm-session-start.sh now, once."
+The hook-enforced daemon is what makes a Devin primary safe; the nudge only asks the model to take the helm.
+A `block` decision refuses the session locally, so a lock refusal or a pane-less launch fails closed instead of starting blind.
 
 ### Cursor compaction
 

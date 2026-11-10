@@ -9,7 +9,8 @@
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
 # "{<harness>,...} " render only for the listed harnesses), and Grok's arm
 # command becomes the host; on a home that does not run it the output is
-# unchanged.
+# unchanged. A devin primary renders its own quiet-daemon protocol
+# (docs/supervision-protocols/devin.md) and never runs the supervision host.
 set -eu
 
 # Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
@@ -107,7 +108,7 @@ case "$HARNESS" in
   hermes)
     echo 'error: hermes is a crewmate/scout adapter only; primary supervision is unsupported' >&2
     exit 1 ;;
-  claude|codex|opencode|pi|grok|cursor|omp|agy) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|pi|grok|cursor|omp|agy|devin) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -201,6 +202,10 @@ repair_line() {
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
     return 0
   fi
+  if [ "$HARNESS" = devin ]; then
+    printf '%s\n' 'the quiet daemon owns supervision on a Devin primary; run bin/fm-devin-primary.sh ensure to restart it, and tell the captain plainly if that fails; never run fm-watch.sh or fm-watch-arm.sh yourself.'
+    return 0
+  fi
   if [ "$AFK" -eq 1 ]; then
     if [ "$AFK_MODE" = quiet ]; then
       printf '%s\n' 'Quiet mode owns watcher supervision; load /quiet and ensure the daemon is running instead of starting normal supervision directly.'
@@ -291,6 +296,9 @@ ordinary_wake_line() {
       ;;
     agy)
       printf '%s\n' '- Ordinary wake: the Stop-hook park (bin/fm-turnend-guard-agy.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      ;;
+    devin)
+      printf '%s\n' '- Ordinary wake: the quiet daemon (bin/fm-supervise-daemon.sh) owns watcher continuity; drain, handle, ack, end the turn; never arm a watcher yourself.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

@@ -27,17 +27,17 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
-# Known harness command names; extend when a new adapter is verified. omp and
-# agy are anchored exactly like pi: their process names are the bare words `omp`
-# (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
-# comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
+# Known harness command names; extend when a new adapter is verified. omp, agy
+# and devin are anchored exactly like pi: their process names are the bare
+# words `omp` (verified, omp 18.1.11), `agy`, and `devin`, and a substring match
+# would claim ompd or comp.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$|^devin$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy devin)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

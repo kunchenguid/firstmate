@@ -31,6 +31,10 @@ VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/claude"
 NAMED_CLAUDE="$FAKEBIN/claude"
+# Devin anchors identity by its bare process name, exactly like agy and omp:
+# the Devin CLI session process is named `devin`.
+ln -s /bin/bash "$FAKEBIN/devin"
+NAMED_DEVIN="$FAKEBIN/devin"
 
 # --- unit layer: identity behind a deterministic process table ---------------
 
@@ -1642,7 +1646,71 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
   pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
 }
 
+test_devin_session_is_identified_by_its_process_name() {
+  local dir fakebin got
+  dir="$TMP_ROOT/devin-named"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  800:comm=) printf '%s\n' devin ;;
+  800:args=) printf '%s\n' 'devin --config /home/u/config.json' ;;
+  800:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-devin-primary.sh session-start' ;;
+  *:ppid=) printf '%s\n' 800 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '800\n' > "$dir/state/.lock"
+
+  # Non-vacuity: a devin-prefixed name is not the bare harness word, so the same
+  # table without the exact anchor must find nothing.
+  if lib_eval "$fakebin" 'fm_harness_path_name /opt/devinci/bin/devinci'; then
+    fail "a devin-prefixed executable name was read as the devin harness"
+  fi
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a devin-named session was not found in the ancestry at all"
+  [ "$got" = 800 ] || fail "ancestry resolved '$got', expected the devin session pid 800"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 800' \
+    || fail "a live devin session was not recognized as a harness"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the devin session holding the lock did not recognize itself as the owner"
+  pass "session-lock: a devin-named session is identified as the lock anchor"
+}
+
+test_e2e_devin_named_process_claims_the_lock() {
+  local dir
+  dir="$TMP_ROOT/e2e-devin-named"
+  mkdir -p "$dir/state"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_DEVIN" -c '
+      "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/acquire.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/devin-pid"
+    '
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/acquire.rc")" \
+    "a devin-named session could not acquire the home lock: $(cat "$dir/state/acquire.out")"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$(tr -d '[:space:]' < "$dir/state/devin-pid")" ] \
+    || fail "the lock did not anchor to the devin session pid: $(cat "$dir/state/.lock")"
+  pass "session-lock e2e: a devin-named process claims the home lock"
+}
+
 test_version_named_session_is_identified_on_both_platforms
+test_devin_session_is_identified_by_its_process_name
+test_e2e_devin_named_process_claims_the_lock
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
