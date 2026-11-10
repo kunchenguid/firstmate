@@ -1722,9 +1722,9 @@ _status_delivered_receipt_endpoint() {  # <status-file> <endpoint>
 # A primary drain presents notes, annotations and the latest backstop event, not
 # every actionable line. Publish its receipt only through contiguous delivery:
 # a task whose span the drain fully presented keeps its endpoint, every other
-# task stops before the first actionable line the daemon has not already seen.
+# task stops before its first actionable line past the confirmed delivery cursor.
 status_presented_receipts() {  # <state> <acknowledged-rows> <fully-presented-task-ids>
-  local state=$1 task endpoint ident f start seen bounded
+  local state=$1 task endpoint ident f start bounded
   while IFS=$'\t' read -r task endpoint ident; do
     [ -n "$task" ] || continue
     case "
@@ -1732,8 +1732,6 @@ $3
 " in *$'\n'"$task"$'\n'*) printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident"; continue ;; esac
     f="$state/$task.status"
     start=$(status_delivered_cursor_offset "$f") || continue
-    seen=$(status_presentation_marker_offset "$(status_daemon_seen_marker_path "$state" "$task")" "$f")
-    [ "$seen" -le "$start" ] || start=$seen
     bounded=$(_status_receipt_span_endpoint "$f" "$start" "$endpoint" actionable) || continue
     printf '%s\t%s\t%s\n' "$task" "$bounded" "$ident"
   done <<EOF
