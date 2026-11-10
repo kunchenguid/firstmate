@@ -1909,7 +1909,7 @@ What this does not hide:
 
 A remote secondmate does not receive forwarded values: its commands run on the remote host under `env -i` with a fixed set of variables.
 The file is inherited into secondmate homes through the same [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md) as `launch-env-allowlist`.
-Regression coverage lives in [`tests/fm-launch-env-forward.test.sh`](../tests/fm-launch-env-forward.test.sh), the relaunch case in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh); [`tests/fm-backend-tmux-smoke.test.sh`](../tests/fm-backend-tmux-smoke.test.sh) shows the staleness gap and checks against a real tmux server that the worker sees the value while the pane's whole scrollback does not contain it.
+Regression coverage lives in [`tests/fm-launch-env-forward.test.sh`](../tests/fm-launch-env-forward.test.sh), the relaunch case in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh); [`tests/fm-backend-tmux-smoke.test.sh`](../tests/fm-backend-tmux-smoke.test.sh) shows the staleness gap and, against a real tmux server, sources a hand-built launch file with the same layout and checks that the worker sees the value while the pane's whole scrollback does not contain it. The launch file `fm-spawn` actually writes is covered by `tests/fm-launch-env-forward.test.sh` with a fake pane.
 
 ## Project capacity (config/project-capacity)
 
