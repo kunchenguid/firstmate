@@ -1,2 +1,15 @@
-# Bash parses shell scripts with LF line endings on every supported platform.
+# Firstmate executes or reads these files at runtime, so they keep LF line
+# endings even in a Git for Windows checkout with core.autocrlf=true: a CRLF
+# shebang names an interpreter such as `python3\r`, and text a script reads
+# carries the carriage return into what it emits.
 *.sh text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.pl text eol=lf
+*.lua text eol=lf
+*.jq text eol=lf
+.agents/skills/** text eol=lf
+skills/** text eol=lf
+docs/supervision-protocols/** text eol=lf
