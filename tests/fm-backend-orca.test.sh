@@ -616,6 +616,18 @@ test_worktree_create_preserves_other_errors() {
   pass 'Orca create preserves non-timeout errors'
 }
 
+test_worktree_create_ignores_stderr_on_success() {
+  local out
+  recovery_case create-stderr-warning
+  rm "$RESP/2.exit"
+  echo '(node:1234) ExperimentalWarning: request timeout option is experimental' > "$RESP/2.err"
+  printf '{"ok":true,"result":{"worktree":{"id":"repo-123::%s","path":"%s"}}}\n' "$WT" "$WT" > "$RESP/2.out"
+  out=$(run_recovery_create 2>/dev/null) || fail 'stderr warning broke a successful create'
+  assert_recovered_once "$out"
+  [ "$(cat "$RESP/.count")" = 2 ] || fail 'successful create triggered recovery'
+  pass 'Orca create parses stdout JSON when a successful create also writes stderr'
+}
+
 test_worktree_and_terminal_helpers_parse_json() {
   local out wt_id wt_path term
   orca_case lifecycle-helpers
@@ -1589,4 +1601,5 @@ test_worktree_recovery_waits_for_clean_git_root
 test_worktree_recovery_refuses_unknown_prior_ownership
 test_worktree_recovery_deadline_preserves_allocation
 test_worktree_create_preserves_other_errors
+test_worktree_create_ignores_stderr_on_success
 test_spawn_removes_orca_worktree_when_terminal_create_fails 1

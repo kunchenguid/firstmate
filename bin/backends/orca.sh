@@ -181,23 +181,28 @@ fm_backend_orca_repo_ensure() {  # <project-path>
 # never retry create or delete an unconfirmed allocation. The bounded inventory
 # and adoption checks live in orca-worktree-recover.js.
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path terminal recoverable=0 recovery
+  local project=$1 name=$2 repo_id out err err_file rc wt_id wt_path terminal recoverable=0 recovery
   recovery="$(dirname -- "${BASH_SOURCE[0]}")/orca-worktree-recover.js"
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
   # A failed inventory disables recovery, not ordinary successful creation.
   node "$recovery" available "$repo_id" "$name" && recoverable=1
-  if ! out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json 2>&1); then
-    case "$out" in
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-orca-create.XXXXXX") || return 1
+  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json 2>"$err_file") && rc=0 || rc=$?
+  err=$(cat "$err_file")
+  rm -f "$err_file"
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  if [ "$rc" -ne 0 ]; then
+    case "$err$out" in
       *"runtime closed the connection before responding"*|*"timed out"*|*"timeout"*|*"Timeout"*)
         if [ "$recoverable" != 1 ]; then
-          printf '%s\n' "$out" >&2
+          [ -z "$out" ] || printf '%s\n' "$out" >&2
           echo "error: Orca worktree $name was not proven absent before create; reconcile the allocation before retrying spawn" >&2
           return 1
         fi
         echo "Orca create response timed out; waiting for worktree $name without retrying create" >&2
         out=$(node "$recovery" recover "$repo_id" "$name") || return 1
         ;;
-      *) printf '%s\n' "$out" >&2; return 1 ;;
+      *) [ -z "$out" ] || printf '%s\n' "$out" >&2; return 1 ;;
     esac
   fi
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
