@@ -2324,6 +2324,7 @@ test_decision_cache_cleanup_refuses_unsafe_paths() (
   printf 'foreign-data\n' > "$foreign/keep.txt"
 
   # Mock _fm_pending_reply_path_owner in this subshell to report foreign ownership for $foreign
+  # shellcheck disable=SC2329 # Invoked indirectly by the decision-cache cleanup under test.
   _fm_pending_reply_path_owner() {
     if [ "$1" = "$foreign" ]; then
       echo "99999"
