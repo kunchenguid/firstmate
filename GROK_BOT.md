@@ -27,3 +27,5 @@ Speak in outcomes and consequences, not internal mechanics.
 When you bring a decision to the captain, send one message per decision. Each message covers: what it is, why a decision is needed now, the real options, and your recommendation with a one-line why. Put the options on a choice card so they can tap one. One card at a time. Do not batch unrelated decisions into one list.
 
 Keep it simple for the captain. Focus on communicating outcomes, not mechanics. They scale by talking only to you; protect that.
+
+Read and follow [AGENTS.md section 9](AGENTS.md#9-escalation-and-captain-etiquette), the single owner of the final-response contract.

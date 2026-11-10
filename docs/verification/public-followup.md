@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports six active guarantees for promised public replies made through the myfirstmate relay:
+This record supports seven active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
 2. A home that never opted into the relay pays nothing for any of it.
@@ -10,6 +10,7 @@ This record supports six active guarantees for promised public replies made thro
 4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
 5. A public loop whose work lives in a REMOTE secondmate home retires when readable remote state proves no link exists, or after readable and writable remote state clears the matching bound legacy Relay link; unreadable state, a non-writable matching link, an identity mismatch, a metadata lock it cannot acquire within its bound, or unconfirmed completion retains the loop instead of hanging, and `--force` still covers only the unresolved obligation.
 6. Work bound to a REMOTE secondmate home can report its typed terminal result: the instructions name paths that exist on the worker's own machine, the owning home collects results for open registrations over that route, an unreachable route fails loudly, an empty reachable route is a healthy no-op, and a non-open registration is skipped without contact.
+7. Work that ends failed or parked remains deliverable when its promised final expected a merged pull request, so the original thread receives the honest failed outcome exactly once instead of retaining an undeliverable promise.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -20,6 +21,7 @@ Recorded 2026-09-01 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.
 The stock macOS compatibility lane additionally runs the focused first-registration regression with `/bin/bash` 3.2.57 and a real `tasks-axi` installation.
 The relay is a fakebin `curl` in every case, so no public post is ever made; `tasks-axi` and `jq` are the real tools, because stubbing the obligation state machine would verify nothing.
 The remote-route cases fake only the SSH binary at the `FM_SSH_BIN` process seam and then run the real tracked `fm-remote-entrypoint.sh` against a local checkout standing in for the remote one, so the work that has to reach the remote home actually runs there; no host and no network are involved.
+The failed-result regression was refreshed separately on 2026-09-22 in the same environment with tasks-axi 0.2.6.
 
 ## Restart end-to-end and regressions
 
@@ -106,13 +108,26 @@ ok - staging requires the matching secondmate firstmate home
 The restart case is the end-to-end proof of guarantee 1.
 It reproduces the stranded state first (work bound, no reconciled terminal result, delivery refused with "still waiting on its bound work" and zero posts), then has a secondmate-shaped child report a typed `pr-merged` result, deletes the drained inbox payload, reconciles from disk, and asserts exactly one `connector/followup` call carrying the original `request_id`, a validated `posted` receipt, and a Done obligation.
 
+The focused tasks-axi 0.2.6 regression is the proof of guarantee 7:
+
+```sh
+FM_TEST_ONLY=test_failed_work_on_pr_merged_promise_delivers_honest_outcome bash tests/fm-public-followup.test.sh
+```
+
+```
+ok - failed work on a pr-merged promise delivers its honest outcome exactly once
+```
+
+It binds a `pr-merged` promised final to work that reports `outcome=failed`, reconciles that accepted relation to `ready`, posts the recorded failure text once to the original request, and verifies that the obligation closes.
+Parked work uses the same typed failed terminal outcome, so it follows the same state-machine path.
+
 The dropped-baton case is the end-to-end proof of guarantee 3.
 It delivers a `report-ready` promised-final, asserts the registration is retained and `pending` prints `open-loop`, then shows that an unbound follow-on ship is not teardown-refused (the one-variable control still refuses the moment a commitment is registered for that work).
 `rechain` then binds a fresh `pr-merged` obligation onto the same request/thread, and a second follow-up carries the shipped text.
 `retire --reason` records its private receipt before removal and is the only close; replayed registration cannot reopen that retired loop.
 The concurrency and interrupted-bind cases verify that one delivered source cannot fork and that retry converges on the same destination obligation.
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
-The stock macOS Bash lane in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) sets `FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32` and runs `tests/fm-public-followup.test.sh` through real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
+The stock macOS Bash lane in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) sets `FM_TEST_STOCK_BASH=1` and runs `tests/fm-public-followup.test.sh` through `bin/fm-test-tap-verify.sh` under real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
 
 The eight remote-route cases are the proof of guarantee 5.
 A remote secondmate home exists only on its own machine, so its registration records no local path, and every close that must first clear the bound legacy Relay link had nothing local to act on.

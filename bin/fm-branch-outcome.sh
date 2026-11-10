@@ -7,7 +7,9 @@
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
-#     or status provenance remain valid and are treated as visible.
+#     or status provenance remain valid and are treated as visible. A silent
+#     row must have verdict `routine`; the branch prompt and delivery consumers
+#     own the additional no-change eligibility rule.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -15,12 +17,13 @@
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
-#   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     Pi as a routine merge note, persisted as a sequence-keyed visible captain
-#     entry, emitted by the locked session-start replay, or silently consumed
-#     there because `silent` is true. Records above the cursor are unread.
-#     A captain row advances only after its matching visible entry exists in
-#     Pi's session, so reload recovery is idempotent across that crash window.
+#   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq presented
+#     by Pi as a routine merge note or sequence-keyed visible captain entry,
+#     emitted by Pi's locked session-start replay, silently consumed there
+#     because `silent` is true, or presented by the supervision-host drain.
+#     Records above the cursor are unread. A captain row advances only after
+#     Pi persists its matching visible entry or the host prints its drain
+#     section, so interrupted presentation can be retried.
 #     A cursor beyond the validated store tail fails closed.
 #   - Processed marker: $STATE/.branch-outcomes-processed holds the highest
 #     seq whose captain rows main has ACKNOWLEDGED as processed, separately
@@ -33,11 +36,14 @@
 #     the read cursor; a routine, unread, or already-processed target is
 #     refused. It never moves past the read cursor or backwards, so an
 #     unrelated or empty model answer cannot move it. An absent marker reads as
-#     0 (every delivered captain row is unprocessed, the safe direction);
-#     processed-init is the one-time migration that sets an absent marker to
-#     the read cursor so rows delivered before the marker existed are not
-#     re-presented. A present marker is validated before the migration returns,
-#     and a marker ahead of the read cursor fails closed.
+#     0 (every delivered captain row is unprocessed, the safe direction), and
+#     nothing ever creates it from the read cursor: the Pi branch's visible
+#     entries and a supervision-host drain's presentation both advance that
+#     cursor without main acknowledging anything, and no stored state tells
+#     which one did. So a home without a marker, including one upgraded from
+#     before the marker existed or switched between Pi and the host, presents
+#     its delivered captain rows again, dated and check-first, until main
+#     acknowledges them. A marker ahead of the read cursor fails closed.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
 #     cache of the latest outcome's status provenance. The authoritative copy
 #     is in the append-only row. $STATE/.branch-outcome-index-ready is removed
@@ -51,6 +57,18 @@
 #     Main-actor drain calls processed-init under the outcome lock when that
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
+#   - Tail copy: $STATE/.branch-outcomes-tail.jsonl holds the newest
+#     OUTCOME_TAIL_ROWS store lines verbatim, and only as many of the newest
+#     as fit in OUTCOME_TAIL_MAX_BYTES (1 MiB): older rows leave first, a row
+#     is never shortened, and a newest row larger than the budget leaves the
+#     copy empty. It is replaced atomically after each append. It is a
+#     read-only display source for readers that cannot read the
+#     unbounded store (the Claude Code Calm mod's supervision notes, whose file
+#     read rejects over 4 MiB); it is never authoritative, and a failed refresh
+#     leaves the stored outcome and its delivery untouched. seed-tail creates
+#     it from a bounded window of the store's newest complete rows when it is
+#     absent, so a home whose store predates it gains one at its next session
+#     start without scanning lifetime history.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -64,23 +82,44 @@
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
-#     Advance the cursor (never backwards) after handing the records to Pi.
+#     Advance the cursor (never backwards) after Pi delivers the records or
+#     the host presents them in its drain.
 #   fm-branch-outcome.sh unprocessed
-#     Print every captain record that is read but not yet processed (raw
-#     JSONL, ascending seq). Exit 0 with no output when none.
+#     Print read but unprocessed captain records as JSONL in ascending seq, up to 32 per call, each with "recordedAgo".
+#     Summaries over 1024 characters are abbreviated within that bound and point to lookup --seqs <n> for the full outcome.
+#     Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-processed --through <seq>
 #     Advance the processed marker after main acknowledged the captain rows
 #     through <seq>; the target itself must be a currently unprocessed captain
 #     row at or below the read cursor.
+#   fm-branch-outcome.sh present
+#     A supervision-host drain's presentation off Pi (bin/fm-wake-drain.sh
+#     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
+#     the lock, print every unread record and every unprocessed captain record
+#     (JSONL, ascending seq, each with an added "unread" boolean, and each
+#     captain record also with "recordedAgo"). It moves nothing: off Pi that
+#     drain presentation is what the visible entry is, so the drain runs
+#     mark-read once it has presented the rows; it is the only reader that
+#     advances the cursor there. Prints nothing when nothing is unread or
+#     unprocessed.
+#     "recordedAgo" is how long before this read the row was appended, as
+#     whole minutes under an hour, whole hours under two days, else whole days
+#     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
+#     owner of that wording for both presenters, the drain's BRANCH OUTCOMES
+#     section and the Pi branch's processing request, because a row main never
+#     acknowledged can be presented again long after its situation settled.
 #   fm-branch-outcome.sh processed-init [--held-lock]
-#     Rebuild the bounded per-task outcome indexes, then create the processed
-#     marker at the current read cursor when it does not exist yet; validate a
-#     present marker without changing it. --held-lock is only for a descendant
-#     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
-#     run its redirected presentation body in a subshell on Bash 3.2); it skips
-#     the nested acquire so drain's bounded lock wait remains the deadline.
+#     Validate the read cursor and the processed marker without changing them,
+#     then rebuild the bounded per-task outcome indexes. --held-lock is only
+#     for a descendant of the process holding $STATE/.branch-outcomes.lock
+#     (fm-wake-drain.sh may run its redirected presentation body in a subshell
+#     on Bash 3.2); it skips the nested acquire so drain's bounded lock wait
+#     remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
+#   fm-branch-outcome.sh lookup --seqs <n,...>
+#     Print the requested records in sequence order only when every sequence
+#     exists; validate the full store while holding its lock.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -89,9 +128,15 @@
 #     acknowledge that row. Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
+#   fm-branch-outcome.sh seed-tail
+#     Under the lock, when the store has rows and the display tail copy is
+#     absent, validate only the newest complete rows within the display-tail
+#     row and byte budget and write the copy from them; otherwise read and
+#     change nothing. fm-session-start.sh runs it at every locked session
+#     start, on every harness and away posture, before the drain.
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -105,9 +150,20 @@ MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
+OUTCOME_TAIL="$STATE/.branch-outcomes-tail.jsonl"
+OUTCOME_TAIL_ROWS=200
+OUTCOME_TAIL_MAX_BYTES=1048576
+# The "recordedAgo" field present and unprocessed add to captain rows (see the
+# usage above).
+# Callers pass --argjson now "$(date +%s)".
+# shellcheck disable=SC2016  # jq program text: $now and $s are jq variables.
+RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
+  | if $s < 3600 then "\($s / 60 | floor)m"
+    elif $s < 172800 then "\($s / 3600 | floor)h"
+    else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -174,9 +230,10 @@ read_processed() {
   printf '%s\n' "$value"
 }
 
-last_seq() {
-  [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  jq -Rse '
+last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
+  local file=${1:-$STORE} start=${2:-1}
+  [ -s "$file" ] || { printf '0\n'; return 0; }
+  jq -Rse --argjson start "$start" '
     def valid:
       type == "object"
       and (
@@ -193,18 +250,18 @@ last_seq() {
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
       and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
-      and (.silent != true or (.task == "fleet" and .verdict == "routine"));
+      and (.silent != true or .verdict == "routine");
     if endswith("\n") then split("\n")[:-1]
     else error("unterminated outcome store")
     end
     | map(fromjson)
     | . as $rows
     | if reduce range(0; length) as $i
-        (true; . and ($rows[$i] | valid and .seq == ($i + 1)))
+        (true; . and ($rows[$i] | valid and .seq == ($i + ($start // $rows[0].seq))))
       then .[-1].seq
       else error("malformed or non-sequential outcome store")
       end
-  ' "$STORE" 2>/dev/null
+  ' "$file" 2>/dev/null
 }
 
 record_seq() { # <jsonl-line>
@@ -296,6 +353,24 @@ EOF
   publish_outcome_index_ready "$(last_seq)"
 }
 
+write_outcome_tail() { # [<bounded input file>] (append uses the store)
+  local tmp input=${1:-$STORE}
+  tmp=$(mktemp "$STATE/.branch-outcomes-tail.XXXXXX") || return 1
+  if ! { tail -n "$OUTCOME_TAIL_ROWS" "$input" | LC_ALL=C awk -v budget="$OUTCOME_TAIL_MAX_BYTES" '
+        { row[NR] = $0 }
+        END {
+          first = NR + 1
+          while (first > 1 && total + length(row[first - 1]) + 1 <= budget) {
+            first--
+            total += length(row[first]) + 1
+          }
+          for (i = first; i <= NR; i++) print row[i]
+        }' > "$tmp" && mv -f -- "$tmp" "$OUTCOME_TAIL"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 print_unread() {
   local cursor last
   cursor=$(read_cursor)
@@ -350,8 +425,13 @@ print_unprocessed() {
     return 1
   fi
   [ -s "$STORE" ] || return 0
-  jq -c --argjson processed "$processed" --argjson cursor "$cursor" \
-    'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)' "$STORE"
+  jq -cn --argjson processed "$processed" --argjson cursor "$cursor" --argjson now "$(date +%s)" \
+    "$RECORDED_AGO_JQ"'(reduce inputs as $row ([];
+        if length < 32 and $row.verdict == "captain" and $row.seq > $processed and $row.seq <= $cursor
+        then . + [$row] else . end))[]
+      | ("… [summary abbreviated; read the full outcome with bin/fm-branch-outcome.sh lookup --seqs \(.seq)]") as $note
+      | .summary |= (if length > 1024 then .[:(1024 - ($note | length))] + $note else . end)
+      | . + {recordedAgo: recorded_ago}' "$STORE"
 }
 
 # Assumes $LOCK is already held. Callers that do not already hold it use the
@@ -369,16 +449,12 @@ processed_init_locked() {
     echo "error: refusing processed initialization because the outcome cursor is ahead of the store" >&2
     return 1
   fi
-  if [ -e "$PROCESSED" ]; then
-    if ! processed_seq=$(read_processed); then
-      return 1
-    fi
-    if [ "$processed_seq" -gt "$cursor_seq" ]; then
-      echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
-      return 1
-    fi
-  else
-    write_processed "$cursor_seq" || return 1
+  if ! processed_seq=$(read_processed); then
+    return 1
+  fi
+  if [ "$processed_seq" -gt "$cursor_seq" ]; then
+    echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
+    return 1
   fi
   if ! rebuild_outcome_indexes; then
     echo "error: outcome index migration could not be completed safely" >&2
@@ -442,8 +518,8 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
-    if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
-      echo "error: silent outcomes must be routine fleet outcomes" >&2
+    if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
+      echo "error: silent outcomes must have the routine verdict" >&2
       exit 2
     fi
     fm_lock_acquire_wait "$LOCK"
@@ -464,6 +540,7 @@ case "$CMD" in
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
       "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    write_outcome_tail || echo "warning: outcome $SEQ was stored but its display tail copy could not be refreshed" >&2
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still
@@ -514,6 +591,33 @@ case "$CMD" in
       exit 1
     fi
     if ! advance_cursor "$THROUGH"; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
+    fm_lock_release "$LOCK"
+    ;;
+  present)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! LAST_SEQ=$(last_seq); then
+      fm_lock_release "$LOCK"
+      echo "error: refusing presentation because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! CURSOR_SEQ=$(read_cursor) || ! PROCESSED_SEQ=$(read_processed); then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
+    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ] || [ "$PROCESSED_SEQ" -gt "$CURSOR_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing presentation because the outcome cursor or processed marker is out of order" >&2
+      exit 1
+    fi
+    if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
+        --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'
+        select(.seq > $cursor or (.verdict == "captain" and .seq > $processed))
+        | . + {unread: (.seq > $cursor)}
+        | if .verdict == "captain" then . + {recordedAgo: recorded_ago} else . end' "$STORE"; then
       fm_lock_release "$LOCK"
       exit 1
     fi
@@ -613,6 +717,38 @@ case "$CMD" in
     fi
     fm_lock_release "$LOCK"
     ;;
+  lookup)
+    [ "$#" -eq 2 ] && [ "$1" = --seqs ] || usage
+    SEQS=$2
+    case "$SEQS" in ''|,*|*,|*,,*) usage ;; esac
+    IFS=, read -r -a REQUESTED <<< "$SEQS"
+    [ "${#REQUESTED[@]}" -gt 0 ] || usage
+    WANT='['
+    SEP=
+    for SEQ in "${REQUESTED[@]}"; do
+      bounded_uint "$SEQ" || usage
+      WANT="${WANT}${SEP}${SEQ}"
+      SEP=,
+    done
+    WANT="${WANT}]"
+    printf '%s\n' "$WANT" | jq -e 'length == (unique | length)' >/dev/null || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing lookup because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! jq -cs --argjson wanted "$WANT" '
+      . as $rows
+      | [ $wanted[] as $seq | $rows[] | select(.seq == $seq) ]
+      | if length == ($wanted | length) then .[] else error("requested outcome sequence is missing") end
+    ' "$STORE" 2>/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing lookup because one or more requested outcome sequences are missing" >&2
+      exit 1
+    fi
+    fm_lock_release "$LOCK"
+    ;;
   startup-replay)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
@@ -634,6 +770,42 @@ case "$CMD" in
         exit 1
       fi
     fi
+    fm_lock_release "$LOCK"
+    ;;
+  seed-tail)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if [ -e "$OUTCOME_TAIL" ] || [ ! -s "$STORE" ]; then
+      fm_lock_release "$LOCK"
+      exit 0
+    fi
+    WINDOW=$(mktemp "$STATE/.branch-outcomes-window.XXXXXX") || { fm_lock_release "$LOCK"; exit 1; }
+    # One extra byte distinguishes a complete first row from a partial one.
+    # Discard the first line when the store exceeds this window: it may be
+    # partial (or empty when the boundary falls exactly on a newline).
+    START=1
+    STORE_SIZE=$(_fm_status_file_size "$STORE") || { rm -f -- "$WINDOW"; fm_lock_release "$LOCK"; exit 1; }
+    if [ "$STORE_SIZE" -gt "$((OUTCOME_TAIL_MAX_BYTES + 1))" ]; then
+      START=null
+      tail -c "$((OUTCOME_TAIL_MAX_BYTES + 1))" "$STORE" | awk 'NR > 1' | tail -n "$OUTCOME_TAIL_ROWS" > "$WINDOW"
+    else
+      tail -n "$OUTCOME_TAIL_ROWS" "$STORE" > "$WINDOW"
+      # Even a short store can have more rows than the display limit.
+      [ "$(wc -l < "$STORE")" -le "$OUTCOME_TAIL_ROWS" ] || START=null
+    fi
+    if ! last_seq "$WINDOW" "$START" >/dev/null; then
+      rm -f -- "$WINDOW"
+      fm_lock_release "$LOCK"
+      echo "error: refusing to seed the display tail copy because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! write_outcome_tail "$WINDOW"; then
+      rm -f -- "$WINDOW"
+      fm_lock_release "$LOCK"
+      echo "error: the display tail copy could not be seeded from the outcome store" >&2
+      exit 1
+    fi
+    rm -f -- "$WINDOW"
     fm_lock_release "$LOCK"
     ;;
   *) usage ;;

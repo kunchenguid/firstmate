@@ -53,7 +53,7 @@ printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-remote-file.sh" \
   "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-wake-lib.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-path-lib.sh" "$REMOTE_ROOT/bin/"
 ln -s "$(command -v tasks-axi)" "$REMOTE_ROOT/bin/tasks-axi"
 ln -s "$(command -v node)" "$REMOTE_ROOT/bin/node"
 chmod +x "$REMOTE_ROOT/bin"/*.sh
@@ -380,7 +380,7 @@ bash -c '. "$1"; fm_pending_reply_tick "$2"' _ "$ROOT/bin/fm-pending-reply-lib.s
   || fail "watcher tick did not escalate the undelivered wake, got $(grep '^phase=' "$escalated_rec")"
 [ -z "$(grep '^delivered_epoch=' "$escalated_rec" | cut -d= -f2-)" ] \
   || fail "escalation must not invent a delivery for the undelivered wake"
-[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]:" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]" "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "undelivered wake escalation was not published exactly once"
 set +e
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending > "$TMP_ROOT/wake-escalated-resume.out" 2>&1
@@ -398,7 +398,7 @@ assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" "escalated wake 
   || fail "successful wake retry did not confirm delivery on the same correlation"
 [ "$(grep '^phase=' "$escalated_rec" | cut -d= -f2-)" = awaiting_report ] \
   || fail "delivered wake retry did not return the correlation to awaiting its report"
-[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]:" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]" "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "wake retry duplicated the published escalation"
 write_backlog '- [ ] after-escalated - next handoff flows once the escalated wake is retried (repo: alpha)'
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios after-escalated >/dev/null \
@@ -689,5 +689,27 @@ fresh_out=$(FM_HOME="$FRESH" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
 assert_not_contains "$fresh_out" 'SECONDMATE_HANDOFF:' "unconfigured bootstrap emitted a remote handoff diagnostic"
 [ ! -s "$SSH_COUNT" ] || fail "unconfigured bootstrap touched SSH"
 pass "unconfigured bootstrap has no remote handoff behavior"
+
+# A .tasks.toml for another backend in the receiver's working directory must
+# not redirect the receipt, which names explicit markdown files.
+RECV_HOME="$TMP_ROOT/decoy-receive-home"
+RECV_DECOY="$TMP_ROOT/decoy-receive-cwd"
+mkdir -p "$RECV_HOME/bin" "$RECV_HOME/data" "$RECV_HOME/state/handoff" "$RECV_DECOY"
+printf 'fixture\n' > "$RECV_HOME/AGENTS.md"
+printf 'ios\n' > "$RECV_HOME/.fm-secondmate-home"
+printf '## Queued\n\n## Done\n' > "$RECV_HOME/data/backlog.md"
+printf '## Queued\n- [ ] decoy-recv - received despite a cwd beads config (repo: alpha)\n\n## Done\n' \
+  > "$RECV_HOME/state/handoff/ios.outbox.md"
+recv_bytes=$(LC_ALL=C wc -c < "$RECV_HOME/state/handoff/ios.outbox.md" | tr -d ' ')
+recv_hash=$(sha256_file "$RECV_HOME/state/handoff/ios.outbox.md")
+printf '1\n%s\n%s\n' "$recv_bytes" "$recv_hash" > "$RECV_HOME/state/handoff/.ios.upload-generation"
+printf 'backend = "beads"\n\n[beads]\ndb = "%s/missing/beads.db"\n' "$RECV_DECOY" > "$RECV_DECOY/.tasks.toml"
+recv_out=$(cd "$RECV_DECOY" && FM_HOME="$RECV_HOME" "$ROOT/bin/fm-backlog-receive.sh" \
+  state/handoff/ios.outbox.md "$recv_bytes" "$recv_hash" 1 2>&1) \
+  || fail "receipt from a cwd with a beads .tasks.toml failed: $recv_out"
+assert_contains "$recv_out" 'received: ios moved=1 already=0' "decoy-cwd receipt did not move the item"
+assert_grep 'decoy-recv' "$RECV_HOME/data/backlog.md" "decoy-cwd receipt did not reach the destination backlog"
+assert_absent "$RECV_HOME/state/handoff/ios.outbox.md" "decoy-cwd receipt kept the delivered outbox"
+pass "a cwd .tasks.toml for another backend does not redirect a markdown receipt"
 
 echo "ALL TESTS PASSED"

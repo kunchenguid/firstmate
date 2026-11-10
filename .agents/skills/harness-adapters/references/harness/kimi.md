@@ -1,6 +1,7 @@
 # Kimi Code
 
-Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
+The folder prompt was recorded again on 2026-10-23 with Kimi Code CLI 2.3.0 and 2.3.1, which reworded it; `tests/fm-kimi-trust-prompt-live-e2e.test.sh` refreshes that evidence against the installed binary.
 
 ## Operating facts
 
@@ -13,16 +14,21 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 | Exit command | `/exit`. |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
-| Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None observed on a clean first launch in a fresh pooled worktree. |
+| Autonomy | `--auto` is the `Never Ask` tier; `-y` and `--yolo` now select the distinct, weaker `Ask When Needed` tier and are not used. |
+| Trust dialog | A fresh worktree shows `Trust this folder?` with the affirmative option pre-selected; spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - and one recorded option pair: `❯ Trust this folder` with `Don't trust` on 2.0.0, `❯ Trust and continue` with `Exit` on 2.3.0), sends Enter on every poll the complete dialog is still there, verifies that a later visible-pane capture no longer contains it, and then continues the ordinary readiness gate. A 2.3.0 prompt that announces project MCP servers (`Start N MCP server(s) automatically` over `Config: <file>`) is never answered, because Enter starts those servers before any login and Kimi's per-folder trust is not a consent decision that covers them; the launch fails naming that reason, and the operator removes the servers from the file the `Config:` line names. A prompt that pages its disclosure (`←→ page · N / M`) receives no key either, because the announcement can sit on a page that is not shown, and a prompt collapsed for a short terminal is never the complete dialog. `bin/fm-kimi-trust-lib.sh` owns the predicates and `tests/captures/kimi-code-2.3.0/README.md` the recorded wordings. Trust is never pre-registered in `config.toml`; the dialog is answered live. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
-| Environment marker | None; detection uses process ancestry command name `kimi`. |
+| Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
-| Effort | No verified reasoning-effort flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
+| Effort | `kimi provider list --json` exposes per-model `supportEfforts` values `low`, `high`, and `max` plus a `defaultEffort`; the launch flag and mapping remain unverified, so spawn records and omits requested effort per `references/common/model-and-effort.md`. |
 
 ## Readiness-gated start
 
-`../../../bin/fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+`../../../bin/fm-spawn.sh` launches Kimi bare, handles the complete trust dialog when it appears in a wording `bin/fm-kimi-trust-lib.sh` recognizes, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+Kimi 2.3.0 reads a root `.mcp.json` at the git worktree root as a project MCP declaration in addition to `.kimi-code/mcp.json`, while its documentation names only the latter; the prompt names whichever file declared the servers on its `Config:` line, which is why the refusal reads the prompt rather than any file.
+Every trust predicate reads `fm_backend_visible_capture` - the viewport with no scrollback - never the 120-line history read the delivery gate uses: the dialog is a TUI frame, and a history-backed capture would keep reporting it after Kimi redrew past it, storming Enter into a live composer and then failing an already trusted spawn.
+`FM_BACKEND_VISIBLE_CAPTURE` in `bin/fm-backend.sh` is the authoritative capability list; [`docs/rex-backend.md`](../../../../../docs/rex-backend.md#current-operation-and-safety) explains Rex's derived viewport.
+Orca has only a history read; cmux's `read-screen` without `--scrollback` plausibly reads just the viewport but has not been live-verified. A Kimi spawn on either is therefore refused at preflight, before the worktree or pane exists, naming the backend and the missing verified viewport capability, pending that verification for cmux. There is no fallback to the scrollback read. A viewport read that exits nonzero fails readiness immediately with the backend named, rather than being mistaken for a blank screen. A successful but blank viewport read is absence of evidence, not evidence of a cleared dialog: it costs that poll, restarts the two-capture ready count below, and leaves the trust diagnostics where they were. The trust answer is retried until the dialog clears - Kimi swallows keypresses during its startup window, so a single Enter can be dropped - and the re-send is gated on the complete dialog still being on that visible pane, so it cannot fire once the dialog cleared. Trust is accepted only after a later visible-pane capture proves that the dialog cleared; a stuck dialog fails with the observed dialog signals and the answer count in the diagnostic.
+Any single marker of the dialog on that visible pane - `Trust this folder`, `Trust and continue`, or the negative `Don't trust` option - withholds the ready verdict, because a capture caught mid-redraw and a capture that has painted only the box title both miss the complete dialog while the banner above it would otherwise read as ready. The banner also prints before the dialog paints at all, which no single capture can distinguish from a ready pane, so the verdict additionally requires two consecutive captures that are each ready and free of dialog text; a capture that is not ready, and a blank one, restarts that count, which is what keeps the pre-banner boot captures and redraw frames from spending it.
 This launch-then-send shape is mandatory because Kimi rejects positional instructions as an unknown command.
 The path must be absolute because the instructions live outside the task worktree and Kimi reads them there without `--add-dir`.
 

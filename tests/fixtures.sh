@@ -94,8 +94,12 @@ fm_test_fake_gh_axi() {
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# set, each send-keys -l payload is appended one per line. When FM_FAKE_PANE_LOG
+# is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
+# carry no -l) is appended there instead, one per line in send order. Optional
+# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. A staged OpenCode 2
+# launch simulates its busy-state plugin per FM_FAKE_OPENCODE_TURN (see below),
+# and FM_FAKE_ENTER_LOG records each bare Enter key.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -105,26 +109,168 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Simulate the OpenCode 2 worker's busy-state plugin reporting its turn start,
+# using the exact apply command fm-spawn generated into the worktree plugin.
+fake_opencode_plugin() {
+  printf '%s\n' "${FM_FAKE_PANE_PATH:-}/.opencode/plugins/fm-busy-state.js"
+}
+fake_opencode_turn_starts() {
+  local plugin bin state id gen
+  plugin=$(fake_opencode_plugin)
+  [ -f "$plugin" ] || return 0
+  bin=$(sed -n 's/.*execFile("\([^"]*fm-busy-event\.sh\)".*/\1/p' "$plugin" | head -1)
+  state=$(sed -n 's/.*"apply", "\([^"]*\)", "\([^"]*\)", state,.*/\1/p' "$plugin" | head -1)
+  id=$(sed -n 's/.*"apply", "\([^"]*\)", "\([^"]*\)", state,.*/\2/p' "$plugin" | head -1)
+  gen=$(sed -n 's/.*"--gen", "\([^"]*\)".*/\1/p' "$plugin" | head -1)
+  [ -n "$bin" ] && [ -n "$gen" ] || return 0
+  "$bin" apply "$state" "$id" busy --gen "$gen" --source opencode-plugin \
+    --event session-execution-started >/dev/null 2>&1 || true
+}
+# FM_FAKE_OPENCODE_TURN picks what a launched OpenCode 2 worker does with its
+# brief: auto (default) starts the turn on launch, enter waits for one Enter,
+# never leaves it unsent. The pending-Enter marker sits beside the plugin.
+# Each composer cursor read is counted beside the plugin; the composer reads
+# unknown (no numeric cursor row) unless FM_FAKE_OPENCODE_COMPOSER_UNKNOWN_READS
+# is set, in which case the reads past that count render a drawn composer that
+# holds the brief while the pending-Enter marker exists.
+fake_opencode_launched() {
+  case "${FM_FAKE_OPENCODE_TURN:-auto}" in
+    auto) fake_opencode_turn_starts ;;
+    enter)
+      : > "$(fake_opencode_plugin).fake-pending"
+      : > "$(fake_opencode_plugin).fake-launching"
+      ;;
+  esac
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
+fake_opencode_composer_drawn() {
+  local reads
+  reads=$(cat "$(fake_opencode_plugin).fake-composer-reads" 2>/dev/null) || reads=0
+  [ -n "${FM_FAKE_OPENCODE_COMPOSER_UNKNOWN_READS:-}" ] \
+    && [ "$reads" -gt "$FM_FAKE_OPENCODE_COMPOSER_UNKNOWN_READS" ]
+}
+window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{cursor_y}"*)
+        if [ -f "$(fake_opencode_plugin)" ]; then
+          reads=$(cat "$(fake_opencode_plugin).fake-composer-reads" 2>/dev/null) || reads=0
+          printf '%s\n' "$((reads + 1))" > "$(fake_opencode_plugin).fake-composer-reads"
+          if fake_opencode_composer_drawn; then printf '1\n'; exit 0; fi
+        fi
+        ;;
+    esac
+    printf 'firstmate\n'
+    exit 0
+    ;;
+  capture-pane)
+    if ! fake_opencode_composer_drawn; then
+      :
+    elif [ -f "$(fake_opencode_plugin).fake-pending" ]; then
+      printf '╭──────────────╮\n│ prefilled    │\n╰──────────────╯\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0
+    ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
+    [ ! -s "$window_file" ] || cat "$window_file"
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    exit 0
+    ;;
+  kill-window)
+    : > "$window_file"
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-l" ]; then
+        case "$a" in
+          ". '"*"'")
+            staged=${a#". '"}
+            staged=${staged%"'"}
+            if [ -f "$staged" ] && grep -q -- 'opencode.* --standalone --prompt' "$staged"; then
+              fake_opencode_launched
+            fi
+            ;;
+        esac
+      fi
+      prev=$a
+    done
+    if [ "$#" -eq 4 ] && [ "$4" = Enter ]; then
+      [ -z "${FM_FAKE_ENTER_LOG:-}" ] || printf 'enter\n' >> "$FM_FAKE_ENTER_LOG"
+      # The first Enter runs the staged launch line; only a later one reaches
+      # the OpenCode composer.
+      if [ -f "$(fake_opencode_plugin).fake-launching" ]; then
+        rm -f "$(fake_opencode_plugin).fake-launching"
+      elif [ -f "$(fake_opencode_plugin).fake-pending" ]; then
+        rm -f "$(fake_opencode_plugin).fake-pending"
+        fake_opencode_turn_starts
+      fi
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
+          # A spawn types a short line sourcing its staged launch file; log
+          # the staged command itself so suites assert what the pane runs.
+          # Direct literals past the terminal line buffer are truncated, so a
+          # long launch only survives when it arrived through that short source.
+          case "$a" in
+            ". '"*"'")
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              if [ -f "$staged" ]; then
+                a=$(cat "$staged")
+              elif [ "${#a}" -gt 1024 ]; then
+                a=${a:0:1024}
+              fi
+              ;;
+            *)
+              if [ "${#a}" -gt 1024 ]; then
+                a=${a:0:1024}
+              fi
+              ;;
+          esac
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
+      done
+    fi
+    # The pre-launch pane exports ride the text-line form
+    # (`send-keys -t <target> <text> Enter`), which carries no -l flag, so a
+    # suite that asserts on what the pane shell received opts in with its own
+    # log. Skip the flags, the target, and the trailing key so only the payload
+    # is recorded, one per line, in send order.
+    if [ -n "${FM_FAKE_PANE_LOG:-}" ]; then
+      shift
+      skip_next=
+      literal=
+      for a in "$@"; do
+        if [ -n "$skip_next" ]; then skip_next=; continue; fi
+        case "$a" in
+          -t) skip_next=1; continue ;;
+          -l) literal=1; continue ;;
+          Enter|C-m) continue ;;
+          *) [ -n "$literal" ] || printf '%s\n' "$a" >> "$FM_FAKE_PANE_LOG" ;;
+        esac
       done
     fi
     exit 0

@@ -72,10 +72,11 @@ install_scripts() {
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
            fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
            fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
-           fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh \
+           fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
-           fm-gate-refuse-lib.sh; do
+           fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
+           fm-supervision-engine-lib.sh fm-lease-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
@@ -471,6 +472,122 @@ test_park_inert_when_afk() {
   pass "cursor park: inert while away mode is active"
 }
 
+# A supervision host fixture standing in for bin/fm-supervision-host.sh: it
+# records its primary pin and arguments, then closes the way <kind> says.
+write_host_fixture() {  # <dir> <kind>
+  local dir=$1 kind=$2
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "%%s\\t%%s\\t%%s\\n" "$$" "${FM_SUPERVISION_HOST_PRIMARY:-}" "$*" >> "$FM_HOME/state/host-ran"\n'
+    case "$kind" in
+      handback)
+        printf 'printf "watcher: started pid=%%s (beacon fresh)\\n" "$$"\n'
+        printf 'for i in 1 2 3 4 5 6 7 8 9 10; do printf "stale: fixture-win %%s\\n" "$i"; done\n'
+        printf 'printf "supervision-host: the away session could not take this wake: fixture; this wake is yours\\n"\n'
+        printf 'for i in 1 2 3 4 5 6 7 8 9 10; do printf "supervision-host: outcome %%s for demo [routine]: fixture\\n" "$i"; done\n'
+        ;;
+      boundary)
+        printf 'printf "supervision-host: cycle boundary - fixture\\n"\n'
+        ;;
+      stood-down)
+        printf 'printf "supervision-host stood down: this session no longer owns supervision\\n"\n'
+        ;;
+      dies-once)
+        printf '[ "$(wc -l < "$FM_HOME/state/host-ran")" -gt 1 ] || kill -KILL $$\n'
+        printf 'printf "stale: fixture-win after a retry\\n"\n'
+        ;;
+    esac
+    printf 'exit 0\n'
+  } > "$dir/bin/fm-supervision-host.sh"
+  chmod +x "$dir/bin/fm-supervision-host.sh"
+}
+
+test_park_runs_the_supervision_host_only_when_opted_in() {
+  local dir out body
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-off")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  [ -e "$dir/state/arm-ran" ] || fail "a home without config/supervision-host must park on the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home without config/supervision-host ran the supervision host"
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-opted-out")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host-off"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  [ -e "$dir/state/arm-ran" ] || fail "a home opted out by config/supervision-host-off must park on the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home opted out by config/supervision-host-off ran the supervision host"
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-on")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk-contract"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  [ ! -e "$dir/state/arm-ran" ] || fail "an opted-in home ran the plain arm"
+  [ "$(cut -f2,3 "$dir/state/host-ran")" = "$(printf 'cursor\tpark')" ] \
+    || fail "the park must run the host as 'park' with the cursor primary pin: $(cat "$dir/state/host-ran")"
+  [ "$(kind_of_followup "$out")" = watcher ] || fail "a handed-back wake must arrive as a watcher-kind follow-up, got: $out"
+  body=$(followup_of "$out")
+  [ "$(printf '%s\n' "$body" | grep -c '^supervision-host:')" -eq 11 ] \
+    || fail "the follow-up must carry every supervision-host line: $body"
+  [ "$(printf '%s\n' "$body" | grep -c '^stale: fixture-win')" -eq 8 ] \
+    || fail "the follow-up must keep the eight-line cap on wake lines: $body"
+  case "$body" in *'not from the captain: it is not a return'*) ;; *) fail "an away handback must say it is not the captain's return: $body" ;; esac
+
+  # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+  # QUIET), so the same handback beside it carries no away note.
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-quiet")
+  : > "$dir/state/task1.meta"
+  FM_HOME="$dir" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "fixture: could not record quiet mode"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  body=$(followup_of "$out")
+  case "$body" in *'supervision-host:'*) ;; *) fail "the quiet-record handback did not reach main: $out" ;; esac
+  case "$body" in *'not a return'*) fail "a handback beside a quiet record called itself away-posture supervision: $body" ;; esac
+  pass "cursor park: an opted-in home parks on the supervision host and relays every host line"
+}
+
+test_park_host_boundary_stand_down_and_death() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-boundary")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" boundary
+  out=$(run_park "$dir")
+  case "$(followup_of "$out")" in *'supervision-host: cycle boundary - fixture'*) ;; *) fail "the park boundary must reach the session as a follow-up: $out" ;; esac
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-stood-down")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" stood-down
+  out=$(run_park "$dir")
+  [ -z "$out" ] || fail "a host that stood down must end the park silently: $out"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "a host that stood down must not be retried"
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-died")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" dies-once
+  out=$(run_park "$dir")
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "a host that died without a close must be retried: $(cat "$dir/state/host-ran")"
+  case "$(followup_of "$out")" in *'stale: fixture-win after a retry'*) ;; *) fail "the retried host's wake was not delivered: $out" ;; esac
+  pass "cursor park: the host's boundary wakes, its stand-down is silent, and a host that died is retried"
+}
+
 test_park_inert_under_pi_coding_agent() {
   local dir out payload
   dir=$(make_primary_dir "$TMP_ROOT/park-pi-host")
@@ -576,6 +693,104 @@ test_park_stands_down_after_session_takeover() {
   budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-cursor-blocks" 2>/dev/null || true)
   [ "$budget_count" = 1 ] || fail "the replaced session mutated nag state after takeover: $budget_count"
   pass "cursor park: session takeover stops polling without output or state mutation"
+}
+
+# A fakebin standing in for Git Bash: uname reports <uname>, ps refuses -o as
+# Cygwin's does and reports every local process as a shell whose parent link is
+# severed, and `ps -W` lists FM_TEST_WIN_TABLE. The session therefore resolves
+# only through the Windows bridge, as the tagged win:7204 its CLAUDE_PID names.
+windows_session_fakebin() {  # <dir> <uname>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %s\n' "$2" > "$fakebin/uname"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) echo "ps: unknown option -- o" >&2; exit 1 ;;
+    -W)
+      printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+      [ -z "${FM_TEST_WIN_TABLE:-}" ] || printf '%s\n' "$FM_TEST_WIN_TABLE"
+      exit 0
+      ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+printf '%s 1 %s 9999 ? 0 00:00:00 /usr/bin/bash\n' "$pid" "$pid"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+WIN_SESSION_ROW='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
+WIN_OTHER_ROW='  4201600       0       0       7300  ?              0 22:30:00 C:\Users\u\.local\bin\claude.exe'
+
+run_windows_park() {  # <dir> <fakebin> <windows-table>
+  printf '%s' "$CURSOR_PAYLOAD" | env -u PI_CODING_AGENT -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+    PATH="$2:$PATH" FM_TEST_WIN_TABLE="$3" FM_HOME="$1" FM_CURSOR_PARK_POLL=1 \
+    CLAUDE_PID=7204 CLAUDE_CODE_SESSION_ID=sess-win \
+    bash "$1/bin/fm-turnend-guard-cursor.sh" 2>/dev/null
+}
+
+# On Windows/Git Bash the session lock legitimately holds a tagged win:<pid>
+# (bin/fm-session-lock-lib.sh). The park must recognize its own tagged lock and
+# reclaim a dead tagged holder's, instead of reading either as malformed.
+test_park_honors_a_windows_tagged_session_lock() {
+  local dir fakebin out
+  dir=$(make_primary_dir "$TMP_ROOT/park-win-owned")
+  fakebin=$(windows_session_fakebin "$dir" MINGW64_NT-10.0-26200)
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  printf 'win:7204\n' > "$dir/state/.lock"
+  out=$(run_windows_park "$dir" "$fakebin" "$WIN_SESSION_ROW")
+  [ -e "$dir/state/arm-ran" ] || fail "the park did not arm for the session holding its own tagged lock"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "the owner of a tagged lock must receive the actionable wake, got: $out"
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-win-reclaim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  printf 'win:7300\n' > "$dir/state/.lock"
+  out=$(run_windows_park "$dir" "$fakebin" "$WIN_SESSION_ROW")
+  [ "$(cat "$dir/state/.lock")" = 'win:7204' ] \
+    || fail "a dead tagged holder's lock was not reclaimed: $(cat "$dir/state/.lock")"
+  [ -e "$dir/state/arm-ran" ] || fail "the park did not arm after reclaiming a dead tagged holder's lock"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "the reclaiming session must receive the actionable wake, got: $out"
+  pass "cursor park: a Windows-tagged session lock is owned by its session and reclaimed from a dead holder"
+}
+
+# A live tagged holder is another session, a malformed tagged value is no
+# identity, and the tag means nothing off Windows: each leaves the lock alone.
+test_park_leaves_other_tagged_session_locks_alone() {
+  local spec case_name uname lock table dir fakebin out
+  for spec in \
+    "live-other|MINGW64_NT-10.0-26200|win:7300|both" \
+    "malformed|MINGW64_NT-10.0-26200|win:72x4|session" \
+    "not-windows|Linux|win:7300|session"; do
+    IFS='|' read -r case_name uname lock table <<EOF
+$spec
+EOF
+    case "$table" in
+      both) table="$WIN_SESSION_ROW
+$WIN_OTHER_ROW" ;;
+      *) table=$WIN_SESSION_ROW ;;
+    esac
+    dir=$(make_primary_dir "$TMP_ROOT/park-win-$case_name")
+    fakebin=$(windows_session_fakebin "$dir" "$uname")
+    : > "$dir/state/task1.meta"
+    write_arm_fixture "$dir" actionable
+    printf '%s\n' "$lock" > "$dir/state/.lock"
+    out=$(run_windows_park "$dir" "$fakebin" "$table")
+    [ -z "$out" ] || fail "$case_name: a session that does not own the tagged lock emitted a follow-up: $out"
+    [ ! -e "$dir/state/arm-ran" ] || fail "$case_name: the park armed without owning the tagged lock"
+    [ "$(cat "$dir/state/.lock")" = "$lock" ] \
+      || fail "$case_name: the tagged lock was rewritten to $(cat "$dir/state/.lock")"
+  done
+  pass "cursor park: a live, malformed, or off-Windows tagged lock is left alone"
 }
 
 test_park_inert_in_child_worktree() {
@@ -695,11 +910,15 @@ test_park_stands_down_when_superseded
 test_park_serializes_supersession_with_followup_commit
 test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
+test_park_runs_the_supervision_host_only_when_opted_in
+test_park_host_boundary_stand_down_and_death
 test_park_inert_under_pi_coding_agent
 test_park_still_parks_with_pi_leak_and_cursor_identity
 test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
 test_park_stands_down_after_session_takeover
+test_park_honors_a_windows_tagged_session_lock
+test_park_leaves_other_tagged_session_locks_alone
 test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context

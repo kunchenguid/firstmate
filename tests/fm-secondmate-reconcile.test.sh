@@ -74,7 +74,6 @@ make_remote_ssh_stub() {  # <dir> -> echoes fakebin dir
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -931,6 +930,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 \
     "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
   watcher=$!
   i=0

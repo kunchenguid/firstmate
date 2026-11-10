@@ -31,19 +31,22 @@ HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-gemini-harness)
 
 test_gemini_marker_outranks_inherited_claudecode() {
-  local out
+  local out fakebin base_path
+  base_path=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+  fakebin=$(fm_fakebin "$TMP_ROOT/marker-ordering")
+  fm_fake_blind_ancestry "$fakebin"
   # This is the exact hazard: gemini does not clear an inherited CLAUDECODE, so
   # a gemini worker under a claude primary carries both markers at once.
-  out=$(CLAUDECODE=1 GEMINI_CLI=1 "$HARNESS")
+  out=$(PATH="$fakebin:$base_path" CLAUDECODE=1 GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "CLAUDECODE + GEMINI_CLI must detect gemini, got '$out'"
   # Drive the two signals apart so the case above cannot go quietly vacuous:
   # each marker alone must still produce its own verdict.
-  out=$(env -u CLAUDECODE GEMINI_CLI=1 "$HARNESS")
+  out=$(env -u CLAUDECODE PATH="$fakebin:$base_path" GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "GEMINI_CLI alone must detect gemini, got '$out'"
-  out=$(env -u GEMINI_CLI CLAUDECODE=1 "$HARNESS")
+  out=$(env -u GEMINI_CLI PATH="$fakebin:$base_path" CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # Cursor's marker still outranks gemini's, preserving the documented order.
-  out=$(CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
+  out=$(PATH="$fakebin:$base_path" CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT must still outrank GEMINI_CLI, got '$out'"
   pass "fm-harness.sh: gemini's marker outranks an inherited CLAUDECODE"
 }
@@ -125,9 +128,10 @@ test_gemini_node_bundle_is_not_ancestry_detectable() {
   # documents ancestry as covering gemini or "fixes" it by matching MainThread.
   comm=$(node -e 'const{execSync}=require("child_process");process.stdout.write(execSync("ps -o comm= -p "+process.pid).toString().trim())' 2>/dev/null)
   [ -n "$comm" ] || return 0
-  if [ "$comm" = node ]; then
-    # A platform whose node DOES report `node` reaches the interpreter arm, and
-    # there the gemini script path must win.
+  case "$(basename -- "$comm")" in node*)
+    # A platform whose comm basename matches production's `node*` interpreter
+    # arm, including a versioned name, reaches that arm, and there the gemini
+    # script path must win.
     cat > "$dir/gemini" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
@@ -138,12 +142,13 @@ process.stdout.write(r.stdout || '');
 JS
     out=$(FM_HARNESS_BIN="$HARNESS" node "$dir/gemini" 2>/dev/null | tr -d '\n')
     [ "$out" = gemini ] \
-      || fail "where node reports comm=node, a gemini script path must detect gemini, got '$out'"
-    pass "fm-harness.sh: this platform's node reports comm=node and ancestry reaches gemini"
+      || fail "where node reports comm=$comm, a gemini script path must detect gemini, got '$out'"
+    pass "fm-harness.sh: this platform's node reports comm=$comm and ancestry reaches gemini"
     return 0
-  fi
-  # The measured case: comm is not `node`, so ancestry cannot see the bundle and
-  # the marker is the only detection path.
+    ;;
+  esac
+  # The measured case: comm does not reach the interpreter arm, so ancestry
+  # cannot see the bundle and the marker is the only detection path.
   cat > "$dir/gemini" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };

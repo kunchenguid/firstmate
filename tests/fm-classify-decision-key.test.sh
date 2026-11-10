@@ -11,7 +11,9 @@
 # verb, regardless of order or count. These tests drive the REAL
 # status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
-# fold's own source text. Also covers status_key_closing_verb, which reports how
+# fold's own source text. Also covers status_event_recorded: a recorded line
+# stays recorded across a later resolved line for its key. Also covers
+# status_key_closing_verb, which reports how
 # the status side currently reads one key so a consumer can tell a settled key
 # from one handed to a durable captain-held task (bin/fm-captain-hold.sh
 # diverged). Cross-drain cursor persistence and the incremental
@@ -338,3 +340,267 @@ EOF
 
 test_closing_verb_separates_resolution_from_durable_transfer
 test_closing_verb_tracks_the_last_transition_in_both_positions
+
+# The per-key read pre-selects candidate lines by their leading verb before the
+# bash fold sees them, and the resolve/durable-transfer verbs are overridable, so
+# an overridden verb buried behind unrelated history must still close its key.
+test_closing_verb_honors_overridden_transition_verbs() {
+  local dir f i
+  dir=$(case_dir closing-verb-overrides)
+  f="$dir/task.status"
+  printf 'kind=ship\n' > "$dir/task.meta"
+  printf 'blocked [key=route]: waiting\n' > "$f"
+  for ((i = 0; i < 200; i++)); do
+    printf 'note: routine reply\nworking: still going\nContinuation prose here.\n' >> "$f"
+  done
+  printf 'answered [key=route]: settled\n' >> "$f"
+  [ "$(FM_CLASSIFY_RESOLVE_VERB=answered status_key_closing_verb "$f" route)" = answered ] \
+    || fail "an overridden resolve verb stopped closing its key"
+  [ "$(status_key_closing_verb "$f" route)" = blocked ] \
+    || fail "without the override the same line must leave the key open"
+  printf 'blocked [key=access]: waiting\nawaiting-captain [key=access]: handed off\n' >> "$f"
+  [ "$(FM_CLASSIFY_CAPTAIN_HELD_VERB=awaiting-captain status_key_closing_verb "$f" access)" = awaiting-captain ] \
+    || fail "an overridden durable-transfer verb stopped closing its key"
+  pass "overridden resolve and durable-transfer verbs still close keys behind unrelated history"
+}
+
+test_closing_verb_filters_unrelated_history_without_subshell_growth() {
+  local dir f want tag size i level small large
+  dir=$(case_dir closing-verb-processes)
+  f="$dir/task.status"
+  printf 'kind=secondmate\n' > "$dir/task.meta"
+  for want in route default; do
+    tag="[key=$want]"
+    [ "$want" != default ] || tag=''
+    for size in 1 1000; do
+      printf 'blocked corr=0123456789abcdef %s: waiting\n' "$tag" > "$f"
+      for ((i = 0; i < size; i++)); do
+        printf 'note: routine reply\nworking: mentions [key=%s] in prose\ndone: another task finished\nfailed: unrelated work\nPR ready https://example.com/pull/1\n\n' "$want" >> "$f"
+        if [ "$want" != default ]; then
+          printf 'blocked [key=other]: another question\nresolved [key=other]: answered\n' >> "$f"
+        fi
+      done
+      printf 'resolved corr=0123456789abcdef: %s answered\nnote: cleanup complete\n' "$tag" >> "$f"
+      : > "$dir/children-$size"
+      (
+        level=$BASH_SUBSHELL
+        set -T
+        trap 'if [ "$BASH_SUBSHELL" -gt "$level" ]; then printf x >> "$dir/children-$size"; fi' DEBUG
+        status_key_closing_verb "$f" "$want" > "$dir/output"
+      )
+      [ "$(cat "$dir/output")" = resolved ] || fail "$want lost its resolution behind unrelated history"
+    done
+    small=$(wc -c < "$dir/children-1")
+    large=$(wc -c < "$dir/children-1000")
+    [ "$large" -le "$((small + 20))" ] || fail "$want launches subprocess work for unrelated history ($small -> $large)"
+  done
+  pass "per-key reads retain resolutions without subprocess work growing with unrelated history"
+}
+
+test_closing_verb_filter_preserves_terminal_chronology() {
+  local dir f kind want tag terminal expected
+  dir=$(case_dir closing-verb-terminals)
+  f="$dir/task.status"
+  for kind in ship scout secondmate; do
+    printf 'kind=%s\n' "$kind" > "$dir/task.meta"
+    for want in access default; do
+      tag="[key=$want]"
+      [ "$want" != default ] || tag=''
+      for terminal in 'done' failed; do
+        printf 'blocked %s: waiting\n' "$tag" > "$f"
+        case "$terminal" in
+          done) printf 'done: report saved\n' >> "$f" ;;
+          failed) printf 'failed corr=0123456789abcdef [key=other]: task failed\n' >> "$f" ;;
+        esac
+        printf 'note: cleanup complete\n' >> "$f"
+        expected=$terminal
+        [ "$kind" != secondmate ] || expected=blocked
+        [ "$(status_key_closing_verb "$f" "$want")" = "$expected" ] || fail "$kind/$want lost $terminal chronology"
+        printf 'needs-decision: [key=%s] reopened\nnote: more cleanup\n' "$want" >> "$f"
+        [ "$(status_key_closing_verb "$f" "$want")" = needs-decision ] || fail "$kind/$want lost a post-terminal reopening"
+      done
+    done
+  done
+  pass "per-key filtering retains ship/scout terminals, reopenings, and secondmate blockers"
+}
+
+test_closing_verb_filters_unrelated_history_without_subshell_growth
+test_closing_verb_honors_overridden_transition_verbs
+test_closing_verb_filter_preserves_terminal_chronology
+
+test_bare_prose_cannot_impersonate_a_terminal_declaration() {
+  local dir f kind word open
+  dir=$(case_dir prose-terminal)
+  open=$(printf 'route\tneeds-decision\tA or B?\n')
+  for kind in ship scout; do
+    for word in 'done' failed; do
+      f="$dir/$kind-$word.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word.meta"
+      printf 'needs-decision [key=route]: A or B?\npaused: waiting on the vendor\nSteps remaining:\n %s\n' \
+        "$word" > "$f"
+      assert_fold "$f" "$open" "$kind: bare '$word' prose"
+      [ "$(status_key_closing_verb "$f" route)" = needs-decision ] \
+        || fail "$kind: bare '$word' prose closed a still-open key"
+      f="$dir/$kind-$word-real.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word-real.meta"
+      printf 'needs-decision [key=route]: A or B?\n%s: real outcome\n' "$word" > "$f"
+      assert_fold "$f" '' "$kind: genuine $word supersedes"
+      [ "$(status_key_closing_verb "$f" route)" = "$word" ] \
+        || fail "$kind: genuine $word no longer supersedes the open key"
+    done
+  done
+  pass "prose without a colon cannot impersonate a ship or scout terminal declaration"
+}
+
+test_bare_prose_cannot_impersonate_a_terminal_declaration
+
+test_bare_prose_cannot_open_or_close_a_decision() {
+  local dir f word blocked
+  dir=$(case_dir prose-decision)
+  blocked=$(printf 'default\tblocked\tneed release access\n')
+  for word in blocked needs-decision resolved; do
+    f="$dir/open-$word.status"
+    printf 'kind=ship\n' > "$dir/open-$word.meta"
+    printf 'working: investigating the deploy\nOptions considered:\n %s\n' "$word" > "$f"
+    assert_fold "$f" '' "bare '$word' prose opened a decision"
+
+    f="$dir/close-$word.status"
+    printf 'kind=ship\n' > "$dir/close-$word.meta"
+    printf 'blocked: need release access\nSteps remaining:\n %s\n' "$word" > "$f"
+    assert_fold "$f" "$blocked" "bare '$word' prose moved an open decision"
+  done
+
+  f="$dir/keyed-colonless.status"
+  printf 'kind=ship\n' > "$dir/keyed-colonless.meta"
+  printf 'blocked [key=access]\n' > "$f"
+  assert_fold "$f" "$(printf 'access\tblocked\tblocked [key=access]\n')" \
+    "a keyed colonless line stopped opening its key"
+  printf 'resolved [key=access]\n' >> "$f"
+  assert_fold "$f" '' "a keyed colonless line stopped closing its key"
+
+  f="$dir/real-resolution.status"
+  printf 'kind=ship\n' > "$dir/real-resolution.meta"
+  printf 'blocked: need release access\nresolved: access granted\n' > "$f"
+  assert_fold "$f" '' "a genuine resolution stopped closing its decision"
+  pass "only a colon-bearing or keyed line is a decision transition in the fold"
+}
+
+# A stated [key=default] is the shared decision bucket --resolve-key default
+# writes. It must keep closing a keyless decision, and it must not cancel a
+# keyless live wait that only prints as default. A worker's own keyless
+# resolved: still retracts that wait, and neither form closes a differently
+# keyed wait.
+test_keyless_wait_survives_stated_default_retraction() {
+  local dir f
+  dir=$(case_dir keyless-wait)
+  f="$dir/live.status"
+  printf 'needs-decision: which color\n' > "$f"
+  printf 'paused: waiting on the vendor release\n' >> "$f"
+  assert_fold "$f" "$(printf 'default\tneeds-decision\twhich color\n')" \
+    "keyless decision stays open beside the wait"
+  [ "$(status_open_activities "$f")" = "$(printf 'default\tpaused\twaiting on the vendor release\n')" ] \
+    || fail "keyless pause did not open as its own default phase: '$(status_open_activities "$f")'"
+
+  printf 'resolved [key=default]: answered: blue\n' >> "$f"
+  assert_fold "$f" "" "stated default retraction closes the keyless decision"
+  [ "$(status_open_activities "$f")" = "$(printf 'default\tpaused\twaiting on the vendor release\n')" ] \
+    || fail "stated default retraction cancelled the unrelated keyless wait: '$(status_open_activities "$f")'"
+
+  printf 'paused: waiting on the vendor release\nresolved: [key=default] answered: blue\n' \
+    > "$dir/colon-first.status"
+  [ "$(status_open_activities "$dir/colon-first.status")" = "$(printf 'default\tpaused\twaiting on the vendor release\n')" ] \
+    || fail "a colon-first stated default retraction cancelled the keyless wait: '$(status_open_activities "$dir/colon-first.status")'"
+
+  printf 'paused: waiting on the vendor release\n' > "$dir/self.status"
+  printf 'resolved: the vendor shipped\n' >> "$dir/self.status"
+  [ -z "$(status_open_activities "$dir/self.status")" ] \
+    || fail "a keyless self-retraction left the keyless wait open: '$(status_open_activities "$dir/self.status")'"
+
+  printf 'paused [key=legal]: awaiting counsel\n' > "$dir/keyed.status"
+  printf 'resolved [key=default]: answered: blue\n' >> "$dir/keyed.status"
+  printf 'resolved: unrelated keyless close\n' >> "$dir/keyed.status"
+  [ "$(status_open_activities "$dir/keyed.status")" = "$(printf 'legal\tpaused\tawaiting counsel\n')" ] \
+    || fail "a default or keyless retraction closed a keyed wait: '$(status_open_activities "$dir/keyed.status")'"
+
+  printf 'paused [key=default]: named default wait\n' > "$dir/stated.status"
+  printf 'resolved [key=default]: that wait cleared\n' >> "$dir/stated.status"
+  [ -z "$(status_open_activities "$dir/stated.status")" ] \
+    || fail "a stated default retraction did not close the stated default wait"
+
+  printf 'working: legacy start\ndone: legacy completion\n' > "$dir/legacy.status"
+  [ -z "$(status_open_activities "$dir/legacy.status")" ] \
+    || fail "a keyless terminal stopped superseding the keyless working phase"
+
+  printf 'paused: waiting on the vendor release\nneeds-decision [key=default]: which color\n' \
+    > "$dir/stated-open.status"
+  [ "$(status_open_activities "$dir/stated-open.status")" = "$(printf 'default\tpaused\twaiting on the vendor release\n')" ] \
+    || fail "a stated default decision cancelled the keyless wait: '$(status_open_activities "$dir/stated-open.status")'"
+  pass "a stated default retraction closes its decision and leaves an unrelated keyless wait standing"
+}
+
+# The supervisors' declared-wait read keeps a pause standing behind answers
+# for other keys even when those answers outrun the bounded tail window, and a
+# resolved line for the pause's own key still retracts it from there.
+test_declared_wait_survives_answers_past_the_event_window() {
+  local dir f i
+  dir=$(case_dir declared-wait-window)
+  f="$dir/answered.status"
+  printf 'needs-decision: which color\npaused: waiting on the vendor release\n' > "$f"
+  i=0
+  while [ "$i" -le "$FM_CLASSIFY_EVENT_WINDOW_LINES" ]; do
+    printf 'resolved [key=q%s]: answered\n' "$i" >> "$f"
+    i=$((i + 1))
+  done
+  printf 'resolved [key=default]: answered: blue\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on the vendor release' ] \
+    || fail "answers past the event window cancelled the wait: '$(status_declared_wait_line "$f")'"
+  printf 'resolved: the vendor shipped\n' >> "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "the worker's own keyless resolved line did not retract the wait past the window"
+  pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
+}
+
+test_keyless_wait_survives_stated_default_retraction
+test_declared_wait_survives_answers_past_the_event_window
+test_bare_prose_cannot_open_or_close_a_decision
+
+# status_event_recorded is an idempotent retry check: a stamped retry matches,
+# and no later resolved line - for another key, outside the reserved-key
+# vocabulary, or the real close of that key - makes a recorded line new again.
+# The same holds for a note and a done line.
+test_recorded_line_stays_recorded_across_a_resolve() {
+  local dir f line
+  dir=$(case_dir episode)
+  f="$dir/task.status"
+  line='blocked [key=pending-reply-abc]: pending-reply-delivery-unknown: task=mate pending-reply-id=abc request=wake'
+  printf '%s\n' "$line" > "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "the open blocker was not recorded"
+  status_event_recorded "$f" \
+    "blocked [key=pending-reply-abc] [at=1700000000]: pending-reply-delivery-unknown: task=mate pending-reply-id=abc request=wake" \
+    || fail "a stamp made the recorded blocker look new"
+  printf '%s\n' 'resolved [key=other]: answered elsewhere' >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "another key's resolve made the blocker look new"
+  printf '%s\n' 'resolved [key=pending-reply-abc]: answered: not this library' >> "$f"
+  status_event_recorded "$f" "$line" \
+    || fail "a reserved-key resolve outside the vocabulary made the blocker look new"
+  printf '%s\n' 'resolved [key=pending-reply-abc] [at=1700000001]: pending-reply-resolved: task=mate pending-reply-id=abc via=operator-resolve-key dismiss' >> "$f"
+  [ -z "$(status_open_decisions "$f")" ] \
+    || fail "the resolve did not close the decision: $(status_open_decisions "$f")"
+  status_event_recorded "$f" "$line" \
+    || fail "the resolve of its own key made the blocker look new"
+  printf '%s\n' 'note: remote document did not transfer for ios: data/reply/missing.md - absent' \
+    > "$dir/note.status"
+  printf '%s\n' 'resolved: closed the default decision' >> "$dir/note.status"
+  status_event_recorded "$dir/note.status" \
+    'note: remote document did not transfer for ios: data/reply/missing.md - absent' \
+    || fail "a resolve made a note look new"
+  printf '%s\n' 'done [corr=abcd]: shipped' > "$dir/done.status"
+  printf '%s\n' 'resolved [key=default]: closed' >> "$dir/done.status"
+  status_event_recorded "$dir/done.status" 'done [corr=abcd]: shipped' \
+    || fail "a resolve made a done line look new"
+  pass "a recorded line stays recorded across a later resolve"
+}
+
+test_recorded_line_stays_recorded_across_a_resolve

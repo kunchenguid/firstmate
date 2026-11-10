@@ -39,7 +39,7 @@ empty_backlog() {  # <path>
 make_split() {  # <name>; prints the case directory
   local dir="$TMP_ROOT/$1"
   mkdir -p "$dir/code/data" "$dir/home/data" "$dir/home/state" "$dir/home/config"
-  cp "$ROOT/.tasks.toml" "$dir/code/.tasks.toml"
+  fm_test_tasks_toml "$dir/code/.tasks.toml"
   empty_backlog "$dir/home/data/backlog.md"
   ln -s "$dir/home/data/backlog.md" "$dir/code/data/backlog.md"
   printf '%s\n' "$dir"
@@ -104,7 +104,7 @@ test_guard_silent_for_single_home() {
   local dir out
   dir="$TMP_ROOT/single-guard"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   empty_backlog "$dir/data/backlog.md"
   printf '## Done\n' > "$dir/data/done-archive.md"
   out=$(bootstrap_backlog_lines "$dir")
@@ -204,11 +204,34 @@ test_wrapper_refusals() {
   pass "fm-tasks-axi.sh refuses caller --file, a symlinked home backlog, and an unresolvable home"
 }
 
+# Dispatch alone moves a row to In flight, because only bin/fm-spawn.sh
+# creates the task record, status file, and inbox that go with it; a row
+# hand-placed there through `add --start` would count as live work nobody runs.
+test_wrapper_refuses_add_start() {
+  local dir out rc before
+  dir=$(make_split wrapper-add-start)
+  before=$(cat "$dir/home/data/backlog.md")
+  out=$(wrapper_from_code "$dir" add hs-1 "hand-started" --start 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "add --start"
+  assert_contains "$out" "bin/fm-spawn.sh" "the add --start refusal did not name the dispatch path"
+  assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a refused add --start still wrote a row"
+  out=$(wrapper_from_code "$dir" create hs-c "hand-started via alias" --start 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "create --start"
+  assert_contains "$out" "bin/fm-spawn.sh" "the create --start refusal did not name the dispatch path"
+  assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a refused create --start still wrote a row"
+  wrapper_from_code "$dir" add hs-2 "queued" >/dev/null || fail "plain add was refused"
+  assert_grep "hs-2" "$dir/home/data/backlog.md" "plain add did not write its row"
+  wrapper_from_code "$dir" start hs-2 >/dev/null || fail "start <id> was refused"
+  pass "fm-tasks-axi.sh refuses add --start while plain add and start <id> pass through"
+}
+
 test_wrapper_single_home() {
   local dir
   dir="$TMP_ROOT/single-wrapper"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   empty_backlog "$dir/data/backlog.md"
   (cd "$dir" && FM_ROOT_OVERRIDE="$dir" "$WRAPPER" add solo-1 "single home" >/dev/null) \
     || fail "add in the single-home layout failed"
@@ -224,6 +247,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_writes_through_to_home
   test_wrapper_overrides_ambient_file
   test_wrapper_refusals
+  test_wrapper_refuses_add_start
   test_wrapper_single_home
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"

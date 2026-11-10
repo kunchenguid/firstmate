@@ -10,6 +10,8 @@
 # projected model. The projection is view-specific: it DROPS fields from the bearings
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
+# Open decision rows retain a bounded summary for overview use and a full question
+# for decision presentation, including all options recorded in the hold reason.
 #
 # By default the canonical snapshot performs bounded concurrent remote-ledger reads
 # for registered remote homes under one shared collection budget and may atomically
@@ -21,7 +23,9 @@
 # never ambiguous.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
-# backlog roles, unresolved blockers, and captain actionability. It never infers
+# backlog roles, unresolved blockers, and captain actionability.
+# Contributions project cached coverage and required actors from fm-contributions.sh;
+# only captain rows are exposed, with counts for the other actors and unmeasured homes. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 # Underway (in_flight) projects every main live worker plus every active child
 # from every readable secondmate ledger, independently of that home's
@@ -146,11 +150,13 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,question,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
+Decision presentation uses question, the full title and hold reason; summary
+  remains a bounded overview and must not substitute for the question/options.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -287,6 +293,12 @@ EOF
     for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
     nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
+    # The task side of the mapping rides a temp file, not an argv element: a
+    # fleet snapshot exceeds the ~128KB per-argument exec cap on large fleets,
+    # and an E2BIG there would drop the repo's PR rows into the warning count.
+    tasks_file=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-tasks.XXXXXX") \
+      || { echo "fm-bearings-snapshot: cannot create a temporary tasks file" >&2; exit 1; }
+    printf '%s' "$SNAP" | jq '.tasks // []' > "$tasks_file"
     for repo in $repos; do
       if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
       nrepos=$((nrepos + 1))
@@ -294,11 +306,15 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" --slurpfile tasks "$tasks_file" '
+        ($tasks[0] // []) as $all_tasks
+        | def task_for_branch($ref):
+            ( [ $all_tasks[] | select((.branch // ("fm/" + .id)) == $ref) | .id ] | .[0] )
+            // (if ($ref | startswith("fm/")) then ($ref | ltrimstr("fm/")) else "-" end);
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:task_for_branch(.headRefName // ""),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),
@@ -316,6 +332,7 @@ EOF
       npr=$((npr + cnt))
       rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
     done
+    rm -f "$tasks_file"
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
     PR_ROWS_MIN_TOTAL=$((npr + ncapped))
@@ -514,14 +531,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]
+            summary:hold_summary(.title; .hold_reason),
+            question:(.title + ": " + .hold_reason),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
-                                      (.reason // "captain decision pending")),owner:$m.id} ]
+                                      (.reason // "captain decision pending")),
+                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -531,7 +550,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                                        (.hold_reason // "captain decision pending")),
+                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
@@ -594,6 +614,34 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       home: $home,
       generated: $now,
       prs: $prs,
+      contributions:(
+        ([$snap.contributions + {owner:"(main)"}]
+          + [($snap.secondmate_current.records // [])[] as $m | if $m.contributions == null then null else $m.contributions + {owner:$m.id} end])
+        | map(if . != null and .owner != "(main)" and .known > 0 and (.valid_until // 0) < ($now | fromdateiso8601)
+              then .complete=false | .proven_clear=false | .checked=0 | .captain=[]
+                | .unmeasured=(.unmeasured // 0)
+                | .counts={captain:0,fleet:(.known - .unmeasured),maintainer:0,nobody:0}
+              else . end) as $homes
+        | ([$homes[] | select(. != null)]) as $measured
+        | {scope:"owned contributions per home",known:([$measured[].known] | add // 0),
+           checked:([$measured[].checked] | add // 0),
+           counts:{captain:([$measured[].counts.captain] | add // 0),fleet:([$measured[].counts.fleet] | add // 0),
+                   maintainer:([$measured[].counts.maintainer] | add // 0),nobody:([$measured[].counts.nobody] | add // 0)},
+           complete:(all($homes[]; . != null and .complete) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           proven_clear:(all($homes[]; . != null and .proven_clear) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           unmeasured_homes:([$homes[] | select(. == null)] | length),
+           unreadable_records:([$measured[].unreadable_records] | add // 0),
+           unmeasured:([$measured[].unmeasured] | add // 0),
+           stale_verdicts:([$measured[].stale_verdicts] | add // 0),
+           missing_verdicts:([$measured[].missing_verdicts] | add // 0),
+           captain_omitted:([$measured[].captain_omitted] | add // 0),
+           captain:[$measured[] as $h | $h.captain[]? | . + {owner:$h.owner}]}),
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
@@ -661,8 +709,8 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
+# Nested objects use indented keys; arrays of uniform scalar objects use
+# the tabular array form
 # (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
 # per the TOON spec. Quoting follows the spec exactly.
 TOON=$(printf '%s\n' "$MODEL" | jq -r '
@@ -683,7 +731,9 @@ TOON=$(printf '%s\n' "$MODEL" | jq -r '
     elif type == "number" then tostring
     else q end;
   def emit($k; $v):
-    if ($v | type) == "array" then
+    if ($v | type) == "object" then
+      "\($k): ", ($v | to_entries[] | emit(.key;.value) | "  " + .)
+    elif ($v | type) == "array" then
       if ($v | length) == 0 then "\($k): []"
       else
         ($v[0] | keys_unsorted) as $ks

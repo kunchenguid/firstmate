@@ -22,7 +22,7 @@
 #
 # Safety (2026-07-02 incident): every test-owned Herdr operation goes through
 # bin/fm-herdr-lab.sh, which appends the named session flag and verifies the
-# default fleet session is unchanged after teardown. Never replace the helper
+# configured fleet session is unchanged after teardown. Never replace the helper
 # with an ambient HERDR_SESSION-only command.
 set -u
 
@@ -34,6 +34,12 @@ assert_contains_local() {  # <haystack> <needle> <msg>
   case "$1" in
     *"$2"*) : ;;
     *) fail "$3"$'\n'"--- got ---"$'\n'"$1" ;;
+  esac
+}
+assert_not_contains_local() {  # <haystack> <needle> <msg>
+  case "$1" in
+    *"$2"*) fail "$3"$'\n'"--- got ---"$'\n'"$1" ;;
+    *) : ;;
   esac
 }
 
@@ -120,11 +126,11 @@ env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
 status=$?
 [ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed auto-detecting herdr"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
 
-assert_contains_local "$(cat "$ERR_FILE")" "NOTICE" \
-  "fm-spawn.sh did not print the auto-detect notice to stderr when selecting herdr"
-assert_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL herdr backend" \
-  "fm-spawn.sh's auto-detect notice did not flag herdr as experimental"
-pass "real herdr: fm-spawn.sh auto-detects herdr from HERDR_ENV=1 (no explicit config) and prints the loud notice"
+assert_not_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL" \
+  "fm-spawn.sh's Herdr auto-detection retained the obsolete experimental label"
+assert_not_contains_local "$(cat "$ERR_FILE")" "--backend tmux to opt out" \
+  "fm-spawn.sh's Herdr auto-detection retained the obsolete tmux opt-out steer"
+pass "real herdr: fm-spawn.sh auto-detects verified herdr from HERDR_ENV=1 (no explicit config) without an opt-out steer"
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || fail "fm-spawn.sh did not write a meta file for $ID"
@@ -177,7 +183,7 @@ pass "real herdr: teardown completes the auto-detected spawn/teardown cycle (met
 
 if ! cleanup_all; then
   trap - EXIT
-  fail "isolated Herdr lab teardown failed or the default fleet session changed"
+  fail "isolated Herdr lab teardown failed or the configured fleet session changed"
 fi
 trap - EXIT
-pass "real herdr: isolated lab session removed and default fleet session unchanged"
+pass "real herdr: isolated lab session removed and configured fleet session unchanged"

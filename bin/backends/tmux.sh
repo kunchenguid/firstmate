@@ -42,11 +42,18 @@ fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
-# fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
-# `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
-# `tmux send-keys -t "$T" "$2"`.
+# fm_backend_tmux_visible_capture: the visible viewport only. `-S -0` starts at
+# the first line of the pane rather than in its history, so nothing scrolled out
+# of view can appear in the result - the guarantee a trust-dialog predicate
+# needs, which the scrollback-bounded capture above cannot give.
+fm_backend_tmux_visible_capture() {  # <target>
+  tmux capture-pane -p -t "$1" -S -0
+}
+
+# fm_backend_tmux_send_key: one named key. Tmux can prefix-match a gone target
+# to a live neighbor, so require exact membership before sending the key.
 fm_backend_tmux_send_key() {  # <target> <key>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
+  fm_backend_tmux_target_exists "$1" || return 1
   tmux send-keys -t "$1" "$2"
 }
 
@@ -58,13 +65,34 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_own_session: print the name of the tmux session this process
+# was started in. An untargeted display-message picks the most recently used
+# member of a session group, and so does a pane target, so an external client
+# attached through a grouped session (`new-session -t <session>`) would be
+# named instead. The third field of $TMUX is the id of the session the pane was
+# created in, which stays unambiguous across the group; fall back to the
+# untargeted lookup when it is absent, malformed, or stale (tmux answers a
+# killed session's id with empty output and exit 0).
+fm_backend_tmux_own_session() {
+  local sid=${TMUX##*,} name=
+  case "$sid" in
+  ''|*[!0-9]*) ;;
+  *) name=$(tmux display-message -p -t "\$$sid" '#S' 2>/dev/null) ;;
+  esac
+  if [ -n "$name" ]; then
+    printf '%s\n' "$name"
+  else
+    tmux display-message -p '#S'
+  fi
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
-    tmux display-message -p '#S'
+    fm_backend_tmux_own_session
   else
     tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'
@@ -121,11 +149,133 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
+# fm_backend_tmux_window_inventory: <session-target>'s window names, one per
+# line on stdout, together with a verdict on the READ ITSELF, which is what
+# every caller that must not guess depends on:
+#   0 - the inventory was read; its lines are that session's windows.
+#   2 - tmux answered definitively that the session, or its whole server, is
+#       absent, so no window of that session exists.
+#   1 - the read could not be made at all, and proves nothing either way. A
+#       transient tmux problem, or a tmux that is not even on PATH, must never
+#       be read as an absent endpoint: that mistake launches a duplicate agent
+#       for fm_backend_tmux_agent_state and reports a live window as closed for
+#       fm_backend_tmux_kill.
+# The target is passed through exactly as the caller means it, so a caller that
+# requires the exact recorded session asks for `=session` and still gets the
+# same classification.
+fm_backend_tmux_window_inventory() {  # <session-target>
+  local windows
+  if windows=$(LC_ALL=C tmux list-windows -t "$1" -F '#{window_name}' 2>&1); then
+    printf '%s\n' "$windows"
+    return 0
+  fi
+  case "$windows" in
+    *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+      return 2
+      ;;
+  esac
+  return 1
+}
+
+# Resolve one exact window selector in one exact session to its stable id.
+# The shared dispatcher header owns the accepted target grammar.
+fm_backend_tmux_window_id() {  # <session-name> <window-name|index|@id>
+  local session=$1 selector=$2 rows window_id window_index window_name
+  rows=$(LC_ALL=C tmux list-windows -t "=$session" \
+    -F '#{window_id}|#{window_index}|#{window_name}' 2>/dev/null) || return 1
+  while IFS='|' read -r window_id window_index window_name; do
+    case "$selector" in
+      @*) [ "$window_id" = "$selector" ] || continue ;;
+      *[!0-9]*) [ "$window_name" = "$selector" ] || continue ;;
+      *) [ "$window_index" = "$selector" ] || continue ;;
+    esac
+    printf '%s\n' "$window_id"
+    return 0
+  done <<EOF
+$rows
+EOF
+  return 1
+}
+
+# Adapter-owned tmux endpoint membership. Every comparison is literal and
+# session-scoped where the target names a session, so tmux never gets a chance
+# to satisfy the predicate through its prefix, pattern, or active-window
+# fallbacks.
+fm_backend_tmux_target_exists() {  # <target>
+  local target=${1:-} session selector windows base pane_index window_id
+  [ -n "$target" ] || return 1
+  case "$target" in
+    %*)
+      tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -Fqx -- "$target"
+      ;;
+    @*)
+      tmux list-windows -a -F '#{window_id}' 2>/dev/null | grep -Fqx -- "$target"
+      ;;
+    *:*:*)
+      return 1
+      ;;
+    *:*)
+      session=${target%%:*}
+      selector=${target#*:}
+      case "$session" in =*) session=${session#=} ;; esac
+      case "$selector" in =*) selector=${selector#=} ;; esac
+      [ -n "$session" ] && [ -n "$selector" ] || return 1
+
+      case "$selector" in
+        @*) fm_backend_tmux_window_id "$session" "$selector" >/dev/null ; return ;;
+        *[!0-9]*) ;;
+        *) fm_backend_tmux_window_id "$session" "$selector" >/dev/null ; return ;;
+      esac
+
+      windows=$(fm_backend_tmux_window_inventory "=$session") || return 1
+      if printf '%s\n' "$windows" | grep -Fqx -- "$selector"; then
+        return 0
+      fi
+
+      case "$selector" in
+        *.*)
+          base=${selector%.*}
+          pane_index=${selector##*.}
+          [ -n "$base" ] && [ -n "$pane_index" ] || return 1
+          case "$base" in *[!0-9]*) return 1 ;; esac
+          case "$pane_index" in *[!0-9]*) return 1 ;; esac
+          window_id=$(fm_backend_tmux_window_id "$session" "$base") || return 1
+          tmux list-panes -t "$window_id" -F '#{pane_index}' 2>/dev/null \
+            | grep -Fqx -- "$pane_index"
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      session=$target
+      case "$session" in =*) session=${session#=} ;; esac
+      [ -n "$session" ] || return 1
+      tmux has-session -t "=$session" 2>/dev/null
+      ;;
+  esac
+}
+
+# fm_backend_tmux_kill: remove one explicitly named task window.
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.
+#
+# A close that did not succeed is resolved, never assumed: `kill-window` fails
+# for the ordinary already-exited window exactly as it does for a window that
+# is still there, so its status alone cannot tell a benign cleanup from a
+# stranded endpoint. The re-read below settles which one happened, under the
+# window's EXACT recorded identity (`=session` plus a whole-line name match -
+# never a prefix, which would read a neighbor as this window's survivor).
+# Only a read that actually happened can settle it, so the same classification
+# fm_backend_tmux_agent_state uses applies here: a window still present is the
+# kill failing to do its job, a definitively absent session or server is the
+# silent success, and an inventory that could not be read refuses rather than
+# calling a window it never saw closed. An already-gone window, and a whole
+# server that is already gone, stay silent successes. Verified against real
+# tmux 3.7c: killing a live window, re-killing the same gone window, and
+# killing into a dead session all return 0 here
+# (docs/verification/runtime-backends.md "Endpoint close").
 fm_backend_tmux_kill() {  # <target>
-  local target=${1:-} session window
+  local target=${1:-} session window windows inventory_status
   case "$target" in
     *:*)
       session=${target%%:*}
@@ -136,7 +286,19 @@ fm_backend_tmux_kill() {  # <target>
   case "$session:$window" in
     :*|*:|*:*:*) return 1 ;;
   esac
-  tmux kill-window -t "=$session:=$window" 2>/dev/null || true
+  tmux kill-window -t "=$session:=$window" 2>/dev/null && return 0
+  windows=$(fm_backend_tmux_window_inventory "=$session")
+  inventory_status=$?
+  if [ "$inventory_status" -eq 2 ]; then
+    return 0
+  fi
+  if [ "$inventory_status" -ne 0 ]; then
+    echo "error: tmux window $session:$window could not be read after its close, so whether it survived is unknown" >&2
+    return 1
+  fi
+  printf '%s\n' "$windows" | grep -qxF -- "$window" || return 0
+  echo "error: tmux window $session:$window is still present after its close" >&2
+  return 1
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -246,6 +408,8 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
+# fm_backend_tmux_window_inventory above owns that read classification, shared
+# with fm_backend_tmux_kill so both mean the same thing by an absent session.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -263,20 +427,14 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
+  windows=$(fm_backend_tmux_window_inventory "$session")
+  inventory_status=$?
   if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
-    esac
+    if [ "$inventory_status" -eq 2 ]; then
+      printf 'missing'
+    else
+      printf 'unreadable'
+    fi
     return 0
   fi
   if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
@@ -309,11 +467,11 @@ $argv0s
 EOF
 
   # Preserve argv boundaries where the platform exposes them. This is needed
-  # when the Gemini script path contains whitespace, which flattened ps output
-  # cannot represent unambiguously.
+  # when a Gemini or Hermes script path contains whitespace, which flattened
+  # ps output cannot represent unambiguously.
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    if fm_gemini_pid_is_gemini "$pid"; then
+    if fm_gemini_pid_is_gemini "$pid" || fm_hermes_process_matches '' "$pid"; then
       printf 'alive'
       return 0
     fi
@@ -325,7 +483,7 @@ EOF
   # evidence only - a bare interpreter still reaches the negative verdicts.
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    if fm_gemini_args_are_gemini "$name"; then
+    if fm_gemini_args_are_gemini "$name" || fm_hermes_process_matches "$name"; then
       printf 'alive'
       return 0
     fi

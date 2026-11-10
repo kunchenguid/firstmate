@@ -12,8 +12,8 @@
 # directory component silently classifies as this harness. That widening would
 # let firstmate launch an unrelated executable with Cursor flags.
 #
-# Two independent kinds of Cursor evidence are accepted, and either alone
-# carries a positive verdict, so no single vendor string is load-bearing:
+# Two independent kinds of Cursor evidence are accepted, so no single vendor
+# string is load-bearing:
 #
 #   Structural (no subprocess, safe during a process scan): the canonical path
 #   is named cursor-agent or lives under Cursor's versioned install tree.
@@ -27,6 +27,15 @@
 #   CURSOR_API_ENDPOINT / api2.cursor.sh option text. Fails closed on a
 #   timeout, a non-zero exit, or missing markers - a bare zero exit is never
 #   accepted as proof.
+#
+# Launch resolution is stricter than process identity (see
+# fm_cursor_verify_executable): a probe alone may accept a candidate, but a
+# name or install-tree match alone is never enough to launch, because a
+# right-looking path can hold a broken file (including the IDE shim that prints
+# "No Cursor IDE installation found" on stderr). Every launch candidate runs one
+# bounded --help through bin/fm-timeout-lib.sh (timeout, gtimeout, perl, or the
+# bash fallback), so a host without coreutils timeout still refuses a broken
+# preferred name instead of accepting it on structure alone.
 #
 # Process detection deliberately uses the structural signal only. Probing an
 # arbitrary pid's executable during an ancestry walk or a liveness poll would
@@ -43,6 +52,25 @@
 # immediately; the bound exists so a hung or interactive impostor cannot wedge
 # a spawn or a readiness check.
 FM_CURSOR_PROBE_TIMEOUT=${FM_CURSOR_PROBE_TIMEOUT:-10}
+
+# bin/fm-timeout-lib.sh is the single owner of bounded execution. It is loaded
+# only when a probe actually runs, so the hook and process-scan consumers that
+# source this file never depend on it. It declares set -u for its own hygiene;
+# restore the caller's nounset setting so a probe does not impose it.
+fm_cursor_run_timed() {  # <seconds> <command...>
+  if ! declare -F fm_run_timed >/dev/null; then
+    local dir nounset=off
+    dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 1
+    case $- in *u*) nounset=on ;; esac
+    # shellcheck source=bin/fm-timeout-lib.sh
+    # shellcheck disable=SC1091
+    # Missing sibling stays silent: hooks that source this file require empty
+    # stderr, and a probe without the bound owner must fail closed, not print.
+    . "$dir/fm-timeout-lib.sh" 2>/dev/null || return 1
+    [ "$nounset" = on ] || set +u
+  fi
+  fm_run_timed "$@"
+}
 
 # Canonical absolute path for $1, or the input unchanged when it cannot be
 # resolved. Symlink resolution is what makes the structural signal work, since
@@ -85,21 +113,14 @@ fm_cursor_path_is_cursor() {  # <path>
 # fail-closed: a timeout, a non-zero exit, or output without a Cursor-specific
 # marker is a refusal. Never called during a process scan.
 fm_cursor_bounded_output() {  # <path> <args...>
-  local path=$1 runner=
+  local path=$1
   shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  if command -v timeout >/dev/null 2>&1; then runner=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
-  fi
-  [ -n "$runner" ] || return 1
-  "$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
+  fm_cursor_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
 }
 
-fm_cursor_probe_is_cursor() {  # <path>
-  local path=$1 out
-  out=$(fm_cursor_bounded_output "$path" --help) || return 1
-  [ -n "$out" ] || return 1
-  case "$out" in
+fm_cursor_help_marks_cursor() {  # <help-text>
+  case "$1" in
     *"Start the Cursor Agent"*) return 0 ;;
     *CURSOR_API_ENDPOINT*) return 0 ;;
     *api2.cursor.sh*) return 0 ;;
@@ -107,18 +128,46 @@ fm_cursor_probe_is_cursor() {  # <path>
   return 1
 }
 
+# True when probe text is the Cursor IDE shim's "no installation" refusal.
+# That message is the measured failure mode of the broken cursor-agent the
+# installer can leave behind; it is never Cursor Agent CLI identity.
+fm_cursor_help_is_ide_shim_refusal() {  # <help-text>
+  case "$1" in
+    *"No Cursor IDE installation found"*) return 0 ;;
+  esac
+  return 1
+}
+
 # True when executable $1 may be launched as Cursor.
 #
-# An executable whose own name is cursor-agent is accepted on the ordinary
-# executable check: the name is Cursor's and is specific enough to stand alone.
-# Anything else - which in practice means the legacy `agent` alias - must first
-# prove itself Cursor, structurally or by the bounded probe.
+# A name or install-tree match alone is not enough to launch: Cursor's own
+# installer writes its `cursor` IDE shim through the ~/.local/bin/cursor ->
+# cursor-agent symlink, which can replace a versioned
+# cursor-agent/versions/<version>/cursor-agent with a script that only prints
+# "No Cursor IDE installation found" (on stderr) and exits non-zero. Every
+# candidate, whatever its name, must therefore either print Cursor's CLI
+# identity under one bounded --help probe, or carry the structural evidence AND
+# have that same probe exit successfully with non-empty output that is not the
+# IDE-shim refusal. The probe always runs through fm_run_timed (at most once)
+# and keeps both streams so a stderr-only refusal is visible; a failed run is
+# refused without retrying. Structure alone never launches.
 fm_cursor_verify_executable() {  # <path>
-  local path=$1
+  local path=$1 out rc=0
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  case "${path##*/}" in cursor-agent) return 0 ;; esac
-  fm_cursor_path_is_cursor "$path" && return 0
-  fm_cursor_probe_is_cursor "$path"
+  # Keep stderr: the broken IDE shim prints only there. stdout-only capture
+  # would hide the refusal text on a future exit-0 variant of the same file.
+  out=$(fm_cursor_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fm_cursor_help_marks_cursor "$out" && return 0
+    fm_cursor_help_is_ide_shim_refusal "$out" && return 1
+    # Successful --help without a Cursor marker still needs real output plus
+    # structural evidence; empty success is not enough to launch.
+    [ -n "$out" ] || return 1
+    fm_cursor_path_is_cursor "$path"
+    return $?
+  fi
+  # Bounded launch failed (timeout or non-zero). Refuse even with structure.
+  return 1
 }
 
 fm_cursor_list_models() {  # <path>
@@ -150,9 +199,10 @@ fm_cursor_catalog_has_model() {  # <model>
 # cursor-agent on PATH, `agent` on PATH, then the ~/.local/bin installs of
 # both. cursor-agent is preferred over the alias at every stage. The
 # ~/.local/bin fallbacks exist because Cursor's user-local install is routinely
-# absent from a non-interactive login PATH. Every `agent` candidate passes
+# absent from a non-interactive login PATH. Every candidate passes
 # fm_cursor_verify_executable before it is accepted, so an unrelated executable
-# named agent is rejected rather than launched with Cursor's flags.
+# named agent, or a broken cursor-agent, is skipped rather than launched with
+# Cursor's flags.
 #
 # The STABLE path is printed, not the canonical one. Identity is proven THROUGH
 # canonicalization (that is what makes the `agent` alias safe), but cursor's
@@ -180,7 +230,7 @@ fm_cursor_resolve_binary() {
       return 0
     fi
   done
-  echo "error: no verified cursor executable found; searched PATH for 'cursor-agent' and 'agent', plus '${HOME:-}/.local/bin/cursor-agent' and '${HOME:-}/.local/bin/agent'. A file named 'agent' is accepted only when it resolves into Cursor's install tree or its --help identifies the Cursor Agent CLI." >&2
+  echo "error: no verified cursor executable found; searched PATH for 'cursor-agent' and 'agent', plus '${HOME:-}/.local/bin/cursor-agent' and '${HOME:-}/.local/bin/agent'. Every candidate must pass one bounded --help probe: Cursor Agent CLI identity, or a canonical cursor-agent name or Cursor versioned install-tree path with a successful, non-empty, non-refusal response. A name or install-tree match alone is never enough." >&2
   return 1
 }
 

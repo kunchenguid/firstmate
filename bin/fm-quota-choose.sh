@@ -5,10 +5,12 @@
 #   fm-quota-choose.sh [--snapshot <path>] [--candidate <harness:model>]...
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
-# provided file, or from stdin when --snapshot is omitted. For each --candidate
-# in order, it maps <harness> to its primary provider family, then applies the
-# provider-wide scopes and exact model or product scopes for <model>. A candidate
-# is eligible only when no applicable runway is `exhausted_now` and its known
+# provided file, or from stdin when --snapshot is omitted.
+# bin/fm-quota-axi-lib.sh owns schema compatibility and the shared row join.
+# For each --candidate in order, it maps <harness> to its primary provider
+# family, then applies the matched row's provider-wide scopes and exact model
+# or product scopes for <model>. A candidate is eligible only when no
+# applicable runway is `exhausted_now` and its known
 # effective percent remaining is greater than zero. The first eligible
 # candidate is printed as "<harness> <model>" and the script exits 0.
 # If no candidate is quota-eligible, it prints "none" and exits 1.
@@ -24,7 +26,8 @@
 # candidate remains eligible under the captured quota evidence.
 #
 # Multi-provider limitation: this helper maps each harness to ONE primary
-# provider family (see provider_for_harness below) and checks quota for that
+# provider family (fm_quota_provider_for_harness in bin/fm-quota-axi-lib.sh)
+# and checks quota for that
 # family only. Some harnesses can run models from several providers - for
 # example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
 # candidate whose established provider differs from the harness's primary family
@@ -114,7 +117,7 @@ if printf '%s\n' "$QUOTA_SNAPSHOT" | jq -e 'type == "object"' >/dev/null 2>&1; t
   QUOTA_JSON=$QUOTA_SNAPSHOT
   schema=$(printf '%s\n' "$QUOTA_JSON" | jq -r '.schemaVersion // empty' 2>/dev/null) || schema=
   case "$schema" in
-    5) ;;
+    5|6) ;;
     '') die "quota-axi json missing schemaVersion" ;;
     *) die "unsupported quota-axi schema version: $schema" ;;
   esac
@@ -160,12 +163,20 @@ else
         ((decoded_row | length) == $field_count) and
         all(decoded_row[]; length > 0)
       );
+    # Schema 6 TOON adds accountKey right after provider in every block; $k is
+    # that column offset (0 or 1) and keyed_row folds it into the record.
+    def key_col($k): if $k == 1 then "accountKey," else "" end;
+    def keyed_row($k): if $k == 1 then {provider: .[0], accountKey: .[1]} else {provider: .[0]} end;
+    def account_of: if has("accountKey") then {accountKey} else {} end;
+    def schema_of($k): if $k == 1 then 6 else 5 end;
     def valid_attention_entries:
       type == "array" and
       all(.[];
         type == "object" and
         (.provider | type) == "string" and
         (.provider | test("^[a-z0-9]+(-[a-z0-9]+)*$")) and
+        ((has("accountKey") | not) or
+         ((.accountKey | type) == "string" and (.accountKey | length) > 0 and ((.accountKey | test("\\s")) | not))) and
         (.scope | type) == "string" and
         (.scope | length) > 0 and
         ((.scope | test("^\\s|\\s$")) | not) and
@@ -183,26 +194,31 @@ else
       end;
     def unknown_providers($entries):
       $entries |
-      group_by(.provider) |
-      map({
-        provider: .[0].provider,
+      group_by([.provider, .accountKey]) |
+      map((.[0] | {provider} + account_of) + {
         quotaSemantics: {
           status: "unknown",
           effectiveAvailability: [.[] | attention_availability]
         }
       });
-    def exhaustion_count:
+    def unknown_snapshot($entries):
+      {schemaVersion: (if any($entries[]; has("accountKey")) then 6 else 5 end), providers: unknown_providers($entries)};
+    def exhaustion_count($k):
       if . == "exhaustion[0]:" or . == "exhaustion: []" then 0
       else
-        capture("^exhaustion\\[(?<count>[1-9][0-9]*)\\]\\{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId\\}:$").count |
+        capture("^exhaustion\\[(?<count>[1-9][0-9]*)\\]\\{provider," + key_col($k) + "scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId\\}:$").count |
         tonumber
       end;
-    def attention_count:
+    def attention_count($k):
       if . == "attention[0]:" or . == "attention: []" then 0
       else
-        capture("^attention\\[(?<count>[1-9][0-9]*)\\]\\{provider,scope,kind,detail,remedy\\}:$").count |
+        capture("^attention\\[(?<count>[1-9][0-9]*)\\]\\{provider," + key_col($k) + "scope,kind,detail,remedy\\}:$").count |
         tonumber
       end;
+    def attention_entries($k):
+      map(decoded_row | keyed_row($k) + {
+        scope: .[1 + $k], kind: .[2 + $k], detail: .[3 + $k], remedy: .[4 + $k]
+      });
     (split("\n") | map(select(length > 0))) as $lines |
     ($lines | map(. == "quota[0]:" or . == "quota: []") | index(true)) as $zero_index |
     if $zero_index != null then
@@ -214,17 +230,16 @@ else
           if ($tail[1] == "attention[0]:" or $tail[1] == "attention: []") and
              ($tail[2:] | valid_help_tail) then
             {schemaVersion: 5, providers: []}
-          elif ($tail[1] | test("^attention\\[[1-9][0-9]*\\]\\{provider,scope,kind,detail,remedy\\}:$")) then
-            ($tail[1] | attention_count) as $attention_count |
+          elif ($tail[1] | test("^attention\\[[1-9][0-9]*\\]\\{provider,(accountKey,)?scope,kind,detail,remedy\\}:$")) then
+            (if ($tail[1] | contains("{provider,accountKey,")) then 1 else 0 end) as $k |
+            ($tail[1] | attention_count($k)) as $attention_count |
             ($tail[2:(2 + $attention_count)]) as $attention_rows |
             if ($attention_rows | length) == $attention_count and
-               ($attention_rows | valid_rows(5)) and
+               ($attention_rows | valid_rows(5 + $k)) and
                ($tail[(2 + $attention_count):] | valid_help_tail) then
-              ($attention_rows | map(decoded_row | {
-                provider: .[0], scope: .[1], kind: .[2], detail: .[3], remedy: .[4]
-              })) as $entries |
+              ($attention_rows | attention_entries($k)) as $entries |
               if ($entries | valid_attention_entries) then
-                {schemaVersion: 5, providers: unknown_providers($entries)}
+                unknown_snapshot($entries)
               else error("invalid zero-row attention identities")
               end
             else error("invalid zero-row attention section")
@@ -233,7 +248,7 @@ else
             ($tail[1] | sub("^attention: "; "") | fromjson) as $entries |
             if ($entries | valid_attention_entries) and
                ($tail[2:] | valid_help_tail) then
-              {schemaVersion: 5, providers: unknown_providers($entries)}
+              unknown_snapshot($entries)
             else error("invalid zero-row attention array")
             end
           else error("invalid zero-row attention section")
@@ -243,55 +258,51 @@ else
       else error("invalid zero-row quota header")
       end
     else
-      ($lines | map(test("^quota\\[[1-9][0-9]*\\]\\{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt\\}:$")) | index(true)) as $quota_index |
+      ($lines | map(test("^quota\\[[1-9][0-9]*\\]\\{provider,(accountKey,)?scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt\\}:$")) | index(true)) as $quota_index |
       if $quota_index == null then error("missing quota section")
       else
+        (if ($lines[$quota_index] | contains("{provider,accountKey,")) then 1 else 0 end) as $k |
         ($lines[:$quota_index]) as $head |
         ($lines[$quota_index] | capture("^quota\\[(?<count>[1-9][0-9]*)\\]").count | tonumber) as $quota_count |
         ($lines[($quota_index + 1):($quota_index + 1 + $quota_count)]) as $quota_lines |
         ($quota_index + 1 + $quota_count) as $exhaustion_index |
-        ($lines[$exhaustion_index] | exhaustion_count) as $exhaustion_count |
+        ($lines[$exhaustion_index] | exhaustion_count($k)) as $exhaustion_count |
         ($lines[($exhaustion_index + 1):($exhaustion_index + 1 + $exhaustion_count)]) as $exhaustion_rows |
         ($exhaustion_index + 1 + $exhaustion_count) as $attention_index |
-        ($lines[$attention_index] | attention_count) as $attention_count |
+        ($lines[$attention_index] | attention_count($k)) as $attention_count |
         ($lines[($attention_index + 1):($attention_index + 1 + $attention_count)]) as $attention_rows |
         ($lines[($attention_index + 1 + $attention_count):]) as $tail |
         if (($head | valid_preamble) | not) or
            ($quota_lines | length) != $quota_count or
-           (($quota_lines | valid_rows(8)) | not) or
+           (($quota_lines | valid_rows(8 + $k)) | not) or
            ($exhaustion_rows | length) != $exhaustion_count or
-           (($exhaustion_rows | valid_rows(5)) | not) or
+           (($exhaustion_rows | valid_rows(5 + $k)) | not) or
            ($attention_rows | length) != $attention_count or
-           (($attention_rows | valid_rows(5)) | not) or
+           (($attention_rows | valid_rows(5 + $k)) | not) or
            (($tail | valid_help_tail) | not) then
           error("invalid quota-axi TOON envelope")
         else
           ($quota_lines | map(decoded_row)) as $rows |
-          ($attention_rows | map(decoded_row | {
-            provider: .[0], scope: .[1], kind: .[2], detail: .[3], remedy: .[4]
-          })) as $attention_entries |
+          ($attention_rows | attention_entries($k)) as $attention_entries |
           if (($attention_entries | valid_attention_entries) | not) then error("invalid attention identities")
-          elif any($rows[]; length != 8) then error("invalid quota rows")
+          elif any($rows[]; length != 8 + $k) then error("invalid quota rows")
           else
             {
-              schemaVersion: 5,
+              schemaVersion: schema_of($k),
               providers: (($rows |
-                map({
-                  provider: .[0],
+                map(keyed_row($k) + {
                   availability: {
-                    scope: .[1],
+                    scope: .[1 + $k],
                     status: "known",
-                    effectivePercentRemaining: (.[2] | tonumber),
-                    runway: {status: .[4]}
+                    effectivePercentRemaining: (.[2 + $k] | tonumber),
+                    runway: {status: .[4 + $k]}
                   }
                 })) +
-                ($attention_entries | map(. as $entry | {
-                  provider: $entry.provider,
+                ($attention_entries | map(. as $entry | ($entry | {provider} + account_of) + {
                   availability: ([$entry | attention_availability] | first // null)
                 })) |
-                group_by(.provider) |
-                map({
-                  provider: .[0].provider,
+                group_by([.provider, .accountKey]) |
+                map((.[0] | {provider} + account_of) + {
                   quotaSemantics: {
                     status: (if any(.[]; .availability.status == "known") then "known" else "unknown" end),
                     effectiveAvailability: [.[].availability | select(. != null)]
@@ -309,41 +320,23 @@ fi
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
 # provider_for_harness <harness> [<model>]
-# Map a firstmate harness name to its primary quota-axi provider family.
-# Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. omp is keyed on the candidate model prefix instead
-# and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
-# quota-array-dispatch skill, not this helper.
+# The harness -> primary provider family table is owned by
+# fm_quota_provider_for_harness in bin/fm-quota-axi-lib.sh; see the header
+# limitation note for why one family per harness is all this helper checks.
 provider_for_harness() {
-  case "$1" in
-    omp)
-      case "${2:-}" in
-        openai-codex/*)  printf 'codex\n' ;;
-        claude-bridge/*) printf 'claude\n' ;;
-        *)               return 1 ;;
-      esac
-      ;;
-    claude)       printf 'claude\n' ;;
-    codex)        printf 'codex\n' ;;
-    opencode)     printf 'codex\n' ;;
-    pi|pi-signed) printf 'pi\n' ;;
-    grok)         printf 'grok\n' ;;
-    kimi)         printf 'kimi\n' ;;
-    cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
-    *)            return 1 ;;
-  esac
+  fm_quota_provider_for_harness "$@"
 }
 
-# effective_for_provider_model <provider> <model>
+# effective_for_provider_model <provider> <model> <lane>
 # Print the most constraining applicable quota evidence for the provider/model
-# tuple, including provider-wide and exact model or product scopes.
+# tuple, including provider-wide and exact model or product scopes. The row is
+# bound through quota_row from bin/fm-quota-axi-lib.sh, so <lane> matters only
+# on a schema 6 snapshot.
 effective_for_provider_model() {
-  local provider=$1 model=${2:-default}
-  printf '%s\n' "$QUOTA_JSON" | jq -c --arg provider "$provider" --arg model "$model" '
+  local provider=$1 model=${2:-default} lane=${3:-}
+  printf '%s\n' "$QUOTA_JSON" | jq -c --arg provider "$provider" --arg model "$model" --arg lane "$lane" "$FM_QUOTA_ROW_JQ"'
     ($model | sub("^model:"; "")) as $model_token |
-    ([.providers[]? | select(.provider == $provider)] | first) as $p |
+    quota_row(.; $provider; $lane) as $p |
     if ($p // null) == null then {status: "unknown"}
     else ($p.quotaSemantics.effectiveAvailability // []) |
     map(select(.scope as $scope |
@@ -385,7 +378,8 @@ for c in "${CANDIDATES[@]}"; do
   provider=$(provider_for_harness "$harness" "$model")
   scope_model=$model
   [ "$harness" != omp ] || scope_model=${model#*/}
-  effective=$(effective_for_provider_model "$provider" "$scope_model")
+  lane=$(jq -rn --arg h "$harness" --arg m "$model" "$FM_QUOTA_ROW_JQ"'quota_lane($h; $m)')
+  effective=$(effective_for_provider_model "$provider" "$scope_model" "$lane")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue
   fi

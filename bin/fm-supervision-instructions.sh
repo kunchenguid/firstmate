@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
-# the short repair line used by guards and turn-end hooks.
+# the short repair line used by guards and turn-end hooks. On a non-Pi primary
+# with a supervision protocol (claude, cursor, opencode, omp, grok, codex, agy) whose
+# home runs the supervision host (fm_supervision_host_enabled in
+# bin/fm-supervision-engine-lib.sh: by default on Claude, by
+# config/supervision-host elsewhere, never with config/supervision-host-off), the block
+# adds one state line and the host's main-side protocol
+# (docs/supervision-protocols/supervision-host.md, whose lines tagged
+# "{<harness>,...} " render only for the listed harnesses), and Grok's arm
+# command becomes the host; on a home that does not run it the output is
+# unchanged.
 set -eu
+
+# Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
+shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -13,16 +25,19 @@ DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 HARNESS=
 READ_ONLY=0
 AFK=0
+AFK_MODE=away
 X_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
+--afk-mode only matters when --afk 1 (present); it selects the away-mode vs
+quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
 EOF
 }
 
@@ -48,6 +63,14 @@ while [ "$#" -gt 0 ]; do
     --afk)
       [ "$#" -gt 1 ] || { echo "error: --afk requires 0 or 1" >&2; exit 2; }
       AFK=$(bool_value "$2")
+      shift 2
+      ;;
+    --afk-mode)
+      [ "$#" -gt 1 ] || { echo "error: --afk-mode requires away or quiet" >&2; exit 2; }
+      case "$2" in
+        away|quiet) AFK_MODE=$2 ;;
+        *) AFK_MODE=away ;;
+      esac
       shift 2
       ;;
     --x-mode)
@@ -81,11 +104,34 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-  claude|codex|opencode|pi|grok|cursor|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  hermes)
+    echo 'error: hermes is a crewmate/scout adapter only; primary supervision is unsupported' >&2
+    exit 1 ;;
+  claude|codex|opencode|pi|grok|cursor|omp|agy) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
+CODEX_PARK=0
+if [ "$HARNESS" = codex ]; then
+  if [ -x "$SCRIPT_DIR/fm-codex-stop-park.sh" ] && "$SCRIPT_DIR/fm-codex-stop-park.sh" --capable; then
+    CODEX_PARK=1
+  else
+    SNIPPET="$DOC_DIR/codex-checkpoint.md"
+  fi
+fi
+HOST_SNIPPET=
+grok_arm='bin/fm-watch-arm.sh'
+case "$HARNESS" in
+  claude|cursor|opencode|omp|grok|codex|agy)
+    # shellcheck source=bin/fm-supervision-engine-lib.sh
+    . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+    if fm_supervision_host_enabled "$CONFIG" "$HARNESS"; then
+      HOST_SNIPPET="$DOC_DIR/supervision-host.md"
+      grok_arm='bin/fm-supervision-host.sh park'
+    fi
+    ;;
+esac
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -93,6 +139,21 @@ pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 omp_ext="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
 omp_turnend_ext="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
+
+# True when the active home is not the firstmate checkout: omp's extensions load
+# from the checkout, and only the `fm <project>` launcher points them at another home.
+omp_home_elsewhere=0
+if [ "$(cd -P "$FM_HOME" 2>/dev/null && pwd -P || printf '%s' "$FM_HOME")" != "$(cd -P "$FM_ROOT" 2>/dev/null && pwd -P || printf '%s' "$FM_ROOT")" ]; then
+  omp_home_elsewhere=1
+fi
+# shellcheck disable=SC2016  # backticks are literal markdown in the rendered text
+if [ "$omp_home_elsewhere" -eq 1 ]; then
+  omp_restart_long='exit omp and relaunch through `fm <project>`, which sets FM_HOME and --cwd; a bare omp or /resume from the firstmate checkout does not register the extensions for this home'
+  omp_restart_short='exit omp and relaunch through `fm <project>`'
+else
+  omp_restart_long="restart omp inside this home; pass \`-e $omp_turnend_ext -e $omp_ext\` only when omp must start from another directory, because omp loads a file named both ways twice"
+  omp_restart_short='restart omp inside this home'
+fi
 
 shell_quote() {
   printf "'"
@@ -106,17 +167,33 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
 fi
 
-render_snippet() {
-  local line
+render_snippet() {  # [snippet]
+  local line tags snippet=${1:-$SNIPPET} codex_tag=codex-checkpoint
+  [ "$CODEX_PARK" -eq 0 ] || codex_tag=codex-park
   while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '{'*'} '*)
+        tags=${line%%\} *}
+        tags=${tags#\{}
+        case ",$tags," in
+          *",$HARNESS,"*) ;;
+          *",$codex_tag,"*) [ "$HARNESS" = codex ] || continue ;;
+          *) continue ;;
+        esac
+        line=${line#*\} }
+        ;;
+    esac
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
+    line=${line//__FM_OMP_RESTART_LONG__/$omp_restart_long}
+    line=${line//__FM_OMP_RESTART_SHORT__/$omp_restart_short}
     line=${line//__FM_OMP_EXT__/$omp_ext}
     line=${line//__FM_OMP_TURNEND_EXT__/$omp_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    line=${line//__FM_GROK_ARM__/$grok_arm}
     printf '%s\n' "$line"
-  done < "$SNIPPET"
+  done < "$snippet"
 }
 
 repair_line() {
@@ -125,7 +202,11 @@ repair_line() {
     return 0
   fi
   if [ "$AFK" -eq 1 ]; then
-    printf '%s\n' 'Away mode owns watcher supervision; load /afk and ensure the daemon is running instead of starting normal supervision directly.'
+    if [ "$AFK_MODE" = quiet ]; then
+      printf '%s\n' 'Quiet mode owns watcher supervision; load /quiet and ensure the daemon is running instead of starting normal supervision directly.'
+    else
+      printf '%s\n' 'Away mode owns watcher supervision; load /afk and ensure the daemon is running instead of starting normal supervision directly.'
+    fi
     return 0
   fi
 
@@ -142,22 +223,38 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      if [ "$CODEX_PARK" -eq 1 ]; then
+        printf '%s%s\n' "$prefix" 'watcher supervision is owned by the Codex asynchronous Stop park; inspect state/.codex-park.json and the native hook registration before ending blind.'
+      else
+        printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
       ;;
     omp)
-      printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the omp tool fm_watch_arm_omp, or restart omp inside this home so ' "$omp_turnend_ext" ' and ' "$omp_ext" ' auto-load from .omp/extensions/ (use -e with both paths only when starting omp from another directory).'
+      # shellcheck disable=SC2016  # backticks are literal markdown in the rendered text
+      if [ "$omp_home_elsewhere" -eq 1 ]; then
+        printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the omp tool fm_watch_arm_omp, or exit omp and relaunch through `fm <project>` (the launcher sets FM_HOME and --cwd) so ' "$omp_turnend_ext" ' and ' "$omp_ext" ' load for this home; a bare omp or /resume from the firstmate checkout does not register the extensions for this home.'
+      else
+        printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the omp tool fm_watch_arm_omp, or restart omp inside this home so ' "$omp_turnend_ext" ' and ' "$omp_ext" ' auto-load from .omp/extensions/ (use -e with both paths only when starting omp from another directory).'
+      fi
       ;;
     opencode)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'
       ;;
     grok)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$grok_arm" ' as its own Grok tracked background task, never shell &.'
       ;;
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
+      ;;
+    agy)
+      if [ -n "$HOST_SNIPPET" ]; then
+        printf '%s%s\n' "$prefix" 'supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh running the supervision host); inspect the hook registration and supervision host startup path before ending the turn.'
+      else
+        printf '%s%s\n' "$prefix" 'watcher supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh); inspect the hook registration and watcher startup path before ending the turn.'
+      fi
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
@@ -171,7 +268,11 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      if [ "$CODEX_PARK" -eq 1 ]; then
+        printf '%s\n' '- Ordinary wake: the Codex Stop hook (bin/fm-codex-stop-park.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      else
+        printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
@@ -183,10 +284,13 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
       ;;
     grok)
-      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
+      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$grok_arm" ' Grok tracked background task as directed below.'
       ;;
     cursor)
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      ;;
+    agy)
+      printf '%s\n' '- Ordinary wake: the Stop-hook park (bin/fm-turnend-guard-agy.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'
@@ -210,16 +314,27 @@ else
   printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
 fi
 if [ "$AFK" -eq 1 ]; then
-  printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
+  if [ "$AFK_MODE" = quiet ]; then
+    printf '%s\n' '- Quiet mode: active; load /quiet and keep normal harness supervision paused while the daemon owns the watcher. Ordinary captain chat does NOT exit it - only an explicit /quiet off does.'
+  else
+    printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
+  fi
 else
-  printf '%s\n' '- Away mode: inactive.'
+  printf '%s\n' '- Away/quiet mode: inactive.'
 fi
 if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
+if [ -n "$HOST_SNIPPET" ]; then
+  printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'
+fi
 ordinary_wake_line
 printf '\n'
 render_snippet
 printf '\n'
+if [ -n "$HOST_SNIPPET" ]; then
+  render_snippet "$HOST_SNIPPET"
+  printf '\n'
+fi

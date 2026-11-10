@@ -143,7 +143,11 @@ record_pi_extension_session() {
       version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
         _ "$ROOT/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
     fi
-    printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+    if [ "${pair##*:}" = watch ]; then
+      printf '%s\n%s\ngeneration=1 phase=active\n' "$version" "$session_pid" > "$home/state/$marker"
+    else
+      printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+    fi
   done
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$home/state/.lock"
   return 0
@@ -154,6 +158,38 @@ count_text() {
   awk -v needle="$needle" 'index($0, needle) { c++ } END { print c + 0 }' <<EOF
 $haystack
 EOF
+}
+
+# The same persistent-model call from the supervision branch actor, as the
+# supervision host's engine turn runs every guarded command.
+run_guard_case_as_branch() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=persistent \
+    FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+# The branch actor never owns watcher continuity, so a down watcher is never an
+# instruction to it, and its calls neither open nor end main's down-episode.
+test_branch_actor_is_never_told_to_repair_the_watcher() {
+  local dir out
+  dir=$(make_guard_case branch-watcher-down)
+  out=$(run_guard_case_as_branch "$dir")
+  assert_not_contains "$out" "WATCHER DOWN" "the branch actor was shown the watcher-down banner: $out"
+  assert_not_contains "$out" "watcher still down" "the branch actor was shown the watcher-down reminder: $out"
+  assert_not_contains "$out" "repair" "the branch actor was given a watcher repair instruction: $out"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a branch call must not consume main's full banner for the episode: $out"
+  out=$(run_guard_case_as_branch "$dir")
+  [ -z "$out" ] || fail "the branch actor must stay silent inside main's episode: $out"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "full banner already printed this episode" \
+    "a branch call must not end main's down-episode"
+  pass "fm-guard stale banner: the branch actor is never told to repair the watcher and leaves main's episode alone"
 }
 
 test_first_stale_call_prints_full_banner() {
@@ -167,6 +203,22 @@ test_first_stale_call_prints_full_banner() {
   assert_contains "$out" "WILL still run" \
     "full banner must keep the guarded-operation continuation line"
   pass "fm-guard stale banner: first stale call prints the full actionable banner"
+}
+
+test_full_banner_names_quiet_mode_when_active() {
+  # kunchenguid/firstmate#2356: the banner's repair line must not misdirect a
+  # captain in quiet mode to /afk - fm-guard.sh threads the flag's declared
+  # mode through to fm-supervision-instructions.sh's --afk-mode.
+  local dir home out
+  dir=$(make_guard_case quiet-mode-banner)
+  home=$(case_home "$dir")
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "Quiet mode owns watcher supervision; load /quiet" \
+    "full banner did not name /quiet for an active quiet-mode flag"
+  assert_not_contains "$out" "Away mode owns watcher supervision" \
+    "full banner misdirected a quiet-mode captain to /afk"
+  pass "fm-guard stale banner: repair line is quiet-mode-aware, not hardcoded to away mode"
 }
 
 test_repeated_same_episode_prints_reminder_only() {
@@ -597,6 +649,59 @@ test_extension_handoff_with_live_session_is_healthy() {
   pass "fm-guard stale banner: extension-owned hand-off with a live session is healthy"
 }
 
+# A fakebin whose uname reports <uname> and whose `ps -W` lists one Pi-shaped
+# Windows process, WINPID 7204; every other ps question is the real one.
+windows_table_fakebin() {  # <dir> <uname>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %s\n' "$2" > "$fakebin/uname"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = -W ] || exec /bin/ps "$@"
+printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\AppData\Roaming\npm\pi.exe'
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# A Windows/Git Bash home records its session as a tagged win:<pid>
+# (bin/fm-session-lock-lib.sh). That holder is outside the local process table,
+# so the hand-off tolerance answers its liveness from the Windows table instead
+# of reading a correctly locked home as supervision off. A dead or malformed
+# tagged holder, and the same tag on a non-Windows host, stay loud.
+test_extension_handoff_with_tagged_windows_session() {
+  local spec case_name uname session_pid expect dir home fakebin out
+  for spec in \
+    "live:MINGW64_NT-10.0-26200:win:7204:healthy" \
+    "dead:MINGW64_NT-10.0-26200:win:7300:alarm" \
+    "malformed:MINGW64_NT-10.0-26200:win:72x4:alarm" \
+    "not-windows:Linux:win:7204:alarm"; do
+    case_name=${spec%%:*}
+    uname=$(printf '%s' "$spec" | cut -d: -f2)
+    session_pid=$(printf '%s' "$spec" | cut -d: -f3-4)
+    expect=${spec##*:}
+    dir=$(make_guard_case "extension-tagged-$case_name")
+    home=$(case_home "$dir")
+    fakebin=$(windows_table_fakebin "$dir" "$uname")
+    record_pi_extension_session "$dir" "$session_pid" \
+      || fail "could not record the tagged Pi extension session for $case_name"
+    touch "$home/state/.last-watcher-beat"
+    out=$(PATH="$fakebin:$PATH" run_guard_case_extension "$dir")
+    case "$expect" in
+      healthy)
+        [ -z "$out" ] \
+          || fail "an extension-owned hand-off with a live tagged session must stay silent, got: $out"
+        ;;
+      alarm)
+        [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+          || fail "a $case_name tagged session must not prove extension ownership; guard output: $out"
+        ;;
+    esac
+  done
+  pass "fm-guard stale banner: a live Windows-tagged session owns the extension hand-off, a dead or malformed one does not"
+}
+
 # A released owner may leave the lock directory briefly before cleanup. It is
 # still genuinely unheld when it records no pid, so the hand-off stays benign.
 test_extension_handoff_with_empty_lock_is_healthy() {
@@ -697,7 +802,9 @@ test_extension_ownership_needs_every_signal() {
     "missing-watch-marker:live:watch:" \
     "missing-turnend-marker:live:turnend:" \
     "drifted-watch-build:live::watch" \
-    "drifted-turnend-build:live::turnend"; do
+    "drifted-turnend-build:live::turnend" \
+    "handoff-watch-generation:live::" \
+    "legacy-watch-marker:live::"; do
     case_name=${spec%%:*}
     dir=$(make_guard_case "extension-$case_name")
     home=$(case_home "$dir")
@@ -711,6 +818,20 @@ test_extension_ownership_needs_every_signal() {
       "$(printf '%s' "$spec" | cut -d: -f3)" \
       "$(printf '%s' "$spec" | cut -d: -f4)" \
       || fail "could not record the Pi extension session for $case_name"
+    case "$case_name" in
+      handoff-watch-generation)
+        head -n 2 "$home/state/.pi-watch-extension-loaded" \
+          > "$home/state/.pi-watch-extension-loaded.tmp"
+        printf 'generation=1 phase=handoff\n' \
+          >> "$home/state/.pi-watch-extension-loaded.tmp"
+        mv "$home/state/.pi-watch-extension-loaded.tmp" "$home/state/.pi-watch-extension-loaded"
+        ;;
+      legacy-watch-marker)
+        head -n 2 "$home/state/.pi-watch-extension-loaded" \
+          > "$home/state/.pi-watch-extension-loaded.tmp"
+        mv "$home/state/.pi-watch-extension-loaded.tmp" "$home/state/.pi-watch-extension-loaded"
+        ;;
+    esac
     touch "$home/state/.last-watcher-beat"
     out=$(run_guard_case_extension "$dir")
     kill "$pid" 2>/dev/null || true
@@ -841,11 +962,15 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence() {
 # The cases above pin the model. This one takes the end-user path instead: no
 # FM_SUPERVISION_MODEL at all, so bin/fm-harness.sh must route a Pi primary to the
 # extension model on its own. Without that routing the tolerance would never reach
-# a real Pi home. The foreign markers are cleared because fm-harness.sh tests them
-# ahead of Pi, and the host running this suite may carry one.
+# a real Pi home. Pinning Pi takes both halves of the evidence: the foreign markers
+# are cleared because the host running this suite may carry one, and the ancestry
+# walk is blinded because a structural ancestor of a different harness outranks the
+# Pi marker, so the harness this suite was launched from would otherwise answer.
 test_pi_harness_routes_itself_to_the_extension_model() {
-  local dir home out pid harness
+  local dir home out pid harness blind
   local -a pi_env
+  blind=$(fm_fakebin "$TMP_ROOT/pi-routing-blind")
+  fm_fake_blind_ancestry "$blind"
   for harness in pi pi-signed; do
     pi_env=(PI_CODING_AGENT=true)
     [ "$harness" = pi ] || pi_env+=(FM_PI_HARNESS=pi-signed)
@@ -857,6 +982,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
     touch "$home/state/.last-watcher-beat"
     out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
       "${pi_env[@]}" \
+      PATH="$blind:$PATH" \
       FM_ROOT_OVERRIDE="$(case_root "$dir")" \
       FM_HOME="$home" \
       FM_GUARD_GRACE=999 \
@@ -870,9 +996,11 @@ test_pi_harness_routes_itself_to_the_extension_model() {
 }
 
 test_first_stale_call_prints_full_banner
+test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy
+test_extension_handoff_with_tagged_windows_session
 test_extension_handoff_with_empty_lock_is_healthy
 test_extension_held_unhealthy_locks_stay_alarm
 test_extension_without_ownership_evidence_stays_alarm
@@ -880,6 +1008,7 @@ test_extension_ownership_needs_every_signal
 test_extension_stale_beacon_alarms_despite_live_session
 test_extension_handoff_keeps_queued_wake_warning
 test_branch_actor_is_not_told_to_drain_queued_wakes
+test_branch_actor_is_never_told_to_repair_the_watcher
 test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy

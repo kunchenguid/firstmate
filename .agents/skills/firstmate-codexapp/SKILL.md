@@ -1,8 +1,7 @@
 ---
 name: firstmate-codexapp
 description: >-
-  Agent-only playbook for coordinating visible Codex Desktop threads alongside Firstmate without pretending they are a selectable shell backend.
-  Use before creating, reading, steering, archiving, debugging, or reviewing a Codex App visible thread for Firstmate work, and before responding to requests to make Codex App native to Firstmate.
+  Load before creating, reading, steering, archiving, debugging, or reviewing a Codex App visible thread for Firstmate work, and before responding to requests to make Codex App native to Firstmate.
 user-invocable: false
 metadata:
   internal: true
@@ -62,7 +61,7 @@ For a Firstmate-managed task, include an explicit status instruction:
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
 Use only these prefixes for status changes: working:, needs-decision:, blocked:, paused:, done:, failed:.
-Use paused: only for a deliberate known external wait that should be rechecked later, never for a blocker that needs firstmate to act.
+Follow the task brief's status-reporting rule for declaring and resolving waits; bin/fm-brief.sh owns that rule.
 Before doing substantive work, append "working: Codex Desktop thread started".
 ```
 

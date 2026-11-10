@@ -21,13 +21,13 @@ The tool reference names the integration form.
 Validate changes against the real harness in a scratch project before trusting them.
 
 A primary must also account for built-in delegation that can create work outside Firstmate's durable records.
-Claude's verified delegation guard is in `references/harness/claude.md`.
+Claude's verified delegation guard is in `references/harness/claude.md`, and Antigravity's is in `references/harness/agy.md`.
 `../../../docs/subagent-guard.md` owns its full contract, local hardening, escape hatch, and per-harness applicability review.
 Never generalize Claude tool names or permissions without live evidence.
 
 ## Session start
 
-`../../../AGENTS.md` section 3 remains the behavioral owner.
+`../../../AGENTS.md` section 3 and the `session-start-recovery` skill remain the behavioral owners.
 `../../../docs/sessionstart-nudge.md` owns native tier assignment, transport, source routing, runtime bound, and fail-open behavior.
 Read it before changing session-open behavior.
 `../../../docs/verification/supervision.md` under "Native session-start delivery" owns active dated evidence.

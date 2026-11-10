@@ -41,7 +41,9 @@ watch_delivery_clean_reason() {
 }
 
 watch_delivery_publish() {
-  local reason=$1 i size tmp raw
+  # Identity/reason cleaning are sequential $(): sibling $() args to one
+  # printf are a bash 5.2 parse-error landmine when a CHLD trap is set.
+  local reason=$1 i size tmp raw ident cleaned_reason
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
   [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] || return 0
   i=0
@@ -50,10 +52,12 @@ watch_delivery_publish() {
     sleep 0.02
     i=$((i + 1))
   done
+  ident=$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")
+  cleaned_reason=$(watch_delivery_clean_reason "$reason")
   printf '%s\t%s\t%s\n' \
     "$FM_WATCH_DELIVERY_PID" \
-    "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
-    "$(watch_delivery_clean_reason "$reason")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
+    "$ident" \
+    "$cleaned_reason" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
   size=$(wc -c < "$WATCH_DELIVERY_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
     ''|*[!0-9]*) ;;
@@ -85,9 +89,11 @@ triage_log() {
 }
 
 # Exit after reporting one actionable wake. Tests override this callback.
+# An optional cadence kind lets actionable work retain heartbeat delivery while
+# resetting idle backoff; omitted kinds keep the wake reason's existing accounting.
 wake() {
   local output_status=0
-  case "$1" in
+  case "${2:-$1}" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
@@ -140,17 +146,18 @@ mark_surface_reported() {  # <status-file> <reported-signature>
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to window task reason span_record rest surface_end='' surface_ident=''
+  local backend=$1 session=$2 record=$3 pane_id to detail window task reason span_record rest surface_end='' surface_ident='' note
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
+  detail=$(fm_transition_detail "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
-  window="$session:$pane_id"
+  window=$(fm_backend_transition_target "$backend" "$session" "$pane_id")
   task=$(window_to_task "$window" "$STATE")
   # A declared wait already names the human this transition would report: an
   # external dependency, or the captain a verified hold transferred the work to.
   # Either way the wait is durably recorded, so absorb the immediate escalation
   # and leave the bounded re-surface to the watcher's own pause cadence.
-  if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+  if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
     triage_log "absorbed push $to (declared wait, awaiting external or captain): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return
@@ -160,7 +167,8 @@ handle_push_transition() {  # <backend> <session> <record>
   case $? in
     0|1) surface_end=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; surface_ident=${rest%%$'\t'*} ;;
   esac
-  reason="stale: $window (herdr: agent $to - waiting on human, escalated immediately, not via wedge timer)"
+  note=$(fm_backend_transition_note "$backend" "$record" 2>/dev/null || true)
+  reason="stale: $window ($backend: agent $to${detail:+ ($detail)} - waiting on human${note:+: $note}, escalated immediately, not via wedge timer)"
   fm_wake_append stale "$window" "$reason" || exit 1
   fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
   mark_surfaced "$STATE/$task.status" "$surface_end" "$surface_ident"

@@ -26,6 +26,25 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# Ambient hc (herdr-core) terminal markers are scrubbed for the whole suite:
+# discover_supervisor_target/discover_supervisor_backend read HC_TERMINAL_ID
+# and HC_TERMINAL_SOCKET now, so running these tests inside a real hc
+# terminal would leak an hc resolution into the tmux/herdr/fallback
+# expectations below. Per-case fixtures set their own HC_* claims.
+unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SESSION HC_SOCKET
+
+# What the pinned claude primary received: each typed line, with every
+# record-backed doorbell followed by the envelope its record holds.
+delivered_digest() {  # <sent-log>
+  local line record
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    fm_operational_doorbell_path "$line" record || continue
+    cat "$record" 2>/dev/null
+    printf '\n'
+  done <"$1"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -55,6 +74,22 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   assert_contains "$out" "does not support supervisor backend 'unsupported'" "daemon startup did not reach backend validation"
   assert_not_contains "$out" "daemon already running" "fm-afk-start.sh trusted a stale pidfile-only live pid"
   pass "fm-afk-start.sh ignores stale pidfile-only live pids"
+}
+
+test_afk_start_refuses_tern_supervisor_backend() {
+  local dir state out status
+  dir=$(make_supercase afk-start-tern-unsupported)
+  state="$dir/state"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tern "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse a tern supervisor backend (away mode supports only tmux, herdr, and rex)"
+  case "$out" in
+    *"does not support supervisor backend 'tern'"*|*"no non-visible daemon-launch primitive for backend 'tern'"*) : ;;
+    *) fail "away mode did not name tern as an unsupported supervisor backend: $out" ;;
+  esac
+  pass "fm-afk-start.sh refuses tern as an away-mode supervisor backend (unsupported; documented in docs/tern-backend.md)"
 }
 
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
@@ -346,6 +381,90 @@ EOF
   pass "failed escalation writes retain durable wakes and classification positions"
 }
 
+test_busy_inbox_escalation_reaches_supervision() {
+  local variant=$1 mode=$2 dir state task=busy-inbox win gen pane reason detail buffer sent drain
+  dir=$(make_supercase "busy-inbox-$variant-$mode"); state="$dir/state"
+  win="sess:fm-$task"; pane="$dir/pane.txt"; sent="$dir/sent.log"
+  buffer="$state/.subsuper-escalations"; drain="$dir/daemon-bin"
+  printf '%s\n' "$mode" > "$state/.afk"
+  printf 'working: processing instructions\n' > "$state/$task.status"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" \
+    --source claude-hook --event UserPromptSubmit
+  printf 'Question awaiting an answer\n' > "$pane"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$pane" \
+    stale_window_is_busy "$win" "$state" || fail "inbox consumer fixture is not busy"
+  case "$variant" in
+    stuck)
+      detail="unread firstmate instruction: stuck-busy after 2 consecutive busy-deferred due doorbells; $state/$task.inbox/001.msg stays unhandled and no doorbell was typed; inspect the worker"
+      ;;
+    write)
+      detail="steering-inbox busy bookkeeping unwritable: $state/$task.inbox/.busy-state cannot be written while $state/$task.inbox/001.msg stays unhandled; inspect the inbox directory"
+      ;;
+    reset)
+      detail="steering-inbox busy bookkeeping unwritable: $state/$task.inbox/.busy-state cannot be reset after a non-busy check; inspect the inbox directory"
+      ;;
+  esac
+  reason="stale: $win ($detail)"
+  mkdir "$drain"
+  cat > "$drain/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${FM_TEST_WAKE_FALLBACK:-0}" != 1 ]; then
+  printf '1\t1\tstale\t$win\t%s\n' "$reason"
+fi
+printf 'WAKE_ACK_REQUIRED: inbox --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$drain/fm-wake-drain.sh"
+  FM_DAEMON_DIR="$drain" FM_ESCALATE_BATCH_SECS=999999 handle_durable_wakes "$reason" "$state" \
+    || fail "$variant $mode inbox wake was not handled"
+  [ "$(cat "$buffer" 2>/dev/null)" = "${reason#stale: }" ] \
+    || fail "$variant $mode inbox escalation was absorbed before supervision"
+  [ "$(cat "$dir/acked")" = ack ] || fail "buffered inbox wake was not acknowledged once"
+  [ "$(status_seen_offset "$state" "$task")" = 0 ] || fail "inbox escalation consumed worker status"
+  [ ! -e "$state/.subsuper-stale-$task" ] || fail "inbox escalation entered transient stale recovery"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=0 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(cat "$buffer")" = "${reason#stale: }" ] || fail "busy housekeeping lost the inbox escalation"
+  printf '❯ \n' > "$pane"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=sess:supervisor escalate_flush "$state" \
+    || fail "$variant $mode inbox escalation did not reach the supervisor"
+  assert_contains "$(delivered_digest "$sent")" "${reason#stale: }" "supervisor digest lost the inbox reason"
+  [ ! -s "$buffer" ] || fail "delivered inbox escalation stayed buffered"
+
+  rm "$buffer" "$dir/acked"
+  mkdir "$buffer"
+  ! FM_DAEMON_DIR="$drain" FM_ESCALATE_BATCH_SECS=999999 handle_durable_wakes "$reason" "$state" 2>/dev/null \
+    || fail "unwritable inbox escalation buffer acknowledged its wake"
+  [ ! -e "$dir/acked" ] || fail "failed inbox buffering acknowledged the wake"
+  rmdir "$buffer"
+  FM_DAEMON_DIR="$drain" FM_ESCALATE_BATCH_SECS=999999 FM_TEST_WAKE_FALLBACK=1 \
+    handle_durable_wakes "$reason" "$state" || fail "inbox fallback reason did not recover"
+  [ "$(cat "$buffer")" = "${reason#stale: }" ] || fail "fallback lost the inbox escalation"
+  [ "$(cat "$dir/acked")" = ack ] || fail "recovered inbox buffering did not acknowledge the wake"
+  pass "$variant inbox escalation reaches supervision in $mode mode and survives buffering failure"
+}
+
+test_busy_inbox_dispatch_preserves_other_stale_reasons() {
+  local dir state detail
+  dir=$(make_supercase inbox-dispatch-scope); state="$dir/state"
+  printf 'working: processing instructions\n' > "$state/ordinary.status"
+  for detail in \
+    '' \
+    'busy for 4000s without a turn boundary' \
+    "unread firstmate instruction: $state/ordinary.inbox/001.msg still unhandled after 3 doorbell delivery attempts with an idle pane; inspect the worker" \
+    'steering-inbox ladder bookkeeping unwritable: .ring-state cannot be written' \
+    'steering-inbox retry mark unremovable: .retry-ring cannot be removed'; do
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "stale: sess:fm-ordinary${detail:+ ($detail)}" "$state" \
+      || fail "ordinary stale handling failed"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "inbox dispatch changed another stale reason: $detail"
+    [ -e "$state/.subsuper-stale-ordinary" ] || fail "inbox dispatch bypassed ordinary stale recovery"
+  done
+  pass "inbox dispatch preserves ordinary stale, busy-turn, and other doorbell routing"
+}
+
 test_catchall_buffer_failure_preserves_position() {
   local dir state buffer out
   dir=$(make_supercase catchall-write-failure); state="$dir/state"
@@ -605,6 +724,92 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+# An unrecognized wake escalates once per identity. Delivery acknowledges that
+# exact line; a later copy does not escalate again. A different identity still
+# escalates, and an identity that never flushed still escalates. Ordinary
+# escalation lines are not part of that acknowledgement. A new away session
+# clears the acknowledgements, so the same identity can fire again.
+test_unknown_wake_ack_suppresses_handled_identity() {
+  local dir state fakebin sent capture out
+  dir=$(make_supercase unknown-wake-ack)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "the first unknown wake was not handled"
+  [ ! -e "$state/.subsuper-unknown-acked" ] \
+    || fail "an undelivered unknown wake was acknowledged"
+
+  : > "$state/.subsuper-escalations"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an undelivered unknown wake did not escalate again after its buffer was lost"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "a lost undelivered unknown wake did not escalate again"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "unknown-wake flush failed"
+  grep -F 'unknown wake: frobnicate: already-handled' "$state/.subsuper-unknown-acked" >/dev/null \
+    || fail "a delivered unknown wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered unknown wake stayed buffered"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an acknowledged unknown wake was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an acknowledged unknown wake escalated again: $(cat "$state/.subsuper-escalations")"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: brand-new" "$state" \
+    || fail "a new unknown wake was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    "unknown wake: frobnicate: brand-new") ;;
+    *) fail "a new unknown wake did not escalate on its own: $out" ;;
+  esac
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an ordinary escalation was swallowed by unknown-wake acknowledgement"
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "an ordinary escalation was deduped by unknown-wake acknowledgement"
+
+  bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
+    || fail "clearing the away-session artifacts failed"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an unknown wake from a prior session was not handled"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an unknown wake acknowledged in a prior away session did not fire again"
+  pass "a delivered unknown wake is acknowledged once per away session; a new one and ordinary escalations still fire"
+}
+
+# A digest that inject_msg already delivered must not be injected again just
+# because the acknowledgement write failed afterwards.
+test_unknown_wake_ack_failure_still_clears_delivered_digest() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase unknown-wake-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  mkdir -p "$state/.subsuper-unknown-acked"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: ack-write-fails" "$state" \
+    || fail "the unknown wake was not handled"
+  escalate_add "$state" "done: PR https://example.test/pull/10"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
+    || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
+  delivered_digest "$sent" | grep -F 'unknown wake: frobnicate: ack-write-fails' >/dev/null \
+    || fail "the digest was not delivered: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a delivered digest stayed buffered for re-injection: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-escalations.since" ] || fail "a delivered digest kept its batch timer"
+  pass "a failed unknown-wake acknowledgement write does not re-inject a delivered digest"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -759,6 +964,41 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   pass "an enriched wedge under a declared wait uses the pause cadence and restores wedge detection on resume"
 }
 
+# Upstream kunchenguid/firstmate#6899, away-daemon half. In a home that armed
+# config/wedge-defer-worker-wait, a worker's own open newest `blocked:` line is a
+# declaration too, so an enriched wedge for its pane is not escalated on top of
+# the blocker the daemon already escalated; unarmed, the wedge escalates as before.
+test_enriched_wedge_under_worker_blocker_follows_its_flag() {
+  local dir state task win reason armed
+  for armed in 1 0; do
+    dir=$(make_supercase "enriched-wedge-worker-blocker-$armed")
+    state="$dir/state"
+    task=blocked-wedge-w$armed; win="sess:fm-$task"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+    printf 'working: wiring the client\nblocked: need the API key for the staging account\n' \
+      > "$state/$task.status"
+    mkdir -p "$dir/config"
+    [ "$armed" -eq 0 ] || : > "$dir/config/wedge-defer-worker-wait"
+    # The blocker's own signal is escalated first, as it is when it lands.
+    FM_CONFIG_OVERRIDE="$dir/config" LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $win" "$state"
+    grep -F 'need the API key' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the fixture's blocker was never escalated, so this case pins nothing"
+    : > "$state/.subsuper-escalations"
+    reason="stale: $win (idle 250s, possible wedge, escalation 2)"
+    FM_CONFIG_OVERRIDE="$dir/config" LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=999 handle_wake "$reason" "$state"
+    if [ "$armed" -eq 1 ]; then
+      [ ! -s "$state/.subsuper-escalations" ] \
+        || fail "an armed home escalated a wedge on top of a worker blocker: $(cat "$state/.subsuper-escalations")"
+    else
+      grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+        || fail "an unarmed home stopped escalating a wedge under a worker blocker"
+    fi
+  done
+  pass "an enriched wedge under a worker blocker is not escalated only where config/wedge-defer-worker-wait arms it"
+}
+
 test_stale_terminal_escalates() {
   local dir state out
   dir=$(make_supercase stale-terminal)
@@ -821,6 +1061,29 @@ test_stale_paused_classifies_pause() {
   pass "paused reasons with captain phrases remain pause-classified"
 }
 
+# A resolved line for another phase key, including the stated default key that
+# `fm-send --resolve-key default` writes for a keyless decision, lands after the
+# pause without ending it. The worker's own keyless resolved line does end it.
+test_stale_pause_survives_a_foreign_resolved_line() {
+  local dir state out
+  dir=$(make_supercase stale-paused-foreign-resolved)
+  state="$dir/state"
+  printf 'needs-decision: which color\npaused: waiting on the vendor release\nresolved [key=default]: answered: blue\n' \
+    > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*"paused: waiting on the vendor release") ;; *) fail "a default-key answer cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved [key=legal]: counsel answered\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) ;; *) fail "a differently keyed resolved line cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved: the vendor shipped\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "the worker's own keyless resolved line did not retract the pause: $out" ;; esac
+  printf 'captain-held [key=route]: tracked by task-decision-route\nresolved [key=default]: answered: blue\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "a later resolved line no longer retracted a captain-held declaration: $out" ;; esac
+  pass "a foreign resolved line keeps a pause, while the worker's own resolved line retracts it"
+}
+
 # A verified captain-held transfer is the other declaration that leaves an idle pane
 # EXPECTED, so it earns the same pause action as paused: rather than being aged as a
 # wedge. The wait itself is already durable in the captain-held backlog task.
@@ -878,7 +1141,7 @@ test_handle_wake_terminal_signal_clears_pause_tracking() {
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-terminal.meta"
   printf 'done: upstream landed\n' > "$state/held-w10-terminal.status"
   key=$(printf '%s' "held-w10-terminal" | tr '.:/' '___')
-  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  watcher_key=$(watch_window_key "$win")
   date +%s > "$state/.subsuper-paused-$key"
   date +%s > "$state/.subsuper-stale-$key"
   : > "$state/.paused-$watcher_key"
@@ -902,7 +1165,7 @@ test_housekeeping_migrates_watcher_pause_marker() {
   win="sess:fm-held-w10-migrate"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/held-w10-migrate.status"
-  key=$(printf '%s' "$win" | tr '.:/' '___')
+  key=$(watch_window_key "$win")
   : > "$state/.paused-$key"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   key=$(printf '%s' "held-w10-migrate" | tr '.:/' '___')
@@ -918,7 +1181,7 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   win="sess:fm-held-w10-migrate-unpaused"
   printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-migrate-unpaused.meta"
   printf 'working: upstream landed, resuming\n' > "$state/held-w10-migrate-unpaused.status"
-  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  watcher_key=$(watch_window_key "$win")
   : > "$state/.paused-$watcher_key"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   key=$(printf '%s' "held-w10-migrate-unpaused" | tr '.:/' '___')
@@ -991,6 +1254,36 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
   [ "$age" -lt 60 ] || fail "captain-held marker was not reset to now on re-surface (age ${age}s)"
   pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
+}
+
+# The away record owns the one exception: nobody is there to answer a captain
+# hold, so it is never rechecked. Quiet mode's record is a present captain
+# (bin/fm-afk-contract.sh AWAY OR QUIET), so a quiet daemon rechecks the same
+# hold on the same cadence.
+test_housekeeping_captain_held_silenced_only_by_an_away_record() {
+  local mode dir state fakebin win pane key
+  for mode in away quiet; do
+    dir=$(make_supercase "captain-held-$mode-record")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    win="sess:fm-held-w11r"; pane="$dir/pane.txt"
+    printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/held-w11r.status"
+    printf 'idle prompt $\n' > "$pane"
+    key=$(printf '%s' "held-w11r" | tr ':/.' '___')
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_AFK_MODE="$mode" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+      || fail "fixture: could not record the $mode posture"
+    [ "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" mode)" = "$mode" ] || fail "fixture: the record is not $mode"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    if [ "$mode" = away ]; then
+      ! grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "a captain hold was rechecked while the away record exists: $(cat "$state/.subsuper-escalations")"
+    else
+      grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "quiet mode's record silenced a captain hold as if the captain were away: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+    fi
+  done
+  pass "housekeeping silences a captain hold only under an away record, never under quiet mode's"
 }
 
 # A crew that RESUMED - whose latest status line no longer declares the wait - drops
@@ -1105,6 +1398,369 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
       || fail "$case_name busy declared wait re-surfaced again inside its reset window ($escalations escalations)"
   done
   pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
+}
+
+# The pause ceiling is opt-in; a case that exercises it arms the home's presence flag.
+arm_pause_ceiling() {  # <home-dir>
+  mkdir -p "$1/config" && : > "$1/config/pause-ceiling"
+}
+
+test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
+  local dir state fakebin task win pane key statusf marker identity offset blocked actual_identity rc pause_size
+  dir=$(make_supercase overdue-pause-away-mode)
+  arm_pause_ceiling "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-away; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  pause_size=$(log_size "$statusf")
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$key"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  ! grep -Fq "blocked [key=paused-overdue-$task]" "$statusf" \
+    || fail "attended housekeeping opened an away-only overdue decision"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+
+  blocked="blocked [key=paused-overdue-$task]"
+  [ "$(grep -cF "$blocked" "$statusf")" -eq 1 ] \
+    || fail "away-mode housekeeping did not append exactly one overdue decision: $(cat "$statusf")"
+  marker="$state/.paused-overdue-$task"
+  [ -f "$marker" ] || fail "away-mode housekeeping did not preserve the overdue marker"
+  IFS=: read -r identity offset < "$marker"
+  if [ "$(uname)" = Darwin ]; then
+    actual_identity=$(/usr/bin/stat -f '%d %i' "$statusf")
+  else
+    actual_identity=$(stat -c '%d %i' "$statusf")
+  fi
+  [ "$identity" = "$actual_identity" ] \
+    || fail "away-mode marker is not bound to the status-log identity"
+  [ "$offset" = "$pause_size" ] \
+    || fail "away-mode marker does not retain the original pause snapshot"
+  [ "$(status_seen_offset "$state" "$task")" = "$(log_size "$statusf")" ] \
+    || fail "away-mode overdue event was not recorded as reported through its own line"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away-mode overdue recheck did not queue exactly one stale escalation"
+  status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+    || fail "away-mode overdue decision is absent from the open-decision fold"
+
+  printf 'resolved [key=unrelated]: unrelated answer\n' >> "$statusf"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" housekeeping "$state" \
+    || fail "daemon housekeeping failed to reconcile unrelated resolution"
+  [ -f "$marker" ] || fail "unrelated resolution removed the overdue marker"
+  status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+    || fail "unrelated resolution closed the overdue decision"
+
+  printf 'needs-decision: dependency needs captain input\n' >> "$statusf"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "daemon housekeeping failed to reconcile a later worker status event (rc=$rc)"
+  [ ! -e "$marker" ] || fail "worker resume retained the overdue marker"
+  status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+    && fail "worker resume left the overdue decision open"
+  pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
+}
+
+test_housekeeping_pause_ceiling_absent_keeps_the_pause_recheck() {
+  local dir state fakebin task win pane key statusf before
+  dir=$(make_supercase overdue-pause-flag-absent)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-off; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$key"
+  sleep 2
+  before=$(cat "$statusf")
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(cat "$statusf")" = "$before" ] || fail "without config/pause-ceiling housekeeping wrote to the status log: $(cat "$statusf")"
+  [ ! -e "$state/.paused-overdue-$task" ] || fail "without config/pause-ceiling housekeeping created an overdue marker"
+  [ "$(grep -c . "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "without config/pause-ceiling the pause recheck was not queued exactly once: $(cat "$state/.subsuper-escalations")"
+  grep -F "wait overdue" "$state/.subsuper-escalations" >/dev/null \
+    && fail "without config/pause-ceiling the recheck asked for an overdue decision"
+  pass "without config/pause-ceiling an old away-mode pause keeps the plain pause recheck"
+}
+
+test_housekeeping_overdue_queue_failure_leaves_decision_open() {
+  local dir state fakebin task win pane statusf
+  dir=$(make_supercase overdue-queue-retry)
+  arm_pause_ceiling "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-retry; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 || fail "fixture: could not record away posture"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  real_escalate_add=$(declare -f escalate_add)
+  escalate_add() { return 1; }
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
+  [ -z "$(overdue_delivered_key "$state" "$task")" ] || fail "failed queue was recorded as delivered"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1" && reconcile_overdue_pauses' _ "$ROOT/bin/fm-watch.sh" \
+    || fail "watcher overdue reconciliation failed"
+  [ -e "$state/.paused-overdue-$task" ] || fail "a watcher poll discarded the overdue marker"
+  eval "$real_escalate_add"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-last-scan"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_HEARTBEAT_SCAN_SECS=0 housekeeping "$state"
+  [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] || fail "the failed queue opened a second decision"
+  [ "$(grep -cF "paused-overdue-$task" "$state/.subsuper-escalations")" -eq 1 ] || fail "the next housekeeping pass did not raise the open decision once"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 0 ] || fail "a failed alert was retried"
+  pass "a failed overdue queue stays an open decision the next housekeeping pass raises"
+}
+
+test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
+  local dir state task win statusf size identity
+  dir=$(make_supercase overdue-watcher-marker)
+  arm_pause_ceiling "$dir"
+  state="$dir/state"; task=overdue-shared; win="sess:fm-$task"; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  size=$(wc -c < "$statusf" | tr -d ' ')
+  printf 'blocked [key=paused-overdue-%s]: paused 90s, wait overdue - decide or release\n' "$task" >> "$statusf"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  (
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 . "$ROOT/bin/fm-wake-lib.sh"
+    if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
+    printf '%s:%s\n' "$identity" "$size" > "$state/.paused-overdue-$task"
+    [ -z "$(overdue_delivered_key "$state" "$task")" ] || fail "an undelivered marker hid its blocker"
+    handle_wake "stale: $win (paused 90s, wait overdue - decide or release)" "$state"
+    grep -F "paused-overdue-$task" "$state/.subsuper-escalations" >/dev/null \
+      || fail "the daemon never escalated a blocker only the watcher had reported"
+  ) || fail "watcher marker hid the blocker"
+  pass "a watcher-written overdue marker leaves the blocker to ordinary escalation"
+}
+
+test_overdue_open_decision_without_marker_is_not_repeated() {
+  local dir state task statusf
+  dir=$(make_supercase overdue-open-no-marker)
+  arm_pause_ceiling "$dir"
+  state="$dir/state"; task=overdue-crash; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\nblocked [key=paused-overdue-%s]: paused 9s, wait overdue - decide or release\n' "$task" > "$statusf"
+  fm_write_meta "$state/$task.meta" "window=sess:fm-$task" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away"
+  printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
+  sleep 2
+  (
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999 . "$ROOT/bin/fm-wake-lib.sh"
+    housekeeping "$state"
+    [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] || fail "an interrupted emission opened a second decision"
+  ) || fail "open decision without a marker was repeated"
+  pass "an open overdue decision with no marker is not opened again"
+}
+
+test_housekeeping_overdue_queue_failure_resume_discards() {
+  local event route dir state fakebin task win pane statusf original_enqueue original_append undated
+  original_enqueue=$(declare -f escalate_add)
+  for event in working paused; do
+    for route in housekeeping signal stale; do
+      (
+        dir=$(make_supercase "overdue-resume-$event-$route")
+        arm_pause_ceiling "$dir"
+        state="$dir/state"; fakebin="$dir/fakebin"
+        task=overdue-resume; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+        printf 'paused: waiting for dependency\n' > "$statusf"
+        printf 'idle prompt $\n' > "$pane"
+        fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away posture"
+        printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
+        sleep 2
+        . "$ROOT/bin/fm-wake-lib.sh"
+        # Prefix assignments on a sourced file last only while it is sourced, so each
+        # daemon call carries the fixture environment itself.
+        undated=1
+        fixture() { PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+          FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=$undated FM_ESCALATE_BATCH_SECS=999999 "$@"; }
+        original_append=$(declare -f fm_wake_status_append_self_announced)
+        escalate_add() { return 1; }
+        fixture housekeeping "$state"
+        [ -e "$state/.paused-overdue-$task" ] || fail "failed queue lost the overdue marker"
+        undated=86400
+        printf '%s: worker changed wait\n' "$event" >> "$statusf"
+        eval "$original_enqueue"
+        fm_wake_status_append_self_announced() { return 2; }
+        case "$route" in
+          housekeeping) fixture housekeeping "$state" ;;
+          signal) fixture handle_wake "signal: $statusf" "$state" ;;
+          stale) fixture handle_wake "stale: $win" "$state" ;;
+        esac
+        [ -e "$state/.paused-overdue-$task" ] || fail "failed resolution lost the overdue marker ($event/$route)"
+        : > "$state/.subsuper-escalations"
+        eval "$original_append"
+        case "$route" in
+          housekeeping) fixture housekeeping "$state" ;;
+          signal) fixture handle_wake "signal: $statusf" "$state"; fixture housekeeping "$state" ;;
+          stale) fixture handle_wake "stale: $win" "$state"; fixture housekeeping "$state" ;;
+        esac
+        [ ! -s "$state/.subsuper-escalations" ] || fail "resumed worker queued an obsolete alert ($event/$route)"
+        [ ! -e "$state/.paused-overdue-$task" ] || fail "resume retained the overdue marker"
+        FM_HOME="$dir" status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+          && fail "resume left the overdue decision open ($event/$route)"
+        grep -Fq "resolved [key=paused-overdue-$task]" "$statusf" || fail "resume did not record resolution"
+      ) || fail "pending resume reconciliation failed ($event/$route)"
+    done
+  done
+  pass "failed enqueue followed by a worker event closes without an obsolete alert, retaining failed resolutions"
+}
+
+test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
+  local dir state task statusf identity offset event
+  for event in blocked repeated prose custom "done" merged configured-resolve; do
+    dir=$(make_supercase "overdue-reconcile-$event"); state="$dir/state"
+    arm_pause_ceiling "$dir"
+    task=overdue-reconcile; statusf="$state/$task.status"
+    if [ "$event" = custom ]; then printf 'holding [at=100]: waiting for dependency\n' > "$statusf"; else printf 'paused [at=100]: waiting for dependency\n' > "$statusf"; fi
+    offset=$(wc -c < "$statusf" | tr -d ' ')
+    printf 'blocked [key=paused-overdue-%s]: overdue\n' "$task" >> "$statusf"
+    if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
+    printf '%s:%s\n' "$identity" "$offset" > "$state/.paused-overdue-$task"
+    case "$event" in
+      blocked) printf 'blocked [key=other]: another decision\n' >> "$statusf" ;;
+      repeated) printf 'paused [at=200]: waiting for dependency\n' >> "$statusf" ;;
+      prose) printf 'Still waiting for the dependency\n' >> "$statusf" ;;
+      custom) printf 'holding [at=200]: waiting for dependency\n' >> "$statusf" ;;
+      done) printf 'done: finished\n' >> "$statusf" ;;
+      merged) printf 'merged\n' >> "$statusf" ;;
+      configured-resolve) printf 'working: resumed\n' >> "$statusf" ;;
+    esac
+    (
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+      if [ "$event" = custom ]; then
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"
+      elif [ "$event" = configured-resolve ]; then
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CLASSIFY_RESOLVE_VERB=answered reconcile_overdue_pause "$state" "$task"
+      else
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$state" reconcile_overdue_pause "$state" "$task"
+      fi
+      if [ "$event" = "done" ] || [ "$event" = merged ] || [ "$event" = configured-resolve ]; then
+        [ ! -e "$state/.paused-overdue-$task" ] || fail "$event left the overdue marker"
+        if [ "$event" = configured-resolve ]; then
+          ! FM_CLASSIFY_RESOLVE_VERB=answered status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
+          grep -Fq "answered [key=paused-overdue-$task]" "$statusf" || fail "$event did not record configured resolution"
+        else
+          ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event left the overdue decision open"
+        fi
+      else
+        [ -e "$state/.paused-overdue-$task" ] || fail "$event removed the overdue marker"
+        status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || fail "$event closed the overdue decision"
+      fi
+    ) || fail "overdue reconciliation accepted $event as resume"
+  done
+  pass "unrelated blockers and repeated pauses preserve overdue decisions"
+}
+
+test_housekeeping_overdue_initial_publication_reconciles_resume() {
+  local timing dir state task statusf original_append
+  for timing in before after; do
+    (
+      dir=$(make_supercase "overdue-initial-resume-$timing"); state="$dir/state"
+      arm_pause_ceiling "$dir"
+      task=overdue-initial; statusf="$state/$task.status"
+      printf 'paused: waiting for dependency\n' > "$statusf"
+      fm_write_meta "$state/$task.meta" "window=sess:fm-$task" "worktree=$dir/wt" "kind=ship" "harness=pi"
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away posture"
+      printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
+      sleep 2
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+      original_append=$(declare -f fm_wake_status_append_self_announced)
+      eval "${original_append/fm_wake_status_append_self_announced ()/original_append_impl ()}"
+      fm_wake_status_append_self_announced() {
+        case "$3" in blocked*)
+          [ "$timing" != before ] || printf 'working: resumed\n' >> "$2"
+          original_append_impl "$@"
+          [ "$timing" != after ] || printf 'working: resumed\n' >> "$2"
+          return 1 ;;
+        esac
+        original_append_impl "$@"
+      }
+      PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+        FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+      [ ! -s "$state/.subsuper-escalations" ] || fail "initial publication queued an obsolete alert ($timing)"
+      [ -z "$(status_open_decisions "$statusf")" ] || fail "initial publication left an obsolete decision ($timing)"
+      grep -Fq "resolved [key=paused-overdue-$task]" "$statusf" || fail "initial race was not reconciled"
+    ) || fail "initial resume race failed ($timing)"
+  done
+  pass "initial overdue publication reconciles resumes on either side of its blocker append"
+}
+
+test_housekeeping_quiet_overdue_pause_opens_decision() {
+  local dir state fakebin task win pane statusf
+  dir=$(make_supercase quiet-overdue-pause)
+  arm_pause_ceiling "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-quiet; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the quiet posture"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] \
+    || fail "quiet-mode housekeeping did not open one overdue decision"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "quiet-mode housekeeping did not queue one stale escalation"
+  pass "quiet-mode housekeeping applies the overdue pause ceiling"
+}
+
+test_housekeeping_overdue_pause_preserves_prior_actionable_event() {
+  local dir state fakebin task win pane statusf blocked
+  dir=$(make_supercase overdue-pause-unread-event)
+  arm_pause_ceiling "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-unread; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  printf 'done: prior actionable event\npaused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-last-scan"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+
+  blocked="blocked [key=paused-overdue-$task]"
+  [ "$(grep -cF "$blocked" "$statusf")" -eq 1 ] || fail "overdue blocker was not appended once"
+  [ "$(grep -cF 'prior actionable event (catch-all scan)' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the prior unread status event was not presented once"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the overdue pause was not queued once"
+  ! grep -Fq "paused-overdue-$task (catch-all scan)" "$state/.subsuper-escalations" \
+    || fail "the self-announced overdue blocker was re-reported by heartbeat"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(grep -cF 'prior actionable event (catch-all scan)' "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the prior actionable event was presented more than once"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "the overdue pause was queued more than once"
+  pass "overdue self-announcement preserves prior unread events without duplicate heartbeat"
 }
 
 test_housekeeping_declared_time_controls_pause_recheck() {
@@ -1407,7 +2063,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
 }
 
 test_escalate_batches_into_one_digest() {
-  local dir state fakebin sent capture n
+  local dir state fakebin sent capture n record
   dir=$(make_supercase batch)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1419,17 +2075,74 @@ test_escalate_batches_into_one_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
-  grep -F 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent" >/dev/null \
-    || fail "batch digest lacks the exact current away-supervisor kind"
-  grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
-  grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
+  # A Claude Code primary strips U+2063 from submitted prompts, so the digest
+  # travels as a record in this home's operational inbox behind a plain doorbell.
+  record=$(sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p" "$sent" | head -1)
+  [ -n "$record" ] || fail "batch digest was not typed as a record-backed doorbell for the claude primary: $(cat "$sent")"
+  grep -F "$FM_OPERATIONAL_MARK" "$sent" >/dev/null \
+    && fail "the claude primary was typed the invisible marker it strips"
+  [ "$(cd "$(dirname "$record")" && pwd -P)" = "$(cd "$state/operational-inbox" && pwd -P)" ] \
+    || fail "the doorbell names a record outside this home's operational inbox: $record"
+  grep -F "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: " "$record" >/dev/null \
+    || fail "the digest record lacks the exact current away-supervisor envelope"
+  grep -F "event A" "$record" >/dev/null || fail "batch digest missing event A"
+  grep -F "event B" "$record" >/dev/null || fail "batch digest missing event B"
+  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$record" >/dev/null \
     || fail "batch digest did not join events with literal ' | '"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
   n=$(grep -c '\[ENTER\]' "$sent")
   [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
   pass "multiple escalations flush as a single batched digest"
+}
+
+test_escalate_marker_preserving_primary_types_envelope() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase batch-typed-envelope)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  escalate_add "$state" "event C: done: PR 3"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_DAEMON_PRIMARY_HARNESS=codex \
+    escalate_flush "$state" || fail "escalate_flush failed for a marker-preserving primary"
+  grep -F "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: " "$sent" >/dev/null \
+    || fail "a marker-preserving primary lost the typed away-supervisor envelope"
+  grep -F 'event C: done: PR 3' "$sent" >/dev/null || fail "typed digest missing event C"
+  grep -F 'Firstmate operational input waiting' "$sent" >/dev/null \
+    && fail "a marker-preserving primary was sent a record-backed doorbell"
+  [ ! -e "$state/operational-inbox" ] || fail "a marker-preserving primary published an operational record"
+  pass "a marker-preserving primary still receives the typed U+2063 away-supervisor envelope and no record"
+}
+
+test_record_doorbell_detection() {
+  local dir state other doorbell stray missing
+  dir=$(make_supercase doorbell-detect)
+  state="$dir/state"
+  other="$dir/other-state"
+  mkdir -p "$other"
+  afk_enter "$state"
+  fm_operational_record_write "$state" away-supervisor "Supervisor escalate: done" doorbell \
+    || fail "could not publish an away-supervisor record"
+  message_is_injection "$doorbell" "$state" \
+    || fail "a doorbell for this home's own record was not detected as an injection"
+  should_exit_afk "$state" "$doorbell" \
+    && fail "a doorbell for this home's own record exited afk"
+  fm_operational_record_write "$other" away-supervisor "Supervisor escalate: done" stray \
+    || fail "could not publish another home's record"
+  should_exit_afk "$state" "$stray" \
+    || fail "a doorbell naming another home's record kept afk"
+  missing=${doorbell%.msg\'*}-gone.msg${doorbell##*.msg}
+  should_exit_afk "$state" "$missing" \
+    || fail "a doorbell naming no record kept afk"
+  should_exit_afk "$state" "FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate: done" \
+    || fail "a typed ASCII FIRSTMATE_OP label kept afk"
+  rm -f "$state"/operational-inbox/*.msg
+  should_exit_afk "$state" "$doorbell" \
+    || fail "a doorbell whose record was pruned kept afk"
+  pass "record-backed doorbell: only a doorbell naming this home's own record stays afk; a bare ASCII label, a missing record, and another home's record exit"
 }
 
 test_escalate_batch_age_uses_first_append() {
@@ -1446,7 +2159,7 @@ test_escalate_batch_age_uses_first_append() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
     housekeeping "$state"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
+  delivered_digest "$sent" | grep -F 'event A: done: PR 1 | event B: done: PR 2' >/dev/null \
     || fail "backdated batch did not flush as a joined digest (max-delay measured from last append)"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after backdated flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
@@ -2079,7 +2792,7 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
+  [ "$(delivered_digest "$sent" 2>/dev/null | grep -c 'Supervisor escalate' || true)" -eq 1 ] \
     || fail "max-defer typed the digest more than once"
   [ -s "$state/.subsuper-inject-wedged" ] \
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
@@ -2124,6 +2837,35 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+test_composer_deferral_names_pending_text_or_unrecognized_shape() {
+  # A deferral must say WHICH refusal it was: real unsubmitted text is a
+  # human's draft, while an unproven composer points at the classifier, the
+  # pane, a dead shell, or a busy harness - the case a titled claude rule once
+  # hid for hours.
+  local dir state fakebin sent log
+  dir=$(make_bordered_case composer-deferral-reason)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    inject_msg "needs-decision: pick B" "$state"; then
+    fail "inject_msg typed into a pending composer"
+  fi
+  grep -F 'inject deferred: supervisor composer not confirmed-empty (state=pending: unsubmitted text in the composer)' "$log" >/dev/null \
+    || fail "a pending composer deferral does not name the unsubmitted text: $(cat "$log")"
+  : > "$log"
+  printf 'build output\nplain transcript line\n' > "$dir/composer"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    inject_msg "needs-decision: pick B" "$state"; then
+    fail "inject_msg typed into a screen with no recognized composer"
+  fi
+  grep -F 'inject deferred: supervisor composer not confirmed-empty (state=unknown: composer not proven empty or pending (unrecognized screen, or harness not idle))' "$log" >/dev/null \
+    || fail "an unrecognized screen deferral does not say the composer was not proven empty or pending: $(cat "$log")"
+  [ ! -s "$sent" ] || fail "a deferred inject typed text"
+  pass "a composer deferral names pending text apart from an unproven composer"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -2138,6 +2880,159 @@ test_normal_flush_clears_stale_wedge_marker() {
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after normal flush"
   [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker survived successful normal flush"
   pass "normal flush clears a stale wedge marker"
+}
+
+# The start-up catch-all scan turns each status log's unread span into one
+# buffered item, so a first digest can exceed the 131,071 bytes one transport
+# argument can carry. The fake tmux refuses any literal send above that.
+test_oversized_digest_is_bounded_and_kept_durable() {
+  local dir state fakebin sent raw digest full i item
+  dir=$(make_bordered_case digest-oversized)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  for i in a b c; do
+    item="secondmate-$i.status: "
+    while [ "${#item}" -lt 60000 ]; do item+="done: café fix shipped, PR https://x/y/pull/1 ; "; done
+    escalate_add "$state" "$item (catch-all scan)"
+  done
+  escalate_add "$state" "secondmate-a.status: needs-decision [key=pick]: pick A or B"
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  raw=$(LC_ALL=C wc -c < "$dir/buffer.orig" | tr -d ' ')
+  [ "$raw" -gt 131071 ] || fail "fixture buffer is only $raw bytes; it must exceed one argument's 131,071-byte ceiling"
+  afk_enter "$state"
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SEND_MAX_BYTES=131071 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    || fail "oversized digest was not delivered: $(cat "$dir/daemon.log" 2>/dev/null)"
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
+  [ "$(printf '%s\n' "$digest" | wc -l | tr -d ' ')" -eq 1 ] || fail "expected exactly one typed digest"
+  [ "$(printf '%s' "$digest" | LC_ALL=C wc -c | tr -d ' ')" -le 16384 ] \
+    || fail "delivered digest is not bounded well below the transport ceilings"
+  assert_contains "$digest" 'Supervisor escalate (4 event(s)): secondmate-a.status: done:' "digest lost its header or first event"
+  assert_contains "$digest" 'secondmate-a.status: needs-decision [key=pick]: pick A or B' "a short event did not survive whole"
+  printf '%s' "$digest" | grep -E '\[\+[0-9]+ bytes\]' >/dev/null || fail "truncated items carry no omitted-bytes marker"
+  if command -v iconv >/dev/null 2>&1; then
+    printf '%s' "$digest" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || fail "truncation split a UTF-8 sequence"
+  fi
+  full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
+  [ -n "$full" ] && [ -f "$full" ] || fail "bounded digest names no readable full-text file: $digest"
+  cmp -s "$full" "$dir/buffer.orig" || fail "full-text file does not hold every buffered event verbatim"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after the bounded digest was delivered"
+  pass "an oversized buffered digest is delivered bounded, with the full text kept durable"
+}
+
+test_digest_budget_counts_omitted_events() {
+  local dir state fakebin sent digest full i shown more
+  dir=$(make_bordered_case digest-many)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  for i in $(seq 1 20); do
+    escalate_add "$state" "event $i: $(printf 'x%.0s' $(seq 1 1000))"
+  done
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  afk_enter "$state"
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" || fail "many-event digest was not delivered"
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
+  assert_contains "$digest" 'Supervisor escalate (20 event(s)): event 1: x' "digest header must count every buffered event"
+  more=$(printf '%s' "$digest" | sed -n 's/.* | +\([0-9][0-9]*\) more event(s).*/\1/p')
+  [ -n "$more" ] || fail "an exhausted budget left no '+K more event(s)' tail: $digest"
+  shown=$(printf '%s' "$digest" | grep -o 'event [0-9][0-9]*: x' | wc -l | tr -d ' ')
+  [ "$((shown + more))" -eq 20 ] || fail "shown ($shown) plus omitted ($more) events do not account for all 20"
+  full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
+  cmp -s "$full" "$dir/buffer.orig" || fail "omitted events are missing from the full-text file"
+  pass "a digest past its byte budget counts the omitted events and keeps them in the full text"
+}
+
+test_inject_send_failure_logs_stage_stderr_and_bytes() {
+  local dir state fakebin sent log item
+  dir=$(make_bordered_case digest-send-failure)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  item="secondmate-b.status: "
+  while [ "${#item}" -lt 5000 ]; do item+="blocked: waiting on review ; "; done
+  escalate_add "$state" "$item"
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  afk_enter "$state"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SEND_MAX_BYTES=100 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success although the transport refused the send"
+  fi
+  grep -E 'inject failed at initial send or Enter delivery \(verdict=send-failed, bytes=[0-9]+;[^)]*\): command too long' "$log" >/dev/null \
+    || fail "send failure did not log its stage, byte count, and transport stderr: $(cat "$log")"
+  if grep -F 'Enter confirmation' "$log" >/dev/null; then
+    fail "an initial-send failure was reported as an Enter-confirmation failure: $(cat "$log")"
+  fi
+  [ ! -s "$sent" ] || fail "nothing may be typed when the initial send fails"
+  cmp -s "$state/.subsuper-escalations" "$dir/buffer.orig" || fail "buffer changed after a failed send"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SEND_MAX_BYTES=100 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success on a retried refused send"
+  fi
+  [ "$(find "$state/.subsuper-digests" -type f | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "retrying an unchanged buffer must reuse one full-text file: $(ls -A "$state/.subsuper-digests")"
+  WEDGE_ALARM_LAST_EPOCH=0
+  LOG="$log" FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=herdr inject_wedge_alarm "$state" 600
+  grep -E 'ERROR: away-mode escalation undelivered 600s; last delivery failure: initial send .*command too long' "$log" >/dev/null \
+    || fail "wedge line does not carry the last failure reason: $(cat "$log")"
+  grep -F 'Last delivery failure: initial send' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "wedge marker does not carry the last failure reason"
+  pass "an initial-send failure logs its stage, bytes, and stderr, and the wedge alarm names it"
+}
+
+test_inject_enter_failure_logs_confirmation_stage() {
+  local dir state fakebin sent log
+  dir=$(make_bordered_case digest-enter-failure)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  touch "$dir/.swallow"
+  escalate_add "$state" "needs-decision: pick C"
+  afk_enter "$state"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state"; then
+    fail "escalate_flush reported success on a swallowed Enter"
+  fi
+  grep -E 'inject failed at Enter confirmation: submit unconfirmed after 3 retries \(verdict=pending[a-z-]*, bytes=[0-9]+, text may be in composer\)' "$log" >/dev/null \
+    || fail "Enter-confirmation failure did not log its stage and byte count: $(cat "$log")"
+  if grep -F 'initial send' "$log" >/dev/null; then
+    fail "an Enter-confirmation failure was reported as an initial-send failure"
+  fi
+  pass "an Enter-confirmation failure logs its own stage and byte count"
+}
+
+test_bounded_digest_full_text_kept_after_typing() {
+  local dir state fakebin sent log item digest full
+  dir=$(make_bordered_case digest-kept-after-typing)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  touch "$dir/.swallow"
+  item="secondmate-c.status: "
+  while [ "${#item}" -lt 5000 ]; do item+="blocked: waiting on review ; "; done
+  escalate_add "$state" "$item"
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  afk_enter "$state"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state"; then
+    fail "escalate_flush reported success on a swallowed Enter"
+  fi
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
+  full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
+  [ -n "$full" ] && [ -f "$full" ] || fail "a typed bounded digest names a full-text file that was removed: $digest"
+  cmp -s "$full" "$dir/buffer.orig" || fail "kept full-text file does not hold the buffered event verbatim"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success while the composer still held the typed digest"
+  fi
+  [ -f "$full" ] || fail "a deferred retry removed the full-text file the typed digest names"
+  escalate_add "$state" "needs-decision: pick D"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success while the composer still held the typed digest"
+  fi
+  [ "$(ls -A "$state/.subsuper-digests")" = "$(basename "$full")" ] \
+    || fail "a deferral before any send must leave no new full-text file: $(ls -A "$state/.subsuper-digests")"
+  pass "a bounded digest's full-text file survives a failure after typing, and a deferral writes none"
 }
 
 test_below_max_defer_does_nothing() {
@@ -2293,6 +3188,27 @@ test_wedge_alarm_herdr_channel_selected() {
   grep -F 'WEDGED 800s undelivered' "$log" >/dev/null || fail "herdr channel did not carry the summary"
   grep -F 'osascript' "$log" >/dev/null && fail "herdr-only config also selected osascript"
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+test_wedge_alarm_rex_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-rex); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=rex FM_SUPERVISOR_BACKEND=rex \
+    wedge_alarm_notify "away-mode escalations WEDGED 700s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'rex' "$log" >/dev/null || fail "rex channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 700s undelivered' "$log" >/dev/null || fail "rex channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "rex-only config also selected osascript"
+  pass "rex channel routes through the notifier seam with the summary (never a real pane write)"
+}
+
+test_wedge_alarm_auto_never_selects_rex() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-rex); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    FM_SUPERVISOR_BACKEND=rex wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "auto on Darwin did not select osascript: $(cat "$log")"
+  grep -E '^rex' "$log" >/dev/null && fail "auto selected the opt-in rex channel on a Rex supervisor: $(cat "$log")"
+  pass "auto never adds the opt-in rex channel, even on a Rex supervisor pane"
 }
 
 test_wedge_alarm_command_channel_receives_summary() {
@@ -2588,8 +3504,11 @@ test_discover_supervisor_backend_precedence() {
   out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
 
-  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
-    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
+  # The adapter reads its bearer from FM_BACKEND_CONFIG_DIR (pinned when
+  # fm-backend.sh was sourced); pointing it at no bearer keeps the t3code rule
+  # closed whatever T3 state this dev box carries.
+  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_backend); then
+    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV, no T3 bearer) should return non-zero"
   fi
   [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
 
@@ -2610,12 +3529,178 @@ test_discover_supervisor_target_herdr() {
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_supervisor_target)
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
-  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target); then
     fail "bare fallback should return non-zero"
   fi
   [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
 
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+}
+
+# --- hc supervisor discovery (fm-herdr-core-s3-app) --------------------------
+# A firstmate inside an hc terminal - including a Herdr.app terminal, which
+# carries the same core markers - must resolve its own terminal as the
+# supervisor target and hc as the backend, so the away daemon's supported-
+# backend check refuses loudly instead of silently steering firstmate:0 tmux.
+test_discover_supervisor_hc() {
+  local out
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock HC_SESSION='' \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target)
+  [ "$out" = "default:t9" ] || fail "hc target should default HC_SESSION to 'default': $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock HC_SESSION=iso1 \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target)
+  [ "$out" = "iso1:t9" ] || fail "hc target should use an explicit HC_SESSION: $out"
+
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_backend)
+  [ "$out" = hc ] || fail "hc markers should resolve the hc backend: $out"
+
+  # The pair is required: a bare HC_TERMINAL_ID without a socket keeps the
+  # fallback, and the earlier innermost markers still win.
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET='' HC_SESSION='' \
+    FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target); then
+    fail "a bare HC_TERMINAL_ID must not resolve a supervisor target"
+  fi
+  [ "$out" = "firstmate:0" ] || fail "a bare HC_TERMINAL_ID must keep the tmux fallback: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_target)
+  [ "$out" = '%3' ] || fail "TMUX_PANE nested in an hc terminal must keep tmux: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_target)
+  [ "$out" = "default:w1:p9" ] || fail "herdr markers nested in an hc terminal must keep herdr: $out"
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 \
+    HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "herdr markers nested in an hc terminal must keep herdr: $out"
+
+  # The resolution is deliberately fail-closed: the away daemon's supported
+  # list does not name hc, so it refuses at startup with the supported set
+  # rather than silently steering the tmux fallback.
+  if fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" hc; then
+    fail "the away daemon must not list hc as a supported supervisor backend"
+  fi
+
+  pass "discover_supervisor_{target,backend}: hc markers resolve <session>:<address> + hc; bare id, nested tmux/herdr keep their verdicts; supported list stays closed to hc"
+}
+
+# --- t3code supervisor discovery and busy verdict --------------------------
+# The real adapter is sourced once so fm_backend_source's sourced flag keeps it
+# from re-sourcing over the stub; the stub records every home it is asked about
+# and answers from FM_FAKE_T3_THREAD (empty: no live thread, `ambiguous`: the
+# adapter's two-threads error, anything else: that thread id).
+t3_discovery_stub() {
+  fm_backend_source t3code || fail "could not source the t3code adapter"
+  fm_backend_t3code_thread_for_home() {
+    printf '%s\n' "$1" >> "${FM_FAKE_T3_CALLS:?}"
+    case "${FM_FAKE_T3_THREAD:-}" in
+      '') return 1 ;;
+      ambiguous) echo "error: 2 live T3 threads run in $1 (t-a, t-b); set FM_SUPERVISOR_TARGET to the captain thread id" >&2; return 2 ;;
+      *) printf '%s' "$FM_FAKE_T3_THREAD" ;;
+    esac
+  }
+}
+
+test_discover_supervisor_t3code_after_env_tmux_and_herdr() {
+  local dir
+  dir=$(make_supercase discover-t3code)
+  mkdir -p "$dir/config"
+  printf 'tok\n' > "$dir/config/t3code-token"
+  (
+    t3_discovery_stub
+    export FM_FAKE_T3_CALLS="$dir/calls" FM_FAKE_T3_THREAD=thread-captain
+    export FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9 FM_BACKEND=
+    local out
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "T3 supervisor discovery must require explicit backend selection"
+    fi
+    [ "$out" = firstmate:0 ] || fail "without explicit T3 selection the tmux fallback must stand"
+    [ ! -s "$dir/calls" ] || fail "without explicit T3 selection the adapter must not be consulted"
+    printf '\n t3code \n' > "$dir/config/backend"
+    [ "$(fm_backend_name)" = t3code ] || fail "spawns must read the padded config/backend as t3code"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target) \
+      || fail "one live T3 thread in the home must resolve the target cleanly"
+    [ "$out" = thread-captain ] || fail "the target should be the live thread id, got '$out'"
+    if out=$(FM_BACKEND=tmux FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "FM_BACKEND=tmux must override config/backend for T3 supervisor discovery"
+    fi
+    [ "$out" = firstmate:0 ] || fail "FM_BACKEND=tmux must leave the tmux fallback, got '$out'"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend) \
+      || fail "one live T3 thread in the home must resolve the backend cleanly"
+    [ "$out" = t3code ] || fail "the backend should be t3code, got '$out'"
+    [ "$(sort -u "$dir/calls")" = "$dir" ] || fail "the adapter must be asked about this home only, got '$(cat "$dir/calls")'"
+
+    : > "$dir/calls"
+    out=$(FM_SUPERVISOR_TARGET=explicit:target FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+    [ "$out" = explicit:target ] || fail "explicit FM_SUPERVISOR_TARGET must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+    [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+    [ "$out" = '%3' ] || fail "TMUX_PANE must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+    [ "$out" = tmux ] || fail "TMUX_PANE must resolve tmux ahead of t3code: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
+    [ "$out" = default:w1:p9 ] || fail "herdr markers must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_backend)
+    [ "$out" = herdr ] || fail "herdr markers must resolve herdr ahead of t3code: $out"
+    [ ! -s "$dir/calls" ] || fail "the explicit env, tmux, and herdr rules must win before the adapter is consulted"
+
+    export FM_FAKE_T3_THREAD=
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "no live T3 thread must fall through to the default with a non-zero status"
+    fi
+    [ "$out" = firstmate:0 ] || fail "no live T3 thread should still print the tmux default target: $out"
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
+      fail "no live T3 thread must fall through to the default backend with a non-zero status"
+    fi
+    [ "$out" = tmux ] || fail "no live T3 thread should still print the tmux default backend: $out"
+
+    export FM_FAKE_T3_THREAD=ambiguous
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target 2>"$dir/ambiguous.err"); then
+      fail "two live T3 threads must not resolve a target"
+    fi
+    [ "$out" = firstmate:0 ] || fail "an ambiguous home falls through to the default target: $out"
+    assert_contains "$(cat "$dir/ambiguous.err")" "error: 2 live T3 threads run in $dir (t-a, t-b)" "discovery must pass the adapter's ambiguity error through to stderr"
+
+    : > "$dir/calls"
+    export FM_FAKE_T3_THREAD=thread-captain
+    rm -f "$dir/config/t3code-token"
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "without a bearer the t3code rule must stay closed"
+    fi
+    [ "$out" = firstmate:0 ] || fail "without a bearer the default target stands: $out"
+    [ ! -s "$dir/calls" ] || fail "without a bearer the adapter must not be consulted"
+  ) || fail "t3code discovery subshell failed"
+  pass "discover_supervisor_*: t3code resolves from the home's live thread after env, TMUX_PANE, and herdr; zero, ambiguous, and no-bearer fall through"
+}
+
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture() {
+  local dir row
+  dir=$(make_supercase primary-t3code-busy)
+  (
+    fm_backend_source t3code || fail "could not source the t3code adapter"
+    fm_backend_capture() { : > "$dir/capture-called"; }
+    fm_backend_t3code_probe() {
+      [ "$1" = thread-captain ] || : > "$dir/unexpected-probe"
+      printf '%s' "${FM_FAKE_T3_ROW:?}"
+    }
+    for row in running starting blocked error http-failure http-404 archived closing; do
+      FM_FAKE_T3_ROW=$row FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code \
+        || fail "a T3 supervisor thread reading $row must defer injection"
+    done
+    for row in idle ready interrupted; do
+      if FM_FAKE_T3_ROW=$row FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code; then
+        fail "a settled T3 supervisor thread reading $row must accept injection without a rendered-tail fallback"
+      fi
+    done
+  ) || fail "t3code pane_is_busy subshell failed"
+  [ ! -e "$dir/capture-called" ] || fail "capture must never be consulted for a t3code supervisor"
+  [ ! -e "$dir/unexpected-probe" ] || fail "pane_is_busy must probe the supervisor thread it was given"
+  pass "pane_is_busy: t3code accepts only a settled thread with no pending request and never reads a rendered tail"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -2733,12 +3818,14 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
+      printf '%s\n' "$3" > "$dir/sent.log"
       printf 'empty'
     }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
       || fail "inject_msg should succeed when send_text_submit confirms empty"
   ) || fail "herdr successful-submit inject_msg subshell failed"
+  delivered_digest "$dir/sent.log" | grep -F 'hello' >/dev/null \
+    || fail "digest text missing from send_text_submit: $(cat "$dir/sent.log")"
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
@@ -2781,19 +3868,29 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_refuses_tern_supervisor_backend
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_unknown_wake_ack_suppresses_handled_identity
+test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
+test_enriched_wedge_under_worker_blocker_follows_its_flag
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
+test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
@@ -2805,8 +3902,19 @@ test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
+test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
+test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
+test_housekeeping_pause_ceiling_absent_keeps_the_pause_recheck
+test_housekeeping_overdue_queue_failure_leaves_decision_open
+test_housekeeping_overdue_queue_failure_resume_discards
+test_watcher_overdue_marker_does_not_hide_blocker_from_daemon
+test_overdue_open_decision_without_marker_is_not_repeated
+test_overdue_reconcile_ignores_unrelated_and_repeated_pause
+test_housekeeping_overdue_initial_publication_reconciles_resume
+test_housekeeping_overdue_pause_preserves_prior_actionable_event
+test_housekeeping_quiet_overdue_pause_opens_decision
 test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
@@ -2834,6 +3942,8 @@ test_marker_detection
 test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
 test_strip_injection_marker
+test_escalate_marker_preserving_primary_types_envelope
+test_record_doorbell_detection
 test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_defers_strict
 test_pane_input_pending_requires_proven_empty_prompt
@@ -2852,6 +3962,13 @@ test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
+test_busy_inbox_escalation_reaches_supervision stuck away
+test_busy_inbox_escalation_reaches_supervision stuck quiet
+test_busy_inbox_escalation_reaches_supervision write away
+test_busy_inbox_escalation_reaches_supervision write quiet
+test_busy_inbox_escalation_reaches_supervision reset away
+test_busy_inbox_escalation_reaches_supervision reset quiet
+test_busy_inbox_dispatch_preserves_other_stale_reasons
 test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
 test_missing_status_stale_is_acknowledged_without_diagnostic
@@ -2869,7 +3986,13 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_composer_deferral_names_pending_text_or_unrecognized_shape
 test_normal_flush_clears_stale_wedge_marker
+test_oversized_digest_is_bounded_and_kept_durable
+test_digest_budget_counts_omitted_events
+test_inject_send_failure_logs_stage_stderr_and_bytes
+test_inject_enter_failure_logs_confirmation_stage
+test_bounded_digest_full_text_kept_after_typing
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_wedge_alarm_library_mode_defaults_to_discard
@@ -2878,6 +4001,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_rex_channel_selected
+test_wedge_alarm_auto_never_selects_rex
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
@@ -2897,6 +4022,9 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_hc
+test_discover_supervisor_t3code_after_env_tmux_and_herdr
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
@@ -2907,3 +4035,119 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+
+# The Claude background-task exit picker names itself on the stale reason.
+# Away mode self-handles the first sight, so the name has to be saved and
+# then appear on the persistence line. A wedge reason that also carries
+# demand-deep-inspection must still escalate, with the name after that clause,
+# and a declared wait must still take the pause cadence.
+test_dialog_name_survives_away_self_handle() {
+  local dir state fakebin win pane key reason
+  dir=$(make_supercase dialog-name-persists)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  win="sess:fm-picker-ship"
+  pane="$dir/pane.txt"
+  printf 'idle on the picker\n' > "$pane"
+  fm_write_meta "$state/picker-ship.meta" "window=$win" "backend=tmux"
+  printf 'working: parked between turns\n' > "$state/picker-ship.status"
+  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  key=$(printf '%s' picker-ship | tr ':/.' '___')
+  [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
+    || fail "a self-handled dialog stale did not save the name: $(cat "$state/.subsuper-dialog-$key" 2>/dev/null)"
+  [ -e "$state/.subsuper-stale-$key" ] || fail "a self-handled dialog stale did not record the persistence marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a first-sight dialog stale escalated instead of waiting: $(cat "$state/.subsuper-escalations")"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  grep -F 'stale persisted' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the persistence line was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the persistence line dropped the dialog name: $(cat "$state/.subsuper-escalations")"
+  grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the persistence line dropped the wedge wording: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-dialog-$key" ] || fail "the saved dialog name outlived the persistence escalation"
+  pass "a dialog name on a first-sight stale reaches the away persistence line"
+}
+
+test_dialog_name_after_demand_deep_inspection_still_escalates() {
+  local dir state win reason i
+  dir=$(make_supercase dialog-name-combined)
+  state="$dir/state"
+  win="sess:fm-picker-ship"
+  fm_write_meta "$state/picker-ship.meta" "window=$win" "backend=tmux"
+  printf 'working: parked between turns\n' > "$state/picker-ship.status"
+  for i in 1 2; do
+    reason="stale: $win (idle 250s, possible wedge, escalation $i, demand-deep-inspection: same pane has wedge-escalated $i times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker)"
+    : > "$dir/daemon.log"
+    LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "escalation $i lost the combined dialog reason: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  done
+  [ "$(grep -c 'blocked-on-prompt: Claude background-task exit picker' "$state/.subsuper-escalations")" -eq 2 ] \
+    || fail "the ladder did not escalate both combined reasons: $(cat "$state/.subsuper-escalations")"
+  grep -F 'demand-deep-inspection:' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the combined reason dropped demand-deep-inspection"
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 2 times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker)' \
+    "$state/.subsuper-escalations" >/dev/null \
+    || fail "the dialog name was not after demand-deep-inspection: $(cat "$state/.subsuper-escalations")"
+  printf 'paused: awaiting an external dependency\n' > "$state/picker-ship.status"
+  : > "$state/.subsuper-escalations"
+  reason="stale: $win (idle 250s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone, blocked-on-prompt: Claude background-task exit picker)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a declared wait with the dialog suffix escalated as a wedge: $(cat "$state/.subsuper-escalations")"
+  pass "a dialog name after demand-deep-inspection still escalates, and a declared wait still pauses"
+}
+
+# /exit on a finished worker with a background shell is what opens the picker,
+# so the status is already `done:` and already escalated when the stale wake
+# arrives. That wake self-handles exactly as a plain stale does: no persistence
+# marker, and no later wedge.
+test_seen_terminal_dialog_stale_clears_like_a_plain_stale() {
+  local dir state win key reason
+  dir=$(make_supercase dialog-name-terminal)
+  state="$dir/state"
+  win="sess:fm-picker-done"
+  fm_write_meta "$state/picker-done.meta" "window=$win" "backend=tmux"
+  printf 'done: shipped the change\n' > "$state/picker-done.status"
+  seen_through "$state" picker-done
+  key=$(printf '%s' picker-done | tr ':/.' '___')
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a seen terminal stale with no dialog recorded a wedge marker"
+  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  grep -F 'stale + terminal (already escalated by signal)' "$dir/daemon.log" >/dev/null \
+    || fail "the fixture did not take the seen terminal self-handle path: $(cat "$dir/daemon.log")"
+  [ ! -e "$state/.subsuper-dialog-$key" ] \
+    || fail "a seen terminal dialog stale kept the saved name"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a seen terminal dialog stale recorded a wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a seen terminal dialog stale escalated: $(cat "$state/.subsuper-escalations")"
+  pass "a seen terminal status on the picker clears like a plain stale"
+}
+
+# The first stale wake after a new `done:` escalates from the status log, and
+# that one line is all the captain gets, so it has to carry the name too.
+test_dialog_name_joins_unseen_status_escalation() {
+  local dir state win
+  dir=$(make_supercase dialog-name-unseen)
+  state="$dir/state"
+  win="sess:fm-picker-new"
+  fm_write_meta "$state/picker-new.meta" "window=$win" "backend=tmux"
+  printf 'done: shipped the change\n' > "$state/picker-new.status"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    handle_wake "stale: $win (blocked-on-prompt: Claude background-task exit picker)" "$state"
+  grep -F 'done: shipped the change' "$state/.subsuper-escalations" \
+    | grep -F 'blocked-on-prompt: Claude background-task exit picker' >/dev/null \
+    || fail "an unseen status escalation dropped the dialog name: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  pass "a dialog name joins the escalation of an unseen status"
+}
+
+test_dialog_name_survives_away_self_handle
+test_seen_terminal_dialog_stale_clears_like_a_plain_stale
+test_dialog_name_joins_unseen_status_escalation
+test_dialog_name_after_demand_deep_inspection_still_escalates

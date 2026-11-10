@@ -24,6 +24,7 @@ This record owns concurrent isolation evidence for the portable parallel candida
 
 - `tests/fm-arm-pretool-check.test.sh`
 - `tests/fm-backend-herdr.test.sh`
+- `tests/fm-backend-t3code.test.sh`
 - `tests/fm-brief.test.sh`
 - `tests/fm-captain-hold-lifecycle.test.sh`
 - `tests/fm-cd-pretool-check.test.sh`
@@ -42,6 +43,7 @@ This record owns concurrent isolation evidence for the portable parallel candida
 - `tests/fm-send-strict.test.sh`
 - `tests/fm-spawn-batch.test.sh`
 - `tests/fm-supervision-instructions.test.sh`
+- `tests/fm-t3-mcp.test.sh`
 - `tests/fm-test-run.test.sh`
 - `tests/fm-tmux-submit-busy.test.sh`
 - `tests/fm-transition-lib.test.sh`
@@ -76,10 +78,24 @@ This record owns concurrent isolation evidence for the portable parallel candida
 | 331 | 0 | 20 | `tests/fm-supervision-instructions.test.sh` |
 | 99 | 0 | 23 | `tests/fm-transition-lib.test.sh` |
 
+## 2026-10-23: T3 Code suites added
+
+`tests/fm-backend-t3code.test.sh` and `tests/fm-t3-mcp.test.sh` joined the candidate set.
+The backend suite spawns real tasks, and `fm-spawn.sh` creates each task's `/tmp/fm-<id>` outside the suite's temporary root, so every case id carries a per-run suffix and the suite's exit cleanup removes only the directories that run created; the helper suite keeps its files under its own root and its fake server binds an ephemeral loopback port.
+
+- Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json <path>` (run `fm-isolation-1792736369527-49823`, 2026-10-23T06:19:29Z to 06:49:34Z, macOS arm64 with stock Bash 3.2 and no tmux)
+- Result: `FM_ISOLATION_SUMMARY total=26 failed=2 concurrency=4 duration_ms=1804656`
+- `tests/fm-backend-t3code.test.sh` exit 0 (734776 ms) and `tests/fm-t3-mcp.test.sh` exit 0 (84247 ms).
+- The two failures are existing members that fail identically on this host without the T3 change: `tests/fm-test-run.test.sh` fails its coverage-guard cases under Bash 3.2 on the base commit too, and `tests/fm-pr-merge.test.sh` fails `forgejo-merges: a well-formed pull request URL should merge` when run alone on the base commit.
+- Separately, two concurrent copies of the backend suite plus the helper suite passed twice, and each suite passed beside `tests/fm-busy-state.test.sh`.
+
+`docs/fm-test-isolation-proof.json` still holds the 2026-08-20 portable-pool artifact; a clean 26-candidate artifact needs a Linux run with Bash 5 and tmux.
+
 ## Family concurrency proofs
 
 `bin/fm-test-isolation-proof.sh --pool <family>` runs the same concurrent proof over a whole `bin/fm-test-run.sh` family, for a stateful family that stays serial on CI but can earn bounded local concurrency.
 A family is admitted to `list_concurrent_safe_families` in `bin/fm-test-run.sh` only by a passing proof recorded here.
+Admission is by family rather than by script, so a script that joins an admitted family afterwards runs concurrently on that family's recorded result without appearing in it.
 
 ### watcher-wake-lock: admitted
 
@@ -143,7 +159,28 @@ The production runner measured the same family at `--family pr-forge --jobs 1` i
 That is close to the family's ceiling rather than a scheduling loss: its longest script runs 198.5s, so no partition of these six can finish faster than about 2.1x.
 The family's clock is two long scripts that do not contend: `fm-pr-check-security` (198.5s) and `fm-teardown` (194.1s) each own a worker for nearly the whole run, and `fm-pr-merge` (118.5s) plus `fm-x-mode` (79.4s) fill the other two.
 `bin/fm-test-isolation-proof.sh`'s own `--list-exclusions` keeps `fm-pr-check-security` and `fm-teardown` out of the mixed PORTABLE pool, where they would share a machine with unrelated lock and forge stress.
-Admitting them inside their own family is a different question and this proof answers it: the family's six scripts are safe with each other at four workers.
+Admitting them inside their own family is a different question and this proof answers it: the six members present on that date are safe with each other at four workers.
+
+`tests/fm-pr-state.test.sh` and `tests/fm-pr-reviewers.test.sh` joined this family after the date above, so that result does not cover them.
+`script_allows_concurrency` in `bin/fm-test-run.sh` grants concurrency by family membership alone, so the family was re-proved at its full eight-member membership.
+
+- Date: 2026-09-12
+- Command: `bin/fm-test-isolation-proof.sh --pool pr-forge --jobs 4`
+- Result: two consecutive runs, 8 candidates, 0 failures.
+
+| Run | Summary |
+|---|---|
+| 1 | `FM_ISOLATION_SUMMARY total=8 failed=0 concurrency=4 duration_ms=367947` |
+| 2 | `FM_ISOLATION_SUMMARY total=8 failed=0 concurrency=4 duration_ms=352910` |
+
+Both recorded runs began with the machine's one-minute load average below 6.0, at 5.55 and 5.76, so they measure isolation rather than contention.
+A third run taken between them also reported `total=8 failed=0 concurrency=4 duration_ms=357804`, but it started at a load average of 9.20 while the previous run's workers were still decaying, so it is disclosed here rather than recorded as a measurement.
+That its duration landed within 3% of the two clean runs is evidence the elevated figure was a lagging load average rather than real competition for the machine.
+
+`tests/fm-pr-health.test.sh` joined this family after the date above, so that result does not cover it.
+
+These durations are not comparable with the six-member run above: that measurement was taken on a different machine state, and the gap is far larger than two short scripts can account for, so it is not evidence about the two new members.
+For the same reason the 1.72x four-worker figure recorded above is left as a statement about that measurement rather than restated as current.
 
 ### secondmate: admitted
 

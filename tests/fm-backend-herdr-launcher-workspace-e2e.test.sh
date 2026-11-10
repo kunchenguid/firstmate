@@ -21,7 +21,7 @@
 #
 # Safety (2026-07-02 incident, see tests/herdr-test-safety.sh): every lifecycle
 # operation goes through bin/fm-herdr-lab.sh, which appends the named session
-# flag and verifies the default fleet session is unchanged after teardown.
+# flag and verifies the configured fleet session is unchanged after teardown.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,6 +69,8 @@ cleanup_all() {
   done
   WORKTREES=()
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
+  # Spawn leaves each state/<id>.git-hooks strip dir read-only.
+  find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
   return "$status"
 }
@@ -175,6 +177,8 @@ printf 'off\n' > "$SM2_HOME/config/herdr-presentation-spaces"
 printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.md"
 printf '%s\n' "$SM2_ID" > "$SM2_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
+printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$SM2_HOME/.gitignore"
+git -C "$SM2_HOME" init -q -b main
 
 # A third primary-shaped home that keeps presentation spaces ON through the
 # historical empty opt-in file, so the default-on migration is exercised against
@@ -441,8 +445,8 @@ pass "real herdr E2E: teardown closes only the worker's own pane and leaves the 
 
 if ! cleanup_all; then
   trap - EXIT
-  printf 'not ok - isolated Herdr lab teardown failed or the default fleet session changed\n' >&2
+  printf 'not ok - isolated Herdr lab teardown failed or the configured fleet session changed\n' >&2
   exit 1
 fi
 trap - EXIT
-pass "real herdr E2E: isolated lab session removed and default fleet session unchanged"
+pass "real herdr E2E: isolated lab session removed and configured fleet session unchanged"

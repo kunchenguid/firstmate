@@ -28,4 +28,4 @@ See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer succes
 
 Exit status 2 is a silent no-op on Cursor's `stop` step, so this adapter never blocks a turn end and instead forces one bounded follow-up, which [`turnend-guard.md`](../turnend-guard.md) accepts as an equal alternative.
 That document owns the double loop bound, the supersession contract, the Pi-host stand-down, and the compatibility limits, including that a Cursor primary must be launched with `--trust` for its project hooks to load at all.
-Cursor's `beforeSubmitPrompt` step fires once for a real captain message and not for hook-driven follow-ups, so it could invalidate the baton at the start of this window, but that registration is deliberately deferred alongside the `preCompact` surface.
+The registered `beforeSubmitPrompt` dialog-mirror hook does not invalidate the park baton; [turnend-guard.md](../turnend-guard.md) owns that deferred boundary.

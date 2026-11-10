@@ -6,8 +6,10 @@
 #   - The running firstmate repo (on its default branch) fast-forwards from
 #     origin; a leased secondmate home (detached HEAD on the default branch)
 #     fast-forwards the same way.
-#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
+#   - A dirty, offline, wrong-branch, or genuinely unique diverged target is
 #     skipped and reported, never forced or stashed, so unlanded work survives.
+#     Divergence leaves a durable reconciliation record, while a clean local
+#     result already present upstream after a squash merge heals automatically.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
@@ -23,6 +25,11 @@
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
+#   - An optional config/self-update-source moves the primary to that one remote
+#     branch instead of origin, under the same fast-forward guards, and local
+#     secondmates (linked worktree or standalone clone) follow the primary's
+#     resulting commit; an unusable file refuses the whole update before
+#     anything moves rather than falling back to origin.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -313,7 +320,7 @@ test_dirty_secondmate_skipped() {
 
 # --- T5: diverged secondmate is skipped, its commit preserved --------------
 test_diverged_secondmate_skipped() {
-  local w out before
+  local w out before marker second_out
   w=$(new_world t5)
   add_sm "$w" sm1
   # Local commit on the secondmate's detached HEAD makes it diverge from origin.
@@ -326,10 +333,57 @@ test_diverged_secondmate_skipped() {
   out=$(run_update "$w")
 
   assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" "diverged home skipped"
+  assert_contains "$out" "reconciliation required (record:" "diverged skip is actionable"
   assert_not_contains "$out" "fm-sm1" "diverged secondmate is not nudged"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
     || fail "diverged secondmate HEAD moved (unlanded work at risk)"
-  pass "T5 diverged secondmate skipped, local commit preserved"
+  marker="$w/home/state/.secondmate-update-reconcile/sm1.pending"
+  assert_present "$marker" "diverged secondmate did not retain a durable reconciliation record"
+  assert_grep 'schema=fm-secondmate-update-reconcile.v1' "$marker" "divergence record schema missing"
+  assert_grep "local_commit=$before" "$marker" "divergence record lost the protected local commit"
+
+  second_out=$(run_update "$w")
+  assert_contains "$second_out" "reconciliation required (record: $marker)" \
+    "a later update did not surface the durable divergence"
+  pass "T5 diverged secondmate is preserved and durably actionable"
+}
+
+test_squash_merged_divergence_reconciles() {
+  local w branch_base local_tip out marker
+  w=$(new_world t5b)
+  add_sm "$w" sm1
+  branch_base=$(git -C "$w/sm1" rev-parse HEAD)
+
+  printf 'v2\n' > "$w/sm1/AGENTS.md"
+  git -C "$w/sm1" add AGENTS.md
+  git -C "$w/sm1" commit -qm local-instructions
+  printf 'echo squash-landed\n' > "$w/sm1/bin/tool.sh"
+  git -C "$w/sm1" add bin/tool.sh
+  git -C "$w/sm1" commit -qm local-tooling
+  local_tip=$(git -C "$w/sm1" rev-parse HEAD)
+
+  bump_origin "$w" readme
+  out=$(run_update "$w")
+  marker="$w/home/state/.secondmate-update-reconcile/sm1.pending"
+  assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" \
+    "unique local work was not initially protected"
+  assert_present "$marker" "initial divergence did not leave its durable record"
+
+  git -C "$w/sm1" diff "$branch_base" "$local_tip" | git -C "$w/seed" apply
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm squash-local-contribution
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: reconciled redundant divergence" \
+    "the squash-merged local result did not heal"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$(git -C "$w/sm1" rev-parse origin/main)" ] \
+    || fail "reconciled secondmate did not reach origin/main"
+  assert_absent "$marker" "successful reconciliation left the divergence marker behind"
+  assert_contains "$out" "restart-secondmates: fm-sm1" \
+    "the reconciled live secondmate was excluded from restart"
+  pass "T5b squash-merged divergence heals and rejoins live convergence"
 }
 
 # --- T6: the git side is idempotent; the restart set is not -----------------
@@ -471,6 +525,172 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: a self-update rebinds a locally armed watch on the primary --------
+# A self-update fast-forwards bin/ in place, changing bytes an armed
+# fm-procevent-when watch's trust binding was hashed against with no
+# tampering involved; without a rebind the very next fire would be refused.
+test_primary_update_rebinds_local_watch() {
+  local w before_hash after_hash out spec
+  w=$(new_world t12)
+  mkdir -p "$w/seed/bin"
+  printf "#!/usr/bin/env bash\necho v1 >> \"\$1\"\n" > "$w/seed/bin/watched-action.sh"
+  chmod +x "$w/seed/bin/watched-action.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm add-watched-action
+  git -C "$w/seed" push -q origin main
+  git -C "$w/main" pull -q origin main
+
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$ROOT/bin/fm-procevent-when.sh" \
+    arm rebind-primary --interval 60 --stable 1 \
+    --condition true --action "$w/main/bin/watched-action.sh" "$w/rebind.log" >/dev/null
+  spec="$w/home/state/when/when-rebind-primary.spec"
+  before_hash=$(grep '^action_sha256=' "$spec")
+
+  printf "#!/usr/bin/env bash\necho v2 >> \"\$1\"\n" > "$w/seed/bin/watched-action.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm bump-watched-action
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "the primary still advanced"
+  assert_contains "$out" "rebound: when-rebind-primary" "the primary self-update rebound its own locally armed watch"
+  after_hash=$(grep '^action_sha256=' "$spec")
+  [ "$before_hash" != "$after_hash" ] \
+    || fail "the watch's trust binding was not refreshed to match the updated action bytes"
+  pass "T12 a self-update rebinds a locally armed watch on the primary"
+}
+
+# --- self-update source helpers -------------------------------------------
+
+# Add a standalone-clone secondmate home (its own object store, unlike add_sm's
+# linked worktree), plus its state meta. Args: world id.
+add_standalone_sm() {
+  local w=$1 id=$2
+  git clone -q "$w/origin.git" "$w/$id"
+  git -C "$w/$id" remote set-head origin main >/dev/null 2>&1 || true
+  {
+    printf 'window=main:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s/%s\n' "$w" "$id"
+    printf 'project=%s/%s\n' "$w" "$id"
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'home=%s/%s\n' "$w" "$id"
+  } > "$w/home/state/$id.meta"
+  printf 'fm-%s\n' "$id" >> "$w/fake/windows"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+}
+
+# Create a bare fork whose `carry` branch is origin's current main plus one
+# carried commit touching the instruction surface, and add it to the primary
+# as the remote `fork`. Echoes the carry commit.
+add_fork_carry() {
+  local w=$1 carry
+  git init -q --bare "$w/fork.git"
+  git -C "$w/seed" pull -q origin main >/dev/null 2>&1 || true
+  git -C "$w/seed" checkout -q -b carry-work
+  printf 'carried\n' >> "$w/seed/AGENTS.md"
+  printf 'echo carried\n' > "$w/seed/bin/tool.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm carried-fix
+  git -C "$w/seed" push -q "$w/fork.git" carry-work:carry
+  carry=$(git -C "$w/seed" rev-parse HEAD)
+  git -C "$w/seed" checkout -q main
+  git -C "$w/main" remote add fork "$w/fork.git"
+  printf '%s\n' "$carry"
+}
+
+write_source() {
+  mkdir -p "$1/home/config"
+  printf '%s\n' "$2" > "$1/home/config/self-update-source"
+}
+
+# --- T13: the primary follows the configured branch; secondmates follow it ---
+test_self_update_source_follows_branch() {
+  local w out carry
+  w=$(new_world t13)
+  add_sm "$w" sm1
+  add_standalone_sm "$w" sm2
+  carry=$(add_fork_carry "$w")
+  # origin also moves, and that commit is NOT in the carry branch, so landing
+  # on it would prove origin was used.
+  bump_origin "$w" readme
+  write_source "$w" "fork carry"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "self-update source: fork carry" "the configured source is announced"
+  assert_contains "$out" "firstmate: updated " "the primary advanced"
+  assert_equals "$(git -C "$w/main" rev-parse HEAD)" "$carry" "the primary did not land on the configured branch"
+  [ "$(git -C "$w/main" symbolic-ref --short HEAD 2>/dev/null)" = "main" ] \
+    || fail "the primary left its default branch"
+  assert_equals "$(git -C "$w/sm1" rev-parse HEAD)" "$carry" "a linked-worktree secondmate did not follow the primary"
+  assert_equals "$(git -C "$w/sm2" rev-parse HEAD)" "$carry" "a standalone-clone secondmate did not follow the primary"
+  assert_contains "$out" "reread-firstmate: yes" "the carried instruction change triggers a reread"
+  assert_contains "$out" "fm-sm1" "the linked secondmate is routed for restart"
+  assert_contains "$out" "fm-sm2" "the standalone secondmate is routed for restart"
+  assert_not_contains "$out" "nudge-secondmates: fm" "restartable mates are not nudged"
+
+  # Removing the file returns to origin; the carried commit is not in origin, so
+  # that path now reports divergence and moves nothing.
+  rm "$w/home/config/self-update-source"
+  out=$(run_update "$w")
+  assert_not_contains "$out" "self-update source:" "an absent file must not announce a source"
+  assert_contains "$out" "firstmate: skipped: diverged from origin/main" "without the file the origin path is used"
+  assert_equals "$(git -C "$w/main" rev-parse HEAD)" "$carry" "the origin path moved a diverged primary"
+  pass "T13 config/self-update-source moves the primary and its local secondmates to that branch"
+}
+
+# --- T14: an unusable config refuses before anything moves ------------------
+test_self_update_source_refuses_unusable_config() {
+  local w before value rc err
+  w=$(new_world t14)
+  add_sm "$w" sm1
+  add_fork_carry "$w" >/dev/null
+  bump_origin "$w" instr
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  for value in "nosuchremote carry" "fork" "fork carry extra" "fork bad..branch" $'fork carry\nfork other'; do
+    write_source "$w" "$value"
+    err=$(PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+      FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1 >/dev/null)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "an unusable self-update source ($value) did not refuse"
+    assert_contains "$err" "config/self-update-source" "the refusal ($value) must name the file"
+    assert_equals "$(git -C "$w/main" rev-parse HEAD)" "$before" "the primary moved despite an unusable source ($value)"
+    assert_equals "$(git -C "$w/sm1" rev-parse HEAD)" "$before" "a secondmate moved despite an unusable source ($value)"
+  done
+  pass "T14 an unusable config/self-update-source refuses without falling back to origin"
+}
+
+# --- T15: a rewritten (non-fast-forward) branch is skipped, never forced -------
+test_self_update_source_rewrite_is_skipped() {
+  local w out carry other
+  w=$(new_world t15)
+  add_sm "$w" sm1
+  carry=$(add_fork_carry "$w")
+  write_source "$w" "fork carry"
+  out=$(run_update "$w")
+  assert_equals "$(git -C "$w/main" rev-parse HEAD)" "$carry" "setup: the primary did not reach the branch"
+
+  # Replace the branch with an unrelated line of history.
+  git -C "$w/seed" checkout -q -b rewritten "$carry~1"
+  printf 'other\n' >> "$w/seed/README.md"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm rewritten
+  git -C "$w/seed" push -q -f "$w/fork.git" rewritten:carry
+  other=$(git -C "$w/seed" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: diverged from refs/remotes/fork/carry" "a rewritten branch must be skipped"
+  assert_equals "$(git -C "$w/main" rev-parse HEAD)" "$carry" "the primary was moved off its commit"
+  assert_not_equals "$(git -C "$w/main" rev-parse HEAD)" "$other" "the primary was forced to the rewritten branch"
+  assert_contains "$out" "secondmate sm1: already current" "a secondmate stays on the primary's unchanged commit"
+  pass "T15 a non-fast-forward self-update source is skipped, never forced"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
@@ -479,11 +699,16 @@ test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_restarts
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
+test_squash_merged_divergence_reconciles
 test_already_current_secondmate_still_restarts
 test_already_current_unprovable_mate_is_nudged
 test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_primary_update_rebinds_local_watch
+test_self_update_source_follows_branch
+test_self_update_source_refuses_unusable_config
+test_self_update_source_rewrite_is_skipped
 
 echo "# all fm-update tests passed"

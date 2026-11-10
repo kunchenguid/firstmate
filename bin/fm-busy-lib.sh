@@ -21,8 +21,11 @@
 # must present the current gen; an event or record carrying any other gen is
 # a stale incarnation and is rejected (written events) or classified unknown
 # (read records). seq is a strictly increasing integer per gen, advanced
-# under the writer's lock, so an out-of-order apply can never regress a
-# newer record.
+# under the writer's lock: it records apply order, not harness emission order,
+# and cannot stop a late apply from overwriting a newer harness event.
+# OpenCode's emission-order queue is owned by the generated plugins in
+# bin/fm-spawn.sh; tests/fm-busy-adapter-wiring.test.sh covers unawaited bursts
+# and the OpenCode 2 server/setup entry points.
 #
 # Semantic sources written by adapters (fm_busy_sources_for_harness owns the
 # per-harness trust table; a record whose source is not trusted for the
@@ -30,42 +33,99 @@
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   omp-ext          omp (Oh My Pi) per-task extension (agent_start/agent_end without willContinue)
-#   opencode-plugin  OpenCode per-task plugin (session.status)
+#   opencode-plugin  OpenCode per-task plugin (2.x session.execution.*;
+#                    1.x session.status/session.idle, also accepted by 2.x)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   devin-hook       Devin UserPromptSubmit / Stop / SessionEnd hooks; manual
+#                    cancellation emits no Stop, so control invalidates to unknown.
+#   commandcode-mod  Command Code per-task mod (run_start opens; run_end, including
+#                    an Escape interrupt, and session end close)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   polytoken-hook   Polytoken pre_user_prompt / pre_model_turn open and stop
+#                    closes; a REST turn cancel emits no stop (verified live),
+#                    so the control plane writes the close itself
+#   cortex-hook      Cortex Code per-task plugin hooks (UserPromptSubmit opens;
+#                    Stop, which also fires on an Escape interrupt, and
+#                    SessionEnd close)
+#   kiro-hook        Kiro V2 agent-config hooks (userPromptSubmit opens; stop
+#                    closes) - kiro's ONLY state source; its per-turn stop hook
+#                    also keeps the turn-ended notification touch
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
-#   fm-interrupt     the legacy Claude fm-send --key Escape idle event
+#   fm-interrupt     the legacy Claude fm-send --key Escape idle event, and the
+#                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   2. a t3code task: the T3 server's busy, idle, or unknown verdict
+#      (the provider reports it for claude and codex alike, and no
+#      shell sits in front of the agent)
+#   3. standalone Kimi before verification       -> unknown kimi-unverified
+#   4. a valid, gen-matching, source-trusted record -> its state and source,
+#      UNLESS the record is still the untouched seed fm-spawn wrote at arm
+#      time (state=busy source=fm-spawn - no adapter hook has posted since
+#      launch) AND the caller supplied a captured tail that matches that
+#      harness's own recognized interactive-prompt signature (a trust
+#      dialog, sign-in screen, or first-run menu - fm_busy_launch_prompt_parked
+#      owns the per-harness table). That combination classifies unknown
+#      launch-prompt instead: the launch never actually started the brief, so
+#      it must not read as proof of an active turn. A record that has
+#      advanced past fm-spawn (any real hook event) is NEVER reclassified
+#      this way, however its rendered tail looks, so a genuinely working turn
+#      keeps its ordinary busy verdict and the general BUSY_TURN_MAX_SECS
+#      bound is unchanged.
+#   5. no record at all: a native busy verdict from herdr, rex, or tern is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
 #      task from its rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
-# redesign, because none of their structured lifecycles was credited-live-verified
+#   6. malformed, stale, or untrusted records -> unknown, never a fallback
+#
+# fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
+# launch whose busy record never advanced past the fm-spawn seed is
+# indistinguishable, from the record alone, between "still reading its
+# brief" and "parked on an interactive prompt the harness never gets past
+# without a human" - a Claude/Gemini/Pi workspace-trust dialog, a sign-in or
+# auth-method picker, or a first-run setup menu. Left alone this reads as
+# ordinary busy for the full BUSY_TURN_MAX_SECS (one hour) before the
+# separate wedge-suspect bound even looks at it. The signature table matches
+# each harness's own verified rendered dialog text (see
+# .agents/skills/harness-adapters/references/harness/*.md and
+# docs/verification/*.md for the evidence), scoped to the exact harness that
+# renders it so one adapter's ordinary output can never match another's
+# dialog. This is a best-effort backstop, not prevention: it never suppresses
+# a real busy verdict once any hook has posted, and it defers to whatever
+# harness-specific trust pre-registration already exists (fm-claude-trust.sh,
+# GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
+# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the only
+# harnesses whose rendered text is their SOLE classification, because none of
+# their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
 # hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter. The delivery
-# guards in bin/fm-composer-lib.sh match rendered footers for submit
-# acknowledgement and away-mode supervisor injection only; neither is a
-# recorded worker state source.
+# its own harness= and can never classify another adapter.
+# Kiro is different: its kiro-hook record above is its ONLY state source (a
+# live-verified per-turn userPromptSubmit/stop pair, references/harness/kiro.md),
+# and it has no rendered-tail arm here. Its `Kiro is working` footer is matched
+# only by the delivery guards in bin/fm-composer-lib.sh, never as a recorded
+# worker state. The one reachable consumer today is the harness-less union entry
+# in FM_DELIVERY_BUSY_REGEX_DEFAULT, which the tmux submit core reads for submit
+# acknowledgement; FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT is registered per the
+# fleet convention that every verified harness declares its own signature, and
+# has no caller today. So a kiro task with no record classifies unknown
+# missing, and an abnormal turn end (no StopFailure/SessionEnd equivalent
+# exists on kiro V2) leaves the record busy until the next userPromptSubmit
+# re-opens it - docs/verification/kiro.md owns that disclosure.
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -160,6 +220,85 @@ fm_busy_gen_path() {  # <state-dir> <id>
   printf '%s/%s.busy-gen' "$1" "$2"
 }
 
+# Optional Pi model-stream contract. The busy writer owns every mutation under
+# its incarnation lock. model-stream is active evidence; model-stream-order
+# retains the latest request and active/closed phase after the marker is cleared.
+#   order: v1 gen=<token> request=<positive uint> phase=<active|closed>
+#   stream / model-progress: v1 gen=<token> request=<uint> rev=<uint> ts=<epoch>
+# Requests strictly increase within a generation. Progress/close must match the
+# open request; closed and older requests cannot reopen or refresh evidence.
+# model-progress is separate from native progress and is read ONLY by opted-in
+# watchers. Missing, malformed, locked, idle, foreign, or stale evidence conveys
+# no model-phase observation, leaving the general busy bound applicable.
+fm_busy_pi_stream_version_supported() {
+  [ "${1:-}" = 1.2.0 ]
+}
+
+fm_busy_stream_seconds() {  # <configured seconds>; off/invalid prints 0
+  local value=${1:-}
+  case "$value" in ''|*[!0-9]*) printf '0'; return ;; esac
+  [ "${#value}" -le 9 ] || { printf '0'; return; }
+  printf '%s' "$((10#$value))"
+}
+
+fm_busy_stream_uint_valid() {
+  case "${1:-}" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 15 ]
+}
+
+fm_busy_stream_order_read() {  # <state-dir> <id>
+  local line version gen request phase extra
+  line=$(cat "$1/$2.model-stream-order" 2>/dev/null) || return 1
+  read -r version gen request phase extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  gen=${gen#gen=} request=${request#request=} phase=${phase#phase=}
+  fm_busy_token_valid "$gen" && fm_busy_stream_uint_valid "$request" || return 1
+  case "$phase" in active|closed) : ;; *) return 1 ;; esac
+  [ "$line" = "v1 gen=$gen request=$request phase=$phase" ] || return 1
+  printf '%s %s %s' "$gen" "$request" "$phase"
+}
+
+fm_busy_stream_record_read() {  # <record path>
+  local line version gen request rev ts extra
+  line=$(cat "$1" 2>/dev/null) || return 1
+  read -r version gen request rev ts extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  gen=${gen#gen=} request=${request#request=} rev=${rev#rev=} ts=${ts#ts=}
+  fm_busy_token_valid "$gen" && fm_busy_stream_uint_valid "$request" &&
+    fm_busy_stream_uint_valid "$rev" && fm_busy_stream_uint_valid "$ts" || return 1
+  [ "$line" = "v1 gen=$gen request=$request rev=$rev ts=$ts" ] || return 1
+  printf '%s %s %s %s' "$gen" "$request" "$rev" "$ts"
+}
+
+fm_busy_stream_read() {  # <state-dir> <id> <harness>; gen request rev ts
+  local state=$1 id=$2 harness=$3 snapshot gen request rev ts order current
+  case "$harness" in pi|pi-signed) : ;; *) return 1 ;; esac
+  [ ! -e "$state/$id.busy-state.lock" ] || return 1
+  current=$(fm_busy_current_gen "$state" "$id") || return 1
+  order=$(fm_busy_stream_order_read "$state" "$id") || return 1
+  snapshot=$(fm_busy_stream_record_read "$state/$id.model-stream") || return 1
+  read -r gen request rev ts <<< "$snapshot"
+  [ "$gen" = "$current" ] && [ "$order" = "$gen $request active" ] || return 1
+  case "$(fm_busy_record_read "$state" "$id")" in 'busy pi-ext '*) : ;; *) return 1 ;; esac
+  [ ! -e "$state/$id.busy-state.lock" ] &&
+    [ "$(fm_busy_current_gen "$state" "$id")" = "$current" ] &&
+    [ "$(fm_busy_stream_order_read "$state" "$id")" = "$order" ] &&
+    [ "$(fm_busy_stream_record_read "$state/$id.model-stream")" = "$snapshot" ] || return 1
+  printf '%s' "$snapshot"
+}
+
+fm_busy_model_progress_ts() {  # <state-dir> <id> <harness>
+  local snapshot gen request rev ts current
+  case "$3" in pi|pi-signed) : ;; *) return 1 ;; esac
+  [ ! -e "$1/$2.busy-state.lock" ] || return 1
+  current=$(fm_busy_current_gen "$1" "$2") || return 1
+  snapshot=$(fm_busy_stream_record_read "$1/$2.model-progress") || return 1
+  read -r gen request rev ts <<< "$snapshot"
+  [ "$gen" = "$current" ] && [ ! -e "$1/$2.busy-state.lock" ] &&
+    [ "$(fm_busy_current_gen "$1" "$2")" = "$current" ] || return 1
+  printf '%s' "$ts"
+}
+
 # fm_busy_token_valid: conservative token charset shared by gen, source, and
 # event fields. Anything else is malformed.
 fm_busy_token_valid() {  # <value>
@@ -198,6 +337,12 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    devin) adapter=devin-hook ;;
+    cortex) adapter=cortex-hook ;;
+    hermes) adapter=hermes-hook ;;
+    commandcode) adapter=commandcode-mod ;;
+    polytoken) adapter=polytoken-hook ;;
+    kiro) adapter=kiro-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
@@ -867,15 +1012,137 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
+#
+# Each function consumes a captured pane tail on stdin (the caller's whole
+# tail40, NOT reduced to the last 12 non-blank lines the way the Grok/Rovo/AGY
+# busy footers above are): a bordered dialog box renders many short lines of
+# pure border/padding (`│  ...  │`) that are NOT whitespace-only, so a 12-line
+# non-blank reduction was verified live to push the box's own heading text
+# (e.g. Gemini's "How would you like to authenticate for this project?")
+# outside the window entirely, silently defeating the match. Matching the
+# full capture avoids that trap; a signature is still best-effort exactly like
+# the footer fallbacks - a screen taller than the capture can still scroll a
+# signature out, so absence never proves the pane is NOT parked, only that
+# this check cannot confirm it.
+
+# fm_busy_claude_launch_prompt_tail: Claude's workspace-trust dialog
+# ("Quick safety check: Is this a project you created or one you trust?",
+# re-verified live on Claude Code 2.1.278, docs/verification/runtime-backends.md
+# "Launch-prompt backstop signatures") and its separate external-CLAUDE.md-
+# imports dialog ("Allow external CLAUDE.md file imports?", verified by
+# disassembly, .agents/skills/harness-adapters/references/harness/claude.md
+# "Hook trust" sibling section). fm-claude-trust.sh pre-registers both before
+# launch; this is the backstop for when that registration did not take effect.
+# Each dialog's own question text is paired with one of its own rendered
+# option/footer lines, both required together: the question text alone is
+# plausible self-referential prose a firstmate-repo worker could easily render
+# on its own (fm-claude-trust.sh's header literally quotes both questions),
+# but the option/footer pairing only ever renders inside the real dialog.
+fm_busy_claude_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_TRUST_PROMPT_REGEX:-Quick safety check: Is this a project you created or one you trust\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'No, exit|Enter to confirm'; then
+    return 0
+  fi
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_IMPORTS_PROMPT_REGEX:-Allow external CLAUDE\\.md file imports\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'No, disable external imports|Yes, allow external imports'
+}
+
+# fm_busy_pi_launch_prompt_tail: Pi's project-trust dialog. Live-verified on
+# pi 0.86.1 (2026-09-22) in a fresh untrusted worktree carrying a project-local
+# .pi/extensions/ file (the shape a real ship/scout spawn always launches
+# into): the rendered heading is "Trust project folder?" and its declining
+# option is literally "Do not trust". An initial guess sourced only from the
+# installed binary's UI strings ("Project trust", the internal panel-title
+# component name, not this dialog's own rendered heading) was proven wrong by
+# that live run and never matched the real screen - which is exactly why this
+# class of check must be proven end to end rather than read off strings or a
+# name. Matching BOTH the heading and "Do not trust" keeps this from firing on
+# a worker's own prose that happens to use the common word "trust" alone.
+# Covers omp too: it shares Pi's engine and the same project-trust gate.
+fm_busy_pi_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_PI_LAUNCH_PROMPT_REGEX:-Trust project folder\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'Do not trust'
+}
+
+# fm_busy_gemini_launch_prompt_tail: Gemini's workspace-trust dialog ("Do you
+# trust the files in this folder?"), its first-run auth-method picker ("How
+# would you like to authenticate for this project?"), and the credential
+# entry it falls through to with no resolvable key ("Enter Gemini API Key").
+# GEMINI_CLI_TRUST_WORKSPACE=true (fm-spawn.sh's launch template) already
+# suppresses the first; the other two have no pre-registration and are the
+# primary target of this backstop. The trust dialog and the auth-method picker
+# were live-verified on gemini 0.60.0 in a credential-less scratch environment
+# (docs/verification/runtime-backends.md "Launch-prompt backstop signatures"),
+# and each question is paired with one of its own rendered option lines,
+# required together, for the same reason as Claude's pairing above: the
+# question text alone is plausible prose this very file's own comments could
+# render. The auth-method picker's live capture is also what proved the
+# full-capture match necessary: its heading renders more than 12 non-blank-
+# looking lines above the bordered box's bottom border. The API-key entry
+# screen is carried over from .agents/skills/harness-adapters/references/
+# harness/gemini.md "Trust, and why the two documented options are not
+# equivalent" rather than this guard's own live capture, and stays a single
+# marker: it is reached only after actively selecting that auth method, so
+# self-referential prose is a materially smaller risk there.
+fm_busy_gemini_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_TRUST_PROMPT_REGEX:-Do you trust the files in this folder\\?}" \
+    && printf '%s' "$buf" | grep -qiE "Trust folder|Don't trust"; then
+    return 0
+  fi
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_AUTH_PROMPT_REGEX:-How would you like to authenticate for this project\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'Use Gemini API Key|No authentication method selected'; then
+    return 0
+  fi
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
+}
+
+# fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
+# or fail when this harness has none. Consumes the tail on stdin. Scoped to
+# exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
+# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
+# read a pinned "busy fm-spawn" record; codex and standalone Kimi already
+# classify unknown before a record is ever consulted, and opencode ships no
+# trust dialog at all.
+fm_busy_launch_prompt_parked() {  # <harness>
+  case "${1:-}" in
+    claude*) fm_busy_claude_launch_prompt_tail ;;
+    pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
+    gemini) fm_busy_gemini_launch_prompt_tail ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
-# the grok, rovo, and agy arms; when absent each captures through
-# fm_backend_capture if available, else reports unknown capture-failed.
+# process state. <tail40> is optional pre-captured plain output: the grok,
+# rovo, and agy arms capture it themselves through fm_backend_capture when it
+# is absent (or report unknown capture-failed if that is unavailable too),
+# while the launch-prompt backstop below has no capture fallback of its own -
+# without a supplied tail40 it is skipped entirely and a record still pinned
+# at the fm-spawn seed keeps reading busy fm-spawn, unchanged.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
+  # t3code first: the T3 server reports the session status for claude and
+  # codex alike. Native uncertainty must not fall through to a stale idle
+  # record or a harness-specific fallback.
+  if [ "$backend" = t3code ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    case "$native" in
+      busy|idle|unknown)
+        printf '%s t3code-native' "$native"
+        return 0
+        ;;
+    esac
+  fi
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -914,7 +1181,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      printf '%s %s' "$r_state" "$r_source"
+      if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
+        && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
+        printf 'unknown launch-prompt'
+      else
+        printf '%s %s' "$r_state" "$r_source"
+      fi
     else
       printf 'unknown source-mismatch'
     fi
@@ -926,17 +1198,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
-    if [ "$native" = busy ]; then
-      printf 'busy herdr-native'
-      return 0
-    fi
-  fi
+  # No record at all. A native herdr, rex, or tern busy verdict is semantic
+  # enough to trust for BUSY (streaming means a turn is running; rex trusts an
+  # OSC 7501 working record only while its reporting process is still in the
+  # block's foreground chain); native idle is narrower than turn state (a long
+  # foreground tool call reads idle) and stays unknown here.
+  case "$backend" in
+    herdr|rex|tern)
+      if command -v fm_backend_busy_state >/dev/null 2>&1; then
+        native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+        if [ "$native" = busy ]; then
+          printf 'busy %s-native' "$backend"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   case "$harness" in
     muse*)
       # Semantic, on demand: fold this task's bound session log. An open run is
@@ -1039,7 +1316,8 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
 # consumer resolves backend, target, and harness the same way instead of
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
-# optional pre-captured plain output reused by the Grok arm.
+# optional pre-captured plain output reused by the contract's rendered-text
+# checks: the Grok/Rovo/AGY busy fallbacks and the launch-prompt backstop.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
@@ -1053,13 +1331,14 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
 }
 
-# fm_busy_is_busy: boolean view for callers that only gate on provable
-# activity. 0 iff the classification verdict is exactly busy; idle, unknown,
-# and dead all return 1, so an unknown can never be silently promoted to
-# either boolean pole - callers that must distinguish idle from unknown read
-# the full classification instead.
+# fm_busy_is_busy: boolean activity guard. T3 native uncertainty returns 0
+# to defer delivery until idle is proven. Other unknown sources, idle, and
+# dead return 1.
 fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local verdict
   verdict=$(fm_busy_classify "$@")
-  [ "${verdict%% *}" = busy ]
+  case "$verdict" in
+    busy\ *|unknown\ t3code-native) return 0 ;;
+    *) return 1 ;;
+  esac
 }

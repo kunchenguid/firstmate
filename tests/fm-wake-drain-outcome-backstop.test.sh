@@ -12,6 +12,14 @@ GRANT="$ROOT/bin/fm-wake-grant.sh"
 OUTCOMES="$ROOT/bin/fm-branch-outcome.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-outcome-backstop-tests)
 
+# These regressions exercise the backstop on a home that does not run the
+# supervision host, so its BRANCH OUTCOMES section stays out of the drain; the
+# explicit off file pins that posture on every primary instead of reading the
+# code root's config (bin/fm-supervision-engine-lib.sh owns the gate).
+mkdir -p "$TMP_ROOT/config"
+: > "$TMP_ROOT/config/supervision-host-off"
+export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
+
 set_mtime() {  # <epoch> <file>
   perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"
 }
@@ -49,9 +57,9 @@ test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
     || fail "uncovered keyless events produced no outcome backstop: $(cat "$out")"
   body=$(backstop_body "$out")
   case "$body" in *'done-task done: PR https://example.test/3346 checks green'*) ;; *) fail "keyless done event did not surface in the backstop: $body" ;; esac
-  grep -F 'blocked-task blocked: release credential unavailable' "$out" >/dev/null \
+  grep -F 'blocked-task [key=default] blocked: release credential unavailable' "$out" >/dev/null \
     || fail "keyless blocked event did not surface through OPEN DECISIONS: $(cat "$out")"
-  grep -F 'decision-task needs-decision: choose REST or RPC' "$out" >/dev/null \
+  grep -F 'decision-task [key=default] needs-decision: choose REST or RPC' "$out" >/dev/null \
     || fail "keyless needs-decision event did not surface through OPEN DECISIONS: $(cat "$out")"
   pass "a newest keyless done, blocked, or needs-decision event with no newer branch outcome surfaces on the next main drain"
 }

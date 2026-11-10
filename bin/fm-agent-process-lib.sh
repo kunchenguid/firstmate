@@ -13,10 +13,15 @@
 # names below, and tests/fm-tmux-agent-liveness.test.sh plus
 # tests/fm-harness-liveness-drift-live-e2e.test.sh keep them honest.
 
+_FM_AGENT_PROCESS_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_AGENT_PROCESS_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_AGENT_PROCESS_LIB_DIR=.
 # shellcheck source=bin/fm-session-lock-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+. "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-gemini-lib.sh"
+. "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-hermes-process-lib.sh
+. "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-hermes-process-lib.sh"
+unset _FM_AGENT_PROCESS_LIB_DIR
 
 # fm_agent_process_classify_name: the single owner of the process-name
 # vocabulary shared by every liveness signal - `agent` for a verified harness,
@@ -44,8 +49,22 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
     # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
     # single binary, comm=agy with argv[0]=agy), and a glob would claim
+    # unrelated commands containing that fragment. devin is anchored the same
+    # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
+    # claims an unrelated command. Command Code is anchored on its own process
+    # title (verified, Command Code 1.74.1: comm=command-code). polytoken is
+    # anchored the same way (verified, polytoken 0.8.19: a TUI pane's foreground
+    # process is comm `polytoken`, the same binary name as its per-session
+    # daemon), so a `*polytoken*` glob never claims an unrelated command.
+    # cortex (Cortex Code) is anchored too (verified, cortex 1.1.104: a
+    # Bun-compiled single binary, comm=cortex).
+    agy|devin|command-code|polytoken|cortex|hermes) printf 'agent' ;;
+    # kiro (Kiro CLI) is anchored for the same reason as muse, omp, and agy: its
+    # live foreground process name is the bare word `kiro-cli` (verified,
+    # kiro-cli 2.21.4: a toolbox/aim-sandbox wrapper whose comm and tmux
+    # #{pane_current_command} both read kiro-cli), and a glob would claim
     # unrelated commands containing that fragment.
-    agy) printf 'agent' ;;
+    kiro-cli) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -94,6 +113,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     [ "$by_argv0" != agent ] || { printf 'agent'; return 0; }
   else
     by_argv0=$by_name
+  fi
+  if fm_hermes_process_matches "$args" "$pid"; then
+    printf 'agent'
+    return 0
   fi
   if [ -n "$pid" ] && fm_gemini_pid_is_gemini "$pid"; then
     printf 'agent'

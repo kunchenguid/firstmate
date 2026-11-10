@@ -11,6 +11,39 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) meta records branch=<custom-prefix> -> the recorded ship branch is
+#       reviewed even when the worktree HEAD has moved off it
+#   (g) meta records a corrupt branch= -> refused, never silently reviewed as
+#       the moved worktree HEAD
+#   (h) meta records base_branch= -> the diff is against origin/<base_branch>,
+#       so the base branch's own commits never appear as task changes
+#   (i) pr= forgejo /pulls/<n> URL with a reachable refs/pull/<n>/head -> the
+#       same live fetched-head review as GitHub
+#   (j) pr= forgejo URL whose repo is literally named pulls -> the LAST
+#       /pulls/ segment names the number, never an earlier one
+#   (k) pr= forgejo URL with no remote pull ref -> offline fallback to a
+#       recorded pr_head=
+#   (l) without config/spawn-base-primary-checkout, mode=local-only on a
+#       project whose local default branch leads origin -> base stays
+#       origin/<default>, the unchanged default
+# With config/spawn-base-primary-checkout:
+#   (m) mode=local-only or a scout planted on a local default branch that leads
+#       origin -> base is the local default, so the review shows only the
+#       task's own work and no local landing
+#   (n) the same state with a publishing mode -> base stays origin/<default>,
+#       so the review shows everything its pull request would carry
+#   (o) a local-only branch rebased onto an advanced local default, which its
+#       definition of done orders, then the default advances again -> base
+#       follows the branch and no other task's landing appears
+#   (p) a local default that trails origin, task planted on origin's tip ->
+#       base stays origin/<default>
+#   (q) diverged local default and origin -> base is the one the task was
+#       planted on
+#   (r) a local default that already contains the branch -> empty review that
+#       says why
+#   (s) a branch merging both diverged default branches -> the unrelated merge
+#       bases are reported rather than picked silently
+#   (t) meta records base_branch= -> base stays origin/<base_branch>
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -72,7 +105,72 @@ run_review_diff() {
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
     "$REVIEW_DIFF" "$@"
+}
+
+# origin.git with a baseline commit and a project clone of it, with no task
+# branch yet: the base cases below plant the task where each one needs it.
+seed_case() { # <name>
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  printf 'base\n' > "$case_dir/_seed/feature.txt"
+  git -C "$case_dir/_seed" add feature.txt
+  git -C "$case_dir/_seed" commit -qm "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+opt_in_review_anchor() { # <case-dir>
+  mkdir -p "$1/config"
+  : > "$1/config/spawn-base-primary-checkout"
+}
+
+# Land commits on the primary checkout's default branch that origin never
+# receives, which is what bin/fm-merge-local.sh does for a local-only project.
+land_locally() { # <case-dir> <n>...
+  local case_dir=$1 n
+  shift
+  for n in "$@"; do
+    printf 'landed %s\n' "$n" > "$case_dir/project/landed-$n.txt"
+    git -C "$case_dir/project" add "landed-$n.txt"
+    git -C "$case_dir/project" commit -qm "local landing $n"
+  done
+}
+
+# Push commits to origin that the primary checkout fetches but never pulls.
+push_to_origin_only() { # <case-dir> <n>...
+  local case_dir=$1 n
+  shift
+  git clone -q "$case_dir/origin.git" "$case_dir/_publisher" 2>/dev/null
+  for n in "$@"; do
+    printf 'upstream %s\n' "$n" > "$case_dir/_publisher/upstream-$n.txt"
+    git -C "$case_dir/_publisher" add "upstream-$n.txt"
+    git -C "$case_dir/_publisher" commit -qm "upstream $n"
+  done
+  git -C "$case_dir/_publisher" push -q origin main
+  rm -rf "$case_dir/_publisher"
+  git -C "$case_dir/project" fetch -q origin
+}
+
+# Plant the task worktree on <ref> and give it one commit of its own.
+plant_task_branch() { # <case-dir> <ref>
+  local case_dir=$1 ref=$2
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" "$ref"
+  printf 'task work\n' > "$case_dir/wt/task-change.txt"
+  git -C "$case_dir/wt" add task-change.txt
+  git -C "$case_dir/wt" commit -qm "task work"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -169,8 +267,327 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_recorded_branch_beats_moved_worktree_head() {
+  local case_dir out
+  case_dir=$(make_case recorded-branch)
+  # The task ships on its recorded custom-prefix branch; the worktree's HEAD
+  # has since moved to an unrelated branch and the legacy fm/<id> branch is
+  # gone, so only meta can anchor the diff to the shipped work.
+  git -C "$case_dir/wt" checkout -q -b fix/task-x1
+  printf 'recorded-ship\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "recorded ship work"
+  git -C "$case_dir/wt" checkout -q -b roam main
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  write_task_meta "$case_dir" "branch=fix/task-x1"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+recorded-ship' \
+    "recorded-branch: diff must use the meta-recorded ship branch, not the moved worktree HEAD"
+  pass "fm-review-diff reviews the meta-recorded ship branch even when the worktree HEAD moved off it"
+}
+
+test_corrupt_recorded_branch_is_refused() {
+  local case_dir out status
+  case_dir=$(make_case corrupt-branch)
+  stale_and_pr_commits "$case_dir"
+  # A space can never be part of a branch name, so this record can only be a
+  # hand-edited or corrupt one: refusing is the only outcome that cannot diff
+  # the wrong content by falling back to the moved worktree HEAD.
+  write_task_meta "$case_dir" "branch=fix task-x1"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "corrupt-branch: a corrupt recorded ship branch was accepted and reviewed the worktree HEAD"
+  assert_contains "$(cat "$case_dir/stderr")" "invalid recorded ship branch 'fix task-x1'" \
+    "corrupt-branch: the refusal did not name the branch it refused"
+  assert_not_contains "$out" '+stale-local' \
+    "corrupt-branch: the corrupt branch silently fell back to the worktree HEAD diff"
+  pass "fm-review-diff refuses a corrupt recorded ship branch instead of reviewing the wrong content"
+}
+
+test_recorded_base_branch_is_the_review_base() {
+  local case_dir out
+  case_dir=$(make_case base-branch)
+  git -C "$case_dir/project" checkout -q -b feature/hub main
+  printf 'hub only\n' > "$case_dir/project/hub.txt"
+  git -C "$case_dir/project" add hub.txt
+  git -C "$case_dir/project" commit -qm "hub branch commit"
+  git -C "$case_dir/project" push -q origin feature/hub
+  git -C "$case_dir/wt" reset -q --hard origin/feature/hub 2>/dev/null \
+    || { git -C "$case_dir/wt" fetch -q origin feature/hub && git -C "$case_dir/wt" reset -q --hard FETCH_HEAD; }
+  printf 'task change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam "task change on hub"
+  write_task_meta "$case_dir" "base_branch=feature/hub"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" '+task change' "base-branch: the task's own change is missing from the review diff"
+  assert_not_contains "$out" 'hub.txt' "base-branch: the base branch's own commit was reviewed as a task change"
+  pass "fm-review-diff compares a task against its recorded base branch"
+}
+
+test_forgejo_pr_url_fetches_pull_head() {
+  local case_dir out
+  case_dir=$(make_case forgejo-pull-head)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/12/head"
+  write_task_meta "$case_dir" \
+    "pr=https://codeberg.org/example/repo/pulls/12"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-pull-head: diff should show the fetched Forgejo PR head content"
+  assert_not_contains "$out" 'stale-local' "forgejo-pull-head: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-pull-head: should not warn when the Forgejo pull head is fetchable"
+  pass "fm-review-diff fetches refs/pull/<n>/head for a Forgejo /pulls/<n> pr= URL"
+}
+
+test_forgejo_repo_named_pulls_resolves_by_last_segment() {
+  local case_dir out
+  case_dir=$(make_case forgejo-repo-named-pulls)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/7/head"
+  write_task_meta "$case_dir" \
+    "pr=https://codeberg.org/example/pulls/pulls/7"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-repo-named-pulls: the greedy /pulls/ split must resolve number 7"
+  assert_not_contains "$out" 'stale-local' "forgejo-repo-named-pulls: diff must not use the stale local branch"
+  pass "fm-review-diff resolves a Forgejo repo literally named pulls by the last /pulls/ segment"
+}
+
+test_forgejo_pr_url_falls_back_to_recorded_head() {
+  local case_dir out
+  case_dir=$(make_case forgejo-recorded-head)
+  stale_and_pr_commits "$case_dir"
+  # No remote pull ref: a recorded pr_head is the offline fallback.
+  write_task_meta "$case_dir" \
+    "pr=https://codeberg.org/example/repo/pulls/9" \
+    "pr_head=$PR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-recorded-head: recorded pr_head must be the offline fallback"
+  assert_not_contains "$out" 'stale-local' "forgejo-recorded-head: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-recorded-head: should not warn when recorded pr_head is reachable offline"
+  pass "fm-review-diff falls back to a recorded Forgejo pr_head when the pull ref cannot be fetched"
+}
+
+# Without the opt-in a remote-backed project keeps the origin/<default> anchor
+# whatever the task's delivery, as before.
+test_default_review_stays_on_origin_without_the_opt_in() {
+  local case_dir out
+  case_dir=$(seed_case default-origin-anchor)
+  land_locally "$case_dir" 1 2 3
+  plant_task_branch "$case_dir" main
+  write_task_meta "$case_dir" "mode=local-only"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' "default-origin-anchor: the default anchor must stay origin/<default>"
+  assert_contains "$out" 'task-change.txt' "default-origin-anchor: the task's own change must be in the diff"
+  assert_contains "$out" 'landed-1.txt' "default-origin-anchor: the default review must not move off origin's anchor"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'note:' "default-origin-anchor: the default review must print no anchor note"
+  pass "fm-review-diff keeps anchoring a remote-backed project on origin without the opt-in"
+}
+
+test_opted_in_local_landing_reviews_against_the_local_default() {
+  local case_dir out contract
+  for contract in local-only scout; do
+    case_dir=$(seed_case "local-landing-$contract")
+    opt_in_review_anchor "$case_dir"
+    land_locally "$case_dir" 1 2 3
+    plant_task_branch "$case_dir" main
+    if [ "$contract" = scout ]; then
+      write_task_meta "$case_dir" "kind=scout"
+    else
+      write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+    fi
+
+    out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+    assert_contains "$out" 'diff base: main' "$contract: the base must be the local default that carries the landed work"
+    assert_contains "$out" 'task-change.txt' "$contract: the task's own change must be in the diff"
+    assert_not_contains "$out" 'landed-' "$contract: locally landed work must not enter the review"
+  done
+  pass "fm-review-diff anchors an opted-in local landing on the local default, not a frozen origin"
+}
+
+# bin/fm-spawn.sh plants a publishing delivery on origin's tip; a worker that
+# rebased onto the local default anyway is exactly what the captain must see
+# before that pull request goes out.
+test_opted_in_publishing_mode_stays_on_origin() {
+  local case_dir out mode
+  for mode in direct-PR no-mistakes; do
+    case_dir=$(seed_case "publishing-$mode")
+    opt_in_review_anchor "$case_dir"
+    land_locally "$case_dir" 1 2 3
+    plant_task_branch "$case_dir" main
+    write_task_meta "$case_dir" "kind=ship" "mode=$mode"
+
+    out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+    assert_contains "$out" 'diff base: origin/main' "$mode: a publishing mode must be reviewed against the branch its pull request targets"
+    assert_contains "$out" 'landed-1.txt' "$mode: commits the pull request would carry must stay visible"
+  done
+  pass "fm-review-diff keeps an opted-in publishing mode on origin, showing everything its pull request would carry"
+}
+
+# The local-only definition of done orders a rebase whenever the default
+# advances, and the default can land again before the review, after which
+# neither default branch reaches the task branch.
+test_opted_in_rebased_branch_reviews_only_its_own_work() {
+  local case_dir out
+  case_dir=$(seed_case rebased-local-only)
+  opt_in_review_anchor "$case_dir"
+  land_locally "$case_dir" 1 2
+  plant_task_branch "$case_dir" main
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+  land_locally "$case_dir" 3
+  git -C "$case_dir/wt" rebase --quiet main >/dev/null 2>&1 \
+    || fail "rebased: the fixture could not perform the rebase the mode orders"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+  assert_contains "$out" 'diff base: main' "rebased: the branch must be reviewed against the default it caught up with"
+  assert_not_contains "$out" 'landed-3.txt' "rebased: another task's landing must not be attributed to this review"
+
+  land_locally "$case_dir" 4
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+  assert_contains "$out" 'diff base: main' "moved-on: the local default still meets the branch later than origin"
+  assert_contains "$out" 'task-change.txt' "moved-on: the task's own change must be in the diff"
+  assert_not_contains "$out" 'landed-' "moved-on: no local landing may be attributed to this review"
+  pass "fm-review-diff follows an opted-in local-only branch through its rebase and later landings"
+}
+
+# The mirror case: origin advanced and the primary checkout never pulled, so the
+# local default trails the origin tip the task was planted on.
+test_opted_in_trailing_local_default_keeps_origin() {
+  local case_dir out
+  case_dir=$(seed_case trailing-primary)
+  opt_in_review_anchor "$case_dir"
+  push_to_origin_only "$case_dir" 1 2
+  plant_task_branch "$case_dir" origin/main
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' "trailing: a local default behind the planted base must not become the anchor"
+  assert_contains "$out" 'task-change.txt' "trailing: the task's own change must be in the diff"
+  assert_not_contains "$out" 'upstream-' "trailing: origin's commits must stay out of the review"
+  pass "fm-review-diff keeps an opted-in review on origin when the local default trails it"
+}
+
+test_opted_in_diverged_defaults_anchor_where_the_task_was_planted() {
+  local case_dir out planted expected foreign
+  for planted in main origin/main; do
+    case_dir=$(seed_case "diverged-${planted//\//-}")
+    opt_in_review_anchor "$case_dir"
+    land_locally "$case_dir" 1 2
+    push_to_origin_only "$case_dir" 1
+    plant_task_branch "$case_dir" "$planted"
+    write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+    if [ "$planted" = main ]; then
+      expected=main
+      foreign=upstream-1.txt
+    else
+      expected=origin/main
+      foreign=landed-1.txt
+    fi
+
+    out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+    assert_contains "$out" "diff base: $expected" "diverged-$planted: the anchor must be the branch the task was planted on"
+    assert_contains "$out" 'task-change.txt' "diverged-$planted: the task's own change must be in the diff"
+    assert_not_contains "$out" "$foreign" "diverged-$planted: a commit only the other branch carries must stay out"
+  done
+  pass "fm-review-diff anchors opted-in diverged default branches on the one the task was planted on"
+}
+
+test_opted_in_landed_branch_reports_an_empty_review() {
+  local case_dir out
+  case_dir=$(seed_case already-landed)
+  opt_in_review_anchor "$case_dir"
+  land_locally "$case_dir" 1
+  plant_task_branch "$case_dir" main
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+  git -C "$case_dir/project" merge --ff-only -q fm/task-x1 >/dev/null 2>&1 \
+    || fail "already-landed: the fixture could not fast-forward the default onto the branch"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'no changes vs main' "already-landed: a landed branch has nothing left to review"
+  assert_contains "$(cat "$case_dir/stderr")" 'main already contains fm/task-x1' "already-landed: the empty review must say why"
+  pass "fm-review-diff says why an opted-in review of a landed branch is empty"
+}
+
+test_opted_in_unrelated_merge_bases_are_reported() {
+  local case_dir out
+  case_dir=$(seed_case unrelated-bases)
+  opt_in_review_anchor "$case_dir"
+  land_locally "$case_dir" 1
+  push_to_origin_only "$case_dir" 1
+  plant_task_branch "$case_dir" main
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only"
+  git -C "$case_dir/wt" merge --no-ff -q -m "merge origin" origin/main >/dev/null 2>&1 \
+    || fail "unrelated-bases: the fixture could not merge origin into the branch"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: main' "unrelated-bases: with no tighter anchor the review takes the local default"
+  assert_contains "$(cat "$case_dir/stderr")" 'unrelated commits' "unrelated-bases: the undecidable pair must be reported"
+  pass "fm-review-diff reports opted-in unrelated merge bases instead of choosing one silently"
+}
+
+# A named base branch is delivered against origin, so the opt-in leaves its
+# review on origin's copy even when the local branch of that name leads it.
+test_opted_in_base_branch_stays_on_origin() {
+  local case_dir out
+  case_dir=$(seed_case opted-in-base-branch)
+  opt_in_review_anchor "$case_dir"
+  git -C "$case_dir/project" checkout -q -b feature/hub main
+  printf 'hub only\n' > "$case_dir/project/hub.txt"
+  git -C "$case_dir/project" add hub.txt
+  git -C "$case_dir/project" commit -qm "hub branch commit"
+  git -C "$case_dir/project" push -q origin feature/hub
+  printf 'local hub only\n' > "$case_dir/project/local-hub.txt"
+  git -C "$case_dir/project" add local-hub.txt
+  git -C "$case_dir/project" commit -qm "local-only hub commit"
+  git -C "$case_dir/project" checkout -q main
+  plant_task_branch "$case_dir" feature/hub
+  write_task_meta "$case_dir" "kind=scout" "base_branch=feature/hub"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/feature/hub' "base-branch: the opt-in must not move a named base off origin"
+  assert_contains "$out" 'local-hub.txt' "base-branch: commits origin's base lacks must stay visible"
+  assert_not_contains "$out" ' hub.txt' "base-branch: the base branch's own commit must not be a task change"
+  pass "fm-review-diff keeps an opted-in named base branch on origin's copy"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_recorded_branch_beats_moved_worktree_head
+test_corrupt_recorded_branch_is_refused
+test_recorded_base_branch_is_the_review_base
+test_forgejo_pr_url_fetches_pull_head
+test_forgejo_repo_named_pulls_resolves_by_last_segment
+test_forgejo_pr_url_falls_back_to_recorded_head
+test_default_review_stays_on_origin_without_the_opt_in
+test_opted_in_local_landing_reviews_against_the_local_default
+test_opted_in_publishing_mode_stays_on_origin
+test_opted_in_rebased_branch_reviews_only_its_own_work
+test_opted_in_trailing_local_default_keeps_origin
+test_opted_in_diverged_defaults_anchor_where_the_task_was_planted
+test_opted_in_landed_branch_reports_an_empty_review
+test_opted_in_unrelated_merge_bases_are_reported
+test_opted_in_base_branch_stays_on_origin

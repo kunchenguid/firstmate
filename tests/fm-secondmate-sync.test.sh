@@ -322,7 +322,7 @@ make_fake_toolchain() {
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -379,7 +379,7 @@ SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.2.4' ;;
+  "--version ") printf '%s\n' '0.2.6' ;;
   "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
   "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
 esac
@@ -389,7 +389,7 @@ SH
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'quota-axi 0.1.29 (fake)'
+  printf '%s\n' 'quota-axi 0.1.51 (fake)'
 fi
 exit 0
 SH
@@ -950,7 +950,6 @@ make_remote_leg_ssh_stub() { # <w> -> echoes the fakebin dir
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -1295,6 +1294,90 @@ test_bootstrap_reports_outdated_host_actionably() {
   pass "R10 a host too old for a parent-targeted sync is reported with the command that fixes it"
 }
 
+# --- R11: a remote home is nudged to reread only when something changed -------
+# Each attempt records its retry marker before converging, so a sweep that is
+# cut off (the startup network bound) or fails used to leave a marker that made
+# the next session start nudge a home whose instructions and inherited material
+# had not changed. Only a marker whose attempt actually changed the home owes a
+# reread, and an advance outside the instruction surface owes none. The fixture
+# send fails (no endpoint), so an attempted nudge shows as its failure line.
+remote_nudge_world() {  # <name> -> world dir with a remote home sm on the primary's tooling commit
+  local w
+  w=$(new_remote_world "$1")
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  add_remote_home "$w" sm "$w/forge.git" "$(head_of "$w/main")"
+  mkdir -p "$w/home/config" "$w/home/projects"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$w/home/data/secondmates.md"
+  fm_write_secondmate_meta "$w/home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$w/home/state/sm.meta"
+  printf '%s\n' "$w"
+}
+
+remote_nudge_bootstrap() {  # <w> -> bootstrap output
+  local w=$1 fakebin
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" \
+    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+remote_marker() {  # <w> <owed:0|1|legacy>
+  local marker="$1/home/state/.secondmate-nudge-pending/sm.pending"
+  mkdir -p "${marker%/*}"
+  {
+    printf 'id=sm\nselector=fm-sm\nhome=%s\ncommit=\ninstructions=remote\n' "$1/sm"
+    printf 'message=%s\nremote=1\n' 'Firstmate instructions or inherited config changed on this host. Re-read AGENTS.md and the inherited config files before further work.'
+    [ "$2" = legacy ] || printf 'owed=%s\n' "$2"
+  } > "$marker"
+}
+
+test_bootstrap_nudges_remote_home_only_when_owed() {
+  local w out marker
+  w=$(remote_nudge_world remote-nudge-owed)
+  marker="$w/home/state/.secondmate-nudge-pending/sm.pending"
+
+  remote_marker "$w" 0
+  out=$(remote_nudge_bootstrap "$w")
+  assert_not_contains "$out" "NUDGE_SECONDMATES: secondmate sm" \
+    "a marker left by a cut-off attempt that changed nothing must not nudge (out: $out)"
+  [ ! -e "$marker" ] || fail "a converged attempt with nothing owed must clear the marker"
+
+  remote_marker "$w" 1
+  out=$(remote_nudge_bootstrap "$w")
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed" \
+    "a reread an earlier attempt still owes must be sent (out: $out)"
+  assert_contains "$(cat "$marker")" "owed=1" "a failed send must keep the reread owed"
+
+  out=$(remote_nudge_bootstrap "$w")
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed" "an owed reread is retried until it is sent"
+  rm -f "$marker"
+
+  bump_primary "$w" readme
+  git -C "$w/main" push -q origin main
+  out=$(remote_nudge_bootstrap "$w")
+  [ "$(head_of "$w/sm")" = "$(head_of "$w/main")" ] || fail "the README-only advance did not reach the remote home (out: $out)"
+  assert_not_contains "$out" "NUDGE_SECONDMATES: secondmate sm" \
+    "an advance outside the instruction surface must not nudge (out: $out)"
+  [ ! -e "$marker" ] || fail "an advance outside the instruction surface owes no reread"
+
+  bump_primary "$w" instr
+  git -C "$w/main" push -q origin main
+  out=$(remote_nudge_bootstrap "$w")
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm: send failed" \
+    "an instruction advance must nudge (out: $out)"
+  assert_contains "$(cat "$marker")" "owed=1" "an instruction advance whose send failed stays owed"
+  pass "R11 a remote home is nudged only for an owed reread or a real instruction change, never for a cut-off attempt that changed nothing"
+}
+
 # --- R9: a remote launch never re-targets the host's own Firstmate copy --------
 # The launch leg runs a host-local spawn whose FM_ROOT is that host's Firstmate
 # copy. Once the parent has synced the home to ITS commit, that spawn must leave
@@ -1373,6 +1456,7 @@ test_remote_sync_skips_dirty_diverged_and_feature_branch
 test_remote_sync_without_target_follows_host_copy
 test_bootstrap_syncs_remote_home_to_primary_commit
 test_bootstrap_reports_outdated_host_actionably
+test_bootstrap_nudges_remote_home_only_when_owed
 test_remote_launch_does_not_retarget_host_copy
 
 echo "# all fm-secondmate-sync tests passed"
