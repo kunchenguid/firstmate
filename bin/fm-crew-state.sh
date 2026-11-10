@@ -291,13 +291,15 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2 reason pr=${3:-}
+  local detail=$2 reason pr=${3:-} destination_pr=${3:-}
   # All run classifications are provisional until this shared publication
   # boundary: passed outcomes, green monitors, recovered monitors and merged
-  # detail must prove the destination of this reading's own PR.
+  # detail must prove the destination before publication.
   if [ "$1" = 'done' ]; then
-    pr=$(run_pr_identity "$pr") || pr=
-    if ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "$pr"); then
+    if [ -z "$destination_pr" ] && fm_pr_metadata_identity_parse "$META"; then
+      destination_pr=$FM_PR_META_URL
+    fi
+    if ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "$destination_pr"); then
       emit blocked run-step "$reason"
     fi
   fi
@@ -529,23 +531,14 @@ change_read_record_bounded() {  # <host> <number>
   FM_PR_RECORD_MERGED=$merged
 }
 
-run_pr_identity() { # <run-pr>; fall back only to this task's recorded identity
-  if fm_pr_url_parse "${1:-}"; then
-    printf '%s\n' "$FM_PR_URL"
-  elif fm_pr_metadata_identity_parse "$META"; then
-    printf '%s\n' "$FM_PR_META_URL"
-  else
-    return 1
-  fi
-}
-
 passed_pr_detail() {
-  local provider url host path number owner repo state_lc
-  if ! url=$(run_pr_identity "$(strip_quotes "$(nm_field pr)")"); then
+  local provider url host path number owner repo raw_pr state_lc
+  raw_pr=$(strip_quotes "$(nm_field pr)")
+  if ! fm_pr_url_parse "$raw_pr"; then
     printf 'run passed: PR state unknown (no PR identity)'
     return
   fi
-  fm_pr_url_parse "$url" || return
+  url=$FM_PR_URL
   provider=$FM_PR_PROVIDER
   host=$FM_PR_HOST
   path=$FM_PR_PATH

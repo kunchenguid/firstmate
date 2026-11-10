@@ -1702,12 +1702,18 @@ test_terminal_passed_uses_matching_retirement_receipt_without_forge() {
   : > "$read_log"
   FM_FAKE_PR_READ_LOG=$read_log
   FM_FAKE_PR_READ_FAIL=1
-  FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dreceipt)"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dreceipt "$url")"
   out=$(run_crew_state "$d" feat-dreceipt)
   assert_contains "$out" "state: done" "passed run with retired PR receipt -> done"
   assert_contains "$out" "run passed: PR merged" "matching retirement receipt is local merged evidence"
-  assert_contains "$out" "pr=$url" "recorded PR is the published identity when the run has none"
+  assert_contains "$out" "pr=$url" "run's own PR is the published identity"
   [ ! -s "$read_log" ] || fail "matching retirement receipt still attempted a forge read"
+  FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dreceipt)"
+  out=$(run_crew_state "$d" feat-dreceipt)
+  assert_contains "$out" 'state: done' 'recorded PR may prove the destination when the run has none'
+  assert_contains "$out" 'run passed: PR state unknown (no PR identity)' 'receipt cannot lend another run its merge state'
+  assert_not_contains "$out" "pr=$url" 'receipt cannot lend another run its PR identity'
+  [ ! -s "$read_log" ] || fail 'run without a PR attempted a merge-state forge read'
   out=$(FM_FAKE_PR_BASE=other run_crew_state "$d" feat-dreceipt)
   assert_contains "$out" 'state: blocked' 'recorded PR receipt cannot bypass a retarget'
   out=$(FM_FAKE_BASE_FAIL=1 run_crew_state "$d" feat-dreceipt)
@@ -1776,6 +1782,52 @@ test_terminal_passed_run_pr_overrides_stale_metadata() {
   assert_contains "$out" "run passed: PR open" "run PR identity outranks stale task metadata"
   assert_not_contains "$out" "PR merged" "stale merged metadata must not report merged"
   pass "terminal passed run PR overrides stale task metadata"
+}
+
+test_run_without_pr_does_not_publish_recorded_identity() {
+  local source proof d out failures=0
+  for source in passed monitor held-green coarse; do
+    for proof in matching mismatch; do
+      (
+        reset_fakes
+        d=$(new_case "run-no-pr-$source-$proof")
+        make_repo_on_branch "$d/wt" fm/no-pr
+        make_fakebin "$d" >/dev/null
+        fm_write_meta "$d/state/no-pr.meta" "window=fm:fm-no-pr" \
+          "worktree=$d/wt" 'kind=ship' 'mode=no-mistakes' \
+          'pr=https://github.com/o/r/pull/47'
+        FM_FAKE_PR_47_STATE=MERGED
+        FM_FAKE_PR_47_MERGED=true
+        FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/no-pr)"
+        case "$source" in
+          monitor)
+            FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/no-pr | sed '/^[[:space:]]*pr:/d')"
+            FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed' ;;
+          held-green)
+            FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/no-pr | sed '/^[[:space:]]*pr:/d')"
+            FM_FAKE_PR_STATE_AXI=open
+            FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed' ;;
+          coarse)
+            FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+            FM_FAKE_RUNS_LIST="  completed  fm/no-pr $FM_FAKE_RUN_HEAD  $(ledger_stamp_minutes_ago 60)" ;;
+        esac
+        [ "$proof" != mismatch ] || FM_FAKE_PR_BASE=release/wrong
+        out=$(run_crew_state "$d" no-pr)
+        if [ "$source" = held-green ]; then
+          assert_contains "$out" 'state: failed' 'ended monitor without its own PR cannot prove delivery'
+        elif [ "$proof" = matching ]; then
+          assert_contains "$out" 'state: done' "$source: recorded identity can prove the destination"
+        else
+          assert_contains "$out" 'state: blocked' "$source: recorded identity must still prove the destination"
+          assert_contains "$out" 'actual base release/wrong' "$source: refusal must name the wrong base"
+        fi
+        assert_not_contains "$out" 'pr=https://github.com/o/r/pull/47' "$source: run must not publish a different run's PR"
+        assert_not_contains "$out" 'PR merged' "$source: run must not publish a different run's merge state"
+      ) || failures=$((failures + 1))
+    done
+  done
+  [ "$failures" -eq 0 ] || fail "$failures run PR identity regressions"
+  pass 'run records without a PR use task identity only for destination proof'
 }
 
 test_terminal_passed_without_readable_pr_identity_reports_unknown() {
@@ -6892,6 +6944,7 @@ test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged
 test_terminal_passed_run_pr_overrides_stale_metadata
+test_run_without_pr_does_not_publish_recorded_identity
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_forgejo_pull_reports_its_state

@@ -7325,8 +7325,14 @@ if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$MODE" != local-only ] &
       fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" && printf '\n' && cat "$SOURCE_BRIEF" &&
         printf '\n# Expected pull request destination\nExpected PR base: %s\nVerify the live PR base equals this branch and inspect its task-only diff before reporting ready.\n' "$EXPECTED_BASE" &&
         { [ "$MODE" != no-mistakes ] || fm_brief_intent_overlay "$CAPTAIN_INTENT"; }
-    } > "$BRIEF_TMP" || exit 1
-    mv "$BRIEF_TMP" "$BRIEF" || exit 1
+    } > "$BRIEF_TMP" || {
+      rm -f -- "$BRIEF_TMP"
+      exit 1
+    }
+    if ! mv "$BRIEF_TMP" "$BRIEF"; then
+      rm -f -- "$BRIEF_TMP"
+      exit 1
+    fi
   fi
 fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"

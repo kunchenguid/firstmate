@@ -126,6 +126,7 @@ Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 It withholds that verdict while the task's endpoint carries a live busy agent or a newer incarnation than the last status line (the script header owns the exact rule).
 The scan applies [`bin/fm-inactive-reconcile.sh`](../bin/fm-inactive-reconcile.sh)'s corroboration and PR-identity contract before publishing a terminal outcome.
+Either way its pull-request identity comes from the same record as the state rather than from a separately recorded task PR, and a scout, which delivers no pull request, carries none on either path.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt.
 A secondmate home's terminal child ledger lines, PR registrations, captain holds, and merges are published on that same parent route by the scripts that record them, so no captain-facing outcome depends on the mate model appending it ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.

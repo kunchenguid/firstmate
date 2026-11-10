@@ -18,6 +18,7 @@ cat > "$DOD_FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
   *' --json baseRefName '*)
+    [ -z "${DOD_FORGE_CALLS:-}" ] || printf 'base\n' >> "$DOD_FORGE_CALLS"
     [ "${DOD_FORGE_UNREADABLE:-0}" != 1 ] || exit 1
     printf '%s\n' "${DOD_FORGE_BASE:-main}" ;;
   *) exit 1 ;;
@@ -161,7 +162,7 @@ test_unpushed_ship_done_is_refused() {
   sha=$(git -C "$wt" rev-parse HEAD)
   meta="$TMP_ROOT/unpushed.meta"
   printf 'expected_base=main\n' > "$meta"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/1 checks green" \
+  reason=$(DOD_FORGE_CALLS="$TMP_ROOT/unpushed-forge.calls" accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/1 checks green" \
     "$TMP_ROOT" unpushed "$meta")
   rc=$?
   [ "$rc" -eq 1 ] || fail "unpushed ship done: was accepted (exit $rc)"
@@ -169,6 +170,7 @@ test_unpushed_ship_done_is_refused() {
     *"named head $sha is unreachable outside the worker copy") ;;
     *) fail "unpushed refusal did not name the commit: $reason" ;;
   esac
+  [ ! -s "$TMP_ROOT/unpushed-forge.calls" ] || fail 'unpushed head triggered a forge destination read'
   pass "unpushed ship done: is refused"
 }
 
@@ -597,14 +599,20 @@ EOF
 # The draft check the DoD hands a worker must be the gh-axi path that rule 3 of
 # every ship brief requires for GitHub operations, never raw gh (issue 5325).
 test_pr_based_dod_draft_check_uses_gh_axi() {
-  local mode out
+  local mode out pr
   for mode in direct-PR no-mistakes; do
-    out="$TMP_ROOT/dod-$mode.md"
-    fm_dod_block "$mode" dod-draft-task > "$out"
-    assert_no_grep 'gh pr view' "$out" "$mode: DoD must not document a raw gh draft check"
-    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`' "$out" \
-      "$mode: DoD must read the draft state through gh-axi"
+    for pr in auto manual; do
+      [ "$mode:$pr" != direct-PR:manual ] || continue
+      out="$TMP_ROOT/dod-$mode.md"
+      fm_dod_block "$mode" dod-draft-task fm/dod-draft-task none '' '' "$pr" > "$out"
+      [ "$(head -1 "$out")" = '# Definition of done' ] || fail "$mode/$pr: instruction escaped the DoD section"
+      [ "$(awk '/^# / { section=$0 } /^Before reporting ready,/ { print section }' "$out")" = '# Definition of done' ] \
+        || fail "$mode/$pr: destination instruction is absent or outside the DoD section"
+      assert_no_grep 'gh pr view' "$out" "$mode: DoD must not document a raw gh draft check"
+      # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+      assert_grep 'confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`' "$out" \
+        "$mode: DoD must read the draft state through gh-axi"
+    done
   done
   pass "PR-based DoD draft check uses gh-axi"
 }

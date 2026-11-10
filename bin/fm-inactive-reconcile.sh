@@ -67,10 +67,11 @@
 # or the configured paused verb) does not contradict it; a state sourced from
 # the pipeline's own RUN STEP outranks that word outright, so the routine ship
 # shape (`done:` written, the run then fails, the crew goes silent) still
-# reaches the captain. terminal_outcome_pr below owns PR identity extraction
-# from the reader's output; fm-crew-state.sh's run_pr_identity helper owns
-# selection of the emitted run-step identity. A scout delivers no PR on either
-# path, so it carries none.
+# reaches the captain. Its PR identity comes from the same record as its state -
+# the run's own published PR for a run-step state, that line's own ready-signal
+# PR for a status-log state, and never a separately recorded task PR; a scout
+# delivers no PR on either path, so it carries none. Together they
+# prevent one captain-facing record from combining claims from different runs.
 # A live agent withholds that verdict only while it is busy, or while its
 # incarnation postdates the terminal evidence (the spawn epoch in spawn_gen is
 # later than the last status line's [at=] epoch). An idle agent on the same

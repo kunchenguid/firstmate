@@ -513,6 +513,7 @@ fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffi
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
 Ship branch: $branch
+Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.
 This project's pull-request text is written by hand: the pipeline's \`pr\` step would rewrite the title and body you write on every validated push, so **no-mistakes runs here as a validation pass that pushes the branch**, and you then open the PR yourself.
 Pass \`--skip pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, \`lint\`, and \`push\` still run, and \`ci\` has no pipeline-opened PR to watch.
 The task is complete only when committed on your branch.
@@ -561,9 +562,6 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
     pr_base=", against the base branch \`$base\` (\`--base $base_q\`), not the repository default"
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
-  fi
-  if [ "$forge" != gerrit ] && [ "$forge" != external ] && [ "$mode" != local-only ]; then
-    printf '%s\n' 'Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.'
   fi
   case "$mode:$forge" in
     direct-PR:gerrit)
@@ -648,6 +646,7 @@ EOF
 # Definition of done
 Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
+Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
@@ -683,6 +682,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
+Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
@@ -913,8 +913,7 @@ fm_dod_read_timeout() {
 }
 
 # One destination predicate for status-log readiness, run-step readiness and
-# inactive terminal presentation. The caller supplies the PR from that claim's
-# own source, never a different run's recorded PR. All live reads share the
+# inactive terminal presentation. All live reads share the
 # caller's remaining scan deadline, including timeout cleanup.
 fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url> [<destination-proof>]
   local kind=${1:-ship} mode=$2 meta=$3 url=$4 read_timeout reason expected proof_key
@@ -1063,7 +1062,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 # The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked [<destination-proof>]]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured=''
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured='' recorded=0
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1085,24 +1084,31 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "the published-for-review report does not name a Gerrit change in the canonical https://<host>/c/<project>/+/<number> form"
     return 1
   fi
+  if [ -n "$url" ] && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
+    recorded=1
+  fi
+  if [ "$recorded" = 0 ]; then
+    if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+      printf '%s\n' "named head cannot be verified: worktree missing"
+      return 1
+    fi
+    if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+      printf '%s\n' "named head cannot be verified: worktree is not a git copy"
+      return 1
+    fi
+    sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || {
+      printf '%s\n' "named head could not be resolved"
+      return 1
+    }
+    if [ "$gerrit" = 0 ] && ! fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+      printf '%s\n' "named head $sha is unreachable outside the worker copy"
+      return 1
+    fi
+  fi
   if [ "$mode" != local-only ]; then
     fm_dod_claim_destination "$kind" "$mode" "$meta" "$url" "${10:-}" || return 1
   fi
-  if [ -n "$url" ] && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
-    return 0
-  fi
-  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    printf '%s\n' "named head cannot be verified: worktree missing"
-    return 1
-  fi
-  if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
-    printf '%s\n' "named head cannot be verified: worktree is not a git copy"
-    return 1
-  fi
-  sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || {
-    printf '%s\n' "named head could not be resolved"
-    return 1
-  }
+  [ "$recorded" = 0 ] || return 0
   if [ "$gerrit" = 1 ]; then
     case "$mode" in
       no-mistakes|'')
@@ -1114,16 +1120,12 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
   fi
-  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
-    if [ "$mode" = local-only ] && [ -n "$meta" ]; then
-      if [ -z "$state" ] || [ -z "$id" ] \
-        || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
-        printf '%s\n' "local-only done head could not be recorded or differs from the recorded head; revised work requires a new task/approval record"
-        return 1
-      fi
+  if [ "$mode" = local-only ] && [ -n "$meta" ]; then
+    if [ -z "$state" ] || [ -z "$id" ] \
+      || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
+      printf '%s\n' "local-only done head could not be recorded or differs from the recorded head; revised work requires a new task/approval record"
+      return 1
     fi
-    return 0
   fi
-  printf '%s\n' "named head $sha is unreachable outside the worker copy"
-  return 1
+  return 0
 }
