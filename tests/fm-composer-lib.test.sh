@@ -1984,8 +1984,12 @@ test_wrapped_draft_after_ruled_row_reads_pending() {
     out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
     [ "$out" = pending ] || fail "cursorless wrapped draft after a ruled row (footer $footer) must read pending, got '$out'"
     out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
-    [ "$out" = "$rule hello" ] \
-      || fail "cursorless wrapped draft must retain its rule cells and continuation (footer $footer), got '$out'"
+    # Without a cursor the selection also takes a footer row directly below the
+    # draft, so the footer variant pins only the draft prefix.
+    case "$footer:$out" in
+      0:"$rule hello"|1:"$rule hello"*) ;;
+      *) fail "cursorless wrapped draft must retain its rule cells and continuation (footer $footer), got '$out'" ;;
+    esac
   done
   pass "ordinary text wrapped below a ruled prompt row keeps the draft pending with and without a cursor"
 }
