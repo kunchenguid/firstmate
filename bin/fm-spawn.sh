@@ -4054,32 +4054,11 @@ spawn_physical_dir() {
 }
 
 spawn_unborn_commit_hint_applies() {
-  local proj=$1 proj_phys projects_phys root_phys
+  local proj=$1 proj_phys projects_phys
+  [ -d "$PROJECTS" ] || return 1
   proj_phys=$(spawn_physical_dir "$proj") || return 1
-  if [ -d "$PROJECTS" ]; then
-    projects_phys=$(spawn_physical_dir "$PROJECTS") || return 1
-    [ "${proj_phys#"$projects_phys"/}" != "$proj_phys" ] && return 0
-  fi
-  root_phys=$(spawn_physical_dir "$FM_ROOT") || return 1
-  [ "$proj_phys" = "$root_phys" ]
-}
-
-spawn_registered_clone_names() {
-  local dir name joined='' sorted
-  local -a names=()
-  [ -d "$PROJECTS" ] || return 0
-  for dir in "$PROJECTS"/*; do
-    [ -d "$dir" ] || continue
-    name=${dir##*/}
-    names+=("$name")
-  done
-  [ "${#names[@]}" -gt 0 ] || return 0
-  sorted=$(printf '%s\n' "${names[@]}" | sort)
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    joined="${joined:+$joined, }$name"
-  done <<< "$sorted"
-  printf '%s\n' "$joined"
+  projects_phys=$(spawn_physical_dir "$PROJECTS") || return 1
+  [ "${proj_phys#"$projects_phys"/}" != "$proj_phys" ]
 }
 
 path_is_ancestor_of() {
@@ -4268,9 +4247,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   if spawn_unborn_commit_hint_applies "$PROJ_ABS"; then
     echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   else
-    unborn_clone_names=$(spawn_registered_clone_names)
-    [ -n "$unborn_clone_names" ] || unborn_clone_names=none
-    echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; $PROJ_ABS is not a registered project clone. Registered clones under $PROJECTS: $unborn_clone_names" >&2
+    echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; $PROJ_ABS is not a registered project clone" >&2
   fi
   exit 1
 fi

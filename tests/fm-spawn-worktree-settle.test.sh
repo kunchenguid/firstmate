@@ -115,15 +115,14 @@ EOF
 
 run_settle_spawn() {
   local id=$1
-  shift
-  FM_ROOT_OVERRIDE="${FM_SETTLE_ROOT_OVERRIDE:-}" FM_HOME="$HOME_DIR" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -234,26 +233,22 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 }
 
 test_unborn_head_project_is_refused_at_once() {
-  local rec id out status started elapsed shown projects_shown
+  local rec id out status started elapsed shown
   id=settle-unborn-head-z5
   rec=$(make_settle_case settle-unborn "$id" 0)
   read_settle_record "$rec"
   PROJ_DIR="$TMP_ROOT/settle-unborn/unborn-project"
   git init -q "$PROJ_DIR"
-  mkdir -p "$HOME_DIR/projects/kept"
 
   started=$SECONDS
   out=$(run_settle_spawn "$id")
   status=$?
   elapsed=$((SECONDS - started))
   shown=$(CDPATH='' cd -- "$PROJ_DIR" && pwd)
-  projects_shown=$(CDPATH='' cd -- "$HOME_DIR/projects" && pwd)
   expect_code 1 "$status" "spawn into a project with no commit should be refused"
   assert_contains "$out" "unborn HEAD" "the refusal did not name the unborn HEAD cause"
   assert_contains "$out" "$shown is not a registered project clone" \
     "the refusal did not say the path is not a registered project clone"
-  assert_contains "$out" "Registered clones under $projects_shown: kept" \
-    "the refusal did not name the registered clone"
   assert_not_contains "$out" "commit --allow-empty" \
     "an unregistered path must not suggest a commit"
   [ "$elapsed" -lt 30 ] || fail "refusal took ${elapsed}s instead of failing before the treehouse wait"
@@ -283,34 +278,11 @@ test_registered_unborn_clone_gets_commit_hint() {
   pass "a registered clone with an unborn HEAD still gets the commit hint"
 }
 
-test_unborn_firstmate_repo_gets_commit_hint() {
-  local rec id out status repo
-  id=settle-unborn-self-z7
-  rec=$(make_settle_case settle-unborn-self "$id" 0)
-  read_settle_record "$rec"
-  repo="$TMP_ROOT/settle-unborn-self/firstmate-repo"
-  git init -q "$repo"
-  PROJ_DIR=$repo
-
-  out=$(FM_SETTLE_ROOT_OVERRIDE="$repo" run_settle_spawn "$id" --harness codex)
-  status=$?
-  expect_code 1 "$status" "spawn into the firstmate repository with no commit should be refused"$'\n'"$out"
-  assert_contains "$out" "unborn HEAD" "the refusal did not name the unborn HEAD cause"
-  assert_contains "$out" "make one commit" "the firstmate repository did not get the commit hint"
-  assert_contains "$out" "commit --allow-empty" "the firstmate repository did not get the commit example"
-  assert_not_contains "$out" "not a registered project clone" \
-    "the firstmate repository was described as unregistered"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  [ -z "$(git -C "$repo" rev-list --all 2>/dev/null)" ] || fail "spawn committed into the repository"
-  pass "the firstmate repository with an unborn HEAD still gets the commit hint"
-}
-
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
 test_registered_unborn_clone_gets_commit_hint
-test_unborn_firstmate_repo_gets_commit_hint
 
 echo "# all fm-spawn-worktree-settle tests passed"
