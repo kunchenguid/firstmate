@@ -1016,34 +1016,41 @@ test_scan_rotates_past_a_hanging_registration() {
 # A scan registration's remote-ref refresh, every remote together, ends inside
 # the scan's own budget, so remotes that hang cannot get the registration cut:
 # the refusal is printed once and marked instead of retried silently on every
-# sweep. When the budget leaves no time for a refresh, none is made.
+# sweep. Once the refresh's time has passed the sweep starts no other task, so
+# that task opens the next sweep and gets its own bounded refresh.
 test_scan_bounds_the_remote_refresh_by_its_budget() {
   local dir state sha out
   dir=$(make_case scan-refresh-hang)
   state="$dir/home/state"
-  write_task_meta "$dir"
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
   add_probe_remotes "$dir"
   sha=$(git -C "$dir/wt" rev-parse HEAD)
   printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
 
   out=$(FM_CHECK_TIMEOUT=16 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
     run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the scan failed: $(cat "$dir/stderr")"
   [ -s "$dir/remote.log" ] || fail "the scan's registration did not refresh the copy's remotes"
-  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "a refusal behind hanging remotes did not print one line: $out"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "a sweep behind hanging remotes did not report exactly one task: $out"
   case "$out" in
     "task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy; could not refresh remote: "*) ;;
     *) fail "the refusal behind hanging remotes was not reported: $out" ;;
   esac
   [ "$(cat "$state/task-a.pr-register-refused")" = https://github.com/o/r/pull/9 ] \
     || fail "the refusal behind hanging remotes was not marked as reported"
+  [ ! -e "$state/task-b.pr-register-refused" ] || fail "a task started after the refresh time had passed was refused"
 
-  rm -f "$dir/remote.log" "$state/task-a.pr-register-refused"
-  out=$(FM_CHECK_TIMEOUT=10 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
-    run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the short scan failed: $(cat "$dir/stderr")"
-  [ ! -e "$dir/remote.log" ] || fail "a scan with no time left for a refresh fetched: $(cat "$dir/remote.log")"
-  [ "$out" = "task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy" ] \
-    || fail "the refusal without a refresh was not reported: $out"
-  pass "a scan bounds its registrations' remote refresh by its budget and still reports the refusal"
+  rm -f "$dir/remote.log"
+  out=$(FM_CHECK_TIMEOUT=16 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the second scan failed: $(cat "$dir/stderr")"
+  [ -s "$dir/remote.log" ] || fail "the task that opened the next sweep got no refresh"
+  case "$out" in
+    "task-b reported https://github.com/o/r/pull/20 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy; could not refresh remote: "*) ;;
+    *) fail "the next sweep did not open with the task the previous one never started: $out" ;;
+  esac
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "the next sweep reported more than one task: $out"
+  pass "a scan bounds its registrations' remote refresh by its budget and hands the next sweep to the task it never started"
 }
 
 # A task whose pr= was written but whose poll was never published (the

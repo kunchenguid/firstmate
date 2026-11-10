@@ -128,6 +128,27 @@ test_head_pushed_from_gate_clone_is_accepted_after_refresh() {
   pass "head origin holds through the gate clone is accepted after a refresh, and later reads see it"
 }
 
+test_passed_refresh_deadline_refuses_with_last_known_refs() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/deadline-passed-repo"
+  wt="$TMP_ROOT/deadline-passed-wt"
+  origin="$repo.origin.git"
+  fm_git_worktree "$repo" "$wt" fm/deadline-passed
+  git -C "$wt" commit -q --allow-empty -m 'fix origin holds while the copy has not fetched it'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/deadline-passed:refs/heads/fm/deadline-passed"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/8 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy; could not refresh remote: origin, so this verdict used the last-known refs"*) ;;
+    *) fail "a refusal past the refresh deadline did not say it used the last-known refs: $reason" ;;
+  esac
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/deadline-passed >/dev/null \
+    || fail "a refresh past its deadline fetched anyway"
+  pass "past the refresh deadline nothing is fetched and the refusal says it used the last-known refs"
+}
+
 test_separate_project_clone_is_refreshed() {
   local repo wt origin sha reason rc
   repo="$TMP_ROOT/separate-project-repo"
@@ -587,6 +608,7 @@ test_remote_containing_named_head_is_accepted
 test_gate_mirror_only_named_head_is_refused
 test_head_pushed_from_gate_clone_is_accepted_after_refresh
 test_separate_project_clone_is_refreshed
+test_passed_refresh_deadline_refuses_with_last_known_refs
 test_failed_refresh_refuses_with_last_known_refs
 test_local_only_branch_beside_gate_mirror_is_accepted
 test_moved_branch_without_named_head_is_refused

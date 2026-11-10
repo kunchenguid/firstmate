@@ -55,9 +55,11 @@
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
 # registration cut at that bound prints nothing and is retried. A
 # registration's remote-ref refresh ends 5 seconds before that bound
-# (FM_DOD_REFRESH_DEADLINE) and is skipped once that time has passed, so a
-# registration still refused after it reports that refusal instead of being
-# cut.
+# (FM_DOD_REFRESH_DEADLINE), so a registration still refused after it reports
+# that refusal instead of being cut. Once that time has passed, the sweep
+# starts no further registration, so the cursor stays on the last task that
+# had a full turn; the first registration of a sweep still runs, and with no
+# time left to fetch it refuses on the last-known refs.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -115,6 +117,7 @@ pr_check_pr_retired() {  # <id> <recorded-url>
 
 pr_check_scan() {
   local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
+  local refresh_deadline attempted now
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -136,14 +139,19 @@ pr_check_scan() {
   cursor_file="$STATE/.pr-check-scan-cursor"
   cursor=$(cat "$cursor_file" 2>/dev/null || true)
   candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
+  refresh_deadline=$((start + budget - 5))
+  attempted=0
   while IFS=' ' read -r id url; do
     [ -n "$id" ] || continue
-    left=$((start + budget - $(date +%s)))
+    now=$(date +%s)
+    left=$((start + budget - now))
     [ "$left" -gt 0 ] || break
+    [ "$attempted" = 0 ] || [ "$now" -lt "$refresh_deadline" ] || break
+    attempted=1
     marker="$STATE/$id.pr-register-refused"
     printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
-    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 FM_DOD_REFRESH_DEADLINE=$((start + budget - 5)) \
+    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 FM_DOD_REFRESH_DEADLINE="$refresh_deadline" \
       bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
       rm -f -- "$marker"

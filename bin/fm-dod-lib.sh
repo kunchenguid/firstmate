@@ -1036,16 +1036,15 @@ fm_dod_named_head_on_surviving_ref() {  # <worktree> <project> <mode> <sha>
 # whole refresh, every fetch together, ends by then, and none is made once it
 # has passed. Without FM_DOD_REFRESH_REMOTES the check reads the refs as they
 # are and makes no network call. FM_DOD_REFRESH_FAILED names any remote that
-# could not be refreshed.
+# could not be refreshed, including one left unfetched because the deadline
+# had passed.
 fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
   local wt=$1 project=$2 deadline=${FM_DOD_REFRESH_DEADLINE:-} wt_common project_common
   FM_DOD_REFRESH_FAILED=
   fm_dod_named_head_on_surviving_ref "$@" && return 0
   [ "${FM_DOD_REFRESH_REMOTES:-0}" = 1 ] || return 1
   case "$deadline" in
-    '') ;;
     0*|*[!0-9]*) return 1 ;;
-    *) [ "$deadline" -gt "$(date +%s)" ] || return 1 ;;
   esac
   fm_dod_refresh_remote_refs "$wt" 30 "$deadline"
   if [ -n "$project" ] && [ -d "$project" ]; then
