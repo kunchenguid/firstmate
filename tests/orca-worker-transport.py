@@ -32,6 +32,10 @@ class Transport(unittest.TestCase):
         for path in (self.state, self.data / "task", self.config, self.code / "bin", self.fakebin):
             path.mkdir(parents=True)
         self.env = os.environ.copy()
+        # The fake remote worker strips FM_* (including the test harness's
+        # FM_GATE_REFUSE_BYPASS) like production, so a gate run's marker would
+        # make the staged fm-spawn.sh refuse inside this temporary fixture.
+        self.env.pop("NO_MISTAKES_GATE", None)
         self.env["PATH"] = str(self.fakebin) + ":" + os.environ["PATH"]
         self.env["HOME"] = str(self.root)
         self.env["ORCA_TEST_ROOT"] = str(self.root)

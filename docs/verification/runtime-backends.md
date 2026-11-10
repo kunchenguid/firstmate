@@ -2302,7 +2302,7 @@ The fake-Orca suite covers readiness, registration, create response parsing, met
 
 ### Remote publishing context
 
-Portable publishing preparation was rechecked on 2026-11-09 with Python 3.14.8 and Git 2.56.0.
+Portable publishing preparation was rechecked on 2026-11-10 with Python 3.14.8 and Git 2.56.0.
 `tests/orca-worker-transport.py`, run by `tests/fm-backend-orca.test.sh`, exercises history transfer, current-script overlays, self-repository refusal, shallow source refusal, publishing origins, locked git-crypt filters, and publishing spawn through both role gates.
 It also verifies immutable local readiness heads, dispatch decisions and overrides, and remote selection while the coordinator's runtime or local lane capacity is unavailable.
 Its SSH and Orca endpoints are fixtures; it does not publish or claim live harness coverage.
@@ -2319,7 +2319,7 @@ The run kept its timing artifact in a private `EVIDENCE_DIR`.
 The transport suite invoked by the Orca backend regression reported:
 
 ```text
-Ran 23 tests in 855.560s
+Ran 27 tests in 49.652s
 
 OK
 ```
