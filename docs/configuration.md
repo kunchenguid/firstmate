@@ -2128,7 +2128,7 @@ It never introduces candidates outside the matched rule or its existing default 
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
 
-- An expanded provider with no matching account row leaves the candidate eligible but unranked.
+- An expanded provider with no matching account row, or with more than one row covering the candidate's account key, leaves the candidate eligible but unranked.
 - Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 
 **Confidence and fallback rules**
