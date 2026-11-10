@@ -320,8 +320,10 @@ fm_backend_detect_hc_usable() {
 # hc's own layout for ${HC_SESSION:-default}, measured on hc 0.1.14:
 # $XDG_RUNTIME_DIR/herdr-core/<session>.sock when XDG_RUNTIME_DIR is set,
 # else ${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core/<session>/<session>.sock.
-# A layout this misses only fails the liveness probe - no switch, never a
-# wrong or newly started core.
+# fm_backend_hc_get (bin/backends/hc.sh) gates every passive hc read on this
+# same socket, so a layout this misses fails detection's liveness probe (no
+# switch, never a wrong or newly started core) and also reads every hc task's
+# endpoint, agent, busy, and path state as unreadable.
 fm_backend_detect_hc_core_sock() {
   local session=${HC_SESSION:-default}
   if [ -n "${FM_HC_SOCKET:-}" ]; then

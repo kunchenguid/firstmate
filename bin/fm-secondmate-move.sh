@@ -216,7 +216,12 @@ elif ! cmp -s "$SNAPSHOT" "$META"; then
 fi
 fm_lock_release "$META_LOCK" || true
 if [ "$FM_SM_LIVE_STATUS" = skipped ]; then
-  [ "$STOPPED" = 1 ] || die "second mate $ID was not moved to $TARGET; nothing was stopped or launched and its record is unchanged: $FM_SM_LIVE_REASON"
+  if [ "$STOPPED" != 1 ]; then
+    [ "$OLD_BACKEND" != t3code ] || die "second mate $ID was not moved to $TARGET; nothing was launched and its record is unchanged, but its T3 thread may have been archived and the T3 environment in its home partly removed: $FM_SM_LIVE_REASON"
+    die "second mate $ID was not moved to $TARGET; nothing was stopped or launched and its record is unchanged: $FM_SM_LIVE_REASON"
+  fi
   die "second mate $ID was not moved to $TARGET: its $OLD_BACKEND agent was stopped, nothing was launched, and its previous record (backend=$OLD_BACKEND) is unchanged, so the next liveness recovery respawns it on its recorded backend: $FM_SM_LIVE_REASON"
 fi
-die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; its home is unchanged and its previous record (backend=$OLD_BACKEND) is in place, so the next liveness recovery respawns it on $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"
+HOME_NOTE="its home is unchanged"
+[ "$OLD_BACKEND" != t3code ] || HOME_NOTE="the T3 environment was removed from its home (a t3code respawn writes it again)"
+die "second mate $ID could not be launched on $TARGET after its $OLD_BACKEND agent was stopped; $HOME_NOTE and its previous record (backend=$OLD_BACKEND) is in place, so the next liveness recovery respawns it on $OLD_BACKEND: $(first_line "$FM_SM_LIVE_OUT")"
