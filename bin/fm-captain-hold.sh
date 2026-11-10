@@ -1925,7 +1925,7 @@ reconcile_close() {
   [ -n "$evidence_file" ] || fail "--evidence-file is required; a moot call closes on evidence, never on assertion"
   load_decision "$evidence_file"
   DECISION_SOURCE_KIND=mechanical
-  DECISION_SOURCE="fm-captain-hold reconcile close: $evidence_file"
+  DECISION_SOURCE="fm-captain-hold reconcile close: sha256:$DECISION_DIGEST"
   DECISION_SOURCE_TIME=
   fm_resolution_source_validate "$DECISION_SOURCE_KIND" "$DECISION_SOURCE" "$DECISION_SOURCE_TIME" || exit 1
   acquire_task_control_lock "$id"

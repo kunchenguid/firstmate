@@ -174,7 +174,7 @@ SH
 }
 
 test_resolution_attribution() {
-  local home kind show at rc
+  local home kind show at rc evidence_dir component
   home=$(make_home attribution)
   printf 'Use the north route.\n' > "$home/answer.txt"
   for kind in user supervisor mechanical; do
@@ -228,11 +228,15 @@ test_resolution_attribution() {
   assert_not_contains "$show" 'Captain answered' "shared supervisor answer claims human authorship"
   run_captain "$home" hold source-reconcile --title "Reconcile source" --reason choose >/dev/null
   request_reconciles "$home" source-fixture source-reconcile || fail "reconcile request failed"
-  run_captain "$home" reconcile close source-reconcile --evidence-file "$home/answer.txt" >/dev/null \
+  component=$(printf '%180s' x | tr ' ' x)
+  evidence_dir="$home/$component/$component/$component"
+  mkdir -p "$evidence_dir"
+  cp "$home/answer.txt" "$evidence_dir/evidence[1].txt"
+  run_captain "$home" reconcile close source-reconcile --evidence-file "$evidence_dir/evidence[1].txt" >/dev/null \
     || fail "mechanical reconciliation failed"
   show=$(tasks_in "$home" show source-reconcile --full)
   assert_contains "$show" 'Source kind: mechanical' "reconciliation lost its source kind"
-  assert_contains "$show" "Source reference: fm-captain-hold reconcile close: $home/answer.txt" "reconciliation lost its operation and evidence"
+  assert_contains "$show" 'Source reference: fm-captain-hold reconcile close: sha256:7ef0cccad81ac1072176154afeab6a2f3efffdea074846d5508310674947c1f5' "reconciliation lost its operation and evidence digest"
   assert_contains "$show" 'Reconciliation evidence:' "reconciliation lost its evidence label"
   pass "direct, shared, and reconciliation records preserve their distinct source"
 }
@@ -1824,7 +1828,7 @@ SH
           assert_present "$home/read-unavailable-proof-next" "the batch never verified its next resolution"
           assert_absent "$home/unexpected-read-proof-next" "the next answer reread its verified body" ;;
         reconcile)
-          kind=mechanical; reference="fm-captain-hold reconcile close: $home/decision.txt"
+          kind=mechanical; reference='fm-captain-hold reconcile close: sha256:6d4b91cf90e4a8b83fdb9d4688fd91b7a723e43390ea512ae24b53c65e6b1fb4'
           out=$(run_captain "$home" reconcile close "$id" --evidence-file "$home/decision.txt" 2>&1) \
             || fail "$route reconciliation failed after verifying its committed resolution: $out" ;;
       esac
@@ -2030,15 +2034,20 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
     <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
 
-  cp "$evidence" "$mate/other-evidence.txt"
+  printf 'Different evidence.\n' > "$mate/other-evidence.txt"
   if run_captain "$mate" reconcile close reconcile-channel-call \
-    --evidence-file "$mate/other-evidence.txt" >/dev/null 2>&1; then
-    fail "closed reconciliation accepted a different evidence reference"
+    --evidence-file "$mate/other-evidence.txt" > "$mate/changed-evidence.out" 2>&1; then
+    fail "closed reconciliation accepted different evidence content"
   fi
-  [ -f "$request" ] || fail "source mismatch retired the retry request"
+  assert_grep 'records a different resolution' "$mate/changed-evidence.out" \
+    "changed evidence was not refused by the recorded digest"
+  [ "$show" = "$(tasks_in "$mate" show reconcile-channel-call --full)" ] \
+    || fail "changed evidence modified the recorded reconciliation"
+  [ -f "$request" ] || fail "changed evidence retired the retry request"
   [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]' "$channel")" -eq 1 ] \
-    || fail "source mismatch duplicated the parent resolution"
-  run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
+    || fail "changed evidence duplicated the parent resolution"
+  cp "$evidence" "$mate/evidence[copy].txt"
+  run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$mate/./evidence[copy].txt" >/dev/null \
     || fail "the closed reconciliation could not finish publication and retirement"
   [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
   [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' \
@@ -2531,13 +2540,9 @@ SH
   set -e
   [ "$rc" -ne 0 ] || fail "the forced reconcile close failure reported success"
   cp "$home/retry-evidence.txt" "$home/other-retry-evidence.txt"
-  if run_captain "$home" reconcile close sample-reconcile-close-retry \
-    --evidence-file "$home/other-retry-evidence.txt" >/dev/null 2>&1; then
-    fail "interrupted reconciliation accepted a different evidence reference"
-  fi
   run_captain "$home" reconcile close sample-reconcile-close-retry \
-    --evidence-file "$home/retry-evidence.txt" >/dev/null \
-    || fail "reconcile close did not recover from its partial failure"
+    --evidence-file "$home/other-retry-evidence.txt" >/dev/null \
+    || fail "reconcile close could not retry identical evidence at another path"
   show=$(tasks_in "$home" show sample-reconcile-close-retry --full)
   [ "$(printf '%s\n' "$show" | grep -c 'Resolution mode: reconciled')" -eq 1 ] \
     || fail "reconcile close duplicated its resolution record on retry"
@@ -2840,7 +2845,7 @@ SH
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
-  local home id fb show list
+  local home id fb show list answer marker diagnostic recovery
   home=$(make_home chat-channel)
   id=sample-chat-review
   mkdir -p "$home/data/$id"
@@ -2855,11 +2860,14 @@ test_chat_channel_feeds_the_same_keyed_answer_intake() {
   run_captain "$home" hold sample-chat-followup --title "Choose the chat follow-up" \
     --reason "captain follow-up choice pending" --repo sample >/dev/null \
     || fail "could not register the task-id chat call"
+  run_captain "$home" hold sample-chat-retry --title "Retry the chat follow-up" \
+    --reason "captain retry choice pending" --repo sample >/dev/null \
+    || fail "could not register the retry chat call"
   run_captain "$home" hold sample-chat-reconcile --title "Reconcile from chat" \
     --reason "captain chat reconcile pending" --repo sample >/dev/null \
     || fail "could not register the chat reconcile call"
   run_captain "$home" complete "$id" "$id-decision-chat-choice" sample-chat-followup \
-    sample-chat-reconcile >/dev/null \
+    sample-chat-retry sample-chat-reconcile >/dev/null \
     || fail "completion failed for the chat calls"
   grep -F 'captain-held [key=chat-choice]' "$home/state/$id.status" >/dev/null \
     || fail "precondition: completion did not transfer the decision to its durable owner"
@@ -2908,12 +2916,49 @@ SH
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
   assert_contains "$show" "answer sent to $id" "the legacy chat answer lost its delivery target"
 
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-chat-retry ] \
+  && [ ! -e "$FM_HOME/chat-close-failed" ]; then
+  : > "$FM_HOME/chat-close-failed"
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$fb/tasks-axi"
+  marker="$home/injected"
+  answer="take the second option'; touch $marker; echo '"
   : > "$home/send.log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+  if env PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
-    || fail "an answer keyed by a task id was refused by the chat channel"
+    "$ROOT/bin/fm-send.sh" "$id" --source-kind user --source "lifecycle fixture message" \
+    --source-time 2026-11-05T12:00:00Z --resolve-key sample-chat-followup \
+    --resolve-key sample-chat-retry "$answer" > "$home/send.out" 2> "$home/send.err"; then
+    fail "an interrupted captain-hold close reported success"
+  fi
+  show=$(tasks_in "$home" show sample-chat-retry --full)
+  assert_contains "$show" 'held: yes' "the failed close did not leave the retry call held"
+  assert_contains "$show" 'Resolution recorded by fm-captain-hold.' "the failed close lost its record"
+  diagnostic=$(cat "$home/send.err")
+  assert_contains "$diagnostic" 'Close it with:' "the failed hold close omitted recovery guidance"
+  recovery=${diagnostic#*Close it with: }
+  recovery=${recovery% - do not resend the answer.}
+  printf '%s\n' "$recovery" > "$home/recovery.sh"
+  env PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" bash "$home/recovery.sh" >/dev/null \
+    || fail "the emitted recovery command could not finish the interrupted close"
+  assert_absent "$marker" "the recovery command executed answer text as shell code"
+  assert_present "$home/state/$id.inbox/002.msg" "the original answer was not delivered"
+  assert_absent "$home/state/$id.inbox/003.msg" "the recovery command resent the delivered answer"
+  show=$(tasks_in "$home" show sample-chat-retry --full)
+  assert_contains "$show" 'state: done' "recovery left the interrupted call open"
+  [ "$(printf '%s\n' "$show" | grep -c 'Resolution recorded by fm-captain-hold\.')" -eq 1 ] \
+    || fail "recovery duplicated the interrupted resolution"
+  assert_contains "$show" "Answer: $answer" "recovery changed the recorded answer"
+  assert_contains "$show" 'Source reference: lifecycle fixture message' "recovery changed the source"
+  assert_contains "$show" 'Source message UTC: 2026-11-05T12:00:00Z' "recovery changed message time"
+  assert_contains "$show" "answer sent to $id" "recovery lost the original delivery task"
+  rm -f -- "$fb/tasks-axi"
   show=$(tasks_in "$home" show sample-chat-followup --full)
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"

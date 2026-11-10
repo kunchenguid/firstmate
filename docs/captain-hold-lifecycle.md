@@ -322,7 +322,7 @@ Each outcome requires both the pending board-created request and the operator in
 
 - `reconcile close <task-id> --evidence-file <path>` is the moot outcome.
   It writes a resolution record whose mode is `reconciled` and whose body is the supplied EVIDENCE under a `Reconciliation evidence:` label, then closes the task.
-  Its mechanical source names the reconciliation operation and evidence file.
+  Its mechanical source names the reconciliation operation and the SHA-256 digest of the loaded evidence text, independent of the evidence file path.
   The distinct mode and label are what keep the record honest: it says the call dissolved against verified evidence, and it never claims the captain answered.
 - `reconcile note <task-id> --note-file <path>` is the still-active outcome.
   It appends one dated `Captain hold reconciled:` note to the task body, leaves the hold in place, and retires the request.

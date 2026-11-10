@@ -922,7 +922,7 @@ fm_send_close_resolved_keys() { # <answer-text>
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() { # <answer-text>
-  local note=$1 k lines='' source_args
+  local note=$1 k lines='' source_args retry_cmd
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_HOLD_KEYS; do
@@ -932,7 +932,9 @@ fm_send_feed_resolved_holds() { # <answer-text>
     --source-kind "$RESOLVE_SOURCE_KIND" --source "$RESOLVE_SOURCE" \
     --source-time "$RESOLVE_SOURCE_TIME" --delivery-task "$RESOLVE_TASK_ID" >/dev/null 2>&1; then
     printf -v source_args ' --source-kind %q --source %q --source-time %q' "$RESOLVE_SOURCE_KIND" "$RESOLVE_SOURCE" "$RESOLVE_SOURCE_TIME"
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer$source_args - do not resend the answer." >&2
+    printf -v retry_cmd "printf '%%s' %q | %s%q answers%s --delivery-task %q" \
+      "$lines" "$(fm_send_resend_env)" "$SCRIPT_DIR/fm-captain-hold.sh" "$source_args" "$RESOLVE_TASK_ID"
+    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with: $retry_cmd - do not resend the answer." >&2
     return 1
   fi
 }
