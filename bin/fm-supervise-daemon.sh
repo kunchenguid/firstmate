@@ -1554,7 +1554,8 @@ housekeeping() {  # <state>
         printf '%s:%s\n' "$pause_identity" "$pause_size" > "$overdue_marker" || continue
         reconcile_overdue_pause "$state" "$task" || continue
         # A failed enqueue leaves the decision open for the next scan to raise.
-        if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)"; then
+        conflict=$(pause_recheck_conflict_clause "$state/$task.meta")
+        if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release${conflict})"; then
           printf 'delivered\n' >> "$overdue_marker"
           record=$(status_span_first_actionable_record "$state/$task.status" \
             "$(status_seen_offset "$state" "$task")" '' '' "paused-overdue-$task")
