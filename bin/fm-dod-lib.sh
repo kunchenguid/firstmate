@@ -700,15 +700,24 @@ EOF
   esac
 }
 
-# 0 when <sha> is contained in a ref under <namespace> in <repo>.
+# 0 when <sha> is contained in a ref under <namespace> in <repo>, ignoring
+# refs that match the optional <excluded-ref-glob>.
 # --contains tests that exact commit, so a branch that moved to a different
 # tip does not count.
-fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha>
-  local repo=$1 ns=$2 sha=$3 hit
+fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha> [<excluded-ref-glob>]
+  local repo=$1 ns=$2 sha=$3 exclude=${4:-} refs ref
   [ -n "$repo" ] && [ -d "$repo" ] || return 1
   [ -n "$sha" ] || return 1
-  hit=$(git -C "$repo" for-each-ref --format='%(refname)' --contains="$sha" --count=1 "$ns" 2>/dev/null) || return 1
-  [ -n "$hit" ]
+  refs=$(git -C "$repo" for-each-ref --format='%(refname)' --contains="$sha" "$ns" 2>/dev/null) || return 1
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    # shellcheck disable=SC2254 # the exclusion is a glob by contract
+    [ -n "$exclude" ] && case "$ref" in $exclude) continue ;; esac
+    return 0
+  done <<EOF
+$refs
+EOF
+  return 1
 }
 
 # 0 when a done: note reports the no-mistakes CI-ready PR (`PR <url> checks
@@ -967,11 +976,13 @@ fm_dod_nm_custody_returned() {  # <worktree>
 }
 
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
-# any remote-tracking ref, or - for local-only - heads in the project clone.
+# any remote-tracking ref except the local no-mistakes gate mirror
+# (refs/remotes/no-mistakes/*, which never leaves this machine), or - for
+# local-only - heads in the project clone.
 fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
-  local wt=$1 project=$2 mode=$3 sha=$4
-  fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
-  fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
+  local wt=$1 project=$2 mode=$3 sha=$4 gate_mirror='refs/remotes/no-mistakes/*'
+  fm_dod_ref_contains "$wt" refs/remotes "$sha" "$gate_mirror" && return 0
+  fm_dod_ref_contains "$project" refs/remotes "$sha" "$gate_mirror" && return 0
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 

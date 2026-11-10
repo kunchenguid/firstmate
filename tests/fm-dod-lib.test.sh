@@ -62,6 +62,42 @@ test_remote_containing_named_head_is_accepted() {
   pass "named head on a remote-tracking ref is accepted"
 }
 
+test_gate_mirror_only_named_head_is_refused() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/mirror-repo"
+  wt="$TMP_ROOT/mirror-wt"
+  fm_git_worktree "$repo" "$wt" fm/mirror
+  git -C "$wt" commit -q --allow-empty -m 'fix pushed only to the local gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  # The local no-mistakes gate mirror lives on this machine, so a head that
+  # only reached it has not left the machine.
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror "$sha"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head only on the no-mistakes gate mirror was accepted (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "gate-mirror refusal did not name the commit: $reason" ;;
+  esac
+  git -C "$wt" update-ref refs/remotes/origin/fm/mirror "$sha"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green" >/dev/null \
+    || fail "named head on origin beside the gate mirror was refused"
+  pass "named head only on the no-mistakes gate mirror is refused; on origin it is accepted"
+}
+
+test_local_only_branch_beside_gate_mirror_is_accepted() {
+  local repo wt sha
+  repo="$TMP_ROOT/mirror-local-repo"
+  wt="$TMP_ROOT/mirror-local-wt"
+  fm_git_worktree "$repo" "$wt" fm/mirror-local
+  git -C "$wt" commit -q --allow-empty -m 'local-only work also on the gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror-local "$sha"
+  accept_done ship local-only "$wt" "$repo" "done: ready in branch fm/mirror-local" >/dev/null \
+    || fail "local-only named branch in the project clone was refused beside a gate mirror ref"
+  pass "local-only named branch stays reachable when the gate mirror also holds it"
+}
+
 test_moved_branch_without_named_head_is_refused() {
   local repo wt main_sha fix_sha reason rc
   repo="$TMP_ROOT/moved-repo"
@@ -452,6 +488,8 @@ test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
+test_gate_mirror_only_named_head_is_refused
+test_local_only_branch_beside_gate_mirror_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
