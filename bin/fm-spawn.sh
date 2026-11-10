@@ -1355,7 +1355,7 @@ fi
 # while it waits for that spawn lock, so the remote path waits only briefly for
 # the meta lock and then publishes by atomic rename instead of deadlocking.
 spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [wait|remote]
-  local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock rc=0
+  local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock locked=1 rc=0
 
   record="$STATE/$id.start-pending"
   if [ ! -e "$CONFIG/spawn-start-check" ]; then
@@ -1369,10 +1369,7 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [
   fi
   lock=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
   if [ "$how" = remote ]; then
-    if ! fm_lock_acquire_wait_max "$lock" 3; then
-      echo "error: $id launched, but its start check could not be armed because the metadata lock was busy; inspect the worker yourself in about two minutes" >&2
-      return 1
-    fi
+    fm_lock_acquire_wait_max "$lock" 3 || locked=0
   else
     fm_lock_acquire_wait "$lock"
   fi
@@ -1389,7 +1386,7 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [
   else
     rm -f "$record" || rc=1
   fi
-  fm_lock_release "$lock"
+  [ "$locked" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
 

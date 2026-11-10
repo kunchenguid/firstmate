@@ -3178,8 +3178,31 @@ start_check_reason() {  # <id> <meta> <harness> <age>
   printf -v START_CHECK_REASON '%s); inspect: %s %q %q' "$head" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
 }
 
-start_check_record_current() {  # <path> <record>
-  [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]
+# start_check_claim <path> <record>: take the start-check record the watcher
+# judged, and only that one, as $START_CHECK_CLAIM for the caller to delete. A
+# remote respawn that cannot get the meta lock within its bound publishes its
+# record by atomic rename without it (bin/fm-spawn.sh spawn_arm_start_check), so
+# a compare-then-remove of the path could delete a replacement landing between
+# the two. Claiming the path by rename first makes the comparison and the
+# removal act on the same file; a claimed record that is not the judged one goes
+# back, unless a newer one already stands there.
+start_check_claim() {  # <path> <record>
+  START_CHECK_CLAIM="$1.claim.$$"
+  mv -f -- "$1" "$START_CHECK_CLAIM" 2>/dev/null || return 1
+  [ "$(cat -- "$START_CHECK_CLAIM")" != "$2" ] || return 0
+  start_check_unclaim "$1"
+  return 1
+}
+
+start_check_unclaim() {  # <path>
+  ln -- "$START_CHECK_CLAIM" "$1" 2>/dev/null || true
+  rm -f -- "$START_CHECK_CLAIM"
+}
+
+# start_check_drop <path> <record>: remove the judged record if it still stands.
+start_check_drop() {  # <path> <record>
+  start_check_claim "$1" "$2" || return 0
+  rm -f -- "$START_CHECK_CLAIM"
 }
 
 start_check_tick() {  # [now-epoch], for deterministic clock callers
@@ -3197,9 +3220,9 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     epoch=; gen=; harness=
     read -r epoch gen harness _ < "$f" || true
     record=$(cat "$f") || record=
-    case "$epoch" in ''|*[!0-9]*) rm -f -- "$f"; fm_lock_release "$lock"; continue ;; esac
+    case "$epoch" in ''|*[!0-9]*) start_check_drop "$f" "$record"; fm_lock_release "$lock"; continue ;; esac
     if [ ! -f "$meta" ]; then
-      rm -f -- "$f"
+      start_check_drop "$f" "$record"
       fm_lock_release "$lock"
       continue
     fi
@@ -3211,7 +3234,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       mgen=$(fm_meta_get "$meta" busy_gen)
     fi
     if [ "${mgen:--}" != "$gen" ]; then
-      rm -f -- "$f"
+      start_check_drop "$f" "$record"
       fm_lock_release "$lock"
       continue
     fi
@@ -3222,8 +3245,8 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     # the parent-side mirror can clear it, and the record waits for a later poll.
     if [ -n "$remote" ] && { [ "$((now - epoch))" -lt "$START_CHECK_SECS" ] || ! start_check_route_budget_left; }; then
       if start_check_local_proof "$id" "$epoch" "$meta"; then
-        start_check_record_current "$f" "$record" || { fm_lock_release "$lock"; continue; }
-        rm -f -- "$f"
+        start_check_claim "$f" "$record" || { fm_lock_release "$lock"; continue; }
+        rm -f -- "$START_CHECK_CLAIM"
         fm_lock_release "$lock"
         triage_log "start check: $id started"
       else
@@ -3232,8 +3255,8 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       continue
     fi
     if start_check_started "$id" "$meta" "$epoch" "$gen"; then
-      start_check_record_current "$f" "$record" || { fm_lock_release "$lock"; continue; }
-      rm -f -- "$f"
+      start_check_claim "$f" "$record" || { fm_lock_release "$lock"; continue; }
+      rm -f -- "$START_CHECK_CLAIM"
       fm_lock_release "$lock"
       triage_log "start check: $id started"
       continue
@@ -3245,9 +3268,9 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     [ -z "$remote" ] || START_CHECK_TICK_STARTED=$(date +%s)
     start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
     reason=$START_CHECK_REASON
-    start_check_record_current "$f" "$record" || { fm_lock_release "$lock"; continue; }
-    fm_wake_append check "start:$id" "$reason" || { fm_lock_release "$lock"; return 1; }
-    rm -f -- "$f"
+    start_check_claim "$f" "$record" || { fm_lock_release "$lock"; continue; }
+    fm_wake_append check "start:$id" "$reason" || { start_check_unclaim "$f"; fm_lock_release "$lock"; return 1; }
+    rm -f -- "$START_CHECK_CLAIM"
     fm_lock_release "$lock"
     # The stale backbone absorbed this parked pane while the record stood; mark
     # the screen this wake already named so it does not re-surface as stale.

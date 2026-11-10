@@ -559,6 +559,60 @@ test_secondmate_launch_is_checked() {
   pass "a secondmate launch, exempt from the stale path, still gets its start check"
 }
 
+# A remote respawn that cannot get the meta lock within its bound publishes its
+# record by atomic rename without the lock (bin/fm-spawn.sh), so the watcher's
+# removal of the record it judged can race that rename. The replacement lands
+# here at the watcher's removal, the latest moment of that window.
+replace_record_at_removal() {  # <id> <replacement-record>
+  REPLACE_RECORD_PATH="$STATE/$1.start-pending"
+  REPLACE_RECORD_BODY=$2
+  REPLACE_RECORD_FIRED=0
+  rm() {
+    local a
+    for a in "$@"; do
+      case "$a" in
+        "$REPLACE_RECORD_PATH"*)
+          if [ "$REPLACE_RECORD_FIRED" = 0 ]; then
+            REPLACE_RECORD_FIRED=1
+            printf '%s\n' "$REPLACE_RECORD_BODY" > "$REPLACE_RECORD_PATH.tmp.respawn"
+            command mv -f -- "$REPLACE_RECORD_PATH.tmp.respawn" "$REPLACE_RECORD_PATH"
+          fi
+          ;;
+      esac
+    done
+    command rm "$@"
+  }
+}
+
+test_replacement_published_during_removal_survives() {
+  local replacement
+  # A launch past its deadline wakes, and the record it judged goes away.
+  reset_state
+  open_pane w1 "$PI_DIALOG"
+  arm_task w1 pi 1000
+  replacement="9000 $ARMED_GEN pi"
+  replace_record_at_removal w1 "$replacement"
+  start_check_tick 5000 || { unset -f rm; fail "tick failed"; }
+  unset -f rm
+  [ "$REPLACE_RECORD_FIRED" = 1 ] || fail "fixture: the replacement was never published"
+  [ "$(count_wakes)" = 1 ] || fail "the judged launch did not wake once: $START_CHECK_WAKE"
+  [ "$(cat "$STATE/w1.start-pending" 2>/dev/null)" = "$replacement" ] \
+    || fail "a replacement published while the wake removed the judged record was deleted"
+  # A record whose launch generation was replaced is dropped without judging.
+  reset_state
+  open_pane g1 "$PI_DIALOG"
+  arm_task g1 pi 1000
+  printf '1000 g-replaced.1.1 pi\n' > "$STATE/g1.start-pending"
+  replacement="9000 $ARMED_GEN pi"
+  replace_record_at_removal g1 "$replacement"
+  start_check_tick 5000 || { unset -f rm; fail "tick failed"; }
+  unset -f rm
+  [ "$REPLACE_RECORD_FIRED" = 1 ] || fail "fixture: the replacement was never published"
+  [ "$(cat "$STATE/g1.start-pending" 2>/dev/null)" = "$replacement" ] \
+    || fail "a replacement published while a stale record was dropped was deleted"
+  pass "a start check published while the watcher removes the record it judged survives"
+}
+
 test_held_lock_defers_without_waiting() {
   local lock start elapsed
   reset_state
@@ -934,6 +988,7 @@ fm_test_run \
   test_stale_records_are_dropped \
   test_secondmate_launch_is_checked \
   test_held_lock_defers_without_waiting \
+  test_replacement_published_during_removal_survives \
   test_remote_secondmate_reads_route \
   test_truncated_reply_log_relaunch_is_not_proof \
   test_remote_cursor_transcript_is_start_proof \
