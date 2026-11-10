@@ -37,14 +37,23 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
-  TMP=$(umask 077 && mktemp "$STATE/.fm-custom-check.XXXXXX") \
-    || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
-  if ! perl -MFcntl=O_RDONLY,O_WRONLY,O_TRUNC,O_NOFOLLOW -e '
-    sysopen(my $out, $ARGV[1], O_WRONLY | O_TRUNC | O_NOFOLLOW) or exit 1;
-    chmod 0700, $out or exit 1;
+  if ! perl -MFile::Temp -MFcntl=O_RDONLY,O_NOFOLLOW -e '
+    my ($tmp, $cleanup);
+    END { unlink $tmp if $cleanup && defined $tmp; }
+    $cleanup = 1;
+    $SIG{HUP} = sub { exit 129; };
+    $SIG{INT} = sub { exit 130; };
+    $SIG{TERM} = sub { exit 143; };
+    my ($out, $name) = File::Temp::tempfile(
+      ".fm-custom-check.XXXXXX", DIR => $ARGV[1], UNLINK => 0, PERMS => 0700,
+    );
+    $tmp = $name;
     sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
     binmode $in or exit 1;
     binmode $out or exit 1;
+    my $previous = select($out);
+    $| = 1;
+    select($previous);
     while (1) {
       my $length = read($in, my $bytes, 8192);
       defined $length or exit 1;
@@ -52,14 +61,16 @@ if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
       print {$out} $bytes or exit 1;
     }
     close $in or exit 1;
+    my @file = stat($out);
+    my @path = lstat($tmp);
+    @file && @path && $file[0] == $path[0] && $file[1] == $path[1] && $path[3] == 1 or exit 1;
+    rename $tmp, $ARGV[0] or exit 1;
     close $out or exit 1;
-  ' "$CHECK" "$TMP" \
-    || ! fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" \
-    || ! mv -f -- "$TMP" "$CHECK"; then
+    $cleanup = 0;
+  ' "$CHECK" "$STATE"; then
     echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2
     exit 1
   fi
-  TMP=
 fi
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
   || { echo "error: custom check state/$ID.check.sh is not a private mode-0700 file; not registered, the watcher will refuse it" >&2; exit 1; }
@@ -67,9 +78,22 @@ fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
   || { echo "error: custom check trust path is unavailable" >&2; exit 1; }
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }
 umask 077
-TMP=$(mktemp "$STATE/.fm-custom-check-trust.XXXXXX") || exit 1
-printf '%s\n%s\n' fm-custom-check-v1 "$HASH" > "$TMP" || exit 1
-chmod 0600 "$TMP" || exit 1
+TMP=$(perl -MFile::Temp -e '
+  my ($tmp, $cleanup);
+  END { unlink $tmp if $cleanup && defined $tmp; }
+  $cleanup = 1;
+  $SIG{HUP} = sub { exit 129; };
+  $SIG{INT} = sub { exit 130; };
+  $SIG{TERM} = sub { exit 143; };
+  my ($out, $name) = File::Temp::tempfile(
+    ".fm-custom-check-trust.XXXXXX", DIR => $ARGV[0], UNLINK => 0, PERMS => 0600,
+  );
+  $tmp = $name;
+  print {$out} "fm-custom-check-v1\n$ARGV[1]\n" or exit 1;
+  close $out or exit 1;
+  $cleanup = 0;
+  print STDOUT $tmp or exit 1;
+' "$STATE" "$HASH") || exit 1
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1
 mv -f -- "$TMP" "$TRUST" || exit 1
 TMP=

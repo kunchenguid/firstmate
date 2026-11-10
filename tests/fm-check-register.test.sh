@@ -13,6 +13,7 @@ set -u
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-check-register)
 PERL=$(command -v perl) || fail "fm-check-register requires perl"
+MKTEMP=$(command -v mktemp) || fail "fm-check-register requires mktemp"
 
 make_home() {
   local home="$TMP_ROOT/$1"
@@ -82,8 +83,11 @@ test_check_swapped_to_hardlink_during_normalization_does_not_touch_target() {
   chmod 0600 "$home/state/poll.check.sh" "$target"
   cat > "$fakebin/perl" <<EOF
 #!/usr/bin/env bash
-mv "$home/state/poll.check.sh" "$home/state/original.check.sh"
-ln "$target" "$home/state/poll.check.sh"
+if [ ! -e "$home/swapped" ]; then
+  mv "$home/state/poll.check.sh" "$home/state/original.check.sh"
+  ln "$target" "$home/state/poll.check.sh"
+  : > "$home/swapped"
+fi
 exec "$PERL" "\$@"
 EOF
   chmod 0700 "$fakebin/perl"
@@ -93,6 +97,36 @@ EOF
   [ "$(fm_pr_file_mode "$home/state/poll.check.sh")" = 700 ] || fail "published check was not set to mode 0700"
   fm_custom_check_registered "$home/state" poll || fail "published check was not registered"
   pass "normalization does not chmod a swapped hard-link target"
+}
+
+test_generated_temp_hardlink_swap_does_not_touch_target() {
+  local home target fakebin out status
+  home=$(make_home generated-hardlink-race)
+  target="$home/target"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
+  printf victim > "$target"
+  chmod 0600 "$home/state/poll.check.sh" "$target"
+  cat > "$fakebin/mktemp" <<EOF
+#!/usr/bin/env bash
+case "\${1-}" in
+  "$home/state/.fm-custom-check.XXXXXX")
+    temp=\$("$MKTEMP" "\$@") || exit 1
+    rm -f -- "\$temp"
+    ln "$target" "\$temp" || exit 1
+    printf '%s\\n' "\$temp"
+    ;;
+  *) exec "$MKTEMP" "\$@" ;;
+esac
+EOF
+  chmod 0700 "$fakebin/mktemp"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll 2>&1); status=$?
+  [ "$status" -eq 0 ] || fail "generated-temp hard-link swap prevented registration: $out"
+  [ "$(cat "$target")" = victim ] || fail "generated-temp hard-link swap changed the target bytes"
+  [ "$(fm_pr_file_mode "$target")" = 600 ] || fail "generated-temp hard-link swap changed the target mode"
+  fm_custom_check_registered "$home/state" poll || fail "published check was not registered"
+  pass "generated temp hard-link swap does not touch target"
 }
 
 test_interrupted_normalization_leaves_no_temporary_copy() {
@@ -127,3 +161,4 @@ test_interrupted_normalization_leaves_no_temporary_copy
 test_unsafe_check_is_refused_naming_the_check
 test_check_swapped_to_symlink_during_normalization_does_not_touch_target
 test_check_swapped_to_hardlink_during_normalization_does_not_touch_target
+test_generated_temp_hardlink_swap_does_not_touch_target
