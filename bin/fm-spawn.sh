@@ -7726,9 +7726,10 @@ if [ "$KIND" = secondmate ]; then
   # The parent's five operational overrides must be ABSENT for the secondmate,
   # not merely empty: consumers may deliberately distinguish the two (for
   # example bin/fm-check-unregister.sh refuses an explicitly empty override),
-  # including inherited non-empty values. Use shell unset because env -u
-  # breaks raw launch commands whose first word is a shell builtin (e.g. exec).
-  LAUNCH="unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  # including inherited non-empty values. env -u keeps the pane line fish-parseable;
+  # sh -c preserves raw commands starting with shell builtins (e.g. exec).
+  # Keep all -u options before assignments for BSD env compatibility.
+  LAUNCH="env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model sh -c $(shell_quote "$LAUNCH")"
 else
   # A ship or scout works for the active home itself.
   LAUNCH="export FM_HOME=$(shell_quote "$FM_HOME"); $LAUNCH"

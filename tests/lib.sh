@@ -186,13 +186,21 @@ fm_test_launch_unframe() {  # <launch>
 }
 
 # The command a pane runs after the launch's Git configuration prefix and its
-# leading export/unset statements, for suites that split it into arguments.
+# leading exports and secondmate sh wrapper, for suites that split arguments.
 fm_test_launch_command() {  # <launch>
   local command=$1 end=' || return 1 2>/dev/null || exit 1; '
   case "$command" in *"$end"*) command=${command#*"$end"} ;; esac
-  while [[ "$command" == export\ *\;* || "$command" == unset\ *\;* ]]; do
+  while [[ "$command" == export\ *\;* ]]; do
     command=${command#*; }
   done
+  case "$command" in
+    env\ -u\ *\ sh\ -c\ *)
+      # Decode only the quoted sh -c argument, never execute the agent command.
+      command=${command#* sh -c }
+      eval "set -- $command"
+      command=$1
+      ;;
+  esac
   printf '%s' "$command"
 }
 
