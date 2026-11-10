@@ -31,12 +31,16 @@ TRUST="$STATE/$ID.check-trust"
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$(fm_pr_file_device "$CHECK")" = "$STATE_DEVICE" ] && [ "$(fm_pr_file_link_count "$CHECK")" = 1 ] \
   || { echo "error: custom check state/$ID.check.sh must be a single-link file on the state device; not registered, the watcher will refuse it" >&2; exit 1; }
+TMP=
+trap '[ -z "$TMP" ] || rm -f -- "$TMP"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
-  TMP=$(perl -MFile::Temp=tempfile -MFcntl=O_RDONLY,O_NOFOLLOW -e '
-    my ($tmp, $ok);
-    END { unlink $tmp if defined $tmp && !$ok; }
-    my ($out, $path) = tempfile(".fm-custom-check.XXXXXX", DIR => $ARGV[1], UNLINK => 0);
-    $tmp = $path;
+  TMP=$(umask 077 && mktemp "$STATE/.fm-custom-check.XXXXXX") \
+    || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
+  if ! perl -MFcntl=O_RDONLY,O_WRONLY,O_TRUNC,O_NOFOLLOW -e '
+    sysopen(my $out, $ARGV[1], O_WRONLY | O_TRUNC | O_NOFOLLOW) or exit 1;
     chmod 0700, $out or exit 1;
     sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
     binmode $in or exit 1;
@@ -49,12 +53,9 @@ if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
     }
     close $in or exit 1;
     close $out or exit 1;
-    $ok = 1;
-    print $path;
-  ' "$CHECK" "$STATE") || { echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2; exit 1; }
-  if ! fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" \
+  ' "$CHECK" "$TMP" \
+    || ! fm_pr_private_file_valid "$TMP" 700 "$STATE_DEVICE" \
     || ! mv -f -- "$TMP" "$CHECK"; then
-    rm -f -- "$TMP"
     echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2
     exit 1
   fi
@@ -67,7 +68,6 @@ fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }
 umask 077
 TMP=$(mktemp "$STATE/.fm-custom-check-trust.XXXXXX") || exit 1
-trap '[ -z "$TMP" ] || rm -f -- "$TMP"' EXIT HUP INT TERM
 printf '%s\n%s\n' fm-custom-check-v1 "$HASH" > "$TMP" || exit 1
 chmod 0600 "$TMP" || exit 1
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1

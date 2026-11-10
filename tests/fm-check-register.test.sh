@@ -95,7 +95,35 @@ EOF
   pass "normalization does not chmod a swapped hard-link target"
 }
 
+test_interrupted_normalization_leaves_no_temporary_copy() {
+  local home fakebin sig status
+  for sig in TERM HUP; do
+    home=$(make_home "interrupt-$sig")
+    fakebin="$home/fakebin"
+    mkdir -p "$fakebin"
+    printf '#!/usr/bin/env bash\nprintf ready\\n\n' > "$home/state/poll.check.sh"
+    chmod 0600 "$home/state/poll.check.sh"
+    # Finish the copy, then signal the registration before it can publish.
+    cat > "$fakebin/perl" <<EOF
+#!/usr/bin/env bash
+"$PERL" "\$@" || exit 1
+while [ ! -s "$home/register.pid" ]; do sleep 0.05; done
+kill -$sig "\$(cat "$home/register.pid")"
+EOF
+    chmod 0700 "$fakebin/perl"
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" poll >/dev/null 2>&1 &
+    printf '%s\n' "$!" > "$home/register.pid"
+    wait "$!"; status=$?
+    [ "$status" -ne 0 ] || fail "$sig during normalization did not stop registration"
+    [ -z "$(find "$home/state" -name '.fm-custom-check*' 2>/dev/null)" ] \
+      || fail "$sig during normalization left a temporary check copy"
+    [ ! -e "$home/state/poll.check-trust" ] || fail "interrupted registration left a trust record"
+  done
+  pass "interrupted normalization leaves no temporary check copy"
+}
+
 test_mode_0600_check_is_normalized_and_registered
+test_interrupted_normalization_leaves_no_temporary_copy
 test_unsafe_check_is_refused_naming_the_check
 test_check_swapped_to_symlink_during_normalization_does_not_touch_target
 test_check_swapped_to_hardlink_during_normalization_does_not_touch_target
