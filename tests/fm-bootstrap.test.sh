@@ -318,7 +318,8 @@ test_record_hygiene_archives_old_orphan_status() {
   assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
-  [ ! -e "$case_dir/home/state/orphan.meta.lock" ] || fail "successful archive left its metadata lock behind"
+  [ ! -e "$case_dir/home/state/.meta-orphan.lock" ] && [ ! -L "$case_dir/home/state/.meta-orphan.lock" ] \
+    || fail "successful archive left its metadata lock behind"
   assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
     "bootstrap lost duplicate PR detection across an intervening metadata record"
   pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
@@ -1717,19 +1718,56 @@ SH
 
 test_record_hygiene_archives_old_orphan_status
 test_record_hygiene_old_orphan_skips_held_metadata_lock() {
-  local case_dir fakebin lock
+  local case_dir fakebin lock out
   case_dir="$TMP_ROOT/record-hygiene-lock"
   fakebin=$(seed_record_hygiene_home "$case_dir")
+  : > "$case_dir/home/config/record-hygiene"
   lock=$(FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_meta_lock_path "$2"' _ "$ROOT" "$case_dir/home/state/orphan.meta")
   mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not scan the orphan status log while its metadata lock was held"
   [ -f "$case_dir/home/state/orphan.status" ] || fail "bootstrap moved orphan status while metadata lock was held"
+  [ ! -e "$case_dir/home/data/orphan" ] || fail "bootstrap archived orphan status while metadata lock was held"
   [ -d "$lock" ] || fail "bootstrap removed another holder's metadata lock"
   pass "bootstrap skips archiving while the task metadata lock is held"
 }
+test_record_hygiene_old_orphan_survives_spawn_publication() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene-spawn-race"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  # The mtime read follows the scan's first metadata-absence check, so a
+  # metadata write there is a spawn publishing between that check and the move.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_TEST_LIB_SOURCED=1 bash -c '
+    SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$SCRIPT_DIR/fm-classify-lib.sh"
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh"
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    # shellcheck source=bin/fm-record-hygiene-lib.sh
+    . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+    _fm_status_file_mtime() {
+      [ "${1##*/}" != orphan.status ] || [ -e "$STATE/orphan.meta" ] \
+        || printf "kind=ship\nwindow=fm:orphan\n" > "$STATE/orphan.meta"
+      echo 1577836800
+    }
+    record_hygiene_report
+  ' _ "$ROOT" "$case_dir/home" 2>&1) || fail "record hygiene pass failed: $out"
+  [ -f "$case_dir/home/state/orphan.meta" ] || fail "fixture did not publish metadata during the scan"
+  [ -f "$case_dir/home/state/orphan.status" ] || fail "record hygiene archived a status log whose metadata a spawn just published"
+  [ ! -e "$case_dir/home/data/orphan" ] || fail "record hygiene created an archive for a just-published worker"
+  pass "record hygiene keeps a status log whose metadata is published before the move"
+}
 test_record_hygiene_old_orphan_skips_held_metadata_lock
+test_record_hygiene_old_orphan_survives_spawn_publication
 test_record_hygiene_watcher_data_is_defined
 test_record_hygiene_reclaims_stale_running_marker
 test_record_hygiene_bounds_backlog_read

@@ -23,6 +23,7 @@ record_hygiene_report() {
         # must remain read-only.
         if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
           case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+          # shellcheck source=bin/fm-wake-lib.sh
           command -v fm_meta_lock_path >/dev/null 2>&1 || . "$SCRIPT_DIR/fm-wake-lib.sh"
           lock=$(fm_meta_lock_path "$STATE/$id.meta") || continue
           fm_lock_try_acquire "$lock" || continue
