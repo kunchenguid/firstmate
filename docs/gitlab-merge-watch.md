@@ -58,6 +58,7 @@ First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 The historical poll therefore read glab's text fields, as shown below.
 The current poll reads state and destination from one JSON response through `jq`, preventing a retarget between separate reads from combining a matching base with a later merged state.
+The optional degraded watch reads the head pipeline and merge-train car from structured responses too.
 [`configuration.md`](configuration.md#forge-selection-dataprojectsmd-forge-token) owns the current tool requirements.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
@@ -212,6 +213,9 @@ Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no ha
 
 The merge path reads `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline from glab's JSON.
 Registration and merging report missing tools before recording anything, while an already armed poll stays silent when it cannot read the record.
+A car-endpoint 404 is confirmed with one bounded read of the project's active merge-train list; only a readable list omitting the merge request triggers one bounded MR-state re-read, while list errors stay silent.
+An `opened` or `locked` re-read reports the drop; `closed` stays silent, `merged` reports the merge only with matching destination proof, and an unreadable re-read reports the confirmed drop with `mr_state=unconfirmed`.
+The watcher emits a drop only after it has recorded the merge request on the train.
 
 The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
 
