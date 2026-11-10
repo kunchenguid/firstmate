@@ -2201,7 +2201,8 @@ EOF
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
-        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && [ "$FM_COMPOSER_SELECTED_FIRST" -eq "$FM_COMPOSER_SELECTED_LAST" ]; then
           _fm_composer_bare_row_strip_furniture_var content
         fi
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \

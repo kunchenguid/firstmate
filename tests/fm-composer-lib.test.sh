@@ -1974,8 +1974,9 @@ ruled_wrapped_draft_screen() {  # <footer-0-or-1>
 }
 
 test_wrapped_draft_after_ruled_row_reads_pending() {
-  local caps screen out footer
+  local caps screen out footer rule
   caps=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
+  rule=$(printf '─%.0s' $(seq 1 60))
   for footer in 0 1; do
     screen=$(ruled_wrapped_draft_screen "$footer")
     out=$(fm_composer_classify_screen "$caps" "$screen" 1 '')
@@ -1983,7 +1984,8 @@ test_wrapped_draft_after_ruled_row_reads_pending() {
     out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
     [ "$out" = pending ] || fail "cursorless wrapped draft after a ruled row (footer $footer) must read pending, got '$out'"
     out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
-    case "$out" in "hello"*) ;; *) fail "cursorless wrapped draft must extract its continuation (footer $footer), got '$out'" ;; esac
+    [ "$out" = "$rule hello" ] \
+      || fail "cursorless wrapped draft must retain its rule cells and continuation (footer $footer), got '$out'"
   done
   pass "ordinary text wrapped below a ruled prompt row keeps the draft pending with and without a cursor"
 }
