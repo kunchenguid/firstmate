@@ -140,6 +140,23 @@ SH
   pass "session-lock: a harness that is pid 1 of its own namespace is examined, not skipped"
 }
 
+test_bun_run_omp_is_identified_on_both_platforms() {
+  local comm fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/bun-omp")
+  # macOS reports the executable path in comm, procps on Linux the exec name.
+  for comm in bun /Users/u/.bun/bin/bun /opt/homebrew/bin/bun; do
+    lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/omp'" \
+      || fail "$comm running the omp launcher must be identified"
+    if lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/ompd'"; then
+      fail "$comm running ompd was identified as a harness"
+    fi
+    if lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun -e omp'"; then
+      fail "$comm -e omp was identified as a harness"
+    fi
+  done
+  pass "session-lock: a bun-run omp script is identified under both platforms' comm reporting"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -1644,6 +1661,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
+test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
