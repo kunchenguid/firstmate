@@ -6,246 +6,318 @@
 # Measured 08.09.2026: a variable exported into firstmate's own process (e.g. by
 # its launcher script) does not reach a freshly spawned worker on its own,
 # because a long-lived backend session or daemon keeps its own environment,
-# captured once, independent of later changes to the launching process's
-# environment (tests/fm-backend-tmux-smoke.test.sh demonstrates that gap
-# against a real tmux server). This suite pins the fix: fm-spawn.sh reads
-# config/launch-env-forward and sends each named, currently-set variable's
-# value into the fresh pane as an explicit `export NAME=value`, through the
-# same pre-launch channel already proven for GOTMPDIR/FM_TASK_ID/TRACEPARENT
-# (which is why it works regardless of backend-environment staleness).
+# captured once (tests/fm-backend-tmux-smoke.test.sh demonstrates that gap
+# against a real tmux server). fm-spawn.sh therefore writes each named,
+# caller-exported value into the private launch file the pane sources, never
+# into pane input.
 #
-# Uses a fake tmux pane that logs every send-keys payload - both the literal
-# launch (`-l`) and a text line (`... Enter`) - one per line, in order, so the
-# export sent before the launch command is directly observable (the same
-# approach tests/fm-trace-context-spawn.test.sh uses for the same reason).
+# The fake tmux below wraps the shared spawn stub. It logs every send-keys
+# payload, keeps a copy of the staged launch file with its modes, and on the
+# Enter that submits `. '<launch file>'` runs that exact line in a real pane
+# shell (sh, bash, zsh, fish), as a pane would: the spawn waits for the pane to
+# unlink the file and would otherwise reclaim it. The raw launch command is a
+# probe that records what the worker received.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-launch-env-forward)
+SECRET=fm-forward-secret-7731
+# Quote, dollar, backtick, backslashes (single, doubled, trailing), spaces and
+# newlines (embedded and trailing): every byte class the launch file quoting
+# must carry unchanged through sh, bash, zsh and fish.
+VALUE="$SECRET it's \$HOME \`false\` \"dq\" a\\b c\\\\d"$'\n\nend\\\n'
 
-make_spawn_fakebin() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
+make_forward_fakebin() {
+  local fakebin
+  fakebin=$(fm_test_make_spawn_fakebin "$1")
+  mv "$fakebin/tmux" "$fakebin/tmux-base"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
-  send-keys)
-    # Capture the text payload of both send forms: the literal launch
-    # (`send-keys -t <target> -l <text>`) and a text line
-    # (`send-keys -t <target> <text> Enter`). Skip the flags, the target, and
-    # the trailing key so only the payload is logged, one per line, in order.
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      shift
-      skip_next=
-      for a in "$@"; do
-        if [ -n "$skip_next" ]; then skip_next=; continue; fi
-        case "$a" in
-          -t) skip_next=1; continue ;;
-          -l) continue ;;
-          Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
-        esac
-      done
+dir=${FM_TEST_CASE_DIR:?}
+if [ "${1:-}" = send-keys ]; then
+  printf '%s\n' "$*" >> "$dir/sent.log"
+  prev=
+  for a in "$@"; do
+    if [ "$prev" = -l ]; then
+      case "$a" in
+        ". '"*"/launch."*".sh'")
+          [ "${FM_TEST_SEND_FAIL:-0}" != 1 ] || exit 1
+          f=${a#". '"}; f=${f%"'"}
+          printf '%s\n' "$f" > "$dir/staged-path"
+          cp "$f" "$dir/staged.copy"
+          { stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f"; } > "$dir/staged.mode"
+          { stat -c '%a' "${f%/*}" 2>/dev/null || stat -f '%Lp' "${f%/*}"; } > "$dir/staged.dirmode"
+          printf '%s\n' "$a" > "$dir/pending"
+          ;;
+      esac
     fi
-    exit 0
-    ;;
-esac
-exit 0
+    prev=$a
+  done
+  last=${!#}
+  if [ "$last" = Enter ] && [ -f "$dir/pending" ] && [ "${FM_TEST_PANE:-none}" != none ]; then
+    line=$(cat "$dir/pending")
+    rm -f "$dir/pending"
+    # shellcheck disable=SC2086 # FM_TEST_PANE_ENV is a list of plain assignments.
+    (cd "$dir" && env -i HOME="$dir/pane-home" XDG_CONFIG_HOME="$dir/pane-home" \
+      XDG_DATA_HOME="$dir/pane-home" ZDOTDIR="$dir/pane-home" ENV= BASH_ENV= TERM=xterm \
+      PATH="${FM_TEST_PANE_PATH:-/usr/bin:/bin}" ${FM_TEST_PANE_ENV:-} \
+      "$FM_TEST_PANE" -c "$line; echo SHELL-STILL-ALIVE") > "$dir/pane.out" 2>&1
+  fi
+fi
+exec "$(dirname "$0")/tmux-base" "$@"
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
 
-make_spawn_case() {
-  local name=$1 case_dir home proj wt fakebin launchlog id
-  case_dir="$TMP_ROOT/$name"
-  home="$case_dir/home"
-  proj="$case_dir/project"
-  wt="$case_dir/wt"
-  launchlog="$case_dir/launch.log"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
-  printf 'codex\n' > "$home/config/crew-harness"
-  touch "$home/state/.last-watcher-beat"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
-  id="$name-z1"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<EOF
-# Task
-## Captain's intent
-Exercise launch-env-forward for $id.
-
-## Firstmate spec
-Verify the spawned pane receives the forwarded value.
-EOF
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog|$id"
+# make_forward_case <name>: fresh home, project, worktree, fakebin and probe.
+# Sets CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR CASE_ID.
+make_forward_case() {
+  CASE_DIR="$TMP_ROOT/$1"
+  HOME_DIR="$CASE_DIR/home"
+  PROJ_DIR="$CASE_DIR/project"
+  WT_DIR="$CASE_DIR/wt"
+  CASE_ID="$1-z1"
+  mkdir -p "$CASE_DIR/pane-home"
+  fm_test_spawn_home "$HOME_DIR" codex
+  fm_test_spawn_brief "$HOME_DIR" "$CASE_ID" "Exercise launch-env-forward for $CASE_ID."
+  fm_git_worktree "$PROJ_DIR" "$WT_DIR" "wt-$1"
+  FAKEBIN_DIR=$(make_forward_fakebin "$CASE_DIR/fake")
+  cat > "$CASE_DIR/probe.sh" <<'SH'
+#!/bin/sh
+dir=$1
+if [ -e "$(cat "$dir/staged-path")" ]; then echo present; else echo gone; fi > "$dir/worker-file"
+printf '%s' "${FM_TEST_FORWARD-unset}" > "$dir/worker-forward"
+printf '%s' "${FM_TEST_GONE-unset}" > "$dir/worker-gone"
+printf '%s' "${ID-unset}" > "$dir/worker-id"
+SH
 }
 
-read_case_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG CASE_ID <<EOF
-$1
-EOF
+# run_forward_spawn: a raw-command ship spawn whose
+# worker is the probe. Callers set FM_TEST_PANE and the caller variables.
+run_forward_spawn() {
+  : > "$CASE_DIR/sent.log"
+  FM_TEST_CASE_DIR="$CASE_DIR" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_ID" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --harness "/bin/sh '$CASE_DIR/probe.sh' '$CASE_DIR'"
 }
 
-run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
-  shift 4
-  : > "$launchlog"
-  mkdir -p "$home/user-home"
-  env FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
+file_is() {  # <file> <expected>: exact contents, trailing newlines included
+  local text
+  text=$(cat "$1"; printf x)
+  [ "${text%x}" = "$2" ]
 }
 
-exported_value() {  # <launchlog> <name>
-  sed -n "s/^export $2=//p" "$1" | tail -1
+pane_shells() {
+  local shell
+  for shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$shell" ] && printf '%s\n' "$shell"
+  done
+  command -v fish || true
 }
 
-test_forward_sends_export_with_current_process_value_before_launch() {
-  local rec out status el ll decoded
-  rec=$(make_spawn_case forward-basic)
-  read_case_record "$rec"
-  printf 'FM_TEST_FORWARD\n' > "$HOME_DIR/config/launch-env-forward"
-
-  out=$(FM_TEST_FORWARD="synthetic-value" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "forward-enabled spawn should succeed"$'\n'"$out"
-
-  el=$(grep -n '^export FM_TEST_FORWARD=' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
-  ll=$(grep -n 'codex' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
-  [ -n "$el" ] || fail "launch log missing the forwarded export"$'\n'"$(cat "$LAUNCH_LOG")"
-  [ -n "$ll" ] || fail "launch log missing the launch command"
-  [ "$el" -lt "$ll" ] || fail "forwarded export must be sent before the launch command (export=$el launch=$ll)"
-
-  decoded=$(exported_value "$LAUNCH_LOG" FM_TEST_FORWARD)
-  eval "decoded=$decoded"
-  [ "$decoded" = "synthetic-value" ] \
-    || fail "forwarded export did not carry the process's current value (got '$decoded')"
-  pass "a variable set in firstmate's own process and listed in launch-env-forward is exported into the pane before the launch command"
+test_forward_value_reaches_worker_only_through_private_file() {
+  local shell name out status
+  while IFS= read -r shell; do
+    name=forward-${shell##*/}
+    make_forward_case "$name"
+    printf 'FM_TEST_FORWARD\nFM_TEST_GONE\nID\n' > "$HOME_DIR/config/launch-env-forward"
+    out=$(unset FM_TEST_GONE ID; FM_TEST_FORWARD="$VALUE" FM_TEST_PANE="$shell" \
+      FM_TEST_PANE_ENV="FM_TEST_GONE=stale-pane-value ID=stale-pane-id" run_forward_spawn)
+    status=$?
+    expect_code 0 "$status" "$shell: forward-enabled spawn should succeed"$'\n'"$out"$'\n'"$(cat "$CASE_DIR/pane.out" 2>/dev/null)"
+    file_is "$CASE_DIR/worker-forward" "$VALUE" \
+      || fail "$shell: the worker did not receive the caller's exact value: $(cat "$CASE_DIR/worker-forward")"
+    [ "$(cat "$CASE_DIR/worker-gone")" = unset ] || fail "$shell: a name the caller left unset kept the pane's old value"
+    [ "$(cat "$CASE_DIR/worker-id")" = unset ] || fail "$shell: fm-spawn's own ID variable (or the pane's) was forwarded"
+    [ "$(cat "$CASE_DIR/worker-file")" = gone ] || fail "$shell: the launch file still existed when the worker started"
+    [ ! -e "$(cat "$CASE_DIR/staged-path")" ] || fail "$shell: the launch file survived the launch"
+    [ "$(cat "$CASE_DIR/staged.mode")" = 600 ] || fail "$shell: the launch file is not 0600"
+    [ "$(cat "$CASE_DIR/staged.dirmode")" = 700 ] || fail "$shell: the launch directory is not 0700"
+    assert_not_contains "$(cat "$CASE_DIR/sent.log")" "$SECRET" "$shell: the forwarded value reached pane input"
+    assert_not_contains "$out" "$SECRET" "$shell: the forwarded value reached spawn output"
+    assert_contains "$(cat "$CASE_DIR/staged.copy")" "$SECRET" "$shell: the value did not travel in the launch file"
+    assert_contains "$(cat "$CASE_DIR/pane.out")" SHELL-STILL-ALIVE "$shell: sourcing the launch file ended the pane shell"
+  done < <(pane_shells)
+  command -v fish >/dev/null 2>&1 || echo "skip: fish not found; the static syntax check below covers it"
+  pass "a forwarded value reaches the worker byte for byte through the private launch file only, in $(pane_shells | sed 's#.*/##' | tr '\n' ' ')"
 }
 
-test_forward_value_with_shell_metacharacters_is_safe() {
-  local rec out status decoded marker
-  rec=$(make_spawn_case forward-unsafe)
-  read_case_record "$rec"
-  printf 'FM_TEST_FORWARD\n' > "$HOME_DIR/config/launch-env-forward"
-  marker="$HOME_DIR/SHOULD_NOT_EXIST"
-
-  # shellcheck disable=SC2016
-  out=$(FM_TEST_FORWARD="synthetic; touch $marker; \$(touch $marker) \`touch $marker\` \"quoted\" 'quoted2'" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "forward-enabled spawn with metacharacters should succeed"$'\n'"$out"
-  [ ! -e "$marker" ] || fail "the forwarded export text executed shell metacharacters instead of staying a literal value"
-
-  decoded=$(exported_value "$LAUNCH_LOG" FM_TEST_FORWARD)
-  eval "decoded=$decoded"
-  case "$decoded" in
-    "synthetic; touch"*'quoted'*'quoted2'*) : ;;
-    *) fail "decoded forwarded value was mangled: '$decoded'" ;;
+# fish rejects POSIX-only syntax; without fish, check the launch file statically.
+test_forward_launch_file_is_fish_syntax() {
+  local text
+  text=$(cat "$TMP_ROOT/forward-bash/staged.copy")
+  text=${text%%/usr/bin/env -u *}
+  # shellcheck disable=SC2016 # These are literal shell tokens fish rejects.
+  case "$text" in
+    *'$('* | *'${'* | *'{ '* | *'if ['* | *'unset '*)
+      fail "the forward part of the launch file uses syntax fish cannot parse: $text" ;;
   esac
-  pass "a forwarded value containing shell metacharacters is sent as a safely quoted literal, never executed"
+  assert_contains "$text" "command rm -- '" "the forward launch file does not unlink itself first"
+  assert_contains "$(cat "$TMP_ROOT/forward-bash/staged.copy")" "/usr/bin/env -u FM_TEST_GONE -u ID /bin/sh -c " \
+    "unset names are not removed with env -u"
+  pass "the forward part of the launch file stays within syntax fish parses"
 }
 
-test_forward_unset_name_is_skipped() {
-  local rec out status
-  rec=$(make_spawn_case forward-unset)
-  read_case_record "$rec"
-  printf 'FM_TEST_FORWARD_UNSET\n' > "$HOME_DIR/config/launch-env-forward"
-  unset FM_TEST_FORWARD_UNSET
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+test_forward_survives_allowlist_filter() {
+  local out status
+  make_forward_case forward-allowlist
+  printf 'FM_TEST_FORWARD\nFM_TEST_GONE\n' > "$HOME_DIR/config/launch-env-forward"
+  printf 'FM_TEST_GONE\n' > "$HOME_DIR/config/launch-env-allowlist"
+  out=$(unset FM_TEST_GONE; FM_TEST_FORWARD="$VALUE" FM_TEST_PANE=/bin/bash \
+    FM_TEST_PANE_ENV="FM_TEST_GONE=stale-pane-value" run_forward_spawn)
   status=$?
-  expect_code 0 "$status" "spawn should succeed even when the forwarded name is unset"$'\n'"$out"
-  grep -q '^export FM_TEST_FORWARD_UNSET=' "$LAUNCH_LOG" \
-    && fail "a name unset in firstmate's own process must not be forced empty into the pane"
-  pass "a launch-env-forward name absent from firstmate's own process is skipped, never forced empty"
+  expect_code 0 "$status" "forward+allowlist spawn should succeed"$'\n'"$out"
+  file_is "$CASE_DIR/worker-forward" "$VALUE" || fail "the forwarded value did not survive the allowlist's env -i"
+  [ "$(cat "$CASE_DIR/worker-gone")" = unset ] || fail "an allowlisted name the caller left unset kept the pane's old value"
+  assert_not_contains "$(cat "$CASE_DIR/sent.log")" "$SECRET" "the forwarded value reached pane input"
+  pass "a forwarded value survives launch-env-allowlist, and an unset forwarded name stays out even when allowlisted"
 }
 
-test_forward_absent_config_changes_nothing() {
-  local rec out status
-  rec=$(make_spawn_case forward-absent)
-  read_case_record "$rec"
-  [ ! -e "$HOME_DIR/config/launch-env-forward" ] || fail "test setup: launch-env-forward should not exist yet"
+normalized_launch() {  # <case-dir> <id>
+  sed -e "s#$1#<case>#g" -e "s#/tmp/fm-$2+[^/']*#<launch-dir>#g" -e 's#launch\.[0-9A-Za-z.-]*\.sh#launch.<gen>.sh#g' \
+    -e 's#git-config\.[0-9A-Za-z.-]*\.sh#git-config.<gen>.sh#g' -e "s#$2#<id>#g" "$1/staged.copy"
+}
 
-  out=$(FM_TEST_FORWARD="synthetic-value" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "spawn without launch-env-forward should succeed unchanged"$'\n'"$out"
-  grep -q 'FM_TEST_FORWARD' "$LAUNCH_LOG" \
-    && fail "an absent launch-env-forward must forward nothing (unchanged ambient behavior)"
-  pass "an absent config/launch-env-forward changes nothing, matching every home that predates this option"
+test_forward_absent_or_empty_config_changes_nothing() {
+  local setting out status absent
+  for setting in absent empty; do
+    make_forward_case "forward-$setting"
+    [ "$setting" = absent ] || printf '# nothing forwarded\n' > "$HOME_DIR/config/launch-env-forward"
+    out=$(FM_TEST_FORWARD="$VALUE" FM_TEST_PANE=none FM_ORCA_LAUNCH_CONSUME_POLLS=0 run_forward_spawn)
+    status=$?
+    expect_code 0 "$status" "spawn with $setting launch-env-forward should succeed without waiting on the pane"$'\n'"$out"
+    assert_not_contains "$(cat "$CASE_DIR/staged.copy")" "$SECRET" "$setting config forwarded a value"
+    assert_not_contains "$(cat "$CASE_DIR/staged.copy")" "command rm" "$setting config made the launch file self-deleting"
+    assert_not_contains "$(cat "$CASE_DIR/staged.copy")" "env -u FM" "$setting config removed a name"
+    if [ "$setting" = absent ]; then
+      absent=$(normalized_launch "$CASE_DIR" "$CASE_ID" | sed 's#forward-absent#forward-X#g')
+    else
+      [ "$(normalized_launch "$CASE_DIR" "$CASE_ID" | sed 's#forward-empty#forward-X#g')" = "$absent" ] \
+        || fail "an empty launch-env-forward changed the launch file"
+    fi
+  done
+  pass "an absent or empty config/launch-env-forward leaves the launch file and its handling unchanged"
 }
 
 test_forward_invalid_config_refuses() {
-  local rec out status bad
-  rec=$(make_spawn_case forward-invalid)
-  read_case_record "$rec"
+  local out status bad
+  make_forward_case forward-invalid
   for bad in 'FM_TEST=value' 'NAME;false' '1INVALID' '*'; do
     printf '%s\n' "$bad" > "$HOME_DIR/config/launch-env-forward"
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+    out=$(FM_TEST_PANE=none run_forward_spawn)
     status=$?
     expect_code 1 "$status" "invalid launch-env-forward content '$bad' must refuse the spawn"
     assert_contains "$out" 'launch-env-forward' "refusal must identify the config file for '$bad'"
-    [ ! -s "$LAUNCH_LOG" ] || fail "an invalid config must refuse before any pane send for '$bad'"
+    [ ! -s "$CASE_DIR/sent.log" ] || fail "an invalid config must refuse before any pane send for '$bad'"
   done
   pass "malformed config/launch-env-forward content refuses the spawn before any pane exists"
 }
 
-# Execute the actual emitted export + launch text in a synthetic pane shell, in
-# the same order fm-spawn.sh sends them, exactly as a real pane would: the
-# forwarded export first (setting the shell's own variable), then the
-# env-allowlist-filtered launch command reading it back. Proves the forwarded
-# name survives the exec-boundary filter when both options are enabled together.
-test_forward_survives_allowlist_filter() {
-  local rec out status probe result pane_shell
-  rec=$(make_spawn_case forward-with-allowlist)
-  read_case_record "$rec"
-  printf 'FM_TEST_FORWARD\n' > "$HOME_DIR/config/launch-env-forward"
-  : > "$HOME_DIR/config/launch-env-allowlist"
-  probe="$CASE_DIR/probe.sh"
-  cat > "$probe" <<'SH'
-#!/bin/sh
-printf '%s\n' "${FM_TEST_FORWARD-unset}"
-SH
-
-  out=$(FM_TEST_FORWARD="forwarded-through-filter" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$CASE_ID" "$PROJ_DIR" --harness "/bin/sh '$probe'")
-  status=$?
-  expect_code 0 "$status" "forward+allowlist spawn should succeed"$'\n'"$out"
-
-  for pane_shell in /bin/sh /bin/bash; do
-    [ -x "$pane_shell" ] || continue
-    result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin \
-      "$pane_shell" -c "$(cat "$LAUNCH_LOG")") \
-      || fail "replaying the sent pane text in $pane_shell failed"
-    [ "$result" = "forwarded-through-filter" ] \
-      || fail "the forwarded value did not survive the launch-env-allowlist filter in $pane_shell (got '$result')"
+test_forward_unsourced_or_undelivered_file_is_removed() {
+  local setting out status staged
+  for setting in unsourced rmfail sendfail; do
+    make_forward_case "forward-$setting"
+    printf 'FM_TEST_FORWARD\n' > "$HOME_DIR/config/launch-env-forward"
+    mkdir -p "$CASE_DIR/rmfail"
+    printf '#!/bin/sh\nexit 1\n' > "$CASE_DIR/rmfail/rm"
+    chmod +x "$CASE_DIR/rmfail/rm"
+    case "$setting" in
+      unsourced) out=$(FM_TEST_FORWARD="$VALUE" FM_TEST_PANE=none FM_ORCA_LAUNCH_CONSUME_POLLS=2 run_forward_spawn) ;;
+      rmfail) out=$(FM_TEST_FORWARD="$VALUE" FM_TEST_PANE=/bin/bash FM_TEST_PANE_PATH="$CASE_DIR/rmfail:/usr/bin:/bin" \
+        FM_ORCA_LAUNCH_CONSUME_POLLS=2 run_forward_spawn) ;;
+      sendfail) out=$(FM_TEST_FORWARD="$VALUE" FM_TEST_PANE=/bin/bash FM_TEST_SEND_FAIL=1 run_forward_spawn) ;;
+    esac
+    status=$?
+    expect_code 1 "$status" "$setting: the spawn must fail"$'\n'"$out"
+    staged=$(ls /tmp/fm-"$CASE_ID"+*/launch.*.sh /tmp/fm-"$CASE_ID"+*/.launch.*.tmp 2>/dev/null)
+    [ -z "$staged" ] || fail "$setting: the launch file carrying the value survived: $staged"
+    [ ! -e "$CASE_DIR/worker-forward" ] || fail "$setting: the worker ran"
+    assert_not_contains "$(cat "$CASE_DIR/sent.log")" "$SECRET" "$setting: the value reached pane input"
+    case "$setting" in
+      unsourced) assert_contains "$out" "did not run the launch command" "the failure must name the unrun launch" ;;
+      rmfail) assert_contains "$(cat "$CASE_DIR/pane.out")" SHELL-STILL-ALIVE "a failed unlink ended the pane shell" ;;
+      sendfail) assert_contains "$out" "could not be delivered" "the failure must name the undelivered launch" ;;
+    esac
   done
-  pass "a launch-env-forward name automatically survives an enabled launch-env-allowlist filter"
+  pass "a launch file the pane never sourced, could not unlink, or never received is removed and the spawn fails"
 }
 
-test_forward_sends_export_with_current_process_value_before_launch
-test_forward_value_with_shell_metacharacters_is_safe
-test_forward_unset_name_is_skipped
-test_forward_absent_config_changes_nothing
-test_forward_invalid_config_refuses
+test_forward_interrupted_spawn_removes_file() {
+  local sig pid status want staged i
+  for sig in TERM HUP INT; do
+    make_forward_case "forward-signal-$sig"
+    printf 'FM_TEST_FORWARD\n' > "$HOME_DIR/config/launch-env-forward"
+    : > "$CASE_DIR/sent.log"
+    # A background job ignores SIGINT on entry; restore the default so the
+    # spawn receives INT as an interactive caller would deliver it.
+    FM_TEST_FORWARD="$VALUE" FM_TEST_PANE=none FM_TEST_CASE_DIR="$CASE_DIR" \
+      python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+      env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" CLAUDE_CONFIG_DIR= \
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX=fake,1,0 PATH="$FAKEBIN_DIR:$PATH" \
+      "$SPAWN" "$CASE_ID" "$PROJ_DIR" --mode no-mistakes --yolo off \
+      --harness "/bin/sh '$CASE_DIR/probe.sh' '$CASE_DIR'" > "$CASE_DIR/spawn.log" 2>&1 &
+    pid=$!
+    for ((i = 0; i < 300; i++)); do
+      grep -q Enter "$CASE_DIR/sent.log" 2>/dev/null && [ -s "$CASE_DIR/staged-path" ] &&
+        tail -1 "$CASE_DIR/sent.log" | grep -q Enter && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    staged=$(cat "$CASE_DIR/staged-path" 2>/dev/null)
+    if [ -z "$staged" ] || [ ! -f "$staged" ] || ! kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null
+      wait "$pid"
+      fail "$sig: the spawn was not waiting on a delivered launch file: $(cat "$CASE_DIR/spawn.log")"
+    fi
+    kill -"$sig" "$pid"
+    wait "$pid"
+    status=$?
+    case "$sig" in TERM) want=143 ;; HUP) want=129 ;; INT) want=130 ;; esac
+    expect_code "$want" "$status" "$sig: interrupted spawn must exit with the signal status: $(cat "$CASE_DIR/spawn.log")"
+    [ ! -e "$staged" ] || fail "$sig: interrupted spawn left the value in $staged"
+    assert_contains "$(cat "$HOME_DIR/state/$CASE_ID.status" 2>/dev/null)" "refused the worker launch" "$sig: the reclaim must reach the task status"
+  done
+  pass "a spawn interrupted while its pane has not sourced the launch file removes it and exits with the signal status"
+}
+
+test_forward_meta_api_key_satisfies_muse_preflight() {
+  local out status
+  make_forward_case forward-muse
+  printf 'META_API_KEY\n' > "$HOME_DIR/config/launch-env-forward"
+  cp "$(command -v bash)" "$FAKEBIN_DIR/muse-bin-test-version"
+  cat > "$FAKEBIN_DIR/muse" <<SH
+#!/bin/sh
+printf '%s' "\${META_API_KEY-unset}" > '$CASE_DIR/worker-forward'
+SH
+  chmod +x "$FAKEBIN_DIR/muse"
+  : > "$CASE_DIR/sent.log"
+  printf '%s\n' "$CASE_DIR/none" > "$CASE_DIR/staged-path"
+  out=$(META_API_KEY="$SECRET-muse" FM_TEST_PANE=/bin/bash FM_TEST_CASE_DIR="$CASE_DIR" \
+    XDG_CONFIG_HOME="$CASE_DIR/xdgconfig" XDG_DATA_HOME="$CASE_DIR/xdgdata" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$CASE_ID" "$PROJ_DIR" muse \
+    --mode no-mistakes --yolo off)
+  status=$?
+  assert_not_contains "$out" "no worker-reachable credential" "a forwarded META_API_KEY did not satisfy the muse preflight"
+  expect_code 0 "$status" "muse spawn with a forwarded META_API_KEY should start"$'\n'"$out"
+  [ "$(cat "$CASE_DIR/worker-forward")" = "$SECRET-muse" ] || fail "muse did not receive the forwarded META_API_KEY"
+  assert_not_contains "$(cat "$CASE_DIR/sent.log")" "$SECRET" "the forwarded META_API_KEY reached pane input"
+  pass "a forwarded META_API_KEY satisfies the muse credential preflight without a login"
+}
+
+test_forward_value_reaches_worker_only_through_private_file
+test_forward_launch_file_is_fish_syntax
 test_forward_survives_allowlist_filter
+test_forward_absent_or_empty_config_changes_nothing
+test_forward_invalid_config_refuses
+test_forward_unsourced_or_undelivered_file_is_removed
+test_forward_interrupted_spawn_removes_file
+test_forward_meta_api_key_satisfies_muse_preflight
 
 echo "# all fm-launch-env-forward tests passed"

@@ -482,16 +482,23 @@
 #   so ordinary ambient inheritance cannot be assumed here). A present
 #   readable regular file names, one POSIX environment name per line (same
 #   format as launch-env-allowlist; blank lines and # comments ignored),
-#   variables to copy from THIS process's current environment into every
-#   fresh launch (ship, scout, secondmate, raw command, and relaunch). A named
-#   variable set in this process is sent into the pane as a literal
-#   `export NAME=value`, quoted, through the same pre-launch channel already
-#   used for GOTMPDIR/FM_TASK_ID/TRACEPARENT, so it reaches the worker
-#   regardless of backend or how stale that backend's own environment is. A
-#   named variable absent from this process stays absent in the worker;
-#   values are never invented. When launch-env-allowlist is also enabled,
-#   every forwarded name is added to its retained set so the explicit export
-#   is not then stripped by the exec-boundary filter.
+#   variables to copy from the environment this script was started with
+#   into every fresh launch (ship, scout, secondmate, raw command, and
+#   relaunch). Values come only from that exported environment, captured
+#   before the script assigns anything, never from its own shell variables.
+#   A named variable set there is written, quoted, as `export NAME=value`
+#   into the private launch file (0600 in a 0700 directory) that the pane
+#   sources; the pane receives only `. '<file>'`, never the value. The
+#   sourcing pane unlinks the file before the worker starts and refuses the
+#   worker if it cannot; the spawn waits for that and otherwise reclaims the
+#   file, as on a failed send or an interrupt. A named variable absent there
+#   is removed from the worker with env -u, so a reused pane's older value
+#   cannot stand in for it; values are never invented. When
+#   launch-env-allowlist is also enabled, every forwarded name is added to
+#   its retained set so the export survives the exec-boundary filter; with
+#   an Orca launch-env-tmux-session source, a forwarded name takes the
+#   caller's value instead of the session's. backend=t3code has no pane and
+#   no launch file, so it refuses when any named variable is set.
 # Codex permission mode: docs/configuration.md owns config/codex-permission-mode.
 #
 # Claude permission mode (config/claude-permission-mode):
@@ -766,6 +773,12 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+# config/launch-env-forward copies values from the caller's exported
+# environment only. Capture it before this script assigns a single variable of
+# its own, so an internal variable that happens to share a forwarded name
+# (ID, MODEL, ...) can never stand in for the caller's value.
+SPAWN_CALLER_ENV=$(export -p)
+export -n SPAWN_CALLER_ENV
 set -eu
 
 # Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
@@ -860,6 +873,48 @@ if [ "$LAUNCH_ENV_FORWARD_ENABLED" = 1 ]; then
     exit 1
   fi
 fi
+# Read one name from the caller's environment captured at the top of this
+# script, never from this shell. Prints the value followed by a guard `x` so
+# command substitution keeps trailing newlines; returns 1 when the caller did
+# not export the name.
+spawn_caller_env_get() {  # <name>
+  (
+    unset -v "$1" 2>/dev/null || exit 1
+    eval "$SPAWN_CALLER_ENV" 2>/dev/null || true
+    [ "${!1+set}" = set ] || exit 1
+    printf '%sx' "${!1}"
+  )
+}
+# Quote a value for the private launch file, which bash, zsh, sh and fish all
+# source. shell_quote's '...' form is not enough there: fish reads \\ and \'
+# inside single quotes as escapes, so every backslash and quote is written
+# outside the quotes as \\ or \', which every one of those shells reads alike.
+spawn_env_quote() {  # <value>
+  local LC_ALL=C value=$1 out="'" i c
+  for ((i = 0; i < ${#value}; i++)); do
+    c=${value:i:1}
+    case "$c" in
+    \\ | \') out="$out'\\$c'" ;;
+    *) out="$out$c" ;;
+    esac
+  done
+  printf "%s'" "$out"
+}
+# Resolve every forwarded name once, before any mutation: a set name becomes an
+# export in the private launch file (LAUNCH_ENV_COPY_EXPORTS), an unset one is
+# removed from the worker so a reused pane's old value cannot stand in for it.
+LAUNCH_ENV_COPY_EXPORTS=
+LAUNCH_ENV_COPY_SET_NAMES=
+LAUNCH_ENV_COPY_UNSET_NAMES=
+for env_copy_name in $LAUNCH_ENV_COPY_NAMES; do
+  if env_copy_value=$(spawn_caller_env_get "$env_copy_name"); then
+    LAUNCH_ENV_COPY_EXPORTS="${LAUNCH_ENV_COPY_EXPORTS}export $env_copy_name=$(spawn_env_quote "${env_copy_value%x}"); "
+    LAUNCH_ENV_COPY_SET_NAMES="$LAUNCH_ENV_COPY_SET_NAMES$env_copy_name"$'\n'
+  else
+    LAUNCH_ENV_COPY_UNSET_NAMES="$LAUNCH_ENV_COPY_UNSET_NAMES$env_copy_name"$'\n'
+  fi
+done
+env_copy_value=
 # config/claude-permission-mode (header above): resolved once per spawn or
 # relaunch, before any mutation, so a malformed file refuses instead of
 # launching a worker on a permission posture the captain did not choose.
@@ -1758,6 +1813,8 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_STAGED_LAUNCH_STAGE=
+SPAWN_LAUNCH_FILE_SECRET=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1786,7 +1843,8 @@ parse_orca_worktree_result() {
   fi
 }
 
-# Non-forced unlink arbitration for a delivered Orca source-mode launch file:
+# Non-forced unlink arbitration for a delivered launch file carrying a value
+# (Orca source mode or config/launch-env-forward):
 # the pane unlinks it before launching the worker and refuses when that unlink
 # fails, so exactly one side's unlink succeeds. Returns 0 when this spawn removed
 # it (the worker is refused), 1 when the pane already had, and 2 when the file
@@ -1990,7 +2048,7 @@ spawn_abort_cleanup() {
             SPAWN_TASK_TMP_CREATED=0
             rm -rf -- "$TASK_TMP" 2>/dev/null || true
           fi
-          if [ -n "$SPAWN_STAGED_LAUNCH_FILE" ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" != 1 ]; then
+          if [ -n "$SPAWN_STAGED_LAUNCH_FILE" ] && [ "${SPAWN_LAUNCH_FILE_SECRET:-0}" != 1 ]; then
             rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
             rmdir -- "$(dirname "$SPAWN_STAGED_LAUNCH_FILE")" 2>/dev/null || true
           fi
@@ -2059,9 +2117,9 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
-  if [ "$status" -ne 0 ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" = 1 ] && [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; then
+  if [ "$status" -ne 0 ] && [ "${SPAWN_LAUNCH_FILE_SECRET:-0}" = 1 ] && [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; then
     if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
-      rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
+      rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" "$SPAWN_STAGED_LAUNCH_STAGE" 2>/dev/null || true
     else
       # The open terminal may still source the delivered file, and no other
       # owner is left to remove it once this spawn exits, so arbitrate exactly
@@ -2069,8 +2127,8 @@ spawn_abort_cleanup() {
       local reclaim_status=0
       spawn_orca_reclaim_launch_file || reclaim_status=$?
       case "$reclaim_status" in
-        0) kimi_spawn_fail "spawn ended before Orca terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
-        2) echo "warning: could not remove Orca launch file $SPAWN_STAGED_LAUNCH_FILE; remove it by hand" >&2 ;;
+        0) kimi_spawn_fail "spawn ended before $BACKEND terminal $T ran the launch command; removed the launch file and refused the worker launch" || true ;;
+        2) echo "warning: could not remove private launch file $SPAWN_STAGED_LAUNCH_FILE; remove it by hand" >&2 ;;
       esac
     fi
   fi
@@ -2460,12 +2518,27 @@ if [ "$RELAUNCH" -eq 0 ]; then
           exit 1
           ;;
       esac
+      # A forwarded name takes its value (or its absence) from this caller, so
+      # the session snapshot neither has to hold it nor may override it.
+      orca_env_names=
+      for env_name in $LAUNCH_ENV_NAMES; do
+        case $'\n'"$LAUNCH_ENV_COPY_NAMES"$'\n' in
+        *$'\n'"$env_name"$'\n'*) ;;
+        *) orca_env_names="$orca_env_names$env_name"$'\n' ;;
+        esac
+      done
       ORCA_LAUNCH_ENV_ARGS=$(fm_backend_orca_launch_env_args \
-        "$ORCA_LAUNCH_ENV_SESSION" "$LAUNCH_ENV_NAMES") || exit 1
+        "$ORCA_LAUNCH_ENV_SESSION" "$orca_env_names") || exit 1
     elif [ -n "$LAUNCH_ENV_NAMES" ]; then
       echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
     fi
   fi
+fi
+# A launch file carrying a value - an Orca source snapshot or a forwarded name -
+# is unlinked by the pane as it sources it; this spawn waits for that, and
+# reclaims the file on every other path.
+if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ] || [ -n "$LAUNCH_ENV_COPY_EXPORTS" ]; then
+  SPAWN_LAUNCH_FILE_SECRET=1
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -3589,6 +3662,10 @@ if [ "$BACKEND" = t3code ]; then
     echo "error: backend=t3code cannot apply config/launch-env-allowlist because T3 starts the agent with its provider instance's environment; remove that file or choose another backend" >&2
     exit 1
   fi
+  if [ -n "$LAUNCH_ENV_COPY_EXPORTS" ]; then
+    echo "error: backend=t3code cannot apply config/launch-env-forward because T3 starts the agent with its provider instance's environment; unset the named variables, remove that file, or choose another backend" >&2
+    exit 1
+  fi
   if [ -n "$WORKER_ACCOUNT" ]; then
     echo "error: backend=t3code cannot apply the $HARNESS worker account pin because T3's provider instance owns the account; select that instance in config/t3code-instances instead" >&2
     exit 1
@@ -3693,6 +3770,14 @@ resolve_rovo_binary() {
 # supervision like a wedged worker rather than a missing credential.
 muse_worker_meta_api_key_present() {
   local session worker_env
+  # A forwarded META_API_KEY reaches the worker through the private launch file
+  # on every pane backend.
+  case $'\n'"$LAUNCH_ENV_COPY_SET_NAMES" in
+  *$'\nMETA_API_KEY\n'*)
+    worker_env=$(spawn_caller_env_get META_API_KEY) || return 1
+    [ "$worker_env" = x ] || return 0
+    ;;
+  esac
   if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
     *$'\nMETA_API_KEY\n'*) ;;
@@ -7948,15 +8033,6 @@ spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
-# config/launch-env-forward (header above): copy each named variable's
-# CURRENT value out of this process, one explicit export per name, through
-# the same pre-launch channel as GOTMPDIR above. A name absent from this
-# process is skipped rather than forced empty.
-for env_fwd_name in $LAUNCH_ENV_COPY_NAMES; do
-  if [ "${!env_fwd_name+set}" = set ]; then
-    spawn_send_text_line "$T" "export $env_fwd_name=$(shell_quote "${!env_fwd_name}")"
-  fi
-done
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
@@ -8001,9 +8077,19 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     HC_SESSION HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_FORWARD_NAMES $LAUNCH_ENV_COPY_NAMES; do
+    # A forwarded name the caller left unset stays out of the worker, and one it
+    # set is exported by the launch file itself, so Orca's snapshot never owns it.
+    case $'\n'"$LAUNCH_ENV_COPY_UNSET_NAMES" in
+      *$'\n'"$env_name"$'\n'*) continue ;;
+    esac
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
-      case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
-        *$'\n'"$env_name"$'\n'*) continue ;;
+      case $'\n'"$LAUNCH_ENV_COPY_SET_NAMES" in
+        *$'\n'"$env_name"$'\n'*) ;;
+        *)
+          case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+            *$'\n'"$env_name"$'\n'*) continue ;;
+          esac
+          ;;
       esac
     fi
     # Only validated names enter shell syntax. Values expand once, quoted, in
@@ -8031,6 +8117,18 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# config/launch-env-forward (header above): the caller's values travel only in
+# the private launch file, never as pane input. A name the caller left unset is
+# removed with env -u, since fish has no unset; the cleared environment above
+# already drops it when the allowlist is on.
+if [ -n "$LAUNCH_ENV_COPY_UNSET_NAMES" ] && [ "$LAUNCH_ENV_ENABLED" != 1 ]; then
+  env_copy_unset=
+  for env_copy_name in $LAUNCH_ENV_COPY_UNSET_NAMES; do
+    env_copy_unset="$env_copy_unset -u $env_copy_name"
+  done
+  LAUNCH="/usr/bin/env$env_copy_unset /bin/sh -c $(shell_quote "$LAUNCH")"
+fi
+LAUNCH="$LAUNCH_ENV_COPY_EXPORTS$LAUNCH"
 if [ "$BACKEND" = t3code ]; then
   # No pane: the launch is the thread's first message, carrying the same
   # encoded brief the LAUNCH template embeds; MODEL/EFFORT were fixed as the
@@ -8063,10 +8161,26 @@ else
     # The sourcing shell already holds the open file; unlink the credentials
     # before launching the worker, including on a later command failure.
     LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || { echo 'error: cannot remove private launch file; refusing worker launch' >&2; return 1 2>/dev/null || exit 1; }; $LAUNCH"
+  elif [ "$SPAWN_LAUNCH_FILE_SECRET" = 1 ]; then
+    # Forwarded values: the same unlink-or-refuse contract, in the plain
+    # command, && and || form a fish pane also sources (no if or { }).
+    LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || return 1 2>/dev/null || exit 1; $LAUNCH"
   fi
   if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
     echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
     exit 1
+  fi
+  if [ "$SPAWN_LAUNCH_FILE_SECRET" = 1 ]; then
+    # Own the file and its staging copy before the first byte is written, so an
+    # interrupt or failure from here on removes both. Bash runs the EXIT trap
+    # for an untrapped fatal signal with status 0, which abort cleanup reads as
+    # success, so exit with the signal's status instead until the pane has
+    # consumed the published launch file.
+    SPAWN_STAGED_LAUNCH_FILE=$LAUNCH_FILE
+    SPAWN_STAGED_LAUNCH_STAGE=$LAUNCH_STAGE
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
   fi
   if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
     chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
@@ -8075,18 +8189,12 @@ else
     exit 1
   fi
   SPAWN_STAGED_LAUNCH_FILE=$LAUNCH_FILE
-  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
-    # Bash runs the EXIT trap for an untrapped fatal signal with status 0, which
-    # abort cleanup reads as success, so exit with the signal's status instead
-    # until the pane has consumed the published launch file.
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-  fi
   sleep 0.3
+  # The spawn_orca_* helpers serve every launch file that carries a value
+  # (SPAWN_LAUNCH_FILE_SECRET), not only Orca's source mode.
   spawn_orca_launch_send_fail() {
     rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
-    kimi_spawn_fail "launch command could not be delivered to Orca terminal $T"
+    kimi_spawn_fail "launch command could not be delivered to $BACKEND terminal $T"
     rovo_endpoint_cleanup
     exit 1
   }
@@ -8102,7 +8210,7 @@ else
       if [ "$i" -gt "$max" ]; then
         spawn_orca_reclaim_launch_file || reclaim_status=$?
         [ "$reclaim_status" != 1 ] || return 0
-        kimi_spawn_fail "Orca terminal $T did not run the launch command or could not remove the launch file; refused the worker launch"
+        kimi_spawn_fail "$BACKEND terminal $T did not run the launch command or could not remove the launch file; refused the worker launch"
         exit 1
       fi
       sleep 0.2
@@ -8119,7 +8227,7 @@ else
     LAUNCH_SOURCE_TEXT="if [ -e $(shell_quote "$LAUNCH_FILE") ]; then $LAUNCH_SOURCE_TEXT || true; else echo 'error: private launch file was already removed; refusing worker launch' >&2; fi"
   fi
   if ! spawn_send_literal "$T" "$LAUNCH_SOURCE_TEXT"; then
-    [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
+    [ "$SPAWN_LAUNCH_FILE_SECRET" != 1 ] || spawn_orca_launch_send_fail
     exit 1
   fi
   sleep 0.3
@@ -8128,10 +8236,10 @@ else
     spawn_herdr_presentation_order_lock_release
   fi
   if ! spawn_send_key "$T" Enter; then
-    [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail
+    [ "$SPAWN_LAUNCH_FILE_SECRET" != 1 ] || spawn_orca_launch_send_fail
     exit 1
   fi
-  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+  if [ "$SPAWN_LAUNCH_FILE_SECRET" = 1 ]; then
     spawn_orca_wait_launch_consumed
     trap - HUP INT TERM
   fi
