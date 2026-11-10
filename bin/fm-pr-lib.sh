@@ -408,7 +408,7 @@ fm_pr_base_proof_key() {  # <meta> <expected-base> <provider> <url> <host> <path
 }
 
 fm_pr_require_base() {  # <meta> <provider> <url> <host> <path> <number> [<proof-variable>]
-  local meta=$1 expected actual proof_var=${7:-} proof_key= current_key=
+  local meta=$1 expected actual proof_var=${7:-} proof_key='' current_key=''
   shift
   if [ -n "$proof_var" ]; then
     case "$proof_var" in [0-9]*|*[!A-Za-z0-9_]*) return 1 ;; esac
