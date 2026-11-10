@@ -1967,7 +1967,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
-| Profile `account` | Optional, Claude profiles only: one [`config/claude-accounts`](#several-claude-accounts-configclaude-accounts) entry (`ordinary`, an absolute path, or `token:<absolute path>`), passed through as `--account`; `fm-spawn.sh` still refuses it unless the home declares that entry. |
+| Profile `account` | Optional, Claude profiles only: one [`config/claude-accounts`](#several-claude-accounts-configclaude-accounts) entry (`ordinary`, an absolute path, or `token:<absolute path>`), passed through as `--account`; its JSON string is matched exactly, including leading or trailing spaces in an absolute path, and `fm-spawn.sh` still refuses it unless the home declares that entry. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
