@@ -2314,6 +2314,7 @@ Recovery output excerpt:
 
 ```text
 ok - Orca create response timeout adopts the matching worktree without recreating
+ok - Concurrent Orca creates recover and clean up only their own random attempt identities
 ok - Orca recovery rejects foreign, ambiguous, incomplete and unsafe identities before adoption
 ok - Orca recovery waits until the exact Git root is readable and clean
 ok - Orca recovery preserves preexisting allocations and refuses incomplete pre-create inventory

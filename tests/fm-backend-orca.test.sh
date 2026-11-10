@@ -459,10 +459,21 @@ test_json_get_ignores_undocumented_terminal_id_shapes() {
   pass "fm_backend_orca_json_get: ignores undocumented terminal id shapes"
 }
 
+# Control entropy only for the fixed inventory fixtures; the concurrent case
+# below exercises independent calls with the real random-name generator.
+fixed_attempt_node() {
+  local real_node
+  real_node=$(command -v node)
+  # Keep parameter expansion in the generated shim, not this writer.
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\nif [ "${1:-}" = -p ] && [ "${2:-}" = '\''require("crypto").randomUUID()'\'' ]; then\n  echo fixture-attempt\nelse\n  exec %q "$@"\nfi\n' "$real_node" > "$1/node"
+  chmod +x "$1/node"
+}
+
 # Recovery fixtures describe the measured composite worktree identity and
 # complete inventory shape, with real Git repositories for the readiness gate.
 write_recovery_inventory() {  # <file> <path> [variant] [name]
-  node - "$1" "$2" "${3:-ready}" "${4:-fm-task}" <<'JS'
+  node - "$1" "$2" "${3:-ready}" "${4:-fm-task-fixture-attempt}" <<'JS'
 const fs = require("fs");
 const [file, wt, variant, name] = process.argv.slice(2);
 const w = {id: `repo-123::${wt}`, repoId: "repo-123", displayName: name, path: wt, isMainWorktree: false};
@@ -483,8 +494,9 @@ JS
 
 recovery_case() {  # <name> -> sets RECOVER_HOME WT and standard create timeout
   orca_case "$1"
+  fixed_attempt_node "$FB"
   RECOVER_HOME="$CASE_DIR/home"
-  WT="$RECOVER_HOME/orca/workspaces/project/fm-task"
+  WT="$RECOVER_HOME/orca/workspaces/project/fm-task-fixture-attempt"
   fm_git_init_commit "$WT"
   printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/1.out"
   echo 'request timed out' > "$RESP/2.err"
@@ -515,20 +527,118 @@ test_worktree_create_recovers_timeout() {
   pass 'Orca create response timeout adopts the matching worktree without recreating'
 }
 
+test_concurrent_worktree_recovery_owns_only_its_attempt() {
+  local lane pid_a pid_b out_a out_b name_a name_b path_a path_b
+  orca_case concurrent-recovery
+  mkdir -p "$CASE_DIR/home/orca/workspaces/project"
+  cat > "$FB/orca" <<'JS'
+#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+const {spawnSync} = require("child_process");
+const root = process.env.FM_TEST_ORCA_RACE;
+const lane = process.env.FM_TEST_ORCA_LANE;
+const args = process.argv.slice(2);
+const mark = name => path.join(root, name);
+const read = name => fs.readFileSync(mark(name), "utf8");
+const write = (name, value = "") => fs.writeFileSync(mark(name), value);
+function waitFor(name) {
+  const deadline = Date.now() + 15000;
+  while (!fs.existsSync(mark(name))) {
+    if (Date.now() >= deadline) throw new Error(`barrier timed out: ${name}`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+}
+function allocate(owner) {
+  const name = read(`${owner}.name`);
+  const wt = path.join(root, "home/orca/workspaces/project", name);
+  fs.mkdirSync(wt, {recursive: true});
+  const git = spawnSync("git", ["init", "--quiet", wt]);
+  if (git.status !== 0) throw new Error("fixture git init failed");
+  write(`${owner}.ready`, JSON.stringify({id: `repo-123::${wt}`, repoId: "repo-123",
+    displayName: name, path: wt, isMainWorktree: false}));
+}
+function result(value) { process.stdout.write(JSON.stringify({ok: true, result: value})); }
+switch (args.slice(0, 2).join(" ")) {
+  case "repo show": result({repo: {id: "repo-123"}}); break;
+  case "worktree list": {
+    if (!fs.existsSync(mark(`${lane}.before`))) {
+      write(`${lane}.before`);
+      waitFor(`${lane === "a" ? "b" : "a"}.before`);
+      result({worktrees: [], totalCount: 0, truncated: false});
+      break;
+    }
+    if (lane === "a") {
+      waitFor("b.ready");
+      if (fs.existsSync(mark("a.saw-foreign"))) allocate("a");
+      else write("a.saw-foreign");
+    }
+    const rows = ["a", "b"].filter(owner => fs.existsSync(mark(`${owner}.ready`)))
+      .map(owner => JSON.parse(read(`${owner}.ready`)));
+    result({worktrees: rows, totalCount: rows.length, truncated: false});
+    break;
+  }
+  case "worktree create":
+    write(`${lane}.name`, args[args.indexOf("--name") + 1]);
+    if (lane === "b") allocate("b");
+    else waitFor("b.ready");
+    console.error("request timed out");
+    process.exitCode = 1;
+    break;
+  case "worktree rm": {
+    const id = args[args.indexOf("--worktree") + 1];
+    write(`${lane}.removed`, id);
+    fs.rmSync(id.slice("id:repo-123::".length), {recursive: true});
+    result({});
+    break;
+  }
+  default: throw new Error(`unexpected command: ${args}`);
+}
+JS
+  chmod +x "$FB/orca"
+  for lane in a b; do
+    HOME="$CASE_DIR/home" FM_HOME="$CASE_DIR/fm-home-$lane" PATH="$FB:$PATH" \
+      FM_TEST_ORCA_RACE="$CASE_DIR" FM_TEST_ORCA_LANE="$lane" \
+      FM_ORCA_WORKTREE_RECOVER_TIMEOUT_MS=12000 \
+      bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" \
+      > "$CASE_DIR/$lane.out" 2> "$CASE_DIR/$lane.err" &
+    if [ "$lane" = a ]; then pid_a=$!; else pid_b=$!; fi
+  done
+  wait "$pid_a" || fail "first concurrent create failed: $(cat "$CASE_DIR/a.err")"
+  wait "$pid_b" || fail "second concurrent create failed: $(cat "$CASE_DIR/b.err")"
+  name_a=$(cat "$CASE_DIR/a.name")
+  name_b=$(cat "$CASE_DIR/b.name")
+  [ "$name_a" != "$name_b" ] || fail 'concurrent creates reused a task alias as ownership identity'
+  path_a="$CASE_DIR/home/orca/workspaces/project/$name_a"
+  path_b="$CASE_DIR/home/orca/workspaces/project/$name_b"
+  out_a=$(cat "$CASE_DIR/a.out")
+  out_b=$(cat "$CASE_DIR/b.out")
+  [ "$out_a" = "$(printf 'repo-123::%s\t%s' "$path_a" "$path_a")" ] || fail 'first recovery adopted the other request'
+  [ "$out_b" = "$(printf 'repo-123::%s\t%s' "$path_b" "$path_b")" ] || fail 'second recovery adopted the other request'
+  assert_present "$CASE_DIR/a.saw-foreign" 'race did not expose the other allocation first'
+  # Exercise the same backend cleanup interface used after a later spawn failure.
+  PATH="$FB:$PATH" FM_TEST_ORCA_RACE="$CASE_DIR" FM_TEST_ORCA_LANE=a \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "$1"' "$ROOT" "repo-123::$path_a" \
+    || fail 'cleanup of recovered allocation failed'
+  assert_absent "$path_a" 'owned fixture was not removed'
+  assert_present "$path_b/.git" 'cleanup removed the other home allocation'
+  pass 'Concurrent Orca creates recover and clean up only their own random attempt identities'
+}
+
 test_worktree_recovery_waits_for_safe_inventory() {
   local variant out rejected
   for variant in repo name id main incomplete count omitted duplicate malformed cli-failure outside symlink basename; do
     recovery_case "recover-$variant"
     rejected=$WT
     case "$variant" in
-      outside) rejected="$CASE_DIR/outside/fm-task"; fm_git_init_commit "$rejected" ;;
+      outside) rejected="$CASE_DIR/outside/fm-task-fixture-attempt"; fm_git_init_commit "$rejected" ;;
       symlink)
-        rejected="$RECOVER_HOME/orca/workspaces/linked/fm-task"
-        fm_git_init_commit "$CASE_DIR/outside/fm-task"
+        rejected="$RECOVER_HOME/orca/workspaces/linked/fm-task-fixture-attempt"
+        fm_git_init_commit "$CASE_DIR/outside/fm-task-fixture-attempt"
         mkdir -p "$(dirname "$rejected")"
-        ln -s "$CASE_DIR/outside/fm-task" "$rejected"
+        ln -s "$CASE_DIR/outside/fm-task-fixture-attempt" "$rejected"
         ;;
-      basename) rejected="$(dirname "$WT")/fm-task-1"; fm_git_init_commit "$rejected" ;;
+      basename) rejected="$(dirname "$WT")/fm-task-fixture-attempt-1"; fm_git_init_commit "$rejected" ;;
     esac
     write_recovery_inventory "$RESP/3.out" "$rejected" "$variant"
     case "$variant" in
@@ -631,6 +741,7 @@ test_worktree_create_ignores_stderr_on_success() {
 test_worktree_and_terminal_helpers_parse_json() {
   local out wt_id wt_path term
   orca_case lifecycle-helpers
+  fixed_attempt_node "$FB"
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-123::/orca/wt-123","path":"/tmp/orca-wt"}}}\n' > "$RESP/3.out"
@@ -648,7 +759,7 @@ test_worktree_and_terminal_helpers_parse_json() {
     "worktree helper should first check repo registration"
   assert_contains "$(cat "$LOG")" $'orca\x1f''repo'$'\x1f''add'$'\x1f''--path'$'\x1f''/repo/path'$'\x1f''--json' \
     "worktree helper should register an absent repo"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create'$'\x1f''--repo'$'\x1f''id:repo-123'$'\x1f''--name'$'\x1f''fm-task'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create'$'\x1f''--repo'$'\x1f''id:repo-123'$'\x1f''--name'$'\x1f''fm-task-fixture-attempt'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--json' \
     "worktree helper did not create an independent no-hook worktree"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-123::/orca/wt-123'$'\x1f''--title'$'\x1f''fm-task'$'\x1f''--json' \
     "terminal helper did not create a titled terminal for the worktree"
@@ -850,7 +961,7 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   data="$TMP_ROOT/terminal-fail-data-$recovered"
   state="$TMP_ROOT/terminal-fail-state-$recovered"
   config="$TMP_ROOT/terminal-fail-config-$recovered"
-  [ "$recovered" != 1 ] || wt="$SPAWN_HOME/orca/workspaces/terminal-fail/fm-$id"
+  [ "$recovered" != 1 ] || wt="$SPAWN_HOME/orca/workspaces/terminal-fail/fm-$id-fixture-attempt"
   worktree_id="wt-terminal-fail::/orca/wt-terminal-fail"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
@@ -862,13 +973,14 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-terminal-fail::/orca/wt-terminal-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
   if [ "$recovered" = 1 ]; then
+    fixed_attempt_node "$FB"
     worktree_id="repo-123::$wt"
     printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
     : > "$RESP/3.out"
     echo 'request timed out' > "$RESP/3.err"
     echo 1 > "$RESP/3.exit"
     rm "$RESP/4.exit"
-    write_recovery_inventory "$RESP/4.out" "$wt" ready "fm-$id"
+    write_recovery_inventory "$RESP/4.out" "$wt" ready "fm-$id-fixture-attempt"
     echo 1 > "$RESP/5.exit"
   fi
   out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1596,6 +1708,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
 
 test_worktree_create_recovers_timeout
+test_concurrent_worktree_recovery_owns_only_its_attempt
 test_worktree_recovery_waits_for_safe_inventory
 test_worktree_recovery_waits_for_clean_git_root
 test_worktree_recovery_refuses_unknown_prior_ownership

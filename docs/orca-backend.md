@@ -51,7 +51,8 @@ Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the w
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
 A lost or timed-out create response is reconciled against Orca's inventory without repeating the create request, which could allocate a second worktree.
-Recovery adopts only a newly appearing, uniquely matching worktree inside the local Orca workspace root after its Git root is readable and clean.
+Each create attempt uses a random worktree name, so concurrent homes using the same task alias cannot recover each other's allocation.
+Recovery adopts only a newly appearing worktree uniquely matching that attempt inside the local Orca workspace root after its Git root is readable and clean.
 An ambiguous or unfinished allocation is preserved for operator reconciliation; a recovered allocation follows the normal spawn cleanup path if a later step fails.
 Exact command flags, recovery bounds, and response parsing are owned by `bin/backends/orca.sh`, `bin/backends/orca-worktree-recover.js`, and script help.
 
