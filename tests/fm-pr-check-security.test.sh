@@ -3514,7 +3514,9 @@ group/subgroup/project
 $dir/fakebin
 $(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
 EOF
-  ! PATH="$noperl" command -v perl >/dev/null 2>&1 \
+  # A scoped assignment clears Bash 3.2's command cache before the lookup;
+  # a temporary assignment can still resolve a previously cached perl.
+  ! (PATH="$noperl"; command -v perl) >/dev/null 2>&1 \
     || fail "the perl-free search path still resolved perl"
   for train in '' gone; do
     rm -f "$dir/glab.log.train"
