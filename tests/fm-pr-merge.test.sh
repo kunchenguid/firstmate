@@ -443,6 +443,7 @@ if [ "${1:-}" = api ]; then
         echo '[{"status":"idle"}]'
         exit 0
       fi
+      [ ! -e "$case_dir/glab-train-added" ] || [ ! -e "$case_dir/train-car-stalls" ] || sleep 30
       [ ! -e "$case_dir/train-car-fails" ] || { echo 'glab: 502 Bad Gateway (HTTP 502)' >&2; exit 1; }
       [ -f "$case_dir/train-car.json" ] || { echo 'glab: 404 Merge Train Merge Request Not Found (HTTP 404)' >&2; exit 1; }
       cat "$case_dir/train-car.json"
@@ -476,6 +477,7 @@ case "${1:-} ${2:-}" in
     esac
     if [ -e "$case_dir/glab-train-added" ]; then
       [ ! -e "$case_dir/train-view-stalls" ] || sleep 30
+      [ ! -e "$case_dir/train-view-slow" ] || sleep 2
       views=$(( $(cat "$case_dir/glab-train-views" 2>/dev/null || echo 0) + 1 ))
       echo "$views" > "$case_dir/glab-train-views"
       if [ -f "$case_dir/mr-train-$views.json" ]; then
@@ -5547,7 +5549,7 @@ run_train_merge() {
   local case_dir=$1 rc
   shift
   set +e
-  FM_PR_GITLAB_TRAIN_WAIT=${TRAIN_WAIT:-0} FM_PR_GITLAB_TRAIN_POLL_INTERVAL=0 \
+  FM_PR_GITLAB_TRAIN_WAIT=${TRAIN_WAIT:-3} FM_PR_GITLAB_TRAIN_POLL_INTERVAL=0 \
     run_pr_merge "$case_dir" task-x1 "$MR_URL" "$@" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -5716,6 +5718,34 @@ test_gitlab_merge_train_stalled_read_cannot_outlive_the_wait() {
   assert_grep "is queued in the merge train" "$case_dir/stderr" \
     "gitlab-train-stalled-read: the stalled wait was not reported as queued"
   pass "a stalled merge-train read cannot outlive the bounded wait"
+
+  # A later read in the same pass is bounded by what the earlier read left.
+  case_dir=$(make_gitlab_train_case gitlab-train-stalled-later-read)
+  : > "$case_dir/train-view-slow"
+  : > "$case_dir/train-car-stalls"
+  write_mr_json "$case_dir/mr-train.json" merge_when_pipeline_succeeds=true
+  rc=0; started=$SECONDS
+  TRAIN_WAIT=5 run_train_merge "$case_dir" || rc=$?
+  elapsed=$((SECONDS - started))
+  expect_code 1 "$rc" "gitlab-train-stalled-later-read: a stalled later read must end as queued"
+  [ "$elapsed" -lt 9 ] \
+    || fail "gitlab-train-stalled-later-read: the car read outlived the 5 second wait (${elapsed}s)"
+  assert_grep "is queued in the merge train" "$case_dir/stderr" \
+    "gitlab-train-stalled-later-read: the stalled wait was not reported as queued"
+
+  # Merged, but the wait runs out while the landed-commit proof is being read.
+  case_dir=$(make_gitlab_train_case gitlab-train-merged-out-of-time)
+  : > "$case_dir/train-view-slow"
+  write_mr_json "$case_dir/mr-train.json" state=merged detail=not_open \
+    merge_when_pipeline_succeeds=true
+  rc=0
+  TRAIN_WAIT=3 run_train_merge "$case_dir" || rc=$?
+  expect_code 1 "$rc" "gitlab-train-merged-out-of-time: an unproved merge must not report success"
+  assert_grep "reads as merged but GitLab has not recorded the commit that landed" "$case_dir/stderr" \
+    "gitlab-train-merged-out-of-time: the unproved merge was not reported"
+  if grep -q 'is queued in the merge train' "$case_dir/stderr"; then
+    fail "gitlab-train-merged-out-of-time: a merged request was reported as queued"
+  fi
 }
 
 test_gitlab_merge_train_keeps_the_pre_merge_guards() {

@@ -2017,6 +2017,13 @@ gitlab_read_train_car() {
   [ -z "${fields#* }" ] || FM_PR_TRAIN_PIPELINE_URL=${fields#* }
 }
 
+# Sets FM_PR_READ_BOUND to the seconds left before the caller's deadline and
+# fails once none are left, so no forge read starts after the wait is spent.
+train_read_bound() {
+  FM_PR_READ_BOUND=$((deadline - SECONDS))
+  [ "$FM_PR_READ_BOUND" -ge 1 ]
+}
+
 # Wait, within a bounded time, for proof that the train merged the request:
 # state merged plus the commit that landed, which is the merge commit, a squash
 # commit, or for a fast-forward project the head the target branch moved to.
@@ -2035,11 +2042,11 @@ gitlab_await_train_bounded() {
   deadline=$((SECONDS + wait))
   while :; do
     fields=
-    # Every forge read below is bounded by what is left of the wait, and the
-    # bound stops the read's whole process group, so a stalled read cannot
-    # outlive FM_PR_GITLAB_TRAIN_WAIT.
-    FM_PR_READ_BOUND=$((deadline - SECONDS))
-    [ "$FM_PR_READ_BOUND" -ge 1 ] || FM_PR_READ_BOUND=1
+    # Every forge read below is bounded by what is left of the wait, recomputed
+    # immediately before that read, and the bound stops the read's whole process
+    # group, so no read starts after or outlives
+    # FM_PR_GITLAB_TRAIN_WAIT.
+    train_read_bound || break
     if json=$(GITLAB_HOST="$FM_PR_HOST" fm_run_timed "$FM_PR_READ_BOUND" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
       && [ -n "$json" ]; then
       fields=$(printf '%s' "$json" | jq -r '
@@ -2058,13 +2065,15 @@ $fields
 FIELDS
       case "$state" in
         merged)
+          merged_unrecorded=true
+          train_read_bound || break
           if [ "$(fm_run_timed "$FM_PR_READ_BOUND" "$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" = merged ]; then
             printf 'verified: %s was merged by the merge train\n' "$URL"
             return 0
           fi
-          merged_unrecorded=true
           ;;
         opened)
+          train_read_bound || break
           car_rc=0
           gitlab_read_train_car || car_rc=$?
           if [ "$car_rc" -eq 1 ] && [ "$mwps" = false ]; then
