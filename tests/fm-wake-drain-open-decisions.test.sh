@@ -31,7 +31,11 @@ case "$1 ${2:-}" in
     ;;
   'mv --help') echo '[<id>...]' ;;
   'ready '*|ready)
-    if [ "${FM_FAKE_TASKS_AXI_FAIL_READY:-0}" = 1 ]; then
+    if [ -n "${FM_FAKE_TASKS_AXI_IGNORE_TERM_PIDFILE:-}" ]; then
+      trap '' TERM
+      echo "$$" > "$FM_FAKE_TASKS_AXI_IGNORE_TERM_PIDFILE"
+      exec sleep 30
+    elif [ "${FM_FAKE_TASKS_AXI_FAIL_READY:-0}" = 1 ]; then
       echo 'fake ready failure' >&2
       exit 1
     elif [ "${FM_FAKE_TASKS_AXI_EMPTY:-0}" = 1 ]; then
@@ -204,6 +208,40 @@ test_stalled_backlog_gate_does_not_block_drain() {
     fail "a stalled backlog gate printed READY WORK"
   fi
   pass "a stalled backlog gate times out and the drain continues"
+}
+
+test_term_ignoring_ready_lookup_is_killed_at_the_bound() {
+  local dir state out pidfile pid start elapsed i
+  dir=$(make_case ready-work-ignores-term)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  pidfile="$dir/ready.pid"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/drain.out"
+  start=$SECONDS
+  FM_TASKS_AXI_TIMEOUT=1 FM_FAKE_TASKS_AXI_IGNORE_TERM_PIDFILE="$pidfile" \
+    run_drain_with_backlog "$dir" "$state" "$out" \
+    || fail "drain failed after a TERM-ignoring ready lookup"
+  elapsed=$((SECONDS - start))
+  pid=$(cat "$pidfile" 2>/dev/null) || fail "the ready lookup never started"
+  for ((i = 0; i < 20; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null
+    fail "a TERM-ignoring tasks-axi ready outlived the drain (pid $pid)"
+  fi
+  [ "$elapsed" -lt 10 ] || fail "the drain waited ${elapsed}s for a TERM-ignoring ready lookup"
+  grep -F 'heartbeat' "$out" >/dev/null \
+    || fail "the drain did not present the heartbeat after the lookup timed out"
+  if grep -F 'READY WORK (queued' "$out" >/dev/null; then
+    fail "a timed-out ready lookup printed READY WORK"
+  fi
+  pass "a TERM-ignoring ready lookup is killed at the bound and the drain continues"
 }
 
 test_manual_backlog_suppresses_ready_work() {
@@ -427,6 +465,7 @@ test_ready_work_only_on_heartbeat
 test_absent_flag_keeps_heartbeat_drain_unchanged
 test_large_drain_rows_reach_ready_lookup
 test_stalled_backlog_gate_does_not_block_drain
+test_term_ignoring_ready_lookup_is_killed_at_the_bound
 test_manual_backlog_suppresses_ready_work
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it

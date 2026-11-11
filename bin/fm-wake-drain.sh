@@ -800,9 +800,7 @@ print_status_sections() {
 
 # shellcheck disable=SC2329 # Called through declare -f/eval in the timed child.
 print_ready_work_section() {  # <deduped-raw-rows>
-  local rows=$1 ready gate_status ready_status FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
-  case "$FM_TASKS_AXI_TIMEOUT" in ''|*[!0-9]*|0) FM_TASKS_AXI_TIMEOUT=10 ;; esac
-  export FM_TASKS_AXI_TIMEOUT
+  local rows=$1 ready gate_status ready_status
   if fm_backlog_transition_applies "$CONFIG" "$DATA" ship; then
     :
   else
@@ -817,9 +815,9 @@ print_ready_work_section() {  # <deduped-raw-rows>
     return 0
   fi
   if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready --file "$FM_BACKLOG_AXI_FILE" 2>&1)
+    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && tasks-axi ready --file "$FM_BACKLOG_AXI_FILE" 2>&1)
   else
-    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready 2>&1)
+    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && tasks-axi ready 2>&1)
   fi
   ready_status=$?
   if [ "$ready_status" -ne 0 ]; then
@@ -842,16 +840,19 @@ print_ready_work_section_bounded() {  # <deduped-raw-rows>
   case "$seconds" in ''|*[!0-9]*|0) seconds=10 ;; esac
   printf '%s\n' "$rows" | awk -F '\t' '$3 == "heartbeat" { found=1 } END { exit !found }' || return 0
   function_body=$(declare -f print_ready_work_section) || return 0
+  # This one bound owns every tasks-axi call of the lookup. They all stay in
+  # its process group, so a tasks-axi that ignores TERM still dies with the
+  # group at the bound instead of outliving the drain.
   # shellcheck disable=SC2016 # The child bash expands these values after the timeout starts.
   if printf '%s\n' "$rows" | fm_run_timed "$seconds" bash -c '
     eval "$1"
-    SCRIPT_DIR=$2 CONFIG=$3 DATA=$4 QUEUED_LIMIT=$5 FM_TASKS_AXI_TIMEOUT=$6
-    export SCRIPT_DIR CONFIG DATA QUEUED_LIMIT FM_TASKS_AXI_TIMEOUT
+    SCRIPT_DIR=$2 CONFIG=$3 DATA=$4 QUEUED_LIMIT=$5
+    export SCRIPT_DIR CONFIG DATA QUEUED_LIMIT
     . "$SCRIPT_DIR/fm-tasks-axi-lib.sh" || exit
     . "$SCRIPT_DIR/fm-backlog-transition-lib.sh" || exit
     rows=$(cat) || exit
     print_ready_work_section "$rows"
-  ' _ "$function_body" "$SCRIPT_DIR" "$CONFIG" "$DATA" "$QUEUED_LIMIT" "$seconds"; then
+  ' _ "$function_body" "$SCRIPT_DIR" "$CONFIG" "$DATA" "$QUEUED_LIMIT"; then
     return 0
   else
     status=$?
