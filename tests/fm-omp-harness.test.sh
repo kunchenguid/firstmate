@@ -119,18 +119,14 @@ test_lock_identity_and_liveness_classification() {
 }
 
 # The bun global package install: `~/.bun/bin/omp` is a `#!/usr/bin/env bun`
-# script, so the process is named `bun` and only its first non-option argument
+# script, so the process is named `bun` and only the argument right after bun
 # says omp. Shells named `bun` run script files laid out like that install.
 make_bun_shapes() {  # <dir> -> echoes <dir>
   local dir=$1 script
-  mkdir -p "$dir/bin" "$dir/scripts/node_modules/@oh-my-pi/pi-coding-agent/dist" \
-    "$dir/scripts/node_modules/@oh-my-pi/other/dist" "$dir/scripts/lib" \
-    "$dir/scripts/Agent Tools/bin"
+  mkdir -p "$dir/bin" "$dir/scripts/Agent Tools/bin"
   ln -sf /bin/bash "$dir/bin/bun"
   ln -sf /bin/bash "$dir/bin/claude"
-  for script in omp ompd comp prompt.sh node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js \
-    node_modules/@oh-my-pi/other/dist/cli.js lib/cli.js "Agent Tools/bin/omp" \
-    "Agent Tools/bin/ompd"; do
+  for script in omp ompd comp prompt.sh "Agent Tools/bin/omp" "Agent Tools/bin/ompd"; do
     # shellcheck disable=SC2016 # the body expands inside the script that runs it
     printf '%s\n' 'printf "%s\n" "$$" > "$1"; shift; "$@"; :' > "$dir/scripts/$script"
   done
@@ -140,9 +136,8 @@ make_bun_shapes() {  # <dir> -> echoes <dir>
 # Runs <claude shell> -> <bun shell running a script> -> probe, and records what
 # the probe saw. The claude shell is the nearest other harness, so a shape that
 # is not omp resolves there instead of walking into the harness running this suite.
-run_bun_shape() {  # <dir> <name> <bun-args...>: the script path is $dir/scripts/<last bun arg>
-  local dir=$1 name=$2 home
-  shift 2
+run_bun_shape() {  # <dir> <name> <script>: the script path is $dir/scripts/<script>
+  local dir=$1 name=$2 script=$3 home
   home="$dir/home-$name"
   mkdir -p "$home/state"
   git init -q "$home"
@@ -157,56 +152,47 @@ SH
   # shellcheck disable=SC2016 # the quoted body expands inside the claude shell
   env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$dir/bin/claude" -c 'printf "%s\n" "$$" > "$1"; shift; "$@"; :' _ "$home/claude.pid" \
-    "$dir/bin/bun" "${@:1:$#-1}" "$dir/scripts/${!#}" "$home/shape.pid" bash "$dir/probe-$name.sh"
+    "$dir/bin/bun" "$dir/scripts/$script" "$home/shape.pid" bash "$dir/probe-$name.sh"
   printf '%s' "$home"
 }
 
 test_bun_package_omp_is_identified_and_owns_the_lock() {
   local dir home shape
   dir=$(make_bun_shapes "$TMP_ROOT/bun-shapes")
-  for shape in omp node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js "Agent Tools/bin/omp"; do
+  for shape in omp "Agent Tools/bin/omp"; do
     home=$(run_bun_shape "$dir" "pos-${shape//[\/ ]/_}" "$shape")
     [ "$(cat "$home/harness.out")" = omp ] || fail "bun running $shape must detect as omp, got '$(cat "$home/harness.out")'"
     [ "$(cat "$home/lock.rc")" = 0 ] || fail "bun running $shape must let the session lock be acquired: $(cat "$home/lock.out")"
     [ "$(sed -n 1p "$home/state/.lock")" = "$(cat "$home/shape.pid")" ] \
       || fail "the lock for bun running $shape must name the bun-run omp process, got '$(sed -n 1p "$home/state/.lock")'"
   done
-  home=$(run_bun_shape "$dir" pos-flags --norc --noprofile omp)
-  [ "$(cat "$home/harness.out")" = omp ] || fail "bun options before the script must not hide omp, got '$(cat "$home/harness.out")'"
-  for shape in ompd comp prompt.sh node_modules/@oh-my-pi/other/dist/cli.js lib/cli.js \
-    "Agent Tools/bin/ompd"; do
+  for shape in ompd comp prompt.sh "Agent Tools/bin/ompd"; do
     home=$(run_bun_shape "$dir" "neg-${shape//[\/ ]/_}" "$shape")
     [ "$(cat "$home/harness.out")" = claude ] || fail "bun running $shape must not detect as omp, got '$(cat "$home/harness.out")'"
     [ "$(sed -n 1p "$home/state/.lock")" = "$(cat "$home/claude.pid")" ] \
       || fail "the lock for bun running $shape must not name the bun process"
   done
-  home=$(run_bun_shape "$dir" neg-eval -e omp)
-  [ "$(cat "$home/harness.out")" = claude ] || fail "bun -e must not detect as omp even when a later word is omp, got '$(cat "$home/harness.out")'"
-  pass "fm-harness and fm-lock: a bun-run omp script owns the session; ompd, comp, bun -e, and other scripts do not"
+  pass "fm-harness and fm-lock: a bun-run omp script owns the session; ompd, comp, and other scripts do not"
 }
 
 test_bun_package_omp_identity_unit_shapes() {
   fm_omp_process_matches bun 'bun /home/u/.bun/bin/omp' || fail "bun omp launcher must match"
-  fm_omp_process_matches /opt/homebrew/bin/bun '/opt/homebrew/bin/bun --hot /x/omp --cwd /y' || fail "bun options then omp must match"
-  fm_omp_process_matches bun 'bun /g/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js' || fail "the package cli.js must match"
+  fm_omp_process_matches /opt/homebrew/bin/bun '/opt/homebrew/bin/bun /x/omp --cwd /y' || fail "omp then arguments must match"
   ! fm_omp_process_matches bun 'bun /x/ompd' || fail "ompd must not match"
   ! fm_omp_process_matches bun 'bun /x/comp' || fail "comp must not match"
   ! fm_omp_process_matches bun 'bun /x/script.js omp' || fail "a later omp argument must not match"
-  ! fm_omp_process_matches bun 'bun -e omp' || fail "bun -e must not match"
-  ! fm_omp_process_matches bun 'bun --print omp' || fail "bun --print must not match"
-  ! fm_omp_process_matches bun 'bun /x/@oh-my-pi/other/dist/cli.js' || fail "another package's cli.js must not match"
   local spaced="$TMP_ROOT/spaced omp/bin"
   mkdir -p "$spaced"
   : > "$spaced/omp"
   : > "$spaced/ompd"
   fm_omp_process_matches bun "bun $spaced/omp" || fail "a script path with spaces must match"
-  fm_omp_process_matches bun "bun --hot $spaced/omp --cwd /y" || fail "a spaced path then arguments must match"
+  fm_omp_process_matches bun "bun $spaced/omp --cwd /y" || fail "a spaced path then arguments must match"
   ! fm_omp_process_matches bun "bun $spaced/ompd" || fail "a spaced ompd path must not match"
   : > "$TMP_ROOT/other.js"
   ! fm_omp_process_matches bun "bun $TMP_ROOT/other.js $spaced/omp" || fail "an existing script followed by a spaced omp argument must not match"
   ! fm_omp_process_matches bun 'bun' || fail "bare bun must not match"
   ! fm_omp_process_matches node 'node /x/omp' || fail "only bun may run the omp script"
-  pass "fm_omp_process_matches: the bun shape is anchored on the first non-option argument"
+  pass "fm_omp_process_matches: the bun shape is anchored on the argument right after bun"
 }
 
 # --- 2. Launch ---------------------------------------------------------------

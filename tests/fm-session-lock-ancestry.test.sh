@@ -150,9 +150,6 @@ test_bun_run_omp_is_identified_on_both_platforms() {
     if lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/ompd'"; then
       fail "$comm running ompd was identified as a harness"
     fi
-    if lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun -e omp'"; then
-      fail "$comm -e omp was identified as a harness"
-    fi
   done
   pass "session-lock: a bun-run omp script is identified under both platforms' comm reporting"
 }

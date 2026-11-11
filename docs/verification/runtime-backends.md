@@ -3433,8 +3433,8 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 
 `ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
 The bun global package (`bun install -g @oh-my-pi/pi-coding-agent`) installs `~/.bun/bin/omp` as a symlink to `dist/cli.js` with a `#!/usr/bin/env bun` shebang, so its process is named `bun` and only its arguments (`bun <path>/omp`) name omp.
-`bin/fm-omp-process-lib.sh` owns both shapes: the exact name `omp`, or `bun` whose first non-option argument is a script named exactly `omp` or the package's `@oh-my-pi/pi-coding-agent/dist/cli.js`.
-`ompd`, `comp`, `bun -e omp`, another script followed by an `omp` argument, and another package's `dist/cli.js` never match.
+`bin/fm-omp-process-lib.sh` owns both shapes: the exact name `omp`, or `bun` whose argument right after bun is a script named exactly `omp`, including an install path that contains spaces.
+`ompd`, `comp`, and another script followed by an `omp` argument never match.
 `tests/fm-omp-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin these shapes with real processes; the former also drives `bin/fm-harness.sh` and `bin/fm-lock.sh` from a bun-run script.
 
 The token-free guard refreshes the installed-omp evidence and spends no model tokens: it starts omp in JSON-RPC mode with no prompt, and a loaded extension runs `bin/fm-harness.sh` and `bin/fm-lock.sh` from inside that process.
