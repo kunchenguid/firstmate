@@ -193,7 +193,11 @@ SH
 # (bin/fm-auggie-lib.sh owns the rule).
 test_auggie_node_bundle_is_identified_by_its_package_script() {
   local dir fakebin pkg link comm args
-  dir="$TMP_ROOT/auggie"
+  # PID 2147483647 cannot expose a real /proc argv, so these cases exercise
+  # the macOS ps fallback on either platform. The shorter existing file
+  # ensures extraction chooses the full script path, not the first file.
+  dir="$TMP_ROOT/auggie Agent Tools"
+  : > "$TMP_ROOT/auggie"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state" "$dir/prefix/bin" "$dir/notes/auggie-notes" "$dir/other"
   pkg="$dir/prefix/lib/node_modules/@augmentcode/auggie"
@@ -233,11 +237,22 @@ SH
       [ \"\$(fm_harness_ancestry_pid)\" = 2147483647 ] || exit 1
       fm_harness_pid_alive 2147483647 || exit 2
       fm_session_lock_owned_by_self '$dir/state' || exit 3
+      fm_session_lock_pid_blocks_reclaim 2147483647 || exit 4
+      fm_session_lock_inspect '$dir/state'
+      [ \"\$FM_LOCK_INSPECT_STATE\" = held ] || exit 5
+      [ \"\$FM_LOCK_INSPECT_LIVE_HARNESS\" = true ] || exit 6
+      [ \"\$(bash '$ROOT/bin/fm-harness.sh' ancestry 2147483647)\" = 'comm auggie' ] || exit 7
     "
   }
 
+  # The extracted path is a public result too: the oracle is the actual
+  # symlink created above, even with an existing shorter prefix and CLI args.
+  lib_eval "$fakebin" "
+    [ \"\$(fm_auggie_script_arg 'node --no-warnings $link --resume session' 2147483647)\" = '$link' ]
+  " || fail "auggie: flattened ps args did not preserve the complete script path"
+
   for comm in node-MainThread MainThread node /usr/local/bin/node; do
-    for args in "node $link" "node --no-warnings $link" "node $pkg/auggie-v2.mjs"; do
+    for args in "node $link" "node --no-warnings $link --resume session" "node $pkg/auggie-v2.mjs"; do
       auggie_owns "$comm" "$args" \
         || fail "auggie: comm '$comm' args '$args' was not identified as the lock-holding harness"
     done

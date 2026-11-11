@@ -59,8 +59,10 @@ fm_auggie_path_is_auggie() {  # <path>
 # Print the first non-flag argument after argv[0], from the live process's
 # NUL-delimited argv when [pid] is readable under /proc (which keeps a script
 # path containing spaces intact), otherwise from the flattened <args> string.
+# For flattened args, prefer the longest space-joined prefix after interpreter
+# flags that names an existing file, preserving script paths containing spaces.
 fm_auggie_script_arg() {  # <args> [pid]
-  local args=$1 pid=${2:-} token index=0
+  local args=$1 pid=${2:-} token index=0 candidate='' script=''
   local -a words=()
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
     while IFS= read -r -d '' token; do
@@ -73,9 +75,17 @@ fm_auggie_script_arg() {  # <args> [pid]
   fi
   read -r -a words <<<"$args" || [ "${#words[@]}" -gt 0 ] || return 1
   for token in "${words[@]:1}"; do
-    case "$token" in -*) ;; *) printf '%s\n' "$token"; return 0 ;; esac
+    if [ -z "$candidate" ]; then
+      case "$token" in -*) continue ;; esac
+      candidate=$token
+      script=$token
+    else
+      candidate="$candidate $token"
+    fi
+    [ ! -f "$candidate" ] || script=$candidate
   done
-  return 1
+  [ -n "$script" ] || return 1
+  printf '%s\n' "$script"
 }
 
 # True when the process described by command name $1 and full argument string
