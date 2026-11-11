@@ -243,7 +243,7 @@ bound() {  # <inventory-timeout>
 # command under its bound and record {rc, timedout, timeout, stdout, stderr}.
 run_owner() {
   local fact=$1 timeout=$2 env_json=$3 command_json=$4 rc=0 line
-  local -a envs=("FM_HOME=$FM_HOME") argv=()
+  local -a envs=("FM_HOME=$FM_HOME" "FM_WAKE_READ_ONLY=1") argv=()
   while IFS= read -r line; do
     envs+=("$line")
   done < <(printf '%s' "$env_json" | jq -r 'to_entries[] | "\(.key)=\(.value)"')

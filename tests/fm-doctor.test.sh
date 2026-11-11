@@ -506,6 +506,33 @@ test_run_is_read_only() {
   after=$(cd "$dir/home" && find . -exec ls -ld {} + | sort)
   [ "$before" = "$after" ] || fail "a doctor run changed the home"$'\n'"$before"$'\n---\n'"$after"
   pass "a doctor run writes nothing to the home"
+
+  dir=$(new_case readonly-uninitialized)
+  rmdir "$dir/home/state"
+  before=$(cd "$dir/home" && find . -exec ls -ld {} + | sort)
+  local ready area format
+  ready=$(FM_HOME="$dir/home" "$ROOT/bin/fm-inbox.sh" ready) || fail "readiness inspection failed"
+  [ "$(printf '%s\n' "$ready" | jq -r '.lock.state')" = free ] || fail "uninitialized home must have a free lock"
+  [ "$(printf '%s\n' "$ready" | jq -r '.can_receive')" = false ] || fail "uninitialized home cannot receive"
+  after=$(cd "$dir/home" && find . -exec ls -ld {} + | sort)
+  [ "$before" = "$after" ] || fail "readiness inspection changed the uninitialized home"
+  for area in all supervision; do
+    for format in text json; do
+      case "$area:$format" in
+        all:text) doctor "$dir" ;;
+        all:json) doctor "$dir" --json ;;
+        supervision:text) doctor "$dir" --area supervision ;;
+        supervision:json) doctor "$dir" --area supervision --json ;;
+      esac
+      [ "$DOCTOR_RC" -eq 0 ] || fail "uninitialized doctor exited $DOCTOR_RC"
+      if [ "$format" = json ]; then
+        assert_status "$DOCTOR_OUT" supervision/ready warn "uninitialized home"
+      fi
+      after=$(cd "$dir/home" && find . -exec ls -ld {} + | sort)
+      [ "$before" = "$after" ] || fail "$area $format doctor changed the uninitialized home"
+    done
+  done
+  pass "readiness and doctor leave an absent state directory absent"
 }
 
 test_missing_jq_is_a_plain_failure() {
