@@ -73,6 +73,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -96,6 +98,10 @@ task_id_or_die() {
 
 meta_path() {
   printf '%s/%s.meta' "$STATE" "$1"
+}
+
+incarnation_key() {
+  printf '%s|%s|%s' "$(fm_meta_get "$1" worktree)" "$(fm_meta_get "$1" branch)" "$(fm_meta_get "$1" project)"
 }
 
 status_path() {
@@ -367,7 +373,7 @@ cmd_bind() {
 cmd_consider() {
   local id snapshot='' account='' pane='' mode meta kind array cur_h cur_m cur_e
   local rows='' idx harness model effort provider qscope last_match=-1 exact_match=-1 wild_match=-1
-  local ch='' cm='' ce='' reason='' epoch note rc=0
+  local ch='' cm='' ce='' reason='' epoch note rc=0 key_before gen_before control_rc lock
   [ "$#" -ge 1 ] || usage
   id=$(task_id_or_die "$1")
   shift
@@ -481,10 +487,16 @@ cmd_consider() {
   fi
   epoch=$(date +%s)
   note='The previous run stopped on a usage limit. Continue this task from the existing local copy, including uncommitted work.'
+  key_before=$(incarnation_key "$meta")
+  gen_before=$(fm_meta_get "$meta" spawn_gen)
   "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"
   control_rc=$?
-  if [ ! -f "$meta" ]; then
-    printf 'task %s was retired; nothing recorded\n' "$id" >&2
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$meta" ] || [ "$(incarnation_key "$meta")" != "$key_before" ] \
+    || { [ "$control_rc" -ne 0 ] && [ "$(fm_meta_get "$meta" spawn_gen)" != "$gen_before" ]; }; then
+    fm_lock_release "$lock"
+    printf 'task %s was retired or replaced; nothing recorded\n' "$id" >&2
     return 1
   fi
   if [ "$control_rc" -ne 0 ]; then
@@ -493,6 +505,7 @@ cmd_consider() {
     if ! status_has_key "$id" blocked midtask-fallback; then
       append_status "$id" "blocked [at=$epoch] [key=midtask-fallback]: relaunch onto the next profile failed; the local copy was kept"
     fi
+    fm_lock_release "$lock"
     return 1
   fi
   printf 'midtask_switch=%s\n' \
@@ -501,6 +514,7 @@ cmd_consider() {
     append_status "$id" "resolved [at=$epoch] [key=midtask-fallback]: relaunched on the next eligible profile"
   fi
   append_status "$id" "switched [at=$epoch]: $cur_h $cur_m $cur_e -> $ch $cm $ce because a usage limit stopped the worker"
+  fm_lock_release "$lock"
   printf 'relaunched: %s %s %s\n' "$ch" "$cm" "$ce"
 }
 
