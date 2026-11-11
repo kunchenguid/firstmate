@@ -3584,8 +3584,10 @@ fi
 if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
   preflight_args=("$HARNESS" "${MODEL:-default}" --effort "${EFFORT:-default}")
   dispatch_provider='' dispatch_scope='' dispatch_quota=''
-  if [ -f "$DISPATCH_RECORD" ] && command -v jq >/dev/null 2>&1; then
-    dispatch_quota=$(jq -r '[.profile.provider // "", .profile.quota_scope // ""] | @tsv' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_quota=
+  if [ "$RELAUNCH" -eq 0 ] && [ -f "$DISPATCH_RECORD" ] && command -v jq >/dev/null 2>&1; then
+    dispatch_quota=$(jq -r --arg h "$HARNESS" --arg m "${MODEL:-default}" \
+      'select((.profile.harness // "") == $h and (((.profile.model // "") == $m) or ((.profile.model // "") == "" and $m == "default"))) | [.profile.provider // "", .profile.quota_scope // ""] | @tsv' \
+      "$DISPATCH_RECORD" 2>/dev/null) || dispatch_quota=
     IFS=$'\t' read -r dispatch_provider dispatch_scope <<<"$dispatch_quota" || true
     [ -z "$dispatch_provider" ] || preflight_args+=(--provider "$dispatch_provider")
     [ -z "$dispatch_scope" ] || preflight_args+=(--quota-scope "$dispatch_scope")

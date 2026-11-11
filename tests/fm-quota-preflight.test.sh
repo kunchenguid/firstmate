@@ -126,6 +126,30 @@ EOF
   pass "fm-quota-preflight: explicit lanes and account roots select the launched account"
 }
 
+test_ordinary_claude_account_unsets_config_root() {
+  local out
+  cat > "$TMP_ROOT/fakebin/quota-axi" <<EOF
+#!/usr/bin/env bash
+if [ "\${CLAUDE_CONFIG_DIR+x}" = x ]; then
+  printf 'set=%s\\n' "\$CLAUDE_CONFIG_DIR" > "$TMP_ROOT/ordinary-root-seen"
+else
+  printf 'unset\\n' > "$TMP_ROOT/ordinary-root-seen"
+fi
+printf '%s\\n' "\$*" > "$TMP_ROOT/ordinary-args-seen"
+cat "$SNAP"
+EOF
+  chmod +x "$TMP_ROOT/fakebin/quota-axi"
+  out=$(env PATH="$TMP_ROOT/fakebin:$PATH" CLAUDE_CONFIG_DIR="$TMP_ROOT/wrong-root" QUOTA_AXI_SNAPSHOT=wrong \
+    FM_QUOTA_PREFLIGHT=on FM_CONFIG_OVERRIDE="$CONFIG" bash "$PREFLIGHT" claude fable --provider claude --account ordinary)
+  assert_contains "$out" "provider claude is exhausted_now at model:fable" \
+    "ordinary Claude preflight should still inspect the ordinary account"
+  [ "$(cat "$TMP_ROOT/ordinary-root-seen")" = unset ] \
+    || fail "ordinary Claude preflight should unset CLAUDE_CONFIG_DIR"
+  [ "$(cat "$TMP_ROOT/ordinary-args-seen")" = "--provider claude --json" ] \
+    || fail "ordinary Claude preflight should avoid profile-only mode"
+  pass "fm-quota-preflight: ordinary Claude preserves its unset config-root contract"
+}
+
 test_quiet_without_evidence() {
   local out rc
   out=$(preflight pi some/unknown-model); rc=$?
@@ -147,4 +171,5 @@ test_quiet_without_evidence() {
 test_exhausted_candidate_gets_one_notice
 test_declared_provider_and_scope_apply
 test_account_scoped_preflight
+test_ordinary_claude_account_unsets_config_root
 test_quiet_without_evidence

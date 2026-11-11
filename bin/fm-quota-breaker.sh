@@ -118,6 +118,8 @@ done < "$CONFIG/quota-breaker"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 now=$(date +%s)
 for meta in "$STATE"/*.meta; do
@@ -145,15 +147,30 @@ for meta in "$STATE"/*.meta; do
   row=${verdict#*$'\t'}
   gen=$(fm_meta_get "$meta" spawn_gen)
   record="$STATE/$id.quota-breaker"
+  breaker_lock="$STATE/.quota-breaker-$id.lock"
+  fm_lock_try_acquire "$breaker_lock" || continue
   if [ -f "$record" ] \
      && [ "$(sed -n 's/^class=//p' "$record")" = "$class" ] \
      && [ "$(sed -n 's/^spawn_gen=//p' "$record")" = "$gen" ]; then
     last=$(sed -n 's/^epoch=//p' "$record")
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
-    [ $((now - last)) -ge "$REALERT" ] || continue
+    if [ $((now - last)) -lt "$REALERT" ]; then
+      fm_lock_release "$breaker_lock"
+      continue
+    fi
   fi
-  printf 'class=%s\nspawn_gen=%s\nepoch=%s\n' "$class" "$gen" "$now" > "$record" || continue
+  breaker_tmp=$(mktemp "$STATE/.$id.quota-breaker.XXXXXX") || {
+    fm_lock_release "$breaker_lock"
+    continue
+  }
+  if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\n' "$class" "$gen" "$now" > "$breaker_tmp" \
+    || ! mv -f -- "$breaker_tmp" "$record"; then
+    rm -f -- "$breaker_tmp"
+    fm_lock_release "$breaker_lock"
+    continue
+  fi
   printf 'quota-breaker %s %s harness=%s model=%s: %s\n' "$id" "$class" \
     "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$row"
+  fm_lock_release "$breaker_lock"
 done
 exit 0

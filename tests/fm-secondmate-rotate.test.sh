@@ -166,6 +166,21 @@ SH
   pass "fm-secondmate-rotate tokens: Herdr bare IDs select exact, unambiguous Pi transcripts"
 }
 
+test_account_pinned_transcript_root_is_measured() {
+  local dir out account_root transcript_dir
+  dir=$(new_case account-root)
+  add_mate "$dir" pinned pi 900000
+  account_root="$dir/pi-alt"
+  printf 'account=%s\n' "$account_root" >> "$dir/home/state/pinned.meta"
+  transcript_dir="$account_root/sessions/--$(printf '%s' "${dir#/}/homes/pinned" | tr '/\\:' '---')--"
+  mkdir -p "$transcript_dir"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","usage":{"totalTokens":321000}}}' \
+    > "$transcript_dir/account.jsonl"
+  out=$(run_rotate "$dir" tokens pinned)
+  [ "$out" = 321000 ] || fail "a pinned account root must supply the mate transcript, got: $out"
+  pass "fm-secondmate-rotate tokens: account-pinned Pi roots are measured"
+}
+
 test_scan_rotates_only_due_mates_once_per_window() {
   local dir out
   dir=$(new_case scan)
@@ -243,6 +258,7 @@ test_watcher_sweep_queues_the_rotation() {
 
 test_tokens_reads_each_measured_harness
 test_bound_herdr_id_selects_exact_session
+test_account_pinned_transcript_root_is_measured
 test_scan_rotates_only_due_mates_once_per_window
 test_invalid_restart_does_not_consume_rotation_window
 test_watcher_sweep_queues_the_rotation

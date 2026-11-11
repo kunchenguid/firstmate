@@ -80,6 +80,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-warm-compact-lib.sh
@@ -178,16 +182,27 @@ pi_context_tokens() {  # <transcript>
 
 # mate_context_tokens <id>: print the measured size, or fail.
 mate_context_tokens() {  # <id>
-  local id=$1 meta harness home transcript='' dir tokens
+  local id=$1 meta harness home account acct_cfg resolved transcript='' dir agent_root claude_root tokens
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || return 1
   harness=$(fm_meta_get "$meta" harness)
   home=$(fm_meta_get "$meta" home)
   [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
   case "$home" in /*) ;; *) return 1 ;; esac
+  account=$(fm_meta_get "$meta" account)
+  if [ -z "$account" ]; then
+    acct_cfg=$(fm_worker_account_config "$harness" "$CONFIG" "$id" 2>/dev/null) || acct_cfg=
+    resolved=$(fm_worker_account_resolve "$harness" "$acct_cfg" account 2>/dev/null || true)
+    account=${resolved%%$'\t'*}
+  fi
   case "$harness" in
     pi|pi-signed)
-      dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/--$(printf '%s' "${home#/}" | tr '/\\:' '---')--"
+      case "$account" in
+        /*) agent_root=$account ;;
+        ordinary) agent_root="$HOME/.pi/agent" ;;
+        *) agent_root="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" ;;
+      esac
+      dir="$agent_root/sessions/--$(printf '%s' "${home#/}" | tr '/\\:' '---')--"
       if transcript=$(pi_bound_session "$meta" "$dir"); then
         :
       else
@@ -199,7 +214,12 @@ mate_context_tokens() {  # <id>
       tokens=$(pi_context_tokens "$transcript")
       ;;
     claude)
-      dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$home" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
+      case "$account" in
+        /*) claude_root=$account ;;
+        ordinary) claude_root="$HOME/.claude" ;;
+        *) claude_root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
+      esac
+      dir="$claude_root/projects/$(printf '%s' "$home" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
       transcript=$(newest_jsonl "$dir") || return 1
       tokens=$(fm_warm_compact_context_tokens "$transcript")
       ;;
@@ -263,19 +283,38 @@ for meta in "$STATE"/*.meta; do
   [ "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" = alive ] || continue
   tokens=$(mate_context_tokens "$id") || continue
   [ "$tokens" -ge "$ROTATE_THRESHOLD" ] || continue
-  [ $((now - $(last_rotation "$id"))) -ge "$ROTATE_WINDOW" ] || continue
   case "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" in
     idle*) ;;
     *) continue ;;
   esac
-  printf 'epoch=%s\ntokens=%s\nthreshold=%s\n' "$now" "$tokens" "$ROTATE_THRESHOLD" \
-    > "$STATE/$id.rotation" || continue
+  rotation_lock="$STATE/.rotate-$id.lock"
+  fm_lock_try_acquire "$rotation_lock" || continue
+  if [ $((now - $(last_rotation "$id"))) -lt "$ROTATE_WINDOW" ]; then
+    fm_lock_release "$rotation_lock"
+    continue
+  fi
+  rotation_tmp=$(mktemp "$STATE/.$id.rotation.XXXXXX") || {
+    fm_lock_release "$rotation_lock"
+    continue
+  }
+  if ! printf 'epoch=%s\ntokens=%s\nthreshold=%s\n' "$now" "$tokens" "$ROTATE_THRESHOLD" > "$rotation_tmp"; then
+    rm -f -- "$rotation_tmp"
+    fm_lock_release "$rotation_lock"
+    continue
+  fi
+  if ! mv -f -- "$rotation_tmp" "$STATE/$id.rotation"; then
+    rm -f -- "$rotation_tmp"
+    fm_lock_release "$rotation_lock"
+    continue
+  fi
   if launch_rotation "$id"; then
     printf 'rotating %s: context %s tokens >= %s; persist-then-restart onto a fresh session started (report: state/%s.rotation.log)\n' \
       "$id" "$tokens" "$ROTATE_THRESHOLD" "$id"
+    fm_lock_release "$rotation_lock"
   else
     rm -f -- "$STATE/$id.rotation"
     printf 'error: could not start secondmate rotation for %s; no rotation window was consumed\n' "$id" >&2
+    fm_lock_release "$rotation_lock"
   fi
 done
 exit 0

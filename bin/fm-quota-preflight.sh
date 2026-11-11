@@ -63,7 +63,6 @@ command -v jq >/dev/null 2>&1 || exit 0
 [ "$MODEL" != default ] || MODEL=
 if [ -z "$ACCOUNT_ROOT" ] && [ -n "$ACCOUNT" ]; then
   case "$ACCOUNT" in
-    ordinary) ACCOUNT_ROOT="${HOME:-}/.claude" ;;
     /*) ACCOUNT_ROOT=$ACCOUNT ;;
   esac
 fi
@@ -113,6 +112,15 @@ else
         ;;
       pi|pi-signed)
         quota_command=(env -u QUOTA_AXI_SNAPSHOT PI_CODING_AGENT_DIR="$ACCOUNT_ROOT" quota-axi --json)
+        ;;
+    esac
+  elif [ "$ACCOUNT" = ordinary ]; then
+    case "$HARNESS" in
+      claude)
+        quota_command=(env -u QUOTA_AXI_SNAPSHOT -u CLAUDE_CONFIG_DIR quota-axi --provider claude --json)
+        ;;
+      pi|pi-signed)
+        quota_command=(env -u QUOTA_AXI_SNAPSHOT PI_CODING_AGENT_DIR="${HOME:-}/.pi/agent" quota-axi --json)
         ;;
     esac
   fi
