@@ -197,6 +197,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-auggie-lib.sh" "$dir/bin/fm-auggie-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
@@ -1498,6 +1499,7 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-auggie-lib.sh" "$dir/bin/fm-auggie-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"

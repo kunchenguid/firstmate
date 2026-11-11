@@ -22,7 +22,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
-- Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Stdin JSON at `.tool_input.command` for Claude, Codex, and Auggie.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode, Pi, pi-signed, and omp.
 - `--background` as a compatibility-only field that never changes the decision.
@@ -154,6 +154,7 @@ Prose may improve without changing adapter behavior.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
+- Auggie blocks on exit 2 and passes stderr to the agent; it also honors the default stdout `decision=deny` object.
 - OpenCode throws only when the checker exits 2.
 - Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
 
@@ -167,6 +168,7 @@ Prose may improve without changing adapter behavior.
 | OpenCode | `output.args.command` for the 1.x `bash` tool; `event.input.command` for the 2.x `shell` tool's `execute.before` event | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
+| Auggie | `.tool_input.command` | `.augment/settings.json` matches the `bash` tool (and its legacy `launch-process` name) and forwards stdin in default mode, anchored at `${AUGMENT_PROJECT_DIR:-$(pwd -P)}` and failing open when that root has no checker; the cd-guard rides the same entry. Live blocking is unverified ([`verification/auggie.md`](verification/auggie.md)). |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
 
 Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.

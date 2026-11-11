@@ -59,7 +59,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, Cursor Agent CLI, or Antigravity CLI (`agy`).
+- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, Cursor Agent CLI, Antigravity CLI (`agy`), or Augment's `auggie`.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -78,6 +78,7 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
 Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-local `.agents/hooks.json` whose Stop hook parks on the watcher between turns like Cursor's.
+Augment's `auggie` is verified as a primary only, using Codex-style bounded foreground checkpoints with no enforced turn-end guard and no session-open hook; [turn-end guard compatibility limits](docs/turnend-guard.md#compatibility-limits) list the tradeoffs.
 
 ### Install and launch
 

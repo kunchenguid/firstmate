@@ -45,6 +45,7 @@ Codex's interactive TUI has verified session-open delivery only on the native ve
 | omp | Run | [omp](#omp) |
 | Antigravity (agy) | Run | [Antigravity (agy)](#antigravity-agy) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
+| Auggie | Uncovered | [Auggie](#auggie) |
 
 ### Why the run tier exists
 
@@ -391,6 +392,13 @@ A Cursor primary does not re-emit its digest after a compaction.
 Cursor's compaction surface is uncovered in the same sense as compaction in [Codex's interactive TUI](#codex-interactive-tui).
 Firstmate registers nothing for `preCompact`.
 So a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
+
+### Auggie
+
+Auggie is uncovered and has no tracked session-open transport.
+The tracked `.augment/settings.json` registers no `SessionStart` hook, so nothing runs the digest before the first turn.
+An auggie primary runs `bin/fm-session-start.sh` itself, as `AGENTS.md` section 3 requires of any harness without a run-tier adapter.
+Designing a run-tier transport for auggie is deliberately deferred.
 
 ## Regression coverage
 

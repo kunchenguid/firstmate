@@ -271,6 +271,71 @@ SH
   pass "an interpreter script-path match answers alone but never outranks a marker"
 }
 
+# auggie ships as a node bundle with no identity marker: its process reads comm
+# node-MainThread (or MainThread, or node) and only its script argument, a
+# symlink into the @augmentcode/auggie package, names it. Verified live on
+# auggie 1.2.0 with Node v26. That package path is structural evidence, so the
+# verdict is comm strength and outranks a retained foreign marker, unlike the
+# generic interpreter-args match above. The interpreter running an unrelated
+# script, under the same retained marker, is the divergence that keeps it
+# non-vacuous. Each probe runs ORPHANED, so the walk cannot climb into the
+# session running this suite, which may itself be a real harness.
+orphan_probe() {  # <out> <VAR=VAL ...> -- <command...>
+  local out=$1 i=0
+  shift
+  local -a assignments=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    assignments+=("$1")
+    shift
+  done
+  shift
+  rm -f "$out"
+  # shellcheck disable=SC2016 # the child shell expands its own parameters
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS ${assignments[@]+"${assignments[@]}"} \
+    FM_PROBE_OUT="$out" bash -c '{ "$@" > "$FM_PROBE_OUT.tmp" 2>/dev/null; mv "$FM_PROBE_OUT.tmp" "$FM_PROBE_OUT"; } &' _ "$@"
+  while [ "$i" -lt 200 ] && [ ! -e "$out" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$out" ] || fail "an orphaned harness probe never finished: $*"
+  cat "$out"
+}
+
+test_auggie_node_bundle_decides_at_comm_strength() {
+  local dir node pkg link other got interp out
+  dir="$TMP_ROOT/auggie"
+  out="$dir/probe.out"
+  pkg="$dir/prefix/lib/node_modules/@augmentcode/auggie"
+  mkdir -p "$pkg" "$dir/prefix/bin"
+  # shellcheck disable=SC2016 # the fixture script expands its own parameters
+  printf 'r=$("%s" "$@"); printf %%s "$r"\n' "$HARNESS" > "$pkg/auggie-v2.mjs"
+  link="$dir/prefix/bin/auggie"
+  ln -s ../lib/node_modules/@augmentcode/auggie/auggie-v2.mjs "$link"
+  other="$dir/build.mjs"
+  cp "$pkg/auggie-v2.mjs" "$other"
+  for interp in node-MainThread MainThread node; do
+    node=$(named_bin "$dir/$interp" "$interp")
+
+    got=$(orphan_probe "$out" -- "$node" "$link")
+    [ "$got" = auggie ] || fail "$interp auggie ancestry alone resolved '$got', expected auggie"
+
+    got=$(orphan_probe "$out" CLAUDECODE=1 -- "$node" "$link")
+    [ "$got" = auggie ] || fail "$interp auggie ancestry with a retained CLAUDECODE resolved '$got', expected auggie"
+
+    got=$(orphan_probe "$out" PI_CODING_AGENT=true -- "$node" "$link")
+    [ "$got" = auggie ] || fail "$interp auggie ancestry with a retained PI_CODING_AGENT resolved '$got', expected auggie"
+
+    got=$(orphan_probe "$out" -- "$node" "$link" ancestry)
+    [ "$got" = "comm auggie" ] || fail "$interp auggie ancestry verdict was '$got', expected comm strength"
+
+    got=$(orphan_probe "$out" CLAUDECODE=1 -- "$node" "$other")
+    [ "$got" = claude ] \
+      || fail "$interp running an unrelated script under CLAUDECODE resolved '$got', expected claude (the comm alone decided)"
+  done
+  pass "an auggie node bundle decides at comm strength from its package script, over a retained marker"
+}
+
 # The real Codex install topology, modelled because the fix depends on it. codex
 # ships as a `node` npm shim that spawns its native `codex` binary as a child and
 # waits, so BOTH are in a tool subprocess's parent chain and the native name is
@@ -832,6 +897,7 @@ test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
 test_pi_signed_survives_agreeing_ancestry
 test_interpreter_args_match_does_not_outrank_a_marker
+test_auggie_node_bundle_decides_at_comm_strength
 test_native_child_of_an_interpreter_shim_decides_at_comm_strength
 test_harness_at_namespace_pid1_is_examined
 test_descent_probe_reaches_a_strength_the_top_of_session_cannot

@@ -2663,7 +2663,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | auggie | devin | commandcode | polytoken | cortex | kiro | hermes)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -3203,6 +3203,19 @@ launch_template() {
   esac
 }
 
+# auggie is verified as a PRIMARY harness only: it has no launch template and no
+# verified worker lifecycle, so an explicit or resolved auggie worker is refused
+# with that reason rather than the generic unknown-harness one. An auggie
+# primary with an absent or "default" config/crew-harness resolves here too.
+refuse_primary_only_harness() {  # <harness> <source>
+  case "$1" in
+    auggie)
+      echo "error: auggie is verified as a primary harness only and cannot run a crewmate, scout, or secondmate; $2 must name a verified worker harness" >&2
+      exit 1
+      ;;
+  esac
+}
+
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -3236,6 +3249,7 @@ case "$ARG3" in
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
     harness_src='config/crew-harness'
   fi
+  refuse_primary_only_harness "$HARNESS" "$harness_src"
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
     echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
     exit 1
@@ -3243,6 +3257,7 @@ case "$ARG3" in
   ;;
 *)
   HARNESS=$ARG3
+  refuse_primary_only_harness "$HARNESS" 'the explicit harness argument'
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
     echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
     exit 1

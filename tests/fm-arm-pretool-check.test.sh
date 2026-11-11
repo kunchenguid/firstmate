@@ -448,6 +448,52 @@ test_allow_is_silent_both_modes() {
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
 
+# Auggie runs each tracked .augment/settings.json PreToolUse command through the
+# system shell with the hook payload on stdin; exit 2 blocks the tool call and
+# stderr reaches the agent. Drive the registration itself with an auggie-shaped
+# payload rather than calling the checker directly.
+test_auggie_settings_hook_denies_through_the_registration() {
+  local settings cmd matcher payload deny allow out err rc empty how scratch
+  settings="$ROOT/.augment/settings.json"
+  [ -f "$settings" ] || fail "auggie: .augment/settings.json is not tracked"
+  matcher=$(jq -r '.hooks.PreToolUse[] | select(any(.hooks[]; .command | contains("fm-arm-pretool-check.sh"))) | .matcher' "$settings")
+  printf 'bash\n' | grep -Eiq -- "$matcher" || fail "auggie: the seatbelt matcher '$matcher' does not match the bash tool"
+  cmd=$(jq -r '.hooks.PreToolUse[].hooks[] | select(.command | contains("fm-arm-pretool-check.sh")) | .command' "$settings")
+  [ -n "$cmd" ] || fail "auggie: no PreToolUse registration runs bin/fm-arm-pretool-check.sh"
+  deny=$(jq -cn '{hook_event_name:"PreToolUse",tool_name:"bash",tool_input:{command:"bin/fm-watch-arm.sh &"}}')
+  allow=$(jq -cn '{hook_event_name:"PreToolUse",tool_name:"bash",tool_input:{command:"exec bin/fm-watch-arm.sh"}}')
+  scratch=$(fm_test_tmproot fm-arm-pretool-auggie)
+  err="$scratch/stderr"
+
+  for payload in "$deny" "$allow"; do
+    for how in env cwd; do
+      if [ "$how" = env ]; then
+        out=$(cd /tmp && printf '%s' "$payload" | AUGMENT_PROJECT_DIR="$ROOT" sh -c "$cmd" 2>"$err")
+      else
+        out=$(cd "$ROOT" && printf '%s' "$payload" | env -u AUGMENT_PROJECT_DIR sh -c "$cmd" 2>"$err")
+      fi
+      rc=$?
+      if [ "$payload" = "$deny" ]; then
+        [ "$rc" -eq 2 ] || fail "auggie ($how): a backgrounded arm must be blocked with exit 2, got $rc"
+        jq -e '.systemMessage | test("\\[watcher-background\\]")' "$err" >/dev/null 2>&1 \
+          || fail "auggie ($how): the deny reason must reach stderr: $(cat "$err")"
+        printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null 2>&1 \
+          || fail "auggie ($how): stdout must carry decision=deny: $out"
+      else
+        [ "$rc" -eq 0 ] && [ -z "$out" ] && [ ! -s "$err" ] \
+          || fail "auggie ($how): the blessed arm must pass silently, got exit $rc: $out $(cat "$err")"
+      fi
+    done
+  done
+
+  empty="$scratch/empty"
+  mkdir -p "$empty"
+  out=$(printf '%s' "$deny" | AUGMENT_PROJECT_DIR="$empty" sh -c "$cmd" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "auggie: a root without the checker must fail open silently, got exit $rc: $out"
+  pass "auggie: the .augment/settings.json registration blocks a backgrounded arm, allows the blessed one, and fails open without the checker"
+}
+
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 #
 # Delegated to bin/fm-lint.sh rather than calling shellcheck directly, because
@@ -480,4 +526,5 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
+test_auggie_settings_hook_denies_through_the_registration
 test_shellcheck_clean

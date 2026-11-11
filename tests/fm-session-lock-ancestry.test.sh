@@ -187,6 +187,81 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+# Auggie runs as a node bundle: comm reads node-MainThread (Node v26), a bare
+# MainThread (Node 24), or node, and only the script argument - a symlink into
+# the published @augmentcode/auggie package - carries the identity
+# (bin/fm-auggie-lib.sh owns the rule).
+test_auggie_node_bundle_is_identified_by_its_package_script() {
+  local dir fakebin pkg link comm args
+  dir="$TMP_ROOT/auggie"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/prefix/bin" "$dir/notes/auggie-notes" "$dir/other"
+  pkg="$dir/prefix/lib/node_modules/@augmentcode/auggie"
+  mkdir -p "$pkg/node_modules/dep"
+  : > "$pkg/auggie-v2.mjs"
+  : > "$pkg/node_modules/dep/cli.js"
+  : > "$dir/notes/auggie-notes/run.mjs"
+  : > "$dir/other/auggie-mcp"
+  : > "$dir/other/myauggie"
+  link="$dir/prefix/bin/auggie"
+  ln -s ../lib/node_modules/@augmentcode/auggie/auggie-v2.mjs "$link"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  600:comm=) printf '%s\n' "$FM_TEST_AUGGIE_COMM" ;;
+  600:args=) printf '%s\n' "$FM_TEST_AUGGIE_ARGS" ;;
+  600:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash -c bin/fm-session-start.sh' ;;
+  *:ppid=) printf '%s\n' 600 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '600\n' > "$dir/state/.lock"
+
+  auggie_owns() {  # <comm> <args>
+    FM_TEST_AUGGIE_COMM=$1 FM_TEST_AUGGIE_ARGS=$2 lib_eval "$fakebin" "
+      [ \"\$(fm_harness_ancestry_pid)\" = 600 ] || exit 1
+      fm_harness_pid_alive 600 || exit 2
+      fm_session_lock_owned_by_self '$dir/state' || exit 3
+    "
+  }
+
+  for comm in node-MainThread MainThread node /usr/local/bin/node; do
+    for args in "node $link" "node --no-warnings $link" "node $pkg/auggie-v2.mjs"; do
+      auggie_owns "$comm" "$args" \
+        || fail "auggie: comm '$comm' args '$args' was not identified as the lock-holding harness"
+    done
+  done
+
+  # Drive the signals apart: an interpreter comm with no auggie script, and the
+  # auggie script under a non-interpreter comm, must each fail on its own.
+  for args in node MainThread "node $dir/notes/auggie-notes/run.mjs" "node $dir/other/auggie-mcp" \
+    "node $dir/other/myauggie" "node $pkg/node_modules/dep/cli.js" "node /tmp/build.js --name auggie"; do
+    if auggie_owns node-MainThread "$args"; then
+      fail "auggie: an interpreter running '$args' was accepted as an auggie harness"
+    fi
+  done
+  if auggie_owns bash "bash $link"; then
+    fail "auggie: the auggie script under a non-interpreter comm was accepted as a harness"
+  fi
+  # The positive verdict above rests on the script path, not the comm: the same
+  # comm with an unrelated script is rejected while the auggie script is accepted.
+  if ! auggie_owns node-MainThread "node $link" || auggie_owns node-MainThread "node $dir/other/myauggie"; then
+    fail "auggie: the comm alone decided the verdict, so the script-path case is vacuous"
+  fi
+  pass "session-lock: an auggie node bundle is identified from its package script, and only from it"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -866,6 +941,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-auggie-lib.sh" "$dir/bin/fm-auggie-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
@@ -1645,6 +1721,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
+test_auggie_node_bundle_is_identified_by_its_package_script
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain

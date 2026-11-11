@@ -107,7 +107,7 @@ case "$HARNESS" in
   hermes)
     echo 'error: hermes is a crewmate/scout adapter only; primary supervision is unsupported' >&2
     exit 1 ;;
-  claude|codex|opencode|pi|grok|cursor|omp|agy) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|pi|grok|cursor|omp|agy|auggie) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -249,6 +249,9 @@ repair_line() {
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
+    auggie)
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" ', passing the bash tool an explicit timeout above that bound; no Stop hook can do it for you.'
+      ;;
     agy)
       if [ -n "$HOST_SNIPPET" ]; then
         printf '%s%s\n' "$prefix" 'supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh running the supervision host); inspect the hook registration and supervision host startup path before ending the turn.'
@@ -291,6 +294,9 @@ ordinary_wake_line() {
       ;;
     agy)
       printf '%s\n' '- Ordinary wake: the Stop-hook park (bin/fm-turnend-guard-agy.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      ;;
+    auggie)
+      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below, before this turn ends.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

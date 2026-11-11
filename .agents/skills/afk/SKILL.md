@@ -40,7 +40,7 @@ Hold-for-return is the default and the only reach profile this release records: 
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
-   - **Every other harness** (codex, opencode, omp, and cursor on a home that does not run the supervision host, and kimi): run `bin/fm-afk-launch.sh start`.
+   - **Every other harness** (codex, opencode, omp, and cursor on a home that does not run the supervision host, and kimi and auggie): run `bin/fm-afk-launch.sh start`.
      It is the single owner of the daemon terminal: on pane backends it creates a NON-VISIBLE tracked terminal and passes the captain endpoint as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
      On the t3code backend there is no terminal to create, so `start` refuses and only the native path above works; a Codex captain hosted by T3 Code has no away daemon (docs/t3code-backend.md "Active limits").
    Both daemon paths require the record `enter` wrote and share `bin/fm-afk-start.sh` as the daemon entry.
