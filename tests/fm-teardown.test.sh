@@ -98,6 +98,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_MV_FOR_TEST=$(command -v mv)
+export REAL_MV_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -6531,6 +6533,43 @@ test_cleanup_keeps_watchers_markers_of_a_shared_endpoint() {
   pass "cleanup of one task keeps every watcher marker of an endpoint a second task record still names"
 }
 
+test_cleanup_prunes_wake_queued_after_pre_removal_prune() {
+  local case_dir state window rc
+  case_dir=$(make_case watcher-wake-pruned)
+  state="$case_dir/state"
+  window="firstmate:fm-task-x1"
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append stale "$2" "stale: $2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$window" \
+    || fail "wake-pruned: could not seed the stale wake"
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_MV_FOR_TEST:?}
+dest=${!#}
+case "$dest" in
+  */state/.wake-queue)
+    "$real" "$@" || exit $?
+    if [ ! -e "${FM_TEST_WAKE_INJECTED:?}" ]; then
+      : > "$FM_TEST_WAKE_INJECTED"
+      printf '999\t999\tstale\tfirstmate:fm-task-x1\tstale: firstmate:fm-task-x1\n' >> "$dest"
+    fi
+    ;;
+  *) exec "$real" "$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/mv"
+  rc=0
+  FM_TEST_WAKE_INJECTED="$case_dir/wake-injected" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "wake-pruned: teardown failed: $(cat "$case_dir/stderr")"
+  if [ -e "$state/.wake-queue" ] && awk -F '\t' -v window="$window" \
+      '$3 == "stale" && $4 == window { found=1 } END { exit found ? 0 : 1 }' \
+      "$state/.wake-queue"; then
+    fail "wake-pruned: stale wake injected after the first prune survived record removal"
+  fi
+  pass "teardown prunes a stale wake appended after its pre-removal cleanup"
+}
+
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
@@ -6692,3 +6731,4 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_cleanup_retires_the_freed_endpoints_watcher_markers
 test_cleanup_keeps_watchers_markers_of_a_shared_endpoint
+test_cleanup_prunes_wake_queued_after_pre_removal_prune

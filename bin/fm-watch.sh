@@ -584,6 +584,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
   fi
+  retire_unrecorded_endpoint "$w" && return 0
   fm_wake_append stale "$w" "$reason" || exit 1
   if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
     echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
@@ -673,6 +674,7 @@ inbox_steer_check() {  # <window> <task>
         fi
         if [ -d "${rec%/*}" ]; then
           reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.ring-state cannot be written while $rec stays unhandled; the doorbell cannot advance toward escalation - inspect the inbox directory)"
+          retire_unrecorded_endpoint "$w" && return 0
           fm_wake_append stale "$w" "$reason" || exit 1
           wake "$reason"
         fi
@@ -685,6 +687,7 @@ inbox_steer_check() {  # <window> <task>
         fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
+        retire_unrecorded_endpoint "$w" && return 0
         fm_wake_append stale "$w" "$reason" || exit 1
         wake "$reason"
       fi
@@ -696,6 +699,7 @@ inbox_steer_check() {  # <window> <task>
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0
       fi
+      retire_unrecorded_endpoint "$w" && return 0
       fm_wake_append stale "$w" "$reason" || exit 1
       if ! fm_task_inbox_record_escalated "$STATE" "$task" "$rec"; then
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
@@ -961,23 +965,18 @@ retire_endpoint_markers() {  # <window>
 # Returns 1, changing nothing, in every other case.
 #
 # What this catches is the cleanup that lands while the sweep is still working
-# through the inventory it already took: the endpoint is still in hand, its pane
-# may still capture, and every classification below would describe work that is
-# cleaned up and gone. Queueing that costs a supervisor turn and answers nothing,
-# which is the 2026-11-10 delivery this closes, and re-marking it leaves files
-# nothing can reach again.
+# through the inventory it already took: the endpoint is still in hand when an
+# inbox escalation is ready to publish, but the work is already cleaned up and
+# gone. Queueing that costs a supervisor turn and answers nothing, which is the
+# 2026-11-10 delivery this closes.
 #
-# Every route the sweep can queue a stale wake through asks this immediately
-# before it appends, not when the sweep reached the endpoint: the classification
-# between those two points is where a cleanup lands, and a check that ran earlier
-# proves nothing about the row being written now.
+# Each steering-inbox route that can queue a stale wake asks this immediately
+# before it appends, not when the sweep reached the endpoint: the inbox work
+# between those two points is where a cleanup can land.
 #
 # The SWEEP_ENDPOINT scope is what makes that safe to ask inside a shared route.
-# These routes are also driven directly, in isolation and with no endpoint records
-# at all, by the mechanism unit tests; a route that retired on "no record names
-# this window" would silently no-op for every one of them. Only the sweep sets
-# SWEEP_ENDPOINT, and only for an endpoint whose record it confirmed, so the
-# invariant applies exactly where the race is and nowhere else.
+# The inbox helper is also driven directly, in isolation and with no endpoint
+# records, so only the sweep sets SWEEP_ENDPOINT and only for a confirmed record.
 #
 # This is the sweep-side half of the reconciliation; bin/fm-teardown.sh owns the
 # other half, retiring the same family when it removes the record. Both consume
@@ -1588,7 +1587,6 @@ _wedge_cap_rollback() {
 # throttle keeps the cadence between repeats.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [status-file] [blocked-line] [overdue-marker]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} snapshot=${10-} append_rc task
-  retire_unrecorded_endpoint "$win" && return 0
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
@@ -1985,7 +1983,6 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
     return 0
   fi
   reason="stale: $win (idle ${age}s, agent $agent_state - $detail, so this is not a wedge; reported once and not re-escalated while it stays that way - reconcile this record, and check for unlanded work before any cleanup)"
-  retire_unrecorded_endpoint "$win" && return 0
   # Append before the marker, for the reason stale_wait_record gives: a marker
   # written ahead of a failed append outlives it, and the next sighting would then
   # absorb the retry - the one way this bound could swallow the report outright
@@ -2182,7 +2179,6 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
-  retire_unrecorded_endpoint "$win" && return 0
   _wkey=$(window_key "$win")
   # Cap-fire short-circuit: a previous poll wrote a rollback-failure sentinel,
   # from any of the routes that have to defend cap state this state dir would not
@@ -2520,7 +2516,6 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age
-  retire_unrecorded_endpoint "$win" && return 0
   key=$(window_key "$win")
   pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -2642,7 +2637,6 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         return 0
       fi
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
-        retire_unrecorded_endpoint "$win" && return 0
         fm_wake_append stale "$win" "stale: $win" || exit 1
         printf '%s' "$declared" > "$STATE/.stale-$key"
         wake "stale: $win"
@@ -3120,7 +3114,6 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
     bounded=0
   fi
   if [ "$throttled" -ne 0 ]; then
-    retire_unrecorded_endpoint "$win" && return 0
     reason=$(stale_reason_naming_dialog "stale: $win" "$dialog")
     fm_wake_append stale "$win" "$reason" || exit 1
     stale_wait_record "$key"
@@ -4559,10 +4552,6 @@ EOF
       continue
     fi
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
-    # The capture is this body's slow step, so it is also where a concurrent
-    # cleanup is most likely to have landed since the check above. Re-ask before
-    # any classification reads or writes this endpoint's markers.
-    retire_unrecorded_endpoint "$w" && continue
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this
     # poll already takes, and a miss drops a name the away daemon saved.
@@ -4601,7 +4590,6 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            retire_unrecorded_endpoint "$w" && continue
             stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
             fm_wake_append stale "$w" "$stale_reason" || exit 1
             printf '%s' "$h" > "$sf"
@@ -4647,7 +4635,6 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
-              retire_unrecorded_endpoint "$w" && continue
               stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
               fm_wake_append stale "$w" "$stale_reason" || exit 1
               stale_wait_record "$key"
