@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Editable source for assets/banner.png.
+
+  Regenerate the PNG from this file at its exact 1774x887 canvas:
+
+    chrome-devtools-axi resize 1774 887
+    chrome-devtools-axi open file:///<abs>/assets/banner.svg
+    chrome-devtools-axi screenshot <abs>/assets/banner.png
+
+  Type is drawn with a font stack rather than outlined paths, so a machine
+  without the first family falls back to the next one and the rendered PNG
+  shifts slightly. The committed PNG is the published artifact; this file is
+  what to edit.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1774" height="887" viewBox="0 0 1774 887" role="img"
+     aria-label="Aman Crew - command hub for isolated agent crews across every repository">
+  <defs>
+    <linearGradient id="parchment" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F6E8CB"/>
+      <stop offset="1" stop-color="#EBD7B0"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#20362B"/>
+      <stop offset="1" stop-color="#16251D"/>
+    </linearGradient>
+    <g id="anchor" stroke="#A97B23" stroke-width="10" stroke-linecap="round" fill="none">
+      <circle cx="0" cy="-50" r="15"/>
+      <path d="M0,-35 L0,50"/>
+      <path d="M-32,-16 L32,-16"/>
+      <path d="M-46,10 C-46,42 -23,60 0,60 C23,60 46,42 46,10"/>
+    </g>
+    <g id="terminal">
+      <rect x="0" y="0" width="340" height="124" rx="10" fill="url(#screen)"/>
+      <text x="22" y="48" font-family="'SFMono-Regular', Menlo, Consolas, monospace"
+            font-size="30" fill="#8BD99A">&gt;_</text>
+      <rect x="22" y="70" width="210" height="10" rx="5" fill="#4E7A5C"/>
+      <rect x="22" y="92" width="140" height="10" rx="5" fill="#3B5E47"/>
+    </g>
+  </defs>
+
+  <rect width="1774" height="887" fill="url(#parchment)"/>
+
+  <!-- rope frame: a brass band with a darker twist laid over it -->
+  <rect x="36" y="36" width="1702" height="815" rx="40" fill="none" stroke="#D9A441" stroke-width="18"/>
+  <rect x="36" y="36" width="1702" height="815" rx="40" fill="none" stroke="#A97B23" stroke-width="8"
+        stroke-linecap="round" stroke-dasharray="4 26"/>
+  <rect x="62" y="62" width="1650" height="763" rx="24" fill="none" stroke="#1E3A52" stroke-width="4"/>
+
+  <use href="#anchor" transform="translate(268,196) scale(0.95)"/>
+  <use href="#anchor" transform="translate(1506,196) scale(0.95)"/>
+
+  <!-- wordmark -->
+  <text x="887" y="235" text-anchor="middle"
+        font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+        font-size="156" font-weight="bold" fill="#1E3A52" opacity="0.18">Aman Crew</text>
+  <text x="887" y="230" text-anchor="middle"
+        font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+        font-size="156" font-weight="bold" fill="#C04A2B">Aman Crew</text>
+
+  <text x="887" y="310" text-anchor="middle"
+        font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+        font-size="46" fill="#1E3A52">Command hub for isolated agent crews across every repository.</text>
+
+  <!-- divider -->
+  <path d="M470,364 L1304,364" stroke="#C9A05A" stroke-width="4" stroke-linecap="round"/>
+  <path d="M887,350 L901,364 L887,378 L873,364 Z" fill="#C04A2B"/>
+
+  <!-- three repositories, each with its own isolated worktree -->
+  <g>
+    <rect x="167" y="416" width="440" height="266" rx="20" fill="#F7EDD8" stroke="#1E3A52" stroke-width="5"/>
+    <rect x="167" y="416" width="440" height="62" rx="20" fill="#1E3A52"/>
+    <rect x="167" y="456" width="440" height="22" fill="#1E3A52"/>
+    <text x="387" y="458" text-anchor="middle"
+          font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+          font-size="32" fill="#F6E8CB">repo: web-app</text>
+    <use href="#terminal" transform="translate(217,502)"/>
+    <text x="387" y="660" text-anchor="middle"
+          font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+          font-size="26" fill="#6B5636">worktree 1</text>
+  </g>
+  <g>
+    <rect x="667" y="416" width="440" height="266" rx="20" fill="#F7EDD8" stroke="#1E3A52" stroke-width="5"/>
+    <rect x="667" y="416" width="440" height="62" rx="20" fill="#1E3A52"/>
+    <rect x="667" y="456" width="440" height="22" fill="#1E3A52"/>
+    <text x="887" y="458" text-anchor="middle"
+          font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+          font-size="32" fill="#F6E8CB">repo: backend</text>
+    <use href="#terminal" transform="translate(717,502)"/>
+    <text x="887" y="660" text-anchor="middle"
+          font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+          font-size="26" fill="#6B5636">worktree 2</text>
+  </g>
+  <g>
+    <rect x="1167" y="416" width="440" height="266" rx="20" fill="#F7EDD8" stroke="#1E3A52" stroke-width="5"/>
+    <rect x="1167" y="416" width="440" height="62" rx="20" fill="#1E3A52"/>
+    <rect x="1167" y="456" width="440" height="22" fill="#1E3A52"/>
+    <text x="1387" y="458" text-anchor="middle"
+          font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+          font-size="32" fill="#F6E8CB">repo: mobile</text>
+    <use href="#terminal" transform="translate(1217,502)"/>
+    <text x="1387" y="660" text-anchor="middle"
+          font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+          font-size="26" fill="#6B5636">worktree 3</text>
+  </g>
+
+  <path d="M560,742 L1214,742" stroke="#C9A05A" stroke-width="3" stroke-linecap="round"/>
+  <text x="887" y="790" text-anchor="middle"
+        font-family="Georgia, 'Iowan Old Style', 'Times New Roman', serif"
+        font-size="38" fill="#1E3A52">One agent on the bridge. A crew in every worktree.</text>
+</svg>
