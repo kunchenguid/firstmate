@@ -4611,6 +4611,11 @@ EOF
       rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.stale-$key"
       wedge_episode_end "$key"
       clear_write_tracking "$key"
+      # The capture shows no composer dialog, so a name the away daemon saved
+      # for this task no longer describes the pane. Drop it here too: the
+      # ordinary path below is skipped by this branch's continue, and a stale
+      # name would otherwise be attached to the next stale wake.
+      clear_dialog_suffix "$task"
       continue
     fi
     # The matcher is already defined in this shell. It reads the capture this

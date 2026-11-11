@@ -2465,6 +2465,32 @@ test_empty_pane_capture_ends_the_wedge_episode() {
   pass "a pane that renders nothing ends its wedge episode instead of escalating"
 }
 
+# The away daemon saved a blocking-dialog name while the picker was up, then the
+# pane went blank. An empty capture shows no composer dialog, so the
+# empty-capture branch has to drop the saved name just as the ordinary stale path
+# does; otherwise the next stale wake still names a dialog that is already gone.
+test_empty_pane_capture_drops_saved_dialog_name() {
+  local dir state fakebin out capture window pid
+  dir=$(wedge_threshold_fixture empty-pane-dialog 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"
+  : > "$capture"
+  printf '%s' 'Claude background-task exit picker' > "$state/.subsuper-dialog-wedge"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_STALE_ESCALATE_SECS=0 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "the watcher did not finish a poll over an empty pane capture: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -e "$state/.subsuper-dialog-wedge" ] \
+    || fail "an empty pane capture kept a saved dialog name"
+  [ ! -s "$out" ] \
+    || fail "an empty pane capture with a saved dialog name raised a wake: $(cat "$out")"
+  pass "an empty pane capture drops a saved dialog name instead of carrying it to the next stale"
+}
+
 # The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
 # as it did before, and so must every verdict short of proof: an unattributable
 # foreground process (`ambiguous`) and an unreadable endpoint keep the identical
@@ -5556,6 +5582,7 @@ fm_test_run \
   test_wedge_escalation_resets_when_pane_becomes_active \
   test_gone_endpoint_reports_once_instead_of_escalating_forever \
   test_empty_pane_capture_ends_the_wedge_episode \
+  test_empty_pane_capture_drops_saved_dialog_name \
   test_live_and_unproven_endpoints_still_wedge_escalate \
   test_wedge_guards_absent_config_keeps_the_unchanged_ladder \
   test_wedge_guard_critical_defers_one_window_at_a_time_up_to_the_cap \
