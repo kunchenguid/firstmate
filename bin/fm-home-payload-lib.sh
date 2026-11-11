@@ -112,7 +112,14 @@ try:
         if old.get("leased") is not True:
             # The slot was already unleased, so only another holder taking it
             # shows that this attempt transferred the slot away.
-            sys.exit(2 if current.get("leased", False) is True else 0)
+            owner_fields = ("owner_pid", "owner_started_at")
+            old_owner = tuple(old.get(key, 0) for key in owner_fields)
+            current_owner = tuple(current.get(key, 0) for key in owner_fields)
+            new_process_owner = (
+                all(type(value) is int and value > 0 for value in current_owner)
+                and current_owner != old_owner
+            )
+            sys.exit(2 if current.get("leased", False) is True or new_process_owner else 0)
         if current.get("leased", False) is False or current.get("leased_at") != old.get("leased_at") or current.get("lease_holder") != old.get("lease_holder") or current.get("lease_id") != old.get("lease_id"):
             sys.exit(2)
         raise ValueError("pool ownership cannot be reconciled")

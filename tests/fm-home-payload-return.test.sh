@@ -196,6 +196,54 @@ fm_home_payload_recover "$home" "$parent" mate
 fm_home_payload_finalize "$home" "$parent" mate
 [ -z "$(ls -A "$staging_root")" ] || fail 'unleased-slot finalization left payload staging behind'
 
+write_process_owner() {
+  python3 - "$pool_state" "$1" "$2" <<'PYOWNER'
+import json
+import sys
+state, pid, started = sys.argv[1:]
+with open(state) as stream:
+    document = json.load(stream)
+document["worktrees"][0].update(owner_pid=int(pid), owner_started_at=int(started))
+with open(state, "w") as stream:
+    json.dump(document, stream)
+PYOWNER
+}
+process_owned_return() {
+  unleased_return success || return 1
+  write_process_owner "$new_pid" "$new_started"
+  case "$return_outcome" in
+    term) kill -TERM "$BASHPID" ;;
+    kill) kill -KILL "$BASHPID" ;;
+    failure) return 1 ;;
+  esac
+}
+while read -r old_pid old_started new_pid new_started return_outcome expected_retired expected_status; do
+  prepare_retry
+  rm -f "$TMP_ROOT/lease"
+  write_pool_lease ''
+  write_process_owner "$old_pid" "$old_started"
+  status=0
+  fm_home_payload_return "$home" mate "$parent" process_owned_return 2>"$TMP_ROOT/process-return.err" || status=$?
+  [ "$status" = "$expected_status" ] || fail "process-owner return exited $status instead of $expected_status"
+  fm_home_payload_recover "$home" "$parent" mate
+  [ "$FM_HOME_PAYLOAD_RETIRED" = "$expected_retired" ] || fail "incorrect transfer verdict for process owner $old_pid/$old_started -> $new_pid/$new_started"
+  if [ "$expected_retired" = 1 ]; then
+    assert_absent "$home/data" 'recovery restored retired payload into a process-owned slot'
+    assert_absent "$home/.fm-secondmate-home" 'recovery restored retired identity into a process-owned slot'
+    assert_absent "$gitdir/locked" 'recovery locked a new process owner out of its slot'
+    assert_absent "$gitdir/firstmate-home-lock" 'recovery restored retired lock ownership'
+    fm_home_payload_finalize "$home" "$parent" mate
+  else
+    assert_home_restored 'unchanged or cleared process ownership' unleased
+  fi
+done <<'OWNERS'
+0 0 101 201 term 1 143
+101 201 102 201 failure 1 0
+101 201 101 202 kill 1 137
+101 201 101 201 failure 0 1
+101 201 0 0 failure 0 1
+OWNERS
+
 prepare_retry
 printf() {
   [ "$1" != 'committed=1\n' ] || return 1
