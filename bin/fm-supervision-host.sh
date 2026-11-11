@@ -567,7 +567,7 @@ boundary_exit() {
   ARM_OUT=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  if ! hand_back_acknowledged_episode; then
+  if ! hand_back_acknowledged_episode "$HANDBACK_LOCK_BOUND"; then
     log_line "boundary	downtime-unrestored"
     printf 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime\n'
     exit 1
@@ -712,10 +712,10 @@ emit() {  # [line...]
   [ -z "$text" ] || printf '%s\n' "$text"
 }
 
-hand_back_acknowledged_episode() {
+hand_back_acknowledged_episode() {  # [lock-bound-seconds]
   fm_recovery_marker_read "$STATE/.watcher-down" || return 0
   case "$FM_RECOVERY_MARKER_TOKEN" in
-    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" "$HANDBACK_LOCK_BOUND" >/dev/null 2>&1 ;;
+    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" "${1:-}" >/dev/null 2>&1 ;;
   esac
 }
 
