@@ -1498,7 +1498,7 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   fm_composer_normalize_trim_var next
   if fm_composer_leading_agent_glyph_var plain "$content" \
      && _fm_composer_row_is_rule_furniture "${content#*"$plain"}" \
-     && _fm_composer_row_is_ordinary_continuation "$next"; then
+     && _fm_composer_row_is_draft_continuation "$next"; then
     _fm_composer_classify_bare_wrap "$screen" "$styled" "$row" "$((row + 1))"
     return 0
   fi
@@ -1559,10 +1559,9 @@ _fm_composer_row_is_braille_furniture() {  # <row>
 }
 
 # _fm_composer_bare_row_is_ruled: 0 when the bare agent-glyph <row> of the plain
-# screen is the glyph followed only by rule cells and no ordinary text wraps onto
-# the row below it, so the row is its own closing border and owns no wrapped
-# input. A ruled row whose next row is ordinary continuation text is the first
-# row of a real wrapped draft and stays input.
+# screen is the glyph followed only by rule cells and no draft continuation wraps
+# onto the row below it, so the row is its own closing border and owns no wrapped
+# input. A ruled row whose next row continues a draft stays input.
 _fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
   local text glyph next
   text=$(_fm_composer_screen_row "$2" "$1")
@@ -1571,10 +1570,7 @@ _fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
   _fm_composer_row_is_rule_furniture "${text#*"$glyph"}" || return 1
   next=$(_fm_composer_screen_row "$(($2 + 1))" "$1")
   fm_composer_normalize_trim_var next
-  _fm_composer_row_is_ordinary_continuation "$next" && return 1
-  # A typed row that merely opens with a mode glyph (`⏸ pause playback`) is the
-  # draft's continuation; only a row shaped like claude's mode footer closes it.
-  _fm_composer_row_is_mode_hint "$next" && ! _fm_composer_row_is_mode_footer "$next" && return 1
+  _fm_composer_row_is_draft_continuation "$next" && return 1
   return 0
 }
 
@@ -1612,6 +1608,13 @@ _fm_composer_row_is_ordinary_continuation() {  # <trimmed-row>
   return 0
 }
 
+# _fm_composer_row_is_draft_continuation: 0 when the trimmed <row> continues a
+# wrapped draft, including a typed mode-hint row but excluding the mode footer.
+_fm_composer_row_is_draft_continuation() {  # <trimmed-row>
+  _fm_composer_row_is_ordinary_continuation "$1" && return 0
+  _fm_composer_row_is_mode_hint "$1" && ! _fm_composer_row_is_mode_footer "$1"
+}
+
 # _fm_composer_bare_row_strip_furniture_var: on a bare agent-glyph row, reduce
 # the row to its glyph when everything behind the glyph is braille furniture,
 # in place through the named variable; a row whose tail carries anything else,
@@ -1622,16 +1625,13 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
   local __fmbf_name=$1 __fmbf_text=${!1} __fmbf_glyph='' __fmbf_body
   fm_composer_leading_agent_glyph_var __fmbf_glyph "$__fmbf_text" || return 0
   __fmbf_body=${__fmbf_text#*"$__fmbf_glyph"}
-  if _fm_composer_row_is_braille_furniture "$__fmbf_body" \
-     || _fm_composer_row_is_rule_furniture "$__fmbf_body"; then
+  if _fm_composer_row_is_braille_furniture "$__fmbf_body"; then
     printf -v "$__fmbf_name" '%s' "$__fmbf_glyph"
   fi
 }
 
 # _fm_composer_row_is_rule_furniture: 0 when the text is non-blank and made only
-# of horizontal-rule cells (`─ ━ ═`). A divider drawn behind the prompt glyph
-# (claude left a stray `B❯ ────` row after a redraw glitch) is a border, never
-# typed input, whatever grey it is drawn in.
+# of horizontal-rule cells (`─ ━ ═`).
 _fm_composer_row_is_rule_furniture() {  # <text>
   local text=$1 rest
   fm_composer_normalize_trim_var text
