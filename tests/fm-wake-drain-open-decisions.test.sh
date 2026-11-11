@@ -228,10 +228,10 @@ test_term_ignoring_ready_lookup_is_killed_at_the_bound() {
   elapsed=$((SECONDS - start))
   pid=$(cat "$pidfile" 2>/dev/null) || fail "the ready lookup never started"
   for ((i = 0; i < 20; i++)); do
-    kill -0 "$pid" 2>/dev/null || break
+    is_live_non_zombie "$pid" || break
     sleep 0.1
   done
-  if kill -0 "$pid" 2>/dev/null; then
+  if is_live_non_zombie "$pid"; then
     kill -KILL "$pid" 2>/dev/null
     fail "a TERM-ignoring tasks-axi ready outlived the drain (pid $pid)"
   fi
