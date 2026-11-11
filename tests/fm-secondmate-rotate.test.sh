@@ -77,8 +77,13 @@ add_mate() {
 
 run_rotate() {  # <case> <args...>
   local dir=$1; shift
+  run_rotate_with_command "$dir" "$dir/restart-stub" "$@"
+}
+
+run_rotate_with_command() {  # <case> <command> <args...>
+  local dir=$1 cmd=$2; shift 2
   env FM_HOME="$dir/home" PI_CODING_AGENT_DIR="$dir/pi" CLAUDE_CONFIG_DIR="$dir/claude" \
-    FM_SECONDMATE_ROTATE_RESTART="$dir/restart-stub" \
+    FM_SECONDMATE_ROTATE_RESTART="$cmd" \
     bash "$ROTATE" "$@" 2>&1
 }
 
@@ -141,6 +146,24 @@ test_scan_rotates_only_due_mates_once_per_window() {
   pass "fm-secondmate-rotate scan: only idle local mates past the threshold, at most once per window"
 }
 
+test_invalid_restart_does_not_consume_rotation_window() {
+  local dir out
+  dir=$(new_case invalid-restart)
+  add_mate "$dir" big pi 300000
+  : > "$dir/home/config/secondmate-rotation"
+  out=$(run_rotate_with_command "$dir" "$dir/does-not-exist" scan)
+  assert_contains "$out" "could not start secondmate rotation for big" \
+    "an invalid restart command should report the failed launch"
+  [ ! -e "$dir/home/state/big.rotation" ] \
+    || fail "a failed rotation launch must not leave a window record behind"
+  out=$(run_rotate_with_command "$dir" "$dir/does-not-exist" scan)
+  assert_contains "$out" "could not start secondmate rotation for big" \
+    "a failed rotation should remain eligible for retry"
+  [ ! -e "$dir/home/state/big.rotation" ] \
+    || fail "a retry after a failed rotation must not be suppressed by stale state"
+  pass "fm-secondmate-rotate scan: an invalid restart command does not consume a rotation window"
+}
+
 test_watcher_sweep_queues_the_rotation() {
   local dir rc
   dir=$(new_case watch)
@@ -162,4 +185,5 @@ test_watcher_sweep_queues_the_rotation() {
 
 test_tokens_reads_each_measured_harness
 test_scan_rotates_only_due_mates_once_per_window
+test_invalid_restart_does_not_consume_rotation_window
 test_watcher_sweep_queues_the_rotation

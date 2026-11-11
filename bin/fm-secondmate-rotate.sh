@@ -198,19 +198,26 @@ last_rotation() {  # <id>
 }
 
 launch_rotation() {  # <id>
-  local id=$1 cmd=${FM_SECONDMATE_ROTATE_RESTART:-$SCRIPT_DIR/fm-secondmate-restart.sh}
+  local id=$1 cmd=${FM_SECONDMATE_ROTATE_RESTART:-$SCRIPT_DIR/fm-secondmate-restart.sh} resolved
+  if [ ! -f "$cmd" ] || [ ! -x "$cmd" ]; then
+    resolved=$(command -v "$cmd" 2>/dev/null) || return 1
+    [ -f "$resolved" ] && [ -x "$resolved" ] || return 1
+    cmd=$resolved
+  fi
   # The watcher stops this check's whole process group as soon as the scan
   # returns, and the persist gate alone can take minutes, so the restart runs in
   # its own session. The parent returns only after the child's setsid, so the
   # group stop can never land between the fork and the new session.
   # shellcheck disable=SC2016  # Perl, not the shell, expands its variables.
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" nohup perl -e '
+    use Fcntl qw(F_SETFD FD_CLOEXEC);
     use POSIX qw(setsid);
     pipe(my $r, my $w) or exit 1;
+    fcntl($w, F_SETFD, FD_CLOEXEC) or exit 1;
     my $pid = fork;
     exit 1 unless defined $pid;
-    if (!$pid) { close $r; setsid(); close $w; exec @ARGV or POSIX::_exit(127) }
-    close $w; my $ready = <$r>; exit 0' \
+    if (!$pid) { close $r; setsid(); exec @ARGV or do { print $w "err\n"; POSIX::_exit(127) } }
+    close $w; my $ready = <$r>; exit(defined($ready) && $ready eq "err\n" ? 1 : 0)' \
     "$cmd" --rotate "$id" > "$STATE/$id.rotation.log" 2>&1 < /dev/null
 }
 
@@ -229,8 +236,12 @@ for meta in "$STATE"/*.meta; do
   esac
   printf 'epoch=%s\ntokens=%s\nthreshold=%s\n' "$now" "$tokens" "$ROTATE_THRESHOLD" \
     > "$STATE/$id.rotation" || continue
-  launch_rotation "$id"
-  printf 'rotating %s: context %s tokens >= %s; persist-then-restart onto a fresh session started (report: state/%s.rotation.log)\n' \
-    "$id" "$tokens" "$ROTATE_THRESHOLD" "$id"
+  if launch_rotation "$id"; then
+    printf 'rotating %s: context %s tokens >= %s; persist-then-restart onto a fresh session started (report: state/%s.rotation.log)\n' \
+      "$id" "$tokens" "$ROTATE_THRESHOLD" "$id"
+  else
+    rm -f -- "$STATE/$id.rotation"
+    printf 'error: could not start secondmate rotation for %s; no rotation window was consumed\n' "$id" >&2
+  fi
 done
 exit 0

@@ -40,7 +40,11 @@ cat > "$CONFIG/crew-dispatch.json" <<'EOF'
 {"rules":[{"when":"simple","use":[
   {"harness":"pi","model":"zai/glm-5.3-flash","effort":"high","provider":"zai"},
   {"harness":"pi","model":"antigravity/gemini-3.8-flash","effort":"high","provider":"agy","quota_scope":"gemini"},
-  {"harness":"pi","model":"antigravity/claude-sonnet-5-5","effort":"high","provider":"agy","quota_scope":"claude_gpt"}]}],
+  {"harness":"pi","model":"antigravity/claude-sonnet-5-5","effort":"high","provider":"agy","quota_scope":"claude_gpt"},
+  {"harness":"pi","model":"multi/model","effort":"low","provider":"agy","quota_scope":"gemini"},
+  {"harness":"pi","model":"multi/model","effort":"high","provider":"zai"},
+  {"harness":"pi","model":"ambiguous/model","effort":"high","provider":"zai"},
+  {"harness":"pi","model":"ambiguous/model","effort":"high","provider":"agy","quota_scope":"gemini"}]}],
  "default":[{"harness":"claude","model":"sonnet","effort":"high"},
   {"harness":"pi","model":"zai/default-model","effort":"high","provider":"zai"}]}
 EOF
@@ -71,7 +75,12 @@ test_declared_provider_and_scope_apply() {
   out=$(preflight pi zai/default-model)
   assert_contains "$out" "provider zai is exhausted_now at all_models" \
     "the top-level default profile should bind its explicit provider"
-  pass "fm-quota-preflight: the declared provider and quota_scope bind the right row"
+  out=$(preflight pi multi/model --effort high)
+  assert_contains "$out" "provider zai is exhausted_now at all_models" \
+    "an effort-specific profile should select its provider"
+  out=$(preflight pi ambiguous/model --effort high)
+  [ -z "$out" ] || fail "ambiguous provider profiles must stay quiet rather than guess, got: $out"
+  pass "fm-quota-preflight: the declared provider, effort, and quota scope bind safely"
 }
 
 test_quiet_without_evidence() {

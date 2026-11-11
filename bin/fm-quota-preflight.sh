@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fm-quota-preflight.sh - advisory quota pre-flight for one worker launch.
 #
-# Usage: fm-quota-preflight.sh <harness> <model> [--provider <id>]
-#                              [--quota-scope <scope>] [--snapshot <path>]
+# Usage: fm-quota-preflight.sh <harness> <model> [--effort <level>]
+#                              [--provider <id>] [--quota-scope <scope>]
+#                              [--snapshot <path>]
 #
 # Prints one `quota-preflight:` notice when quota-axi reports the launch's
 # provider `exhausted_now` on a scope that applies to <model>, and nothing
@@ -40,9 +41,11 @@ shift
 [ "$#" -eq 0 ] || shift
 PROVIDER=
 QUOTA_SCOPE=
+EFFORT=
 SNAPSHOT=
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --effort) EFFORT=${2:-}; shift 2 || exit 0 ;;
     --provider) PROVIDER=${2:-}; shift 2 || exit 0 ;;
     --quota-scope) QUOTA_SCOPE=${2:-}; shift 2 || exit 0 ;;
     --snapshot) SNAPSHOT=${2:-}; shift 2 || exit 0 ;;
@@ -59,11 +62,17 @@ RULES=
 if [ -n "$RULES" ]; then
   [ "$(jq -r '.shared_quota // false' "$RULES" 2>/dev/null)" != true ] || exit 0
   if [ -z "$PROVIDER" ]; then
-    declared=$(jq -r --arg h "$HARNESS" --arg m "$MODEL" '
+    declared=$(jq -r --arg h "$HARNESS" --arg m "$MODEL" --arg e "$EFFORT" '
         def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
         [ ((.rules // [])[] | profiles(.use)[], profiles(.default)[]), profiles(.default)[] ]
         | map(select(.harness == $h and ((.model // "") == $m) and ((.provider // "") != "")))
-        | first // empty | "\(.provider)\t\(.quota_scope // "")"
+        | (if ($e != "" and $e != "default") then
+             (map(select((.effort // "") == $e)) as $effort
+              | if ($effort | length) > 0 then $effort else . end)
+           else . end)
+        | map({provider: .provider, quota_scope: (.quota_scope // "")})
+        | unique_by([.provider, .quota_scope])
+        | if length == 1 then .[0] | "\(.provider)\t\(.quota_scope)" else empty end
       ' "$RULES" 2>/dev/null) || declared=
     if [ -n "$declared" ]; then
       PROVIDER=${declared%%$'\t'*}
