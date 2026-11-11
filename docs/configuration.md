@@ -3638,7 +3638,7 @@ Apart from a first-sight classification, only a pane that leaves the stale path,
 That shared reset is what makes the release structural rather than a list of sites to keep in step.
 At the first-sight routes the reset is also opt-in per site: under a configured cap the count restarts with the released episode, while with the cap at its default 0 the count survives those routes exactly as the pre-cap watcher's did - the timer dropped and re-armed (or dropped alone), the escalation count standing - so a home that has not set anything keeps today's ladder, including the `demand-deep-inspection` prompt for a stuck pane.
 An operator can re-engage a capped window at once by deleting its `state/.wedge-permanent-<key>` marker, and a window silenced by a failed cap-state write by deleting its `state/.wedge-rollback-failed-<key>` sentinel; both files are safe to delete, and the window then escalates on the ordinary schedule again.
-[`bin/fm-watch-key-lib.sh`'s header](../bin/fm-watch-key-lib.sh) owns `<key>` derivation and the optional cleanup procedure for obsolete per-endpoint markers.
+[`bin/fm-watch-key-lib.sh`'s header](../bin/fm-watch-key-lib.sh) owns `<key>` derivation, the per-endpoint marker family list that a retiring endpoint's cleanup removes, and the optional manual procedure for orphans that predate it.
 Turning the cap back off takes effect at once: every cap marker is read only while the cap is configured, so a leftover from an earlier configured run cannot keep a window silent in a home that has turned the cap off.
 
 Upgrading a live home to the bounded `v3.` watcher keys intentionally resets its per-endpoint observation caches once, including stale timers, escalation counts, cap markers, and pause/wait notification throttles.

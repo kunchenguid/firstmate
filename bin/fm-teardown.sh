@@ -433,6 +433,10 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# The watcher's per-endpoint marker family list, so retiring a freed endpoint
+# names exactly the markers the watcher itself would name.
+# shellcheck source=bin/fm-watch-key-lib.sh
+. "$SCRIPT_DIR/fm-watch-key-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -507,6 +511,41 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
+}
+
+# teardown_retire_endpoint_markers: drop the watcher's per-endpoint marker family
+# for an endpoint whose task record is gone.
+#
+# Those markers are keyed on the endpoint, never on the task, and removing the
+# record is the only event that can retire them: the watcher's pane sweep
+# enumerates endpoints FROM the records (recorded_windows in bin/fm-watch.sh), so
+# once state/<id>.meta is gone the endpoint is never visited again and every
+# marker it left behind outlives the task forever. bin/fm-watch-key-lib.sh owns
+# the family list this consumes.
+#
+# Call it only after the record is gone, so the endpoint has already left that
+# enumeration and a concurrent poll cannot re-mark it, and only for an endpoint
+# NO other record names: two tasks can share one endpoint, and dropping the
+# survivor's watcher history is the cross-endpoint collision the v3 key exists to
+# prevent. Best effort by contract - an orphaned marker is inert, so a failure
+# warns and never fails a cleanup that has already proved the work landed.
+teardown_retire_endpoint_markers() {  # <state-dir> <task-id> <endpoint>
+  local state=$1 id=$2 endpoint=${3:-} meta other
+  [ -n "$endpoint" ] || return 0
+  [ -d "$state" ] || return 0
+  # A record that still stands has not retired its endpoint, so its watcher
+  # history is still in use.
+  if [ -e "$state/$id.meta" ]; then
+    return 0
+  fi
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    other=$(fm_backend_target_of_meta "$meta" 2>/dev/null) || other=
+    if [ "$other" = "$endpoint" ]; then
+      return 0
+    fi
+  done
+  watcher_endpoint_markers_clear "$state" "$endpoint"
 }
 
 teardown_export_records() {  # <state> <task-id>
@@ -4263,6 +4302,9 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# The record is gone, so nothing can reach this endpoint's watcher markers again.
+teardown_retire_endpoint_markers "$STATE" "$ID" "${T:-}" || \
+  echo "warning: some watcher markers for $ID's endpoint ${T:-none} survived cleanup; they are inert, so this cleanup stands (bin/fm-watch-key-lib.sh's header owns removing them by hand)" >&2
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
