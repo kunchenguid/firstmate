@@ -128,7 +128,9 @@
 # the line. If that hand-back cannot take the marker lock within
 # FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND (default 2 seconds) or the marker
 # write fails, the host prints a watcher FAILED line and exits 1, and it does
-# not print the boundary line. The verified Codex asynchronous owner sets
+# not print the boundary line. The successor hand-back uses that same bound and
+# that same failure, so a close that stops the successor cycle cannot wait
+# without a deadline or hide a failed restore. The verified Codex asynchronous owner sets
 # FM_CODEX_MODEL_FREE_PARK=1: its boundary resets the quiet timer while keeping
 # the watcher and recovery generation alive, with no output to the model.
 # All other owners keep the bounded lifecycle. The boundary is checked on
@@ -568,9 +570,7 @@ boundary_exit() {
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
   if ! hand_back_acknowledged_episode "$HANDBACK_LOCK_BOUND"; then
-    log_line "boundary	downtime-unrestored"
-    printf 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime\n'
-    exit 1
+    fail_handback
   fi
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
@@ -719,6 +719,12 @@ hand_back_acknowledged_episode() {  # [lock-bound-seconds]
   esac
 }
 
+fail_handback() {
+  log_line "boundary	downtime-unrestored"
+  printf 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime\n'
+  exit 1
+}
+
 # Stop the successor cycle: the state main's own turn end starts from without
 # the host.
 retire_successor() {
@@ -727,7 +733,9 @@ retire_successor() {
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  hand_back_acknowledged_episode
+  if ! hand_back_acknowledged_episode "$HANDBACK_LOCK_BOUND"; then
+    fail_handback
+  fi
 }
 
 # Hand the close to main: stop the successor cycle, print the close, why, and

@@ -333,6 +333,7 @@ The OpenCode, omp, and Grok owners have no hook timeout and keep the same defaul
 By default, at the boundary the host stops the home's watcher and exits with one `supervision-host: cycle boundary` line.
 An acknowledged downtime episode is handed back as announced downtime before that line.
 If that hand-back cannot take the marker lock within its bound (`FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND`, default 2 seconds), or the marker write fails, the host prints a `watcher: FAILED` line and exits nonzero instead of the boundary line.
+The successor hand-back uses that same bound and that same failure.
 With [acknowledged hand-back](#acknowledged-hand-back) enabled, it verifies a successor before returning that line and retains supervision until main acknowledges.
 Main drains and acknowledges, and the owner starts the next park:
 

@@ -466,6 +466,38 @@ test_park_boundary_handback_reports_a_lock_wait_that_expires() {
 }
 
 
+# The successor watcher has already exited, and the engine is still inside its
+# turn. The lock wait that remains is the hand-back, not watcher cleanup.
+test_successor_handback_reports_a_lock_wait_that_expires() {
+  local home successor
+  home=$(make_primary_home hook-successor-lock)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo hang > "$home/stub-mode"
+  FM_SUPERVISION_HOST_TURN_TIMEOUT=15 FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND=1 \
+    start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "successor lock: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -e "$home/engine-call.1" \
+    || fail "successor lock: the engine did not start: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  successor=$(cat "$home/state/.watch.lock/pid")
+  append_status "$home" 'wake while the engine is handling'
+  wait_until 80 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
+    || fail "successor lock: its watcher did not close during the engine turn: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  seed_acked_downtime "$home"
+  hold_marker_lock "$home"
+  wait_until 200 hook_exited "$home" \
+    || fail "successor lock: the park did not end while the marker lock was held: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  [ -e "$home/release-marker-lock" ] && fail "successor lock: the holder was released before the hook returned"
+  assert_park_boundary_handback_failure_notifies "$home" "successor lock"
+  assert_grep $'boundary\tdowntime-unrestored' "$home/state/.supervision-host.log" \
+    "successor lock: the host must log the unrestored hand-back"
+  release_marker_lock "$home"
+  : > "$home/session.stop"
+  pass "host+hook: a successor hand-back that cannot take the marker lock delivers the failure notice"
+}
+
+
 # A failed marker write used to be hidden, the host still exited 0 with the
 # boundary line, and the Stop hook dropped that wake because the marker stayed
 # acknowledged.
@@ -887,6 +919,7 @@ fm_test_run \
   test_handoff_retry_reaches_the_receiving_herdr_pane \
   test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode \
   test_park_boundary_handback_reports_a_lock_wait_that_expires \
+  test_successor_handback_reports_a_lock_wait_that_expires \
   test_park_boundary_handback_reports_a_failed_marker_write \
   test_queued_close_survives_a_failed_park_boundary_handback \
   test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main \
