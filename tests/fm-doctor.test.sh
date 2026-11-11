@@ -354,13 +354,27 @@ test_memory_budget_status() {
 test_supported_harnesses() {
   local dir harness
   dir=$(new_case harnesses)
-  for harness in claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex; do
+  for harness in claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex hermes; do
     printf '%s\n' "$harness" > "$dir/home/config/crew-harness"
     DOCTOR_OUT=$(PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
       FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS="$harness" "$DOCTOR" --json --area config 2>/dev/null)
     assert_status "$DOCTOR_OUT" config/harness ok "supported own harness $harness"
     assert_status "$DOCTOR_OUT" config/crew-harness ok "supported crew harness $harness"
   done
+  printf '%s\n' kiro > "$dir/home/config/crew-harness"
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  '-o comm= -p '*) printf '%s\n' kiro-cli ;;
+  '-o args= -p '*) printf '%s\n' kiro-cli ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/ps"
+  doctor "$dir" --json --area config
+  assert_status "$DOCTOR_OUT" config/harness ok "supported own harness kiro"
+  assert_status "$DOCTOR_OUT" config/crew-harness ok "supported crew harness kiro"
+  rm "$dir/fakebin/ps"
   for harness in bogus unknown codex-extra; do
     printf '%s\n' "$harness" > "$dir/home/config/crew-harness"
     doctor "$dir" --json --area config
