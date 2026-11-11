@@ -1410,7 +1410,7 @@ overdue_delivered_key() {  # <state> <task>
 }
 
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size seen_identity overdue_marker overdue_task pause_identity pause_size record
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason conflict dialog_name persisted append_rc size seen_identity overdue_marker overdue_task pause_identity pause_size record
   now=$(_now)
   for overdue_marker in "$state"/.paused-overdue-*; do
     [ -f "$overdue_marker" ] || continue
@@ -1554,7 +1554,8 @@ housekeeping() {  # <state>
         printf '%s:%s\n' "$pause_identity" "$pause_size" > "$overdue_marker" || continue
         reconcile_overdue_pause "$state" "$task" || continue
         # A failed enqueue leaves the decision open for the next scan to raise.
-        if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)"; then
+        conflict=$(pause_recheck_conflict_clause "$state/$task.meta")
+        if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release${conflict})"; then
           printf 'delivered\n' >> "$overdue_marker"
           record=$(status_span_first_actionable_record "$state/$task.status" \
             "$(status_seen_offset "$state" "$task")" '' '' "paused-overdue-$task")
@@ -1594,10 +1595,11 @@ housekeeping() {  # <state>
             _now > "$marker"
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
+          conflict=$(pause_recheck_conflict_clause "$state/$task.meta")
           if [ "$bounded_until" -eq 1 ]; then
-            pause_reason="paused ${age}s (awaiting external, the declared time is beyond the recheck cadence; confirm the wait still holds): $win"
+            pause_reason="paused ${age}s (awaiting external, the declared time is beyond the recheck cadence; confirm the wait still holds${conflict}): $win"
           else
-            pause_reason="paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+            pause_reason="paused ${age}s (awaiting external, recheck whether the wait still holds${conflict}): $win"
           fi
           if escalate_add "$state" "$pause_reason"; then
             _now > "$marker"
