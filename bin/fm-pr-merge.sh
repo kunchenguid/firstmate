@@ -487,8 +487,38 @@ caller_has_commit_text() {
 # The "## What Changed" section of the PR body on stdin, without its heading
 # or surrounding blank lines. It ends at the next level-two heading or the
 # no-mistakes attestation comment; nothing is printed when it is absent.
+# Lines inside a fenced code block (``` or ~~~, closed by a run of the same
+# character at least as long) are never read as a heading or that comment.
 what_changed_section() {
   tr -d '\r' | awk '
+    # The fence run a line opens or closes with: up to three spaces of
+    # indent, then three or more backticks or tildes; empty when none.
+    function fence_run(line,   s, c, n) {
+      s = line
+      sub(/^ ? ? ?/, "", s)
+      c = substr(s, 1, 1)
+      if (c != "`" && c != "~") return ""
+      n = 0
+      while (substr(s, n + 1, 1) == c) n++
+      return n >= 3 ? substr(s, 1, n) : ""
+    }
+    {
+      run = fence_run($0)
+      if (fence != "") {
+        rest = $0
+        sub(/^ ? ? ?/, "", rest)
+        rest = substr(rest, length(run) + 1)
+        if (run != "" && substr(run, 1, 1) == substr(fence, 1, 1) \
+          && length(run) >= length(fence) && rest ~ /^[[:space:]]*$/) fence = ""
+        if (inside) lines[++n] = $0
+        next
+      }
+      if (run != "") {
+        fence = run
+        if (inside) lines[++n] = $0
+        next
+      }
+    }
     /^## / { if (inside) exit; if ($0 ~ /^## What Changed[[:space:]]*$/) { inside = 1; next } }
     inside && /^<!-- no-mistakes-/ { exit }
     inside { lines[++n] = $0 }

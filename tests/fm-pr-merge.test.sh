@@ -5717,8 +5717,41 @@ test_squash_summary_leaves_gitlab_and_forgejo_untouched() {
   pass "fm-pr-merge leaves GitLab and Forgejo merges unchanged under the squash-summary opt-in"
 }
 
+# Fenced code is never read as a heading: a fenced "## What Changed" in the
+# intent is not the section, and a "## " line inside a ``` or ~~~ block in the
+# section does not end it (CommonMark: a fence closes only on a run of the
+# same character at least as long as the one that opened it).
+test_squash_summary_ignores_headings_inside_code_fences() {
+  local case_dir label body want
+  for label in fenced-heading-in-section fenced-section-before-real-one; do
+    case "$label" in
+      fenced-heading-in-section)
+        body=$'## What Changed\n\n- Document the config file.\n\n````md\n## Usage\n```\nfm --help\n````\n\n~~~\n## Not a heading\n~~~\n- Keep the rest.\n\n## Risk Assessment\n\nlow\n'
+        want=$'- Document the config file.\n\n````md\n## Usage\n```\nfm --help\n````\n\n~~~\n## Not a heading\n~~~\n- Keep the rest.'
+        ;;
+      fenced-section-before-real-one)
+        body=$'## Intent\n\nExample body:\n\n```\n## What Changed\n- fake summary\n```\n\n## What Changed\n\n- Real summary.\n\n## Testing\n\nok\n'
+        want='- Real summary.'
+        ;;
+    esac
+    case_dir=$(make_case "squash-fence-$label")
+    add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+    : > "$case_dir/home/config/pr-squash-summary"
+    write_github_text "$case_dir" "$SQUASH_TITLE" "$body"
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/65 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    expect_code 0 "$?" "squash-fence-$label: the merge should succeed: $(cat "$case_dir/stderr")"
+    set -e
+    [ "$(github_merge_flag_value "$case_dir" --body)" = "$want" ] \
+      || fail "squash-fence-$label: unexpected body: '$(github_merge_flag_value "$case_dir" --body)'"
+  done
+  pass "fm-pr-merge ignores headings inside fenced code when reading the What Changed section"
+}
+
 test_squash_summary_uses_title_and_what_changed
 test_squash_summary_reads_crlf_bodies
 test_squash_summary_falls_back_to_repository_default
 test_squash_summary_caller_commit_text_wins
 test_squash_summary_leaves_gitlab_and_forgejo_untouched
+test_squash_summary_ignores_headings_inside_code_fences
