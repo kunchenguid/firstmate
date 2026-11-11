@@ -94,6 +94,7 @@ Coordinate any workflow rollback with its required-check names so a retired chec
 - In Markdown, put each full sentence on its own line.
 - `README.md` stays a concise overview plus pointers: it never carries a wall of inline detail.
   Route detail to the most specific `docs/` file (architecture, configuration, or a backend guide) and link to it instead.
+- `assets/banner.png` is the published artifact; edit [`assets/banner.svg`](assets/banner.svg) instead and regenerate the PNG with the recipe in that file's header comment, so the two stay in step.
 
 ## Development
 

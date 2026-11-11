@@ -1865,7 +1865,7 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
-    docs/configuration.md|docs/supervision-protocols/*)
+    VISION.md|docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
     tests/git-config-helpers.sh)
@@ -1917,10 +1917,7 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|VISION.md|GROK_BOT.md|LICENSE|assets/*|docs/*|.gitignore)
-      # Prose and assets with no test consumer select nothing. CONTRIBUTING.md
-      # and AGENTS.md stay out: suites name them, so the reference scan below
-      # still maps them.
+    README.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
       if [ -e "$path" ]; then
