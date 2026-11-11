@@ -559,7 +559,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - An unconfirmed successor reported in the banner without withholding the wake.
 - The [session-bound HUP/TERM/INT failure handoff](turnend-guard.md#failure-progression-and-block-budget) and replacement-session notice isolation.
 
-It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
+It also covers generation-claim single-flight, stuck-claim and earlier-session supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
 
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh`:
@@ -587,7 +587,7 @@ OpenCode support targets persistent TUI sessions rather than headless `opencode 
 The other harnesses rely on these mechanisms:
 
 - Claude normally depends on the [auto-arm hook's rewake](#claude-stop-hook).
-  The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) adds guarded tmux retries when that continuation is lost.
+  The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) owns guarded retries when that continuation is lost.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
 - Codex retains bounded foreground checkpoints unless the home opts in to its [native Stop park](supervision-protocols/codex.md).

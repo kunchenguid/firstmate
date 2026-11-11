@@ -6,7 +6,8 @@
 # process as the session-socket owner, and real holder processes whose
 # environment and ancestry carry the birth markers the guard reads. It pins
 # the decision table: no server -> start; an Aqua-born owner -> leave it; an
-# SSH-born or unprovable owner -> stop it, wait for the socket, start. Nothing
+# SSH-born or unprovable owner -> stop it, wait for the socket, and start, but
+# only on a start the operator's --fix authorized, else leave it. Nothing
 # here touches the runner's own herdr servers, launch agents, or login
 # session, and no live harness guard applies: the verdict comes from process
 # environment and ancestry, which are kernel facts rather than vendor output.
@@ -34,7 +35,7 @@ SESSION=fm-remote
 # so a case can also present a host with NO lsof.
 TOOLS="$TMP_ROOT/tools"
 mkdir -p "$TOOLS"
-for tool in ps awk sed grep tr dirname basename sleep cat cp rm env bash sh id head; do
+for tool in ps awk sed grep tr dirname basename sleep cat cp mv rm env bash sh id head; do
   real=$(command -v "$tool") || fail "test host lacks $tool"
   ln -sf "$real" "$TOOLS/$tool"
 done
@@ -171,6 +172,16 @@ guard() { # [extra env assignments...]
 }
 
 herdr_calls() { cat "$CASE_LOG"; }
+TAKEOVER_MARKER="$TMP_ROOT/.firstmate/remote-herdr-takeover-$SESSION"
+# authorize [pid]: construct the doctor/guard two-line authorization protocol.
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+authorize() {
+  local pid=${1:-$$} start
+  mkdir -p "${TAKEOVER_MARKER%/*}"
+  start=$(fm_remote_job_process_start "$pid") || start=finished-process
+  printf '%s\n%s\n' "$pid" "$start" > "$TAKEOVER_MARKER"
+}
 assert_started() { # <msg>
   [ -f "$CASE_STATE/started" ] || fail "$1"
   assert_grep "session=$SESSION" "$CASE_STATE/started" "the server was started for the wrong session"
@@ -257,6 +268,7 @@ new_case running
 printf '%s\n' "$BACKGROUND_PID" > "$CASE_OWNER"
 load_job gui dev.firstmate.herdr.fm-remote
 load_job user dev.firstmate.herdr.fm-remote
+authorize
 guard
 expect_code 0 "$GUARD_RC" "the guard failed to take over a label also loaded in the user domain"
 assert_stop_before_start
@@ -265,6 +277,7 @@ assert_contains "$GUARD_OUT" "pid $BACKGROUND_PID born outside the Aqua login se
 
 new_case running
 printf '%s\n' "$XPC_ZERO_PID" > "$CASE_OWNER"
+authorize
 guard
 expect_code 0 "$GUARD_RC" "the guard failed to take over an XPC_SERVICE_NAME=0 owner"
 assert_stop_before_start
@@ -274,6 +287,7 @@ assert_contains "$GUARD_OUT" "pid $XPC_ZERO_PID born outside the Aqua login sess
 for foreign in "ssh $SSH_PID" "ssh $BRIDGE_CHILD_PID" "ssh $SSHD_CHILD_PID" "unknown $UNMARKED_PID"; do
   new_case running
   printf '%s\n' "${foreign#* }" > "$CASE_OWNER"
+  authorize
   guard
   expect_code 0 "$GUARD_RC" "the guard failed to take over from a ${foreign%% *} owner (pid ${foreign#* })"
   assert_stop_before_start
@@ -281,11 +295,63 @@ for foreign in "ssh $SSH_PID" "ssh $BRIDGE_CHILD_PID" "ssh $SSHD_CHILD_PID" "unk
   assert_contains "$GUARD_OUT" "pid ${foreign#* } born outside the Aqua login session (${foreign%% *})" \
     "the guard did not name the foreign owner and its birth"
 done
-pass "background, inherited-XPC, SSH-born, SSH-descended, and unprovable owners are taken over"
+assert_absent "$TAKEOVER_MARKER" "the guard left its one-shot takeover authorization behind"
+pass "background, inherited-XPC, SSH-born, SSH-descended, and unprovable owners are taken over when the operator authorizes it"
+
+# --- without the operator's authorization a foreign owner is left alone -----
+
+new_case running
+printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
+guard
+expect_code 0 "$GUARD_RC" "an unauthorized start over a foreign server did not exit 0, so launchd would respawn it"
+assert_not_contains "$(herdr_calls)" 'server stop' "an unauthorized start stopped a foreign server"
+assert_not_started "an unauthorized start started a second server"
+assert_contains "$GUARD_OUT" "pid $SSH_PID born outside the Aqua login session (ssh); leaving it alone" \
+  "the guard did not report leaving the foreign server alone"
+
+# A reused PID is modeled deterministically by pairing a live PID with a
+# different start identity. The authorization contract requires both to match;
+# PID-only acceptance would stop this foreign server.
+for start in stale-process-start ''; do
+  new_case running
+  printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
+  mkdir -p "${TAKEOVER_MARKER%/*}"
+  printf '%s\n%s\n' "$$" "$start" > "$TAKEOVER_MARKER"
+  guard
+  expect_code 0 "$GUARD_RC" "a mismatched process identity made the guard fail"
+  assert_not_contains "$(herdr_calls)" 'server stop' "a live PID revived stale takeover permission"
+  assert_not_started "stale takeover permission started a replacement server"
+  assert_absent "$TAKEOVER_MARKER" "stale takeover permission was not consumed"
+done
+pass "a live PID cannot revive a missing or mismatched process-start identity"
+
+new_case running
+printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
+( exit 0 ) &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null || true
+authorize "$DEAD_PID"
+guard
+expect_code 0 "$GUARD_RC" "a stale authorization made the guard fail"
+assert_not_contains "$(herdr_calls)" 'server stop' "an authorization from a finished doctor stopped a foreign server"
+assert_absent "$TAKEOVER_MARKER" "a stale authorization was left for a later start to honor"
+
+new_case running
+printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
+authorize
+guard
+assert_stop_before_start
+: > "$CASE_LOG"
+rm -f "$CASE_STATE/started"
+printf 'true\n' > "$CASE_RUNNING"
+guard
+assert_not_contains "$(herdr_calls)" 'server stop' "one authorization took over the session twice"
+pass "a login, KeepAlive, or automatic start never takes over a foreign server, and an authorization is honored once"
 
 # --- an owner nobody can prove is treated as foreign -------------------------
 
 new_case running
+authorize
 guard
 expect_code 0 "$GUARD_RC" "the guard failed when lsof listed no owner"
 assert_contains "$GUARD_OUT" 'no herdr process could be proven to own' "the guard did not report the unprovable owner"
@@ -295,6 +361,7 @@ pass "a running session with no provable owner is taken over rather than trusted
 new_case running
 printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
 rm -f "$FAKE/lsof"
+authorize
 guard
 cp "$TMP_ROOT/lsof.fake" "$FAKE/lsof"
 chmod +x "$FAKE/lsof"
@@ -308,6 +375,7 @@ pass "a host without lsof cannot prove an Aqua birth, so the session is taken ov
 new_case running
 printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
 touch "$CASE_STATE/stop-ignored"
+authorize
 guard
 expect_code 1 "$GUARD_RC" "the guard did not exit 1 when the foreign server kept its socket"
 assert_not_started "the guard started a server while the foreign one still held the socket"
@@ -320,6 +388,7 @@ pass "a foreign server that never releases the socket yields exit 1 so launchd r
 new_case running
 printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
 printf '3\n' > "$CASE_STATE/stop-releases-after"
+authorize
 guard
 expect_code 0 "$GUARD_RC" "the guard gave up on a server that released its socket after a few polls"
 assert_started "the guard did not start after the delayed release"

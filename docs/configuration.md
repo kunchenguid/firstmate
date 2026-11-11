@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -830,6 +830,13 @@ A refused registration, such as a draft, prints one `check: pr-register:` wake f
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
 
+## Degraded PR watch (config/pr-degraded-watch)
+
+The optional local, gitignored `config/pr-degraded-watch` presence flag opts this home into waking once when a ready PR or MR degrades, including a GitHub failing check, a GitLab failed pipeline, or a merge-train drop.
+With the flag present, registration records a degraded/train baseline and each poll checks those states; repeated reports of the same transition remain silent.
+Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab JSON, pipeline, or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
+The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
+
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
 The optional local, gitignored `config/pipeline-spend` presence flag opts this home into recording per-task no-mistakes pipeline spend in `data/pipeline-spend.jsonl` during teardown.
@@ -1064,6 +1071,18 @@ With the flag absent the watcher spends no current-state read for it and keeps t
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the declared-wait contract and `bin/fm-watch.sh`'s `paused_wait_superseded` owns the exact derivation, reasons, and throttle.
 
+## Silent paused rechecks (config/paused-recheck-silent)
+
+The optional local, gitignored `config/paused-recheck-silent` presence flag opts this home into a default-off quiet form of the declared-wait recheck.
+With it present, the watcher's `FM_PAUSE_RESURFACE_SECS` recheck of a worker's `paused:` declaration queues no wake when the declaration is unchanged since its first recheck wake, the agent is confirmed alive (a secondmate's liveness is never read), its declared `until` time is not yet due, and the task has no open decision.
+The watcher records the recheck in the declaration's existing throttle marker, so the recheck cadence is unchanged.
+A first sight, a changed status line, a due declared time, and an open decision still wake.
+Captain-held transfers are not affected.
+
+With the flag absent, every recheck wakes as before.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+`bin/fm-watch.sh`'s `handle_paused_stale` owns the exact condition.
+
 ## Open-decision reminders (config/open-decision-reminders)
 
 The optional local, gitignored `config/open-decision-reminders` presence flag enables a default-off watcher backstop for unanswered keyed `needs-decision` and `blocked` records.
@@ -1237,6 +1256,26 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
+
+## Stow guard (config/stow-guard)
+
+`config/stow-guard` is an optional local, gitignored file that asks a Claude primary to run `/stow` while there is still room before context compaction.
+Without the file the session is unchanged.
+
+With the file present, the Claude Stop hook `bin/fm-stow-guard.sh` blocks one turn end and tells that session to run the existing `/stow` skill.
+It asks when the newest context reading in the transcript tail is at least `tokens` (default 300000), once per crossing, and again only after a later reading falls below two-thirds of that line.
+It also asks when the newest `/stow` it has seen is at least `hours` old (default 24), and then not again for an hour.
+That age ask is skipped when a `/stow` timestamp cannot be read.
+The stored state is what makes each ask once per crossing, so a continuation stop is handled like any other stop.
+A hook error does not block the turn, and the hook never compacts the session itself.
+It runs for a plain Claude primary checkout of this home.
+It stays silent in a crew worktree and in a marked secondmate home, because a Stop block there leaves the parent recording that mate as idle while it is still working.
+The file is per home and is not inherited.
+Blank lines and lines that start with `#` are ignored.
+Optional lines are `tokens=<n>` and `hours=<n>`.
+An unusable value keeps its default.
+Remove the file to turn the ask off.
+The script header owns the transcript read, the state file, and the block message.
 
 ## Self-update source (config/self-update-source)
 
@@ -1534,8 +1573,8 @@ Neither fallback is unrestricted execution, and Firstmate does not change vendor
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 
-The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available.
-The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored.
+The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available, or to stop sending the schemas of tools a worker never calls with every model request.
+The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored by the launch (Claude name typos are the exception, see [Validation](#validation)).
 With no file, or a file with no entries, every launch on every runtime is unchanged.
 
 Create the file with one tool name per line, such as `mcp__<server>__<tool>` for an MCP tool.
@@ -1548,10 +1587,19 @@ It does not apply to a secondmate's own agent, which neither reads nor refuses o
 
 | Runtime | With a non-empty list |
 | --- | --- |
+| `claude` | Launches with `--disallowedTools '<names>'`, so each listed tool's schema is absent from every model request, not only denied at call time. An entry may also be an MCP server name such as `mcp__<server>`, which hides all of that server's tools. Applies to every ship and scout spawn and relaunch. |
 | `pi`, `pi-signed` | Hides listed tool names, MCP tools included, on every ship and scout spawn and relaunch. |
 | Every other runtime, and a raw launch command | The launch refuses with an error naming `config/crew-exclude-tools`, because that runtime has no verified way to hide tools. |
 
 A relaunch validates the list and the replacement runtime's support before stopping the running worker, so an exclusion-list refusal preserves the running agent.
+
+### Trimming Claude tool schemas
+
+Claude Code sends every enabled tool's schema with each model call, and a long-lived worker resends them on every turn.
+List a tool the workers do not use to remove its schema from that fixed cost, for example `Workflow` or the artifact tools; the measured examples are in `docs/verification/runtime-backends.md`.
+Claude Code can supply a built-in `Artifact` tool when the artifacts MCP server is disallowed, so hide both `mcp__<artifacts-server>` and `Artifact` to remove every artifact schema.
+Only a name that matches a tool present in the worker's session has any effect; [Validation](#validation) explains why Claude names go unchecked, so confirm the saving from a worker's first request or `/context`.
+The measured effect on a Claude Code 2.1.319 worker launch is recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md).
 
 ### Validation
 
@@ -1561,6 +1609,7 @@ An unreadable or nonregular file, or a path inspection error, also refuses and n
 For a new worker, these checks run before its endpoint, local copy, or task record is created; Firstmate never launches with a partial list.
 Only exact tool names are accepted, not wildcard patterns.
 Firstmate checks syntax and runtime support before launch but never runs `pi mcp list` or otherwise connects to servers to validate names.
+Claude workers get no post-launch name check, so a misspelled Claude entry is silently ineffective.
 When its first agent run starts, after Pi's startup tool-loading boundary, the worker extension compares the launch's exclusion list with its own loaded-tool registry and appends a timestamped warning note to `state/<task-id>.status` naming the configuration file and every unmatched entry for the supervisor.
 The check runs before worker actions so it cannot supersede a terminal status emitted during the turn.
 An unmatched entry is reported as **unverified**, not valid: Pi versions that omit excluded tools from the registry cannot distinguish a correct exclusion from a typo, and a server that has not connected cannot verify its tools either.

@@ -219,6 +219,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+PR_DEGRADED_WATCH_ENABLED=0
+[ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
 mkdir -p "$STATE"
 # Hold this state directory open for the main loop's teardown check: a
 # directory recreated at the same path is then a different directory, and the
@@ -2468,6 +2470,24 @@ paused_wait_superseded() {  # <window> <task>
   return 0
 }
 
+# 0 when an unchanged paused declaration with no usable declared time is due its
+# recheck and config/paused-recheck-silent says to run it without a wake: the
+# agent is confirmed alive and no decision is open. Advances the throttle marker.
+# The cheap age and marker reads run first, so the backend probe and the status
+# fold happen only when silence would replace a wake.
+paused_recheck_silent() {  # <window> <statusf> <key> <declaration> <status-age>
+  local win=$1 statusf=$2 key=$3 declaration=$4 age=$5 marker
+  marker="$STATE/.paused-resurfaced-$key"
+  [ -e "$CONFIG/paused-recheck-silent" ] \
+    && [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] \
+    && [ "$(cat "$marker" 2>/dev/null || true)" = "$declaration" ] \
+    && [ "$(age_of "$marker")" -ge "$PAUSE_RESURFACE_SECS" ] \
+    && { [ "$(window_kind "$win")" = secondmate ] || [ "$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null || true)" = alive ]; } \
+    && [ -z "$(status_own_open_decisions "$statusf")" ] \
+    || return 1
+  printf '%s' "$declaration" > "$marker"
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer. Non-overdue waits re-surface every
 # PAUSE_RESURFACE_SECS; an overdue pause opens a keyed blocked decision and stays
@@ -2487,7 +2507,7 @@ paused_wait_superseded() {  # <window> <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age silent=0
   if paused_wait_superseded "$win" "$task"; then return 0; fi
   key=$(window_key "$win")
   pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
@@ -2527,6 +2547,7 @@ handle_paused_stale() {  # <window> <task> <hash>
       return 0
     elif [ "$now" -lt "$until" ]; then
       detail="paused, declared time beyond recheck cadence"
+      silent=1
       reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
     else
       # The declared time has passed: recheck now, once per declaration, then
@@ -2538,7 +2559,12 @@ handle_paused_stale() {  # <window> <task> <hash>
     fi
   else
     detail="paused, awaiting external"
+    silent=1
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+  fi
+  if [ "$silent" = 1 ] && paused_recheck_silent "$win" "$statusf" "$key" "$declaration" "$age"; then
+    triage_log "absorbed stale (${detail}, unchanged declaration rechecked without a wake, age ${age}s): $win"
+    return 0
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${pause_age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task" "$snapshot"
@@ -3072,8 +3098,10 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
         STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
         stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
       fi
-    else
-      stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+    elif stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" \
+      || paused_recheck_silent "$win" "$STATE/$task.status" "$key" "$STALE_WAIT_DECLARATION" \
+        "$(( $(date +%s) - $(stat_mtime "$STATE/$task.status") ))"; then
+      throttled=0
     fi
   elif status_is_captain_held "$last"; then
     declared=0
@@ -4010,6 +4038,8 @@ resurface_after_downtime() {
 }
 
 while :; do
+  PR_DEGRADED_WATCH_ENABLED=0
+  [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
   # Native Codex may tear down the async hook and its watchdog together.
   # fm-codex-stop-park.sh owns this optional identity binding. Self-expiry
   # closes the normal recovery generation and lets the arm/host exit too.
@@ -4277,6 +4307,73 @@ EOF
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
+          wake "$reason"
+        elif [ "$is_pr_poll" -eq 1 ] \
+          && { [ "$out" = ontrain ] || [ "${out%% *}" = degraded ]; } \
+          && [ "$PR_DEGRADED_WATCH_ENABLED" != 1 ]; then
+          pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
+          continue
+        elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ] && [ "$PR_DEGRADED_WATCH_ENABLED" = 1 ]; then
+          # A ready MR still on its merge train: remember it in the train
+          # marker so a later drop (the car gone while the MR is still open)
+          # is a transition worth a wake. The drop wake clears that marker,
+          # so a drop wakes once and a re-queue arms the next one.
+          if ! fm_pr_poll_degraded_already_notified "$STATE" "$id" \
+              "$provider" "$host" "$path" "$number" train=on; then
+            fm_pr_poll_degraded_mark_notified "$STATE" "$id" \
+              "$provider" "$host" "$path" "$number" train=on || exit 1
+          fi
+          pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
+          continue
+        elif [ "$is_pr_poll" -eq 1 ] && [ "${out%% *}" = degraded ] && [ "$PR_DEGRADED_WATCH_ENABLED" = 1 ]; then
+          # A ready PR/MR that degraded after its ready report - a failing
+          # check on GitHub, a failed head pipeline on GitLab, the readable
+          # trace of a merge train dropping the merge request - would
+          # otherwise leave the worker and this supervisor idle until a human
+          # notices. Wake once per transition: the poll names the head or
+          # pipeline that degraded, the marker records the identity that last
+          # woke, and a repeat or an unreadable line stays silent.
+          degraded_identity=${out#'degraded '}
+          degraded_identity=${degraded_identity%% *}
+          case $out in
+            *$'\n'*) degraded_identity= ;;
+          esac
+          if ! fm_pr_poll_degraded_identity_valid "$degraded_identity"; then
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            triage_log "PR poll for $id emitted an unreadable degraded result; staying silent"
+            continue
+          fi
+          if [ "$degraded_identity" != train=dropped ] \
+              && fm_pr_poll_degraded_already_notified "$STATE" "$id" \
+                "$provider" "$host" "$path" "$number" "$degraded_identity"; then
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            triage_log "absorbed duplicate degraded PR poll result for $id"
+            continue
+          fi
+          if [ "$degraded_identity" = train=dropped ] \
+              && ! fm_pr_poll_degraded_already_notified "$STATE" "$id" \
+                "$provider" "$host" "$path" "$number" train=on; then
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            triage_log "PR poll for $id reported a train drop it never saw on the train; staying silent"
+            continue
+          fi
+          # The durable wake lands before the marker, both under the control
+          # lock, so a failure between them can only repeat this wake on the
+          # next poll, never record a transition nobody was woken for.
+          reason="check: PR $url degraded after ready: $out"
+          fm_wake_append check "$c" "$reason" || exit 1
+          fm_pr_poll_degraded_mark_notified "$STATE" "$id" \
+            "$provider" "$host" "$path" "$number" "$degraded_identity" || exit 1
+          if [ "$degraded_identity" = train=dropped ]; then
+            fm_pr_poll_train_clear "$STATE" "$id" || exit 1
+          fi
+          pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
           wake "$reason"
         fi
         pr_poll_control_release || exit 1

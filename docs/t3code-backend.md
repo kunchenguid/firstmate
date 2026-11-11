@@ -227,9 +227,9 @@ Resolve ambiguity by explicitly setting both `FM_SUPERVISOR_BACKEND=t3code` and 
 Injection is a `t3_thread_send` only into a settled supervisor thread, one the [thread status table](#restart-and-liveness-behavior) reads idle/alive with no pending request; any other row, including `blocked` and an unreadable thread, defers the digest exactly as a busy pane does on every other backend.
 An unknown native busy verdict defers new-turn delivery but does not prove that work resumed.
 Away housekeeping keeps an overdue stale alert pending and buffers one possible-wedge report while the verdict remains unknown, including a failed run or a transient thread-read failure.
-Delivered warnings stay suppressed while the same unknown condition persists.
-If a fresh daemon entry discards a queued, undelivered warning, it clears that warning's reported marker and preserves its stale timer, so the next housekeeping pass queues exactly one replacement.
-Refreshing a live daemon preserves the queue; a failed start restores the previous queue and reported markers.
+Within the same away session, delivered warnings stay suppressed while the same unknown condition persists.
+The [stale-artifact lifecycle](../.agents/skills/afk/SKILL.md#stale-artifact-lifecycle) owns session-boundary cleanup and recheck-window resets.
+Refreshing a live daemon preserves the queue and episode markers; a failed start restores the previous queue and episode markers.
 Confirmed busy activity, a missing thread, or an idle verdict after the unknown condition was reported clears the stale and reported markers without another report, so a later unknown condition can report again.
 Declared external-wait rechecks also survive native uncertainty; the worker's declaration still controls their cadence.
 `stale_window_is_busy` and `housekeeping` in `bin/fm-supervise-daemon.sh` own stale tracking; `fm_afk_clear_stale_artifacts` in `bin/fm-afk-start.sh` and the launcher in `bin/fm-afk-launch.sh` own queue discard and startup rollback.
