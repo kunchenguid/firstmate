@@ -142,7 +142,8 @@ fm_home_payload_finalize() {
     [ -d "$staging" ] && [ ! -L "$staging" ] || continue
     record=$staging/$FM_HOME_PAYLOAD_RECORD
     [ -f "$record" ] && [ ! -L "$record" ] || continue
-    grep -Fxq "home=$home" "$record" && grep -Fxq "id=$id" "$record" || continue
+    grep -Fxq "home=$home" "$record" || continue
+    grep -Fxq "id=$id" "$record" || continue
     fm_home_payload_reconcile "$home" "$staging" || {
       echo "error: durable home $home has an unresolved return at $staging" >&2
       return 1
