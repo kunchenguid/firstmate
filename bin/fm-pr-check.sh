@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# The poll also wakes when a ready pull request or merge request degrades
+# after its ready report - a failing check on GitHub, a failed head pipeline
+# on GitLab (the readable trace of a merge train dropping the merge request) -
+# one wake per head/pipeline transition naming the failed jobs, the forge's
+# failure reasons, and the pipeline or check URL, so the worker can be steered
+# to fix it; the merged wake itself is unchanged.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
@@ -20,6 +26,8 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# That merge-time re-record also skips the degraded baseline read below, so it
+# makes no forge read the merge's own live reads would duplicate.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 #
@@ -48,6 +56,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DEGRADED_WATCH_ENABLED=0
+[ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-degraded-watch" ] || DEGRADED_WATCH_ENABLED=1
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -149,6 +159,7 @@ if [ "$#" -eq 1 ] && [ "$1" = scan ]; then
   exit 0
 fi
 
+
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
@@ -207,6 +218,15 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # a change's subject before its status, and a subject is free text.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
+fi
+# The GitLab poll reads the merge request as JSON (glab -F json), the same
+# read the merge path makes, because its head pipeline state - the readable
+# trace of a merge train dropping the merge request - exists only there. A
+# missing jq would leave the poll silent on every read, so arming refuses for
+# the same reason it refuses without glab.
+if [ "$PROVIDER" = gitlab ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires jq on PATH" >&2
   exit 1
 fi
 if [ "$PROVIDER" = gerrit ]; then
@@ -293,16 +313,33 @@ if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
 fi
 
 META_TMP=
+BASELINE_BACKUP=
+BASELINE_BACKUP_COMPLETE=0
 META_LOCK=
 META_LOCK_HELD=0
 PR_POLL_PUBLISH_LOCK=
 PR_POLL_PUBLISH_LOCK_HELD=0
+CONTROL_LOCK=
+CONTROL_LOCK_HELD=0
 pr_check_cleanup() {
+  if [ -n "$BASELINE_BACKUP" ] && [ -d "$BASELINE_BACKUP" ] \
+    && declare -F restore_baselines >/dev/null; then
+    if restore_baselines; then
+      rm -rf -- "$BASELINE_BACKUP"
+      BASELINE_BACKUP=
+    else
+      echo "error: could not restore previous PR poll registration; backup retained at $BASELINE_BACKUP" >&2
+    fi
+  fi
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
   if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
     fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
     PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -313,6 +350,53 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
+
+# The degraded dedupe baseline is the poll's own reading at the ready report:
+# a change already degraded is not news, and a merge request already on its
+# merge train arms the wake for its drop. It is read first, under the task's
+# control lock the watcher holds while it reads and dedupes, and before the
+# metadata is rewritten: a stalled or failed read fails registration with the
+# task metadata and the previously published poll unchanged. Lock order is
+# control -> meta -> publish. A merge-time re-record neither takes the lock
+# (bin/fm-pr-merge.sh already holds it) nor reads or rewrites the baseline: it
+# records before any forge call, and the marker it leaves is keyed to the PR
+# identity, so it can only ever match the PR it was written for.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+  CONTROL_LOCK="$STATE/.control-$ID.lock"
+  fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
+  CONTROL_LOCK_HELD=1
+  # The read runs under the control lock the watcher waits on, so it is
+  # bounded by the watcher's own check bound.
+  BASELINE_RC=0
+  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+  if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
+    if [ "$BASELINE_RC" = 124 ]; then
+      echo "error: baseline read of the PR poll timed out" >&2
+    else
+      echo "error: baseline read of the PR poll failed" >&2
+    fi
+    exit 1
+  fi
+  BASELINE_TRAIN=0
+  BASELINE_TRAIN_UNKNOWN=0
+  BASELINE_DEGRADED=
+  while IFS= read -r baseline_line; do
+    case $baseline_line in
+      ontrain) BASELINE_TRAIN=1 ;;
+      train=unknown) BASELINE_TRAIN_UNKNOWN=1 ;;
+      'degraded head='*|'degraded pipeline='*)
+        BASELINE_DEGRADED=${baseline_line#degraded }
+        BASELINE_DEGRADED=${BASELINE_DEGRADED%% *}
+        ;;
+    esac
+  done <<EOF
+$BASELINE
+EOF
+  if [ "$BASELINE_TRAIN_UNKNOWN" = 1 ]; then
+    echo "error: merge-train baseline read was inconclusive" >&2
+    exit 1
+  fi
+fi
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
@@ -344,27 +428,88 @@ fm_pr_metadata_identity_parse "$META_TMP" || exit 1
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
-mv -f -- "$META_TMP" "$META" || exit 1
+
+# Keep the current registration recoverable until all replacement files commit.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+  BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
+  restore_baselines() {
+    local artifact backup
+    for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+      "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+      backup="$BASELINE_BACKUP/$(basename "$artifact")"
+      if [ -e "$backup" ]; then
+        rm -f -- "$artifact" || return 1
+        mv -- "$backup" "$artifact" || return 1
+      elif [ "$BASELINE_BACKUP_COMPLETE" = 1 ]; then
+        rm -f -- "$artifact" || return 1
+      fi
+    done
+  }
+  baseline_failure() {
+    exit 1
+  }
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train" \
+    "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] \
+      && [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] \
+      && [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || { rm -rf -- "$BASELINE_BACKUP"; exit 1; }
+  done
+  for artifact in "$META" "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    mv -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
+  done
+fi
+mv -f -- "$META_TMP" "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 META_TMP=
-fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META" || exit 1
+fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+fm_pr_metadata_identity_parse "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
-
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
-fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK_HELD=1
+if [ -n "${BASELINE_BACKUP:-}" ]; then
+  for artifact in "$STATE/$ID.check.sh" "$STATE/$ID.pr-poll" "$STATE/$ID.pr-poll-registration"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    mv -- "$artifact" "$BASELINE_BACKUP/$(basename "$artifact")" || baseline_failure
+  done
+  BASELINE_BACKUP_COMPLETE=1
+  if [ -n "$BASELINE_DEGRADED" ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE_DEGRADED" || baseline_failure
+  else
+    rm -f -- "$STATE/$ID.pr-poll-degraded" || baseline_failure
+  fi
+  if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || baseline_failure
+  else
+    rm -f -- "$STATE/$ID.pr-poll-train" || baseline_failure
+  fi
+fi
 if fm_pr_poll_publish_prepared; then
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
 else
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
+  [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure
   exit 1
+fi
+fm_lock_release "$META_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+META_LOCK_HELD=0
+if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$CONTROL_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+  CONTROL_LOCK_HELD=0
+fi
+if [ -n "${BASELINE_BACKUP:-}" ]; then
+  OBSOLETE_BASELINE_BACKUP=$BASELINE_BACKUP
+  BASELINE_BACKUP=
+  BASELINE_BACKUP_COMPLETE=0
+  rm -rf -- "$OBSOLETE_BASELINE_BACKUP"
 fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
