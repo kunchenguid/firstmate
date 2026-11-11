@@ -475,6 +475,7 @@ case "${1:-} ${2:-}" in
       *) "$0" "$@" -F json | jq -r '"state: " + .state'; exit 0 ;;
     esac
     if [ -e "$case_dir/glab-train-added" ]; then
+      [ ! -e "$case_dir/train-view-stalls" ] || sleep 30
       views=$(( $(cat "$case_dir/glab-train-views" 2>/dev/null || echo 0) + 1 ))
       echo "$views" > "$case_dir/glab-train-views"
       if [ -f "$case_dir/mr-train-$views.json" ]; then
@@ -5701,6 +5702,22 @@ test_gitlab_merge_train_unreadable_car_is_not_a_drop() {
   pass "an unreadable merge-train car stays indeterminate instead of reporting a drop"
 }
 
+test_gitlab_merge_train_stalled_read_cannot_outlive_the_wait() {
+  local case_dir rc=0 started elapsed
+  case_dir=$(make_gitlab_train_case gitlab-train-stalled-read)
+  : > "$case_dir/train-view-stalls"
+  started=$SECONDS
+  TRAIN_WAIT=2 run_train_merge "$case_dir" || rc=$?
+  elapsed=$((SECONDS - started))
+
+  expect_code 1 "$rc" "gitlab-train-stalled-read: a stalled read must end as queued"
+  [ "$elapsed" -lt 15 ] \
+    || fail "gitlab-train-stalled-read: the run outlived the 2 second wait (${elapsed}s)"
+  assert_grep "is queued in the merge train" "$case_dir/stderr" \
+    "gitlab-train-stalled-read: the stalled wait was not reported as queued"
+  pass "a stalled merge-train read cannot outlive the bounded wait"
+}
+
 test_gitlab_merge_train_keeps_the_pre_merge_guards() {
   local case_dir rc
   case_dir=$(make_gitlab_train_case gitlab-train-wrong-source)
@@ -5917,6 +5934,7 @@ test_gitlab_merge_train_drop_is_reported_with_its_pipeline
 test_gitlab_merge_train_lost_entry_response_is_reconciled
 test_gitlab_merge_train_lost_entry_for_another_head_is_refused
 test_gitlab_merge_train_unreadable_car_is_not_a_drop
+test_gitlab_merge_train_stalled_read_cannot_outlive_the_wait
 test_gitlab_merge_train_keeps_the_pre_merge_guards
 test_gitlab_merge_train_entry_runs_under_away_authority
 test_expected_head_matching_reaches_each_forge

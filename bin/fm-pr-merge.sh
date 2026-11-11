@@ -698,7 +698,11 @@ note_expected_head() {
 FM_PR_GITLAB_TRAIN=false
 GITLAB_PROJECT_API=
 gitlab_project_api() {
-  GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" "$@"
+  if [ -n "${FM_PR_READ_BOUND:-}" ]; then
+    GITLAB_HOST="$FM_PR_HOST" fm_run_timed "$FM_PR_READ_BOUND" glab api --hostname "$FM_PR_HOST" "$@"
+  else
+    GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" "$@"
+  fi
 }
 
 gitlab_read_project_settings() {
@@ -2021,7 +2025,7 @@ gitlab_read_train_car() {
 # merge poll still armed so a later landing is recorded by it. Any state other
 # than merged, opened, or closed, such as GitLab's transient locked while the
 # merge runs, is waited on rather than judged.
-gitlab_await_train() {
+gitlab_await_train_bounded() {
   local wait interval deadline json fields state mwps hp_ref hp_url hp_status car_rc
   local merged_unrecorded=false
   wait=${FM_PR_GITLAB_TRAIN_WAIT:-90}
@@ -2031,7 +2035,12 @@ gitlab_await_train() {
   deadline=$((SECONDS + wait))
   while :; do
     fields=
-    if json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
+    # Every forge read below is bounded by what is left of the wait, and the
+    # bound stops the read's whole process group, so a stalled read cannot
+    # outlive FM_PR_GITLAB_TRAIN_WAIT.
+    FM_PR_READ_BOUND=$((deadline - SECONDS))
+    [ "$FM_PR_READ_BOUND" -ge 1 ] || FM_PR_READ_BOUND=1
+    if json=$(GITLAB_HOST="$FM_PR_HOST" fm_run_timed "$FM_PR_READ_BOUND" glab mr view "$PR_NUMBER" -R "$PROJECT_URL" -F json 2>/dev/null) \
       && [ -n "$json" ]; then
       fields=$(printf '%s' "$json" | jq -r '
           if type == "object" and (.state | type) == "string" then
@@ -2049,7 +2058,7 @@ $fields
 FIELDS
       case "$state" in
         merged)
-          if [ "$("$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" = merged ]; then
+          if [ "$(fm_run_timed "$FM_PR_READ_BOUND" "$SCRIPT_DIR/fm-pr-poll.sh" --validated gitlab "$URL" "$FM_PR_HOST" "$PR_PATH" "$PR_NUMBER" 2>/dev/null)" = merged ]; then
             printf 'verified: %s was merged by the merge train\n' "$URL"
             return 0
           fi
@@ -2086,6 +2095,13 @@ FIELDS
   [ -z "$FM_PR_TRAIN_PIPELINE_URL" ] \
     || printf 'error: its merge train pipeline is %s\n' "$FM_PR_TRAIN_PIPELINE_URL" >&2
   return 1
+}
+
+gitlab_await_train() {
+  local rc=0
+  gitlab_await_train_bounded || rc=$?
+  FM_PR_READ_BOUND=
+  return "$rc"
 }
 
 # Unlike gh and glab, "tea api" reports an HTTP-level failure (a rejected or
