@@ -2238,6 +2238,13 @@ EOF
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && [ "$FM_COMPOSER_SELECTED_FIRST" -eq "$FM_COMPOSER_SELECTED_LAST" ]; then
           _fm_composer_bare_row_strip_furniture_var content
+          # A lone ruled glyph row is proven composer furniture by selection.
+          # Preserve its cells in multi-row wrapped drafts, but do not expose
+          # them as extracted input from this single-row selection.
+          if fm_composer_leading_agent_glyph_var glyph "$content" \
+             && _fm_composer_row_is_rule_furniture "${content#*"$glyph"}"; then
+            content=$glyph
+          fi
         fi
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then

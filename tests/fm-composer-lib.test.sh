@@ -1939,6 +1939,9 @@ test_ruled_first_row_over_plan_mode_footer_is_empty() {
   [ "$out" = empty ] || fail "ruled first row over plan-mode footer must read empty, got '$out'"
   out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
   [ "$out" = empty ] || fail "cursorless ruled first row over plan-mode footer must read empty, got '$out'"
+  out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+  [ -z "$out" ] \
+    || fail "ruled first row over plan-mode footer must extract no input, got '$out'"
   pass "a plan-mode footer below a ruled first row remains empty"
 }
 test_ruled_first_row_over_plan_mode_footer_is_empty
