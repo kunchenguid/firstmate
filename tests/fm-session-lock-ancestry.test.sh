@@ -217,21 +217,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$pid:$field" in
-  600:comm=) printf '%s\n' "$FM_TEST_AUGGIE_COMM" ;;
-  600:args=) printf '%s\n' "$FM_TEST_AUGGIE_ARGS" ;;
-  600:ppid=) printf '%s\n' 1 ;;
+  2147483647:comm=) printf '%s\n' "$FM_TEST_AUGGIE_COMM" ;;
+  2147483647:args=) printf '%s\n' "$FM_TEST_AUGGIE_ARGS" ;;
+  2147483647:ppid=) printf '%s\n' 1 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash -c bin/fm-session-start.sh' ;;
-  *:ppid=) printf '%s\n' 600 ;;
+  *:ppid=) printf '%s\n' 2147483647 ;;
 esac
 SH
   chmod +x "$fakebin/ps"
-  printf '600\n' > "$dir/state/.lock"
+  printf '2147483647\n' > "$dir/state/.lock"
 
   auggie_owns() {  # <comm> <args>
     FM_TEST_AUGGIE_COMM=$1 FM_TEST_AUGGIE_ARGS=$2 lib_eval "$fakebin" "
-      [ \"\$(fm_harness_ancestry_pid)\" = 600 ] || exit 1
-      fm_harness_pid_alive 600 || exit 2
+      [ \"\$(fm_harness_ancestry_pid)\" = 2147483647 ] || exit 1
+      fm_harness_pid_alive 2147483647 || exit 2
       fm_session_lock_owned_by_self '$dir/state' || exit 3
     "
   }
