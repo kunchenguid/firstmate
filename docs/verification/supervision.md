@@ -526,6 +526,7 @@ tests/fm-watch-arm.test.sh
 tests/fm-watch-scan-signals.test.sh
 tests/fm-watch-recovery-loop.test.sh
 tests/fm-wake-queue.test.sh
+tests/fm-watch-secondmate-wake-stall.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh

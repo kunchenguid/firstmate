@@ -116,8 +116,11 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS; observation is read-only
-#                          and one parent receipt suppresses repeats for that row
+#                          FM_SECONDMATE_WAKE_STALL_SECS AND the mate's own
+#                          endpoint is not provably busy; a positive busy read
+#                          stays silent, while a failed capture or any
+#                          unprovable read still reports; observation is
+#                          read-only and one parent receipt suppresses repeats
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -806,7 +809,8 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason verdict
+  local backend target harness label
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -841,6 +845,25 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
+    # A mate drains its own wake queue at turn start, never mid-turn, so ANY
+    # single turn longer than the threshold looks like a stalled loop while the
+    # mate is in fact working - the ordinary behaviour this rung exists to
+    # detect would satisfy the alarm. bin/fm-spawn.sh arms the same semantic
+    # busy contract for a mate that it arms for a crew window, so a positive
+    # busy read proves the mate is mid-turn and the rung stays silent. The live
+    # classifier checks the endpoint first, so a mate whose endpoint is gone is
+    # dead, never busy, and a stale record cannot silence the rung forever.
+    # Only a POSITIVE read suppresses: idle, unknown, dead, missing, no-target,
+    # and any capture failure inside the busy lib all fall through and still
+    # report, so a mate that cannot be proven working is never silently
+    # exempted. Nothing below the marker, receipt, dedupe, or notify-key shape
+    # changes.
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    harness=$(fm_meta_get "$meta" harness)
+    label="fm-$task"
+    verdict=$(fm_busy_classify_live "$backend" "$target" "$harness" "$task" "$STATE" "$label")
+    [ "${verdict%% *}" = busy ] && continue
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then

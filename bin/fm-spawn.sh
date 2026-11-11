@@ -200,8 +200,11 @@
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi semantic busy-state
+#                  events plus the turn-end notification, written by this script;
+#                  outside the worktree to avoid pi's trust gate). Loaded by a crew
+#                  window and by a pi secondmate, whose busy record the wake-stall
+#                  rung reads.
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1372,7 +1375,11 @@ launch_template() {
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        # __PIEXT__ carries the semantic busy-state events the wake-stall rung
+        # reads; without it a pi mate's armed record would never leave its seed
+        # state. It is written outside the mate home, so it loads without a
+        # project-trust dialog exactly as it does for a crew window.
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
@@ -2957,112 +2964,115 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
-  # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
-  # adapter with a verified semantic source. The launch brief sent below IS a
-  # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
-  # embedded into each adapter's wiring so an event from a superseded
-  # incarnation is rejected as stale. Grok and rovo stay on their isolated
-  # rendered-tail fallbacks and standalone Kimi stays unknown until
-  # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
-  # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
-  # open-close pair.
-  BUSY_GEN=
-  case "$HARNESS" in
-    codex*)
-      if fm_busy_codex_semantic_source; then
-        echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
-        exit 1
-      fi
-      ;;
-  esac
-  case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+# Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every adapter
+# with a verified semantic source, for EVERY spawn kind. A secondmate arms it
+# too: the wake-stall rung (bin/fm-watch.sh secondmate_wake_stall_tick) reads
+# this record to tell a long mate turn from a stalled loop, and a mate that
+# never armed it could only ever be reported on an unprovable read.
+# The launch brief sent below IS a
+# submitted turn, so the seed record is busy/fm-spawn. The minted gen is
+# embedded into each adapter's wiring so an event from a superseded
+# incarnation is rejected as stale. Grok and rovo stay on their isolated
+# rendered-tail fallbacks and standalone Kimi stays unknown until
+# fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
+# armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
+# open-close pair.
+BUSY_GEN=
+case "$HARNESS" in
+  codex*)
+    if fm_busy_codex_semantic_source; then
+      echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$HARNESS" in
+  claude*|opencode*|pi|pi-signed)
+    BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+      echo "error: failed to arm the busy-state contract for $ID" >&2
+      exit 1
+    }
+    [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    ;;
+  gemini)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
-      ;;
-    gemini)
-      if [ "$RAW_LAUNCH" -eq 0 ]; then
-        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
-          echo "error: failed to arm the busy-state contract for $ID" >&2
-          exit 1
-        }
-        [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
-      fi
-      ;;
-    kimi*)
-      # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
-      # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
-      # the required evidence). Arming without wiring would seed a busy record
-      # nothing can ever clear, so the arm waits for the wiring.
-      if fm_busy_kimi_verified; then
-        echo "error: kimi semantic busy-state wiring is not implemented; open the gate only together with verified wiring" >&2
-        exit 1
-      fi
-      ;;
-  esac
-  case "$HARNESS" in
-    claude*)
-      # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
-      # a turn; Stop (normal completion), StopFailure (API-error turn end),
-      # and SessionEnd (process shutdown) all close it, so an abnormal end can
-      # never leave a stale busy record. Claude fires no hook for a manual
-      # interrupt: fm-control preserves the adapter-owned state, while the
-      # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
-      # the turn-ended NOTIFICATION touch for the watcher. Every
-      # hook command tolerates a refused event (|| true) so a stale-gen writer
-      # can never break Claude's own lifecycle.
-      mkdir -p "$WT/.claude"
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
-      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
-      j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
-      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    fi
+    ;;
+  kimi*)
+    # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
+    # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
+    # the required evidence). Arming without wiring would seed a busy record
+    # nothing can ever clear, so the arm waits for the wiring.
+    if fm_busy_kimi_verified; then
+      echo "error: kimi semantic busy-state wiring is not implemented; open the gate only together with verified wiring" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$HARNESS" in
+  claude*)
+    # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
+    # a turn; Stop (normal completion), StopFailure (API-error turn end),
+    # and SessionEnd (process shutdown) all close it, so an abnormal end can
+    # never leave a stale busy record. Claude fires no hook for a manual
+    # interrupt: fm-control preserves the adapter-owned state, while the
+    # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
+    # the turn-ended NOTIFICATION touch for the watcher. Every
+    # hook command tolerates a refused event (|| true) so a stale-gen writer
+    # can never break Claude's own lifecycle.
+    mkdir -p "$WT/.claude"
+    busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+    busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+    j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+    j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+    j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
-      ;;
-    gemini)
-      if [ "$RAW_LAUNCH" -eq 0 ]; then
-      # Semantic busy-state hooks (bin/fm-busy-lib.sh): BeforeAgent opens a
-      # turn and AfterAgent closes it, with SessionEnd closing on process
-      # shutdown so an abnormal end can never leave a stale busy record.
-      # Verified live on gemini-cli 0.58.0 as a clean open/close pair:
-      # mid-turn only BeforeAgent had fired, and AfterAgent followed at turn
-      # end. AfterAgent ALSO fires on a manual Escape interrupt (carrying
-      # prompt_response "[no response text]"), so unlike Claude a cancelled
-      # gemini turn closes its own record instead of leaving it busy.
-      # SessionEnd was observed firing TWICE for one /quit; the busy writer is
-      # idempotent for a repeated idle event, so the duplicate is harmless and
-      # deliberately not de-duplicated here.
-      # These are written into a FIRSTMATE-OWNED settings file under state/,
-      # reached through GEMINI_CLI_SYSTEM_SETTINGS_PATH on the launch command,
-      # never into the worktree's own .gemini/settings.json - that path is the
-      # PROJECT's committed settings file, so writing it would clobber a
-      # project's configuration and retiring it would delete a tracked file.
-      # Hook arrays MERGE across gemini's settings layers rather than
-      # overriding, so a project's own hooks still run alongside these.
-      # AfterAgent keeps the turn-ended NOTIFICATION touch for the watcher.
-      # Every hook command tolerates a refused event (|| true) so a stale-gen
-      # writer can never break gemini's own lifecycle, and each prints the
-      # empty JSON object gemini's hook contract requires on stdout.
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
-      g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
+    exclude_path '.claude/settings.local.json'
+    ;;
+  gemini)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+    # Semantic busy-state hooks (bin/fm-busy-lib.sh): BeforeAgent opens a
+    # turn and AfterAgent closes it, with SessionEnd closing on process
+    # shutdown so an abnormal end can never leave a stale busy record.
+    # Verified live on gemini-cli 0.58.0 as a clean open/close pair:
+    # mid-turn only BeforeAgent had fired, and AfterAgent followed at turn
+    # end. AfterAgent ALSO fires on a manual Escape interrupt (carrying
+    # prompt_response "[no response text]"), so unlike Claude a cancelled
+    # gemini turn closes its own record instead of leaving it busy.
+    # SessionEnd was observed firing TWICE for one /quit; the busy writer is
+    # idempotent for a repeated idle event, so the duplicate is harmless and
+    # deliberately not de-duplicated here.
+    # These are written into a FIRSTMATE-OWNED settings file under state/,
+    # reached through GEMINI_CLI_SYSTEM_SETTINGS_PATH on the launch command,
+    # never into the worktree's own .gemini/settings.json - that path is the
+    # PROJECT's committed settings file, so writing it would clobber a
+    # project's configuration and retiring it would delete a tracked file.
+    # Hook arrays MERGE across gemini's settings layers rather than
+    # overriding, so a project's own hooks still run alongside these.
+    # AfterAgent keeps the turn-ended NOTIFICATION touch for the watcher.
+    # Every hook command tolerates a refused event (|| true) so a stale-gen
+    # writer can never break gemini's own lifecycle, and each prints the
+    # empty JSON object gemini's hook contract requires on stdout.
+    busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+    busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
+    g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
+    g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
+    g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat > "$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
 EOF
-      fi
-      ;;
-    opencode*)
-      mkdir -p "$WT/.opencode/plugins"
+    fi
+    ;;
+  opencode*)
+    mkdir -p "$WT/.opencode/plugins"
       cat > "$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -3112,12 +3122,12 @@ export const FmBusyState = async () => {
   };
 };
 EOF
-      exclude_path '.opencode/plugins/fm-busy-state.js'
-      ;;
-    pi|pi-signed)
-      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-      # loaded from inside the project (verified live), but an explicit -e path
-      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+    exclude_path '.opencode/plugins/fm-busy-state.js'
+    ;;
+  pi|pi-signed)
+    # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
+    # loaded from inside the project (verified live), but an explicit -e path
+    # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -3146,42 +3156,42 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
-      ;;
-    codex*)
-      # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
-      # probes and the evidence). Neither Codex path is usable on the
-      # installed binary: a pane worker's turns are not observable through
-      # the app-server protocol, and its lifecycle hooks did not fire for a
-      # firstmate-launched worker. Codex therefore classifies unknown with
-      # an explicit reason rather than falling back to idle, and no busy
-      # wiring is installed. The turn-end NOTIFICATION marker still rides
-      # the launch command via -c notify=[...] and __TURNEND__.
-      ;;
-    grok*)
-      # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
-      # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
-      # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
-      # after the folder is granted hook-trust, which is not automatic and which
-      # firstmate cannot establish at launch without editing grok's own managed
-      # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
-      # always trusted and load on first launch with no gate. So the turn-end hook
-      # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
-      # guarded no-op for every non-firstmate grok session: it fires only when the
-      # current workspace holds a .fm-grok-turnend token pointer that matches the
-      # firstmate-owned hook registry. firstmate then drops that per-task pointer
-      # (gitignored, like the other harnesses' worktree hook files).
-      # Result: the hook is outside the worktree, needs no trust grant, and never
-      # touches grok's managed config - only firstmate-owned files.
-      GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
-      GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
-      mkdir -p "$GROK_AUTH_DIR"
-      old_umask=$(umask)
-      umask 077
-      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
-      umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
-      sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
+    ;;
+  codex*)
+    # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
+    # probes and the evidence). Neither Codex path is usable on the
+    # installed binary: a pane worker's turns are not observable through
+    # the app-server protocol, and its lifecycle hooks did not fire for a
+    # firstmate-launched worker. Codex therefore classifies unknown with
+    # an explicit reason rather than falling back to idle, and no busy
+    # wiring is installed. The turn-end NOTIFICATION marker still rides
+    # the launch command via -c notify=[...] and __TURNEND__.
+    ;;
+  grok*)
+    # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
+    # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
+    # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
+    # after the folder is granted hook-trust, which is not automatic and which
+    # firstmate cannot establish at launch without editing grok's own managed
+    # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
+    # always trusted and load on first launch with no gate. So the turn-end hook
+    # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
+    # guarded no-op for every non-firstmate grok session: it fires only when the
+    # current workspace holds a .fm-grok-turnend token pointer that matches the
+    # firstmate-owned hook registry. firstmate then drops that per-task pointer
+    # (gitignored, like the other harnesses' worktree hook files).
+    # Result: the hook is outside the worktree, needs no trust grant, and never
+    # touches grok's managed config - only firstmate-owned files.
+    GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
+    GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
+    mkdir -p "$GROK_AUTH_DIR"
+    old_umask=$(umask)
+    umask 077
+    auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+    umask "$old_umask"
+    printf '%s\n' "$TURNEND" > "$auth_file"
+    printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
+    sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
 #!/usr/bin/env bash
 set -u
@@ -3200,80 +3210,79 @@ case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
 touch "\$t" 2>/dev/null || true
 exit 0
 EOF
-      chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
-      hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
-      printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
-      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
-      exclude_path '.fm-grok-turnend'
-      ;;
-    muse*)
-      # muse's turn lifecycle is neither a hook nor a launch flag: its plugin
-      # engine (the only hook surface) is disabled in the default build, so
-      # firstmate reads muse's own durable session event log instead
-      # (bin/fm-busy-lib.sh owns the fold). That is a PULL
-      # source with no writer, so nothing is armed and no record is seeded -
-      # exactly the reason standalone Kimi is not armed either.
-      # This sidecar is the whole binding: it pins the sessions root, the
-      # workspace root that muse records in each log's metadata, this pane's
-      # binding identity, and every matching main log that predates this pane.
-      # The classifier then accepts only one new matching log, so it never
-      # guesses between pane incarnations. Recording the resolved root here
-      # also means a later change to XDG_DATA_HOME cannot silently re-point an
-      # already-running task at a different log tree.
-      MUSE_SESSIONS_ROOT="${MUSE_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/muse/sessions"
-      MUSE_BINDING_ID="$$.$RANDOM.$(date +%s)"
-      rm -f "$STATE/$ID.muse-session-current"
-      {
-        printf 'sessions_root=%s\n' "$MUSE_SESSIONS_ROOT"
-        printf 'workspace_root=%s\n' "$WT"
-        printf 'binding_id=%s\n' "$MUSE_BINDING_ID"
-        while IFS= read -r MUSE_PRIOR_LOG; do
-          [ -n "$MUSE_PRIOR_LOG" ] && printf 'prior_log=%s\n' "$MUSE_PRIOR_LOG"
+    chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
+    hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
+    printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
+    printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
+    exclude_path '.fm-grok-turnend'
+    ;;
+  muse*)
+    # muse's turn lifecycle is neither a hook nor a launch flag: its plugin
+    # engine (the only hook surface) is disabled in the default build, so
+    # firstmate reads muse's own durable session event log instead
+    # (bin/fm-busy-lib.sh owns the fold). That is a PULL
+    # source with no writer, so nothing is armed and no record is seeded -
+    # exactly the reason standalone Kimi is not armed either.
+    # This sidecar is the whole binding: it pins the sessions root, the
+    # workspace root that muse records in each log's metadata, this pane's
+    # binding identity, and every matching main log that predates this pane.
+    # The classifier then accepts only one new matching log, so it never
+    # guesses between pane incarnations. Recording the resolved root here
+    # also means a later change to XDG_DATA_HOME cannot silently re-point an
+    # already-running task at a different log tree.
+    MUSE_SESSIONS_ROOT="${MUSE_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/muse/sessions"
+    MUSE_BINDING_ID="$$.$RANDOM.$(date +%s)"
+    rm -f "$STATE/$ID.muse-session-current"
+    {
+      printf 'sessions_root=%s\n' "$MUSE_SESSIONS_ROOT"
+      printf 'workspace_root=%s\n' "$WT"
+      printf 'binding_id=%s\n' "$MUSE_BINDING_ID"
+      while IFS= read -r MUSE_PRIOR_LOG; do
+        [ -n "$MUSE_PRIOR_LOG" ] && printf 'prior_log=%s\n' "$MUSE_PRIOR_LOG"
         done <<EOF
 $(fm_busy_muse_matching_logs "$MUSE_SESSIONS_ROOT" "$WT" || true)
 EOF
-      } > "$STATE/$ID.muse-session"
-      ;;
-    cursor*)
-      # Cursor's turn lifecycle is neither a hook nor a launch flag: it writes
-      # its own durable per-conversation transcript and brackets every turn
-      # there (bin/fm-busy-lib.sh owns the fold). Like muse that is a PULL
-      # source with no writer, so nothing is armed and no record is seeded.
-      # This sidecar is the whole binding. It pins the projects root and the
-      # exact workspace path cursor records in each project's
-      # .workspace-trusted, plus every conversation that already exists for
-      # that workspace, so a relaunch into a reused worktree folds its OWN
-      # conversation instead of its predecessor's. The classifier then accepts
-      # only one remaining conversation and never guesses between incarnations.
-      CURSOR_PROJECTS_ROOT="${CURSOR_PROJECTS_ROOT_OVERRIDE:-$HOME/.cursor/projects}"
-      {
-        printf 'projects_root=%s\n' "$CURSOR_PROJECTS_ROOT"
-        printf 'workspace_root=%s\n' "$WT"
-        if CURSOR_PRIOR_PROJECT=$(fm_busy_cursor_project_dir "$CURSOR_PROJECTS_ROOT" "$WT" 2>/dev/null); then
-          for CURSOR_PRIOR_DIR in "$CURSOR_PRIOR_PROJECT"/agent-transcripts/*/; do
-            [ -d "$CURSOR_PRIOR_DIR" ] || continue
-            printf 'prior_conversation=%s\n' "$(basename -- "${CURSOR_PRIOR_DIR%/}")"
-          done
-        fi
-      } > "$STATE/$ID.cursor-session"
-      ;;
-    kimi*)
-      # Kimi's Stop hook is global, but it is inert unless cwd contains this
-      # task's token pointer and the token resolves through Firstmate's private
-      # registry. The installer above owns the format-preserving config edit and
-      # the always-zero, silent hook script.
-      KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
-      old_umask=$(umask)
-      umask 077
-      auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
-      umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
-      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
-      exclude_path '.fm-kimi-turnend'
-      ;;
-  esac
-fi
+    } > "$STATE/$ID.muse-session"
+    ;;
+  cursor*)
+    # Cursor's turn lifecycle is neither a hook nor a launch flag: it writes
+    # its own durable per-conversation transcript and brackets every turn
+    # there (bin/fm-busy-lib.sh owns the fold). Like muse that is a PULL
+    # source with no writer, so nothing is armed and no record is seeded.
+    # This sidecar is the whole binding. It pins the projects root and the
+    # exact workspace path cursor records in each project's
+    # .workspace-trusted, plus every conversation that already exists for
+    # that workspace, so a relaunch into a reused worktree folds its OWN
+    # conversation instead of its predecessor's. The classifier then accepts
+    # only one remaining conversation and never guesses between incarnations.
+    CURSOR_PROJECTS_ROOT="${CURSOR_PROJECTS_ROOT_OVERRIDE:-$HOME/.cursor/projects}"
+    {
+      printf 'projects_root=%s\n' "$CURSOR_PROJECTS_ROOT"
+      printf 'workspace_root=%s\n' "$WT"
+      if CURSOR_PRIOR_PROJECT=$(fm_busy_cursor_project_dir "$CURSOR_PROJECTS_ROOT" "$WT" 2>/dev/null); then
+        for CURSOR_PRIOR_DIR in "$CURSOR_PRIOR_PROJECT"/agent-transcripts/*/; do
+          [ -d "$CURSOR_PRIOR_DIR" ] || continue
+          printf 'prior_conversation=%s\n' "$(basename -- "${CURSOR_PRIOR_DIR%/}")"
+        done
+      fi
+    } > "$STATE/$ID.cursor-session"
+    ;;
+  kimi*)
+    # Kimi's Stop hook is global, but it is inert unless cwd contains this
+    # task's token pointer and the token resolves through Firstmate's private
+    # registry. The installer above owns the format-preserving config edit and
+    # the always-zero, silent hook script.
+    KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
+    old_umask=$(umask)
+    umask 077
+    auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
+    umask "$old_umask"
+    printf '%s\n' "$TURNEND" > "$auth_file"
+    printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
+    printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
+    exclude_path '.fm-kimi-turnend'
+    ;;
+esac
 
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit
