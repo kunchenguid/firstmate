@@ -127,7 +127,7 @@ for meta in "$STATE"/*.meta; do
     ''|ship|scout) ;;
     *) continue ;;
   esac
-  case "$(tail -n 1 "$STATE/$id.status" 2>/dev/null)" in
+  case "$(grep -v '^[[:space:]]*$' "$STATE/$id.status" 2>/dev/null | tail -n 1)" in
     'done '*|'done['*|'failed '*|'failed['*) continue ;;
   esac
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue

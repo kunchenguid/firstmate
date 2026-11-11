@@ -146,8 +146,8 @@ test_scan_reports_once_per_incarnation() {
   add_task "$dir" sm1 secondmate 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
   add_task "$dir" dead ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
   printf 'zsh\n' > "$dir/fake/cmd.fm-dead"
-  add_task "$dir" done ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
-  printf 'done [at=2026-11-11T18:00:00Z]: completed\n' > "$dir/home/state/done.status"
+  add_task "$dir" "done" ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
+  printf 'done [at=2026-11-11T18:00:00Z]: completed\n\n' > "$dir/home/state/done.status"
 
   out=$(scan "$dir")
   [ -z "$out" ] || fail "the breaker must stay off without config/quota-breaker, got: $out"

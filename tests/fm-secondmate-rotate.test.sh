@@ -24,7 +24,38 @@ trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 new_case() {  # <name> -> case dir with a home, agent dirs, and a restart stub
   local dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/config" "$dir/pi" "$dir/claude"
+  mkdir -p "$dir/home/state" "$dir/home/config" "$dir/pi" "$dir/claude" "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+target=
+prev=
+for arg in "$@"; do
+  [ "$prev" = -t ] && target=$arg
+  prev=$arg
+done
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *pane_current_command*)
+        if [ -f "$FM_ROTATE_CASE_DIR/cmd.${target##*:}" ]; then
+          cat "$FM_ROTATE_CASE_DIR/cmd.${target##*:}"
+        else
+          printf 'pi\n'
+        fi
+        ;;
+      *) printf '\n' ;;
+    esac
+    ;;
+  list-windows)
+    for meta in "$FM_HOME"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      id=${meta##*/}
+      printf 'fm-%s\n' "${id%.meta}"
+    done
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
   cat > "$dir/restart-stub" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$(dirname "$0")/restarts"
@@ -82,7 +113,8 @@ run_rotate() {  # <case> <args...>
 
 run_rotate_with_command() {  # <case> <command> <args...>
   local dir=$1 cmd=$2; shift 2
-  env FM_HOME="$dir/home" PI_CODING_AGENT_DIR="$dir/pi" CLAUDE_CONFIG_DIR="$dir/claude" \
+  env PATH="$dir/fakebin:$PATH" FM_ROTATE_CASE_DIR="$dir" \
+    FM_HOME="$dir/home" PI_CODING_AGENT_DIR="$dir/pi" CLAUDE_CONFIG_DIR="$dir/claude" \
     FM_SECONDMATE_ROTATE_RESTART="$cmd" \
     bash "$ROTATE" "$@" 2>&1
 }
@@ -113,10 +145,29 @@ test_tokens_reads_each_measured_harness() {
   pass "fm-secondmate-rotate tokens: Pi and Claude transcripts are measured, everything else is unmeasured"
 }
 
+test_bound_herdr_id_selects_exact_session() {
+  local dir out sdir
+  dir=$(new_case bound-id)
+  add_mate "$dir" bound pi 900000
+  sed -i.bak 's/^window=.*/window=herdr-session:pane-1/; $a backend=herdr' "$dir/home/state/bound.meta"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","usage":{"totalTokens":300000}}}' \
+    > "$dir/pi/sessions/--$(printf '%s' "${dir#/}/homes/bound" | tr '/\\:' '---')--/chat_bound-id.jsonl"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"result":{"agent":{"agent":"pi","agent_session":{"kind":"id","value":"bound-id"}}}}'
+SH
+  chmod +x "$dir/fakebin/herdr"
+  out=$(run_rotate "$dir" tokens bound)
+  [ "$out" = 300000 ] || fail "a bound bare session id must select its exact transcript, got: $out"
+  pass "fm-secondmate-rotate tokens: a Herdr bare session id selects its exact Pi transcript"
+}
+
 test_scan_rotates_only_due_mates_once_per_window() {
   local dir out
   dir=$(new_case scan)
   add_mate "$dir" big pi 300000
+  add_mate "$dir" dead pi 300000
+  printf 'zsh\n' > "$dir/cmd.fm-dead"
   add_mate "$dir" small pi 100000
   add_mate "$dir" busy pi 900000 busy
   add_mate "$dir" far pi 900000 idle "remote_host=elsewhere"
@@ -130,6 +181,8 @@ test_scan_rotates_only_due_mates_once_per_window() {
   assert_contains "$out" "rotating big: context 300000 tokens >= 250000" "the idle oversized mate should be rotated"
   [ "$(printf '%s\n' "$out" | grep -c '^rotating ')" = 1 ] \
     || fail "a small, busy, or remote mate must not be rotated, got: $out"
+  assert_not_contains "$out" "rotating dead:" \
+    "a dead shell with stale idle state must not be rotated"
   wait_restarts "$dir" 1 || fail "the detached restart was never started"
   [ "$(cat "$dir/restarts")" = "--rotate big" ] \
     || fail "rotation must run the guarded restart in rotate mode, got: $(cat "$dir/restarts")"
@@ -172,7 +225,8 @@ test_watcher_sweep_queues_the_rotation() {
   printf '#!/usr/bin/env bash\nprintf "stop-cycle\\n"\n' > "$dir/home/state/z-stop.check.sh"
   chmod 0700 "$dir/home/state/z-stop.check.sh"
   FM_HOME="$dir/home" "$ROOT/bin/fm-check-register.sh" z-stop >/dev/null || fail "could not register the stop check"
-  timeout 60 env FM_HOME="$dir/home" PI_CODING_AGENT_DIR="$dir/pi" CLAUDE_CONFIG_DIR="$dir/claude" \
+  timeout 60 env PATH="$dir/fakebin:$PATH" FM_ROTATE_CASE_DIR="$dir" \
+    FM_HOME="$dir/home" PI_CODING_AGENT_DIR="$dir/pi" CLAUDE_CONFIG_DIR="$dir/claude" \
     FM_SECONDMATE_ROTATE_RESTART="$dir/restart-stub" FM_BACKEND=tmux \
     FM_CHECK_INTERVAL=0 FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
     bash "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err"; rc=$?
@@ -184,6 +238,7 @@ test_watcher_sweep_queues_the_rotation() {
 }
 
 test_tokens_reads_each_measured_harness
+test_bound_herdr_id_selects_exact_session
 test_scan_rotates_only_due_mates_once_per_window
 test_invalid_restart_does_not_consume_rotation_window
 test_watcher_sweep_queues_the_rotation

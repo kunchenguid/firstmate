@@ -3583,7 +3583,7 @@ fi
 # dispatcher can move it to the next same-group candidate before it stalls.
 if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
   preflight_args=("$HARNESS" "${MODEL:-default}" --effort "${EFFORT:-default}")
-  dispatch_provider= dispatch_scope= dispatch_quota=
+  dispatch_provider='' dispatch_scope='' dispatch_quota=''
   if [ -f "$DISPATCH_RECORD" ] && command -v jq >/dev/null 2>&1; then
     dispatch_quota=$(jq -r '[.profile.provider // "", .profile.quota_scope // ""] | @tsv' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_quota=
     IFS=$'\t' read -r dispatch_provider dispatch_scope <<<"$dispatch_quota" || true

@@ -126,8 +126,9 @@ fm_file_mtime() {  # <path>
 }
 
 # pi_bound_session: the session path the mate's Herdr pane is bound to.
-pi_bound_session() {  # <meta>
-  local meta=$1 target identity ref
+pi_bound_session() {  # <meta> <session-dir>
+  local meta=$1 sdir=$2 target identity ref file base id count duplicate
+  local -a matches=()
   [ "$(fm_backend_of_meta "$meta")" = herdr ] || return 1
   target=$(fm_backend_target_of_meta "$meta")
   fm_backend_source herdr >/dev/null 2>&1 || return 1
@@ -135,9 +136,53 @@ pi_bound_session() {  # <meta>
   identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
   [ "${identity%%$'\t'*}" = pi ] || return 1
   ref=${identity#*$'\t'}
-  case "$ref" in /*) ;; *) return 1 ;; esac
-  [ -r "$ref" ] || return 1
-  printf '%s' "$ref"
+  [ -n "$ref" ] || return 1
+  case "$ref" in
+    /*)
+      [ -f "$ref" ] && [ -r "$ref" ] || return 2
+      printf '%s' "$ref"
+      return 0
+      ;;
+  esac
+  [ -d "$sdir" ] || return 2
+  for file in "$sdir"/*.jsonl; do
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    base=${file##*/}
+    case "$base" in
+      *_"$ref".jsonl|"$ref".jsonl)
+        duplicate=0
+        for id in "${matches[@]}"; do
+          [ "$id" = "$file" ] || continue
+          duplicate=1
+          break
+        done
+        [ "$duplicate" -eq 1 ] || matches+=("$file")
+        ;;
+    esac
+  done
+  count=${#matches[@]}
+  if [ "$count" -eq 1 ]; then
+    printf '%s' "${matches[0]}"
+    return 0
+  elif [ "$count" -gt 1 ]; then
+    return 2
+  fi
+  command -v jq >/dev/null 2>&1 || return 2
+  for file in "$sdir"/*.jsonl; do
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    id=$(head -n 1 "$file" 2>/dev/null | jq -r '.id // empty' 2>/dev/null) || continue
+    [ "$id" = "$ref" ] || continue
+    duplicate=0
+    for base in "${matches[@]}"; do
+      [ "$base" = "$file" ] || continue
+      duplicate=1
+      break
+    done
+    [ "$duplicate" -eq 1 ] || matches+=("$file")
+  done
+  count=${#matches[@]}
+  [ "$count" -eq 1 ] || return 2
+  printf '%s' "${matches[0]}"
 }
 
 pi_context_tokens() {  # <transcript>
@@ -161,10 +206,14 @@ mate_context_tokens() {  # <id>
   case "$home" in /*) ;; *) return 1 ;; esac
   case "$harness" in
     pi|pi-signed)
-      transcript=$(pi_bound_session "$meta") || transcript=
-      if [ -z "$transcript" ]; then
-        dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/--$(printf '%s' "${home#/}" | tr '/\\:' '---')--"
-        transcript=$(newest_jsonl "$dir") || return 1
+      dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions/--$(printf '%s' "${home#/}" | tr '/\\:' '---')--"
+      if transcript=$(pi_bound_session "$meta" "$dir"); then
+        :
+      else
+        case "$?" in
+          1) transcript=$(newest_jsonl "$dir") || return 1 ;;
+          *) return 1 ;;
+        esac
       fi
       tokens=$(pi_context_tokens "$transcript")
       ;;
@@ -227,6 +276,10 @@ for meta in "$STATE"/*.meta; do
   id=$(basename "$meta" .meta)
   [ "$(fm_meta_get "$meta" kind)" = secondmate ] || continue
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || continue
+  [ "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" = alive ] || continue
   tokens=$(mate_context_tokens "$id") || continue
   [ "$tokens" -ge "$ROTATE_THRESHOLD" ] || continue
   [ $((now - $(last_rotation "$id"))) -ge "$ROTATE_WINDOW" ] || continue
