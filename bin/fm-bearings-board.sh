@@ -76,9 +76,10 @@
 # when known, otherwise its durable identifier.
 # A Captain's Call item MAY carry `context`, and each of its options MAY carry
 # `details`: each a non-empty array of non-empty paragraph strings. The card's
-# Details button opens a full-screen view of the call - its about, decide and
-# context, then every option with its hint and details - and queues nothing.
-# Only https:// URLs inside a paragraph render as links.
+# Details button opens a full-screen view of the call - its about, decide,
+# risk, detail, pr_url and context, then every option with its hint and
+# details - and queues nothing. In that view only https:// URLs inside
+# `detail`, `context` and `details` render as links.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
