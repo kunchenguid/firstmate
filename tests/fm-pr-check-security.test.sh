@@ -377,6 +377,24 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
+# Gives the case's copy the remotes origin and backup, both served by
+# fakebin/git-remote-probe, and a named head that no ref outside the copy holds.
+# Each fetch appends a line to FM_TEST_REMOTE_LOG, sleeps FM_TEST_REMOTE_SLEEP
+# seconds (default 0), and fails.
+add_probe_remotes() {  # <dir>
+  local dir=$1
+  cat > "$dir/fakebin/git-remote-probe" <<'SH'
+#!/bin/sh
+printf 'fetch %s\n' "$1" >> "$FM_TEST_REMOTE_LOG"
+sleep "${FM_TEST_REMOTE_SLEEP:-0}"
+exit 1
+SH
+  chmod +x "$dir/fakebin/git-remote-probe"
+  git -C "$dir/wt" remote add origin probe::origin
+  git -C "$dir/wt" remote add backup probe::backup
+  git -C "$dir/wt" commit -q --allow-empty -m 'named head only in the copy'
+}
+
 # Extra "field=value" arguments are written before pr=, because
 # fm_pr_metadata_identity_parse rejects an unrecognised line after it.
 write_poll_meta() {
@@ -849,6 +867,44 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
 }
 
+# bin/fm-pr-merge.sh re-records through fm-pr-check.sh (FM_PR_CHECK_MERGE=1).
+# A GitLab merge request records no pr_head, so that re-record's gate reads the
+# copy's own refs: it refreshes them first, accepting a head origin holds
+# through the no-mistakes gate clone that the copy never fetched, and still
+# refuses a head that only the copy and the local gate mirror hold.
+test_merge_rerecord_refreshes_before_refusing() {
+  local dir state origin sha url
+  dir=$(make_case merge-rerecord-refresh)
+  state="$dir/home/state"
+  origin="$dir/origin.git"
+  url=https://gitlab.example/group/project/-/merge_requests/4
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir"
+  git init -q --bare "$origin"
+  git -C "$dir/wt" remote add origin "file://$origin"
+  git -C "$dir/wt" commit -q --allow-empty -m 'fix the pipeline validates'
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task-a "$sha"
+
+  FM_PR_CHECK_MERGE=1 run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    && fail "the merge-time re-record registered an unpushed head"
+  grep -Fq "named head $sha is unreachable outside the worker copy" "$dir/stderr" \
+    || fail "the merge-time refusal did not name the unpushed head: $(cat "$dir/stderr")"
+  ! grep -q '^pr=' "$state/task-a.meta" || fail "the refused merge-time re-record recorded pr="
+
+  # The pipeline pushes from its own gate clone, so origin holds the head while
+  # the copy's remote-tracking refs do not.
+  git -C "$origin" fetch -q "$dir/wt" "HEAD:refs/heads/fm/task-a"
+  ! git -C "$dir/wt" rev-parse -q --verify refs/remotes/origin/fm/task-a >/dev/null \
+    || fail "fixture: the copy already tracks origin's branch"
+  FM_PR_CHECK_MERGE=1 run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the merge-time re-record refused a head origin holds: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "the merge-time re-record did not record pr="
+  [ "$(git -C "$dir/wt" rev-parse refs/remotes/origin/fm/task-a)" = "$sha" ] \
+    || fail "the merge-time re-record did not leave origin's head in the copy's refs"
+  pass "the merge-time re-record refreshes before refusing: origin's unfetched head is accepted, an unpushed one refused"
+}
+
 # A PR a task reported in a done line is recorded by the scan whatever the rest
 # of the line says, so its merge monitoring never waits on the supervisor
 # running this command by hand. A URL without the "PR " prefix is prose, a scout
@@ -955,6 +1011,46 @@ test_scan_rotates_past_a_hanging_registration() {
   grep -qxF 'pr=https://github.com/o/r/pull/20' "$state/task-b.meta" \
     || fail "a hanging registration starved a later report on every sweep"
   pass "the scan starts a later sweep at a different task so a hanging registration cannot starve it"
+}
+
+# A scan registration's remote-ref refresh, every remote together, ends inside
+# the scan's own budget, so remotes that hang cannot get the registration cut:
+# the refusal is printed once and marked instead of retried silently on every
+# sweep. Once the refresh's time has passed the sweep starts no other task, so
+# that task opens the next sweep and gets its own bounded refresh.
+test_scan_bounds_the_remote_refresh_by_its_budget() {
+  local dir state sha out
+  dir=$(make_case scan-refresh-hang)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+  add_probe_remotes "$dir"
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/9 checks green' > "$state/task-a.status"
+  printf '%s\n' 'done [at=2]: PR https://github.com/o/r/pull/20 checks green' > "$state/task-b.status"
+
+  out=$(FM_CHECK_TIMEOUT=16 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the scan failed: $(cat "$dir/stderr")"
+  [ -s "$dir/remote.log" ] || fail "the scan's registration did not refresh the copy's remotes"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "a sweep behind hanging remotes did not report exactly one task: $out"
+  case "$out" in
+    "task-a reported https://github.com/o/r/pull/9 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy; could not refresh remote: "*) ;;
+    *) fail "the refusal behind hanging remotes was not reported: $out" ;;
+  esac
+  [ "$(cat "$state/task-a.pr-register-refused")" = https://github.com/o/r/pull/9 ] \
+    || fail "the refusal behind hanging remotes was not marked as reported"
+  [ ! -e "$state/task-b.pr-register-refused" ] || fail "a task started after the refresh time had passed was refused"
+
+  rm -f "$dir/remote.log"
+  out=$(FM_CHECK_TIMEOUT=16 FM_TEST_GH_HEAD=unavailable FM_TEST_REMOTE_SLEEP=60 FM_TEST_REMOTE_LOG="$dir/remote.log" \
+    run_check_entry "$dir" scan 2> "$dir/stderr") || fail "the second scan failed: $(cat "$dir/stderr")"
+  [ -s "$dir/remote.log" ] || fail "the task that opened the next sweep got no refresh"
+  case "$out" in
+    "task-b reported https://github.com/o/r/pull/20 in a done line, but it was not recorded: named head $sha is unreachable outside the worker copy; could not refresh remote: "*) ;;
+    *) fail "the next sweep did not open with the task the previous one never started: $out" ;;
+  esac
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "the next sweep reported more than one task: $out"
+  pass "a scan bounds its registrations' remote refresh by its budget and hands the next sweep to the task it never started"
 }
 
 # A task whose pr= was written but whose poll was never published (the
@@ -5101,10 +5197,12 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_merge_rerecord_refreshes_before_refusing
 test_scan_records_a_pr_reported_in_a_done_line
 test_scan_reports_a_refusal_once_and_retries
 test_scan_retries_refused_task_behind_a_hanging_registration
 test_scan_rotates_past_a_hanging_registration
+test_scan_bounds_the_remote_refresh_by_its_budget
 test_scan_publishes_a_missing_poll_for_a_recorded_pr
 test_scan_does_not_overwrite_a_pr_recorded_meanwhile
 test_scan_does_not_rearm_a_retired_merged_poll
