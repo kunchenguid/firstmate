@@ -928,11 +928,14 @@ fm_afk_launch_start_native() {
 
 # Steps (1) and (2) of `stop`: end the daemon and close its recorded terminal,
 # leaving state/.afk and the posture record alone. Returns 2 for a malformed
-# record and 3 when the daemon did not exit, both before anything changes;
-# 1 when the signal or the terminal teardown failed. Sets
+# record and 3 when the daemon could not be identified or did not exit, both
+# before anything changes; 1 when the signal or the terminal teardown failed.
+# A daemon still alive after a short grace is blocked in a foreground child (a
+# backoff `sleep`), which defers its TERM trap until that child returns, so its
+# direct children get SIGTERM too and the trap runs its cleanup. Sets
 # FM_AFK_LAUNCH_CLOSED_TERMINAL when a non-native terminal was torn down.
 fm_afk_launch_daemon_teardown() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result attempt
   FM_AFK_LAUNCH_CLOSED_TERMINAL=0
   fm_afk_launch_record_read
   read_result=$?
@@ -943,16 +946,19 @@ fm_afk_launch_daemon_teardown() {
   pid=""
   pid_identity=""
   if daemon_lock_held_by_live_daemon; then
-    pid=$(daemon_lock_pid 2>/dev/null) || return 1
-    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    pid=$(daemon_lock_pid 2>/dev/null) || return 3
+    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 3
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
-    for _ in $(seq 1 40); do
+    for attempt in $(seq 1 40); do
       fm_pid_alive "$pid" || break
+      if [ "$attempt" -eq 8 ] && [ "$(fm_pid_identity "$pid" 2>/dev/null)" = "$pid_identity" ]; then
+        pkill -TERM -P "$pid" 2>/dev/null || true
+      fi
       sleep 0.25
     done
   fi

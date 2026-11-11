@@ -49,7 +49,9 @@ mkdir -p "$TMUX_TMPDIR"
 # the home's daemon lock (the real daemon does the same at startup) and then
 # stays alive, so fm_afk_daemon_owns_supervision holds. It never runs a
 # watcher, so state/.last-watcher-beat stays stale - which is what keeps the
-# turn-end guard blocking in the Stop-hook cases.
+# turn-end guard blocking in the Stop-hook cases. Like the real daemon in its
+# target-gone backoff, it traps TERM to release its lock while blocked in a
+# long foreground sleep, so bash defers that trap until the sleep returns.
 STUB_DAEMON="$TMP_ROOT/stub-daemon.sh"
 cat > "$STUB_DAEMON" <<SH
 #!/usr/bin/env bash
@@ -59,6 +61,7 @@ state="\${FM_HOME:?}/state"
 mkdir -p "\$state/.supervise-daemon.lock"
 printf '%s\n' "\$\$" > "\$state/.supervise-daemon.lock/pid"
 fm_pid_identity "\$\$" > "\$state/.supervise-daemon.lock/pid-identity"
+trap 'rm -rf "\$state/.supervise-daemon.lock"; exit 0' TERM
 sleep 600
 SH
 chmod +x "$STUB_DAEMON"
