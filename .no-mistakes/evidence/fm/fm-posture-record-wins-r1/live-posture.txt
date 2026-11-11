@@ -1,0 +1,117 @@
+Real primary harness: claude
+SCENARIO 1: real readiness CLI, synthetic record/flag matrix (oracle: record wins; flag only without record)
+record=none flag=none expected=present actual={"state":"present"}
+record=none flag=away expected=away actual={"state":"away"}
+record=none flag=quiet expected=quiet actual={"state":"quiet"}
+record=away flag=none expected=away actual={"state":"away"}
+record=away flag=away expected=away actual={"state":"away"}
+record=away flag=quiet expected=away actual={"state":"away"}
+record=quiet flag=none expected=quiet actual={"state":"quiet"}
+record=quiet flag=away expected=quiet actual={"state":"quiet"}
+record=quiet flag=quiet expected=quiet actual={"state":"quiet"}
+SCENARIO 2: unspecified flag refresh repairs contradiction using the standing record
+fm-afk-contract: replaced the earlier quiet mode; its record is archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360243-superseded-1794360243.afk-contract
+record=quiet refreshed flag=quiet
+{
+  "posture": {
+    "state": "quiet"
+  }
+}
+fm-afk-contract: quiet mode became the away posture; the quiet record is archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360243-superseded-1794360244.afk-contract
+record=away refreshed flag=away
+{
+  "posture": {
+    "state": "away"
+  }
+}
+fm-afk-launch: away-posture record archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360244.afk-contract
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
+SCENARIO 3: real quiet daemon on supervision-host home; rejected entries must not disturb it
+Quiet mode is not already the ordinary posture on this home, because the main session could not be identified, so every attended wake reaches this conversation; quiet mode enters through the quiet daemon instead.
+Quiet mode recorded at 2026-11-11T01:24:05Z: you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation. Only an explicit /quiet off ends it.
+Quiet mode (recorded):
+  entered: 2026-11-11T01:24:05Z
+  holds: none - you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.
+  your words (verbatim):
+    quiet lab captain
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-819489415-216-3846-1794360245', supervising %0
+Running daemon:
+  608 bash {run-worktree}/bin/fm-supervise-daemon.sh
+fm-afk-contract: words file not found: /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/no-such-file
+missing-words exit=2
+{
+  "posture": {
+    "state": "quiet"
+  }
+}
+Quiet daemon and serialized posture/terminal records unchanged
+fm-afk-contract: --expected-return must be UTC ISO 8601 (YYYY-MM-DDTHH:MM[:SS]Z), got 'yesterday'
+invalid-return exit=2
+{
+  "posture": {
+    "state": "quiet"
+  }
+}
+Quiet daemon and serialized posture/terminal records unchanged
+SCENARIO 4: published away entry stops real quiet daemon, closes exact tmux session, clears flag, keeps away record
+Terminal record before transition:
+tmux	fm-afk-daemon-819489415-216-3846-1794360245	
+fm-afk-contract: quiet mode became the away posture; the quiet record is archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360245-superseded-1794360246.afk-contract
+Away posture recorded at 2026-11-11T01:24:06Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-11T01:24:06Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    merge anything green
+fm-afk-launch: this home runs the supervision host, so the away entry ends daemon-mode here: stopping the daemon and clearing its flag by exact id under the away record
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+{
+  "posture": {
+    "state": "away"
+  }
+}
+daemon pid=608 terminated; flag and terminal record absent; away record stands
+fm-afk-launch: the away daemon is not launched on this claude home, which runs the supervision host (docs/supervision-host.md); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)
+Away daemon restart refused: exit=1
+fm-afk-launch: away-posture record archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360246.afk-contract
+fm-afk-launch: away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived
+{
+  "posture": {
+    "state": "present"
+  }
+}
+SCENARIO 5: supervision-host opt-out preserves daemon across away entry
+Quiet mode recorded at 2026-11-11T01:24:08Z: you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation. Only an explicit /quiet off ends it.
+Quiet mode (recorded):
+  entered: 2026-11-11T01:24:08Z
+  holds: none - you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.
+  your words (verbatim):
+    quiet opt-out captain
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-819489415-3291-644-1794360249', supervising %0
+fm-afk-contract: quiet mode became the away posture; the quiet record is archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360248-superseded-1794360249.afk-contract
+Away posture recorded at 2026-11-11T01:24:09Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-11-11T01:24:09Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    away without supervision host
+opted-out real daemon pid=3719 survives away entry; readiness follows record despite quiet flag
+{
+  "posture": {
+    "state": "away"
+  }
+}
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+fm-afk-launch: away-posture record archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.sxFrju/state/afk-contracts/1794360249.afk-contract
+fm-afk-launch: away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived
+{
+  "posture": {
+    "state": "present"
+  }
+}
+ALL FIVE LIVE SCENARIOS COMPLETED
+DRIVER_EXIT=0

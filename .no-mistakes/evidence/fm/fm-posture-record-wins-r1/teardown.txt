@@ -1,0 +1,8 @@
+Remaining private lab sessions after scenario completion:
+primary: 1 windows (created Tue Nov 10 17:22:50 2026)
+Daemon identities after both stop operations:
+608 absent
+3719 absent
+Stopping private fm-lab server:
+Private server stopped
+Disposable lab home removed
