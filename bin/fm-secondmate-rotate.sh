@@ -127,7 +127,7 @@ fm_file_mtime() {  # <path>
 
 # pi_bound_session: the session path the mate's Herdr pane is bound to.
 pi_bound_session() {  # <meta> <session-dir>
-  local meta=$1 sdir=$2 target identity ref file base id count duplicate
+  local meta=$1 sdir=$2 target identity ref file base id count filename_match id_match
   local -a matches=()
   [ "$(fm_backend_of_meta "$meta")" = herdr ] || return 1
   target=$(fm_backend_target_of_meta "$meta")
@@ -145,43 +145,24 @@ pi_bound_session() {  # <meta> <session-dir>
       ;;
   esac
   [ -d "$sdir" ] || return 2
-  for file in "$sdir"/*.jsonl; do
-    [ -f "$file" ] && [ -r "$file" ] || continue
-    base=${file##*/}
-    case "$base" in
-      *_"$ref".jsonl|"$ref".jsonl)
-        duplicate=0
-        for id in "${matches[@]}"; do
-          [ "$id" = "$file" ] || continue
-          duplicate=1
-          break
-        done
-        [ "$duplicate" -eq 1 ] || matches+=("$file")
-        ;;
-    esac
-  done
-  count=${#matches[@]}
-  if [ "$count" -eq 1 ]; then
-    printf '%s' "${matches[0]}"
-    return 0
-  elif [ "$count" -gt 1 ]; then
-    return 2
-  fi
   command -v jq >/dev/null 2>&1 || return 2
   for file in "$sdir"/*.jsonl; do
     [ -f "$file" ] && [ -r "$file" ] || continue
-    id=$(head -n 1 "$file" 2>/dev/null | jq -r '.id // empty' 2>/dev/null) || continue
-    [ "$id" = "$ref" ] || continue
-    duplicate=0
-    for base in "${matches[@]}"; do
-      [ "$base" = "$file" ] || continue
-      duplicate=1
-      break
-    done
-    [ "$duplicate" -eq 1 ] || matches+=("$file")
+    base=${file##*/}
+    filename_match=0
+    case "$base" in
+      *_"$ref".jsonl|"$ref".jsonl) filename_match=1 ;;
+    esac
+    id=$(head -n 1 "$file" 2>/dev/null | jq -r '.id // empty' 2>/dev/null) || id=
+    id_match=0
+    [ "$id" = "$ref" ] && id_match=1
+    if [ "$filename_match" -eq 1 ] || [ "$id_match" -eq 1 ]; then
+      matches+=("$file")
+    fi
   done
   count=${#matches[@]}
   [ "$count" -eq 1 ] || return 2
+  [ -r "${matches[0]}" ] || return 2
   printf '%s' "${matches[0]}"
 }
 

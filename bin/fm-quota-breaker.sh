@@ -135,7 +135,7 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || continue
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" in
-    alive|unverified) ;;
+    alive) ;;
     *) continue ;;
   esac
   tail=$(fm_backend_capture "$backend" "$target" 60 2>/dev/null) || continue

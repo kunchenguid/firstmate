@@ -159,7 +159,11 @@ SH
   chmod +x "$dir/fakebin/herdr"
   out=$(run_rotate "$dir" tokens bound)
   [ "$out" = 300000 ] || fail "a bound bare session id must select its exact transcript, got: $out"
-  pass "fm-secondmate-rotate tokens: a Herdr bare session id selects its exact Pi transcript"
+  printf '%s\n' '{"id":"bound-id"}' '{"type":"message","message":{"role":"assistant","usage":{"totalTokens":400000}}}' \
+    > "$dir/pi/sessions/--$(printf '%s' "${dir#/}/homes/bound" | tr '/\\:' '---')--/declared.jsonl"
+  out=$(run_rotate "$dir" tokens bound)
+  [ "$out" = unmeasured ] || fail "ambiguous bound session matches must stay unmeasured, got: $out"
+  pass "fm-secondmate-rotate tokens: Herdr bare IDs select exact, unambiguous Pi transcripts"
 }
 
 test_scan_rotates_only_due_mates_once_per_window() {
