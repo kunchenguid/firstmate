@@ -488,11 +488,13 @@ caller_has_commit_text() {
 # or surrounding blank lines. It ends at the next level-two heading or the
 # no-mistakes attestation comment; nothing is printed when it is absent.
 # Lines inside a fenced code block (``` or ~~~, closed by a run of the same
-# character at least as long) are never read as a heading or that comment.
+# character at least as long) are never read as a heading or that comment;
+# a ``` line whose info string holds a backtick is inline code, not a fence.
 what_changed_section() {
   tr -d '\r' | awk '
     # The fence run a line opens or closes with: up to three spaces of
-    # indent, then three or more backticks or tildes; empty when none.
+    # indent, then three or more backticks or tildes; empty when none. A
+    # backtick run followed by another backtick is inline code, not a fence.
     function fence_run(line,   s, c, n) {
       s = line
       sub(/^ ? ? ?/, "", s)
@@ -500,7 +502,9 @@ what_changed_section() {
       if (c != "`" && c != "~") return ""
       n = 0
       while (substr(s, n + 1, 1) == c) n++
-      return n >= 3 ? substr(s, 1, n) : ""
+      if (n < 3) return ""
+      if (c == "`" && index(substr(s, n + 1), "`")) return ""
+      return substr(s, 1, n)
     }
     {
       run = fence_run($0)

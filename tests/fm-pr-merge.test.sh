@@ -5723,8 +5723,19 @@ test_squash_summary_leaves_gitlab_and_forgejo_untouched() {
 # same character at least as long as the one that opened it).
 test_squash_summary_ignores_headings_inside_code_fences() {
   local case_dir label body want
-  for label in fenced-heading-in-section fenced-section-before-real-one; do
+  for label in fenced-heading-in-section fenced-section-before-real-one \
+    inline-code-in-section inline-code-before-section; do
     case "$label" in
+      # A backtick run whose info string holds a backtick is inline code
+      # (CommonMark), so it opens no fence that could hide a heading.
+      inline-code-in-section)
+        body=$'## What Changed\n\n```fm --help``` now lists the flag.\n- Keep the rest.\n\n## Risk Assessment\n\nlow\n\n<!-- no-mistakes-pipeline-attestation:v1 {} -->\n'
+        want=$'```fm --help``` now lists the flag.\n- Keep the rest.'
+        ;;
+      inline-code-before-section)
+        body=$'## Intent\n\nRun ```fm --help``` first.\n\n## What Changed\n\n- Real summary.\n\n## Testing\n\nok\n'
+        want='- Real summary.'
+        ;;
       fenced-heading-in-section)
         body=$'## What Changed\n\n- Document the config file.\n\n````md\n## Usage\n```\nfm --help\n````\n\n~~~\n## Not a heading\n~~~\n- Keep the rest.\n\n## Risk Assessment\n\nlow\n'
         want=$'- Document the config file.\n\n````md\n## Usage\n```\nfm --help\n````\n\n~~~\n## Not a heading\n~~~\n- Keep the rest.'
@@ -5746,7 +5757,7 @@ test_squash_summary_ignores_headings_inside_code_fences() {
     [ "$(github_merge_flag_value "$case_dir" --body)" = "$want" ] \
       || fail "squash-fence-$label: unexpected body: '$(github_merge_flag_value "$case_dir" --body)'"
   done
-  pass "fm-pr-merge ignores headings inside fenced code when reading the What Changed section"
+  pass "fm-pr-merge ignores headings inside fenced code, and treats a backtick run holding a backtick as inline code, when reading the What Changed section"
 }
 
 test_squash_summary_uses_title_and_what_changed
