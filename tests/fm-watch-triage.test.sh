@@ -4597,12 +4597,15 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 test_afk_heartbeat_preserves_idle_accounting() {
   local dir state fakebin out pid
   dir=$(make_case afk-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$dir/data"
+  fm_test_tasks_toml "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   out="$dir/watch.out"
   date '+%s' > "$state/.afk"
   printf '3\n' > "$state/.heartbeat-streak"
   touch "$state/.last-heartbeat"
   set_mtime "$(( $(date +%s) - 30 ))" "$state/.last-heartbeat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "away-mode heartbeat did not hand off to daemon triage"

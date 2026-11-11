@@ -4801,23 +4801,18 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up ready queued work or a captain-relevant status the per-wake path
-    # missed. Absorb the no-change case (advance the schedule and back off as wake() would,
-    # without exiting); the away-mode daemon, when present, owns triage and wants
-    # every heartbeat.
-    if afk_present; then
-      # The away-mode daemon owns triage and wants plain heartbeat accounting.
-      fm_wake_append heartbeat heartbeat heartbeat || exit 1
-      touch "$STATE/.last-heartbeat"
-      wake "heartbeat"
-    elif fm_ready_queue_needs_review; then
-      # Ready queued work is actionable fleet work: supervision must recheck
-      # current stops and capacity now, so this heartbeat resets idle backoff
-      # instead of doubling the wait to the next check.
+    # Triage: ready or unknown queue readiness resets idle backoff in every
+    # posture. Away-mode heartbeats with a proven-empty queue retain idle
+    # accounting; the daemon owns their triage and wants every heartbeat.
+    # Otherwise surface missed captain-relevant statuses or absorb no change.
+    if fm_ready_queue_needs_review; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat" actionable
+    elif afk_present; then
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant event the per-wake path absorbed by mistake.
       # Enqueue first, then record every status log surfaced through its end so the

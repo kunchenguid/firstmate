@@ -57,8 +57,8 @@ SH
 }
 
 test_ready_heartbeat() {
-  local mode=${1:-ready} dir pid out
-  dir=$(make_case "$mode-heartbeat")
+  local mode=${1:-ready} posture=${2:-attended} dir pid out
+  dir=$(make_case "$mode-$posture-heartbeat")
   mkdir -p "$dir/data" "$dir/config"
   fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
@@ -74,10 +74,9 @@ test_ready_heartbeat() {
     printf '#!/usr/bin/env bash\nprintf "readiness unavailable\\n" >&2\nexit 2\n' > "$dir/fakebin/tasks-axi"
     chmod +x "$dir/fakebin/tasks-axi"
   fi
-  # No away record, live worker, or new status event: the queue itself must
-  # cause a fleet review after a restriction expires. Seed a cooled-down
-  # heartbeat streak and an already-due schedule: the ready-queue review is
-  # actionable, so it must reset the backoff rather than double it (3 -> 4).
+  if [ "$posture" = away ]; then
+    printf 'mode: quiet\n' > "$dir/state/.afk"
+  fi
   printf '3\n' > "$dir/state/.heartbeat-streak"
   fm_touch_epoch "$(( $(date +%s) - 30 ))" "$dir/state/.last-heartbeat"
   out="$dir/watch.out"
@@ -88,11 +87,11 @@ test_ready_heartbeat() {
   wait_for_exit "$pid" 60 || fail 'ready queue heartbeat was absorbed without a supervision turn'
   [ "$(cat "$out")" = heartbeat ] || fail 'ready queue did not produce heartbeat wake'
   [ "$(cat "$dir/state/.heartbeat-streak" 2>/dev/null || echo 0)" = 0 ] \
-    || fail "$mode ready queue review doubled idle heartbeat backoff instead of resetting it"
+    || fail "$posture $mode ready queue review doubled idle heartbeat backoff instead of resetting it"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2>/dev/null \
     || fail 'could not drain queued heartbeat'
   assert_contains "$(cat "$dir/drain.out")" "$(printf '\theartbeat\t')" 'heartbeat was not durably delivered'
-  pass "$mode queue reaches supervision despite stale title and silent status logs"
+  pass "$posture $mode queue reaches supervision despite stale title and silent status logs"
 }
 
 test_not_ready_heartbeat() {
@@ -230,6 +229,8 @@ test_ready_queue_addressing relative-home
 test_ready_queue_addressing trailing-slash-home
 test_ready_heartbeat
 test_ready_heartbeat unreadable
+test_ready_heartbeat ready away
+test_ready_heartbeat unreadable away
 test_not_ready_heartbeat empty
 test_not_ready_heartbeat held
 test_emitted_stop_revalidation_contract
