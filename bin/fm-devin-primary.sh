@@ -22,7 +22,12 @@
 #                 then that `start`. --replace-mismatched restarts a live
 #                 daemon left behind for another pane or primary harness (a
 #                 crashed Devin, a Claude primary's quiet daemon) without
-#                 ending the posture, so wakes never go to a dead pane.
+#                 ending the posture, so wakes never go to a dead pane. Only
+#                 the session that owns the session lock
+#                 (fm_session_lock_owned_by_self) passes it; a hand run from
+#                 another terminal would resolve that terminal as the target,
+#                 so it gets the plain start, which never replaces a live
+#                 daemon.
 #                 While the away return's catch-up gate
 #                 (state/.afk-return-catchup) is pending, fm-afk-launch refuses
 #                 every entry, so ensure exits 3 with a line naming
@@ -130,17 +135,24 @@ supervisor_pane_addressable() {
 }
 
 cmd_ensure() {
-  local out
+  local out replace=()
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if [ -e "$STATE/.afk-return-catchup" ]; then
     echo "away return catch-up is pending, so the daemon stays down until its gate clears: work the return brief and run bin/fm-afk-return.sh check; quiet daemon supervision restarts at the next Stop after that" >&2
     return 3
   fi
+  # Only the lock-owning Devin session resolves the real primary pane as its
+  # supervisor target; a hand run from another terminal would resolve that
+  # terminal and tear down a healthy daemon, so it keeps the plain idempotent
+  # start, which never replaces a live daemon.
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+  fm_session_lock_owned_by_self "$STATE" 2>/dev/null && replace=(--replace-mismatched)
   if [ -e "$STATE/.afk" ] && [ -f "$STATE/.afk-contract" ]; then
     # Same posture: a buffer left by a daemon that died or is being replaced
     # holds wakes it acked but never delivered; the restarted daemon owns them.
-    if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start --replace-mismatched --keep-escalations 2>&1); then
+    if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start ${replace[@]+"${replace[@]}"} --keep-escalations 2>&1); then
       printf '%s\n' "$out" >&2
       return 1
     fi
@@ -149,7 +161,7 @@ cmd_ensure() {
       printf '%s\n' "$out" >&2
       return 1
     fi
-    if ! out=$(FM_AFK_MODE=quiet "$SCRIPT_DIR/fm-afk-launch.sh" start --replace-mismatched 2>&1); then
+    if ! out=$(FM_AFK_MODE=quiet "$SCRIPT_DIR/fm-afk-launch.sh" start ${replace[@]+"${replace[@]}"} 2>&1); then
       printf '%s\n' "$out" >&2
       return 1
     fi

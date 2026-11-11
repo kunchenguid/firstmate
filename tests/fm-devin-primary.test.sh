@@ -374,6 +374,29 @@ test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert() {
   pass "fm-devin-primary ensure: restarting a daemon that died within the posture keeps its undelivered check alert"
 }
 
+# A hand-run `ensure` from another terminal resolves that terminal as its
+# supervisor target, not the Devin primary's pane. Outside the lock-owning
+# session it must keep the plain idempotent start and leave a healthy daemon
+# that supervises the real primary pane alone.
+test_hand_run_ensure_keeps_a_healthy_daemon() {
+  local dir old out primary
+  dir=$(make_home "$TMP_ROOT/ensure-hand-run")
+  old=$(start_earlier_daemon "$dir" pane-a devin quiet)
+  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  primary=$(start_foreign_devin)
+  printf '%s\n' "$primary" > "$dir/state/.lock"
+  out=$(env -u TMUX_PANE FM_HOME="$dir" FM_SUPERVISOR_TARGET=pane-b FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" bash "$SCRIPT" ensure 2>&1) \
+    || fail "a hand-run ensure failed beside a healthy daemon: $out"
+  if [ "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" != "$old" ] || ! kill -0 "$old" 2>/dev/null; then
+    fail "a hand-run ensure from another terminal replaced the healthy daemon (old $old, now $(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null))"
+  fi
+  [ "$(cut -f4 "$dir/state/.afk-daemon-terminal" 2>/dev/null)" = pane-a ] \
+    || fail "the daemon record no longer names the primary pane: $(cat "$dir/state/.afk-daemon-terminal" 2>/dev/null)"
+  assert_contains "$out" "quiet daemon running: pid $old supervising pane pane-a" "the hand-run ensure did not report the daemon's recorded pane: $out"
+  pass "fm-devin-primary ensure: a hand run outside the lock-owning session leaves a healthy daemon alone"
+}
+
 test_session_start_replaces_a_daemon_for_another_harness() {
   local dir old new out ctx
   dir=$(make_home "$TMP_ROOT/start-stale-harness")
@@ -444,6 +467,7 @@ test_session_start_replaces_a_daemon_for_another_pane
 test_session_start_replacement_keeps_an_undelivered_check_alert
 test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert
 test_session_start_replaces_a_daemon_for_another_harness
+test_hand_run_ensure_keeps_a_healthy_daemon
 test_example_config_hooks_run_the_wrapper
 test_stop_allows_after_a_successful_heal
 test_stop_passes_guard_block_and_respects_cap
