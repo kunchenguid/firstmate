@@ -1326,6 +1326,8 @@ This lock does not prevent filesystem trash operations, a `treehouse return` tha
 The [home-lock library](../bin/fm-home-worktree-lock-lib.sh) owns receipt validation and release mechanics.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
 A returned slot is an ordinary pool checkout again, so a successful retirement return or attempt-owned seed-rollback return clears the retired home's payload (`data/`, `state/`, `config/`, `projects/`, and both identity markers), while a failed or handled-interruption return puts the whole home back for the preserved retry; a slot that kept the payload would refuse the next seed in it as already marked for a mate that no longer exists.
+A return stages that payload in the parent's state directory and refuses a home it cannot stage there atomically before anything moves, so a parent on another filesystem leaves the home intact rather than half-moved.
+A return killed outright, or signalled while the slot release itself runs, can still strand that staging and leave the home stripped of its payload and identity.
 The [payload library](../bin/fm-home-payload-lib.sh) owns that cleanup.
 
 ### Project modes and backlog handoff
