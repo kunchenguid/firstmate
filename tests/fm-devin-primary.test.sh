@@ -405,7 +405,7 @@ test_example_config_hooks_run_the_wrapper() {
   cmd=$(printf '%s' "$config" | jq -r '.hooks.SessionStart[0].hooks[0].command')
   out=$(env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET FM_HOME="$dir" \
     "$NAMED_DEVIN" -c 'printf "%s" "{\"source\":\"startup\"}" | bash -c "$0"' "$cmd")
-  assert_contains "$out" "devin --config" "the example SessionStart hook did not reach the wrapper's pane refusal: $out"
+  assert_contains "$out" "env -u NO_COLOR devin --config" "the example SessionStart hook did not reach the wrapper's pane refusal: $out"
   cmd=$(printf '%s' "$config" | jq -r '.hooks.PreToolUse[] | select(.matcher == "^ask_user_question$") | .hooks[0].command')
   [ "$(bash -c "$cmd" | jq -r '.decision')" = block ] || fail "the example PreToolUse hook does not block ask_user_question"
   pass "fm-devin-primary: the documented example config runs the wrapper and blocks the question dialog"

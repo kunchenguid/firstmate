@@ -1384,7 +1384,8 @@ Claude uses [hook-owned tokenless re-arm cycles](watcher-continuity.md#claude-st
 ### Devin primary
 
 A Devin primary is always supervised by the quiet daemon, because Devin cannot be woken from inside the model.
-Launch it as `devin --config <path-to-primary-config.json>` from inside a tmux pane or Herdr tab, with the firstmate home as the working directory.
+Launch it as `env -u NO_COLOR devin --config <path-to-primary-config.json>` from inside a tmux pane or Herdr tab, with the firstmate home as the working directory.
+Clearing `NO_COLOR` keeps the styling that tells Devin's composer placeholder apart from typed input; without it the daemon reads the placeholder as a draft and defers every wake.
 The config path is the captain's choice; a gitignored file under the home's `config/` keeps it out of the tracked tree.
 Without a tmux or Herdr pane the `SessionStart` hook refuses the session, because the daemon has nowhere to type wakes.
 A daemon left running for another pane or primary harness, for example after a crashed Devin or a Claude primary's quiet mode, is replaced at `SessionStart` with one for this pane; the posture, quiet or away, is kept.

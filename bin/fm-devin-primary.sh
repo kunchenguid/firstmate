@@ -184,7 +184,7 @@ cmd_session_start() {
 
   # The pane check comes first so a refused launch never leaves a lock behind.
   if ! supervisor_pane_addressable; then
-    emit_block "Firstmate on Devin: this primary is not inside a tmux or Herdr pane the daemon can supervise (no TMUX_PANE, no Herdr pane id, no FM_SUPERVISOR_TARGET). Relaunch it as \`devin --config <path-to-primary-config.json>\` from inside a tmux pane or Herdr tab in the firstmate home - see docs/configuration.md \"Devin primary\"."
+    emit_block "Firstmate on Devin: this primary is not inside a tmux or Herdr pane the daemon can supervise (no TMUX_PANE, no Herdr pane id, no FM_SUPERVISOR_TARGET). Relaunch it as \`env -u NO_COLOR devin --config <path-to-primary-config.json>\` from inside a tmux pane or Herdr tab in the firstmate home - see docs/configuration.md \"Devin primary\"."
   fi
 
   if ! lock_diag=$("$SCRIPT_DIR/fm-lock.sh" 2>&1); then
