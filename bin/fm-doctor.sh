@@ -56,8 +56,10 @@
 #
 # OUTPUT. TOON by default (bin/fm-toon-lib.sh): home, verdict, summary, every
 # check with one line of evidence, findings (the fix for each warn or fail), and
-# help. --json prints the full model (schema fm-doctor.v1) with every evidence
-# line per check. --area <name> runs only that area's checks; the built-in
+# help. --json prints the underlying model (schema fm-doctor.v1): home, area,
+# verdict, counts, and checks with their fix hints and full evidence details.
+# The TOON-only summary, findings, and help are derived from that model.
+# --area <name> runs only that area's checks; the built-in
 # checks always run. --network adds the network sources above.
 #
 # EXIT. 0 when no check failed (warnings allowed); 1 when a check failed,
