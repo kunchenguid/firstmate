@@ -19,7 +19,15 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-devin-primary)
 fm_git_identity fmtest fmtest@example.invalid
 
-SCRIPT="$ROOT/bin/fm-devin-primary.sh"
+# The hooks act only from a genuine primary code root (a plain checkout, never
+# a linked task worktree), so run them from a plain-checkout copy of the
+# tracked scripts and docs rather than from $ROOT, which may be a worktree.
+CODE_ROOT="$TMP_ROOT/code-root"
+mkdir -p "$CODE_ROOT"
+cp -R "$ROOT/bin" "$ROOT/docs" "$CODE_ROOT/"
+: > "$CODE_ROOT/AGENTS.md"
+fm_git_init_commit "$CODE_ROOT" >/dev/null
+SCRIPT="$CODE_ROOT/bin/fm-devin-primary.sh"
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/devin"
@@ -165,7 +173,7 @@ test_stop_passes_guard_block_and_respects_cap() {
       "$NAMED_DEVIN" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         printf "%s" "$1" | bash "$0" stop
-      ' "$SCRIPT" "$payload"); rc=$?
+      ' "$SCRIPT" "$payload" 2>/dev/null); rc=$?
     expect_code 0 "$rc" "stop $i must exit 0 while passing a block through"
     assert_contains "$out" '"decision":"block"' "stop $i did not pass the guard's block through: $out"
     [ "$(cat "$dir/state/.devin-stop-blocks.p-cap" 2>/dev/null)" = "$i" ] \
@@ -180,7 +188,7 @@ test_stop_passes_guard_block_and_respects_cap() {
     "$NAMED_DEVIN" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
       printf "%s" "$1" | bash "$0" stop
-    ' "$SCRIPT" "$payload"); rc=$?
+    ' "$SCRIPT" "$payload" 2>/dev/null); rc=$?
   expect_code 0 "$rc" "the capped stop must still exit 0"
   [ -z "$out" ] || fail "the 4th stop produced output past the per-turn cap: $out"
   pass "fm-devin-primary stop: guard block passes through as JSON and the per-turn cap fails open"
