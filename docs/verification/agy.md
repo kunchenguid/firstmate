@@ -144,6 +144,19 @@ agy renders the busy footer late for that confirm loop - about 1.5 s after Enter
 `tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
 This is the cursor precedent, not a gap to patch in shared code.
 
+The control plane's exit therefore clears the composer with Ctrl+U instead of proving it empty (`fm_control_composer_clear_key` in `bin/fm-control-lib.sh`).
+Measured live on `agy 1.5.6` (2026-11-11) in a 120x40 PTY rendered by `pyte`, launched as `agy --dangerously-skip-permissions` with no prompt submitted:
+
+```
+idle:            >  Accept-edits mode: file edits auto-approved (shift+tab to cycle)   (hint in SGR 90)
+typed hello:     > hello world                                                          (default colour)
+after Ctrl+U:    >
+typed, Ctrl+C:   > again text      status row: press ctrl+c again to exit
+```
+
+Ctrl+U returned a typed draft to the bare `>` row, while Ctrl+C left the draft in place and armed exit, so Ctrl+U is the clear key and Ctrl+C is never used for it.
+`tests/fm-control.test.sh` pins the clear-then-exit order, and that a still-busy agy receives no clear key.
+
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 
 A trivial scout ran end to end through `bin/fm-spawn.sh --harness agy` against the same isolated lab session: `spawned agy-e2e1 harness=agy kind=scout` with a treehouse-provisioned worktree, `--model gemini-3.8-flash-low`, and `--effort low` all recorded in task metadata.

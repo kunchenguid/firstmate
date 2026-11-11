@@ -257,6 +257,27 @@ fm_control_interrupt_clear_key() {  # <harness>
   esac
 }
 
+# The key that empties the composer of an adapter whose IDLE composer the shared
+# classifier reads as `unknown` by design, or nothing. bin/fm-control.sh's exit
+# sends it only after the composer has settled at `unknown` with the agent
+# alive and not busy, never over a `pending` or `pending-unproven` verdict, and
+# re-reads the composer afterwards, so a draft the classifier can see still
+# refuses. agy is the one entry: its composer is a bare `>` row between two
+# rules, which the dead-shell rule keeps `unknown` whether it is empty or holds
+# a draft (docs/verification/agy.md "Composer: unknown by design"), so without
+# this key no agy agent could ever be exited or relaunched. Ctrl+U empties it:
+# a typed `> hello world` row returned to the bare `>` row, while Ctrl+C left
+# the draft in place and armed `press ctrl+c again to exit` (verified live,
+# agy 1.5.6 in a PTY). Every other adapter's idle composer is provable, so it
+# keeps the strict refusal on an unproven read.
+fm_control_composer_clear_key() {  # <harness>
+  case "${1-}" in
+    agy) printf 'C-u' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|devin|commandcode|polytoken|cortex|kiro|hermes) ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_control_interrupt_ack_source() {  # <harness>
   case "${1-}" in
     muse) printf 'muse-session-terminal' ;;
@@ -331,6 +352,30 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
       ;;
   esac
   return 0
+}
+
+# How a relaunch asked for a FRESH conversation (`relaunch --fresh-session`,
+# the second-mate session rotation) gets one while keeping the resume above.
+# Prints `fresh` when the replacement would start a new conversation anyway (no
+# resume flag for this harness and registration, or no reference), `archive`
+# when the reference is an absolute session path the replacement would resume:
+# the old agent's file is moved aside after it stops, and Pi creates a new,
+# empty session at exactly that path, so the pane's bound identity - and the
+# status authority with it - survives while the conversation does not
+# (docs/herdr-backend.md "Agent status authority and relaunch"). Returns 1 for
+# a reference the replacement would resume that cannot be moved aside, such as
+# a bare id, so the caller refuses before anything is stopped.
+fm_control_fresh_session_plan() {  # <harness> <registered-agent> <session-ref>
+  local flag
+  flag=$(fm_control_relaunch_resume_flag "${1-}" "${2-}")
+  if [ -z "$flag" ] || [ -z "${3-}" ]; then
+    printf 'fresh'
+    return 0
+  fi
+  case "$3" in
+    /*) printf 'archive' ;;
+    *) return 1 ;;
+  esac
 }
 
 # Which named keys a backend adapter can deliver. Every session provider

@@ -2,7 +2,7 @@
 # Restart second mates onto the current instruction surface and launch-time
 # wiring, persisting their open records first.
 #
-# Usage: fm-secondmate-restart.sh <secondmate-id>... [--help]
+# Usage: fm-secondmate-restart.sh [--rotate] <secondmate-id>... [--help]
 #
 # This is the executable half of /updatefirstmate's reload step. A running agent
 # holds AGENTS.md and every skill it has loaded frozen from launch, and no
@@ -59,6 +59,13 @@
 # the update pass actually left on the target commit; this command re-checks
 # capability on its own argv rather than trusting a caller's list.
 #
+# --rotate is second-mate SESSION ROTATION (bin/fm-secondmate-rotate.sh): the
+# same persist gate, then a relaunch onto a fresh conversation
+# (bin/fm-control.sh relaunch --fresh-session), because the point is shedding
+# context rather than reloading instructions. A rotation has nothing to reload,
+# so a mate that cannot be restarted is reported unreached instead of nudged,
+# and a remote mate is refused, since its session lives on another host.
+#
 # Environment knobs:
 #   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
 #   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
@@ -72,7 +79,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,75{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -101,8 +108,10 @@ case "$PERSIST_WAIT" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_PERSIST_WAIT mus
 case "$PERSIST_POLL" in ''|*[!0-9]*|0) echo "error: FM_SECONDMATE_PERSIST_POLL must be a positive integer: $PERSIST_POLL" >&2; exit 2 ;; esac
 
 IDS=()
+ROTATE=0
 for arg in "$@"; do
   case "$arg" in
+    --rotate) ROTATE=1; continue ;;
     -*) echo "error: unexpected argument '$arg'" >&2; usage >&2; exit 2 ;;
   esac
   # /updatefirstmate's action line names each mate by its fm-<id> selector; the
@@ -146,6 +155,10 @@ first_reported_line() {  # <text>
 # plainly which it was. A nudge is a partial reload and is never reported as more.
 fall_back_to_nudge() {  # <id> <reason>
   local id=$1 reason=$2 out
+  if [ "$ROTATE" = 1 ]; then
+    report_unreached "$id" "session not rotated: $reason"
+    return
+  fi
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
     nudged_count=$((nudged_count + 1))
@@ -164,6 +177,7 @@ report_unreached() {  # <id> <reason>
 
 restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
+  local -a restart_args
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -171,8 +185,10 @@ restart_mate() {  # <array-index>
       "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
     restart_rc=$?
   else
+    restart_args=(relaunch)
+    [ "$ROTATE" = 0 ] || restart_args+=(--fresh-session)
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
+      "$SCRIPT_DIR/fm-control.sh" "$id" "${restart_args[@]}" 2>&1)
     restart_rc=$?
   fi
   if [ "$restart_rc" -eq 0 ]; then
@@ -265,6 +281,11 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     continue
   fi
   PLACEMENT[i]=$FM_SECONDMATE_RESTART_PLACEMENT
+  if [ "$ROTATE" = 1 ] && [ "${PLACEMENT[i]}" = remote ]; then
+    REASON[i]="it runs on another host, where its session cannot be rotated from here"
+    i=$((i + 1))
+    continue
+  fi
   HOST[i]=$FM_SECONDMATE_RESTART_HOST
   HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
   if [ "${PLACEMENT[i]}" = remote ]; then

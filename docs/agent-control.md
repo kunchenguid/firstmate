@@ -55,6 +55,8 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 For a typed exit, `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
+An agent it just interrupted is still ending its turn when the key lands - Pi keeps its busy footer, and with it an unproven composer, for a moment after Escape - so after an interrupt `exit` polls the composer for up to `FM_CONTROL_COMPOSER_WAIT` seconds (8) and judges the last read, rather than the one taken the instant the key landed; an agent it did not interrupt is judged on its one read.
+An adapter whose idle composer the shared classifier can never prove empty declares a verified clear key instead (`fm_control_composer_clear_key`): agy's bare `>` row reads `unknown` whether or not it holds a draft, so once the composer has settled at `unknown` and agy no longer reads busy, `exit` sends Ctrl+U, reads the composer again, and still refuses if that read shows pending text.
 `exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
 A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
@@ -98,6 +100,8 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
    This reference is a launch input, never authority to send, close, or act on the pane.
    [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and measured behavior.
+   `--fresh-session` asks for a new conversation while keeping that identity: when the replacement would resume a recorded session file, the old file is moved aside to `<path>.rotated-<UTC stamp>` after step 4, and the replacement creates an empty session at the same path; a recorded reference that is not a file refuses before step 4.
+   [Second-mate session rotation](configuration.md#second-mate-session-rotation-configsecondmate-rotation) relaunches this way.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 

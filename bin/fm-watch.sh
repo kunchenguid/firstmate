@@ -4152,6 +4152,30 @@ while :; do
         fm_wake_append check pr-register "$pr_register_reason" || exit 1
       fi
     fi
+    # Opt-in fleet sweeps, each gated by its own config file and owned by its
+    # script: second-mate session rotation (bin/fm-secondmate-rotate.sh) and the
+    # quota circuit breaker (bin/fm-quota-breaker.sh). Every output line is one
+    # notification.
+    if [ -e "$CONFIG/secondmate-rotation" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        run_check_capture "$SCRIPT_DIR/fm-secondmate-rotate.sh" scan || exit 1
+      while IFS= read -r sweep_line; do
+        [ -n "$sweep_line" ] || continue
+        fm_wake_append check secondmate-rotation "check: secondmate-rotation: $sweep_line" || exit 1
+      done <<EOF
+$FM_CHECK_RESULT
+EOF
+    fi
+    if [ -e "$CONFIG/quota-breaker" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        run_check_capture "$SCRIPT_DIR/fm-quota-breaker.sh" scan || exit 1
+      while IFS= read -r sweep_line; do
+        [ -n "$sweep_line" ] || continue
+        fm_wake_append check quota-breaker "check: quota-breaker: ${sweep_line#quota-breaker }" || exit 1
+      done <<EOF
+$FM_CHECK_RESULT
+EOF
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0

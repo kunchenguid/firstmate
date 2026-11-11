@@ -987,6 +987,32 @@ w = { tokens: [],
   pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
 
+# --- T17: --rotate restarts onto a fresh session, and never nudges ----------
+test_rotate_restarts_onto_a_fresh_session() {
+  local dir out rc
+  dir=$(new_case rotate)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" --rotate sm1); rc=$?
+  expect_code 0 "$rc" "a confirmed persist should rotate the mate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (claude)" "the rotated mate should be restarted"
+  assert_grep 'phase=complete' "$dir/home/state/sm1.control-relaunch" \
+    "the rotation should run the ordinary relaunch transaction"
+
+  # A mate that never confirms keeps its conversation and is reported, but a
+  # rotation has nothing to reload, so no re-read message is sent.
+  dir=$(new_case rotate-unconfirmed)
+  add_local_mate "$dir" sm1
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" --rotate sm1); rc=$?
+  expect_code 3 "$rc" "an unconfirmed rotation is not a success"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1: session not rotated:" "an unconfirmed rotation should be reported unreached"
+  assert_not_contains "$out" "nudged:" "a rotation must never fall back to the re-read message"
+  [ "$(find "$dir/home/state/sm1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "only the persist request should reach the mate, never a re-read message"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "an unconfirmed rotation stopped the agent"
+  pass "T17 --rotate relaunches onto a fresh session after the persist gate and never nudges"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -1013,3 +1039,4 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_t3_mate_stays_on_the_nudge_path
 
 echo "# all fm-secondmate-restart tests passed"
+test_rotate_restarts_onto_a_fresh_session

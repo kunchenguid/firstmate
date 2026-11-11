@@ -392,6 +392,19 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_fresh_session_relaunch_reports_a_fresh_conversation() {
+  local dir out rc
+  dir=$(new_case fresh rl45)
+  add_ship_task "$dir" rl45 claude
+  out=$(run_control "$dir" rl45 relaunch --fresh-session --note "rotate the conversation"); rc=$?
+  expect_code 0 "$rc" "a fresh-session relaunch off Herdr should succeed: nothing is resumed there"$'\n'"$out"
+  assert_contains "$out" "relaunched rl45 harness=claude" "the relaunch should report its transition"
+  assert_contains "$out" "session=fresh" "a fresh-session relaunch should say the conversation is new"
+  assert_not_contains "$out" "archived=" "nothing is moved aside when nothing would be resumed"
+  [ "$(journal_field "$dir" rl45 phase)" = complete ] || fail "the transaction journal should end complete"
+  pass "fm-control relaunch --fresh-session: off Herdr the ordinary relaunch is already a fresh conversation"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3224,6 +3237,7 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_fresh_session_relaunch_reports_a_fresh_conversation
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

@@ -3522,6 +3522,13 @@ if [ "$HARNESS" = kiro ]; then
     kiro_hook_path_validate "$STATE" "$ID" || exit 1
   fi
 fi
+# Quota pre-flight (bin/fm-quota-preflight.sh owns it): advisory only. In a home
+# with dispatch profiles, a ship or scout launch whose candidate quota-axi
+# already reports exhausted_now prints one quota-preflight: notice, so the
+# dispatcher can move it to the next same-group candidate before it stalls.
+if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-quota-preflight.sh" "$HARNESS" "${MODEL:-default}" >&2 || true
+fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
