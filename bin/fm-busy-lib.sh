@@ -1013,10 +1013,13 @@ fm_busy_agy_tail_busy() {
 }
 
 fm_busy_agy_tail_idle() {
-  local tail
+  local tail last previous
   tail=$(grep -v '^[[:space:]]*$' | tail -12)
-  ! printf '%s\n' "$tail" | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel' \
-    && printf '%s\n' "$tail" | grep -qiE '[?][[:space:]]+for[[:space:]]+shortcuts'
+  ! printf '%s\n' "$tail" | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel' || return 1
+  last=$(printf '%s\n' "$tail" | tail -n 1)
+  previous=$(printf '%s\n' "$tail" | tail -n 2 | head -n 1)
+  printf '%s\n' "$last" | grep -qE '^[[:space:]]*\?[[:space:]]+for[[:space:]]+shortcuts([[:space:]]|$)' || return 1
+  printf '%s\n' "$previous" | grep -qE '^[[:space:]]*─{10,}[[:space:]]*$'
 }
 
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------

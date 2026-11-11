@@ -196,9 +196,13 @@ test_agy_classify_distinguishes_status_markers() {
 esc to cancel                                                           Gemini 3.8 Flash · low')
   [ "$busy" = "busy agy-regex" ] || fail "a busy tail must classify busy agy-regex, got '$busy'"
   idle=$(fm_busy_classify tmux fake:win agy agy-case-2 "$statedir" 'reply landed
+────────────────────────────────────────
 ? for shortcuts                                                         Gemini 3.8 Flash · low')
-  [ "$idle" = "idle agy-regex" ] || fail "the pinned idle row must classify idle, got '$idle'"
+  [ "$idle" = "idle agy-regex" ] || fail "the pinned idle footer must classify idle, got '$idle'"
   idle=$(fm_busy_classify tmux fake:win agy agy-case-3 "$statedir" 'reply landed
+? for shortcuts                                                         Gemini 3.8 Flash · low')
+  [ "$idle" = "unknown agy-regex" ] || fail "an unanchored idle marker must stay unknown, got '$idle'"
+  idle=$(fm_busy_classify tmux fake:win agy agy-case-4 "$statedir" 'reply landed
 some ambiguous output')
   [ "$idle" = "unknown agy-regex" ] || fail "a pane without either status marker must classify unknown, got '$idle'"
   pass "fm-busy-lib: agy classifies busy, idle, and ambiguous tails distinctly"

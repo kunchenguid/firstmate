@@ -90,7 +90,11 @@ if [ -n "$RULES" ]; then
           elif length == 1 then .[0] | "\(.provider)\t\(.quota_scope)"
           else "" end
       ' "$RULES" 2>/dev/null) || declared=
-    [ "$declared" != ambiguous ] || exit 0
+    if [ "$declared" = ambiguous ]; then
+      printf 'quota-preflight: %s%s has ambiguous provider/quota_scope across crew-dispatch.json profiles; pass --provider or verify quota before relying on this candidate\n' \
+        "$HARNESS" "${MODEL:+:$MODEL}"
+      exit 0
+    fi
     if [ -n "$declared" ]; then
       PROVIDER=${declared%%$'\t'*}
       [ -n "$QUOTA_SCOPE" ] || QUOTA_SCOPE=${declared#*$'\t'}

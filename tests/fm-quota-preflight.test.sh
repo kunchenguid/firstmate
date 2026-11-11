@@ -76,7 +76,8 @@ test_exhausted_candidate_gets_one_notice() {
   assert_contains "$out" "quota-preflight: claude:fable provider claude is exhausted_now at model:fable (0% left)" \
     "an exhausted model scope should be named"
   out=$(preflight claude sonnet)
-  [ -z "$out" ] || fail "conflicting claude profiles must stay quiet rather than use the family fallback, got: $out"
+  assert_contains "$out" "quota-preflight: claude:sonnet has ambiguous provider/quota_scope across crew-dispatch.json profiles" \
+    "conflicting Claude profiles should warn instead of using the family fallback"
   pass "fm-quota-preflight: an exhausted candidate gets one notice, a healthy one none"
 }
 
@@ -95,7 +96,8 @@ test_declared_provider_and_scope_apply() {
   assert_contains "$out" "provider zai is exhausted_now at all_models" \
     "an effort-specific profile should select its provider"
   out=$(preflight pi ambiguous/model --effort high)
-  [ -z "$out" ] || fail "ambiguous provider profiles must stay quiet rather than guess, got: $out"
+  assert_contains "$out" "quota-preflight: pi:ambiguous/model has ambiguous provider/quota_scope across crew-dispatch.json profiles" \
+    "ambiguous provider profiles should warn instead of silently guessing"
   pass "fm-quota-preflight: the declared provider, effort, and quota scope bind safely"
 }
 

@@ -880,7 +880,7 @@ A tripped worker queues one `check: quota-breaker: <task> <class> harness=<h> mo
 The breaker only notifies; it never stops or relaunches a worker itself.
 `bin/fm-quota-breaker.sh` owns the exact signatures, with coverage in [`tests/fm-quota-breaker.test.sh`](../tests/fm-quota-breaker.test.sh).
 
-In a home with dispatch profiles, every ship and scout launch also runs the advisory `bin/fm-quota-preflight.sh`, which prints one `quota-preflight:` notice when quota-axi already reports the launch's candidate `exhausted_now`; it never refuses a launch, and `FM_QUOTA_PREFLIGHT=off` silences it.
+In a home with dispatch profiles, every ship and scout launch also runs the advisory `bin/fm-quota-preflight.sh`, which prints one `quota-preflight:` notice when quota-axi already reports the launch's candidate `exhausted_now` or when provider/quota-scope profiles are ambiguous; it never refuses a launch, and `FM_QUOTA_PREFLIGHT=off` silences it.
 
 ## Degraded PR watch (config/pr-degraded-watch)
 
