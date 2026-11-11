@@ -51,14 +51,13 @@
 #                 when no live identity-matched daemon holds this home it runs
 #                 `ensure` and logs the result to stderr; a successful restart
 #                 has just proved a live daemon, so that stop is allowed
-#                 without waiting for the new watcher's first beacon. While
-#                 the away return's catch-up gate is pending the daemon cannot
-#                 start and the captain is present working the return, so the
-#                 stop is allowed with the gate's instruction on stderr.
+#                 without waiting for the new watcher's first beacon.
 #                 Otherwise it pipes the payload to
 #                 `bin/fm-turnend-guard.sh --devin` and passes a returned block
-#                 object through (prefixed with the failed ensure outcome when
-#                 self-heal ran). The guard owns the per-turn block cap
+#                 object through, prefixed with the ensure outcome when
+#                 self-heal ran: a pending away-return catch-up gate names
+#                 `bin/fm-afk-return.sh check` as the unblock action, since no
+#                 daemon can start until that gate clears. The guard owns the per-turn block cap
 #                 (state/.turnend-blocks keyed on prompt_id,
 #                 FM_TURNEND_MAX_BLOCKS), so a persistently unhealthy daemon
 #                 can never wedge the session.
@@ -280,17 +279,21 @@ cmd_stop() {
   # Self-heal once per stop: a missing daemon is exactly the failure the Stop
   # hook exists to restart. A successful ensure has just verified a live
   # identity-matched daemon, so the stop is allowed before the new watcher's
-  # first beacon; a failed attempt rides in the block reason.
+  # first beacon; a refused or failed attempt rides in the block reason.
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if ! fm_afk_daemon_owns_supervision "$STATE"; then
     heal=$(cmd_ensure 2>&1)
     heal_rc=$?
-    if [ "$heal_rc" -eq 0 ] || [ "$heal_rc" -eq 3 ]; then
+    if [ "$heal_rc" -eq 0 ]; then
       printf 'fm-devin-primary stop: %s\n' "$heal" >&2
       exit 0
     fi
-    heal="daemon restart attempt FAILED: ${heal:-no diagnostic}. "
+    if [ "$heal_rc" -eq 3 ]; then
+      heal="SUPERVISION IS PAUSED: the away return's catch-up gate (state/.afk-return-catchup) is still pending, so no daemon or watcher runs and no wake reaches this pane. Run bin/fm-afk-return.sh check and work its blockers until the gate clears; ensure cannot start the daemon before then, and the next Stop after it clears restores quiet daemon supervision. "
+    else
+      heal="daemon restart attempt FAILED: ${heal:-no diagnostic}. "
+    fi
     printf 'fm-devin-primary stop: %s\n' "$heal" >&2
   fi
 

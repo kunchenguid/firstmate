@@ -12,6 +12,8 @@ When this session owns supervision:
 4. In quiet mode, never type `/quiet off` or otherwise leave daemon supervision: there is no other supervision path on this harness.
    If the captain asks for normal supervision, explain that quiet mode is the only posture that keeps a Devin primary supervised, and keep it.
    In away mode, the captain's return still goes through `bin/fm-afk-return.sh` and its catch-up gate, as `away-quiet-supervision` says.
-   The daemon stays down while that gate is pending, and the `Stop` hook lets turns end meanwhile; once `bin/fm-afk-return.sh check` clears the gate, the next `Stop` (or `bin/fm-devin-primary.sh ensure`) puts the home back under quiet daemon supervision.
+   While that gate (`state/.afk-return-catchup`) is pending, no daemon or watcher runs and no wake reaches this pane, because nothing can start the daemon until the gate clears.
+   With work in flight, the `Stop` hook refuses the turn end with a bounded block that names `bin/fm-afk-return.sh check` as the unblock action; past its per-turn cap it lets the turn end, and with nothing in flight it allows silently.
+   Run `bin/fm-afk-return.sh check` and work its blockers until the gate clears; the next `Stop` (or `bin/fm-devin-primary.sh ensure`) then puts the home back under quiet daemon supervision.
 5. The `Stop` hook refuses a turn end while the daemon is unhealthy and tries to restart it itself.
    Manual repair is `bin/fm-devin-primary.sh ensure`; if that fails, tell the captain plainly rather than improvising another watcher.
