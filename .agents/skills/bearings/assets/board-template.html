@@ -574,12 +574,20 @@ __FM_BEARINGS_BOARD_DATA__
   modal.hidden = true;
   /* Only https:// URLs become links; trailing sentence punctuation stays text. */
   var URL_RE = /https:\/\/[^\s<>"']+/g;
+  var URL_OPENER = { ")": "(", "]": "[" };
+  function trimUrl(url) {
+    for (;;) {
+      var end = url.charAt(url.length - 1), open = URL_OPENER[end];
+      if (/[.,;:!?]/.test(end) || (open && url.split(open).length < url.split(end).length)) url = url.slice(0, -1);
+      else return url;
+    }
+  }
   function richText(node, text) {
     var s = String(text), last = 0, m;
     URL_RE.lastIndex = 0;
     while ((m = URL_RE.exec(s)) !== null) {
-      var url = m[0].replace(/[.,;:!?)\]]+$/, "");
-      if (!url.length || url === "https://") { URL_RE.lastIndex = m.index + m[0].length; continue; }
+      var url = trimUrl(m[0]);
+      if (url === "https://") { URL_RE.lastIndex = m.index + m[0].length; continue; }
       if (m.index > last) node.appendChild(el("span", null, s.slice(last, m.index)));
       var a = el("a", null, url);
       a.href = url; a.target = "_blank"; a.rel = "noopener";

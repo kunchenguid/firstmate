@@ -4,11 +4,14 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label,tag,type,scrolls_to,target_declared,prompts}],
+//   { stats:[{n,label,tag,type,scrolls_to,prompts}],
 //     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error,
 //     call:{wide:[page], narrow:[page], empty, details:[view]} }
-// where each Captain's Call page is {title, height, natural}: the card the back
+// where a tile's scrolls_to lists the visible eyebrow heading of each section a
+// click scrolled to, read from the built page's markup (null for a target that
+// is not such a section), and each Captain's Call page is
+// {title, height, natural}: the card the back
 // and next buttons show, the height it lays out at, and the height its own
 // content needs. Layout is a toy model - text wraps at a fixed character width
 // within the viewport width, and a hidden element takes no space - so height
@@ -16,7 +19,9 @@
 // pages after the initial render and web fonts load; "narrow" pages again after
 // the window narrows and fires resize. Each details view is what one card's
 // Details button opened: {button, was_closed, open, title, ctx_rows, context,
-// none, options:[{label, rec, hint, details}], links, closed_after, prompts}.
+// none, options:[{label, rec, hint, details}], links, closed_after, prompts},
+// where button.controls is the declared role of the element the button's
+// aria-controls names, and open and closed state are read from that element.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -97,11 +102,18 @@ class Node {
   }
 }
 
-// Ids the built page declares in its static markup. getElementById below mints
-// any id the script asks for, so a tile aimed at an id the page never declares
-// is visible as a scroll to an undeclared target.
-const declaredIds = new Set(
-  [...html.split("<script")[0].matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+// The built page's static markup: the opening tag of every element it declares
+// by id, and the visible eyebrow heading of every section that carries an id.
+const markup = html.split("<script")[0];
+const declared = new Map(
+  [...markup.matchAll(/<[a-z][^>]*\sid="([^"]+)"[^>]*>/g)].map((m) => [m[1], m[0]]));
+const roleOf = (id) => declared.get(id)?.match(/\srole="([^"]*)"/)?.[1] ?? null;
+const sectionHeading = new Map(
+  [...markup.matchAll(/<section\b[^>]*\sid="([^"]+)"[^>]*>([\s\S]*?)<\/section>/g)].map(([, id, body]) => [
+    id,
+    (body.match(/class="[^"]*\bfm-sign--eyebrow\b[^"]*"[^>]*>([\s\S]*?)<\/span>/)?.[1] ?? "")
+      .replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim(),
+  ]));
 const scrolls = [];
 const prompts = [];
 
@@ -114,16 +126,16 @@ byId.set("bearings-data", dataNode);
 
 globalThis.document = {
   createElement: (tag) => new Node(tag),
-  // Lazily mint any element the page asks for: the shim tracks whatever ids
-  // the shipped template actually uses instead of pinning a fixed list.
+  // Lazily mint an element the first time the page asks for it, but, as in a
+  // browser, only for an id its static markup declares; any other id is null.
   getElementById: (id) => {
-    if (!byId.has(id)) {
+    if (!byId.has(id) && declared.has(id)) {
       const n = new Node("div");
       n.id = id;
       new Node("div").appendChild(n);
       byId.set(id, n);
     }
-    return byId.get(id);
+    return byId.get(id) ?? null;
   },
   querySelector: (sel) => {
     const id = "sel:" + sel;
@@ -191,16 +203,17 @@ const linksIn = (n, out = []) => {
 const details = decisionCards().map((card) => {
   const btn = card.querySelectorAll(".bb-detailsbtn")[0];
   if (!btn) return { button: null };
-  const modal = byId.get("bb-modal");
+  const controls = btn.attributes["aria-controls"] ?? null;
+  const modal = document.getElementById(controls);
   const body = byId.get("bb-modal-body");
   const text = (n) => n.textContent;
-  const wasClosed = modal.hidden;
+  const wasClosed = modal?.hidden === true;
   const before = prompts.length;
   btn.dispatch("click");
   const view = {
-    button: { tag: btn.tagName, type: btn.type, label: btn.textContent, controls: btn.attributes["aria-controls"] ?? null },
+    button: { tag: btn.tagName, type: btn.type, label: btn.textContent, controls: roleOf(controls) },
     was_closed: wasClosed,
-    open: !modal.hidden,
+    open: modal?.hidden === false,
     title: byId.get("bb-modal-title").textContent,
     ctx_rows: body.querySelectorAll(".bb-ctx__row").map((r) => r.children.map(text)),
     context: body.querySelectorAll(".bb-modal__ctxp").map(text),
@@ -214,7 +227,7 @@ const details = decisionCards().map((card) => {
     links: linksIn(body),
   };
   byId.get("bb-modal-close").dispatch("click");
-  view.closed_after = modal.hidden;
+  view.closed_after = modal?.hidden === true;
   view.prompts = prompts.length - before;
   return view;
 });
@@ -238,8 +251,7 @@ const stats = strip.children.map((t) => {
     label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
     tag: t.tagName,
     type: t.type,
-    scrolls_to: hit.map((h) => h.id),
-    target_declared: hit.length > 0 && hit.every((h) => declaredIds.has(h.id)),
+    scrolls_to: hit.map((h) => sectionHeading.get(h.id) ?? null),
     prompts: prompts.length - before.prompts,
   };
 });

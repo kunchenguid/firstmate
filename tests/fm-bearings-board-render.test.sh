@@ -274,16 +274,18 @@ test_each_summary_tile_scrolls_to_the_section_it_counts() {
   ]' '[
     {"id":"queued-one","repo":"sample","title":"Queued","reason":"","dispatchable":true}
   ]')
+  # The oracle is the heading the captain reads on each section, not the ids
+  # the template happens to use.
   printf '%s' "$out" | jq -e '
     .error == ""
       and ([.stats[] | {label, scrolls_to}] == [
-        {label:"need you", scrolls_to:["bb-sec-call"]},
-        {label:"underway", scrolls_to:["bb-sec-underway"]},
-        {label:"landed recently", scrolls_to:["bb-sec-landed"]},
-        {label:"charted next", scrolls_to:["bb-sec-charted"]}])
-      and all(.stats[]; .target_declared and .tag == "button" and .type == "button" and .prompts == 0)
-  ' >/dev/null || fail "a summary tile lost its section target or reached the agent: $out"
-  pass "each summary tile is a button that scrolls to its own declared section and queues nothing"
+        {label:"need you", scrolls_to:["Captain'"'"'s Call"]},
+        {label:"underway", scrolls_to:["Underway"]},
+        {label:"landed recently", scrolls_to:["Recently Landed"]},
+        {label:"charted next", scrolls_to:["Charted Next"]}])
+      and all(.stats[]; .tag == "button" and .type == "button" and .prompts == 0)
+  ' >/dev/null || fail "a summary tile did not scroll to the section it counts, or reached the agent: $out"
+  pass "each summary tile is a button that scrolls to the section headed by what it counts and queues nothing"
 }
 
 test_every_captains_call_card_takes_the_tallest_cards_height() {
@@ -339,7 +341,7 @@ test_every_captains_call_card_opens_a_full_screen_details_view() {
   printf '%s' "$out" | jq -e '
     (.call.details | length) == 2
       and all(.call.details[];
-        .button == {tag:"button", type:"button", label:"Details", controls:"bb-modal"}
+        .button == {tag:"button", type:"button", label:"Details", controls:"dialog"}
           and .was_closed and .open and .closed_after and .prompts == 0)
       and ([.call.details[] | .title] == ["An explained call", "Merge: plain"])
   ' >/dev/null || fail "a card lacked a Details button, or it did not open and close a full-screen view without queuing anything: $out"
@@ -361,6 +363,23 @@ test_every_captains_call_card_opens_a_full_screen_details_view() {
       and ($d.options | map(.label)) == ["Merge now"]
   ' >/dev/null || fail "a card without context did not say so in its Details view: $out"
   pass "every Captain's Call card opens a full-screen Details view with its context and every option's details, queuing nothing"
+}
+
+# Oracle: the GFM autolink rule - a trailing ")" belongs to the URL only when
+# the URL holds a matching "(", and trailing sentence punctuation stays text.
+test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation() {
+  local home out para
+  home=$(make_home call-details-links)
+  para='Background is at https://en.wikipedia.org/wiki/Foo_(bar) (see https://example.com/x).'
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg p "$para" '[
+    {key:"linked",type:"decision",repo:"sample",title:"A linked call",
+     context:[$p],options:[{value:"go",label:"Go ahead"}]}]')")
+  printf '%s' "$out" | jq -e --arg p "$para" '
+    .error == ""
+      and .call.details[0].links == ["https://en.wikipedia.org/wiki/Foo_(bar)", "https://example.com/x"]
+      and .call.details[0].context == [$p]
+  ' >/dev/null || fail "a Details paragraph cut a URL at its own parenthesis or linked trailing punctuation: $out"
+  pass "a Details link keeps a balanced closing parenthesis and leaves trailing punctuation as text"
 }
 
 test_an_empty_captains_call_still_shows_its_empty_state() {
@@ -406,6 +425,7 @@ EOF
 test_full_snapshot_question_reaches_the_rendered_decision
 test_every_captains_call_card_takes_the_tallest_cards_height
 test_every_captains_call_card_opens_a_full_screen_details_view
+test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation
 test_an_empty_captains_call_still_shows_its_empty_state
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
