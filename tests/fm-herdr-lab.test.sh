@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 unset FM_HERDR_LAB_FLEET_SESSION
+export HOME=/home/test
+unset XDG_CONFIG_HOME
 
 TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
@@ -57,10 +59,23 @@ case "$1 ${2:-}" in
     fi
     ;;
   "server --session")
+    if [ -n "${FM_FAKE_HERDR_SERVER_NOISE:-}" ]; then
+      head -c "$FM_FAKE_HERDR_SERVER_NOISE" /dev/zero | tr '\0' x >&2
+      exit 1
+    fi
+    if [ -n "${FM_FAKE_HERDR_SERVER_FAIL:-}" ]; then
+      printf '%s\n' "$FM_FAKE_HERDR_SERVER_FAIL" >&2
+      exit 1
+    fi
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
     printf '%s\n' running > "$state/$session"
+    if [ -n "${FM_FAKE_HERDR_SERVER_STAY:-}" ]; then
+      # Stay alive after reporting running, like a real server.
+      printf '%s\n' "$$" > "$state/$session.pid"
+      exec "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_STAY"
+    fi
     ;;
   "status --json")
     if [ "$lab_state" = running ]; then
@@ -104,6 +119,8 @@ run_with_fake() {
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
     FM_FAKE_HERDR_FLEET="${FM_FAKE_HERDR_FLEET:-}" \
+    FM_FAKE_HERDR_SERVER_FAIL="${FM_FAKE_HERDR_SERVER_FAIL:-}" \
+    FM_FAKE_HERDR_SERVER_STAY="${FM_FAKE_HERDR_SERVER_STAY:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -120,6 +137,79 @@ test_refuses_unsafe_names() {
   fm_herdr_lab_validate_name "$generated" || fail "generated lab session name was refused"
   [ "${#generated}" -le 40 ] || fail "generated lab session name is too long for Herdr socket paths: $generated"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
+}
+
+test_refuses_names_over_the_socket_path_limit() {
+  local err="$TMP_ROOT/sun-path.err" status=0 name fixed
+  fixed="$HOME/.config/herdr/sessions//herdr-client.sock"
+  name=fm-lab-$(printf 'a%.0s' $(seq 1 $((103 - ${#fixed} - 7))))
+  fm_herdr_lab_check_socket_path "$name" || fail "a name exactly at the sun_path limit was refused"
+  fm_herdr_lab_check_socket_path "${name}a" 2>"$err" && fail "a name over the sun_path limit was accepted"
+  assert_contains "$(cat "$err")" "103-byte sun_path limit" "the refusal must name the limit"
+  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_name long-label >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "name must refuse a label that overflows the socket path"
+  # Multibyte config root: fewer than 103 characters but more than 103 bytes.
+  local wide chars
+  wide=/home/test/$(printf 'é%.0s' $(seq 1 30))
+  chars=$(LC_ALL=C.UTF-8 bash -c 'p=$1/.config/herdr/sessions/fm-lab-x/herdr-client.sock; echo ${#p}' _ "$wide")
+  [ "$chars" -lt 103 ] || fail "multibyte fixture is not under 103 characters: $chars"
+  HOME=$wide fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    && fail "a path under 103 characters but over 103 bytes was accepted"
+  # XDG_CONFIG_HOME relocates the config root: long HOME + short XDG is accepted,
+  # short HOME + long XDG is refused.
+  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) XDG_CONFIG_HOME=/x fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    || fail "a short XDG_CONFIG_HOME was refused because of a long HOME"
+  XDG_CONFIG_HOME=/x/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    && fail "a long XDG_CONFIG_HOME was accepted"
+  status=0
+  run_with_fake fm_herdr_lab_prepare "${name}a" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "prepare must refuse an over-limit name"
+  status=0
+  run_with_fake fm_herdr_lab_provision "${name}a" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "provision must refuse an over-limit name"
+  [ ! -f "$FAKE_STATE/${name}a" ] || fail "provision started a server for an over-limit name"
+  pass "fm-herdr-lab: names whose client socket path exceeds sun_path are refused"
+}
+
+test_noisy_server_log_is_bounded() {
+  local name="fm-lab-server-noisy-$$" size
+  FM_FAKE_HERDR_SERVER_NOISE=300000 \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || true
+  size=$(wc -c < "$TRIPWIRES/$name.server.log" | tr -d ' ')
+  [ "$size" -le 4096 ] || fail "server log grew to $size bytes, over the 4096-byte cap"
+  [ "$size" -gt 0 ] || fail "server output was not captured"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: a noisy server leaves a bounded log"
+}
+
+test_captured_provision_returns_promptly() {
+  local name="fm-lab-captured-$$" started elapsed pid
+  started=$(date +%s)
+  # The server outlives provision. Command substitution waits for every
+  # holder of the pipe to close it, so a collector that kept the caller's
+  # stdout open would block until the server exits.
+  : "$(FM_FAKE_HERDR_SERVER_STAY=20 run_with_fake fm_herdr_lab_provision "$name" 2>&1)"
+  elapsed=$(($(date +%s) - started))
+  pid=$(cat "$FAKE_STATE/$name.pid" 2>/dev/null || true)
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  [ "$elapsed" -lt 10 ] || fail "captured provision held its output pipe open for ${elapsed}s"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: provision does not hold a captured output pipe open"
+}
+
+test_failed_server_start_reports_its_error_quickly() {
+  local name="fm-lab-server-fails-$$" err="$TMP_ROOT/server-fail.err" status=0 started elapsed
+  started=$(date +%s)
+  FM_FAKE_HERDR_SERVER_FAIL="Error: local socket name length exceeds capacity" \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>"$err" || status=$?
+  elapsed=$(($(date +%s) - started))
+  expect_code 1 "$status" "provision must fail when the server exits"
+  [ "$elapsed" -lt 10 ] || fail "provision waited ${elapsed}s for a server that had already exited"
+  assert_contains "$(cat "$err")" "exited before reporting running" "the failure must say the server exited"
+  assert_contains "$(cat "$err")" "local socket name length exceeds capacity" "the failure must show the server's own error"
+  assert_present "$TRIPWIRES/$name.server.log" "the server output was not kept in the state directory"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: a server that fails at startup reports its error without the full wait"
 }
 
 test_provision_run_and_guarded_teardown() {
@@ -633,6 +723,10 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 }
 
 test_refuses_unsafe_names
+test_refuses_names_over_the_socket_path_limit
+test_failed_server_start_reports_its_error_quickly
+test_noisy_server_log_is_bounded
+test_captured_provision_returns_promptly
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction

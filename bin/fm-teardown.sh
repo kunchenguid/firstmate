@@ -402,6 +402,7 @@ for _teardown_source in \
   fm-composer-lib.sh \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
+  fm-dod-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
   fm-lease-lib.sh
@@ -433,6 +434,9 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# The bounded remote-ref refresh is shared with the done-claim gate.
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -2131,33 +2135,22 @@ teardown_note_dirty_return() {
 
 # A worker may have pushed from another checkout, so tracking refs that do not
 # show the work prove nothing until they are refreshed. Runs at most once per
-# teardown. Each fetch is bounded to 30 seconds and non-interactive, and
-# --no-prune keeps a branch a remote has dropped visible, whatever fetch.prune
-# says. The explicit
-# refspec covers every branch even when a clone tracks only some of them. A failed
-# fetch only leaves the last-known refs in place, so the unchanged checks below
-# still refuse work those refs do not show; REMOTE_REFRESH_FAILED names it for the
-# refusal. The no-mistakes gate is skipped: it is a local validation copy, and
-# fetching it would count work as landed that no real remote holds.
+# teardown, through bin/fm-dod-lib.sh's fm_dod_refresh_remote_refs, which owns
+# the bounded, no-prune fetch and skips the no-mistakes gate. A failed fetch
+# only leaves the last-known refs in place, so the unchanged checks below still
+# refuse work those refs do not show; FM_DOD_REFRESH_FAILED names it for the
+# refusal.
 REMOTE_REFS_REFRESHED=0
-REMOTE_REFRESH_FAILED=
 refresh_remote_refs() {
-  local remote
   [ "$REMOTE_REFS_REFRESHED" = 0 ] || return 0
   REMOTE_REFS_REFRESHED=1
-  while IFS= read -r remote; do
-    case "$remote" in ''|no-mistakes) continue ;; esac
-    GIT_TERMINAL_PROMPT=0 fm_run_timed 30 git -C "$WT" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
-      "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
-      || REMOTE_REFRESH_FAILED="$REMOTE_REFRESH_FAILED${REMOTE_REFRESH_FAILED:+, }$remote"
-  done <<EOF
-$(git -C "$WT" remote 2>/dev/null)
-EOF
+  FM_DOD_REFRESH_FAILED=
+  fm_dod_refresh_remote_refs "$WT" 30
 }
 
 report_remote_refresh_failure() {
-  [ -n "$REMOTE_REFRESH_FAILED" ] || return 0
-  echo "Could not refresh remote: $REMOTE_REFRESH_FAILED. This verdict used the last-known refs, so the work may be there; retry once the remote is reachable." >&2
+  [ "$REMOTE_REFS_REFRESHED" = 1 ] && [ -n "$FM_DOD_REFRESH_FAILED" ] || return 0
+  echo "Could not refresh remote: $FM_DOD_REFRESH_FAILED. This verdict used the last-known refs, so the work may be there; retry once the remote is reachable." >&2
 }
 
 # Sets the caller's $dirty from a fresh status read, or refuses when the copy

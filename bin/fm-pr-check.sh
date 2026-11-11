@@ -9,7 +9,13 @@
 # to fix it; the merged wake itself is unchanged.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
-# head is that named head and is already stored on the forge.
+# head is that named head and is already stored on the forge. Registration is
+# the gate caller that refreshes the copy's remote-tracking refs before it
+# refuses (FM_DOD_REFRESH_REMOTES), because a no-mistakes pipeline pushes from
+# its own gate clone and nothing else fetches that push into the copy; the
+# fetch also leaves the refs that the gate's other callers read. The
+# merge-time re-record (FM_PR_CHECK_MERGE=1) refreshes the same way, while
+# bin/fm-pr-merge.sh holds that one task's control lock.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
@@ -56,6 +62,12 @@
 # registration cut at that bound reports the same way that the PR merge watch
 # could not be armed, once per task and URL (state/<task>.pr-register-timed-out),
 # and is retried.
+# A registration's remote-ref refresh ends 5 seconds before that bound
+# (FM_DOD_REFRESH_DEADLINE), so a registration still refused after it reports
+# that refusal instead of being cut. Once that time has passed, the sweep
+# starts no further registration, so the cursor stays on the last task that
+# had a full turn; the first registration of a sweep still runs, and with no
+# time left to fetch it decides on the last-known refs.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -100,6 +112,7 @@ pr_check_pr_retired() {  # <id> <recorded-url>
 
 pr_check_scan() {
   local budget start meta id kind url recorded replaces left refused timed_out marker note line err rc tmp candidates='' cursor_file cursor
+  local refresh_deadline attempted now
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -127,16 +140,22 @@ pr_check_scan() {
   cursor_file="$STATE/.pr-check-scan-cursor"
   cursor=$(cat "$cursor_file" 2>/dev/null || true)
   candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
+  refresh_deadline=$((start + budget - 5))
+  attempted=0
   while IFS=' ' read -r id url replaces; do
     [ -n "$id" ] || continue
-    left=$((start + budget - $(date +%s)))
+    now=$(date +%s)
+    left=$((start + budget - now))
     [ "$left" -gt 0 ] || break
+    [ "$attempted" = 0 ] || [ "$now" -lt "$refresh_deadline" ] || break
+    attempted=1
     refused="$STATE/$id.pr-register-refused"
     timed_out="$STATE/$id.pr-register-timed-out"
     printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
     # The grace lets a registration cut at the bound run its cleanup trap.
     err=$( (fm_exec_timed "$left" 2 env FM_PR_CHECK_SCAN=1 FM_PR_CHECK_SCAN_REPLACES="$replaces" \
+      FM_DOD_REFRESH_DEADLINE="$refresh_deadline" \
       bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url") 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
       rm -f -- "$refused" "$timed_out"
@@ -316,6 +335,7 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
+FM_DOD_REFRESH_REMOTES=1
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2

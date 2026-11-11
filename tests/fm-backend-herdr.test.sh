@@ -607,6 +607,55 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
+# --- the foreground-occupant session proof ----------------------------------
+#
+# fm_backend_herdr_pane_owns_session is the herdr equivalent of the tmux
+# pane_pid ancestor + tpgid proof the hand-back retry makes before delivery:
+# the pane's own process-info must name a shell pid that is an ancestor-or-self
+# of the pinned pid AND that pid's process group must be the pane's foreground
+# group. The canned `pane process-info` body is paired with a real child
+# process so the ancestry walk and pgid read run against the real process
+# table, and every foreign, malformed, or unreadable half refuses.
+
+owns_session_process_info() {  # <shell-pid> <fg-pgid>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[]}}}' "$1" "$2"
+}
+
+owns_session_case() {  # <process-info-body|-> <pid> [process-info-exit]
+  local dir resp log fb
+  dir=$(mktemp -d "$TMP_ROOT/owns-session.XXXXXX")
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  [ "$1" = - ] || printf '%s\n' "$1" > "$resp/1.out"
+  [ -z "${3:-}" ] || printf '%s\n' "$3" > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_owns_session fmtest w1:p2 "$1"' "$ROOT" "$2"
+}
+
+test_pane_owns_session_proves_the_foreground_occupant() {
+  local sleep_bin pid pgid
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  pid=$!
+  pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
+  # shell_pid = the suite's own pid $$ - a real ancestor of the child.
+  owns_session_case "$(owns_session_process_info "$$" "$pgid")" "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a real ancestor shell pid plus a matching foreground group must prove ownership"; }
+  # shell_pid = the pinned pid itself - the pane's top process IS the session.
+  owns_session_case "$(owns_session_process_info "$pid" "$pgid")" "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "a pane whose top process is the session must prove ownership"; }
+  if owns_session_case "$(owns_session_process_info 999999 "$pgid")" "$pid" \
+    || owns_session_case "$(owns_session_process_info "$$" 999999)" "$pid" \
+    || owns_session_case - "$pid" 1 \
+    || owns_session_case "$(owns_session_process_info 1 "$pgid")" "$pid" \
+    || owns_session_case "$(owns_session_process_info "$$" "$pgid")" not-a-pid; then
+    kill "$pid" 2>/dev/null
+    fail "a foreign shell pid, foreign foreground group, unreadable read, invalid shell pid, or invalid pid must all refuse"
+  fi
+  kill "$pid" 2>/dev/null || true
+  pass "herdr pane owns session: the foreground-occupant proof accepts only the real ancestry plus foreground group"
+}
+
 # --- the bound agent session reference (relaunch session continuity) --------
 #
 # Herdr applies only reports carrying the session identity it bound to a pane,
@@ -6500,6 +6549,7 @@ test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_registered_agent_with_a_live_foreground_process_stays_alive
+test_pane_owns_session_proves_the_foreground_occupant
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
 test_exhausted_settle_window_keeps_a_non_shell_foreground_live
