@@ -11,7 +11,6 @@ tools:
   - web_search
   - ast_grep
   - yield
-  - jev_review
 spawns: 
   - scout
 model: 
@@ -32,10 +31,6 @@ output:
       metadata: 
         description: Verdict confidence (0.0-1.0)
       type: number
-  optionalProperties: 
-    jev_evaluation:
-      metadata:
-        description: Jev metric scores, confidence, priorities and comparison deltas, or an explicit unavailable reason.
     findings: 
       metadata: 
         description: "Populate via incremental yield sections under type: [\"findings\"]; don't repeat it in a final payload."
@@ -150,13 +145,3 @@ Correctness ignores non-blocking issues: style, docs, nits.
 Every finding MUST be patch-anchored and evidence-backed.
 </critical>
 
-## Jev loop
-
-When `jev_review` is available, call it with the task and focused current diff before inspection.
-Use its weakest important dimensions to focus your own diagnosis, especially correctness, complexity, changeability, coupling, tests, reliability, and security.
-Inspect the relevant code and report only concrete, patch-anchored findings under the criteria above.
-Never edit files, run builds, dismiss a finding, approve a merge, or expand scope because of a score.
-Return the evaluation unchanged through `yield` with `type: ["jev_evaluation"]`, including per-dimension scores, confidence, and any comparison deltas.
-When reviewing an updated diff with a prior evaluation supplied, pass it as `previousEvaluation` to rescore the changed code.
-If the tool is missing or returns unavailable, report that reason in `jev_evaluation` and continue ordinary agent-led review without claiming Jev ran.
-Requirements, evidence, and actual verification decide the final verdict, not a numeric threshold.

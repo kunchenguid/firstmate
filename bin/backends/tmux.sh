@@ -69,13 +69,12 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name. A server started here copies its startup
-# environment into every later pane, so it starts without the Jev key.
+# prints the resolved session name.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || env -u TYPESAFE_API_KEY tmux new-session -d -s firstmate
+    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'
   fi
 }

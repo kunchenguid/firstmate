@@ -266,14 +266,6 @@
       "audience": "maintainer-architecture"
     },
     {
-      "path": ".omp/extensions/vendor/fast-jev-compaction/NOTICE.md",
-      "audience": "maintainer-architecture"
-    },
-    {
-      "path": ".omp/vendor/jev-review/NOTICE.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -382,14 +374,6 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/jev.md",
-      "audience": "operator-current"
-    },
-    {
-      "path": "docs/verification/jev.md",
-      "audience": "maintainer-verification"
-    },
-    {
       "path": ".omp/agents/reviewer.md",
       "audience": "agent-runtime"
     },
@@ -471,10 +455,6 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/dispatch-resolve.md",
       "audience": "maintainer-verification"
     },
     {

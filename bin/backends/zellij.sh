@@ -232,12 +232,11 @@ fm_backend_zellij_session_exists() {  # <session>
 # actually attach without a TTY, so it exits after creating); running it again
 # against an EXISTING session prints "Session already exists" and exits 1 -
 # harmless here because existence is checked first and the launch is
-# backgrounded, its exit status never inspected. The session passes its startup
-# environment to every later pane, so it starts without the Jev key.
+# backgrounded, its exit status never inspected.
 fm_backend_zellij_server_ensure() {  # <session>
   local session=$1 i
   fm_backend_zellij_session_exists "$session" && return 0
-  ( nohup env -u TYPESAFE_API_KEY zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
+  ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     fm_backend_zellij_session_exists "$session" && return 0
     sleep 0.5

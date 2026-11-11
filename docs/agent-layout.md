@@ -20,16 +20,14 @@ README.md            public overview and development notes
 .agents/skills/      firstmate-loaded internal skills, committed; each carries metadata.internal=true for installers
 .claude/skills       symlink to .agents/skills for claude compatibility
 .claude/mods/        Claude Code mods (function-hooks plugins), committed; Calm's module may load through CLAUDE_CODE_ENABLE_FUNCTION_HOOKS or tengu_plugin_hooks_modules, but activates only when CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is exactly "1" and is otherwise a complete no-op (docs/calm.md)
-.omp/extensions/    Firstmate OMP extensions, shared lib/ and vendored compaction; Jev behavior: docs/jev.md
-.omp/extensions/fm-jev-route.ts  primary OMP task-bound model/effort routing; docs/configuration.md "Primary routing"
-.omp/agents/reviewer.md  read-only OMP reviewer with Jev evaluation; shared with worker extension roots
+.omp/extensions/    Firstmate OMP extensions; docs/architecture.md owns the primary/posture wiring
+.omp/agents/reviewer.md  read-only OMP reviewer used by the primary session
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
-.env                 optional Relay pairing token (presence-gates section 14), mail-plane credentials (docs/configuration.md "Mail plane"), and TYPESAFE_API_KEY for typed dispatch resolution plus Jev compaction, review and desktop (docs/jev.md); LOCAL, gitignored
+.env                 optional Relay pairing token (presence-gates section 14) and mail-plane credentials (docs/configuration.md "Mail plane"); LOCAL, gitignored
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/claude-permission-mode  optional one-token permission posture for every Claude worker launch: absent or "bypass" keeps --dangerously-skip-permissions, "auto" launches with --permission-mode auto; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Claude permission mode"
 config/worker-sandbox  optional one-token write fence for ship and scout workers: absent or "off" keeps today's launch, "on" runs each under macOS Seatbelt and refuses any spawn it cannot fence; LOCAL, gitignored, and not inherited; see docs/configuration.md "Worker sandbox"
-config/jev-compaction  optional one-word Jev compaction switch: "off" turns it off for the primary and every OMP worker so native compaction runs, absent or "on" keeps the key-gated default; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Jev compaction"
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = the configured tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
@@ -59,7 +57,6 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
-  .jev-route.log     primary OMP routing metadata only; docs/configuration.md "Primary routing"
   <id>.status        append-only wake events, not current-state truth; bin/fm-classify-lib.sh owns their syntax
   <id>.turn-ended    touched by turn-end hooks
   <id>.progress      touched for observed native-harness activity inside one Pi turn; bin/fm-busy-event.sh owns its generation binding and bin/fm-watch.sh reads it beside turn-ended for the busy-age bound only, never as a completed turn

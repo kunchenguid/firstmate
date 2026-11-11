@@ -410,17 +410,6 @@ When the file is absent, worker launches do not add a board address and retain t
 Malformed or unreadable values refuse the launch before the worker starts, while the adapter refuses the same malformed value before polling.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
 
-## Jev compaction (config/jev-compaction)
-
-The optional local, gitignored `config/jev-compaction` turns [Jev-guided compaction](jev.md) off for this home's primary and every OMP worker launched from it, so OMP's native compaction runs instead.
-It holds one word: `off` disables it, while `on` or an absent file keeps the default, where a resolved `TYPESAFE_API_KEY` enables it.
-Any other content, or a file that cannot be read, reads as off and is named on the session's stderr, so a mistyped value never silently keeps Jev on.
-The compaction extension reads it under the effective Firstmate home, from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present; worker launches already carry `FM_HOME`.
-A session started with the setting off registers no compaction hook, and a session started before it was turned off falls back to native compaction at its next compaction.
-`FM_JEV_COMPACTION=0` in a launching environment still disables it independently; neither switch changes `jev_review` or dispatch routing.
-The file is inherited into secondmate homes through the primary-authoritative configuration contract, so their workers follow the same choice.
-Native `shake` trimming is the worker default and Jev compaction stays off: every Firstmate-launched OMP session compacts with the shake-first order that [Jev's worker compaction default](jev.md#worker-compaction-default) owns, so keep this file at `off`.
-
 ## Home brief include (config/brief-include.md)
 
 The optional local, gitignored `config/brief-include.md` carries standing worker instructions that one captain wants on every ship and scout brief, so private brief content needs no edit to a tracked file.
@@ -432,7 +421,7 @@ The text is static and never executed or expanded; secondmate charters never tak
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
-With no file, ambient inheritance remains unfiltered: selected harness markers and the [Jev key](jev.md#key-and-activation) are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
+With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 Do not assume every worker inherits the invoking Firstmate process's current environment.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
 Changes apply to subsequent launches; existing processes keep their environment.
@@ -516,7 +505,7 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that firstmate's own intake reads as hints; bootstrap validates their shape, and no shell code applies them.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
@@ -540,77 +529,10 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+Malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
-While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness or a clear `--resolve` result; malformed configuration must be reported and corrected rather than selected around.
+While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
-
-## Typed dispatch resolution (.env TYPESAFE_API_KEY)
-
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
-Off means one `dispatch-resolve: off` line on stderr, nothing on stdout in the default text format (or `{"status":"off"}` with `--json`), exit 0, and no network call, leaving the existing selection unchanged; firstmate discloses that fallback in its dispatch note and launches the already selected explicit or standing profile without `--resolve`.
-This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
-Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
-
-```sh
-bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
-bin/fm-spawn.sh <id> <project-dir> --mode no-mistakes --yolo off --resolve
-```
-
-Firstmate runs the resolver directly on the written brief first; `--resolve` folds that same resolution into a single new ship or scout launch, reading the written brief within the launch rather than relying on copied shell flags.
-The launch consumes the resolver's structured `--json` result without evaluating shell text.
-Explicit harness (including the positional form), model, and effort each win over the corresponding resolved axis.
-An explicit harness that differs from the resolved profile's harness never adopts that profile's model id, because model ids are harness-namespaced: the launch refuses before any worker allocation unless `--model` names a model for the explicit harness, while a resolved effort still applies under the existing per-harness effort mapping.
-Any non-clear result, missing key, malformed result, or resolver failure refuses before launching, even if all three axes were supplied, so `--resolve` is never the no-key path.
-The resolver result remains visible for the existing intake; to proceed after that intake, omit `--resolve` and pass its concrete selection explicitly.
-Secondmate spawns, relaunches, and batch pairs reject `--resolve`.
-When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
-An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
-Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
-Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
-Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
-Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
-On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
-The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
-Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
-Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
-The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
-
-The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
-The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
-The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
-
-### Primary routing (.omp/extensions/fm-jev-route.ts)
-
-The OMP extension chooses once on the first user-work prompt of a session, on an explicit `todo init` plan boundary, or on `/jev-route [goal]`.
-An omitted todo operation routes only after OMP reports a successful inferred `init`; append, progress updates, routine follow-up turns, and compaction do not reroute.
-The command uses its argument or the last user prompt; a todo boundary adds the new task items to that prompt.
-The extension is inactive for `FM_TASK_ID` workers and `FM_JEV_ROUTE=0`, and only acts in the owning home's interactive terminal (`tui`) or RPC primary session; OMP's non-interactive print mode is unchanged.
-Workers use spawn-time selection instead; native Claude Code and unrelated OMP sessions are unchanged.
-Without a key the command remains available and reports `Jev route: off - model unchanged`.
-
-Primary profiles must use `harness: "omp"` and an exact authenticated `provider/id` from the current OMP catalog.
-Configure the rules to prefer reliable completion and admit cheaper or faster candidates only for well-suited work.
-The existing provider declarations, quota floors, confidence and approval rules above remain in force.
-Launch-time `--model`, `--provider`, and `--thinking` overrides win per axis; a subsequent manual model or effort change also stays authoritative at later boundaries.
-Natural-language requests for a particular model or effort must be enacted through OMP's selection controls, or passed as explicit spawn flags.
-The extension uses the registry model object with `setModel` and the session-only `setThinkingLevel`, never saved global defaults.
-An unavailable model, unsupported effort, non-OMP profile, or unresolved `auto` thinking retains the previous selection and reports an error rather than silently selecting another provider or effort.
-Other non-clear resolver outcomes likewise leave the model unchanged and disclose the fallback.
-Before any resolver call, the extension asks the running OMP binary for its effective Hide Secrets switch with `config get secrets.enabled --json`, because OMP's redaction covers its own provider requests, not what an extension sends elsewhere.
-When that switch is on, when the reader fails, or when a `--config` launch overlay mentions secrets in any form, the route is declined before any request as `Jev route: declined (secret protection on|unprovable) - model unchanged`.
-With protection off, the prompt and plan items are sent as written: the extension performs no secret scanning of its own, so credentials do not belong in a routed prompt or plan.
-
-Task context is passed to the resolver in a private temporary directory with a mode-600 file, removed when the bounded 15-second resolver call finishes.
-Only routing metadata is appended to the effective home's `state/.jev-route.log` (or `FM_STATE_OVERRIDE`): timestamp, trigger, status, model, effort, rule identifier, and confidence.
-Prompts, secrets, resolver diagnostics, and temporary filenames are not logged.
-The resolver owns key lookup; the extension never reads a credential store or enables production access.
-[`verification/dispatch-resolve.md`](verification/dispatch-resolve.md) owns the token-free live guard for the RPC and interactive terminal sessions and separately identifies pending authenticated proof.
 
 ## Toolchain
 
@@ -1221,8 +1143,6 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution and Firstmate Jev compaction/review/desktop; environment wins over the home .env (docs/jev.md)
-FM_JEV_COMPACTION=      # 0 in the launching environment disables Jev compaction; otherwise a resolved key enables it (docs/jev.md)
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

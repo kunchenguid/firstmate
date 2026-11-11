@@ -349,7 +349,6 @@ family_for_basename() {
     fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
-    fm-jev-compaction-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
@@ -357,7 +356,6 @@ family_for_basename() {
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
-    fm-jev-route-live-e2e.test.sh|\
     fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -406,8 +404,6 @@ family_for_basename() {
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
-    fm-dispatch-resolve.test.sh|\
-    fm-jev-route.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
@@ -724,7 +720,6 @@ tests/fm-cursor-harness.test.sh 30212
 tests/fm-cursor-primary-live-e2e.test.sh 72
 tests/fm-cursor-primary.test.sh 52269
 tests/fm-daemon.test.sh 27262
-tests/fm-dispatch-resolve.test.sh 4397
 tests/fm-documentation-audiences.test.sh 847
 tests/fm-extension-binding.test.sh 9053
 tests/fm-fleet-snapshot-view.test.sh 17465
@@ -1359,22 +1354,6 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
-    .omp/extensions/fm-jev-compaction.ts|.omp/extensions/vendor/fast-jev-compaction/*|tests/fm-jev-compaction.node.test.ts)
-      # The Node suite is not a tests/*.test.sh file and the vendored library
-      # is referenced by no shell test, so both resolve to the wrapper here.
-      printf '%s\n' "__script__:fm-jev-compaction.test.sh"
-      ;;
-    .omp/vendor/jev-review/*|.omp/extensions/fm-jev-review.ts|.omp/extensions/lib/fm-jev-*|tests/fm-jev-review.node.test.ts)
-      printf '%s\n' "__script__:fm-jev-compaction.test.sh"
-      ;;
-    tests/fixtures/fake-systemone.mjs)
-      printf '%s\n' "__script__:fm-jev-compaction.test.sh"
-      printf '%s\n' "__script__:fm-jev-compaction-live-e2e.test.sh"
-      ;;
-    .omp/package.json|.omp/agents/reviewer.md|tests/fixtures/fm-jev-runtime.mjs|\
-    tests/fixtures/fm-jev-omp-probe.mjs|tests/fixtures/fake-reviewer-model.mjs)
-      printf '%s\n' "__script__:fm-jev-compaction-live-e2e.test.sh"
-      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
@@ -1470,7 +1449,6 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
-      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
@@ -1478,20 +1456,9 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
-    bin/fm-dispatch-resolve.sh)
-      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
-      printf '%s\n' "__script__:fm-spawn-resolve.test.sh"
-      printf '%s\n' "__script__:fm-jev-route-live-e2e.test.sh"
-      ;;
     bin/fm-env-lib.sh)
-      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
-      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token).
       printf '%s\n' pr-forge
-      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
-      ;;
-    .omp/extensions/fm-jev-route.ts|tests/fm-jev-route.node.test.ts|tests/fm-jev-route-rpc.mjs)
-      printf '%s\n' __script__:fm-jev-route.test.sh
-      printf '%s\n' __script__:fm-jev-route-live-e2e.test.sh
       ;;
     .omp/extensions/fm-calm-omp.ts)
       printf '%s\n' __script__:fm-omp-harness.test.sh

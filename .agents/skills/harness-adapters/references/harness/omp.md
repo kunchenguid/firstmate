@@ -9,7 +9,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Fact | Value |
 |---|---|
 | Binary | `omp`, a single Bun-compiled executable resolved from `PATH` by `../../../bin/fm-spawn.sh`; a missing binary refuses the spawn. |
-| Launch | Foreign markers cleared (`CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, `GEMINI_CLI`, Cursor's), `FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 ORT_DISABLE_TELEMETRY=1`, then `omp --config <.omp/fm-worker-overlay.yml> [--config <.omp/fm-tern-worker-overlay.yml> on Tern] --auto-approve --cwd <worktree> [--model] [--thinking] -e state/<id>.omp-ext.ts -e <code-root>/.omp <one positional brief>`, with `FM_HOME=<owning home>` on the launch line so the `.omp` directory package's key-gated Jev extensions resolve that home's `.env` in-process and no credential enters the command (`../../../docs/jev.md`); a secondmate passes no `-e` and relies on auto-discovery. |
+| Launch | Foreign markers cleared (`CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, `GEMINI_CLI`, Cursor's), `FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 ORT_DISABLE_TELEMETRY=1`, then `omp --config <.omp/fm-worker-overlay.yml> [--config <.omp/fm-tern-worker-overlay.yml> on Tern] --auto-approve --cwd <worktree> [--model] [--thinking] -e state/<id>.omp-ext.ts <one positional brief>`; a secondmate passes no `-e` and relies on auto-discovery. |
 | Busy state | `../../../bin/fm-busy-lib.sh` source `omp-ext`: the per-task extension marks busy at `agent_start` and idle at `agent_end` only when `willContinue` is not true; `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end` (`session_stop` is awaited before settle). |
 | Exit command | `/quit` (`/exit` and `/q` are aliases). |
 | Interrupt | Single Escape; the composer is left empty, no clear key. |
@@ -45,7 +45,6 @@ On the Tern backend a second `--config`, `.omp/fm-tern-worker-overlay.yml`, also
 
 omp auto-discovers `<cwd>/.omp/extensions/*.ts` (top level only, cwd only, no ancestor walk, no trust dialog) and the active profile's `agent/extensions/`; `.pi/extensions/` is not a discovery root.
 A file that is both auto-discovered and named with `-e` loads twice, so the per-task worker extension lives in `state/` and a secondmate launch names no `-e` at all.
-The `<code-root>/.omp` directory package a crew or scout launch names is the deliberate exception: its Jev extensions register once per session even when a worktree's own `.omp/extensions/` copies also load (`../../../docs/jev.md`).
 There is no `agent_settled` event; `agent_end` plus `willContinue` replaces it.
 
 ## Primary integration

@@ -83,7 +83,6 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-Before starting validation an OMP ship worker runs the Jev review loop its brief carries; other harnesses skip that section silently (`bin/fm-brief.sh` owns the text; `docs/jev.md` owns the tool).
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.

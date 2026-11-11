@@ -1377,49 +1377,6 @@ test_changed_shared_fixture_selects_its_readers() {
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
-test_changed_jev_runtime_artifacts_select_their_consumers() {
-  local tmp repo listed name
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jev-map.XXXXXX")
-  repo="$tmp/repo"
-  init_changed_fixture_repo "$repo"
-
-  for name in fm-jev-compaction.test.sh fm-jev-compaction-live-e2e.test.sh; do
-    printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$name"
-    chmod +x "$repo/tests/$name"
-  done
-  mkdir -p "$repo/.omp/agents" "$repo/tests/fixtures"
-  : >"$repo/.omp/package.json"
-  : >"$repo/.omp/agents/reviewer.md"
-  for name in fm-jev-runtime fm-jev-omp-probe fake-reviewer-model fake-systemone; do
-    : >"$repo/tests/fixtures/$name.mjs"
-  done
-  git -C "$repo" add .
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm jev-baseline
-
-  for name in .omp/package.json .omp/agents/reviewer.md tests/fixtures/fm-jev-runtime.mjs \
-    tests/fixtures/fm-jev-omp-probe.mjs tests/fixtures/fake-reviewer-model.mjs; do
-    printf '\n' >>"$repo/$name"
-  done
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-jev-compaction-live-e2e.test.sh" \
-    "the OMP package, reviewer and runtime fixtures select the live guard that loads them"
-  case "$listed" in
-    *tests/fm-jev-compaction.test.sh*)
-      fail "runtime-only Jev artifacts selected the Node suite that never loads them: $listed" ;;
-  esac
-  git -C "$repo" checkout -q -- .omp tests/fixtures
-
-  printf '\n' >>"$repo/tests/fixtures/fake-systemone.mjs"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-jev-compaction.test.sh" \
-    "the shared fake endpoint selects the Node review suite that imports it"
-  assert_contains "$listed" "tests/fm-jev-compaction-live-e2e.test.sh" \
-    "the shared fake endpoint selects the live guard whose driver serves it"
-
-  rm -rf "$tmp"
-  pass "Jev runtime artifacts select the suites that load them, and only those"
-}
-
 # Workers are handed scripts in order, so the slowest script must start first or
 # it runs alone at the tail and throws away most of the concurrency.
 test_concurrent_runs_are_ordered_longest_first() {
@@ -1812,7 +1769,6 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
-test_changed_jev_runtime_artifacts_select_their_consumers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice

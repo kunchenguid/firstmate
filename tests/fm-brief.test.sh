@@ -213,9 +213,6 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
-    assert_grep "## Jev review loop" "$brief" "$id: ship brief lost the prevalidation review loop"
-    assert_grep "never add scope, abstractions, or tests to chase scores" "$brief" "$id: score loop must stay inside accepted intent"
-    assert_grep "Never hand-edit a pipeline-owned branch" "$brief" "$id: loop must preserve pipeline ownership"
     assert_grep "## Desktop control" "$brief" "$id: missing desktop consent contract"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
@@ -940,7 +937,6 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
-  assert_no_grep "## Jev review loop" "$brief" "knowledge-only scouts must not inherit the ship improvement loop"
   assert_grep "## Desktop control" "$brief" "scouts need the same desktop consent boundary"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \

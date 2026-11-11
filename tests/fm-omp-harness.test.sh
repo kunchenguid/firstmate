@@ -19,7 +19,7 @@
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
 #   3. Every omp launch clears foreign markers, carries the tracked posture
-#      overlay, --auto-approve, --cwd, and the task plus Jev extensions; a
+#      overlay, --auto-approve, --cwd, and the task extension; a
 #      secondmate launch names no -e at all.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
@@ -186,13 +186,10 @@ test_spawn_launch_line_and_worker_wiring() {
     "omp launch did not carry the tracked posture overlay, --auto-approve, and the pinned working directory"
   assert_contains "$launch" "--model 'openai-codex/gpt-6-astra' --thinking 'medium' -e '$state/$id.omp-ext.ts'" \
     "omp launch did not pass the model, thinking level, and the state-resident worker extension"
-  assert_contains "$launch" "-e '$ROOT/.omp'" \
-    "OMP workers must receive the code root's Jev package and reviewer"
-  assert_contains "$launch" "FM_HOME='$HOME_DIR'" "worker key resolution must name only the owning home, not its credential"
   assert_contains "$launch" "encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md'" "omp launch lost the canonical typed launch-brief envelope"
   case "$launch" in
-    *"-e '$ROOT/.omp' \"\$("*) ;;
-    *) fail "omp launch must keep exactly one positional brief after the Jev extension flags: $launch" ;;
+    *"-e '$state/$id.omp-ext.ts' \"\$("*) ;;
+    *) fail "omp launch must keep exactly one positional brief after the task extension: $launch" ;;
   esac
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] \
     || fail "omp spawn must seed the busy-state contract"
@@ -284,7 +281,7 @@ test_secondmate_launch_relies_on_discovery() {
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 ORT_DISABLE_TELEMETRY=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
   assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
-  pass "fm-spawn: OMP secondmates rely on discovery while workers load task and Jev extensions"
+  pass "fm-spawn: OMP secondmates rely on discovery while workers load the task extension"
 }
 
 test_secondmate_config_pinned_model_is_validated() {

@@ -131,8 +131,7 @@ When every candidate is tight, preserve Daniel's strongest-reasoning class rathe
 Break genuine evidence ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows and remains data-only.
 Load `quota-array-dispatch` before choosing among a matched profile array; that skill is the single owner of the TOON-first spendPriority selection procedure.
-Run `bin/fm-dispatch-resolve.sh` directly on the written brief in the same turn, with no preflight; on `clear` pass its `profile:` line to `fm-spawn` unless you state a reason to override, and `ambiguous`, `escalate`, and `error` mean the intake above, unchanged (contract: `docs/configuration.md` "Typed dispatch resolution").
-Off (no key) also means the intake above: disclose the fallback in the dispatch note and launch the selected explicit or standing profile without `--resolve`, because `--resolve` folds that same resolution into one launch and refuses every non-clear outcome, including off.
+Pass the concrete `--harness`, `--model`, and `--effort` you resolved at intake to `fm-spawn`; the scripts validate the shape but never match the rules or choose an array for you (schema and field semantics: `docs/configuration.md` "Crew dispatch profiles").
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit Daniel and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit Daniel preference.
 Do not add model-specific versions of that policy.
 

@@ -164,34 +164,6 @@ test_launch_command_carries_the_switch_without_the_pane_export() {
   pass "the launch command sets the switch on its own, whichever allowlist posture is in force"
 }
 
-# The Jev key must never reach a worker through its inherited environment, even
-# when the pane holds it ambiently (a terminal server started by a keyed agent)
-# or an allowlist names it; Firstmate's Jev tools read it from the home .env.
-test_launch_drops_an_ambient_jev_key() {
-  local setting rec out status seen
-  for setting in absent enabled; do
-    rec=$(make_case "ship-jevkey-$setting" codex "ship-jevkey-$setting-a1")
-    read_case "$rec"
-    [ "$setting" = absent ] || printf 'TYPESAFE_API_KEY\n' > "$HOME_DIR/config/launch-env-allowlist"
-    out=$(run_case_spawn "ship-jevkey-$setting-a1" "$PROJ_DIR" --mode no-mistakes --yolo off)
-    status=$?
-    expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
-    cat > "$FAKEBIN_DIR/codex" <<'SH'
-#!/bin/sh
-printf '%s\n' "${TYPESAFE_API_KEY-unset}"
-SH
-    chmod +x "$FAKEBIN_DIR/codex"
-    seen=$(env -i HOME="$TMP_ROOT/pane-home" PATH="$FAKEBIN_DIR:$PATH" TERM=xterm \
-      TMUX=synthetic-pane TYPESAFE_API_KEY=ambient-jev-key \
-      /bin/sh -c "$(grep '^export ' "$PANE_LOG")
-$(cat "$LAUNCH_LOG")") \
-      || fail "allowlist=$setting: the emitted launch failed to run"
-    assert_equals unset "$seen" \
-      "allowlist=$setting: a worker must start without an ambient TYPESAFE_API_KEY"
-  done
-  pass "the launch unsets an ambient Jev key, whichever allowlist posture is in force"
-}
-
 test_secondmate_launch() {
   local setting rec sm out status seen
   for setting in absent enabled; do
@@ -376,7 +348,6 @@ SH
 test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
-test_launch_drops_an_ambient_jev_key
 test_secondmate_launch
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
