@@ -84,8 +84,8 @@ test_one_unsettled_status_keeps_full_grace() {
 
 test_status_written_during_grace_keeps_full_grace() {
   local elapsed
-  elapsed=$(LATE_STATUS='t2:done: finished late' run_batch late-status 15 't1:done: finished:marker')
-  [ "$elapsed" -ge 12 ] || fail "a status written during the grace ended it after ${elapsed}s of 15s"
+  elapsed=$(LATE_STATUS='t2:done: finished late' run_batch late-status 8 't1:done: finished:marker')
+  [ "$elapsed" -ge 6 ] || fail "a status written during the grace ended it after ${elapsed}s of 8s"
   pass "a terminal status written during the grace without a marker keeps the full grace"
 }
 
