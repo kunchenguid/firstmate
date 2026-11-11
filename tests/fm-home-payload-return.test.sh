@@ -91,13 +91,17 @@ wait_for_exit() {  # <pid> <what>
     sleep 0.05
   done
 }
-assert_home_restored() {  # <what>
+assert_home_restored() {  # <what> [unleased]
   [ "$(cat "$home/data/notes")" = 'durable data' ] || fail "$1 lost data"
   [ "$(cat "$home/.fm-secondmate-home")" = mate ] || fail "$1 lost identity"
   [ "$(cat "$home/.fm-secondmate-parent")" = "$parent" ] || fail "$1 lost parent binding"
   assert_present "$gitdir/locked" "$1 lost protection"
   assert_present "$gitdir/firstmate-home-lock" "$1 lost ownership"
-  assert_present "$TMP_ROOT/lease" "$1 returned the lease"
+  if [ "${2:-}" = unleased ]; then
+    assert_absent "$TMP_ROOT/lease" "$1 took a lease the slot never had"
+  else
+    assert_present "$TMP_ROOT/lease" "$1 returned the lease"
+  fi
   [ -z "$(ls -A "$staging_root")" ] || fail "$1 left payload staging behind"
 }
 rm -f "$staged_marker"
@@ -160,6 +164,38 @@ prepare_retry() {
   write_pool_lease mate
   fm_home_worktree_lock_acquire "$home" mate "$parent"
 }
+
+# An explicit-path seed can use an existing pool checkout without leasing it, so
+# its slot entry stays unleased for the whole return. An unleased entry is
+# unleased whether the return succeeded or failed, so it holds no evidence that
+# THIS attempt returned the slot: a failed return must put the home back instead
+# of being read as a released slot whose payload and records are discarded.
+unleased_return() {  # never takes a pool lease, like a treehouse return of an unleased slot
+  for path in data state config projects .fm-secondmate-home .fm-secondmate-parent; do
+    [ ! -e "$home/$path" ] || return 1
+  done
+  [ ! -e "$gitdir/firstmate-home-lock" ] || return 1
+  [ ! -e "$gitdir/locked" ] || return 1
+  printf 'observed\n' > "$TMP_ROOT/unleased-return-observed"
+  [ "$1" = success ] || return 1
+}
+prepare_retry
+rm -f "$TMP_ROOT/lease"
+write_pool_lease ''
+if fm_home_payload_return "$home" mate "$parent" unleased_return failure; then
+  fail 'failed return of an unleased slot reported success'
+fi
+assert_home_restored 'failed return of an unleased slot' unleased
+fm_home_payload_return "$home" mate "$parent" unleased_return success \
+  || fail 'return of an unleased slot failed'
+assert_absent "$home/data" 'returned unleased slot retained payload'
+assert_absent "$home/.fm-secondmate-home" 'returned unleased slot retained identity'
+assert_absent "$gitdir/locked" 'returned unleased slot retained protection'
+fm_home_payload_recover "$home" "$parent" mate
+[ "$FM_HOME_PAYLOAD_RETIRED" = 1 ] || fail 'returned unleased slot was not committed'
+fm_home_payload_finalize "$home" "$parent" mate
+[ -z "$(ls -A "$staging_root")" ] || fail 'unleased-slot finalization left payload staging behind'
+
 prepare_retry
 printf() {
   [ "$1" != 'committed=1\n' ] || return 1

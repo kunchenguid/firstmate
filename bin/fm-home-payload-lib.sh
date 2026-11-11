@@ -102,8 +102,17 @@ try:
         if not isinstance(current.get("leased", False), bool):
             raise ValueError("invalid pool lease")
         fields = ("leased", "lease_id", "lease_holder", "leased_at", "owner_pid", "owner_started_at")
-        if old.get("leased") is True and all(old.get(key) == current.get(key) for key in fields):
+        if all(old.get(key) == current.get(key) for key in fields):
+            # An unchanged slot never proves that this attempt returned it. Only
+            # a lease this home held can go away: a slot that was already
+            # unleased when the return started (an explicit-path seed that took
+            # an existing pool checkout without a lease) stays unleased whether
+            # the return succeeded or failed, so it is not evidence.
             sys.exit(0)
+        if old.get("leased") is not True:
+            # The slot was already unleased, so only another holder taking it
+            # shows that this attempt transferred the slot away.
+            sys.exit(2 if current.get("leased", False) is True else 0)
         if current.get("leased", False) is False or current.get("leased_at") != old.get("leased_at") or current.get("lease_holder") != old.get("lease_holder") or current.get("lease_id") != old.get("lease_id"):
             sys.exit(2)
         raise ValueError("pool ownership cannot be reconciled")
@@ -114,11 +123,14 @@ PYPOOL
 }
 
 # A staged return is only put back when the pool still owes this home its slot.
-# The saved pool entry decides: an unchanged held lease means the return never
-# took effect, so the caller restores the payload, while a released or
-# reassigned slot means the return already committed and the payload must stay
-# out. An unreadable or contradictory pool reads as an error, never as a guess,
-# because either wrong answer strips a live home or re-marks a leasable slot.
+# The saved pool entry decides on evidence of a lease transition: a held lease
+# that is still held means the return never took effect, while a lease this home
+# held that is released or reassigned, or a slot another holder acquired, means
+# the return already committed and the payload must stay out. An unchanged slot
+# that was never leased is not evidence either way, so the home keeps its
+# payload for the retry. An unreadable or contradictory pool reads as an error,
+# never as a guess, because either wrong answer strips a live home or re-marks a
+# leasable slot.
 # Returns 0 when the staging is settled as committed, 2 when it must be
 # restored, and 1 when the pool cannot be reconciled.
 fm_home_payload_reconcile() {
