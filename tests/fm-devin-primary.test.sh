@@ -66,6 +66,23 @@ sleep 600
 SH
 chmod +x "$STUB_DAEMON"
 
+# The same stub, run as the child of a parent that never reaps it, so once its
+# TERM trap exits it stays a zombie - the state a replaced daemon is in until
+# its tmux pane reaps it.
+ZOMBIE_STUB_DAEMON="$TMP_ROOT/zombie-stub-daemon.sh"
+cat > "$ZOMBIE_STUB_DAEMON" <<SH
+#!/usr/bin/env bash
+"$STUB_DAEMON" &
+exec sleep 600
+SH
+chmod +x "$ZOMBIE_STUB_DAEMON"
+
+# Liveness as the launch path judges it: an exited daemon its parent has not
+# reaped yet still answers kill -0, so assert death, not reaping.
+pid_alive() {  # <pid>
+  bash -c '. "$1"; fm_pid_alive "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+}
+
 BG_PIDS=()
 CLEANUP() {
   local pid
@@ -153,7 +170,7 @@ test_session_start_ensures_daemon_and_injects_context() {
   assert_contains "$ctx" "Run bin/fm-session-start.sh now, once." "session-start context lost the digest nudge: $ctx"
   [ "$(head -n 1 "$dir/state/.afk" 2>/dev/null)" = quiet ] \
     || fail "session-start did not enter quiet mode: $(cat "$dir/state/.afk" 2>/dev/null)"
-  kill -0 "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" 2>/dev/null \
+  pid_alive "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" \
     || fail "the ensure did not leave a live daemon"
   run_hook_err "$dir" | grep -q "lock acquired" \
     || fail "session-start did not echo its summary to stderr"
@@ -179,7 +196,7 @@ test_stop_allows_after_a_successful_heal() {
   out=$(run_owned_stop "$dir" '{"prompt_id":"p-heal","session_id":"s-1","stop_hook_active":false}'); rc=$?
   expect_code 0 "$rc" "a healed stop must exit 0"
   [ -z "$out" ] || fail "a stop whose self-heal proved a live daemon still blocked on the stale beacon: $out"
-  kill -0 "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" 2>/dev/null \
+  pid_alive "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" \
     || fail "the stop self-heal did not leave a live daemon"
   assert_contains "$(cat "$dir/stop-err" 2>/dev/null)" "quiet daemon running" "the healed stop did not log the ensure result"
   pass "fm-devin-primary stop: a successful self-heal allows the stop"
@@ -215,7 +232,7 @@ test_away_return_catchup_defers_the_daemon() {
   out=$(run_owned_stop "$dir" '{"prompt_id":"p-after","session_id":"s-1","stop_hook_active":false}')
   [ -z "$out" ] || fail "the first stop after the gate cleared did not heal and allow: $out"
   [ "$(head -n 1 "$dir/state/.afk" 2>/dev/null)" = quiet ] || fail "the stop after the gate cleared did not restore quiet mode"
-  kill -0 "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" 2>/dev/null \
+  pid_alive "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" \
     || fail "the stop after the gate cleared did not leave a live daemon"
   pass "fm-devin-primary: a pending away-return gate blocks a busy stop toward its check, then the next stop restores quiet supervision"
 }
@@ -301,13 +318,13 @@ test_session_start_replaces_a_daemon_for_another_pane() {
   local dir old new out ctx
   dir=$(make_home "$TMP_ROOT/start-stale-pane")
   old=$(start_earlier_daemon "$dir" dead-pane devin away)
-  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  pid_alive "$old" || fail "the earlier daemon is not running"
   out=$(run_hook session-start "$dir" '{"source":"startup"}')
   expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
   ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
   new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
-  ! kill -0 "$old" 2>/dev/null || fail "the daemon supervising the dead pane is still running"
-  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+  ! pid_alive "$old" || fail "the daemon supervising the dead pane is still running"
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! pid_alive "$new"; then
     fail "session-start did not leave a fresh live daemon (old $old, new ${new:-none})"
   fi
   assert_contains "$ctx" "away daemon running: pid $new supervising pane test-pane" "the context did not report the fresh daemon's recorded pane: $ctx"
@@ -315,6 +332,49 @@ test_session_start_replaces_a_daemon_for_another_pane() {
   [ -f "$dir/state/.afk-contract" ] || fail "the restart archived the away record"
   [ -z "$(ls -A "$dir/state/afk-contracts" 2>/dev/null)" ] || fail "the restart archived an away record under state/afk-contracts"
   pass "fm-devin-primary session-start: a live daemon for another pane is replaced and the away record survives"
+}
+
+test_pid_alive_reports_a_zombie_dead() {
+  local pidfile parent zombie i=0
+  pidfile="$TMP_ROOT/zombie.pid"
+  sh -c 'sleep 0 & echo $! > "$1"; exec sleep 30' _ "$pidfile" &
+  parent=$!
+  BG_PIDS+=("$parent")
+  while [ "$i" -lt 100 ] && [ ! -s "$pidfile" ]; do sleep 0.05; i=$((i + 1)); done
+  zombie=$(cat "$pidfile" 2>/dev/null)
+  [ -n "$zombie" ] || fail "the zombie fixture did not record its child"
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$zombie" 2>/dev/null && pid_alive "$zombie"; do sleep 0.05; i=$((i + 1)); done
+  kill -0 "$zombie" 2>/dev/null || fail "the zombie fixture's child was reaped, so the case proves nothing"
+  ! pid_alive "$zombie" || fail "fm_pid_alive reported an exited, unreaped pid $zombie as alive"
+  pid_alive "$parent" || fail "fm_pid_alive reported the live parent $parent as dead"
+  kill -TERM "$parent" 2>/dev/null || true
+  pass "fm_pid_alive: an exited process its parent has not reaped reads as dead"
+}
+
+# A replaced daemon that exits on TERM stays a zombie until its pane reaps it.
+# The teardown must read that as an exit, not wait out its window and refuse.
+test_session_start_replaces_a_daemon_that_exits_as_a_zombie() {
+  local dir old new out start elapsed
+  dir=$(make_home "$TMP_ROOT/start-zombie")
+  env -u TMUX_PANE FM_HOME="$dir" FM_SUPERVISOR_TARGET=dead-pane FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY="$ZOMBIE_STUB_DAEMON" FM_AFK_MODE=quiet \
+    bash -c '"$0" enter && "$0" start' "$CODE_ROOT/bin/fm-afk-launch.sh" >/dev/null 2>&1 \
+    || fail "could not start the never-reaped daemon for the fixture"
+  old=$(wait_daemon_pid "$dir")
+  pid_alive "$old" || fail "the earlier daemon is not running"
+  start=$SECONDS
+  out=$(run_hook session-start "$dir" '{"source":"startup"}')
+  elapsed=$((SECONDS - start))
+  expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
+  assert_not_contains "$out" '"decision":"block"' "session-start refused to replace a daemon that exited as a zombie: $out"
+  ! pid_alive "$old" || fail "the replaced daemon is still running"
+  new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! pid_alive "$new"; then
+    fail "session-start did not leave a fresh live daemon (old $old, new ${new:-none})"
+  fi
+  [ "$elapsed" -lt 10 ] || fail "the replacement waited out the teardown window (${elapsed}s) for a daemon that had exited"
+  pass "fm-devin-primary session-start: a replaced daemon left as a zombie counts as exited and a fresh daemon starts"
 }
 
 # The daemon acknowledges a wake once it is buffered, before delivery, and a
@@ -325,7 +385,7 @@ test_session_start_replacement_keeps_an_undelivered_check_alert() {
   local dir old new alert since
   dir=$(make_home "$TMP_ROOT/start-stale-buffer")
   old=$(start_earlier_daemon "$dir" dead-pane devin quiet)
-  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  pid_alive "$old" || fail "the earlier daemon is not running"
   alert='check: fm-pr-check task-7: PR #12 merged'
   since=$(( $(date +%s) - 120 ))
   printf '%s\n' "$alert" > "$dir/state/.subsuper-escalations"
@@ -333,7 +393,7 @@ test_session_start_replacement_keeps_an_undelivered_check_alert() {
   run_hook session-start "$dir" '{"source":"startup"}' >/dev/null
   expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
   new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
-  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! pid_alive "$new"; then
     fail "session-start did not replace the daemon for the dead pane (old $old, new ${new:-none})"
   fi
   [ "$(cat "$dir/state/.subsuper-escalations" 2>/dev/null)" = "$alert" ] \
@@ -350,11 +410,11 @@ test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert() {
   local dir old new alert since i
   dir=$(make_home "$TMP_ROOT/ensure-dead-buffer")
   old=$(start_earlier_daemon "$dir" test-pane devin quiet)
-  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  pid_alive "$old" || fail "the earlier daemon is not running"
   kill -KILL "$old" 2>/dev/null || true
   i=0
-  while kill -0 "$old" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-  ! kill -0 "$old" 2>/dev/null || fail "the earlier daemon survived SIGKILL"
+  while pid_alive "$old" && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  ! pid_alive "$old" || fail "the earlier daemon survived SIGKILL"
   alert='check: fm-pr-check task-8: PR #13 merged'
   since=$(( $(date +%s) - 120 ))
   printf '%s\n' "$alert" > "$dir/state/.subsuper-escalations"
@@ -364,7 +424,7 @@ test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert() {
     "$NAMED_DEVIN" -c 'bash "$0" ensure' "$SCRIPT" >/dev/null 2>&1 \
     || fail "ensure could not restart the dead daemon"
   new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
-  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! pid_alive "$new"; then
     fail "ensure did not leave a fresh live daemon (old $old, new ${new:-none})"
   fi
   [ "$(cat "$dir/state/.subsuper-escalations" 2>/dev/null)" = "$alert" ] \
@@ -382,13 +442,13 @@ test_hand_run_ensure_keeps_a_healthy_daemon() {
   local dir old out primary
   dir=$(make_home "$TMP_ROOT/ensure-hand-run")
   old=$(start_earlier_daemon "$dir" pane-a devin quiet)
-  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  pid_alive "$old" || fail "the earlier daemon is not running"
   primary=$(start_foreign_devin)
   printf '%s\n' "$primary" > "$dir/state/.lock"
   out=$(env -u TMUX_PANE FM_HOME="$dir" FM_SUPERVISOR_TARGET=pane-b FM_SUPERVISOR_BACKEND=tmux \
     FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" bash "$SCRIPT" ensure 2>&1) \
     || fail "a hand-run ensure failed beside a healthy daemon: $out"
-  if [ "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" != "$old" ] || ! kill -0 "$old" 2>/dev/null; then
+  if [ "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" != "$old" ] || ! pid_alive "$old"; then
     fail "a hand-run ensure from another terminal replaced the healthy daemon (old $old, now $(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null))"
   fi
   [ "$(cut -f4 "$dir/state/.afk-daemon-terminal" 2>/dev/null)" = pane-a ] \
@@ -402,13 +462,13 @@ test_session_start_replaces_a_daemon_for_another_harness() {
   dir=$(make_home "$TMP_ROOT/start-stale-harness")
   : > "$dir/config/supervision-host-off"
   old=$(start_earlier_daemon "$dir" test-pane claude quiet)
-  kill -0 "$old" 2>/dev/null || fail "the earlier claude daemon is not running"
+  pid_alive "$old" || fail "the earlier claude daemon is not running"
   out=$(run_hook session-start "$dir" '{"source":"startup"}')
   expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
   ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
   new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
-  ! kill -0 "$old" 2>/dev/null || fail "the daemon judging the pane as claude is still running"
-  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+  ! pid_alive "$old" || fail "the daemon judging the pane as claude is still running"
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! pid_alive "$new"; then
     fail "session-start did not leave a fresh live daemon (old $old, new ${new:-none})"
   fi
   assert_contains "$ctx" "quiet daemon running: pid $new supervising pane test-pane" "the context did not report the fresh quiet daemon: $ctx"
@@ -464,6 +524,8 @@ test_session_start_blocks_without_a_pane
 test_session_start_ensures_daemon_and_injects_context
 test_session_start_names_a_kept_away_record
 test_session_start_replaces_a_daemon_for_another_pane
+test_pid_alive_reports_a_zombie_dead
+test_session_start_replaces_a_daemon_that_exits_as_a_zombie
 test_session_start_replacement_keeps_an_undelivered_check_alert
 test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert
 test_session_start_replaces_a_daemon_for_another_harness
