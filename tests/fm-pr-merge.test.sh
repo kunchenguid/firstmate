@@ -233,9 +233,15 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_VIEW_JSON"
         exit 0
         ;;
+      *" --json title,body "*)
+        [ -f "${FM_TEST_GH_TEXT_JSON:-}" ] || exit 1
+        cat "$FM_TEST_GH_TEXT_JSON"
+        exit 0
+        ;;
     esac
     ;;
   "pr merge")
+    [ -z "${FM_TEST_GH_MERGE_ARGS:-}" ] || printf '%s\0' "$@" > "$FM_TEST_GH_MERGE_ARGS"
     if [ -n "${FM_TEST_META_AT_MERGE:-}" ] && [ -f "${FM_STATE_OVERRIDE:-}/task-x1.meta" ]; then
       cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
     fi
@@ -752,6 +758,8 @@ run_pr_merge() {
   FM_TEST_GH_UPDATE_DONE="$case_dir/github-update-done" \
   FM_TEST_GH_UPDATE_HEAD="$case_dir/github-head-after-update" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
+  FM_TEST_GH_TEXT_JSON="$case_dir/github-text.json" \
+  FM_TEST_GH_MERGE_ARGS="$case_dir/github-merge-args" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
@@ -5548,3 +5556,169 @@ test_expected_head_push_after_verify_is_refused_by_the_forge
 test_expected_head_later_preflight_does_not_adopt_a_new_head
 test_expected_head_bad_inputs_refuse_before_effects
 test_expected_head_keeps_existing_refusals
+
+# The squash-summary cases. A no-mistakes PR body: the operator intent first,
+# then the drafted summary, then the appendix and its attestation comment.
+SQUASH_TITLE='fix: wake once when a ready PR degrades'
+SQUASH_BODY=$'## Intent\n\nraw operator brief with ~/private/paths\n\n## What Changed\n\n- Wake the merge poll once when a ready PR degrades.\n- Add shared PR polling helpers.\n\n  Indented detail line.\n### Notes\n- A subheading stays in the section.\n\n## Risk Assessment\n\nlow\n\n## Pipeline\n\n<!-- no-mistakes-pipeline-attestation:v1 {} -->\n'
+SQUASH_SECTION=$'- Wake the merge poll once when a ready PR degrades.\n- Add shared PR polling helpers.\n\n  Indented detail line.\n### Notes\n- A subheading stays in the section.'
+
+# Args: case_dir title body. Writes the PR title and body gh reports.
+write_github_text() {
+  jq -n --arg t "$2" --arg b "$3" '{title: $t, body: $b}' > "$1/github-text.json"
+}
+
+# The value gh pr merge received for one flag, or the literal ABSENT.
+# Args: case_dir flag
+github_merge_flag_value() {
+  local arg prev='' found=ABSENT
+  while IFS= read -r -d '' arg; do
+    if [ "$prev" = "$2" ]; then
+      found=$arg
+    fi
+    prev=$arg
+  done < "$1/github-merge-args"
+  printf '%s' "$found"
+}
+
+test_squash_summary_uses_title_and_what_changed() {
+  local case_dir
+  case_dir=$(make_case squash-summary)
+  add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+  : > "$case_dir/home/config/pr-squash-summary"
+  write_github_text "$case_dir" "$SQUASH_TITLE" "$SQUASH_BODY"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  expect_code 0 "$?" "squash-summary: the merge should succeed: $(cat "$case_dir/stderr")"
+  set -e
+  grep -qzx -- '--squash' "$case_dir/github-merge-args" \
+    || fail "squash-summary: the default squash method was dropped"
+  [ "$(github_merge_flag_value "$case_dir" --subject)" = "$SQUASH_TITLE (#61)" ] \
+    || fail "squash-summary: unexpected subject '$(github_merge_flag_value "$case_dir" --subject)'"
+  [ "$(github_merge_flag_value "$case_dir" --body)" = "$SQUASH_SECTION" ] \
+    || fail "squash-summary: unexpected body: '$(github_merge_flag_value "$case_dir" --body)'"
+  pass "fm-pr-merge squash-merges with the PR title and only its What Changed section when opted in"
+}
+
+test_squash_summary_reads_crlf_bodies() {
+  local case_dir
+  case_dir=$(make_case squash-summary-crlf)
+  add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+  : > "$case_dir/home/config/pr-squash-summary"
+  write_github_text "$case_dir" "$SQUASH_TITLE" "${SQUASH_BODY//$'\n'/$'\r\n'}"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  expect_code 0 "$?" "squash-summary-crlf: the merge should succeed: $(cat "$case_dir/stderr")"
+  set -e
+  [ "$(github_merge_flag_value "$case_dir" --body)" = "$SQUASH_SECTION" ] \
+    || fail "squash-summary-crlf: a web-edited CRLF body did not yield the bare section"
+  pass "fm-pr-merge reads the What Changed section from a CRLF PR body"
+}
+
+# Every case where the summary must not be applied leaves today's merge line.
+test_squash_summary_falls_back_to_repository_default() {
+  local case_dir label
+  for label in no-flag no-section empty-section unreadable merge-method rebase-method; do
+    case_dir=$(make_case "squash-fallback-$label")
+    add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+    [ "$label" = no-flag ] || : > "$case_dir/home/config/pr-squash-summary"
+    case "$label" in
+      no-section) write_github_text "$case_dir" "$SQUASH_TITLE" $'## Summary\n\nno drafted section\n' ;;
+      empty-section) write_github_text "$case_dir" "$SQUASH_TITLE" $'## What Changed\n\n\n## Testing\n\nok\n' ;;
+      unreadable) ;;
+      *) write_github_text "$case_dir" "$SQUASH_TITLE" "$SQUASH_BODY" ;;
+    esac
+    set +e
+    if [ "$label" = merge-method ]; then
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 -- --merge \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    elif [ "$label" = rebase-method ]; then
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 -- --rebase \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    else
+      run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+        > "$case_dir/stdout" 2> "$case_dir/stderr"
+    fi
+    expect_code 0 "$?" "squash-fallback-$label: the merge should still succeed: $(cat "$case_dir/stderr")"
+    set -e
+    if [ "$label" = merge-method ]; then
+      assert_logged_gh_merge "$case_dir" 63 example/repo --merge
+    elif [ "$label" = rebase-method ]; then
+      assert_logged_gh_merge "$case_dir" 63 example/repo --rebase
+    else
+      assert_logged_gh_merge "$case_dir" 63 example/repo --squash
+    fi
+    if [ "$label" = no-flag ]; then
+      # Without the flag the run is today's: the exact merge line above, no
+      # read of the PR text, and nothing new on stderr.
+      assert_no_grep 'title,body' "$case_dir/gh.log" \
+        "squash-fallback-no-flag: the PR text was read without the opt-in"
+      assert_no_grep 'squash commit' "$case_dir/stderr" \
+        "squash-fallback-no-flag: the opt-in reported on a run without it"
+    fi
+    if [ "$label" = unreadable ]; then
+      assert_grep 'keeps the repository default' "$case_dir/stderr" \
+        "squash-fallback-unreadable: the unread PR text was not reported"
+    fi
+  done
+  pass "fm-pr-merge keeps the repository's squash text when not opted in, the section is absent or empty, the PR text is unreadable, or the method is merge or rebase"
+}
+
+test_squash_summary_caller_commit_text_wins() {
+  local case_dir spelling
+  for spelling in subject subject-eq body body-file short-t short-b short-cluster-b short-F; do
+    case_dir=$(make_case "squash-caller-$spelling")
+    add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+    : > "$case_dir/home/config/pr-squash-summary"
+    write_github_text "$case_dir" "$SQUASH_TITLE" "$SQUASH_BODY"
+    set -- --squash
+    case "$spelling" in
+      subject) set -- "$@" --subject 'caller subject' ;;
+      subject-eq) set -- "$@" '--subject=caller subject' ;;
+      body) set -- "$@" --body 'caller body' ;;
+      body-file) set -- "$@" --body-file /dev/null ;;
+      short-t) set -- "$@" -t 'caller subject' ;;
+      short-b) set -- "$@" -b 'caller body' ;;
+      short-cluster-b) set -- "$@" -sb 'caller body' ;;
+      short-F) set -- "$@" -F /dev/null ;;
+    esac
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/64 -- "$@" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    expect_code 0 "$?" "squash-caller-$spelling: the merge should succeed: $(cat "$case_dir/stderr")"
+    set -e
+    assert_logged_gh_merge "$case_dir" 64 example/repo "$@"
+    assert_no_grep 'What Changed\|Wake the merge poll' "$case_dir/gh.log" \
+      "squash-caller-$spelling: the PR summary was added beside the caller's own commit text"
+  done
+  pass "fm-pr-merge never adds the PR summary when the caller passed its own subject or body"
+}
+
+test_squash_summary_leaves_gitlab_and_forgejo_untouched() {
+  local case_dir merge_line
+  case_dir=$(make_gitlab_case squash-gitlab)
+  : > "$case_dir/home/config/pr-squash-summary"
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "squash-gitlab: the merge should succeed: $(cat "$case_dir/stderr")"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "squash-gitlab: the opt-in changed the GitLab merge: '$merge_line'"
+  case_dir=$(make_forgejo_case squash-forgejo)
+  : > "$case_dir/home/config/pr-squash-summary"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "squash-forgejo: the merge should succeed: $(cat "$case_dir/stderr")"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"/pulls/9/merge -f Do=merge -f head_commit_id=$FJ_HEAD") : ;;
+    *) fail "squash-forgejo: the opt-in changed the Forgejo merge: '$merge_line'" ;;
+  esac
+  pass "fm-pr-merge leaves GitLab and Forgejo merges unchanged under the squash-summary opt-in"
+}
+
+test_squash_summary_uses_title_and_what_changed
+test_squash_summary_reads_crlf_bodies
+test_squash_summary_falls_back_to_repository_default
+test_squash_summary_caller_commit_text_wins
+test_squash_summary_leaves_gitlab_and_forgejo_untouched
