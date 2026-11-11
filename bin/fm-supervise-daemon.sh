@@ -1433,9 +1433,20 @@ handle_wake() {  # <reason> <state>
   [ "$classification_failed" -eq 0 ]
 }
 
+# Resolve one coalesced signal batch's full changed-path list from the private
+# record bin/fm-watch.sh writes beside the queue. The queued payload is only a
+# compact prompt summary, so classification must not depend on the paths that
+# summary happens to name. Prints nothing when the record is absent.
+signal_batch_record_paths() {  # <state> <batch-key>
+  local state=$1 key=$2 record
+  [ -f "$state/.signal-batch-paths" ] || return 0
+  record=$(awk -F '\t' -v k="$key" '$1 == k { print $2; exit }' "$state/.signal-batch-paths") || return 0
+  printf '%s' "$record"
+}
+
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 failed=0 ack_through ack_generation
+  local handled=0 failed=0 ack_through ack_generation batch_files
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1449,6 +1460,18 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+    if [ "$kind" = signal ]; then
+      case "$key" in
+        signal-batch-*)
+          batch_files=$(signal_batch_record_paths "$state" "$key")
+          if [ -n "$batch_files" ]; then
+            payload="signal: $batch_files"
+          else
+            payload="signal batch record missing: $key"
+          fi
+          ;;
+      esac
+    fi
     handle_wake "$payload" "$state" || failed=1
     handled=$((handled + 1))
   done < "$out"

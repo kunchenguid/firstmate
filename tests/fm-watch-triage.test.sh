@@ -749,11 +749,36 @@ test_turn_ended_not_working_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end whose crew is not provably working"
-  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the surfaced turn-end signal"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced turn-end signal" "$state/task.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null || fail "surfaced turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "surfaced turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/task.turn-ended"
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
+
+# A surfaced wake's printed reason is the compact batch summary (bin/fm-watch.sh's
+# signal_batch_reason), which never names a turn-ended marker, and a batch's full
+# path list goes to the private record beside the queue rather than into the
+# prompt. Keep surfacing assertions on the "signal:" line, on the queued row, and
+# on that record, never on printed paths, so they survive reason-shape changes.
+assert_surfaced_signal_printed() {  # <watcher-out> <message> [forbidden-path]
+  local out=$1 message=$2 forbidden=${3:-}
+  grep -q 'signal:' "$out" || fail "$message: $(cat "$out")"
+  if [ -n "$forbidden" ]; then
+    ! grep -F "$forbidden" "$out" >/dev/null || fail "$message (the reason named $forbidden): $(cat "$out")"
+  fi
+}
+
+assert_surfaced_signal_queued() {  # <drain-out> <message>
+  local drain_out=$1 message=$2
+  grep "$(printf '\tsignal\t')" "$drain_out" >/dev/null || fail "$message: $(cat "$drain_out")"
+}
+
+assert_batch_path_recorded() {  # <state> <path>
+  grep -F "$2" "$1/.signal-batch-paths" >/dev/null \
+    || fail "the queued batch did not record $2 in its private path record"
+}
+
 
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
@@ -923,11 +948,10 @@ test_turn_ended_still_pane_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a bare turn-end from an unchanged pane"
-  grep -F "signal: $state/codexstopped.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced still-pane turn-end signal"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced still-pane turn-end signal" "$state/codexstopped.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the still-pane turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexstopped.turn-ended" >/dev/null \
-    || fail "surfaced still-pane turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "surfaced still-pane turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/codexstopped.turn-ended"
   unset FM_FAKE_CREW_STATE
   pass "a bare turn-end from a pane unchanged since the previous poll still surfaces"
 }
@@ -950,12 +974,11 @@ test_turn_ended_malformed_prior_hash_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a malformed prior hash"
-  grep -F "signal: $state/codexmalformed.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced malformed-hash turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced malformed-hash turn-end" "$state/codexmalformed.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the malformed-hash turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexmalformed.turn-ended" >/dev/null \
-    || fail "malformed-hash turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "malformed-hash turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/codexmalformed.turn-ended"
   unset FM_FAKE_CREW_STATE
   pass "a bare turn-end backed by a malformed prior hash surfaces"
 }
@@ -978,12 +1001,11 @@ test_turn_ended_trailing_newline_prior_hash_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end backed by a newline-terminated prior hash"
-  grep -F "signal: $state/codexnewline.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced newline-hash turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced newline-hash turn-end" "$state/codexnewline.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the newline-hash turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexnewline.turn-ended" >/dev/null \
-    || fail "newline-hash turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "newline-hash turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/codexnewline.turn-ended"
   [ ! -e "$state/.churn-since-$key" ] \
     || fail "a newline-terminated prior hash opened a deferral window"
   unset FM_FAKE_CREW_STATE
@@ -1008,12 +1030,11 @@ test_secondmate_turn_ended_churning_pane_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a churning secondmate turn-end"
-  grep -F "signal: $state/mate.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced churning secondmate turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced churning secondmate turn-end" "$state/mate.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the churning secondmate turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.turn-ended" >/dev/null \
-    || fail "churning secondmate turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "churning secondmate turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/mate.turn-ended"
   unset FM_FAKE_CREW_STATE
   pass "a churning secondmate turn-end surfaces without a stale resurface path"
 }
@@ -1037,12 +1058,11 @@ test_turn_ended_colliding_window_key_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an ambiguous pane marker"
-  grep -F "signal: $state/a.b.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced ambiguous-marker turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced ambiguous-marker turn-end" "$state/a.b.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the ambiguous-marker turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/a.b.turn-ended" >/dev/null \
-    || fail "ambiguous-marker turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "ambiguous-marker turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/a.b.turn-ended"
   unset FM_FAKE_CREW_STATE
   pass "a turn-end whose marker key matches another recorded endpoint surfaces"
 }
@@ -1066,12 +1086,11 @@ test_turn_ended_duplicate_endpoint_records_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a turn-end shared by two endpoint records"
-  grep -F "signal: $state/first.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced duplicate-endpoint turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced duplicate-endpoint turn-end" "$state/first.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the duplicate-endpoint turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.turn-ended" >/dev/null \
-    || fail "duplicate-endpoint turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "duplicate-endpoint turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/first.turn-ended"
   [ ! -e "$state/.churn-since-$key" ] \
     || fail "duplicate endpoint records opened a deferral window"
   unset FM_FAKE_CREW_STATE
@@ -1139,16 +1158,14 @@ test_turn_ended_mixed_positive_evidence_batch_default_off() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a mixed-evidence batch without the opt-in flag"
-  grep -F "$state/firstoff.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the first default-off turn-end"
-  grep -F "$state/secondoff.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the second default-off turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the first default-off turn-end" "$state/firstoff.turn-ended"
+  assert_surfaced_signal_printed "$out" "watcher did not print the second default-off turn-end" "$state/secondoff.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the default-off mixed-evidence batch failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/firstoff.turn-ended" >/dev/null \
-    || fail "the first default-off turn-end was not queued"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/secondoff.turn-ended" >/dev/null \
-    || fail "the second default-off turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "the first default-off turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/firstoff.turn-ended"
+  assert_surfaced_signal_queued "$drain_out" "the second default-off turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/secondoff.turn-ended"
   [ ! -e "$state/.churn-since-$first_key" ] && [ ! -e "$state/.churn-since-$second_key" ] \
     || fail "the default-off mixed-evidence batch opened a deferral window"
   unset FM_FAKE_CREW_STATE_firstoff FM_FAKE_CREW_STATE_secondoff
@@ -1176,16 +1193,15 @@ test_status_and_turn_end_batch_never_uses_churn_evidence() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a status-and-turn-end batch on churn evidence"
-  grep -F "$state/firststatus.status" "$out" >/dev/null \
-    || fail "watcher did not print the status file from the surfaced mixed batch"
-  grep -F "$state/secondturn.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the turn-end from the surfaced mixed batch"
+  assert_surfaced_signal_printed "$out" "watcher did not print the status file from the surfaced mixed batch"
+  grep -F "$state/firststatus.status" "$out" >/dev/null || fail "watcher did not print the status file from the surfaced mixed batch"
+  assert_surfaced_signal_printed "$out" "watcher did not print the turn-end from the surfaced mixed batch" "$state/secondturn.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the surfaced status-and-turn-end batch failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/firststatus.status" >/dev/null \
-    || fail "the status file from the surfaced mixed batch was not queued"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/secondturn.turn-ended" >/dev/null \
-    || fail "the turn-end from the surfaced mixed batch was not queued"
+  assert_surfaced_signal_queued "$drain_out" "the status file from the surfaced mixed batch was not queued"
+  assert_batch_path_recorded "$state" "$state/firststatus.status"
+  assert_surfaced_signal_queued "$drain_out" "the turn-end from the surfaced mixed batch was not queued"
+  assert_batch_path_recorded "$state" "$state/secondturn.turn-ended"
   [ ! -e "$state/.churn-since-$second_key" ] \
     || fail "a status-bearing batch opened a pane-churn deadline"
   unset FM_FAKE_CREW_STATE_firststatus FM_FAKE_CREW_STATE_secondturn
@@ -1214,12 +1230,11 @@ test_turn_ended_churn_absorb_off_by_default() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a churning turn-end without the opt-in flag"
-  grep -F "signal: $state/codexdefault.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced default-off churning turn-end"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced default-off churning turn-end" "$state/codexdefault.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the default-off churning turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexdefault.turn-ended" >/dev/null \
-    || fail "default-off churning turn-end was not queued"
+  assert_surfaced_signal_queued "$drain_out" "default-off churning turn-end was not queued"
+  assert_batch_path_recorded "$state" "$state/codexdefault.turn-ended"
   [ ! -e "$state/.churn-since-$key" ] \
     || fail "the default-off path opened a bounded deferral window"
   unset FM_FAKE_CREW_STATE
@@ -1253,12 +1268,11 @@ test_turn_ended_churn_absorb_bounded() {
   pid=$!
   wait_for_exit "$pid" 100 \
     || fail "a perpetually churning pane deferred its turn-end past the absorb bound"
-  grep -F "signal: $state/codexclock.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the turn-end surfaced by the exhausted absorb bound"
+  assert_surfaced_signal_printed "$out" "watcher did not print the turn-end surfaced by the exhausted absorb bound" "$state/codexclock.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the bounded churn turn-end failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexclock.turn-ended" >/dev/null \
-    || fail "the turn-end surfaced by the exhausted absorb bound was not queued"
+  assert_surfaced_signal_queued "$drain_out" "the turn-end surfaced by the exhausted absorb bound was not queued"
+  assert_batch_path_recorded "$state" "$state/codexclock.turn-ended"
   [ ! -e "$state/.churn-since-$key" ] \
     || fail "an exhausted deferral window was not restarted after surfacing"
   unset FM_FAKE_CREW_STATE
@@ -1284,12 +1298,11 @@ test_turn_ended_churn_timer_write_failure_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a churning turn-end without recording its deadline"
-  grep -F "signal: $state/codextimer.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the turn-end whose churn deadline could not be recorded"
+  assert_surfaced_signal_printed "$out" "watcher did not print the turn-end whose churn deadline could not be recorded" "$state/codextimer.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the failed churn deadline write failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codextimer.turn-ended" >/dev/null \
-    || fail "turn-end with an unrecordable churn deadline was not queued"
+  assert_surfaced_signal_queued "$drain_out" "turn-end with an unrecordable churn deadline was not queued"
+  assert_batch_path_recorded "$state" "$state/codextimer.turn-ended"
   unset FM_FAKE_CREW_STATE
   pass "an unrecordable pane-churn deadline surfaces the turn-end"
 }
@@ -1312,12 +1325,11 @@ test_turn_ended_invalid_churn_bound_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an invalid churn bound"
-  grep -F "signal: $state/codexbound.turn-ended" "$out" >/dev/null \
-    || fail "watcher terminated before printing the invalid-bound turn-end"
+  assert_surfaced_signal_printed "$out" "watcher terminated before printing the invalid-bound turn-end" "$state/codexbound.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the invalid churn bound failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexbound.turn-ended" >/dev/null \
-    || fail "turn-end with an invalid churn bound was not queued"
+  assert_surfaced_signal_queued "$drain_out" "turn-end with an invalid churn bound was not queued"
+  assert_batch_path_recorded "$state" "$state/codexbound.turn-ended"
   [ ! -e "$state/.churn-since-$key" ] \
     || fail "an invalid churn bound opened a deferral window"
   unset FM_FAKE_CREW_STATE
@@ -1342,12 +1354,11 @@ test_turn_ended_oversized_churn_bound_surfaced() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with an oversized churn bound"
-  grep -F "signal: $state/codexoversized.turn-ended" "$out" >/dev/null \
-    || fail "watcher terminated before printing the oversized-bound turn-end"
+  assert_surfaced_signal_printed "$out" "watcher terminated before printing the oversized-bound turn-end" "$state/codexoversized.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the oversized churn bound failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexoversized.turn-ended" >/dev/null \
-    || fail "turn-end with an oversized churn bound was not queued"
+  assert_surfaced_signal_queued "$drain_out" "turn-end with an oversized churn bound was not queued"
+  assert_batch_path_recorded "$state" "$state/codexoversized.turn-ended"
   [ ! -e "$state/.churn-since-$key" ] \
     || fail "an oversized churn bound opened a deferral window"
   unset FM_FAKE_CREW_STATE
@@ -1383,12 +1394,11 @@ test_turn_ended_invalid_churn_deadline_surfaced() {
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
     pid=$!
     wait_for_exit "$pid" 100 || fail "watcher did not surface a turn-end with a $variant churn deadline"
-    grep -F "signal: $state/codexdeadline.turn-ended" "$out" >/dev/null \
-      || fail "watcher terminated before printing the $variant-deadline turn-end"
+    assert_surfaced_signal_printed "$out" "watcher terminated before printing the $variant-deadline turn-end" "$state/codexdeadline.turn-ended"
     FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
       || fail "drain after the $variant churn deadline failed"
-    grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/codexdeadline.turn-ended" >/dev/null \
-      || fail "turn-end with a $variant churn deadline was not queued"
+    assert_surfaced_signal_queued "$drain_out" "turn-end with a $variant churn deadline was not queued"
+    assert_batch_path_recorded "$state" "$state/codexdeadline.turn-ended"
     [ "$(cat "$marker")" = "$value" ] \
       || fail "the $variant churn deadline was rewritten"
   done
@@ -1420,16 +1430,14 @@ test_turn_ended_surfaced_batch_opens_no_partial_deadline() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a batch containing an invalid churn deadline"
-  grep -F "$state/first.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the first turn-end from the surfaced batch"
-  grep -F "$state/second.turn-ended" "$out" >/dev/null \
-    || fail "watcher did not print the second turn-end from the surfaced batch"
+  assert_surfaced_signal_printed "$out" "watcher did not print the first turn-end from the surfaced batch" "$state/first.turn-ended"
+  assert_surfaced_signal_printed "$out" "watcher did not print the second turn-end from the surfaced batch" "$state/second.turn-ended"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
     || fail "drain after the surfaced churn batch failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.turn-ended" >/dev/null \
-    || fail "the first turn-end from the surfaced batch was not queued"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/second.turn-ended" >/dev/null \
-    || fail "the second turn-end from the surfaced batch was not queued"
+  assert_surfaced_signal_queued "$drain_out" "the first turn-end from the surfaced batch was not queued"
+  assert_batch_path_recorded "$state" "$state/first.turn-ended"
+  assert_surfaced_signal_queued "$drain_out" "the second turn-end from the surfaced batch was not queued"
+  assert_batch_path_recorded "$state" "$state/second.turn-ended"
   [ ! -e "$state/.churn-since-$first_key" ] \
     || fail "a surfaced batch opened a partial churn deadline"
   [ "$(cat "$state/.churn-since-$second_key")" = bogus ] \
@@ -1451,9 +1459,12 @@ test_working_note_not_working_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a working: note whose crew has no running pipeline and an idle pane"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the surfaced working: signal"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced working: signal"
+  grep -F "$status_file" "$out" >/dev/null \
+    || fail "the surfaced working: signal did not name $status_file"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced working: note failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "surfaced working: note was not queued"
+  assert_surfaced_signal_queued "$drain_out" "surfaced working: note was not queued"
+  assert_batch_path_recorded "$state" "$status_file"
   [ -s "$state/.seen-task_status" ] || fail "surfaced working: note did not advance its .seen-* suppressor"
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
 }
@@ -1470,11 +1481,11 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   FM_CONFIG_OVERRIDE="$(churn_config "$dir")" watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's routed status note"
-  grep -F "signal: $state/mate.status" "$out" >/dev/null \
-    || fail "watcher did not print the surfaced secondmate note"
+  assert_surfaced_signal_printed "$out" "watcher did not print the surfaced secondmate note"
+  grep -F "$state/mate.status" "$out" >/dev/null || fail "watcher did not print the surfaced secondmate note"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced note failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.status" >/dev/null \
-    || fail "surfaced secondmate note was not queued"
+  assert_surfaced_signal_queued "$drain_out" "surfaced secondmate note was not queued"
+  assert_batch_path_recorded "$state" "$state/mate.status"
   pass "a secondmate's status note surfaces even while its own agent is busy"
 }
 
@@ -1504,8 +1515,8 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   # exact announced bytes, never on task identity.
   printf 'needs-decision [key=k2]: a genuinely new decision\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later different note after a self-announced close was swallowed"
-  grep -F "signal: $status_file" "$out" >/dev/null \
-    || fail "the later note did not surface as a signal"
+  assert_surfaced_signal_printed "$out" "the later note did not surface as a signal"
+  grep -F "$status_file" "$out" >/dev/null || fail "the later note did not surface as a signal"
   pass "a self-announced close never wakes its own home, and the next real note still does"
 }
 
@@ -1520,9 +1531,11 @@ test_actionable_signal_surfaced() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable needs-decision signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
+  assert_surfaced_signal_printed "$out" "watcher did not print the actionable signal reason"
+  grep -F "$status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
+  assert_surfaced_signal_queued "$drain_out" "actionable signal was not queued"
+  assert_batch_path_recorded "$state" "$status_file"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
@@ -1580,7 +1593,8 @@ test_captain_held_signal_payload_marked_for_branch_exclusion() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher absorbed a captain-held signal while the crew was still working"
-  grep -F "signal: $status_file" "$out" >/dev/null \
+  assert_surfaced_signal_printed "$out" "a captain-held signal did not surface a signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
     || fail "a captain-held signal changed its wake reason: $(cat "$out")"
   grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
     || fail "a captain-held signal was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
@@ -1666,10 +1680,11 @@ test_actionable_signal_survives_a_later_routine_append() {
   pid=$!
   wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "watcher absorbed a needs-decision hidden behind a later working: line"; }
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
+  assert_surfaced_signal_printed "$out" "watcher did not print the actionable signal reason"
+  grep -F "$status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the masked signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
-    || fail "the masked actionable signal was not queued"
+  assert_surfaced_signal_queued "$drain_out" "the masked actionable signal was not queued"
+  assert_batch_path_recorded "$state" "$status_file"
   unset FM_FAKE_CREW_STATE
   pass "a captain event hidden behind a later routine append is still surfaced (queue + exit)"
 }
@@ -1689,8 +1704,8 @@ test_release_completion_survives_a_later_routine_append() {
   wait_for_exit "$pid" 100 \
     || { reap "$pid"; fail "watcher absorbed a release/install completion hidden behind later cleanup chatter"; }
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the masked completion failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
-    || fail "the masked completion was not queued"
+  assert_surfaced_signal_queued "$drain_out" "the masked completion was not queued"
+  assert_batch_path_recorded "$state" "$status_file"
   unset FM_FAKE_CREW_STATE
   pass "a finished release reported before routine cleanup chatter is still surfaced"
 }
@@ -1728,8 +1743,9 @@ test_unreadable_status_reports_once_per_file_state() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a dangling status symlink was not reported"; }
-  grep -Fx "signal: $status_file" "$out" >/dev/null \
-    || fail "a dangling status symlink did not use the immediate signal path: $(cat "$out")"
+  assert_surfaced_signal_printed "$out" "a dangling status symlink did not surface a signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
+    || fail "the unreadable status report did not name the status file: $(cat "$out")"
   sig=$(status_observed_signature "$status_file")
   status_presentation_marker_reported_matches "$marker" "$sig" \
     || fail "the unreadable status report did not advance its wake signature"
@@ -1794,8 +1810,9 @@ test_permission_recovery_surfaces_preserved_status() {
   after_ident=$(_fm_open_decisions_file_ident "$status_file")
   [ "$after_ident" = "$before_ident" ] || { reap "$pid"; fail "the permission-only recovery changed file identity"; }
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "readability recovery did not surface preserved content"; }
-  grep -Fx "signal: $status_file" "$out" >/dev/null \
-    || fail "readability recovery did not use the actionable signal path: $(cat "$out")"
+  assert_surfaced_signal_printed "$out" "readability recovery did not use the actionable signal path"
+  grep -F "$status_file" "$out" >/dev/null \
+    || fail "readability recovery did not name the recovered status path: $(cat "$out")"
   [ "$(status_presentation_marker_offset "$marker" "$status_file")" = "$(size_of "$status_file")" ] \
     || fail "readability recovery did not classify from the unadvanced position"
   pass "permission recovery surfaces content from the unadvanced position"
@@ -4969,10 +4986,11 @@ test_afk_present_reverts_watcher_to_one_shot() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "with .afk present the watcher did not exit one-shot for a benign signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal for the daemon"
+  assert_surfaced_signal_printed "$out" "afk-mode watcher did not surface the signal for the daemon"
+  grep -F "$status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal for the daemon"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the afk-mode signal failed"
-  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
-    || fail "afk-mode benign signal was not queued for the daemon to classify"
+  assert_surfaced_signal_queued "$drain_out" "afk-mode benign signal was not queued for the daemon to classify"
+  assert_batch_path_recorded "$state" "$status_file"
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 

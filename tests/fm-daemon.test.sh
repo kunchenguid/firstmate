@@ -390,6 +390,82 @@ EOF
   pass "classification failure retains the complete durable wake batch"
 }
 
+test_durable_batch_resolves_every_path_from_its_private_record() {
+  local dir state fakebin reason attempts
+  dir=$(make_supercase durable-record); state="$dir/state"; fakebin="$dir/daemon-bin"; attempts="$dir/attempts"
+  reason="signal: 2 files (1 status, 1 turn-end): $state/task-a.status +1 more"
+  printf '%s\t%s/task-a.status %s/task-b.status\n' signal-batch-record "$state" "$state" \
+    > "$state/.signal-batch-paths"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tsignal-batch-record\t%s\n'
+printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    handle_wake() { printf '%s\n' "$1" >> "$attempts"; }
+    handle_durable_wakes fallback "$state"
+  ) || fail "a coalesced batch with a private record was not acknowledged"
+  [ "$(cat "$attempts")" = "signal: $state/task-a.status $state/task-b.status" ] \
+    || fail "the daemon classified only the compact prompt paths instead of the full batch: $(cat "$attempts")"
+  pass "durable coalesced signals classify the full batch from the private record"
+}
+
+test_durable_batch_resolves_oldest_queued_record_beyond_summary_paths() {
+  local dir state fakebin out i files
+  dir=$(make_supercase durable-oldest-record); state="$dir/state"; fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  printf 'blocked: decision beyond the printed summary\n' > "$state/task-6.status"
+  files="$state/task-1.status $state/task-2.status $state/task-3.status $state/task-4.status $state/task-5.status $state/task-6.status"
+  for i in $(seq 1 40); do
+    if [ "$i" -eq 1 ]; then
+      printf 'signal-batch-oldest\t%s\n' "$files" >> "$state/.signal-batch-paths"
+    else
+      printf 'signal-batch-%s\t%s/task-6.status\n' "$i" "$state" >> "$state/.signal-batch-paths"
+    fi
+  done
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf ack > "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tsignal-batch-oldest\tsignal: 6 files (6 status, 0 turn-end): $state/task-1.status $state/task-2.status $state/task-3.status $state/task-4.status $state/task-5.status +1 more\n'
+printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "the oldest queued batch was not acknowledged"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: decision beyond the printed summary"*) ;;
+    *) fail "the daemon missed a decision-owned path beyond the compact summary: $out" ;;
+  esac
+  pass "durable coalesced signals resolve the oldest queued record and classify every path"
+}
+
+test_durable_missing_signal_batch_record_escalates_without_advancing() {
+  local dir state fakebin
+  dir=$(make_supercase durable-missing-record); state="$dir/state"; fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  printf 'working: routine progress\n' > "$state/task-a.status"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf ack > "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tsignal-batch-missing\tsignal: 1 file (1 status, 0 turn-end): $state/task-a.status\n'
+printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a missing batch record was not acknowledged"
+  case "$(cat "$state/.subsuper-escalations" 2>/dev/null || true)" in
+    *"signal batch record missing"*) ;;
+    *) fail "a missing batch record was classified as routine" ;;
+  esac
+  [ "$(status_seen_offset "$state" task-a)" = 0 ] \
+    || fail "a missing batch record advanced the status position"
+  pass "a queued batch without its record escalates without advancing the status position"
+}
+
 test_missing_status_stale_is_acknowledged_without_diagnostic() {
   local dir state fakebin
   dir=$(make_supercase durable-no-status); state="$dir/state"; fakebin="$dir/daemon-bin"
@@ -2685,6 +2761,9 @@ test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
 test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
+test_durable_batch_resolves_every_path_from_its_private_record
+test_durable_batch_resolves_oldest_queued_record_beyond_summary_paths
+test_durable_missing_signal_batch_record_escalates_without_advancing
 test_missing_status_stale_is_acknowledged_without_diagnostic
 test_transient_unreadable_signal_recovers_without_advancing
 test_permission_recovery_reclassifies_catchall_status

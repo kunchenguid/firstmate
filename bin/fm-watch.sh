@@ -13,7 +13,13 @@
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <file>...      status/turn-end signals, surfaced when a listed status
+#   signal: <N> file(s) (<S> status, <T> turn-end): <status path>... [+N more]
+#                          a prompt-sized summary of the changed-file batch: the
+#                          total, how many status versus turn-end, then up to five
+#                          changed status paths, never a turn-ended one, capped at
+#                          400 bytes. The batch identity and every internal set
+#                          consumer still use the full path list.
+#                          Surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
@@ -1329,18 +1335,138 @@ signal_batch_key() {  # <file> ...
   printf 'signal-batch-%s' "${digest:0:16}"
 }
 
+# Hard cap on the printed reason's size, in bytes. The reason is a prompt, so a
+# much larger fleet must not be able to grow it back into a token sink; the full
+# path list stays on the arguments the classifiers and the batch key consume.
+FM_SIGNAL_REASON_MAX_BYTES=400
+# Most changed status paths a printed reason ever names (before the byte cap).
+FM_SIGNAL_REASON_MAX_PATHS=5
+
+# Print the status-file paths signal_files_actionable captured in
+# FM_SIGNAL_SURFACE_ENDPOINTS (one "<file>\t<end>\t<ident>" record per file).
+signal_reason_surface_paths() {
+  local f rest endpoints=${FM_SIGNAL_SURFACE_ENDPOINTS-}
+  [ -n "$endpoints" ] || return 0
+  while IFS=$'\t' read -r f rest; do
+    [ -n "$f" ] || continue
+    printf '%s ' "$f"
+  done <<EOF
+$endpoints
+EOF
+}
+
+# Print the compact, human- and model-facing reason for one coalesced signal
+# batch (see the printed-reason line in this file's header). The batch
+# identity is untouched: signal_batch_key still digests the full sorted set, and
+# $files still reaches every classifier as one space-separated list
+# (ids carry no spaces). Only this prompt becomes compact.
+#
+# Shape: "signal: <N> file(s) (<S> status, <T> turn-end): <status path>... [+N more]".
+# Turn-ended markers never appear: they carry no verb and no content, and their
+# only real consumer is the in-process benign check, which reads the argument
+# list rather than this string. Status paths are ordered by decision relevance -
+# decision-owned files, then files with an actionable span, then the rest -
+# because both out-of-process readers of this batch - the away-mode daemon's
+# classify_signal (bin/fm-supervise-daemon.sh) and the Pi branch dispatcher's
+# decision cross-reference (.pi/extensions/fm-primary-pi-watch.ts) - resolve
+# the full path list from the private batch record instead.
+signal_batch_reason() {  # <file> ...
+  local f total=0 status_count=0 turnend_count=0 seen=" " candidates=""
+  local prefix list="" shown=0 remaining budget
+  local decision_files=${FM_SIGNAL_NEEDS_DECISION_FILES-}
+  for f in "$@"; do
+    total=$((total + 1))
+    case "$f" in
+      *.turn-ended) turnend_count=$((turnend_count + 1)) ;;
+      *.status) status_count=$((status_count + 1)) ;;
+    esac
+  done
+  # shellcheck disable=SC2086  # space-separated status-path lists (ids carry no spaces)
+  for f in $decision_files $(signal_reason_surface_paths) "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    candidates="$candidates $f"
+  done
+  prefix="signal: $total file"
+  [ "$total" -eq 1 ] || prefix="${prefix}s"
+  prefix="$prefix ($status_count status, $turnend_count turn-end)"
+  # Reserve room for the worst-case " +<N> more" suffix before adding paths.
+  budget=$((FM_SIGNAL_REASON_MAX_BYTES - 20))
+  for f in $candidates; do
+    [ "$shown" -lt "$FM_SIGNAL_REASON_MAX_PATHS" ] || break
+    [ $(( ${#prefix} + 2 + ${#list} + 1 + ${#f} )) -le "$budget" ] || break
+    list="$list $f"
+    shown=$((shown + 1))
+  done
+  if [ -z "$list" ]; then
+    printf '%s' "$prefix"
+    return 0
+  fi
+  remaining=$((status_count - shown))
+  if [ "$remaining" -gt 0 ]; then
+    printf '%s:%s +%s more' "$prefix" "$list" "$remaining"
+  else
+    printf '%s:%s' "$prefix" "$list"
+  fi
+}
+
+# Private sidecar holding each queued signal batch's full changed-path list,
+# keyed by the batch identity. The queued payload is a compact summary now, and
+# the Pi branch dispatcher still has to resolve every task in a batch from its
+# row's key, so the list lives here instead of in the prompt. One record per
+# batch, newest last, pruned on the next write once its batch key leaves the
+# wake queue; written atomically (unique temp file, then rename) so a reader never observes a
+# partial record. Format: "<batch-key>\t<space-separated paths>".
+signal_record_batch_paths() {  # <batch-key> <file> ...
+  local key=$1 sidecar tmp
+  shift
+  [ -d "$STATE" ] || return 1
+  sidecar="$STATE/.signal-batch-paths"
+  tmp="$sidecar.$$.tmp"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if {
+    if [ -f "$sidecar" ]; then
+      awk -F '\t' -v k="$key" -v queue="$FM_WAKE_QUEUE" '
+        BEGIN {
+          while ((getline row < queue) > 0) {
+            split(row, field, "\t")
+            if (field[4] != "") queued[field[4]] = 1
+          }
+          close(queue)
+        }
+        $1 != k && ($1 in queued) { print }
+      ' "$sidecar"
+    fi
+    printf '%s\t%s\n' "$key" "$*"
+  } > "$tmp"; then
+    if mv -f "$tmp" "$sidecar"; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  rm -f "$tmp"
+  return 1
+}
+
 # Enqueue one coalesced signal wake for a batch of changed files. The ordinary
-# row keeps the byte-identical "signal:$files" payload every harness-arm
-# consumer pattern-matches. A batch containing a decision-owned file emits one
-# additional row keyed by that file's status name, because the Pi branch
-# dispatcher resolves a decision row's task from its key; the ordinary row
-# still carries the whole batch, so the dispatcher's trigger cross-reference
-# keeps the entire coalesced batch on main.
+# row carries the compact prompt reason; the batch identity is the key, so
+# dedupe and identical-batch collapse are unchanged. The batch's full path list
+# is recorded in the private sidecar above before the row is appended, so the
+# branch dispatcher resolves the batch from that record and never from the
+# printed prompt. A batch containing a decision-owned file emits one additional
+# row keyed by that file's status name, because the Pi branch dispatcher resolves
+# a decision row's task from its key; that row keeps the whole batch's path list
+# byte-identical to what it was before the reason was compacted.
 signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
   local reason=$1 decision_files=$2 batch_key decision_key f
   shift 2
   [ "$#" -gt 0 ] || return 1
   batch_key=$(signal_batch_key "$@") || return 1
+  if ! signal_record_batch_paths "$batch_key" "$@"; then
+    reason="signal: $*"
+  fi
   fm_wake_append signal "$batch_key" "$reason" || return 1
   [ -n "$decision_files" ] || return 0
   for f in $decision_files; do
@@ -1348,7 +1474,7 @@ signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
     break
   done
   [ -n "$decision_key" ] || return 1
-  fm_wake_append signal "$decision_key" "needs-decision:${reason#signal:}" || return 1
+  fm_wake_append signal "$decision_key" "needs-decision: $*" || return 1
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -2084,7 +2210,6 @@ while :; do
     done <<EOF
 $pending
 EOF
-    reason="signal:$files"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file gained a captain-relevant event since it was last
@@ -2113,16 +2238,22 @@ EOF
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
+    # Built only now, because the compact reason's ordering prioritizes the two
+    # status sets the call above just captured. $files itself stays untouched.
+    # shellcheck disable=SC2086  # $files is the full space-separated changed-path list
+    reason="$(signal_batch_reason $files)"
     # One coalesced row per batch, not one per file: a busy fleet used to
     # enqueue N rows that each repeated the whole "signal:$files" list. The
-    # wake reason line itself, and every harness-arm consumer that
-    # pattern-matches it, stays byte-identical. A decision-owned file in the
-    # batch still gets its own "needs-decision:$files" row (keyed by that
-    # file's status name so the Pi branch dispatcher can resolve it), which is
-    # what docs/pi-supervision-branch.md's dispatcher reads to keep a
-    # decision-owned row off the supervision branch (fm-branch-dispatch.ts,
-    # fm-primary-pi-watch.ts). Every other harness and script keeps seeing the
-    # exact same "signal:$files" wake it always has.
+    # printed wake reason is the compact batch summary built above, never the
+    # full path list; every harness-arm consumer only pattern-matches the
+    # "signal:" prefix, so the shorter prompt changes none of them. A
+    # decision-owned file in the batch still gets its own
+    # "needs-decision:$files" row (keyed by that file's status name so the Pi
+    # branch dispatcher can resolve it), which is what
+    # docs/pi-supervision-branch.md's dispatcher reads to keep a
+    # decision-owned row off the supervision branch
+    # (.pi/extensions/fm-primary-pi-watch.ts); that row keeps the full path
+    # list byte-identical because the dispatcher resolves the batch from it.
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then

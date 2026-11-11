@@ -69,7 +69,8 @@ test_signal_catchup_without_running_watcher() {
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
+  grep -F "signal:" "$out" >/dev/null || fail "watcher did not print first signal"
+  grep -F "$status_file" "$out" >/dev/null || fail "watcher did not name the first signal path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
@@ -81,7 +82,8 @@ test_signal_catchup_without_running_watcher() {
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
+  grep -F "signal:" "$out" >/dev/null || fail "signal written with no watcher was not caught"
+  grep -F "$status_file" "$out" >/dev/null || fail "signal written with no watcher did not name its path"
   pass "signal written while no watcher runs is caught on next run"
 }
 

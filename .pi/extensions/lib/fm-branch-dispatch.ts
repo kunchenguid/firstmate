@@ -64,6 +64,13 @@ export interface UnreadWakeScope {
    */
   needsDecisionKeys: string[];
   taskByWakeKey: Record<string, string>;
+  /**
+   * Every task resolved from each signal row's full batch, keyed by that row's
+   * queued payload. The compact payload can omit status paths another consumer
+   * needs, so the dispatcher cross-references a trigger against this record
+   * instead of re-parsing the prompt alone.
+   */
+  signalTasksByPayload: Record<string, string[]>;
 }
 
 const EMPTY_SCOPE: UnreadWakeScope = {
@@ -75,6 +82,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   corrupted: false,
   needsDecisionKeys: [],
   taskByWakeKey: {},
+  signalTasksByPayload: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
@@ -85,6 +93,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   corrupted: true,
   needsDecisionKeys: [],
   taskByWakeKey: {},
+  signalTasksByPayload: {},
 };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -188,18 +197,46 @@ function hasOpenNeedsDecision(
 }
 
 // The status files a signal row names. A legacy row is keyed by one status
-// filename; a coalesced batch row is keyed by a stable batch identity and
-// carries the whole batch in its byte-identical "signal:$files" payload, so
-// the task set comes from that payload. An empty result is an unresolvable
-// row, which the caller treats as a scan veto exactly as before.
-function signalRowFiles(key: string, payload: string): string[] {
+// filename; a coalesced batch row is keyed by a stable batch identity whose
+// full batch list lives in the private batch-path record bin/fm-watch.sh writes
+// beside the queue (see its signal_record_batch_paths). A legacy row with no
+// record still carries its path list in the payload, so fall back to the
+// path-shaped tokens there. An empty result is an unresolvable row, which the
+// caller treats as a scan veto so a missing record surfaces rather than being
+// classified from the compact summary alone.
+function signalRowFiles(key: string, payload: string, state: string): string[] {
   if (/^[A-Za-z0-9._-]+\.(?:status|turn-ended)$/.test(key)) return [key];
-  const match = /^signal:(.*)$/.exec(payload);
-  if (!match) return [];
-  return match[1]
+  if (!/^signal:/.test(payload)) return [];
+  const recorded = signalBatchPaths(state, key);
+  if (recorded.length > 0) return recorded;
+  // A compact summary names only the first few paths, so a missing record must
+  // surface the whole batch rather than let the dispatcher claim a partial set.
+  if (/^signal: [0-9]+ file/.test(payload)) return [];
+  return payload
     .split(/\s+/)
-    .filter(Boolean)
+    .filter((token) => /\.(?:status|turn-ended)$/.test(token))
     .map((path) => path.split("/").pop() ?? path);
+}
+
+// The basenames recorded for one batch key, or none when the record is absent.
+function signalBatchPaths(state: string, key: string): string[] {
+  let lines: string[];
+  try {
+    lines = readFileSync(`${state}/.signal-batch-paths`, "utf8").split(/\r?\n/);
+  } catch {
+    return [];
+  }
+  for (const line of lines) {
+    const tab = line.indexOf("\t");
+    if (tab < 0 || line.slice(0, tab) !== key) continue;
+    return line
+      .slice(tab + 1)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((path) => path.split("/").pop() ?? path);
+  }
+  return [];
 }
 
 export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
@@ -250,6 +287,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
+  const signalTasksByPayload: Record<string, string[]> = {};
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -285,15 +323,18 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         needsDecisionKeys.push(key);
         continue;
       }
-      const files = signalRowFiles(key, payload);
+      const files = signalRowFiles(key, payload, state);
       if (files.length === 0) return UNSAFE_SCOPE;
+      const rowTasks = new Set(signalTasksByPayload[payload] ?? []);
       for (const file of files) {
         const fileTask = file.replace(/\.(?:status|turn-ended)$/, "");
         const fileProject = metadata.get(fileTask) ?? "";
         if (!fileTask || !fileProject) return UNSAFE_SCOPE;
         projects.add(fileProject);
         eligibleTasks.add(fileTask);
+        rowTasks.add(fileTask);
       }
+      signalTasksByPayload[payload] = [...rowTasks];
       eligibleSeqs.push(seq);
       continue;
     } else if (kind === "stale") {
@@ -365,6 +406,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     corrupted: false,
     needsDecisionKeys,
     taskByWakeKey: Object.fromEntries(taskByKey),
+    signalTasksByPayload,
   };
 }
 

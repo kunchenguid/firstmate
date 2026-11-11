@@ -698,7 +698,7 @@ export default function (pi: ExtensionAPI) {
     // trigger for the same task stays on main. Other tasks and heartbeat
     // handling remain independent.
     const triggerKeys = /^signal:/.test(message)
-      ? message
+      ? scope.signalTasksByPayload[message] ?? message
         .slice("signal:".length)
         .split(/\s+/)
         .filter(Boolean)

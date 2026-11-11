@@ -139,7 +139,90 @@ test_heartbeat_scan_bounds_each_fold() {
   pass "heartbeat backstop: each fold is bounded and still converges"
 }
 
+# The printed reason is a prompt, not the batch. These pin its shape: a bounded
+# batch summary the fleet can afford to print, while the batch identity
+# (signal_batch_key) and every internal set consumer keep the full path list.
+batch_reason_for() {  # <home> <state> <file> ...
+  local home=$1 state=$2
+  shift 2
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    shift
+    signal_batch_reason "$@"
+  ' _ "$WATCH" "$@"
+}
+
+test_reason_names_no_path_for_a_bare_turnend_batch() {
+  local dir state out
+  dir=$(make_case reason-bare-turnend); state="$dir/state"
+  : > "$state/one.turn-ended"
+  : > "$state/two.turn-ended"
+  : > "$state/three.turn-ended"
+  out=$(batch_reason_for "$dir" "$state" \
+    "$state/one.turn-ended" "$state/two.turn-ended" "$state/three.turn-ended")
+  case "$out" in signal:*) ;; *) fail "the reason lost its signal: prefix: $out" ;; esac
+  case "$out" in *"$state"*) fail "a bare turn-end reason named a path: $out" ;; esac
+  [ "${#out}" -le 400 ] || fail "a bare turn-end reason exceeded the cap (${#out} bytes): $out"
+  pass "a bare turn-end batch produces a path-free reason inside the cap"
+}
+
+test_reason_still_names_a_changed_status_path() {
+  local dir state out
+  dir=$(make_case reason-status-path); state="$dir/state"
+  printf 'blocked: a\n' > "$state/a.status"
+  : > "$state/b.turn-ended"
+  out=$(batch_reason_for "$dir" "$state" "$state/a.status" "$state/b.turn-ended")
+  case "$out" in *"$state/a.status"*) ;; *) fail "a changed status path was dropped from the reason: $out" ;; esac
+  case "$out" in *"$state/b.turn-ended"*) fail "a turn-ended marker reached the reason: $out" ;; esac
+  pass "a changed status path is still named, and no turn-ended path is"
+}
+
+test_identical_file_sets_keep_one_batch_key() {
+  local dir state first second reversed
+  dir=$(make_case reason-batch-key); state="$dir/state"
+  printf 'working: a\n' > "$state/a.status"
+  printf 'working: b\n' > "$state/b.status"
+  first=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_batch_key "$2" "$3"
+  ' _ "$WATCH" "$state/a.status" "$state/b.status")
+  second=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_batch_key "$2" "$3"
+  ' _ "$WATCH" "$state/a.status" "$state/b.status")
+  reversed=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_batch_key "$2" "$3"
+  ' _ "$WATCH" "$state/b.status" "$state/a.status")
+  [ -n "$first" ] || fail "an identical file set produced no batch key"
+  [ "$first" = "$second" ] || fail "two identical file sets produced different batch keys: $first vs $second"
+  [ "$first" = "$reversed" ] || fail "file order changed the batch key: $first vs $reversed"
+  pass "identical file sets keep one batch identity"
+}
+
+test_reason_truncates_a_large_batch_with_a_more_suffix() {
+  local dir state out f i args=()
+  dir=$(make_case reason-truncated); state="$dir/state"
+  for i in 1 2 3 4 5 6 7 8; do
+    printf 'working: %s\n' "$i" > "$state/s$i.status"
+  done
+  for i in $(seq 1 60); do
+    : > "$state/t$i.turn-ended"
+  done
+  for f in "$state"/*.status "$state"/*.turn-ended; do args+=("$f"); done
+  out=$(batch_reason_for "$dir" "$state" "${args[@]}")
+  case "$out" in *'+'*' more'*) ;; *) fail "a large batch did not truncate with a +N more suffix: $out" ;; esac
+  case "$out" in *".turn-ended"*) fail "a large batch leaked a turn-ended path into the reason: $out" ;; esac
+  [ "${#out}" -le 400 ] || fail "a large batch grew the reason past the cap (${#out} bytes): $out"
+  pass "a large batch truncates with +N more instead of growing the reason"
+}
+
+
 test_signal_seen_current_reuses_a_supplied_signature
 test_scan_signals_paces_beacon_refresh_by_elapsed_time
 test_absorbed_heartbeat_advances_surfaced_offset
 test_heartbeat_scan_bounds_each_fold
+test_reason_names_no_path_for_a_bare_turnend_batch
+test_reason_still_names_a_changed_status_path
+test_identical_file_sets_keep_one_batch_key
+test_reason_truncates_a_large_batch_with_a_more_suffix
