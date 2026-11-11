@@ -371,6 +371,59 @@ test_every_captains_call_card_opens_a_full_screen_details_view() {
   pass "every Captain's Call card opens a full-screen Details view with its context and every option's details, queuing nothing"
 }
 
+# One call carries one label: the badge naming a call's type in its Details view
+# is one its card already shows. The card's own label is the one upstream boards
+# shipped before the Details view: "decision" on every call that is not a merge.
+test_a_details_view_shows_the_type_badge_its_card_shows() {
+  local home out
+  home=$(make_home call-details-badge)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"credential.token","type":"credential","repo":"sample","title":"Provide the deploy token",
+     "decide":"Which token should the deploy use?","options":[],"allow_freeform":true},
+    {"key":"pick","type":"decision","repo":"sample","title":"Pick a route",
+     "options":[{"value":"a","label":"Route A"}]},
+    {"key":"merge.it","type":"merge","repo":"sample","title":"Merge: it","risk":"high",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.call.details | length) == 3
+      and .call.details[0].card_badges == [{tone:"solid", text:"decision"}]
+      and all(.call.details[]; (.meta_badges | length) == 1 and (.meta_badges - .card_badges) == [])
+  ' >/dev/null || fail "a Details view labelled its call with a badge the card does not show: $out"
+  pass "a Details view shows the type badge its card shows, a credential card included"
+}
+
+# Oracle: the WAI-ARIA Authoring Practices modal dialog pattern - Shift+Tab on
+# the first focusable control wraps to the last, Tab on the last wraps to the
+# first, Tab anywhere else keeps its default move, and Escape closes the dialog
+# and returns focus to the control that opened it. The view's markup puts Close
+# before the body, so Close is the first control and the body's last link the
+# last. Per CSS overflow, the page behind the open view does not scroll.
+test_details_keeps_keyboard_focus_inside_and_closes_on_escape() {
+  local home out
+  home=$(make_home call-details-keys)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"linked","type":"decision","repo":"sample","title":"A linked call",
+     "context":["Read https://example.com/a and then https://example.com/b first."],
+     "options":[{"value":"go","label":"Go ahead"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .call.keys as $k
+    | .error == "" and $k.card == "A linked call"
+      and $k.opened == {open:true, focus:{label:"Close", card:null, visible:true}, page_overflow:"hidden"}
+      and ($k.steps | length) == 4
+      and ($k.steps[0] | .key == "Tab" and .shift and .prevented and .open
+        and .focus.label == "https://example.com/b")
+      and ($k.steps[1] | .key == "Tab" and (.shift | not) and .prevented and .open
+        and .focus.label == "Close")
+      and ($k.steps[2] | .key == "Tab" and (.shift | not) and (.prevented | not) and .open)
+      and ($k.steps[3] | .key == "Escape" and .prevented and (.open | not)
+        and .focus == {label:"Details", card:"A linked call", visible:true}
+        and .page_overflow == null)
+  ' >/dev/null || fail "the Details view let Tab leave it, or Escape did not close it and return focus to the card: $out"
+  pass "the Details view keeps Tab and Shift+Tab inside it and closes on Escape, returning focus to the card"
+}
+
 # Oracle: the GFM autolink rule - a trailing ")" belongs to the URL only when
 # the URL holds a matching "(", trailing punctuation and the emphasis markers
 # "*", "_" and "~" stay text, and a code-span backtick is never part of a URL.
@@ -476,6 +529,8 @@ EOF
 test_full_snapshot_question_reaches_the_rendered_decision
 test_every_captains_call_card_takes_the_tallest_cards_height
 test_every_captains_call_card_opens_a_full_screen_details_view
+test_a_details_view_shows_the_type_badge_its_card_shows
+test_details_keeps_keyboard_focus_inside_and_closes_on_escape
 test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation
 test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details
 test_a_freeform_only_first_card_still_deals_the_next_card

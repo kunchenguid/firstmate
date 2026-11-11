@@ -7,7 +7,7 @@
 //   { stats:[{n,label,tag,type,scrolls_to,prompts}],
 //     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error,
-//     call:{wide:[page], narrow:[page], empty, details:[view]} }
+//     call:{wide:[page], narrow:[page], empty, details:[view], keys, advance} }
 // where a tile's scrolls_to lists the visible eyebrow heading of each section a
 // click scrolled to, read from the built page's markup (null for a target that
 // is not such a section), and each Captain's Call page is
@@ -20,17 +20,24 @@
 // the window narrows and fires resize. Each details view is what the Details
 // button of one shown card opened, paging from the first card: {button,
 // button_row, was_closed, open, title, ctx_rows, context, none, options:[{label,
-// rec, hint, details}], links, closed_after, focus, prompts}, where
-// button.controls is the declared role of the element the button's
-// aria-controls names, open and closed state are read from that element,
-// button_row is the row holding the button - its buttons' labels and its
-// display and flex-wrap resolved from the built page's stylesheet - and focus
-// is where keyboard focus landed once the view closed: {label, card, visible},
-// card being the title of the card that holds the focused element. call.advance
-// answers the first card, opens its Details before the deal's timer fires,
-// fires it, then closes the view: {answered, shown, focus} (null for fewer than
-// two cards). Focus moves only to an element with no hidden ancestor, as in a
-// browser, and timers fire only when the harness fires them.
+// rec, hint, details}], links, card_badges, meta_badges, closed_after, focus,
+// prompts}, where button.controls is the declared role of the element the
+// button's aria-controls names, open and closed state are read from that
+// element, button_row is the row holding the button - its buttons' labels and
+// its display and flex-wrap resolved from the built page's stylesheet -
+// card_badges and meta_badges are the badges on the card's top row and in the
+// view's header, and focus is where keyboard focus landed once the view closed:
+// {label, card, visible}, card being the title of the card that holds the
+// focused element. call.keys opens the first card's Details view and presses
+// keys on the page: {card, opened, steps:[{key, shift, prevented, open, focus,
+// page_overflow}]} (null for no cards), page_overflow being the body's overflow
+// resolved from the built page's stylesheet. call.advance answers the first
+// card, opens its Details before the deal's timer fires, fires it, then closes
+// the view: {answered, shown, focus} (null for fewer than two cards). The page's
+// static markup is an element tree, so an element starts hidden as its markup
+// declares; focus moves only to an element with no hidden ancestor, as in a
+// browser, the harness performs no key's default action, and timers fire only
+// when the harness fires them.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -101,13 +108,17 @@ class Node {
     return true;
   }
   focus() { if (this.rendered()) globalThis.document.activeElement = this; }
+  // A comma list of simple selectors, each [tag][.class][[attr]][:checked],
+  // matched in document order.
   querySelectorAll(sel) {
-    const want = sel.replace(/^\./, "").replace(/:checked$/, "");
-    const checkedOnly = sel.endsWith(":checked");
+    const parts = sel.split(",").map((s) => s.trim().match(/^([a-z]*)(?:\.([\w-]+))?(?:\[([\w-]+)\])?(:checked)?$/));
+    const hit = (c) => parts.some(([, tag, cls, attr, checked]) =>
+      (!tag || c.tagName === tag) && (!cls || c.className.split(/\s+/).includes(cls))
+        && (!attr || c[attr] || c.attributes[attr] != null) && (!checked || c.checked));
     const out = [];
     const walk = (n) => {
       for (const c of n.children) {
-        if (c.className.split(/\s+/).includes(want) && (!checkedOnly || c.checked)) out.push(c);
+        if (hit(c)) out.push(c);
         walk(c);
       }
     };
@@ -116,12 +127,39 @@ class Node {
   }
 }
 
-// The built page's static markup: the opening tag of every element it declares
-// by id, and the visible eyebrow heading of every section that carries an id.
+// The built page's static markup as an element tree in source order, each
+// element carrying its attributes, class, type, hidden state and, for a leaf,
+// its text; and the visible eyebrow heading of every section that carries an id.
 const markup = html.split("<script")[0];
-const declared = new Map(
-  [...markup.matchAll(/<[a-z][^>]*\sid="([^"]+)"[^>]*>/g)].map((m) => [m[1], m[0]]));
-const roleOf = (id) => declared.get(id)?.match(/\srole="([^"]*)"/)?.[1] ?? null;
+const byId = new Map();
+const VOID = new Set(["meta", "link", "input", "br", "img", "hr", "source", "wbr"]);
+const page = new Node("#document");
+let pageBody = null;
+{
+  const src = markup.replace(/<!--[\s\S]*?-->/g, "");
+  const open = [{ n: page, at: 0 }];
+  for (const m of src.matchAll(/<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g)) {
+    const [, close, tag, attrs] = m;
+    if (close) {
+      const top = open[open.length - 1];
+      if (top.n.tagName === tag && !top.n.children.length) {
+        top.n.textContent = src.slice(top.at, m.index).replace(/\s+/g, " ").trim();
+      }
+      while (open.length > 1 && open.pop().n.tagName !== tag);
+      continue;
+    }
+    const n = open[open.length - 1].n.appendChild(new Node(tag));
+    for (const [, k, v] of attrs.matchAll(/([\w-]+)(?:="([^"]*)")?/g)) n.attributes[k] = v ?? "";
+    n.className = n.attributes.class ?? "";
+    n.id = n.attributes.id ?? "";
+    n.type = n.attributes.type ?? "";
+    n.hidden = "hidden" in n.attributes;
+    if (n.id) byId.set(n.id, n);
+    if (tag === "body") pageBody = n;
+    if (!attrs.trimEnd().endsWith("/") && !VOID.has(tag)) open.push({ n, at: m.index + m[0].length });
+  }
+}
+const roleOf = (id) => byId.get(id)?.attributes.role ?? null;
 const sectionHeading = new Map(
   [...markup.matchAll(/<section\b[^>]*\sid="([^"]+)"[^>]*>([\s\S]*?)<\/section>/g)].map(([, id, body]) => [
     id,
@@ -163,43 +201,41 @@ const scrolls = [];
 const prompts = [];
 const timers = [];
 
-const byId = new Map();
 const dataNode = new Node("script");
 dataNode.textContent = html
   .split('<script id="bearings-data" type="application/json">')[1]
   .split("</script>")[0];
 byId.set("bearings-data", dataNode);
 
+const documentListeners = {};
 globalThis.document = {
   activeElement: null,
+  body: pageBody,
   createElement: (tag) => new Node(tag),
-  // Lazily mint an element the first time the page asks for it, but, as in a
-  // browser, only for an id its static markup declares; any other id is null.
-  getElementById: (id) => {
-    if (!byId.has(id) && declared.has(id)) {
-      const n = new Node("div");
-      n.id = id;
-      new Node("div").appendChild(n);
-      byId.set(id, n);
-    }
-    return byId.get(id) ?? null;
-  },
+  // As in a browser, only an id the static markup declares resolves.
+  getElementById: (id) => byId.get(id) ?? null,
   querySelector: (sel) => {
     const id = "sel:" + sel;
     if (!byId.has(id)) byId.set(id, new Node("div"));
     return byId.get(id);
   },
+  addEventListener: (type, fn) => { (documentListeners[type] ||= []).push(fn); },
 };
 const frames = [];
 const flushFrames = () => { while (frames.length) frames.shift()(); };
 const windowListeners = {};
+const fontListeners = {};
 let fontsReady;
 const fontsLoaded = new Promise((resolve) => { fontsReady = resolve; });
-globalThis.document.fonts = { ready: fontsLoaded };
+globalThis.document.fonts = {
+  ready: fontsLoaded,
+  addEventListener: (type, fn) => { (fontListeners[type] ||= []).push(fn); },
+};
 globalThis.window = {
   lavish: { queuePrompt: (...args) => prompts.push(args) },
   addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn); },
   requestAnimationFrame: (fn) => { frames.push(fn); },
+  matchMedia: () => ({ matches: false }),
 };
 globalThis.TextEncoder = TextEncoder;
 // A submitted form's entries: each named input's value, a radio only when checked.
@@ -227,6 +263,7 @@ const badgesOf = (row) =>
 fontsReady();
 await fontsLoaded;
 await Promise.resolve();
+for (const fn of fontListeners.loadingdone || []) fn({ type: "loadingdone" });
 flushFrames();
 
 // Page through Captain's Call from the first card with the back and next
@@ -308,6 +345,8 @@ const details = eachPage((card) => {
       details: o.querySelectorAll(".bb-modal__optp").map(text),
     })),
     links: linksIn(body),
+    card_badges: badgesOf(card.querySelectorAll(".bb-decision__top")[0]),
+    meta_badges: badgesOf(byId.get("bb-modal-meta")),
   };
   byId.get("bb-modal-close").dispatch("click");
   view.closed_after = modal?.hidden === true;
@@ -315,6 +354,27 @@ const details = eachPage((card) => {
   view.prompts = prompts.length - before;
   return view;
 });
+
+// Open the first card's Details view, then press Shift+Tab, Tab, Tab and Escape
+// on the page in turn. Each step records whether the page cancelled the key's
+// default action, where focus is, whether the view is open, and the page's
+// resolved overflow.
+const keys = (() => {
+  if (!decisionCards().length) return null;
+  showFirst();
+  const card = decisionCards().find((c) => !c.hidden);
+  const modal = byId.get("bb-modal");
+  const state = () => ({ open: modal.hidden === false, focus: focusNow(), page_overflow: styleOf(document.body, "overflow") });
+  const press = (key, shift) => {
+    const ev = { type: "keydown", key, shiftKey: shift, prevented: false, preventDefault() { this.prevented = true; } };
+    for (const fn of documentListeners.keydown || []) fn(ev);
+    return { key, shift, prevented: ev.prevented, ...state() };
+  };
+  card.querySelectorAll(".bb-detailsbtn")[0].dispatch("click");
+  const opened = state();
+  const steps = [["Tab", true], ["Tab", false], ["Tab", false], ["Escape", false]].map(([key, shift]) => press(key, shift));
+  return { card: titleOf(card), opened, steps };
+})();
 
 const callWide = pageCall();
 layout.width = 320;
@@ -391,4 +451,4 @@ const advance = (() => {
 
 process.stdout.write(
   JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText,
-    call: { wide: callWide, narrow: callNarrow, empty: callEmpty, details, advance } }) + "\n");
+    call: { wide: callWide, narrow: callNarrow, empty: callEmpty, details, keys, advance } }) + "\n");

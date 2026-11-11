@@ -504,6 +504,9 @@ __FM_BEARINGS_BOARD_DATA__
     return n;
   }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  function typeBadge(item) {
+    return item.type === "merge" ? badge("online", "checks green") : badge("solid", "decision");
+  }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
@@ -541,7 +544,7 @@ __FM_BEARINGS_BOARD_DATA__
   function scrollToSection(id) {
     var section = document.getElementById(id);
     if (!section) return;
-    var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     section.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
   }
   stats.forEach(function (s) {
@@ -575,7 +578,6 @@ __FM_BEARINGS_BOARD_DATA__
   var modalScroll = document.getElementById("bb-modal-scroll");
   var modalClose = document.getElementById("bb-modal-close");
   var detailsButtons = [];
-  modal.hidden = true;
   /* Only https:// URLs become links; trailing sentence punctuation stays text. */
   var URL_RE = /https:\/\/[^\s<>"'`]+/g;
   var URL_OPENER = { ")": "(", "]": "[" };
@@ -617,8 +619,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   function openDetails(item) {
     modalMeta.textContent = "";
-    if (item.type === "merge") modalMeta.appendChild(badge("online", "checks green"));
-    else modalMeta.appendChild(badge("solid", item.type === "credential" ? "credential" : "decision"));
+    modalMeta.appendChild(typeBadge(item));
     if (item.repo) modalMeta.appendChild(el("span", "bb-decision__repo", item.repo));
     modalTitle.textContent = item.title;
     modalBody.textContent = "";
@@ -658,15 +659,15 @@ __FM_BEARINGS_BOARD_DATA__
     modalBody.appendChild(optSec);
 
     modal.hidden = false;
-    if (modalScroll) modalScroll.scrollTop = 0;
-    if (document.body && document.body.classList) document.body.classList.add("bb-modal-open");
+    modalScroll.scrollTop = 0;
+    document.body.classList.add("bb-modal-open");
     setPageInert(true);
     modalClose.focus();
   }
   function closeDetails() {
     if (modal.hidden) return;
     modal.hidden = true;
-    if (document.body && document.body.classList) document.body.classList.remove("bb-modal-open");
+    document.body.classList.remove("bb-modal-open");
     setPageInert(false);
     /* Focus returns to the Details button of the card now shown: the one that
        opened the view, or, when an answer queued just before opening has since
@@ -674,31 +675,28 @@ __FM_BEARINGS_BOARD_DATA__
     detailsButtons[active].focus();
   }
   modalClose.addEventListener("click", closeDetails);
-  if (document.addEventListener) {
-    document.addEventListener("keydown", function (ev) {
-      if (modal.hidden) return;
-      if (ev.key === "Escape") { ev.preventDefault(); closeDetails(); return; }
-      if (ev.key !== "Tab") return;
-      /* keep keyboard focus inside the open view */
-      var focusable = Array.prototype.filter.call(modal.querySelectorAll("a[href], button"),
-        function (n) { return !n.disabled; });
-      if (!focusable.length) return;
-      var first = focusable[0], last = focusable[focusable.length - 1];
-      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
-      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
-    });
-  }
+  document.addEventListener("keydown", function (ev) {
+    if (modal.hidden) return;
+    if (ev.key === "Escape") { ev.preventDefault(); closeDetails(); return; }
+    if (ev.key !== "Tab") return;
+    /* keep keyboard focus inside the open view */
+    var focusable = Array.prototype.filter.call(modal.querySelectorAll("a[href], button"),
+      function (n) { return !n.disabled; });
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  });
 
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
 
     var top = el("div", "bb-decision__top");
+    top.appendChild(typeBadge(item));
     if (item.type === "merge") {
-      top.appendChild(badge("online", "checks green"));
       top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
     } else {
-      top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
     }
     pad.appendChild(top);
@@ -861,10 +859,8 @@ __FM_BEARINGS_BOARD_DATA__
     showCard(0);
     fitStackHeight();
     window.addEventListener("resize", queueFit);
-    if (document.fonts) {
-      if (document.fonts.ready) document.fonts.ready.then(queueFit);
-      if (document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", queueFit);
-    }
+    document.fonts.ready.then(queueFit);
+    document.fonts.addEventListener("loadingdone", queueFit);
   } else {
     deck.classList.add("bb-call--empty");
     deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
