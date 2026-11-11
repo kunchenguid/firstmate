@@ -166,6 +166,21 @@ SH
   pass "fm-secondmate-rotate tokens: Herdr bare IDs select exact, unambiguous Pi transcripts"
 }
 
+test_unreadable_herdr_registration_stays_unmeasured() {
+  local dir out
+  dir=$(new_case herdr-unreadable)
+  add_mate "$dir" unbound pi 900000
+  sed -i.bak 's/^window=.*/window=herdr-session:pane-1/; $a backend=herdr' "$dir/home/state/unbound.meta"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+  out=$(run_rotate "$dir" tokens unbound)
+  [ "$out" = unmeasured ] || fail "an unreadable Herdr registration must not fall back to newest JSONL, got: $out"
+  pass "fm-secondmate-rotate tokens: unreadable Herdr registrations stay unmeasured"
+}
+
 test_account_pinned_transcript_root_is_measured() {
   local dir out account_root transcript_dir
   dir=$(new_case account-root)
@@ -258,6 +273,7 @@ test_watcher_sweep_queues_the_rotation() {
 
 test_tokens_reads_each_measured_harness
 test_bound_herdr_id_selects_exact_session
+test_unreadable_herdr_registration_stays_unmeasured
 test_account_pinned_transcript_root_is_measured
 test_scan_rotates_only_due_mates_once_per_window
 test_invalid_restart_does_not_consume_rotation_window

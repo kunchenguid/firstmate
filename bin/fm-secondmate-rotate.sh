@@ -135,12 +135,12 @@ pi_bound_session() {  # <meta> <session-dir>
   local -a matches=()
   [ "$(fm_backend_of_meta "$meta")" = herdr ] || return 1
   target=$(fm_backend_target_of_meta "$meta")
-  fm_backend_source herdr >/dev/null 2>&1 || return 1
-  fm_backend_herdr_parse_target "$target" || return 1
-  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
-  [ "${identity%%$'\t'*}" = pi ] || return 1
+  fm_backend_source herdr >/dev/null 2>&1 || return 2
+  fm_backend_herdr_parse_target "$target" || return 2
+  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 2
+  [ "${identity%%$'\t'*}" = pi ] || return 2
   ref=${identity#*$'\t'}
-  [ -n "$ref" ] || return 1
+  [ -n "$ref" ] || return 2
   case "$ref" in
     /*)
       [ -f "$ref" ] && [ -r "$ref" ] || return 2

@@ -170,6 +170,7 @@ for meta in "$STATE"/*.meta; do
     'done '*|'done['*|'failed '*|'failed['*) continue ;;
   esac
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
+  pre_gen=$(fm_meta_get "$meta" spawn_gen)
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || continue
@@ -185,10 +186,24 @@ for meta in "$STATE"/*.meta; do
   [ -n "$verdict" ] || continue
   class=${verdict%%$'\t'*}
   row=${verdict#*$'\t'}
-  gen=$(fm_meta_get "$meta" spawn_gen)
   record="$STATE/$id.quota-breaker"
   breaker_lock="$STATE/.quota-breaker-$id.lock"
   fm_lock_try_acquire "$breaker_lock" || continue
+  if [ ! -f "$meta" ]; then
+    fm_lock_release "$breaker_lock"
+    continue
+  fi
+  case "$(grep -v '^[[:space:]]*$' "$STATE/$id.status" 2>/dev/null | tail -n 1)" in
+    'done '*|'done['*|'failed '*|'failed['*)
+      fm_lock_release "$breaker_lock"
+      continue
+      ;;
+  esac
+  gen=$(fm_meta_get "$meta" spawn_gen)
+  [ "$gen" = "$pre_gen" ] || {
+    fm_lock_release "$breaker_lock"
+    continue
+  }
   if [ -f "$record" ] \
      && [ "$(sed -n 's/^class=//p' "$record")" = "$class" ] \
      && [ "$(sed -n 's/^spawn_gen=//p' "$record")" = "$gen" ]; then
