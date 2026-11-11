@@ -1,0 +1,9 @@
+{run-worktree}/.live-tools/fish-4.0.2.app/Contents/Resources/base/usr/local/bin/fish
+79770 -fish
+FM_BACKEND=tmux
+FM_CONFIG_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_DATA_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_PROJECTS_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_ROOT_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison

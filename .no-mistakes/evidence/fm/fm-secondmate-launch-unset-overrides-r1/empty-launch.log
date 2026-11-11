@@ -1,0 +1,4 @@
+fm-gate-refuse: gate agent lifecycle permitted only against lab home /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+warning: secondmate envproof sync skipped before launch: primary default-branch commit cannot be resolved
+spawned envproof harness=claude kind=secondmate mode=secondmate yolo=off window=primary:fm-envproof worktree=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF

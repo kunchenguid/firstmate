@@ -1,0 +1,4 @@
+Private lab cleanup verification
+Parent lab removed
+Secondmate lab removed
+Private tmux socket removed

@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Opus 4.8 with high effort · Claude Ultra
+ ▝▝   ▝▝   /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+
+
+❯ : Firstmate operational input waiting: read '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF/s
+  tate/operational-inbox/1794359937-6c743c3dfced6f4b.msg' and handle its contents as Firstmate operational input.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+· Accomplishing… (running UserPromptSubmit hooks… 1/2 · 7s)
+                                                                                                      ● high · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

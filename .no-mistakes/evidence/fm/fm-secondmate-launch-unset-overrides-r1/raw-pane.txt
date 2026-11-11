@@ -1,0 +1,41 @@
+
+
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Opus 4.8 with high effort · Claude Ultra
+ ▝▝   ▝▝   /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+
+
+!  bash {run-worktree}/.live-tools/probe.sh
+  raw-exec-nonempty
+  ⎿  (Bash completed with no output)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✢ Proofing… (10s · thinking with high effort)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

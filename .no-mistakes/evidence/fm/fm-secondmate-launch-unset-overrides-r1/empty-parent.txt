@@ -1,0 +1,8 @@
+/bin/bash
+FM_BACKEND=tmux
+FM_CONFIG_OVERRIDE=
+FM_DATA_OVERRIDE=
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_PROJECTS_OVERRIDE=
+FM_ROOT_OVERRIDE=
+FM_STATE_OVERRIDE=

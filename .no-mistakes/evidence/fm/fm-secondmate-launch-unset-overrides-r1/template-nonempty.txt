@@ -1,0 +1,13 @@
+Actual secondmate CLI child environment (template-nonempty)
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_SUPERVISION_MODEL=autoarm
+FM_ROOT_OVERRIDE: absent
+FM_STATE_OVERRIDE: absent
+FM_DATA_OVERRIDE: absent
+FM_PROJECTS_OVERRIDE: absent
+FM_CONFIG_OVERRIDE: absent
+unregistered: state/env-proof.check.sh
+PASS: both synthetic watcher files retired in secondmate state
+error: state directory is unavailable
+PASS: explicit-empty override remains refused

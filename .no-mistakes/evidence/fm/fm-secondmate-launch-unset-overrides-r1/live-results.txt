@@ -1,0 +1,98 @@
+Live pane-path validation: real Claude Code 2.1.322, synthetic disposable homes, private tmux socket.
+The normal Claude login was used unchanged. Fish 4.0.2 and Claude were materialized under the worktree only and removed afterward. No default tmux or Herdr session was driven.
+
+Oracle: all five operational overrides must be absent (printenv must return nonzero); fm-check-unregister must remove both synthetic watcher artifacts only in the secondmate state. Explicitly empty FM_STATE_OVERRIDE must still be refused.
+
+
+=== template-nonempty.txt ===
+Actual secondmate CLI child environment (template-nonempty)
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_SUPERVISION_MODEL=autoarm
+FM_ROOT_OVERRIDE: absent
+FM_STATE_OVERRIDE: absent
+FM_DATA_OVERRIDE: absent
+FM_PROJECTS_OVERRIDE: absent
+FM_CONFIG_OVERRIDE: absent
+unregistered: state/env-proof.check.sh
+PASS: both synthetic watcher files retired in secondmate state
+error: state directory is unavailable
+PASS: explicit-empty override remains refused
+
+
+=== raw-exec-nonempty.txt ===
+Actual secondmate CLI child environment (raw-exec-nonempty)
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_SUPERVISION_MODEL=persistent
+FM_ROOT_OVERRIDE: absent
+FM_STATE_OVERRIDE: absent
+FM_DATA_OVERRIDE: absent
+FM_PROJECTS_OVERRIDE: absent
+FM_CONFIG_OVERRIDE: absent
+unregistered: state/env-proof.check.sh
+PASS: both synthetic watcher files retired in secondmate state
+error: state directory is unavailable
+PASS: explicit-empty override remains refused
+
+
+=== fish-parent.txt ===
+{run-worktree}/.live-tools/fish-4.0.2.app/Contents/Resources/base/usr/local/bin/fish
+79770 -fish
+FM_BACKEND=tmux
+FM_CONFIG_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_DATA_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_PROJECTS_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_ROOT_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3/parent-poison
+
+
+=== fish-nonempty.txt ===
+Actual secondmate CLI child environment (fish-nonempty)
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_SUPERVISION_MODEL=autoarm
+FM_ROOT_OVERRIDE: absent
+FM_STATE_OVERRIDE: absent
+FM_DATA_OVERRIDE: absent
+FM_PROJECTS_OVERRIDE: absent
+FM_CONFIG_OVERRIDE: absent
+unregistered: state/env-proof.check.sh
+PASS: both synthetic watcher files retired in secondmate state
+error: state directory is unavailable
+PASS: explicit-empty override remains refused
+
+
+=== empty-parent.txt ===
+/bin/bash
+FM_BACKEND=tmux
+FM_CONFIG_OVERRIDE=
+FM_DATA_OVERRIDE=
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_PROJECTS_OVERRIDE=
+FM_ROOT_OVERRIDE=
+FM_STATE_OVERRIDE=
+
+
+=== template-empty.txt ===
+Actual secondmate CLI child environment (template-empty)
+FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.EVZ9JF
+FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.WdeMm3
+FM_SUPERVISION_MODEL=autoarm
+FM_ROOT_OVERRIDE: absent
+FM_STATE_OVERRIDE: absent
+FM_DATA_OVERRIDE: absent
+FM_PROJECTS_OVERRIDE: absent
+FM_CONFIG_OVERRIDE: absent
+unregistered: state/env-proof.check.sh
+PASS: both synthetic watcher files retired in secondmate state
+error: state directory is unavailable
+PASS: explicit-empty override remains refused
+
+
+=== cleanup.txt ===
+Private lab cleanup verification
+Parent lab removed
+Secondmate lab removed
+Private tmux socket removed
