@@ -62,18 +62,24 @@ RULES=
 if [ -n "$RULES" ]; then
   [ "$(jq -r '.shared_quota // false' "$RULES" 2>/dev/null)" != true ] || exit 0
   if [ -z "$PROVIDER" ]; then
-    declared=$(jq -r --arg h "$HARNESS" --arg m "$MODEL" --arg e "$EFFORT" '
+    single_provider=$(fm_quota_single_provider_for_harness "$HARNESS" 2>/dev/null || true)
+    declared=$(jq -r --arg h "$HARNESS" --arg m "$MODEL" --arg e "$EFFORT" --arg single_p "$single_provider" '
         def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
         [ ((.rules // [])[] | profiles(.use)[], profiles(.default)[]), profiles(.default)[] ]
-        | map(select(.harness == $h and ((.model // "") == $m) and ((.provider // "") != "")))
+        | map(select(.harness == $h and ((.model // "") == $m)))
+        | map({provider: (.provider // $single_p), quota_scope: (.quota_scope // ""), effort: (.effort // "")})
+        | map(select(.provider != ""))
         | (if ($e != "" and $e != "default") then
-             (map(select((.effort // "") == $e)) as $effort
+             (map(select(.effort == $e)) as $effort
               | if ($effort | length) > 0 then $effort else . end)
            else . end)
-        | map({provider: .provider, quota_scope: (.quota_scope // "")})
+        | map({provider, quota_scope})
         | unique_by([.provider, .quota_scope])
-        | if length == 1 then .[0] | "\(.provider)\t\(.quota_scope)" else empty end
+        | if length > 1 then "ambiguous"
+          elif length == 1 then .[0] | "\(.provider)\t\(.quota_scope)"
+          else "" end
       ' "$RULES" 2>/dev/null) || declared=
+    [ "$declared" != ambiguous ] || exit 0
     if [ -n "$declared" ]; then
       PROVIDER=${declared%%$'\t'*}
       [ -n "$QUOTA_SCOPE" ] || QUOTA_SCOPE=${declared#*$'\t'}

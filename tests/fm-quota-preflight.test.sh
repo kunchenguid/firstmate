@@ -45,7 +45,8 @@ cat > "$CONFIG/crew-dispatch.json" <<'EOF'
   {"harness":"pi","model":"multi/model","effort":"high","provider":"zai"},
   {"harness":"pi","model":"ambiguous/model","effort":"high","provider":"zai"},
   {"harness":"pi","model":"ambiguous/model","effort":"high","provider":"agy","quota_scope":"gemini"}]}],
- "default":[{"harness":"claude","model":"sonnet","effort":"high"},
+ "default":[{"harness":"claude","model":"sonnet","effort":"high","provider":"claude"},
+  {"harness":"claude","model":"sonnet","effort":"high","provider":"zai"},
   {"harness":"pi","model":"zai/default-model","effort":"high","provider":"zai"}]}
 EOF
 
@@ -60,7 +61,7 @@ test_exhausted_candidate_gets_one_notice() {
   assert_contains "$out" "quota-preflight: claude:fable provider claude is exhausted_now at model:fable (0% left)" \
     "an exhausted model scope should be named"
   out=$(preflight claude sonnet)
-  [ -z "$out" ] || fail "a candidate with applicable headroom must get no notice, got: $out"
+  [ -z "$out" ] || fail "conflicting claude profiles must stay quiet rather than use the family fallback, got: $out"
   pass "fm-quota-preflight: an exhausted candidate gets one notice, a healthy one none"
 }
 
