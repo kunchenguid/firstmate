@@ -88,7 +88,8 @@
 #                              primary harness, or none, is torn down as `stop`
 #                              tears it down, without clearing state/.afk or
 #                              archiving the posture record, and a fresh daemon
-#                              is launched for this pane.
+#                              is launched for this pane, keeping the escalation
+#                              buffer the old daemon could not deliver.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
@@ -797,7 +798,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 }
 
 fm_afk_launch_start() {  # [--replace-mismatched]
-  local captain_target captain_backend backup artifact had_afk=0 result replace=0
+  local captain_target captain_backend backup artifact had_afk=0 result replace=0 keep=''
   [ "${1:-}" != --replace-mismatched ] || replace=1
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
@@ -823,6 +824,9 @@ fm_afk_launch_start() {  # [--replace-mismatched]
       || [ "$FM_AFK_REC_HARNESS" != "$(fm_afk_launch_primary_harness)" ]; then
       fm_afk_launch_log "replacing the live daemon recorded for pane '${FM_AFK_REC_CAPTAIN:-none}' (harness ${FM_AFK_REC_HARNESS:-none}) with one for $captain_target"
       fm_afk_launch_daemon_teardown || return 1
+      # Same posture: the old daemon's buffer holds wakes it already acked
+      # but could not deliver to the gone pane; its successor delivers them.
+      keep=--keep-escalations
     fi
   fi
 
@@ -850,7 +854,7 @@ fm_afk_launch_start() {  # [--replace-mismatched]
   if ! fm_afk_launch_reconcile; then
     result=1
   else
-    if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+    if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE" ${keep:+"$keep"}; then
       result=0
     else
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
