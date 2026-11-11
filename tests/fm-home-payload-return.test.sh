@@ -29,6 +29,22 @@ with open(state, "w") as stream:
 PYSTATE
 }
 write_pool_lease mate
+if python3 - "$home" <<'PYDEVICE'
+import os
+import sys
+sys.exit(0 if os.stat(sys.argv[1]).st_dev != os.stat("/dev").st_dev else 1)
+PYDEVICE
+then
+  if fm_home_payload_check_devices "$home" /dev; then
+    fail 'cross-device staging was accepted'
+  fi
+  if fm_home_payload_check_devices /dev "$home"; then
+    fail 'cross-device restoration was accepted'
+  fi
+  assert_present "$home/data/notes" 'device refusal lost home data'
+  assert_present "$home/.fm-secondmate-home" 'device refusal lost home identity'
+  assert_present "$gitdir/locked" 'device refusal lost protection'
+fi
 printf 'mate\n' > "$TMP_ROOT/lease"
 return_slot() {
   [ -f "$TMP_ROOT/lease" ] || return 1

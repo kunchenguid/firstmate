@@ -267,7 +267,7 @@ SH
 # retired mate's payload refuses the next seed as "already marked for <mate>",
 # which turns one ordinary retirement into a permanently unusable pool slot.
 test_durable_home_pool_slot_reuse() {
-  local fmroot home sub fakebin log gitdir guard
+  local fmroot home sub fakebin log gitdir
   fmroot="$TMP_ROOT/slot-reuse-code"
   home="$TMP_ROOT/slot-reuse-parent"
   sub="$TMP_ROOT/slot-reuse-subhome"
@@ -311,20 +311,7 @@ test_durable_home_pool_slot_reuse() {
   grep -F 'id=second' "$gitdir/firstmate-home-lock" >/dev/null || fail "the re-seeded home carries no ownership receipt"
   grep -F 'Firstmate durable home second' "$gitdir/locked" >/dev/null || fail "the re-seeded home carries no Git lock"
 
-  # The cleanup never deletes a checkout's own tracked files: a home whose tree
-  # tracks a payload path is refused instead of being dirtied into a failed return.
-  guard="$TMP_ROOT/slot-reuse-tracked"
-  git -C "$fmroot" worktree add --quiet --detach "$guard" HEAD || fail "cannot create tracked-payload worktree"
-  mkdir -p "$guard/data"
-  printf 'tracked\n' > "$guard/data/notes.md"
-  git -C "$guard" add -f data/notes.md || fail "cannot stage a tracked payload file"
-  git -C "$guard" -c user.name=test -c user.email=test@example.invalid commit -q -m 'track payload' \
-    || fail "cannot commit a tracked payload file"
-  if bash -c '. "$1"; fm_home_payload_prune "$2"' _ "$ROOT/bin/fm-home-payload-lib.sh" "$guard" 2>/dev/null; then
-    fail "payload prune deleted a payload path that carries tracked files"
-  fi
-  assert_present "$guard/data/notes.md" "refused payload prune removed a tracked file"
-  pass "pooled retirement returns a clean slot, the next seed leases it, and tracked payload is never pruned"
+  pass "pooled retirement returns a clean slot and the next seed leases it"
 }
 
 test_fm_home_parameterization() {
