@@ -3337,6 +3337,8 @@ run_check_capture() {
   fm_check_output_cleanup
   # Keep what the check printed before the cut, then report the cut itself.
   [ "$rc" -ne 124 ] || FM_CHECK_RESULT="${FM_CHECK_RESULT:+$FM_CHECK_RESULT$'\n'}timed out after ${CHECK_TIMEOUT}s"
+  # A crashed check must not read as a quiet one; stderr stays unread because it may hold secrets.
+  [ "$rc" -eq 0 ] || [ -n "$FM_CHECK_RESULT" ] || FM_CHECK_RESULT="check failed with exit $rc"
 }
 
 FM_CAPTURE_OUTPUT=
