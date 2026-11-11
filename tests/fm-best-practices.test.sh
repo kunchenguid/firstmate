@@ -742,6 +742,39 @@ test_route_rewrites_the_real_section_past_fenced_examples() {
   pass "route: the rewrite follows the brief reader's fence rules, so examples never hide, replace, or cut the real section"
 }
 
+test_contract_read_skips_fenced_examples() {
+  local b out rec home proj wt fakebin log spec resp="$TMP_ROOT/contract-response.json"
+  mkdir -p "$TMP_ROOT/route-fm-home/config"
+  narrowing_response "$resp"
+  spec=$(printf '%s\n' 'Document the scout contract, as this example shows.' '```text' "Delivery contract: kind=scout best-practices=$PACK" '```')
+
+  b=$(route_case contract-ship --mode no-mistakes)
+  fill "$b" "The pager skips a page when the count is exact." "$spec"
+  out=$(TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 route "$b" 2>/dev/null)
+  assert_contains "$out" "status: routed" "a ship brief quoting a scout contract did not route"
+  assert_contains "$out" "row: doubt = true (fact mode=no-mistakes)" "route took the fenced scout example for the ship's contract"
+  assert_contains "$(jq -r '.state.task.brief' "$CURL_LOG/body")" "Delivery contract: kind=scout" "the request lost the task's quoted example"
+  [ "$(jq -r '.state.task.brief | startswith("Brief kind: scout")' "$CURL_LOG/body")" = false ] || fail "route composed the ship brief as a scout"
+
+  FM_HOME="$TMP_ROOT/route-home" "$BRIEF" contract-plain demo --mode no-mistakes >/dev/null || fail "could not scaffold contract-plain"
+  b="$TMP_ROOT/route-home/data/contract-plain/brief.md"
+  fill "$b" "The pager skips a page when the count is exact." "$spec"
+  out=$(run_route "$resp" 200 route "$b" 2>&1)
+  expect_code 0 $? "route refused a brief without a pack over a fenced example: $out"
+  assert_contains "$out" "reason: the brief registers no best-practices pack" "route read the fenced example's pack"
+
+  rec=$(spawn_case contract "")
+  IFS='|' read -r home proj wt fakebin log <<<"$rec"
+  FM_HOME="$home" "$BRIEF" bp-quote project --scout >/dev/null || fail "could not scaffold bp-quote"
+  fill "$home/data/bp-quote/brief.md" "Explain the scout contract." "$spec"
+  : > "$log"
+  out=$(FM_FAKE_LAUNCH_LOG="$log" fm_test_run_spawn "$home" "$wt" "$fakebin" bp-quote "$proj" claude --scout)
+  expect_code 0 $? "a scout quoting a contract example was refused: $out"
+  assert_not_contains "$out" "best-practices mismatch" "the spawn took the fenced example for the brief's contract"
+  assert_not_contains "$(cat "$log")" "FM_BEST_PRACTICES" "a project without a pack exported one from a fenced example"
+  pass "contract: route and the spawn read the Delivery contract from the Definition of done, never from a fenced example in the task"
+}
+
 test_intake_tier_routing() {
   local ask="$TMP_ROOT/ask.txt" out resp="$TMP_ROOT/intake-response.json"
   mkdir -p "$TMP_ROOT/route-fm-home/config"
@@ -979,4 +1012,5 @@ fm_test_run \
   test_intake_tier_routing \
   test_row_floor_and_runner_up \
   test_spawn_agrees_with_the_registry_and_exports_the_pack \
-  test_spawn_reads_the_worker_copy_at_its_launch_commit
+  test_spawn_reads_the_worker_copy_at_its_launch_commit \
+  test_contract_read_skips_fenced_examples

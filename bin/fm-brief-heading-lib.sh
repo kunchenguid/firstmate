@@ -6,8 +6,9 @@
 # `# Task` subsections bin/fm-brief.sh scaffolds feed the no-mistakes
 # `--intent` contract in bin/fm-dod-lib.sh, spawn and promotion validation,
 # the task text bin/fm-dispatch-resolve.sh sends to the router, and the practice
-# section bin/fm-best-practices.sh route rewrites, so every consumer sees the
-# same section bodies.
+# section bin/fm-best-practices.sh route rewrites, plus the best-practices
+# reads of the Delivery contract line in bin/fm-spawn.sh and
+# bin/fm-best-practices.sh route, so every consumer sees the same section bodies.
 
 # The line rules every brief reader shares, as awk functions. brief_scan_line
 # strips up to three leading spaces into `scan` and tracks fences: `is_fence`
@@ -121,6 +122,13 @@ fm_brief_heading_body() {  # <file> <heading>
 
 fm_brief_heading_present() {  # <file> <heading>
   fm_brief_heading_parse "$1" "$2" present >/dev/null
+}
+
+# The brief's Delivery contract line: the first line starting "Delivery
+# contract: " in the generated # Definition of done section, so a contract
+# example the # Task subsections quote is never taken for it.
+fm_brief_delivery_contract() {  # <file>
+  fm_brief_heading_body "$1" "# Definition of done" | grep -m 1 '^Delivery contract: ' || true
 }
 
 fm_brief_task_heading_body() {  # <file> <heading>

@@ -4585,7 +4585,8 @@ fi
 
 # Best-practices pack (bin/fm-project-mode.sh --best-practices): a project fact
 # like the forge, never a per-task choice, so a ship or scout brief must carry
-# exactly the registered value on its Delivery contract line. A project without
+# exactly the registered value on its Delivery contract line, read from the
+# Definition of done (fm_brief_delivery_contract). A project without
 # the token never causes a plugin registry read. The pack read itself waits
 # for the prepared worker copy below.
 BEST_PRACTICES=none
@@ -4598,7 +4599,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     exit 1
   fi
   [ -n "$BEST_PRACTICES" ] || BEST_PRACTICES=none
-  BRIEF_BEST_PRACTICES=$(sed -n 's/^Delivery contract: .*[[:space:]]best-practices=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_BEST_PRACTICES=$(fm_brief_delivery_contract "$BRIEF" | sed -n 's/^Delivery contract: .*[[:space:]]best-practices=\([^ ]*\).*$/\1/p')
   [ -n "$BRIEF_BEST_PRACTICES" ] || BRIEF_BEST_PRACTICES=none
   if [ "$BRIEF_BEST_PRACTICES" != "$BEST_PRACTICES" ]; then
     if [ "$KIND" = scout ]; then

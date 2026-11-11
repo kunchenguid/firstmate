@@ -425,7 +425,7 @@ cmd_route() {
   local brief=$1 project=$2 contract repo kind mode forge manifest intent sections rows words ask_rows state values new_file out_file
   [ -r "$brief" ] || die "brief file not readable: $brief"
   ROUTE_LABEL='best-practices-route'
-  contract=$(grep -m 1 '^Delivery contract: ' "$brief" || true)
+  contract=$(fm_brief_delivery_contract "$brief")
   repo=$(printf '%s\n' "$contract" | sed -n 's/^Delivery contract: .*[[:space:]]best-practices=\([^ ]*\).*$/\1/p')
   if [ -z "$repo" ]; then
     printf '%s:\n  status: off\n  reason: the brief registers no best-practices pack\n' "$ROUTE_LABEL"
