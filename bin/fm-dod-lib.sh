@@ -981,35 +981,47 @@ fm_dod_nm_custody_returned() {  # <worktree>
 
 # Refreshes <repo>'s remote-tracking refs from every remote except the local
 # no-mistakes gate, which is a validation copy on this machine: fetching it
-# would count work that no real remote holds. origin, when there is one, is
-# fetched first, then the other remotes. Each fetch is bounded to <seconds>
-# (default 30) and is non-interactive. When <deadline> (epoch seconds) is given,
-# each fetch is also bounded to an even share of the time left before it among
-# the remotes still to fetch, so one remote that hangs cannot take the time of
-# the ones after it; a remote whose turn comes after <deadline> is not fetched.
+# would count work that no real remote holds. When <project> is given, its
+# remotes are refreshed the same way after <repo>'s. In each repository origin,
+# when there is one, is fetched first, then the other remotes. Each fetch is
+# bounded to <seconds> (default 30) and is non-interactive. When <deadline>
+# (epoch seconds) is given, each fetch is also bounded to an even share of the
+# time left before it among the remotes still to fetch in both repositories,
+# so one remote that hangs cannot take the time of the ones after it, <project>'s
+# included; a remote whose turn comes after <deadline> is not fetched.
 # --no-prune keeps a branch a remote has dropped visible whatever fetch.prune
 # says, and the explicit refspec covers every branch even when a clone tracks
 # only some of them.
 # A fetch that fails, times out, or is not made only leaves the last-known refs
-# in place; its remote is appended to FM_DOD_REFRESH_FAILED (", "-separated) so
-# a refusal can say its verdict used those refs. Always returns 0.
+# in place; its remote is appended to FM_DOD_REFRESH_FAILED (", "-separated),
+# with " (project clone)" after a <project> remote, so a refusal can say its
+# verdict used those refs. Always returns 0.
 # bin/fm-teardown.sh and the named-head gate below share this one refresh.
 FM_DOD_REFRESH_FAILED=
-fm_dod_refresh_remote_refs() {  # <repo> [<seconds>] [<deadline>]
-  local repo=$1 seconds=${2:-30} deadline=${3:-} remote remotes='' pending=0 bound left
+fm_dod_refresh_remote_refs() {  # <repo> [<seconds>] [<deadline>] [<project>]
+  local repo=$1 seconds=${2:-30} deadline=${3:-} project=${4:-} where dir label remote first rest remotes='' pending=0 bound left
   [ -n "$repo" ] && [ -d "$repo" ] || return 0
-  while IFS= read -r remote; do
-    case "$remote" in
-      ''|no-mistakes) continue ;;
-      origin) remotes="origin"$'\n'"$remotes" ;;
-      *) remotes="$remotes$remote"$'\n' ;;
-    esac
-    pending=$((pending + 1))
-  done <<EOF
-$(git -C "$repo" remote 2>/dev/null)
+  for where in repo project; do
+    dir=$repo
+    [ "$where" = repo ] || dir=$project
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    first='' rest=''
+    while IFS= read -r remote; do
+      case "$remote" in
+        ''|no-mistakes) continue ;;
+        origin) first="$where origin"$'\n' ;;
+        *) rest="$rest$where $remote"$'\n' ;;
+      esac
+      pending=$((pending + 1))
+    done <<EOF
+$(git -C "$dir" remote 2>/dev/null)
 EOF
-  while IFS= read -r remote; do
+    remotes="$remotes$first$rest"
+  done
+  while read -r where remote; do
     [ -n "$remote" ] || continue
+    dir=$repo label=''
+    [ "$where" = repo ] || { dir=$project; label=' (project clone)'; }
     bound=$seconds
     if [ -n "$deadline" ]; then
       left=$((deadline - $(date +%s)))
@@ -1018,9 +1030,9 @@ EOF
     fi
     pending=$((pending - 1))
     [ "$bound" -gt 0 ] \
-      && GIT_TERMINAL_PROMPT=0 fm_run_timed "$bound" git -C "$repo" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
+      && GIT_TERMINAL_PROMPT=0 fm_run_timed "$bound" git -C "$dir" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
         "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
-      || FM_DOD_REFRESH_FAILED="$FM_DOD_REFRESH_FAILED${FM_DOD_REFRESH_FAILED:+, }$remote"
+      || FM_DOD_REFRESH_FAILED="$FM_DOD_REFRESH_FAILED${FM_DOD_REFRESH_FAILED:+, }$remote$label"
   done <<EOF
 $remotes
 EOF
@@ -1047,27 +1059,27 @@ fm_dod_named_head_on_surviving_ref() {  # <worktree> <project> <mode> <sha>
 # triggers one fm_dod_refresh_remote_refs of the copy, and of the project clone
 # when its git directory differs, bounded at 30 seconds per fetch, and is then
 # checked again. When FM_DOD_REFRESH_DEADLINE (epoch seconds) is also set, the
-# whole refresh, every fetch together, ends by then, and none is made once it
-# has passed. Without FM_DOD_REFRESH_REMOTES the check reads the refs as they
-# are and makes no network call. FM_DOD_REFRESH_FAILED names any remote that
-# could not be refreshed, including one left unfetched because the deadline
-# had passed.
+# whole refresh, every fetch in both repositories together, ends by then, and
+# none is made once it has passed. Without FM_DOD_REFRESH_REMOTES the check
+# reads the refs as they are and makes no network call. FM_DOD_REFRESH_FAILED
+# names any remote that could not be refreshed, including one left unfetched
+# because the deadline had passed.
 fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
-  local wt=$1 project=$2 deadline=${FM_DOD_REFRESH_DEADLINE:-} wt_common project_common
+  local wt=$1 project=$2 deadline=${FM_DOD_REFRESH_DEADLINE:-} wt_common project_common separate=''
   FM_DOD_REFRESH_FAILED=
   fm_dod_named_head_on_surviving_ref "$@" && return 0
   [ "${FM_DOD_REFRESH_REMOTES:-0}" = 1 ] || return 1
   case "$deadline" in
     0*|*[!0-9]*) return 1 ;;
   esac
-  fm_dod_refresh_remote_refs "$wt" 30 "$deadline"
   if [ -n "$project" ] && [ -d "$project" ]; then
     wt_common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || wt_common=
     project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || project_common=
     if [ -n "$project_common" ] && [ "$project_common" != "$wt_common" ]; then
-      fm_dod_refresh_remote_refs "$project" 30 "$deadline"
+      separate=$project
     fi
   fi
+  fm_dod_refresh_remote_refs "$wt" 30 "$deadline" "$separate"
   fm_dod_named_head_on_surviving_ref "$@"
 }
 
