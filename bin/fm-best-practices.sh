@@ -81,11 +81,12 @@
 # does; only a usage or configuration error exits 2. They share that tool's
 # provider code (bin/fm-decision-provider-lib.sh): FM_DISPATCH_PROVIDER,
 # FM_DISPATCH_MODEL, FM_DISPATCH_BASE_URL, FM_DISPATCH_API_KEY,
-# TYPESAFE_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, and
-# config/dispatch-never-send mean exactly what docs/configuration.md "Typed
-# dispatch resolution" says, and the key never reaches argv or a child. Routing
-# sends the System One request shape, so it works with typesafe, openrouter,
-# and systemone, and with openai it sends nothing and composes the static text.
+# TYPESAFE_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY,
+# config/dispatch-credential-sources.json, and config/dispatch-never-send mean
+# exactly what docs/configuration.md "Typed dispatch resolution" says, and the
+# key never reaches argv or a child. Routing sends the System One request
+# shape, so it works with typesafe, openrouter, and systemone, and with openai
+# it sends nothing and composes the static text.
 #
 # docs/best-practices-adapters.md owns the architecture, the facets and
 # positions, and the off-limits list; bin/fm-best-practices-lib.sh owns the
@@ -359,10 +360,11 @@ route_ask() {  # <rows-json> <state-json> <subject> -> sets ROUTE_ANSWERS
     return 0
   fi
   err_file="$ROUTE_TMP/gate.err"
-  fm_decision_gate "$ROUTE_LABEL" "$FM_HOME" 2>"$err_file" || gate_rc=$?
+  fm_decision_gate "$ROUTE_LABEL" "$FM_HOME" "$CONFIG/dispatch-credential-sources.json" 2>"$err_file" || gate_rc=$?
   case "$gate_rc" in
     0) ;;
     1) ROUTE_STATUS=off ROUTE_REASON=$(sed -n "s/^$ROUTE_LABEL: off (\(.*\))\$/\1/p" "$err_file" | head -n 1); cat "$err_file" >&2; return 0 ;;
+    3) ROUTE_STATUS=error ROUTE_REASON=$FM_DECISION_ERROR; echo "$ROUTE_LABEL: error ($ROUTE_REASON)" >&2; return 0 ;;
     *) die "$FM_DECISION_ERROR" ;;
   esac
   # Routing asks several Choice and Noul questions in the System One shape;
