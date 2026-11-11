@@ -53,7 +53,9 @@ printf '%s\\n' "\$?" > '$LAB/lock.rc'
 SH
   cat > "$LAB/probe.ts" <<TS
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 export default function () {
+  writeFileSync("$LAB/omp.pid", String(process.pid));
   spawnSync("bash", ["$LAB/probe.sh"], { stdio: "ignore" });
 }
 TS
@@ -75,6 +77,8 @@ TS
     || { printf 'not ok - omp %s (%s) was detected as %s, not omp\n' "$OMP_VERSION" "$INSTALL" "$(cat "$LAB/harness.out")" >&2; exit 1; }
   [ "$(cat "$LAB/lock.rc")" = 0 ] \
     || { printf 'not ok - omp %s (%s) could not own the session lock: %s\n' "$OMP_VERSION" "$INSTALL" "$(cat "$LAB/lock.out")" >&2; exit 1; }
+  [ "$(sed -n 1p "$HOME_DIR/state/.lock")" = "$(cat "$LAB/omp.pid" 2>/dev/null)" ] \
+    || { printf 'not ok - omp %s (%s) acquired the session lock for pid %s, not the omp process %s\n' "$OMP_VERSION" "$INSTALL" "$(sed -n 1p "$HOME_DIR/state/.lock")" "$(cat "$LAB/omp.pid" 2>/dev/null)" >&2; exit 1; }
   printf 'ok - omp %s (%s): detected as omp and acquired the session lock with no model tokens\n' "$OMP_VERSION" "$INSTALL"
   exit 0
 fi
