@@ -563,7 +563,7 @@ fm_role_gate_self_publish() {
   fi
   if [ "$FM_ROLE" = maintainer ] && fm_role_identity_match "$FM_ROLE_SCOPE" "$FM_ROLE_PUB_TARGET"; then
     # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
-    FM_ROLE_PUB_AUTHORITY="maintainer scope $FM_ROLE_PUB_TARGET"
+    FM_ROLE_PUB_AUTHORITY="maintainer scope $FM_ROLE_SCOPE"
     return 0
   fi
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.

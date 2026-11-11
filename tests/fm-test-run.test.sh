@@ -459,9 +459,10 @@ test_changed_dependency_selection_and_unmapped_failure() {
 
 # VISION.md is a tracked prose surface in the documentation-audience inventory,
 # so a change to it must select the audience checks that validate its links and
-# anchors. README.md has no such consumer and selects nothing rather than
+# anchors. README.md is in that same inventory but stays deliberately unmapped
+# under the pre-existing prose policy, so it selects nothing rather than
 # refusing: the unmapped arm exists to catch a new source file whose tests were
-# never wired up, and that product page has no tests to wire.
+# never wired up, not to force a mapping decision on a product page.
 test_changed_prose_selects_audience_coverage_or_nothing() {
   local tmp repo listed rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-prose.XXXXXX")
@@ -480,10 +481,10 @@ test_changed_prose_selects_audience_coverage_or_nothing() {
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD 2>"$tmp/err")
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "changed prose with no test consumer must not refuse (rc=$rc): $(cat "$tmp/err")"
-  [ -z "$listed" ] || fail "changed prose with no test consumer selected tests: $listed"
+  [ "$rc" -eq 0 ] || fail "deliberately unmapped prose must not refuse (rc=$rc): $(cat "$tmp/err")"
+  [ -z "$listed" ] || fail "deliberately unmapped prose selected tests: $listed"
   rm -rf "$tmp"
-  pass "changed prose selects audience coverage when inventoried and nothing when unconsumed"
+  pass "changed prose selects audience coverage when mapped and nothing when deliberately unmapped"
 }
 
 # A direct test reference is per-script evidence. Widening it to the referencing

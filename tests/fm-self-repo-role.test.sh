@@ -270,6 +270,8 @@ test_check_renamed_repository_matches_either_path() {
     "the refusal must report the publication target the remote names, unfolded"
   out=$(check_as "$root" "$old_home" "$clone"); rc=$?
   expect_code 0 "$rc" "a scope written against the former path must cover the renamed repository (got: $out)"
+  assert_contains "$out" "authorized: maintainer scope $old" \
+    "the authority must name the scope the role file holds, not the folded target"
   out=$(check_as "$root" "$user_home" "$clone" upstream-consent "$old"); rc=$?
   expect_code 0 "$rc" "one-task consent written against the former path must cover the renamed repository (got: $out)"
 
