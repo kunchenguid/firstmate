@@ -7,14 +7,16 @@
 //   { stats:[{n,label,tag,type,scrolls_to,target_declared,prompts}],
 //     captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error,
-//     call:{wide:[page], narrow:[page], empty} }
+//     call:{wide:[page], narrow:[page], empty, details:[view]} }
 // where each Captain's Call page is {title, height, natural}: the card the back
 // and next buttons show, the height it lays out at, and the height its own
 // content needs. Layout is a toy model - text wraps at a fixed character width
 // within the viewport width, and a hidden element takes no space - so height
 // assertions test how the page sizes its cards, not real font metrics. "wide"
 // pages after the initial render and web fonts load; "narrow" pages again after
-// the window narrows and fires resize.
+// the window narrows and fires resize. Each details view is what one card's
+// Details button opened: {button, was_closed, open, title, ctx_rows, context,
+// none, options:[{label, rec, hint, details}], links, closed_after, prompts}.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -177,6 +179,46 @@ const pageCall = () => {
   }
   return pages;
 };
+// Open each card's Details view with its button, record what the full-screen
+// view shows, then close it again with its Close button.
+const linksIn = (n, out = []) => {
+  for (const c of n.children) {
+    if (c.tagName === "a" && c.href) out.push(c.href);
+    linksIn(c, out);
+  }
+  return out;
+};
+const details = decisionCards().map((card) => {
+  const btn = card.querySelectorAll(".bb-detailsbtn")[0];
+  if (!btn) return { button: null };
+  const modal = byId.get("bb-modal");
+  const body = byId.get("bb-modal-body");
+  const text = (n) => n.textContent;
+  const wasClosed = modal.hidden;
+  const before = prompts.length;
+  btn.dispatch("click");
+  const view = {
+    button: { tag: btn.tagName, type: btn.type, label: btn.textContent, controls: btn.attributes["aria-controls"] ?? null },
+    was_closed: wasClosed,
+    open: !modal.hidden,
+    title: byId.get("bb-modal-title").textContent,
+    ctx_rows: body.querySelectorAll(".bb-ctx__row").map((r) => r.children.map(text)),
+    context: body.querySelectorAll(".bb-modal__ctxp").map(text),
+    none: body.querySelectorAll(".bb-modal__none").map(text),
+    options: body.querySelectorAll(".bb-modal__opt").map((o) => ({
+      label: o.querySelectorAll(".bb-modal__optname")[0]?.textContent ?? "",
+      rec: o.querySelectorAll(".bb-opt__rec").length > 0,
+      hint: o.querySelectorAll(".bb-modal__opthint")[0]?.textContent ?? null,
+      details: o.querySelectorAll(".bb-modal__optp").map(text),
+    })),
+    links: linksIn(body),
+  };
+  byId.get("bb-modal-close").dispatch("click");
+  view.closed_after = modal.hidden;
+  view.prompts = prompts.length - before;
+  return view;
+});
+
 const callWide = pageCall();
 layout.width = 320;
 for (const fn of windowListeners.resize || []) fn({ type: "resize" });
@@ -234,4 +276,4 @@ const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map(
 
 process.stdout.write(
   JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText,
-    call: { wide: callWide, narrow: callNarrow, empty: callEmpty } }) + "\n");
+    call: { wide: callWide, narrow: callNarrow, empty: callEmpty, details } }) + "\n");

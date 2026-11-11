@@ -318,6 +318,51 @@ test_every_captains_call_card_takes_the_tallest_cards_height() {
   pass "every Captain's Call card takes the tallest card's height, and again after a resize"
 }
 
+test_every_captains_call_card_opens_a_full_screen_details_view() {
+  local home out
+  home=$(make_home call-details)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"explained","type":"decision","repo":"sample","title":"An explained call",
+     "about":"One-line about.","decide":"One-line question?",
+     "context":["First paragraph of context.",
+       "See https://example.com/pr/1. A javascript:alert(1) string stays text."],
+     "options":[
+       {"value":"go","label":"Go ahead","hint":"short hint",
+        "details":["What going ahead does.","What it costs."]},
+       {"value":"wait","label":"Wait"}],
+     "recommend_value":"go","allow_freeform":true},
+    {"key":"merge.plain","type":"merge","repo":"sample","title":"Merge: plain","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    (.call.details | length) == 2
+      and all(.call.details[];
+        .button == {tag:"button", type:"button", label:"Details", controls:"bb-modal"}
+          and .was_closed and .open and .closed_after and .prompts == 0)
+      and ([.call.details[] | .title] == ["An explained call", "Merge: plain"])
+  ' >/dev/null || fail "a card lacked a Details button, or it did not open and close a full-screen view without queuing anything: $out"
+  printf '%s' "$out" | jq -e '
+    .call.details[0] as $d
+    | $d.ctx_rows == [["about","One-line about."],["decide","One-line question?"]]
+      and $d.context == ["First paragraph of context.",
+        "See https://example.com/pr/1. A javascript:alert(1) string stays text."]
+      and $d.none == []
+      and $d.links == ["https://example.com/pr/1"]
+      and ($d.options | map(.label)) == ["Go ahead", "Wait", "Reconcile"]
+      and $d.options[0] == {label:"Go ahead", rec:true, hint:"short hint",
+        details:["What going ahead does.","What it costs."]}
+      and $d.options[1] == {label:"Wait", rec:false, hint:null, details:[]}
+  ' >/dev/null || fail "the Details view did not show the full context and every option with its details: $out"
+  printf '%s' "$out" | jq -e '
+    .call.details[1] as $d
+    | $d.context == [] and $d.none == ["No further context was recorded for this call."]
+      and ($d.options | map(.label)) == ["Merge now"]
+  ' >/dev/null || fail "a card without context did not say so in its Details view: $out"
+  pass "every Captain's Call card opens a full-screen Details view with its context and every option's details, queuing nothing"
+}
+
 test_an_empty_captains_call_still_shows_its_empty_state() {
   local home out
   home=$(make_home call-empty)
@@ -360,6 +405,7 @@ EOF
 
 test_full_snapshot_question_reaches_the_rendered_decision
 test_every_captains_call_card_takes_the_tallest_cards_height
+test_every_captains_call_card_opens_a_full_screen_details_view
 test_an_empty_captains_call_still_shows_its_empty_state
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

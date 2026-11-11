@@ -74,6 +74,11 @@
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
+# A Captain's Call item MAY carry `context`, and each of its options MAY carry
+# `details`: each a non-empty array of non-empty paragraph strings. The card's
+# Details button opens a full-screen view of the call - its about, decide and
+# context, then every option with its hint and details - and queues nothing.
+# Only https:// URLs inside a paragraph render as links.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
@@ -128,6 +133,10 @@ validate_payload() {  # <data.json>
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
+    def optional_paragraphs($name):
+      (has($name) | not)
+      or (.[$name]
+        | if type == "array" then length > 0 and all(.[]; nonempty_string) else false end);
     def optional_https_url($name):
       (has($name) | not)
       or (.[$name]
@@ -153,10 +162,12 @@ validate_payload() {  # <data.json>
         | type == "object"
           and (.value | slug(128))
           and (.label | nonempty_string)
-          and optional_string("hint")] | all)
+          and optional_string("hint")
+          and optional_paragraphs("details")] | all)
       and (optional_string("about"))
       and (optional_string("decide"))
       and (optional_string("detail"))
+      and optional_paragraphs("context")
       and (optional_https_url("pr_url"))
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
