@@ -83,9 +83,9 @@ fm_quota_breaker_classify() {
   breaker_hard_match "$bottom" antigravity-429 'Quota reached\. (Please wait|Next: switch models)|RESOURCE_EXHAUSTED' && return 0
   breaker_hard_match "$bottom" codex-usage-limit "The usage limit has been reached|You've hit your usage limit" && return 0
   breaker_hard_match "$bottom" claude-usage-limit "Claude (AI )?usage limit reached|5-hour limit reached|You've hit your limit" && return 0
-  count=$(printf '%s\n' "$tail" | grep -cE '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1302\\?"|Rate limit reached for requests')
+  count=$(printf '%s\n' "$bottom" | grep -cE '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1302\\?"|Rate limit reached for requests')
   if [ "${count:-0}" -ge "$repeats" ]; then
-    row=$(printf '%s\n' "$tail" | grep -E 'Rate limit reached for requests|"1302"' | tail -n 1)
+    row=$(printf '%s\n' "$bottom" | grep -E 'Rate limit reached for requests|"1302"' | tail -n 1)
     printf '%s\t%s (x%s)\n' zai-1302 "$(printf '%s' "$row" | sed 's/^[[:space:]]*//' | cut -c1-160)" "$count"
   fi
   return 0

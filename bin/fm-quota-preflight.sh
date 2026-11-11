@@ -61,7 +61,7 @@ if [ -n "$RULES" ]; then
   if [ -z "$PROVIDER" ]; then
     declared=$(jq -r --arg h "$HARNESS" --arg m "$MODEL" '
         def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-        [ (.rules // [])[] | profiles(.use)[], profiles(.default)[] ]
+        [ ((.rules // [])[] | profiles(.use)[], profiles(.default)[]), profiles(.default)[] ]
         | map(select(.harness == $h and ((.model // "") == $m) and ((.provider // "") != "")))
         | first // empty | "\(.provider)\t\(.quota_scope // "")"
       ' "$RULES" 2>/dev/null) || declared=

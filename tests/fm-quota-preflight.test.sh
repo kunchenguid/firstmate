@@ -41,7 +41,8 @@ cat > "$CONFIG/crew-dispatch.json" <<'EOF'
   {"harness":"pi","model":"zai/glm-5.3-flash","effort":"high","provider":"zai"},
   {"harness":"pi","model":"antigravity/gemini-3.8-flash","effort":"high","provider":"agy","quota_scope":"gemini"},
   {"harness":"pi","model":"antigravity/claude-sonnet-5-5","effort":"high","provider":"agy","quota_scope":"claude_gpt"}]}],
- "default":[{"harness":"claude","model":"sonnet","effort":"high"}]}
+ "default":[{"harness":"claude","model":"sonnet","effort":"high"},
+  {"harness":"pi","model":"zai/default-model","effort":"high","provider":"zai"}]}
 EOF
 
 preflight() {  # <args...>
@@ -67,6 +68,9 @@ test_declared_provider_and_scope_apply() {
   assert_contains "$out" "provider agy is exhausted_now at gemini" "the declared quota_scope should apply"
   out=$(preflight pi antigravity/claude-sonnet-5-5)
   [ -z "$out" ] || fail "another scope of the same provider must not be blamed, got: $out"
+  out=$(preflight pi zai/default-model)
+  assert_contains "$out" "provider zai is exhausted_now at all_models" \
+    "the top-level default profile should bind its explicit provider"
   pass "fm-quota-preflight: the declared provider and quota_scope bind the right row"
 }
 

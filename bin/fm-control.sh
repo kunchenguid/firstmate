@@ -773,7 +773,7 @@ settle_composer() {  # <interrupted 0|1>
         if [ -n "$clear" ]; then
           case "$(busy_verdict)" in
             busy*) ;;
-            *) settled=1; break ;;
+            idle*) settled=1; break ;;
           esac
         fi
         ;;

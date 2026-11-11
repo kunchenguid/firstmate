@@ -58,6 +58,13 @@ test_classify_ignores_recovered_and_single_rate_limits() {
 
   rows=
   for i in 1 2 3 4; do rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'; done
+  for i in $(seq 1 15); do rows="$rows"$'\n'"progress line $i"; done
+  rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'
+  got=$(classify "$rows")
+  [ -z "$got" ] || fail "stale request rate limits outside the bottom window must not trip, got: $got"
+
+  rows=
+  for i in 1 2 3 4; do rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'; done
   got=$(classify "$rows")
   [ -z "$got" ] || fail "four request rate limits are retries under the default of five, got: $got"
   rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'

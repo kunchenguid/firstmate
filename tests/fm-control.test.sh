@@ -1465,7 +1465,18 @@ test_agy_idle_composer_is_cleared_with_its_verified_key() {
   [ "$(keys_sent "$dir")" = Escape ] \
     || fail "a still-busy agy must not be sent its clear key, got: $(keys_sent "$dir")"
   [ -z "$(literals "$dir")" ] || fail "a still-busy agy must receive no exit command, got: $(literals "$dir")"
-  pass "fm-control exit: agy's unreadable idle composer is cleared with its verified key only once its turn ended"
+
+  dir=$(new_case agy-ambiguous)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  printf 'reply landed\n────────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────────\nGemini 4 Carbon · high\n' > "$dir/fake/pane"
+  printf '2' > "$dir/fake/cursor"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an agy pane without a status marker must refuse"
+  assert_contains "$out" "not proven empty" "an ambiguous agy pane should remain unproven"
+  [ -z "$(keys_sent "$dir")" ] || fail "an ambiguous agy pane must receive neither Escape nor Ctrl+U, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "an ambiguous agy pane must receive no exit command, got: $(literals "$dir")"
+  pass "fm-control exit: agy clears only after an explicit idle status marker"
 }
 
 test_composer_clear_key_table() {
