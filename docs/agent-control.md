@@ -100,7 +100,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
    This reference is a launch input, never authority to send, close, or act on the pane.
    [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and measured behavior.
-   `--fresh-session` asks for a new conversation while keeping that identity: when the replacement would resume a recorded session file, the old file is moved aside to `<path>.rotated-<UTC stamp>` after step 4, and the replacement creates an empty session at the same path; a recorded reference that is not a file refuses before step 4.
+   `--fresh-session` asks for a new conversation while keeping that identity: when the replacement would resume a recorded readable regular session file, the old file is moved aside to `<path>.rotated-<UTC stamp>` after step 4, and the replacement creates an empty session at the same path; a missing, directory, symlink, unreadable, or otherwise non-file reference refuses before step 4.
    [Second-mate session rotation](configuration.md#second-mate-session-rotation-configsecondmate-rotation) relaunches this way.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.

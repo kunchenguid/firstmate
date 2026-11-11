@@ -405,6 +405,31 @@ test_fresh_session_relaunch_reports_a_fresh_conversation() {
   pass "fm-control relaunch --fresh-session: off Herdr the ordinary relaunch is already a fresh conversation"
 }
 
+test_fresh_session_refuses_an_invalid_registered_file_before_stop() {
+  local dir out rc ref kind
+  for kind in missing directory symlink; do
+    herdr_case_or_skip "fresh-invalid-$kind" "fresh-invalid-$kind" || {
+      echo "skip - herdr fresh-session validation needs jq (the herdr adapter parses JSON)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    rm -f "$dir/fake/herdr-stopped"
+    sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/fresh-invalid-$kind.meta"
+    ref="$dir/fake/bound-session"
+    case "$kind" in
+      directory) mkdir -p "$ref" ;;
+      symlink) printf 'session\n' > "$dir/fake/session-target"; ln -s "$dir/fake/session-target" "$ref" ;;
+    esac
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' "$ref" > "$dir/fake/herdr-agent-registration"
+    out=$(run_control "$dir" "fresh-invalid-$kind" relaunch --harness pi --fresh-session --note "rotate the conversation"); rc=$?
+    expect_code 1 "$rc" "a $kind session reference must refuse before relaunch"
+    assert_contains "$out" "not a readable regular file" "the $kind reference should name the preflight refusal"
+    ! grep -q 'pane send-text' "$dir/fake/herdr-log" \
+      || fail "a $kind session reference was allowed to stop or relaunch the agent"
+  done
+  pass "fm-control relaunch --fresh-session: invalid bound references refuse before stopping"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3238,6 +3263,7 @@ test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_fresh_session_relaunch_reports_a_fresh_conversation
+test_fresh_session_refuses_an_invalid_registered_file_before_stop
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

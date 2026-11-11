@@ -1215,7 +1215,11 @@ resolve_fresh_session() {
   fi
   plan=$(fm_control_fresh_session_plan "$TARGET_HARNESS" "$bound_agent" "$ref") \
     || die "task $ID's pane is bound to session '$ref', which the $TARGET_HARNESS replacement would resume and which is not a file that can be moved aside; refusing --fresh-session before stopping anything"
-  [ "$plan" != archive ] || FRESH_SESSION_PATH=$ref
+  if [ "$plan" = archive ]; then
+    [ -f "$ref" ] && [ ! -L "$ref" ] && [ -r "$ref" ] \
+      || die "task $ID's bound session '$ref' is not a readable regular file; refusing --fresh-session before stopping anything"
+    FRESH_SESSION_PATH=$ref
+  fi
 }
 
 # archive_fresh_session: move the old agent's bound session file aside, never
@@ -1224,7 +1228,8 @@ resolve_fresh_session() {
 archive_fresh_session() {
   local dest
   [ -n "$FRESH_SESSION_PATH" ] || return 0
-  [ -e "$FRESH_SESSION_PATH" ] || return 0
+  [ -f "$FRESH_SESSION_PATH" ] && [ ! -L "$FRESH_SESSION_PATH" ] \
+    || die "task $ID's old session '$FRESH_SESSION_PATH' is no longer a regular file, so the replacement would resume it; its agent is stopped and nothing was relaunched"
   dest="$FRESH_SESSION_PATH.rotated-$(date -u +%Y%m%dT%H%M%SZ)"
   [ ! -e "$dest" ] || dest="$dest.$RANDOM"
   mv -- "$FRESH_SESSION_PATH" "$dest" \
