@@ -330,6 +330,38 @@ test_network_checks() {
   pass "--network adds a fresh auth probe and reads the last finished network report"
 }
 
+test_readiness_warnings() {
+  local dir label status rc output
+  # The readiness JSON is the owner-to-doctor contract. Vary its fields
+  # independently at the Python serializer boundary so existing free-lock or
+  # down-consumer rules cannot mask a missing false/stale rule. The oracle is
+  # the doctor requirement: unavailable or unreadable readiness must warn.
+  while IFS='|' read -r label status rc output; do
+    dir=$(new_case "ready-$label")
+    printf '%s\n' "$output" > "$dir/home/ready-output"
+    printf '%s\n' "$rc" > "$dir/home/ready-exit"
+    cat > "$dir/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 11 ] && [ "$1" = - ] || exit 2
+cat "$FM_HOME/ready-output"
+exit "$(cat "$FM_HOME/ready-exit")"
+SH
+    chmod +x "$dir/fakebin/python3"
+    doctor "$dir" --json --area supervision
+    assert_status "$DOCTOR_OUT" supervision/ready "$status" "$label readiness"
+    [ "$(printf '%s\n' "$DOCTOR_OUT" | jq -r .verdict)" = "$status" ] \
+      || fail "$label readiness: wrong verdict: $DOCTOR_OUT"
+    [ "$DOCTOR_RC" -eq 0 ] || fail "$label readiness: warnings must allow exit 0"
+  done <<'ROWS'
+cannot-receive|warn|0|{"can_receive":false,"lock":{"state":"held"},"wake_consumer":{"state":"unknown"}}
+stale-lock|warn|0|{"can_receive":"unknown","lock":{"state":"stale"},"wake_consumer":{"state":"unknown"}}
+failed|warn|1|
+unreadable|warn|0|not JSON
+healthy|ok|0|{"can_receive":true,"lock":{"state":"held"},"wake_consumer":{"state":"healthy"}}
+ROWS
+  pass "readiness warns for unavailable, stale, failed, or unreadable reports and accepts healthy reports"
+}
+
 test_memory_budget_status() {
   local dir role
   dir=$(new_case memory-budget)
@@ -470,6 +502,7 @@ test_tangle_is_rendered
 test_unmapped_line_fails
 test_invalid_inventories_fail
 test_network_checks
+test_readiness_warnings
 test_memory_budget_status
 test_supported_harnesses
 test_toon_and_json_agree
