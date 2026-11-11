@@ -505,7 +505,6 @@ cmd_consider() {
   fi
   epoch=$(date +%s)
   note='The previous run stopped on a usage limit. Continue this task from the existing local copy, including uncommitted work.'
-  gen_before=$(fm_meta_get "$meta" spawn_gen)
   "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"
   control_rc=$?
   lock=$(fm_meta_lock_path "$meta") || return 1
@@ -514,8 +513,7 @@ cmd_consider() {
     return 1
   fi
   if [ "$(fm_meta_get "$meta" dispatch_fallback)" != on ] \
-    || [ "$(fm_meta_get "$meta" dispatch_array)" != "$array" ] \
-    || { [ "$control_rc" -ne 0 ] && [ "$(fm_meta_get "$meta" spawn_gen)" != "$gen_before" ]; }; then
+    || [ "$(fm_meta_get "$meta" dispatch_array)" != "$array" ]; then
     fm_lock_release "$lock"
     printf 'task %s was retired or replaced; nothing recorded\n' "$id" >&2
     return 1

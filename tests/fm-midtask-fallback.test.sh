@@ -38,6 +38,10 @@ printf '%s\n' "$#" >> "$CONTROL_CALLS"
 printf '%s\n' "$@" >> "$CONTROL_CALLS"
 [ -z "${CONTROL_RM_META:-}" ] || rm -f -- "$CONTROL_RM_META"
 [ -z "${CONTROL_REPLACE_META:-}" ] || printf 'kind=ship\nharness=claude\nmodel=claude-sonnet-5\neffort=high\nworktree=/replaced/work\nspawn_gen=sNEW\n' > "$CONTROL_REPLACE_META"
+if [ -n "${CONTROL_REGEN_META:-}" ]; then
+  sed 's/^spawn_gen=.*/spawn_gen=sNEW/' "$CONTROL_REGEN_META" > "$CONTROL_REGEN_META.tmp"
+  mv "$CONTROL_REGEN_META.tmp" "$CONTROL_REGEN_META"
+fi
 if [ -n "${CONTROL_RESPAWN_META:-}" ]; then
   grep -v '^dispatch_' "$CONTROL_RESPAWN_META" > "$CONTROL_RESPAWN_META.tmp"
   mv "$CONTROL_RESPAWN_META.tmp" "$CONTROL_RESPAWN_META"
@@ -108,6 +112,7 @@ invoke() {
   CONTROL_RM_META="${CONTROL_RM_META:-}" \
   CONTROL_REPLACE_META="${CONTROL_REPLACE_META:-}" \
   CONTROL_RESPAWN_META="${CONTROL_RESPAWN_META:-}" \
+  CONTROL_REGEN_META="${CONTROL_REGEN_META:-}" \
   FM_LIMIT_MESSAGE_DIR="$CASE/limits" \
     "$SCRIPT" "$@"
 }
@@ -425,6 +430,24 @@ for rcase in 1 0; do
   grep -q 'blocked\|switched' "$CASE/state/$ID.status" && fail "replaced task (control rc $rcase) got a report" || true
 done
 ok "task replaced by a new incarnation during relaunch is not recorded"
+
+# A relaunch that fails after publishing a new spawn_gen is still this command's failure.
+begin control-failed-regen
+write_pair true high
+write_meta
+grep -q '^spawn_gen=' "$CASE/state/$ID.meta" || printf 'spawn_gen=sOLD\n' >> "$CASE/state/$ID.meta"
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+CONTROL_RC=1
+CONTROL_REGEN_META="$CASE/state/$ID.meta"
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json" 2>&1)
+rc=$?
+unset CONTROL_REGEN_META
+[ "$rc" -eq 1 ] || fail "failed relaunch with new spawn_gen exited $rc: $out"
+grep -q '^midtask_switch_failed=' "$CASE/state/$ID.meta" || fail "failed relaunch with new spawn_gen has no failure record"
+grep -q 'blocked' "$CASE/state/$ID.status" || fail "failed relaunch with new spawn_gen has no blocked report"
+ok "failed relaunch that published a new spawn_gen is still recorded"
 
 # A fresh spawn with the same worktree, branch and project but no fallback binding gets nothing.
 for rcase in 1 0; do
