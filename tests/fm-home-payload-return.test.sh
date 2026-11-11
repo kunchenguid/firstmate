@@ -244,4 +244,84 @@ assert_absent "$parent" 'nested retirement retained retired parent home'
 [ "$(cat "$home/data/notes")" = 'next occupant' ] || fail 'nested retirement changed the next occupant'
 assert_present "$home/state/sentinel.meta" 'nested retirement traversed the next occupant'
 assert_present "$gitdir/locked" 'nested retirement unlocked the next occupant'
-pass 'pool return observes a clean slot, failures preserve retry ownership, and an interrupted return recovers'
+git -C "$home" worktree unlock "$home"
+rm -rf "$home/data" "$home/state" "$home/config" "$home/projects"
+parent="$TMP_ROOT/concurrent-parent"
+staging_root="$parent/state"
+make_firstmate_git_root "$parent"
+mkdir -p "$parent/data" "$parent/state"
+printf 'outer\n' > "$parent/.fm-secondmate-home"
+: > "$parent/data/secondmates.md"
+prepare_retry
+fm_write_secondmate_meta "$parent/state/mate.meta" "$home"
+fm_write_secondmate_meta "$grandparent/state/outer.meta" "$parent"
+printf '%s\n' "- outer - outer mate (home: $parent; scope: outer; projects: alpha; added 2026-06-22)" > "$grandparent/data/secondmates.md"
+for lock_kind in control meta; do
+  rm -f "$staged_marker"
+  (
+    export FM_HOME="$parent" STATE="$parent/state"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    if [ "$lock_kind" = control ]; then
+      test_lock="$parent/state/.control-mate.lock"
+    else
+      test_lock=$(fm_meta_lock_path "$parent/state/mate.meta")
+    fi
+    fm_lock_try_acquire "$test_lock" || exit 1
+    trap 'fm_lock_release "$test_lock"' EXIT
+    fm_home_payload_return "$home" mate "$parent" hang_return
+  ) 2>"$TMP_ROOT/concurrent-child.err" &
+  active_job=$!
+  mover_pid=$(wait_for_staging)
+  if PATH="$fakebin:$PATH" FM_HOME="$grandparent" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
+    FM_FAKE_TMUX_LOG="$TMP_ROOT/fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/fake/pane.txt" \
+    bash "$ROOT/bin/fm-teardown.sh" outer --force >"$TMP_ROOT/concurrent.out" 2>"$TMP_ROOT/concurrent.err"; then
+    kill -TERM "$mover_pid"
+    wait "$active_job" || true
+    fail "parent ignored held child $lock_kind lock"
+  fi
+  assert_absent "$home/.fm-secondmate-home" "parent restored identity before acquiring child $lock_kind lock"
+  assert_absent "$home/data" "parent restored payload before acquiring child $lock_kind lock"
+  assert_absent "$gitdir/locked" "parent relocked the active return under child $lock_kind lock"
+  assert_present "$parent/state/mate.meta" 'parent removed the active child record'
+  kill -TERM "$mover_pid"
+  wait "$active_job" || [ "$?" = 143 ]
+  [ "$(cat "$home/data/notes")" = 'durable data' ] || fail 'active return could not restore its own payload'
+  fm_home_worktree_lock_check "$home" mate "$parent" || fail 'active return lost owned protection'
+done
+
+seedroot="$TMP_ROOT/replacement-code"
+git clone --quiet --no-checkout "$ROOT" "$seedroot"
+git -C "$seedroot" checkout --quiet "$(git -C "$ROOT" rev-parse HEAD)"
+home="$TMP_ROOT/replacement-pool/1/firstmate"
+pool_state="$TMP_ROOT/replacement-pool/treehouse-state.json"
+parent="$TMP_ROOT/replacement-parent"
+staging_root="$parent/state"
+mkdir -p "$parent/data" "$parent/state"
+git -C "$seedroot" worktree add --quiet --detach "$home" HEAD
+gitdir=$(git -C "$home" rev-parse --absolute-git-dir)
+prepare_retry
+fm_home_payload_return "$home" mate "$parent" return_slot success
+fm_home_payload_recover "$home" "$parent" mate
+[ "$FM_HOME_PAYLOAD_RETIRED" = 1 ] || fail 'replacement fixture has no committed return'
+PATH="$fakebin:$PATH" FM_HOME="$parent" FM_ROOT_OVERRIDE="$seedroot" FM_FAKE_TMUX_LOG="$TMP_ROOT/fake/tmux.log" \
+  FM_FAKE_TREEHOUSE_HOME="$home" FM_FAKE_TREEHOUSE_LEASE_FILE="$TMP_ROOT/lease" \
+  FM_SECONDMATE_CHARTER='replacement domain' FM_SECONDMATE_SCOPE='replacement domain' \
+  bash "$ROOT/bin/fm-home-seed.sh" mate - --no-projects >"$TMP_ROOT/replacement.out" 2>"$TMP_ROOT/replacement.err" \
+  || { cat "$TMP_ROOT/replacement.err" >&2; fail 'replacement seed failed'; }
+fm_home_payload_recover "$home" "$parent" mate
+[ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || fail 'replacement seed inherited old retirement state'
+assert_present "$home/data/charter.md" 'replacement seed lost its payload'
+assert_present "$gitdir/locked" 'replacement seed lacks owned protection'
+fm_write_secondmate_meta "$parent/state/mate.meta" "$home"
+write_pool_lease mate
+PATH="$fakebin:$PATH" FM_HOME="$parent" FM_ROOT_OVERRIDE="$seedroot" FM_BACKEND=tmux \
+  FM_FAKE_TMUX_LOG="$TMP_ROOT/fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/fake/pane.txt" \
+  FM_FAKE_TREEHOUSE_KEEP_HOME=1 FM_FAKE_TREEHOUSE_LEASE_FILE="$TMP_ROOT/lease" \
+  bash "$ROOT/bin/fm-teardown.sh" mate >"$TMP_ROOT/replacement-retire.out" 2>"$TMP_ROOT/replacement-retire.err" \
+  || { cat "$TMP_ROOT/replacement-retire.err" >&2; fail 'replacement retirement failed'; }
+assert_absent "$TMP_ROOT/lease" 'replacement retirement stranded its lease'
+assert_absent "$home/.fm-secondmate-home" 'replacement retirement skipped physical cleanup'
+assert_absent "$home/data" 'replacement retirement stranded its payload'
+assert_absent "$gitdir/locked" 'replacement retirement stranded protection'
+assert_absent "$parent/state/mate.meta" 'replacement retirement retained its parent record'
+pass 'recovery respects active child locks and replacement home incarnations'
