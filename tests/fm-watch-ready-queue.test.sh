@@ -75,7 +75,11 @@ test_ready_heartbeat() {
     chmod +x "$dir/fakebin/tasks-axi"
   fi
   # No away record, live worker, or new status event: the queue itself must
-  # cause a fleet review after a restriction expires.
+  # cause a fleet review after a restriction expires. Seed a cooled-down
+  # heartbeat streak and an already-due schedule: the ready-queue review is
+  # actionable, so it must reset the backoff rather than double it (3 -> 4).
+  printf '3\n' > "$dir/state/.heartbeat-streak"
+  fm_touch_epoch "$(( $(date +%s) - 30 ))" "$dir/state/.last-heartbeat"
   out="$dir/watch.out"
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_CONFIG_OVERRIDE="$dir/config" FM_POLL=0.2 FM_CHECK_INTERVAL=999999 \
@@ -83,6 +87,8 @@ test_ready_heartbeat() {
   pid=$!
   wait_for_exit "$pid" 60 || fail 'ready queue heartbeat was absorbed without a supervision turn'
   [ "$(cat "$out")" = heartbeat ] || fail 'ready queue did not produce heartbeat wake'
+  [ "$(cat "$dir/state/.heartbeat-streak" 2>/dev/null || echo 0)" = 0 ] \
+    || fail "$mode ready queue review doubled idle heartbeat backoff instead of resetting it"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" > "$dir/drain.out" 2>/dev/null \
     || fail 'could not drain queued heartbeat'
   assert_contains "$(cat "$dir/drain.out")" "$(printf '\theartbeat\t')" 'heartbeat was not durably delivered'

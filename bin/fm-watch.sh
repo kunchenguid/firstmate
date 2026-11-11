@@ -4806,10 +4806,18 @@ EOF
     # missed. Absorb the no-change case (advance the schedule and back off as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present || fm_ready_queue_needs_review; then
+    if afk_present; then
+      # The away-mode daemon owns triage and wants plain heartbeat accounting.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
+    elif fm_ready_queue_needs_review; then
+      # Ready queued work is actionable fleet work: supervision must recheck
+      # current stops and capacity now, so this heartbeat resets idle backoff
+      # instead of doubling the wait to the next check.
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat" actionable
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant event the per-wake path absorbed by mistake.
       # Enqueue first, then record every status log surfaced through its end so the
