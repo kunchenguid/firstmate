@@ -481,7 +481,13 @@ cmd_consider() {
   fi
   epoch=$(date +%s)
   note='The previous run stopped on a usage limit. Continue this task from the existing local copy, including uncommitted work.'
-  if ! "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"; then
+  "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"
+  control_rc=$?
+  if [ ! -f "$meta" ]; then
+    printf 'task %s was retired; nothing recorded\n' "$id" >&2
+    return 1
+  fi
+  if [ "$control_rc" -ne 0 ]; then
     printf 'midtask_switch_failed=%s\n' \
       "$(switch_object "$cur_h" "$cur_m" "$cur_e" "$ch" "$cm" "$ce" "$reason" "$epoch")" >> "$meta"
     if ! status_has_key "$id" blocked midtask-fallback; then
