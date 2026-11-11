@@ -1917,7 +1917,10 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    README.md|VISION.md|GROK_BOT.md|LICENSE|assets/*|docs/*|.gitignore)
+      # Prose and assets with no test consumer select nothing. CONTRIBUTING.md
+      # and AGENTS.md stay out: suites name them, so the reference scan below
+      # still maps them.
       ;;
     *)
       if [ -e "$path" ]; then

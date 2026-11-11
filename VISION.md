@@ -1,6 +1,6 @@
 # Vision
 
-`firstmate` exists so that one person can run a crew of coding agents with the leverage of a team and the accountability of a single pair of hands.
+Aman Crew exists so that one person can run a crew of coding agents with the leverage of a team and the accountability of a single pair of hands.
 It aims to create an experience: a sense of peacefulness, confidence that everything is under control, and an ease of mind that nothing will fall through the cracks the moment the captain looks away.
 That experience is the experience of being a good captain who sails with a well-managed crew, with a first mate that carries out the captain's direction.
 It serves the captain: an individual operator whose ambitions outrun their attention, and it turns intent stated once into delegated, supervised, evidence-backed work across every project they care about.
@@ -68,11 +68,11 @@ Quota, model, and effort choices stay inspectable and captain-owned; the first m
 
 ## Scope
 
-firstmate is the command layer, not the workshop: validation belongs to no-mistakes, CI belongs to the forge, and merge policy belongs to the configured authority.
+Aman Crew is the command layer, not the workshop: validation belongs to no-mistakes, CI belongs to the forge, and merge policy belongs to the configured authority.
 It is not a general agent framework, not a hosted service, and not a prepackaged product; it is a template one person clones, owns, deeply customizes, and operates under their own identity.
 Setup stays that simple by design: clone the repo, run your agent in it, and that is it.
 The shared surface is generic and captain-agnostic; everything personal - preferences, projects, records, credentials - stays private to the home that owns it.
-This repository ships through its own discipline: firstmate work is validated like any other project's, and field incidents become regression coverage.
+This repository ships through its own discipline: Aman Crew work is validated like any other project's, and field incidents become regression coverage.
 
 A change aligns when it deepens the captain's peace of mind, confidence, and ease of looking away, gives more shipped outcomes per unit of attention and tokens, makes delegation safer or more legible, strengthens a refusal path, keeps the system introspectable, hot-modifiable, and self-evolving, or lets the fleet survive another failure mode.
 A change should be resisted when it trades that experience for more noise or more context-switching, lets the fleet act beyond adjudicable intent, assumes consent instead of asking for it, adds a layer between intent and action, mixes scripted mechanics with agent judgment, spends tokens where a script would do, serves anyone but the captain, couples the distro to one vendor or session manager, buries an outcome in mechanics, or grows the command layer into the workshop it commands.

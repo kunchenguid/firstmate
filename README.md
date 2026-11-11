@@ -1,4 +1,4 @@
-<h1 align="center">firstmate</h1>
+<h1 align="center">Aman Crew</h1>
 <p align="center">
   <a
     href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"
@@ -21,7 +21,7 @@
 <h3 align="center">Talk to one agent. Ship with a crew.</h3>
 
 <p align="center">
-  <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
+  <img alt="Aman Crew - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
 </p>
 
 ## What it is
@@ -29,14 +29,14 @@
 You can run one coding agent easily.
 But the moment you want three project tasks done in parallel - fixes, investigations, plans, audits - you become a tab-juggler: babysitting sessions, copy-pasting context between repos, forgetting which terminal had the failing test.
 
-firstmate flips the model.
+Aman Crew flips the model.
 You talk to a single agent - the first mate - and it runs the crew for you: spawning autonomous agents in a visible session backend, giving each a clean git worktree, supervising them to completion, and handing you finished PRs, approved local merges, or standalone investigation reports.
 For larger fleets, you can opt in to persistent secondmates: second mates that are still ordinary direct reports, but run from their own isolated firstmate homes on this machine or another SSH-reachable host.
 
-firstmate is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
-firstmate is an agent distro for running a crew of agents.
+Aman Crew is not a model, not a harness, not a skill, not an MCP server, and not a CLI.
+Aman Crew is an agent distro for running a crew of agents.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
-There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
+There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled Aman Crew skills, and helper scripts that any terminal coding agent can follow.
 Launching a supported harness inside it for your primary session instantiates your first mate - and makes you the captain.
 
 ## Features
@@ -83,9 +83,14 @@ Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-lo
 
 ```sh
 gh auth login
-git clone https://github.com/kunchenguid/firstmate
-cd firstmate
+git clone https://github.com/kunchenguid/aman-crew
+cd aman-crew
 ```
+
+Aman Crew is the repository and product name; `firstmate` stays the name of the agent you talk to and of everything an installation already uses.
+An existing clone keeps working untouched: an `origin` still pointing at `github.com/kunchenguid/firstmate` resolves through GitHub's rename redirect, and `/updatefirstmate` follows whatever `origin` already points at.
+Every `fm-*` command, `FM_*` variable, `FM_HOME` layout, configuration file name and key, skill name, and state path is unchanged.
+A `maintainer` scope in `config/firstmate-role` that names the repository's former path still matches the renamed repository, so that file needs no edit ([Firstmate role](docs/configuration.md#firstmate-role-configfirstmate-role)).
 
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 
@@ -153,7 +158,7 @@ Setup guides for tmux (the default) and every other supported backend (herdr, ze
                   │  chat: requests, decisions, "merge it"
                   ▼
  ┌─────────────────────────────────────┐
- │ firstmate            (this repo)    │
+ │ Aman Crew            (this repo)    │
  │ reads projects/ + firstmate routes  │
  │ writes guarded backlog/briefs/state │
  └──┬──────────────┬───────────────┬───┘
@@ -180,7 +185,7 @@ Full architecture - the supervision engine, worktree isolation, secondmates, dis
 
 ## Built-in skills
 
-Firstmate ships these user-invocable built-in skills.
+Aman Crew ships these user-invocable built-in skills.
 Claude and grok use the slash form shown here; codex uses the same names with `$`, such as `$afk`.
 
 | Skill              | What it does                                                                                                                                  |
@@ -205,7 +210,7 @@ Agent-only reference skills live under `.agents/skills/` and are loaded by first
 
 ### Two-tier skill layout
 
-Firstmate's skills live in two separate places with different audiences:
+Aman Crew's skills live in two separate places with different audiences:
 
 - `.agents/skills/` - agent-loaded skills (this section's table, plus firstmate's agent-only reference skills). Every one of these assumes a live firstmate home and is meaningless, or actively misleading, installed anywhere else, so each carries `metadata.internal: true` in its frontmatter. That flag hides them from installer discovery (tools like the [skills.sh](https://skills.sh) `npx skills add` installer) without affecting how firstmate itself loads them - frontmatter metadata is inert to the agent's own skill loader.
 - `skills/` - public, installer-facing skills meant to be installed standalone into any project, independent of firstmate.
@@ -259,10 +264,10 @@ MIT - see [LICENSE](LICENSE).
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=kunchenguid%2Ffirstmate&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=kunchenguid%2Faman-crew&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kunchenguid/firstmate&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kunchenguid/firstmate&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kunchenguid/firstmate&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kunchenguid/aman-crew&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kunchenguid/aman-crew&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kunchenguid/aman-crew&type=date&legend=top-left" />
  </picture>
 </a>

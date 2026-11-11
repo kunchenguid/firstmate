@@ -248,6 +248,49 @@ test_check_equivalent_remote_spellings_are_one_repo() {
   pass "fm-role.sh check: equivalent remote spellings resolve to one publication target"
 }
 
+# The repository has been published under more than one path over its life, so
+# a maintainer scope or a one-task consent written against the former path must
+# still cover the renamed repository, and a clone whose remote was never
+# updated must still be covered by a scope written against the current path.
+# The fold is recorded per repository, never per owner, and the reported
+# publication target stays the path the remote actually names.
+test_check_renamed_repository_matches_either_path() {
+  local root clone user_home old_home new_home out rc
+  local old=github.com/kunchenguid/firstmate
+  local new=github.com/kunchenguid/aman-crew
+  root=$(make_lineage_root rename-root "https://$new")
+  user_home=$(make_role_home rename-user)
+  old_home=$(make_role_home rename-old "maintainer $old")
+  new_home=$(make_role_home rename-new "maintainer $new")
+
+  clone=$(clone_with_origin "$root" rename-clone-new "https://$new")
+  out=$(check_as "$root" "$user_home" "$clone"); rc=$?
+  expect_code 1 "$rc" "a user home must still be refused on the renamed repository (got: $out)"
+  assert_contains "$out" "no publication authority for $new" \
+    "the refusal must report the publication target the remote names, unfolded"
+  out=$(check_as "$root" "$old_home" "$clone"); rc=$?
+  expect_code 0 "$rc" "a scope written against the former path must cover the renamed repository (got: $out)"
+  out=$(check_as "$root" "$user_home" "$clone" upstream-consent "$old"); rc=$?
+  expect_code 0 "$rc" "one-task consent written against the former path must cover the renamed repository (got: $out)"
+
+  clone=$(clone_with_origin "$root" rename-clone-old "https://$old")
+  out=$(check_as "$root" "$new_home" "$clone"); rc=$?
+  expect_code 0 "$rc" "a scope written against the current path must cover a remote left on the former path (got: $out)"
+  out=$(check_as "$root" "$user_home" "$clone"); rc=$?
+  expect_code 1 "$rc" "a user home must still be refused on a remote left on the former path (got: $out)"
+  assert_contains "$out" "no publication authority for $old" \
+    "the refusal must report the former path the remote still names, unfolded"
+
+  clone=$(clone_with_origin "$root" rename-clone-sibling https://github.com/kunchenguid/treehouse)
+  out=$(check_as "$root" "$old_home" "$clone"); rc=$?
+  expect_code 1 "$rc" "the rename must not fold a different repository under the same owner (got: $out)"
+  assert_contains "$out" "no publication authority for github.com/kunchenguid/treehouse" \
+    "the sibling refusal must name its own publication target"
+  out=$(check_as "$root" "$user_home" "$clone" upstream-consent "$old"); rc=$?
+  expect_code 1 "$rc" "consent for the renamed repository must not authorize a different repository (got: $out)"
+  pass "fm-role.sh check: a recorded repository rename matches either path, and only that repository"
+}
+
 # Firstmate run from a fork, dispatching to a separate clone of the parent:
 # their origins and git dirs differ, but they share firstmate's root commit,
 # so the task still meets the role/consent gate. A fork's maintainer scope
@@ -724,6 +767,7 @@ test_check_foreign_project_passes_through
 test_check_maintainer_scope_authorizes
 test_check_wrong_scope_and_remote_presence_do_not_authorize
 test_check_equivalent_remote_spellings_are_one_repo
+test_check_renamed_repository_matches_either_path
 test_check_fork_lineage_reaches_the_gate
 test_check_gh_resolved_base_selects_fork
 test_check_undeterminable_lineage_and_target_refuse

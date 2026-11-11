@@ -768,6 +768,7 @@ The file holds exactly one directive line, with blank lines and `#` comment line
 | `maintainer <host>/<owner>/<repo>` | This home may dispatch publishing work that targets the one named firstmate upstream. |
 
 A scope names the publication target repository (where a pull request lands), normalized to lowercase for comparison, not a push destination.
+A scope or `--upstream-consent` value naming the repository path this project was published under before a rename matches the renamed repository, so a file written before the rename needs no edit and a remote left on the former path keeps working; `bin/fm-role-lib.sh` records those renames.
 A fork maintainer contributing to the parent repository uses per-task consent rather than a second standing scope.
 Write the primary home's file by hand; firstmate never grants itself a role, and the file never travels through git.
 Supported secondmate propagation writes or removes the inherited copy as described below.

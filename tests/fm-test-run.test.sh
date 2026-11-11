@@ -170,6 +170,8 @@ init_changed_fixture_repo() {
   : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
+  : >"$repo/README.md"
+  : >"$repo/VISION.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
@@ -453,6 +455,28 @@ test_changed_dependency_selection_and_unmapped_failure() {
   [ -z "$listed" ] || fail "a retired unmapped source without consumers selected tests: $listed"
   rm -rf "$tmp"
   pass "changed selection covers dependents, fails closed for live unmapped source, and accepts retired unconsumed source"
+}
+
+# Tracked prose with no test consumer must select nothing rather than refuse:
+# the unmapped arm exists to catch a new source file whose tests were never
+# wired up, and a product page has no tests to wire. The suite-reference scan
+# still maps a prose file some suite names, so this arm stays a short list.
+test_changed_unconsumed_prose_selects_nothing() {
+  local tmp repo listed rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-prose.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/README.md"
+  printf '\n' >>"$repo/VISION.md"
+  set +e
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "changed prose with no test consumer must not refuse (rc=$rc): $(cat "$tmp/err")"
+  [ -z "$listed" ] || fail "changed prose with no test consumer selected tests: $listed"
+  rm -rf "$tmp"
+  pass "changed selection accepts tracked prose that no suite consumes"
 }
 
 # A direct test reference is per-script evidence. Widening it to the referencing
@@ -1931,6 +1955,7 @@ test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_remote_inheritance_selects_generation_contract
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_unconsumed_prose_selects_nothing
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
 test_windows_posix_mode_emulation_does_not_fail_parallel_runs

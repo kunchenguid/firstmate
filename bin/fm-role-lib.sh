@@ -41,12 +41,18 @@
 # whose remote.<name>.gh-resolved is base, otherwise the first remote named
 # upstream, github, or origin, reduced to lowercase host/owner/repo; a local-path remote
 # is resolved one hop through that repository's own origin, and left as
-# path:<abs> when unreadable. An unknown target never permits.
+# path:<abs> when unreadable. An unknown target never permits. A scope or
+# consent naming a repository path this project was published under before a
+# rename matches the current path (fm_role_repo_canon), so a config file
+# written before the rename and a remote left on the former path both keep
+# working; the comparison widens, the reported target does not.
 #
 # Public functions:
 #   fm_role_file <config-dir>            - the role file path
 #   fm_role_scope_valid <scope>          - host/owner/repo[/subgroup] shape check
 #   fm_role_scope_norm <scope>           - canonical comparison form
+#   fm_role_repo_canon <identity>        - fold a recorded former repository path
+#   fm_role_identity_match <a> <b>       - same repository across a rename
 #   fm_role_remote_identity <url> [<dir>]- host/owner/repo or path:<abs> or empty
 #   fm_role_publication_target <git-dir> - identity a default publication reaches
 #   fm_role_self_repo <project> <root>   - 0 firstmate lineage, 1 not, 2 unknown
@@ -89,6 +95,28 @@ fm_role_scope_valid() {
 # fm_role_scope_norm <scope> - canonical comparison form.
 fm_role_scope_norm() {
   printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# fm_role_repo_canon <identity> - fold a repository path this project has been
+# published under before onto the one it is published under now, so a scope or
+# a task consent written before a rename still names the same repository and an
+# unedited config file keeps working. Only a recorded rename folds; every other
+# identity, including a path:<abs> local identity, is returned unchanged.
+# Record a rename by adding one case line.
+fm_role_repo_canon() {
+  case $1 in
+  github.com/kunchenguid/firstmate) printf 'github.com/kunchenguid/aman-crew\n' ;;
+  *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# fm_role_identity_match <scope-or-consent> <publication-target> - 0 when both
+# normalized identities name the same repository, directly or across a recorded
+# rename. An empty identity never matches.
+fm_role_identity_match() {
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  [ "$1" = "$2" ] && return 0
+  [ "$(fm_role_repo_canon "$1")" = "$(fm_role_repo_canon "$2")" ]
 }
 
 # fm_role_abs_norm <path> - physical path when it exists, else a lexical
@@ -528,12 +556,12 @@ fm_role_gate_self_publish() {
     FM_ROLE_PUB_DENIAL="this task targets firstmate's own repository but no publication target can be determined (no upstream, github, or origin remote on $proj)"
     return 1
   fi
-  if [ -n "$consent" ] && [ "$consent" = "$FM_ROLE_PUB_TARGET" ]; then
+  if [ -n "$consent" ] && fm_role_identity_match "$consent" "$FM_ROLE_PUB_TARGET"; then
     # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     FM_ROLE_PUB_AUTHORITY="task consent for $consent"
     return 0
   fi
-  if [ "$FM_ROLE" = maintainer ] && [ "$FM_ROLE_SCOPE" = "$FM_ROLE_PUB_TARGET" ]; then
+  if [ "$FM_ROLE" = maintainer ] && fm_role_identity_match "$FM_ROLE_SCOPE" "$FM_ROLE_PUB_TARGET"; then
     # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     FM_ROLE_PUB_AUTHORITY="maintainer scope $FM_ROLE_PUB_TARGET"
     return 0
