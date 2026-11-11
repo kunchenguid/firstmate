@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--coalesce <key>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--coalesce <key>] [--allow-dead <reason>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -221,6 +221,30 @@
 # semantics). It needs a local task selector on the inbox plane and is refused
 # with --key, --resolve-key, --fire-and-forget, FM_SEND_IDEMPOTENT=1, any
 # secondmate target, an explicit backend target, and parser-native typed text.
+#
+# Liveness refusal: a text steer to a LOCAL task recorded in this home is
+# refused with exit 3, before any durable write, when the worker is not live:
+# its recorded endpoint reads dead or missing (fm_backend_agent_state), or the
+# endpoint cannot be verified alive (ambiguous, unreadable, or an unverified
+# backend) and the task has shown no activity - no status line, turn end, busy
+# transition, or metadata change - for FM_SEND_LIVENESS_SILENCE_SECS (default
+# 21600, six hours). The message names the time it was last live and says to
+# relaunch first (bin/fm-control.sh <task> relaunch --note '<what happened>'). A verified-alive endpoint
+# is never refused for silence alone, because a worker idle on a decision for
+# hours is still the right place for its answer. A secondmate's silence is
+# never a reason either: an idle secondmate endpoint is healthy and is judged by
+# its routed status rather than by pane quiet, and the secondmate liveness sweep
+# (SECONDMATE_LIVENESS lines in bin/fm-bootstrap.sh) owns dead-secondmate
+# detection. Remote secondmates, explicit backend targets, and --key are not
+# checked here.
+# --allow-dead <reason> writes the record anyway, prints a warning, and appends
+# one audit line to state/.fm-send-allow-dead.log so firstmate sees the
+# override. FM_SEND_LIVENESS_BYPASS=1 is a test-harness escape hatch exported
+# only by tests/lib.sh for its stubbed backends, never an operator knob. This
+# check runs before the inbox/typed plane is chosen, so the exit 3 it returns
+# means "refused, nothing written" on either local plane; the typed plane's own
+# exit 3 (an unconfirmed submit) only follows a live endpoint that passed this
+# check, and the remote leg's exit 3 means the record may already have landed.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -481,6 +505,7 @@ fi
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
 COALESCE_KEY=
+ALLOW_DEAD_REASON=
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -536,6 +561,21 @@ while :; do
           ;;
       esac
       ;;
+    --allow-dead|--allow-dead=*)
+      [ -z "$ALLOW_DEAD_REASON" ] || { echo "error: duplicate --allow-dead" >&2; exit 1; }
+      if [ "$1" = --allow-dead ]; then
+        [ $# -ge 2 ] || { echo "error: --allow-dead requires a reason" >&2; exit 1; }
+        ALLOW_DEAD_REASON=$2
+        shift 2
+      else
+        ALLOW_DEAD_REASON=${1#--allow-dead=}
+        shift
+      fi
+      case "$ALLOW_DEAD_REASON" in
+        *[![:space:]]*) ;;
+        *) echo "error: --allow-dead requires a non-empty reason" >&2; exit 1 ;;
+      esac
+      ;;
     *) break ;;
   esac
 done
@@ -553,6 +593,66 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
+# fm_send_last_activity <task-id>: the newest epoch at which the task showed any
+# sign of life in this home's records, or empty when it has none.
+fm_send_last_activity() {
+  local id=$1 f m newest=
+  for f in "$STATE/$id.status" "$STATE/$id.turn-ended" "$STATE/$id.busy-state" "$STATE/$id.meta"; do
+    [ -e "$f" ] || continue
+    m=$(fm_path_mtime "$f") || continue
+    case "$m" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$newest" ] || [ "$m" -gt "$newest" ]; then newest=$m; fi
+  done
+  printf '%s' "$newest"
+}
+
+fm_send_epoch_utc() {  # <epoch>
+  date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '@%s' "$1"
+}
+
+# fm_send_liveness_gate: refuse (exit status 3) a text steer to a local task
+# whose worker is not live; see "Liveness refusal" in the header.
+fm_send_liveness_gate() {
+  local id state silence last now age why since
+  [ "${FM_SEND_LIVENESS_BYPASS:-}" != 1 ] || return 0
+  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || return 0
+  [ "$TARGET_BACKEND" != remote ] || return 0
+  [ -z "$(fm_meta_get "$TARGET_META" remote_host)" ] || return 0
+  id=$(fm_send_id_from_meta "$TARGET_META")
+  [ -n "$id" ] || return 0
+  silence=${FM_SEND_LIVENESS_SILENCE_SECS:-21600}
+  case "$silence" in ''|*[!0-9]*) silence=21600 ;; esac
+  state=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" 2>/dev/null) || state=unreadable
+  last=$(fm_send_last_activity "$id")
+  now=$(date +%s)
+  why=
+  case "$state" in
+    alive) return 0 ;;
+    dead|missing) why="its $TARGET_BACKEND endpoint $T is $state" ;;
+    *)
+      [ "$(fm_meta_get "$TARGET_META" kind)" != secondmate ] || return 0
+      [ "$silence" -gt 0 ] || return 0
+      if [ -z "$last" ]; then
+        why="it has no recorded activity and its endpoint reads $state"
+      else
+        age=$((now - last))
+        [ "$age" -ge "$silence" ] || return 0
+        why="it has shown no activity for $((age / 3600))h and its endpoint reads $state"
+      fi
+      ;;
+  esac
+  since=never
+  [ -z "$last" ] || since=$(fm_send_epoch_utc "$last")
+  if [ -n "$ALLOW_DEAD_REASON" ]; then
+    echo "warning: $id is not live since $since ($why); writing the steer anyway (--allow-dead: $ALLOW_DEAD_REASON)" >&2
+    printf '%s\t%s\t%s\t%s\n' "$(fm_send_epoch_utc "$now")" "$id" "$why" \
+      "$(printf '%s' "$ALLOW_DEAD_REASON" | tr '\t\n' '  ')" >> "$STATE/.fm-send-allow-dead.log" 2>/dev/null || true
+    return 0
+  fi
+  echo "error: steer not sent to $id: target not live since $since ($why); relaunch first (bin/fm-control.sh $id relaunch --note '<what happened>'), or pass --allow-dead <reason> to record it anyway" >&2
+  return 3
+}
+
 fm_send_known_undelivered_cleanup() {
   [ -n "$PENDING_REPLY_CORR" ] || return 0
   if [ "$PENDING_REPLY_CREATED" = 1 ]; then
@@ -803,6 +903,7 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  fm_send_liveness_gate || exit $?
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in

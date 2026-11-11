@@ -798,10 +798,10 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
+    assert_grep 'Use `awaiting: {why} until HH:MMZ`' "$brief" \
       "$kind brief did not instruct the configured pause status"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_no_grep '`paused: {why}`' "$brief" \
+    assert_no_grep '`paused: {why}' "$brief" \
       "$kind brief still instructs the default paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"

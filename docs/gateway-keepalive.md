@@ -61,6 +61,7 @@ A gateway that is simply unreachable is deliberately outside the transient class
    Either bound alone is insufficient, because one stops a fast loop and the other stops a slow one spread across a real outage.
    The gateway ladder owns every re-ring and both bounds; nothing else re-rings the record.
 4. **Declare.** When either bound is spent, the stall stops being re-rung and is declared once as an external wait (`paused [key=gateway-503]: ...`), so the pane takes the long declared-wait cadence instead of a wedge escalation.
+   This is the one declared-wait shape that needs no `until HH:MMZ` wake time: the OPEN DECISIONS fold exempts exactly this key, so the line stays a declared external wait instead of folding as a blocker, and every other time-less `paused:` note still folds as blocked.
    That declaration is closed (`resolved [key=gateway-503]: ...`) when the record that declared it is dropped, which happens only once the agent is working again - its next turn ended on something other than an API error, or it has been busy for `FM_GATEWAY_BUSY_CLEAR_SECS` - so a crew that carries on is not left reported as still waiting on the gateway.
    Neither of those transitions re-reads the pane, so the close deliberately claims only that the agent is working again and never that the error has left the screen.
 

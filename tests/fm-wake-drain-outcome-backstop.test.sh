@@ -67,7 +67,7 @@ test_newer_task_outcome_and_routine_latest_events_stay_silent() {
   set_mtime "$old" "$state/covered.status"
   append_outcome "$state" covered 'covered completion reached main'
   printf 'working: rebased onto merged #76\n' > "$state/working.status"
-  printf 'paused: waiting for the scheduled release window\n' > "$state/paused.status"
+  printf 'paused: waiting for the scheduled release window until 23:59Z\n' > "$state/paused.status"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "main drain failed for covered and routine latest events"

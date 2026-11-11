@@ -105,7 +105,7 @@ Only a cycle with no matching delivery record emits `watcher: FAILED - cycle end
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
-`state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
+`state/.watch-triage.log` remains only the watcher's own bounded debug log - absorbed wakes, slow-check and lock-reap notes, and a beat-lag line naming the top CPU consumers when the liveness beacon had aged past `FM_WATCH_BEAT_LAG_LOG_SECS` - and carries no lifecycle semantics.
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.

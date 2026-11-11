@@ -209,6 +209,25 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 CHECK_SLOW_LOG_SECS=${FM_CHECK_SLOW_LOG_SECS:-10}  # a check at least this slow is triage-logged
+# Mac-load guard (G16). Every local job this watcher launches - each slow check
+# and the detached ledger, lock-reap, and reconcile jobs - runs under
+# nice -n LOCAL_JOB_NICE (0 disables), so its children (a check that launches a
+# background scan) inherit the low priority while the watcher itself keeps its
+# own. FM_LOCAL_JOB_WORKERS is exported to checks as the parallelism a check may
+# use for its own fan-out (the fleet-stall capture pass honors it). When the
+# beacon has lagged BEAT_LAG_LOG_SECS by the time it is next touched, the top
+# CPU consumers at that moment are triage-logged, at most once per
+# BEAT_LAG_LOG_EVERY seconds.
+LOCAL_JOB_NICE=${FM_LOCAL_JOB_NICE:-19}
+case "$LOCAL_JOB_NICE" in ''|*[!0-9]*) LOCAL_JOB_NICE=19 ;; esac
+[ "$LOCAL_JOB_NICE" -le 19 ] || LOCAL_JOB_NICE=19
+FM_LOCAL_JOB_WORKERS=${FM_LOCAL_JOB_WORKERS:-8}
+case "$FM_LOCAL_JOB_WORKERS" in ''|0|*[!0-9]*) FM_LOCAL_JOB_WORKERS=8 ;; esac
+export FM_LOCAL_JOB_WORKERS
+BEAT_LAG_LOG_SECS=${FM_WATCH_BEAT_LAG_LOG_SECS:-60}
+case "$BEAT_LAG_LOG_SECS" in ''|*[!0-9]*) BEAT_LAG_LOG_SECS=60 ;; esac
+BEAT_LAG_LOG_EVERY=${FM_WATCH_BEAT_LAG_LOG_EVERY:-300}
+case "$BEAT_LAG_LOG_EVERY" in ''|*[!0-9]*) BEAT_LAG_LOG_EVERY=300 ;; esac
 case "$CHECK_SLOW_LOG_SECS" in ''|*[!0-9]*) CHECK_SLOW_LOG_SECS=10 ;; esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
@@ -1550,16 +1569,28 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+# local_job <command...>: run a watcher-launched local job at low priority.
+local_job() {
+  if [ "$LOCAL_JOB_NICE" -gt 0 ] && command -v nice >/dev/null 2>&1; then
+    nice -n "$LOCAL_JOB_NICE" "$@"
+  else
+    "$@"
+  fi
+}
+
 run_check_process() {
-  local c=$1
+  local c=$1 prio=()
   shift
+  if [ "$LOCAL_JOB_NICE" -gt 0 ] && command -v nice >/dev/null 2>&1; then
+    prio=(nice -n "$LOCAL_JOB_NICE")
+  fi
   if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec ${prio[@]+"${prio[@]}"} timeout "$CHECK_TIMEOUT" bash "$c" "$@"
   elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec ${prio[@]+"${prio[@]}"} gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
+    exec ${prio[@]+"${prio[@]}"} perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
   fi
 }
 
@@ -1646,8 +1677,25 @@ watch_beat() {
   local age
   age=$(fm_path_age "$STATE/.last-watcher-beat")
   case "$age" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && touch "$STATE/.last-watcher-beat"
+  [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && watch_beat_touch "$age"
   return 0
+}
+
+# watch_beat_touch [<age>]: touch the beacon, and when it had lagged at least
+# BEAT_LAG_LOG_SECS, log the top CPU consumers so a lag can be attributed.
+WATCH_BEAT_LAG_LOGGED_AT=0
+watch_beat_touch() {
+  local age=${1:-} now top
+  [ -n "$age" ] || age=$(fm_path_age "$STATE/.last-watcher-beat")
+  touch "$STATE/.last-watcher-beat"
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$BEAT_LAG_LOG_SECS" -gt 0 ] && [ "$age" -ge "$BEAT_LAG_LOG_SECS" ] || return 0
+  now=$(date +%s)
+  [ $((now - WATCH_BEAT_LAG_LOGGED_AT)) -ge "$BEAT_LAG_LOG_EVERY" ] || return 0
+  WATCH_BEAT_LAG_LOGGED_AT=$now
+  top=$(LC_ALL=C ps -Ao pcpu=,pid=,comm= 2>/dev/null | sort -rn | head -3 \
+    | awk '{ n = split($3, p, "/"); printf "%s%s pid %s %s%%", (NR > 1 ? "; " : ""), p[n], $2, $1 }')
+  triage_log "watcher beat lagged ${age}s; top CPU: ${top:-unavailable}; load: $(uptime 2>/dev/null | sed 's/.*load averages*: //')"
 }
 
 # watch_beat for a per-item loop: consult the beacon at most once per elapsed
@@ -1924,7 +1972,7 @@ home_summary_refresh_detached() {
     HOME_SUMMARY_PID=
   fi
   FM_HOME_SUMMARY_IF_IDLE=1 \
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+    local_job "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
   HOME_SUMMARY_PID=$!
 }
 
@@ -1942,7 +1990,7 @@ lock_reap_detached() {
   fi
   touch "$STATE/.last-lock-reap" 2>/dev/null || true
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-lock-reap.sh" </dev/null >> "$TRIAGE_LOG" 2>/dev/null &
+    local_job "$SCRIPT_DIR/fm-lock-reap.sh" </dev/null >> "$TRIAGE_LOG" 2>/dev/null &
   LOCK_REAP_PID=$!
 }
 
@@ -1969,7 +2017,7 @@ reconcile_requests_detached() {
     RECONCILE_REQUEST_PID=
   fi
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
+    local_job "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
   RECONCILE_REQUEST_PID=$!
 }
 
@@ -2059,7 +2107,7 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  watch_beat_touch
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

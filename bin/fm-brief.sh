@@ -287,7 +287,7 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+Use \`$PAUSED_VERB: {why} until HH:MMZ\` (distinct from \`blocked:\`; a pause naming no UTC wake time is treated as blocked) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -401,7 +401,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   Use \`$PAUSED_VERB: {why} until HH:MMZ\` - distinct from \`blocked:\`, and a pause naming no UTC wake time is treated as blocked - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
@@ -484,7 +484,7 @@ $RULE1
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   Use \`$PAUSED_VERB: {why} until HH:MMZ\` - distinct from \`blocked:\`, and a pause naming no UTC wake time is treated as blocked - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.

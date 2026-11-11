@@ -63,6 +63,7 @@ For a Firstmate-managed task, include an explicit status instruction:
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
 Use only these prefixes for status changes: working:, needs-decision:, blocked:, paused:, done:, failed:.
 Use paused: only for a deliberate known external wait that should be rechecked later, never for a blocker that needs firstmate to act.
+Always name the UTC wake time as "paused: <why> until HH:MMZ"; a pause naming no wake time is treated as blocked.
 Before doing substantive work, append "working: Codex Desktop thread started".
 ```
 

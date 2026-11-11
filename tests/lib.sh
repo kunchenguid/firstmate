@@ -35,6 +35,12 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Exempt the suite's stubbed backends from fm-send's liveness refusal
+# (bin/fm-send.sh "Liveness refusal"): most stub tmux binaries answer
+# list-windows with nothing, which the real check correctly reads as a missing
+# window. tests/fm-send-liveness.test.sh strips this to verify real refusal.
+export FM_SEND_LIVENESS_BYPASS=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

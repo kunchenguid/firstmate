@@ -168,9 +168,13 @@ age_cooldown() {  # <state-dir> <mate-id> <seconds-ago>
 run_notify() {  # <home> <fakebin> <name> <snapshot> [extra args...]
   local home=$1 fakebin=$2 name=$3 snap=$4
   shift 4
+  # FM_TEST_TMUX_WINDOW / FM_TEST_LIVENESS_BYPASS let one case drive a mate whose
+  # recorded window is absent from the inventory and whose liveness gate is not
+  # bypassed; the defaults keep every other case on the live, bypassed fixture.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" \
-    FM_FAKE_TMUX_WINDOW="firstmate:fm-mate" \
+    FM_FAKE_TMUX_WINDOW="${FM_TEST_TMUX_WINDOW-firstmate:fm-mate}" \
+    FM_SEND_LIVENESS_BYPASS="${FM_TEST_LIVENESS_BYPASS-1}" \
     FM_FAKE_TMUX_LOG="$TMP_ROOT/$name-tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/$name-fake/pane.txt" \
     "$RECONCILE" notify --snapshot "$snap" "$@"
@@ -415,6 +419,29 @@ test_a_failed_send_is_retried_on_the_next_run() {
   assert_absent "$home/state/absent-mate.reconcile-nudged" \
     "a failed ask started a cooldown and would never be retried"
   pass "a failed ask starts no cooldown, so the next run retries it"
+}
+
+test_a_local_send_refused_as_not_live_records_no_cooldown() {
+  local home mate fakebin snap out rc
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home notlive mate)
+  snap="$home/snapshot.json"
+  write_snapshot "$snap" mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  set +e
+  # The recorded window is absent from the inventory, so fm-send's liveness gate
+  # refuses this LOCAL fire-and-forget steer with exit 3 and writes nothing. A
+  # known-undelivered send must not start a cooldown, or the next pass would
+  # never retry it.
+  out=$( (FM_TEST_TMUX_WINDOW='' FM_TEST_LIVENESS_BYPASS='' \
+    run_notify "$home" "$fakebin" notlive "$snap") ); rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a steer to a not-live local mate reported success: $out"
+  assert_contains "$out" "failed: mate" \
+    "the not-live refusal was not reported as a failure: $out"
+  [ ! -e "$home/state/mate.reconcile-nudged" ] \
+    || fail "a refused not-live send started a cooldown and would never be retried"
+  [ "$(inbox_records "$home/state" mate)" -eq 0 ] \
+    || fail "a refused not-live send still wrote a steering record"
+  pass "a local send refused as not live fails without a cooldown or a record"
 }
 
 test_busy_lifecycle_locks_never_hold_up_the_digest() {
@@ -997,6 +1024,7 @@ test_the_ask_never_arms_a_reply_expectation_or_a_re_ring
 test_a_readable_home_without_a_mismatch_is_never_asked
 test_the_parent_never_changes_the_mates_own_files
 test_a_failed_send_is_retried_on_the_next_run
+test_a_local_send_refused_as_not_live_records_no_cooldown
 test_busy_lifecycle_locks_never_hold_up_the_digest
 test_concurrent_recaps_send_one_instruction
 test_a_delayed_snapshot_never_prescribes_a_stale_repair

@@ -69,9 +69,10 @@
 # including when a home was skipped for lock contention or a stale endpoint;
 # it exits 1 when at least one due send failed or its cooldown could not be
 # recorded. A known-undelivered send records no cooldown. Process-requests
-# preserves that request for the next supervision pass; an unconfirmed send
-# records the nudge, because a duplicate ask is worse than one the mate may
-# already have.
+# preserves that request for the next supervision pass; a REMOTE send whose
+# completion is unconfirmed records the nudge, because a duplicate ask is worse
+# than one the mate may already have, while a local send refused as not live is
+# known-undelivered: no cooldown is recorded and the request is preserved.
 #
 # Notify output, one line per selected home in mismatch:
 #   sent: <mate-id> <kind>          one reconcile instruction was recorded
@@ -526,9 +527,12 @@ cmd_notify() {
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
-    # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
-    # record the nudge rather than risk asking twice.
-    if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
+    # A remote send's exit 3 is "recorded or unconfirmed": the record may
+    # already be on the mate's inbox, so record the nudge rather than risk
+    # asking twice. A local fire-and-forget send rides the inbox plane, where
+    # exit 3 is fm-send's liveness refusal with nothing written.
+    if [ "$send_rc" -ne 0 ] \
+      && { [ "$send_rc" -ne 3 ] || [ -z "$expected_remote_host" ]; }; then
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       continue

@@ -117,7 +117,8 @@
 #   FM_FLEET_STALL_PROXY_LOG (<auth dir>/logs/main.log)
 #   FM_FLEET_STALL_EXPIRY_WINDOW_SECS (1800) FM_FLEET_STALL_REFRESH_GRACE_SECS (900)
 #   FM_FLEET_STALL_ERROR_WINDOW_SECS (300)   FM_FLEET_STALL_ERROR_MIN (30)
-#   FM_FLEET_STALL_ERROR_RATE_PCT (50)       FM_FLEET_STALL_CAPTURE_JOBS (16)
+#   FM_FLEET_STALL_ERROR_RATE_PCT (50)       FM_FLEET_STALL_CAPTURE_JOBS (16, at most
+#                                            the watcher's FM_LOCAL_JOB_WORKERS)
 #   FM_FLEET_STALL_CCFLARE_DB (~/.config/better-ccflare/better-ccflare.db; empty = file mode)
 #   FM_FLEET_STALL_ACCESS_SYNC_LOG (~/Library/Logs/ccflare-access-sync.log; empty = not watched)
 #   FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS (600)
@@ -328,6 +329,11 @@ capture_all() {
   local out=$1 jobs deadline id backend target harness pid alive
   local -a pids=()
   jobs=$(conf_int FM_FLEET_STALL_CAPTURE_JOBS 16)
+  # The watcher's local-job worker cap (FM_LOCAL_JOB_WORKERS) bounds the fan-out.
+  case "${FM_LOCAL_JOB_WORKERS:-}" in
+    ''|0|*[!0-9]*) ;;
+    *) [ "$jobs" -le "$FM_LOCAL_JOB_WORKERS" ] || jobs=$FM_LOCAL_JOB_WORKERS ;;
+  esac
   [ "$jobs" -ge 1 ] || jobs=1
   deadline=$((SECONDS + CAPTURE_DEADLINE_SECS))
   # shellcheck source=bin/fm-backend.sh

@@ -215,6 +215,65 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+test_a_pause_without_a_wake_time_is_surfaced_as_blocked() {
+  local dir state out
+  dir=$(make_case timeless-pause)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # Guard G15: lanes paused waiting for a wake nobody set. A pause that names
+  # no "until HH:MMZ" must not wait silently; one that does is a declared wait.
+  printf 'paused [key=winback-v3]: waiting for the next send window\n' > "$state/lane1.status"
+  printf 'paused [key=vendor]: rate-limit reset until 05:30Z\n' > "$state/lane2.status"
+  printf 'paused [key=release]: upstream release until 2026-10-25T09:00Z\n' > "$state/lane3.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on pause lines"
+
+  grep -F 'lane1' "$out" | grep -F '[key=winback-v3]' | grep -F 'blocked' \
+    | grep -F 'paused without a wake time (needs until HH:MMZ): waiting for the next send window' >/dev/null \
+    || fail "a time-less pause was not surfaced as blocked: $(cat "$out")"
+  if grep -F 'lane2' "$out" >/dev/null || grep -F 'lane3' "$out" >/dev/null; then
+    fail "a pause that names its wake time was surfaced: $(cat "$out")"
+  fi
+
+  # The lane naming its wake time on the same key closes the entry.
+  printf 'paused [key=winback-v3]: next send window until 14:00Z\n' >> "$state/lane1.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the lane named its wake time"
+  if grep -F 'lane1' "$out" >/dev/null; then
+    fail "the time-less pause stayed open after the lane named its wake time: $(cat "$out")"
+  fi
+  pass "a pause without until HH:MMZ is surfaced as blocked until the lane names its wake time"
+}
+
+test_the_documented_gateway_wait_stays_a_declared_wait() {
+  local dir state out
+  dir=$(make_case gateway-declared-wait)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The gateway keep-alive's own declaration names no wake time by design
+  # (docs/gateway-keepalive.md), so it stays a declared wait; an ordinary
+  # time-less pause in the same drain still surfaces as blocked.
+  printf 'paused [key=gateway-503]: inference gateway still returning transient errors after 3 continue attempts over 900s; waiting for account pool capacity\n' \
+    > "$state/lane1.status"
+  printf 'paused [key=vendor]: waiting for a reply\n' > "$state/lane2.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the gateway declaration"
+
+  if grep -F 'lane1' "$out" >/dev/null || grep -F 'gateway-503' "$out" >/dev/null; then
+    fail "the documented gateway declared wait was surfaced as open: $(cat "$out")"
+  fi
+  grep -F 'lane2' "$out" | grep -F '[key=vendor]' | grep -F 'blocked' >/dev/null \
+    || fail "an ordinary time-less pause was exempted with the gateway wait: $(cat "$out")"
+
+  # The gateway ladder's own resolution still closes a key that was opened.
+  printf 'blocked [key=gateway-503]: probe\n' >> "$state/lane1.status"
+  printf 'resolved [key=gateway-503]: the agent is working again after 1200s\n' >> "$state/lane1.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the gateway resolution"
+  if grep -F 'gateway-503' "$out" >/dev/null; then
+    fail "the gateway key stayed open after its own resolution: $(cat "$out")"
+  fi
+  pass "the documented gateway-503 wait stays declared while other time-less pauses surface as blocked"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
@@ -224,3 +283,5 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_a_pause_without_a_wake_time_is_surfaced_as_blocked
+test_the_documented_gateway_wait_stays_a_declared_wait

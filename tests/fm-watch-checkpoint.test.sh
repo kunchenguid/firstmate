@@ -15,6 +15,16 @@ make_home() {
   printf '%s\n' "$home"
 }
 
+set_mtime() { # <epoch> <path>
+  local epoch=$1 path=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$path"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$path"
+  fi
+}
+
 test_quiet_checkpoint_exits_124_cleanly() {
   local home out err status
   home=$(make_home quiet)
@@ -94,7 +104,8 @@ SH
   FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" a-slow >/dev/null || fail "could not register the slow check"
   FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" b-beat >/dev/null || fail "could not register the beacon check"
   status=0
-  FM_HOME="$home" FM_GUARD_GRACE=2 FM_CHECK_SLOW_LOG_SECS=2 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
+  FM_HOME="$home" FM_GUARD_GRACE=2 FM_CHECK_SLOW_LOG_SECS=2 FM_WATCH_BEAT_LAG_LOG_SECS=4 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
     "$CHECKPOINT" --seconds 90 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "slow check checkpoint exit"
   age=$(sed -n 's/.*beacon age \([0-9]*\)s after the slow check.*/\1/p' "$out" | head -1)
@@ -104,7 +115,52 @@ SH
   # next check's own start-up.
   [ "$age" -lt 6 ] || fail "the beacon was ${age}s old after a 6-second check in the same sweep; it was not refreshed between checks"
   assert_contains "$(cat "$home/state/.watch-triage.log")" "slow check a-slow.check.sh took" "a slow check left no timing trace in the triage log"
-  pass "a slow check is triage-logged and the beacon advances between checks"
+  assert_contains "$(cat "$home/state/.watch-triage.log")" "watcher beat lagged" "a lagging beacon left no trace in the triage log"
+  assert_contains "$(cat "$home/state/.watch-triage.log")" "top CPU: " "the beat-lag line did not name the top CPU consumers"
+  pass "a slow check is triage-logged, the beacon advances between checks, and a lag names the top CPU consumers"
+}
+
+test_a_restart_does_not_log_the_previous_watchers_downtime_as_lag() {
+  local home out err status triage
+  home=$(make_home restart-beat)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  # A watcher that stopped two hours ago leaves its last beat behind. Starting a
+  # new one now is downtime, not lag: nothing was running to be lagged, so a
+  # "watcher beat lagged" line would blame processes that never delayed it. The
+  # startup beacon touch ahead of the poll loop is what keeps the previous run's
+  # beat out of the lag check; drop it and this case logs a lag that never was.
+  set_mtime $(( $(date +%s) - 7200 )) "$home/state/.last-watcher-beat"
+  status=0
+  FM_HOME="$home" FM_GUARD_GRACE=2 FM_CHECK_SLOW_LOG_SECS=2 FM_WATCH_BEAT_LAG_LOG_SECS=4 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 2 >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "restart checkpoint exit"
+  triage=$(cat "$home/state/.watch-triage.log" 2>/dev/null || true)
+  assert_not_contains "$triage" "watcher beat lagged" \
+    "a restart logged the previous watcher's downtime as lag"
+  pass "a restart does not log the previous watcher's beacon as lag"
+}
+
+test_checks_run_at_low_priority_with_a_worker_cap() {
+  local home out err status
+  home=$(make_home nice-check)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  # Guard G16: a check (and anything it launches) must not compete with the
+  # agents for CPU on a loaded Mac.
+  cat > "$home/state/nice-probe.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'check niceness %s workers %s\n' "$(ps -o nice= -p $$ | tr -d ' ')" "${FM_LOCAL_JOB_WORKERS:-unset}"
+SH
+  chmod 0700 "$home/state/nice-probe.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" nice-probe >/dev/null || fail "could not register the niceness probe"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_LOCAL_JOB_WORKERS=3 \
+    "$CHECKPOINT" --seconds 90 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "niceness probe checkpoint exit"
+  assert_contains "$(cat "$out")" "check niceness 19 workers 3" "the check did not run at nice 19 with the worker cap exported"
+  pass "slow checks run at nice 19 with the local-job worker cap exported"
 }
 
 test_existing_singleton_watcher_is_not_success() {
@@ -126,4 +182,6 @@ test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_slow_check_is_logged_and_the_beacon_advances_between_checks
+test_a_restart_does_not_log_the_previous_watchers_downtime_as_lag
+test_checks_run_at_low_priority_with_a_worker_cap
 test_existing_singleton_watcher_is_not_success

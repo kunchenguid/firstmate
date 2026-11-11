@@ -166,7 +166,7 @@ test_explicit_reclassification_requires_durable_reason() {
 
     # A pause alone cannot mask the keyed blocker. The old concern must be
     # explicitly resolved with the durable reclassification reason first.
-    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window\n' >> "$dir/home/state/repair-task.status"
+    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window until 23:59Z\n' >> "$dir/home/state/repair-task.status"
     set +e
     out=$(run_return "$dir" check)
     rc=$?
@@ -174,7 +174,7 @@ test_explicit_reclassification_requires_durable_reason() {
     [ "$rc" -eq 3 ] || fail "$backend pause silently masked an unresolved blocked key"
 
     printf 'resolved [key=vendor-release]: reclassified as an external wait because the synthetic vendor owns the next event\n' >> "$dir/home/state/repair-task.status"
-    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window\n' >> "$dir/home/state/repair-task.status"
+    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window until 23:59Z\n' >> "$dir/home/state/repair-task.status"
     out=$(run_return "$dir" check) || fail "$backend durable reclassification did not clear the return gate: $out"
     [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "$backend reclassification left a gate behind"
   done

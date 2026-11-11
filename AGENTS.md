@@ -154,8 +154,9 @@ state/               runtime records and signals; gitignored
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .wedge-alarmed-* .writing-* .gw-busy-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
-  .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .watch-triage.log  watcher's bounded debug log (absorbed wakes, slow-check and beat-lag diagnostics); never relied on, safe to delete
   .watchdog-worker.json .watchdog-worker.lock  fleet watchdog record (boot identity, per-task pane shape and stall/inbox ladder stages, connection strikes, per-unit restart history, last reported backlog difference) and its pass lock, both owned by bin/fm-watchdog-worker.sh
+  .fm-send-allow-dead.log  fm-send's append-only `--allow-dead` audit trail (UTC stamp, task, why it was not live, the override reason); read it to see steers written to a task whose endpoint was not live, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes) and between a slow poll's stages; guard scripts read it
   .chair-source .chair-flip-at .chair-alarm .chair-fable-unknown-ticks   firstmate chair sentinel records: the lock holder's bound token source, the flip hysteresis stamp, the no-tank alarm, and the consecutive Fable-unmeasured count; bin/fm-chair-flip.sh and bin/fm-chair-sentinel.sh own the formats; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -443,7 +444,7 @@ Treat any `UNREAD STATUS` section as newly surfaced status that must be read thi
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
-A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
+A declared `paused:` event means a bounded external wait expected to clear on its own and must name its UTC wake time (`until HH:MMZ`), or the drain treats it as blocked; the one exception is the documented gateway keep-alive shape (`paused [key=gateway-503]: ...`), which stays a declared wait without one ([`docs/gateway-keepalive.md`](docs/gateway-keepalive.md)); `blocked:` means firstmate action is needed.
 
 Handle actionable wakes as follows:
 
