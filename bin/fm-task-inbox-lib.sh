@@ -60,7 +60,8 @@
 # stuck-busy reason without submission, but only once the oldest unhandled
 # message is also at least FM_TASK_INBOX_BUSY_BOUND_SECS old, so a long
 # instruction is not reported as stuck while the worker is acting on it. An
-# allowed due check or acknowledgement resets this budget. fm-busy-lib.sh owns the backend-specific delivery guard.
+# allowed due check or acknowledgement resets this budget. fm-busy-lib.sh owns
+# the backend-specific delivery guard.
 # Fire-and-forget retries remain outside escalation. A positively
 # dead or missing endpoint skips delivery and the ladder and escalates directly.
 # This library owns the schedule, durable budgets, and escalation marker.
