@@ -1359,7 +1359,7 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [
 
   record="$STATE/$id.start-pending"
   if [ ! -e "$CONFIG/spawn-start-check" ]; then
-    [ -e "$record" ] || return 0
+    fm_start_check_armed "$STATE" "$id" || return 0
     enabled=0
   fi
   [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0
@@ -1384,7 +1384,7 @@ spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [
       rc=1
     fi
   else
-    rm -f "$record" || rc=1
+    fm_start_check_clear "$STATE" "$id" || rc=1
   fi
   [ "$locked" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"

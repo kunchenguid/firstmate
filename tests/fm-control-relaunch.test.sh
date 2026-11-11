@@ -438,6 +438,31 @@ test_relaunch_without_start_check_flag_arms_nothing() {
   pass "fm-control relaunch: without config/spawn-start-check a relaunch arms no start check"
 }
 
+# A watcher stopped after it claimed a launch's start check leaves only the
+# claimed copy (bin/fm-watch.sh start_check_claim), which its next poll puts
+# back. A relaunch after the check was disabled replaces that launch, so it
+# clears the claimed copy too; a Codex launch records no busy generation, so a
+# restored copy would otherwise match the replacement and warn about it.
+test_disabled_relaunch_clears_an_abandoned_claimed_start_check() {
+  local dir out rc state rows
+  dir=$(new_case startwake-claimed rq3)
+  add_ship_task "$dir" rq3 codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  state="$dir/home/state"
+  printf '1000 - codex\n' > "$state/rq3.start-pending.claim.99999"
+  out=$(run_control "$dir" rq3 relaunch --note "replace the parked launch"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_WAKE_QUEUE="$state/.wake-queue" bash -c '. "$1/bin/fm-watch.sh"; start_check_tick 900000' _ "$ROOT" \
+    >/dev/null 2>&1 || fail "the watcher's start-check poll failed"
+  rows=$(awk -F '\t' '$3 == "check" { print $4 }' "$state/.wake-queue" 2>/dev/null)
+  case $'\n'"$rows"$'\n' in *$'\nstart:rq3\n'*) fail "a relaunch after the check was disabled was warned about by the replaced launch's claimed check" ;; esac
+  [ ! -e "$state/rq3.start-pending" ] || fail "the replaced launch's claimed check was restored after the relaunch"
+  [ -z "$(ls "$state/rq3.start-pending.claim."* 2>/dev/null)" ] || fail "the relaunch left the replaced launch's claimed check behind"
+  pass "fm-control relaunch: a relaunch after the check was disabled clears the replaced launch's claimed check"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3250,6 +3275,7 @@ test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_drops_the_replaced_launchs_queued_start_wake
 test_relaunch_without_start_check_flag_arms_nothing
+test_disabled_relaunch_clears_an_abandoned_claimed_start_check
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

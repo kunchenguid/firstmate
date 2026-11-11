@@ -118,13 +118,13 @@ chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
 # A start wake the replaced launch already queued is dropped with its record.
 # Without the flag only a record left from when it was present is cleared.
-if [ "$START_CHECK" = 1 ] || [ -e "$STATE/$ID.start-pending" ]; then
+if [ "$START_CHECK" = 1 ] || fm_start_check_armed "$STATE" "$ID"; then
   fm_wake_queue_prune_task "$STATE" "$ID" "" start 2>/dev/null || true
 fi
-case "$START_CHECK:$NEW_HARNESS" in 0:* | 1:kimi*) rm -f -- "$STATE/$ID.start-pending" ;;
+case "$START_CHECK:$NEW_HARNESS" in 0:* | 1:kimi*) fm_start_check_clear "$STATE" "$ID" ;;
   *)
     if [ "${FM_SPAWN_NO_START_CHECK:-0}" = 1 ]; then
-      rm -f -- "$STATE/$ID.start-pending"
+      fm_start_check_clear "$STATE" "$ID"
     else
       record_tmp="$STATE/$ID.start-pending.tmp.$$"
       if { printf '%s %s %s\n' "$LAUNCH_EPOCH" "${REMOTE_BUSY_GEN:--}" "$NEW_HARNESS" > "$record_tmp" \

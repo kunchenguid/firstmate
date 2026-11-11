@@ -186,6 +186,19 @@ fm_start_check_launch_epoch() {  # <state-dir> <task-id>
   printf '%s\n' "$now"
 }
 
+# fm_start_check_armed <state-dir> <task-id>: succeed when <task-id> has a
+# start-check record, either visible or as the claimed copy a stopped watcher
+# left (bin/fm-watch.sh start_check_claim), which the watcher's next poll would
+# put back. fm_start_check_clear removes both, so a launch that replaces the one
+# a record names never has that record restored against it.
+fm_start_check_armed() {  # <state-dir> <task-id>
+  [ -e "$1/$2.start-pending" ] || compgen -G "$1/$2.start-pending.claim.*" >/dev/null
+}
+
+fm_start_check_clear() {  # <state-dir> <task-id>
+  rm -f -- "$1/$2.start-pending" "$1/$2.start-pending.claim."*
+}
+
 # fm_start_check_reply_cursor <state-dir> <task-id>: the remote reply mirror's
 # cursor for <task-id> as `<offset>:<prefix-sha256>`, or `none` when it has not
 # read anything (bin/fm-procevent-remote-reply.sh owns the cursor). A remote
