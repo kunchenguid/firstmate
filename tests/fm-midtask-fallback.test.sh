@@ -36,6 +36,7 @@ begin() {
 #!/bin/bash
 printf '%s\n' "$#" >> "$CONTROL_CALLS"
 printf '%s\n' "$@" >> "$CONTROL_CALLS"
+[ -z "${CONTROL_RM_META:-}" ] || rm -f -- "$CONTROL_RM_META"
 exit "${CONTROL_RC:-0}"
 EOF
   chmod +x "$CASE/bin/control"
@@ -99,6 +100,7 @@ invoke() {
   FM_MIDTASK_CONTROL_BIN="$CASE/bin/control" \
   CONTROL_CALLS="$CASE/control-calls" \
   CONTROL_RC="$CONTROL_RC" \
+  CONTROL_RM_META="${CONTROL_RM_META:-}" \
   FM_LIMIT_MESSAGE_DIR="$CASE/limits" \
     "$SCRIPT" "$@"
 }
@@ -363,6 +365,23 @@ rc=$?
 assert_kept "retry after failure"
 [ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 2 ] || fail "later no-candidate stall was not reported"
 ok "failed relaunch is not retried"
+
+# A task retired during the relaunch gets no record and no report.
+begin control-retired
+write_pair true high
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+CONTROL_RC=1
+CONTROL_RM_META="$CASE/state/$ID.meta"
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json" 2>&1)
+rc=$?
+unset CONTROL_RM_META
+[ "$rc" -eq 1 ] || fail "retired task exited $rc: $out"
+[ ! -e "$CASE/state/$ID.meta" ] || fail "retired task record was recreated"
+grep -q 'blocked' "$CASE/state/$ID.status" && fail "retired task got a blocked report" || true
+ok "task retired during relaunch is not recorded"
 
 # A blocked report after a needs-decision report is still written.
 begin decision-then-blocked
