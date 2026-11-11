@@ -1687,22 +1687,48 @@ test_terminal_passed_with_open_pr_does_not_claim_merged() {
 }
 
 test_handed_off_run_reads_as_passed_with_open_pr() {
-  reset_fakes
-  local d; d=$(new_case handed-off)
-  make_repo_on_branch "$d/wt" fm/feat-dhand
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dhand.meta" "window=fm:fm-feat-dhand" \
-    "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/1"
-  FM_FAKE_PR_STATE=OPEN
-  FM_FAKE_PR_MERGED=false
-  FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)"
-  local out; out=$(run_crew_state "$d" feat-dhand)
-  assert_contains "$out" "state: done" "a handed-off run is a passing run"
-  assert_contains "$out" "run passed: PR open" "a handed-off run reports its open PR"
-  assert_not_contains "$out" "outcome: handed-off" "a handed-off run must not surface as an unmapped outcome"
-  assert_not_contains "$out" "unrecognized run status" "handed_off must be a recognized ledger status word"
-  assert_not_contains "$out" "state: unknown" "a handed-off run must never read as unknown"
-  pass "a handed-off run reads as passed with its open PR"
+  local scenario failures=0
+  for scenario in outcome status selected coarse; do
+    (
+      reset_fakes
+      local d out
+      d=$(new_case "handed-off-$scenario")
+      make_repo_on_branch "$d/wt" fm/feat-dhand
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/feat-dhand.meta" "window=fm:fm-feat-dhand" \
+        "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/1"
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      case "$scenario" in
+        outcome)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)" ;;
+        status)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand | sed '/^outcome:/d')" ;;
+        selected)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)"
+          FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+          FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-dhand,handed_off,$FM_FAKE_RUN_HEAD,\"https://github.com/o/r/pull/1\""
+          ;;
+        coarse)
+          FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+          FM_FAKE_RUNS_LIST="  handed_off  fm/feat-dhand $FM_FAKE_RUN_HEAD  2026-09-26 17:00"
+          ;;
+      esac
+      out=$(run_crew_state "$d" feat-dhand)
+      assert_contains "$out" "state: done" "$scenario: a handed-off run is a passing run: $out"
+      assert_not_contains "$out" "unrecognized run status" "$scenario: handed_off must be a recognized ledger status word"
+      assert_not_contains "$out" "state: unknown" "$scenario: a handed-off run must never read as unknown"
+      if [ "$scenario" = coarse ]; then
+        assert_contains "$out" "run handed off: PR open for review" "$scenario: a handed-off ledger row reports the open PR"
+      else
+        assert_contains "$out" "run passed: PR open" "$scenario: a handed-off run reports its open PR"
+      fi
+      pass "$scenario: a handed-off run reads as passed with its open PR"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures handed-off run regressions"
 }
 
 test_terminal_passed_run_pr_overrides_stale_metadata() {
