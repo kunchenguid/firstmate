@@ -406,6 +406,28 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A no-mistakes worker starts its own run in the same turn as its commit, so
+# the contract carries no pre-validation done: handoff that ends the turn, and
+# its one done: is the ready report that names the PR or change.
+test_no_mistakes_dod_starts_run_without_handoff_done() {
+  local forge out
+  for forge in none gerrit; do
+    out="$TMP_ROOT/dod-nm-start-$forge.md"
+    fm_dod_block no-mistakes dod-start-task '' "$forge" > "$out"
+    assert_grep 'start the no-mistakes run yourself in that same turn' "$out" \
+      "$forge: DoD must tell the worker to start its own run after committing"
+    assert_no_grep '{summary}' "$out" "$forge: DoD must not offer a pre-validation done: handoff"
+    assert_no_grep 'Firstmate will then instruct you' "$out" "$forge: DoD must not wait for firstmate to start the run"
+  done
+  # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+  assert_grep 'append `done [at=<epoch>]: PR {url} checks green`' "$TMP_ROOT/dod-nm-start-none.md" \
+    "the CI-ready done: naming the PR must remain"
+  # shellcheck disable=SC2016
+  assert_grep 'append `done [at=<epoch>]: PR {change url} published for review`' "$TMP_ROOT/dod-nm-start-gerrit.md" \
+    "the Gerrit published-for-review done: must remain"
+  pass "no-mistakes DoD starts the run in the commit turn and reports done only with the PR"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -467,6 +489,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_no_mistakes_dod_starts_run_without_handoff_done
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the
