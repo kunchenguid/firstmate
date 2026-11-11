@@ -1634,6 +1634,132 @@ test_undated_pause_overdue_bound() {
   pass "undated pauses stay quiet through the bound and close their overdue decision on resume"
 }
 
+# Opt-in config/paused-recheck-silent: an unchanged paused declaration that was
+# already surfaced once is rechecked without a wake; first sight, a changed
+# declaration, a due declared time, and an open decision still wake.
+silent_recheck_fixture() {  # <name> <until-epoch> <status-age-secs> -> dir
+  local dir state window key
+  dir=$(make_case "$1"); state="$dir/state"; window="test:fm-until"
+  printf 'idle, waiting for the reset\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/until.meta"
+  printf 'paused: rate limit resets, until %s, then resuming\n' "$(iso_utc_at "$2")" > "$state/until.status"
+  set_mtime "$(( $(date +%s) - $3 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  key=$(watch_window_key "$window")
+  printf '%s' "$(hash_text 'idle, waiting for the reset')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$dir"
+}
+
+silent_recheck_case() {  # <name> <flag:on|off> <status-body> -> dir; leaves the first-sight wake acked
+  local name=$1 flag=$2 body=$3 dir state key
+  dir=$(silent_recheck_fixture "$name" "$(( $(date +%s) + 86400 ))" 500); state="$dir/state"
+  printf '%s\n' "$body" > "$state/until.status"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  mkdir -p "$dir/config"
+  [ "$flag" = on ] && : > "$dir/config/paused-recheck-silent"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "first sight of a declared pause did not wake ($name): $(cat "$dir/watch.out")"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight wake ($name)"
+  key=$(watch_window_key test:fm-until)
+  set_mtime "$(( $(date +%s) - 600 ))" "$state/.paused-resurfaced-$key"
+  : > "$dir/watch.out"
+  printf '%s\n' "$dir"
+}
+
+test_silent_recheck_flag_on_absorbs_unchanged_pause() {
+  local dir state key before
+  dir=$(silent_recheck_case silent-on on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  key=$(watch_window_key test:fm-until)
+  before=$(cat "$state/.paused-resurfaced-$key")
+  until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unchanged paused recheck woke the supervisor with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  [ "$(cat "$state/.paused-resurfaced-$key")" = "$before" ] || fail "the recheck changed the declaration scope"
+  [ "$state/.paused-resurfaced-$key" -nt "$state/until.status" ] || fail "the recheck was not recorded in the throttle marker"
+  grep -F 'rechecked without a wake' "$state/.watch-triage.log" >/dev/null || fail "the silent recheck was not logged"
+  pass "with paused-recheck-silent on, an unchanged paused declaration is rechecked without a wake"
+}
+
+test_silent_recheck_flag_off_still_wakes() {
+  local dir state
+  dir=$(silent_recheck_case silent-off off 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "an unchanged paused recheck did not wake with the flag off"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the recheck wake was not printed with the flag off: $(cat "$dir/watch.out")"
+  pass "with paused-recheck-silent absent, the unchanged paused recheck still wakes"
+}
+
+test_silent_recheck_flag_on_wakes_for_an_open_decision() {
+  local dir state body
+  body=$(printf 'needs-decision [at=%s] [key=open-q]: which option\npaused: rate limit resets, until 2999-01-01T00:00Z, then resuming' "$(date +%s)")
+  dir=$(silent_recheck_case silent-open-decision on "$body"); state="$dir/state"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "an open decision did not wake an unchanged pause with the flag on"; }
+  pass "with paused-recheck-silent on, an open decision still wakes"
+}
+
+test_silent_recheck_flag_on_wakes_for_a_changed_declaration() {
+  local dir state
+  dir=$(silent_recheck_case silent-changed on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'paused: a different wait, until 2999-01-01T00:00Z\n' > "$state/until.status"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a changed declaration did not wake with the flag on"; }
+  pass "with paused-recheck-silent on, a changed declaration still wakes"
+}
+
+test_silent_recheck_flag_on_absorbs_unchanged_pause_for_a_live_ship_agent() {
+  local dir state
+  dir=$(silent_recheck_case silent-live-ship on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  FM_FAKE_TMUX_CURRENT_COMMAND=grok until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unchanged paused recheck woke the supervisor for a live ship agent with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  pass "with paused-recheck-silent on, an unchanged paused recheck for a live ship agent is silent"
+}
+
+test_silent_recheck_flag_on_absorbs_a_ticking_pane_for_a_live_ship_agent() {
+  local dir state
+  dir=$(silent_recheck_case silent-ticking on 'paused: waiting on the vendor reply'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  printf 'idle, waiting for the reset 12:01\n' > "$dir/pane.txt"
+  printf '%s' "$(hash_text 'idle, waiting for the reset 12:01')" > "$state/.hash-$(watch_window_key test:fm-until)"
+  FM_FAKE_TMUX_CURRENT_COMMAND=grok until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "a changed pane on an unchanged paused declaration woke the supervisor with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  pass "with paused-recheck-silent on, a ticking pane on an unchanged paused declaration is silent"
+}
+
+test_silent_recheck_flag_on_wakes_when_the_agent_exited() {
+  local dir state
+  dir=$(silent_recheck_case silent-dead on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  FM_FAKE_TMUX_CURRENT_COMMAND=zsh until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a paused recheck for an exited agent did not wake with the flag on"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the exited-agent recheck wake was not printed: $(cat "$dir/watch.out")"
+  pass "with paused-recheck-silent on, a paused recheck for an exited agent still wakes"
+}
+
+test_silent_recheck_flag_on_wakes_when_declared_time_is_due() {
+  local dir state
+  dir=$(silent_recheck_fixture silent-due "$(( $(date +%s) - 30 ))" 500); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/paused-recheck-silent"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a due declared time did not wake with the flag on"; }
+  grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null || fail "the due wake was not the declared-time recheck"
+  pass "with paused-recheck-silent on, a due declared time still wakes"
+}
+
 # --- a live worker paused on its own background job --------------------------
 # A worker declared `paused:` on its own background job and the job then ended
 # without a new status line, so only the passage of time can tell the watcher
@@ -1781,5 +1907,13 @@ fm_test_run \
   test_malformed_dated_pause_is_not_undated_overdue \
   test_undated_pause_age_uses_the_pause_line \
   test_undated_pause_overdue_bound \
+  test_silent_recheck_flag_on_absorbs_unchanged_pause \
+  test_silent_recheck_flag_off_still_wakes \
+  test_silent_recheck_flag_on_wakes_for_an_open_decision \
+  test_silent_recheck_flag_on_wakes_for_a_changed_declaration \
+  test_silent_recheck_flag_on_absorbs_unchanged_pause_for_a_live_ship_agent \
+  test_silent_recheck_flag_on_absorbs_a_ticking_pane_for_a_live_ship_agent \
+  test_silent_recheck_flag_on_wakes_when_the_agent_exited \
+  test_silent_recheck_flag_on_wakes_when_declared_time_is_due \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
