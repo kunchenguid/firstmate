@@ -366,20 +366,24 @@ test_every_captains_call_card_opens_a_full_screen_details_view() {
 }
 
 # Oracle: the GFM autolink rule - a trailing ")" belongs to the URL only when
-# the URL holds a matching "(", and trailing sentence punctuation stays text.
+# the URL holds a matching "(", trailing punctuation and the emphasis markers
+# "*", "_" and "~" stay text, and a code-span backtick is never part of a URL.
 test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation() {
-  local home out para
+  local home out para markup
   home=$(make_home call-details-links)
   para='Background is at https://en.wikipedia.org/wiki/Foo_(bar) (see https://example.com/x).'
-  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg p "$para" '[
+  # shellcheck disable=SC2016 # Backticks are literal Markdown in the paragraph.
+  markup='See `https://github.com/o/r/pull/1`. Also **https://example.com/y**.'
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg p "$para" --arg m "$markup" '[
     {key:"linked",type:"decision",repo:"sample",title:"A linked call",
-     context:[$p],options:[{value:"go",label:"Go ahead"}]}]')")
-  printf '%s' "$out" | jq -e --arg p "$para" '
+     context:[$p,$m],options:[{value:"go",label:"Go ahead"}]}]')")
+  printf '%s' "$out" | jq -e --arg p "$para" --arg m "$markup" '
     .error == ""
-      and .call.details[0].links == ["https://en.wikipedia.org/wiki/Foo_(bar)", "https://example.com/x"]
-      and .call.details[0].context == [$p]
-  ' >/dev/null || fail "a Details paragraph cut a URL at its own parenthesis or linked trailing punctuation: $out"
-  pass "a Details link keeps a balanced closing parenthesis and leaves trailing punctuation as text"
+      and .call.details[0].links == ["https://en.wikipedia.org/wiki/Foo_(bar)", "https://example.com/x",
+        "https://github.com/o/r/pull/1", "https://example.com/y"]
+      and .call.details[0].context == [$p, $m]
+  ' >/dev/null || fail "a Details paragraph cut a URL at its own parenthesis or linked trailing punctuation or Markdown markers: $out"
+  pass "a Details link keeps a balanced closing parenthesis and leaves trailing punctuation and Markdown markers as text"
 }
 
 test_an_empty_captains_call_still_shows_its_empty_state() {

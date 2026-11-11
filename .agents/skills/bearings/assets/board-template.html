@@ -573,12 +573,12 @@ __FM_BEARINGS_BOARD_DATA__
   var modalOpener = null;
   modal.hidden = true;
   /* Only https:// URLs become links; trailing sentence punctuation stays text. */
-  var URL_RE = /https:\/\/[^\s<>"']+/g;
+  var URL_RE = /https:\/\/[^\s<>"'`]+/g;
   var URL_OPENER = { ")": "(", "]": "[" };
   function trimUrl(url) {
     for (;;) {
       var end = url.charAt(url.length - 1), open = URL_OPENER[end];
-      if (/[.,;:!?]/.test(end) || (open && url.split(open).length < url.split(end).length)) url = url.slice(0, -1);
+      if (/[.,;:!?*_~]/.test(end) || (open && url.split(open).length < url.split(end).length)) url = url.slice(0, -1);
       else return url;
     }
   }
