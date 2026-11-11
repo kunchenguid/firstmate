@@ -943,7 +943,11 @@ _FM_SC_MTIME=
 _FM_SC_IDENT=
 fm_status_stat_cache_load() {  # <state>
   local state=$1 out path size mtime raw
-  local -a files=()
+  # Library-local arrays carry the _fm_ prefix on purpose: ShellCheck's
+  # --external-sources analysis leaks a sourced file's `local -a` name into the
+  # sourcing file's function scopes, so a plain `files`/`keys` array here makes
+  # every consumer's scalar of that name trip SC2178/SC2128. Keep the prefix.
+  local -a _fm_files=()
   fm_status_stat_cache_clear
   [ "$_FM_STATUS_STAT_CACHE_SUPPORTED" = 1 ] || return 0
   # A test reader seam owns those answers; never shadow it with real stats.
@@ -951,13 +955,13 @@ fm_status_stat_cache_load() {  # <state>
   for path in "$state"/*.status; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
     case "$path" in *$'\t'*|*$'\n'*) continue ;; esac
-    files+=("$path")
+    _fm_files+=("$path")
   done
-  [ "${#files[@]}" -gt 0 ] || return 0
+  [ "${#_fm_files[@]}" -gt 0 ] || return 0
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
-    out=$(LC_ALL=C stat -f '%N%t%z%t%m%t%d:%i|%B|%FB' -- "${files[@]}" 2>/dev/null) || true
+    out=$(LC_ALL=C stat -f '%N%t%z%t%m%t%d:%i|%B|%FB' -- "${_fm_files[@]}" 2>/dev/null) || true
   else
-    out=$(LC_ALL=C stat --printf '%n\t%s\t%Y\t%d:%i|%W|%w\n' -- "${files[@]}" 2>/dev/null) || true
+    out=$(LC_ALL=C stat --printf '%n\t%s\t%Y\t%d:%i|%W|%w\n' -- "${_fm_files[@]}" 2>/dev/null) || true
   fi
   while IFS=$'\t' read -r path size mtime raw; do
     [ -n "$path" ] && [ -n "$raw" ] || continue
@@ -1458,7 +1462,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 # without a loaded stat pass or under a span test seam.
 status_snapshot_latest_event_prefetch() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f start skip devino ino out rec key i=0 limit=65536
-  local -a args=() keys=()
+  local -a args=() _fm_keys=()
   [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 0
   [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ] || return 0
   while IFS=$'\t' read -r task endpoint ident; do
@@ -1473,11 +1477,11 @@ status_snapshot_latest_event_prefetch() {  # <state> <snapshot>
     devino="${devino%%:*}:${ino%%:*}"
     [ -z "${FM_STATUS_IDENTITY_READER:-}" ] || devino=
     args+=("$f" "$start" "$((endpoint - start))" "$skip" "$devino" "$endpoint")
-    keys+=("$f"$'\t'"$endpoint"$'\t'"$ident")
+    _fm_keys+=("$f"$'\t'"$endpoint"$'\t'"$ident")
   done <<EOF
 $snapshot
 EOF
-  [ "${#keys[@]}" -gt 0 ] || return 0
+  [ "${#_fm_keys[@]}" -gt 0 ] || return 0
   out=$(LC_ALL=C perl -MFcntl=:DEFAULT -e '
     sub latest {
       my ($path, $start, $length, $skip_first, $devino, $endpoint) = @_;
@@ -1520,8 +1524,8 @@ EOF
     }
   ' "${args[@]}" 2>/dev/null) || return 0
   while IFS= read -r rec; do
-    [ "$i" -lt "${#keys[@]}" ] || break
-    key=${keys[$i]}
+    [ "$i" -lt "${#_fm_keys[@]}" ] || break
+    key=${_fm_keys[$i]}
     i=$((i + 1))
     case "$rec" in
       ok$'\t'*) _FM_STATUS_LATEST_MEMO[$key]=${rec#ok$'\t'} ;;
@@ -1865,7 +1869,7 @@ EOF
 # itself to report.
 status_presentation_prefetch_spans() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f offset size out rec n line lines i=0
-  local -a args=() keys=()
+  local -a args=() _fm_keys=()
   [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 0
   [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ] || return 0
   while IFS=$'\t' read -r task endpoint ident; do
@@ -1879,11 +1883,11 @@ status_presentation_prefetch_spans() {  # <state> <snapshot>
     _fm_status_size_into "$f" size || continue
     [ "$endpoint" -le "$size" ] && [ "$offset" -lt "$endpoint" ] || continue
     args+=("$f" "$offset" "$((endpoint - offset))")
-    keys+=("$f"$'\t'"$offset"$'\t'"$endpoint")
+    _fm_keys+=("$f"$'\t'"$offset"$'\t'"$endpoint")
   done <<EOF
 $snapshot
 EOF
-  [ "${#keys[@]}" -gt 0 ] || return 0
+  [ "${#_fm_keys[@]}" -gt 0 ] || return 0
   # One process reads every span: per span a "<ok|fail>\t<count>" header, then
   # its <count> non-blank lines exactly as the per-span `read -r` loop keeps
   # them (newline-split, a final unterminated line included, NULs dropped).
@@ -1907,7 +1911,7 @@ EOF
     }
   ' "${args[@]}" 2>/dev/null) || return 0
   while IFS=$'\t' read -r rec n; do
-    [ "$i" -lt "${#keys[@]}" ] || break
+    [ "$i" -lt "${#_fm_keys[@]}" ] || break
     case "$n" in ''|*[!0-9]*) break ;; esac
     lines=
     while [ "$n" -gt 0 ] && IFS= read -r line; do
@@ -1915,7 +1919,7 @@ EOF
       n=$((n - 1))
     done
     [ "$n" -eq 0 ] || break
-    [ "$rec" != ok ] || _FM_STATUS_SPAN_MEMO[${keys[$i]}]=${lines%$'\n'}
+    [ "$rec" != ok ] || _FM_STATUS_SPAN_MEMO[${_fm_keys[$i]}]=${lines%$'\n'}
     i=$((i + 1))
   done <<EOF
 $out

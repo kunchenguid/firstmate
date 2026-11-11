@@ -1649,7 +1649,7 @@ fm_wake_clean_field() {
 
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker
+  local recovery_marker pending_rows coalesce _tmp
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -1701,8 +1701,13 @@ fm_wake_append() {
   # re-fire, and the drain re-reads the status files anyway, so the extra rows carry no new
   # information.
   if [ "$kind" = signal ]; then
-    pending=$(awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { n++ } END { print n + 0 }' "$FM_WAKE_QUEUE" 2>/dev/null)
-    if [ "${pending:-0}" -ge 3 ]; then
+    # Named pending_rows rather than pending on purpose: ShellCheck's
+    # --external-sources analysis leaks a sourced file's numeric globals into the
+    # sourcing file's scopes, so a bare `pending` here made
+    # bin/fm-pending-reply-lib.sh's `token=pending-reply-missed` parse as the
+    # arithmetic expression `pending - reply - missed` and trip SC2100 there.
+    pending_rows=$(awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { n++ } END { print n + 0 }' "$FM_WAKE_QUEUE" 2>/dev/null)
+    if [ "${pending_rows:-0}" -ge 3 ]; then
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       return 0
     fi

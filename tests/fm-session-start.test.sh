@@ -113,6 +113,24 @@ SH
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
 }
 
+# make_path_without <tool> <dest>: a PATH directory mirroring BASE_PATH without
+# <tool>, so a test can force a MISSING diagnostic even when the host has the
+# tool installed in a system directory.
+make_path_without() {
+  local tool=$1 dest=$2 d f b
+  mkdir -p "$dest"
+  local IFS=:
+  for d in $BASE_PATH; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      [ -f "$f" ] && [ -x "$f" ] || continue
+      b=${f##*/}
+      [ "$b" = "$tool" ] && continue
+      [ -e "$dest/$b" ] || ln -s "$f" "$dest/$b"
+    done
+  done
+}
+
 # make_fake_tasks_axi_compact <fakebin>: a tasks-axi boundary that answers the
 # four group filters the startup listing composes (in-flight, held, blocked
 # queued, and the dispatchable ready set) and REFUSES anything the recovery
@@ -587,6 +605,10 @@ EOF
     printf 'harness=pi\n'
     printf 'home=%s\n' "$mate"
   } > "$home/state/$id.meta"
+  # A live task, not an idle record: the digest prints only tasks that are busy,
+  # holding an open decision, or touched in the last 24h, and these tests assert
+  # the endpoint liveness line the digest prints for this secondmate.
+  printf 'working: secondmate recovery fixture\n' > "$home/state/$id.status"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
@@ -966,7 +988,7 @@ SH
 # read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
   local rec root home fakebin out lock_line boot_line wake_line read_once_line
-  local context_line fleet_line next_line inventory_line missing_line
+  local context_line fleet_line next_line inventory_line missing_line no_node_path
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -975,11 +997,18 @@ EOF
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
+  no_node_path="$TMP_ROOT/ordering-no-node-path"
+  make_path_without node "$no_node_path"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
+  # A live task, not an idle record: the digest prints only tasks that are busy,
+  # holding an open decision, or touched in the last 24h, and this test is about
+  # where that live-task inventory sits relative to the curated memory a
+  # truncated tail is allowed to take.
+  printf 'working: step 1\n' > "$home/state/task-a.status"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$no_node_path")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1340,6 +1369,8 @@ EOF
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  printf 'working: live endpoint fixture\n' > "$home/state/task-live.status"
+  printf 'working: dead endpoint fixture\n' > "$home/state/task-dead.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
@@ -1360,6 +1391,8 @@ EOF
 
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
+  printf 'working: live endpoint fixture\n' > "$home/state/task-live.status"
+  printf 'working: dead endpoint fixture\n' > "$home/state/task-dead.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
@@ -1371,7 +1404,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out no_node_path
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1379,11 +1412,13 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  no_node_path="$TMP_ROOT/composition-no-node-path"
+  make_path_without node "$no_node_path"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$no_node_path")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -1737,6 +1772,7 @@ EOF
   mkdir -p "$home/projects/firstmate"
   printf 'window=fm-sess:compact\nworktree=%s\nproject=firstmate\nkind=ship\n' "$home/projects/firstmate" \
     > "$home/state/compact-startup.meta"
+  printf 'working: compact startup fixture\n' > "$home/state/compact-startup.status"
   log="$home/tasks-axi.log"
 
   out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_READY=3 \

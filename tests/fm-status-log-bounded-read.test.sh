@@ -35,7 +35,15 @@ LATEST_LINE_BOUND_SECS=${LATEST_LINE_BOUND_SECS:-1}
 CREW_STATE_BOUND_SECS=${CREW_STATE_BOUND_SECS:-10}
 FOLD_WARM_BOUND_SECS=${FOLD_WARM_BOUND_SECS:-1}
 FOLD_COLD_BOUND_SECS=${FOLD_COLD_BOUND_SECS:-120}
-DRAIN_BOUND_SECS=${DRAIN_BOUND_SECS:-60}
+# The real drain over a 5 MB log is a shell-side fold, so its wall time tracks
+# the host's I/O rather than the code's complexity. Measured basis: 16.4s on a
+# clean 2-CPU container (GNU coreutils) and 17.4s on the same container with
+# uutils coreutils, but 90.4s on a 2-core GitHub runner, whose filesystem is
+# roughly 5x slower for this workload. The bound is a regression tripwire, not a
+# machine-speed certificate: a fold that fell back to re-reading the whole log
+# per task would be orders of magnitude past this, not 2x. 180s keeps that
+# tripwire meaningful while tolerating the slowest runner measured.
+DRAIN_BOUND_SECS=${DRAIN_BOUND_SECS:-180}
 # The bounded readers inspect at most the final 64 KiB; a regression that falls
 # back to a whole-file scan records the whole log instead.
 BOUNDED_READ_CEILING=${BOUNDED_READ_CEILING:-131072}

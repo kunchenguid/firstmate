@@ -34,13 +34,32 @@ cleanup_procs() {
 }
 trap cleanup_procs EXIT
 
-# Harness-named and stranger-named links to sleep, so `ps -o comm=` reports
-# those exact names for real processes (a copied system binary is killed by
-# macOS code signing; an exec through a link keeps the link's name).
+# Harness-named and stranger-named long-running executables, so `ps -o comm=`
+# reports those exact names for real processes. Each must be a real executable
+# whose own file name is the name under test: a symlink to a system binary is
+# not portable, because Ubuntu 25.10 ships coreutils as the uutils multicall
+# binary, which refuses to run under a name that does not match the utility it
+# was asked for ("Security violation: Requested utility `pi` does not match
+# executable name"). That made the child die instantly and the pane read `dead`
+# on CI while passing locally. Compiling our own tiny spinner keeps the identity
+# equal to the name on every platform, and unlike a copy of a signed system
+# binary it is not killed by macOS arm64 code-signing validation. Where no C
+# compiler exists the symlink fallback still covers the platforms whose `sleep`
+# tolerates being renamed.
 BIN="$TMP_ROOT/bin"
 mkdir -p "$BIN"
-ln -s "$(command -v sleep)" "$BIN/pi"
-ln -s "$(command -v sleep)" "$BIN/mystery"
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -n "$CC_BIN" ]; then
+  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$TMP_ROOT/spin.c"
+fi
+make_stand_in() {  # <path>
+  if [ -n "$CC_BIN" ] && "$CC_BIN" -o "$1" "$TMP_ROOT/spin.c" 2>/dev/null; then
+    return 0
+  fi
+  ln -sf "$(command -v sleep)" "$1"
+}
+make_stand_in "$BIN/pi"
+make_stand_in "$BIN/mystery"
 
 FAKEBIN="$TMP_ROOT/fakebin"
 mkdir -p "$FAKEBIN"

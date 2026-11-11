@@ -377,6 +377,27 @@ assert_no_grep() {
   ! grep -F -- "$1" "$2" >/dev/null || fail "$3"
 }
 
+# assert_signal_wake_for <haystack> <file> <msg>: a durable signal wake must exist
+# for <file>. bin/fm-watch.sh coalesces a changed-file batch into ONE row keyed by
+# a digest of the batch's paths (signal_batch_key), not by the changed status
+# filename, so the row is asserted by its kind plus the file its payload names
+# rather than by the old file-shaped key. <haystack> is the queue file's contents
+# or a drain's output.
+assert_signal_wake_for() {
+  local haystack=$1 file=$2 msg=$3 row
+  row=$(printf '%s\n' "$haystack" | grep -F "$(printf '\tsignal\t')" | grep -F -- "$file" | tail -1)
+  [ -n "$row" ] || fail "$msg (no durable signal row naming '$file')"$'\n'"--- output ---"$'\n'"$haystack"
+}
+
+# assert_no_signal_wake_for <haystack> <file> <msg>: no durable signal wake may
+# name <file>. The negative twin of assert_signal_wake_for.
+assert_no_signal_wake_for() {
+  local haystack=$1 file=$2 msg=$3
+  if printf '%s\n' "$haystack" | grep -F "$(printf '\tsignal\t')" | grep -F -- "$file" >/dev/null; then
+    fail "$msg (a durable signal row still names '$file')"$'\n'"--- output ---"$'\n'"$haystack"
+  fi
+}
+
 # assert_absent <path> <msg>: path must not exist.
 assert_absent() {
   [ ! -e "$1" ] || fail "$2"

@@ -208,13 +208,13 @@ test_handling_successor_does_not_go_blind() {
   fi
   grep -F 'crew.status' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not name the crew status file: $(cat "$out")"; }
-  grep "$(printf '\tsignal\tcrew.status\t')" "$state/.wake-queue" >/dev/null \
+  grep -F "$(printf '\tsignal\t')" "$state/.wake-queue" 2>/dev/null | grep -F crew.status >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not enqueue a durable row for the crew event"; }
   ! grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor emitted synthetic recovery instead of supervising: $(cat "$out")"; }
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf 'T2_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
-    printf 'T2_QUEUE_ROW=%s\n' "$(grep "$(printf '\tsignal\tcrew.status\t')" "$state/.wake-queue" | tail -1)"
+    printf 'T2_QUEUE_ROW=%s\n' "$(grep -F "$(printf '\tsignal\t')" "$state/.wake-queue" | grep -F crew.status | tail -1)"
   fi
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true

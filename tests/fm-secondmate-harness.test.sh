@@ -2278,7 +2278,7 @@ test_config_reread_full_retry_queue_drains_before_new_push() {
 }
 
 test_config_reread_cleanup_runs_after_mixed_delivery_failure() {
-  local w head fakebin state_real fail_path path n report out status count
+  local w head fakebin state_real fail_path path n report out status count real_ln
   w=$(new_world config-reread-mixed-delivery)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -2298,18 +2298,24 @@ test_config_reread_cleanup_runs_after_mixed_delivery_failure() {
   done
   fakebin=$(make_fake_toolchain "$w")
   # Fail only the .9999-fail generation's delivery, at the layer that can now
-  # fail: the durable inbox enqueue. The staged steer record carries that
-  # generation's pointer path in its body, so a content-matching mv wrapper
-  # rejects exactly that one atomic publish and nothing else.
-  real_mv=$(command -v mv)
-  cat > "$fakebin/mv" <<SH
+  # fail: the durable inbox enqueue. Publishing a record is a no-clobber hard
+  # link of a fully written staging file (bin/fm-task-inbox-lib.sh), not a
+  # rename, so the wrapper has to intercept `ln`. The staged steer record
+  # carries that generation's pointer path in its body, so a content-matching
+  # ln wrapper rejects exactly that one atomic publish and nothing else.
+  real_ln=$(command -v ln)
+  cat > "$fakebin/ln" <<SH
 #!/usr/bin/env bash
-if [ -f "\${1:-}" ] && grep -q '\.9999-fail' "\${1:-}" 2>/dev/null; then
-  exit 1
-fi
-exec "$real_mv" "\$@"
+case "\${1:-}" in
+  *.staging.*)
+    if grep -q '\.9999-fail' "\${1:-}" 2>/dev/null; then
+      exit 1
+    fi
+    ;;
+esac
+exec "$real_ln" "\$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/ln"
   report="$w/empty-reread.report"
   : > "$report"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \

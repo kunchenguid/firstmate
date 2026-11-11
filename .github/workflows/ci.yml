@@ -128,16 +128,31 @@ jobs:
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
-    runs-on: ubuntu-latest
-    # Measured whole remainder is ~63 min of serial work; the balanced shards
-    # are ~12.7 min each. Cap is a hang tripwire with roughly 1.6x margin, not
-    # the expected healthy end of the lane.
-    timeout-minutes: 20
+    # Pin this job rather than ubuntu-latest: latest resolves to 25.10, which
+    # ships coreutils as the uutils multicall binary, and uutils `mkdir` is not
+    # atomic (2-3 winners in 114/300 concurrent rounds, against 0/300 on GNU
+    # coreutils 9.4). bin/fm-remote-job-lib.sh's fm_remote_job_next_seq uses
+    # mkdir as its sole uniqueness arbiter, so on 25.10 the claim stops being
+    # unique and monotonic, reproducing the `1 2 3 ... 16 17 17 18 19` duplicate
+    # this lane reported. tests/fm-remote-transport-lanes.test.sh owns the
+    # 20-way uniqueness assertion. The durable atomic-arbiter replacement is
+    # separate follow-up work.
+    runs-on: ubuntu-24.04
+    # Measured whole remainder is ~98 min of serial work. Eight shards put
+    # ~12.6 min of it on each runner; five put ~19.7 min, which was enough
+    # heavy subprocess work on a 2-core runner that concurrency and timing
+    # assertions began failing on contention rather than on any defect. Cap is
+    # a hang tripwire with over 3x margin over the balanced load, not the
+    # expected healthy end of the lane. A cancelled shard is not a passing
+    # shard, so keep real headroom here rather than a marginal bump; the
+    # per-script durations behind the balance live in bin/fm-test-run.sh's
+    # weight hints.
+    timeout-minutes: 40
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v6
         with:

@@ -452,16 +452,16 @@ test_interrupted_handling_is_redrained_on_rearm() {
   is_live_non_zombie "$first_arm" || fail "interrupted-handling fixture watcher did not stay live"
   printf 'done: wake whose handling is interrupted\n' > "$state/interrupted.status"
   wait_for_exit "$first_arm" 120 || fail "fixture watcher did not deliver its wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "delivered wake was not durable before handling"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" interrupted.status \
+    "delivered wake was not durable before handling"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/crash-gap-recovery-arm.out"
   wait_for_exit "$ARM_PID" 80 || fail "re-arm after a pre-successor crash stranded the durable wake"
   recovery_arm=$ARM_PID
   grep -F 'check: rearm-resurface' "$dir/crash-gap-recovery-arm.out" >/dev/null \
     || fail "re-arm after a pre-successor crash did not re-surface the durable wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "pre-successor crash recovery removed the unacknowledged durable wake"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" interrupted.status \
+    "pre-successor crash recovery removed the unacknowledged durable wake"
   case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "reason emission marked recovery handled before a successor was established" ;;
@@ -477,8 +477,8 @@ test_interrupted_handling_is_redrained_on_rearm() {
   generation_replay=$(recovery_marker_generation "$state/.watcher-down")
   [ -n "$generation_replay" ] \
     || fail "reason-emission replay left no recovery generation"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "reason-emission replay removed the unacknowledged durable wake"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" interrupted.status \
+    "reason-emission replay removed the unacknowledged durable wake"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/handling-successor-arm.out" "$recovery_arm"
   is_live_non_zombie "$ARM_PID" \
@@ -500,10 +500,10 @@ test_interrupted_handling_is_redrained_on_rearm() {
     || fail "expected handling successor emitted a recursive recovery wake"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/interrupted-drain.out" \
     2> "$dir/interrupted-drain.err" || fail "handling drain did not expose the durable wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$dir/interrupted-drain.out" >/dev/null \
-    || fail "handling drain did not present the durable wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "interrupted handling removed the unacknowledged durable wake"
+  assert_signal_wake_for "$(cat "$dir/interrupted-drain.out")" interrupted.status \
+    "handling drain did not present the durable wake"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" interrupted.status \
+    "interrupted handling removed the unacknowledged durable wake"
   is_live_non_zombie "$ARM_PID" || fail "handling drain stopped its live successor"
 
   kill -TERM "$ARM_PID" 2>/dev/null || fail "could not interrupt the handling successor"
@@ -519,8 +519,8 @@ test_interrupted_handling_is_redrained_on_rearm() {
     || fail "successor after interruption did not emit durable recovery"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay-drain.out" \
     2> "$dir/replay-drain.err" || fail "successor could not re-drain the interrupted wake"
-  grep "$(printf '\tsignal\tinterrupted.status\t')" "$dir/replay-drain.out" >/dev/null \
-    || fail "successor did not re-drain the still-durable wake"
+  assert_signal_wake_for "$(cat "$dir/replay-drain.out")" interrupted.status \
+    "successor did not re-drain the still-durable wake"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay-drain.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay-drain.err")
   [ -n "$sequence" ] && [ -n "$generation" ] \
@@ -653,8 +653,8 @@ test_handling_window_close_keeps_the_acknowledgement_valid() {
   is_live_non_zombie "$ARM_PID" || fail "handling-window fixture watcher did not stay live"
   printf 'done: wake handled while a watcher cycle closes\n' > "$state/handled.status"
   wait_for_exit "$ARM_PID" 120 || fail "fixture watcher did not deliver its wake"
-  grep "$(printf '\tsignal\thandled.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "delivered wake was not durable before handling"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" handled.status \
+    "delivered wake was not durable before handling"
 
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
     || fail "handling drain did not present the durable wake"
@@ -668,18 +668,18 @@ test_handling_window_close_keeps_the_acknowledgement_valid() {
   is_live_non_zombie "$ARM_PID" || fail "handling-window watcher did not stay live"
   printf 'done: wake published during handling\n' > "$state/during-handling.status"
   wait_for_exit "$ARM_PID" 120 || fail "handling-window watcher did not deliver its wake"
-  grep "$(printf '\tsignal\tduring-handling.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "handling-window watcher did not durably append its wake"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" during-handling.status \
+    "handling-window watcher did not durably append its wake"
 
   [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$generation" ] \
     || fail "repeated publications during handling replaced the outstanding recovery generation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
     --recovery-generation "$generation" 2> "$dir/ack.err" \
     || fail "the printed acknowledgement was rejected after repeated publications: $(cat "$dir/ack.err")"
-  ! grep "$(printf '\tsignal\thandled.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "the acknowledged wake was not consumed"
-  grep "$(printf '\tsignal\tduring-handling.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "the newer handling-window wake was over-consumed"
+  assert_no_signal_wake_for "$(cat "$state/.wake-queue")" handled.status \
+    "the acknowledged wake was not consumed"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" during-handling.status \
+    "the newer handling-window wake was over-consumed"
 
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/remaining-drain.out" \
     2> "$dir/remaining-drain.err" || fail "remaining wake could not be re-drained"
@@ -750,8 +750,8 @@ test_moved_generation_acknowledgement_is_self_healing() {
     || ! grep -F 're-run' "$dir/stale-ack.err" >/dev/null; then
     fail "a moved recovery generation did not name its own remedy: $(cat "$dir/stale-ack.err")"
   fi
-  grep "$(printf '\tsignal\tsecond.status\t')" "$state/.wake-queue" >/dev/null \
-    || fail "a stale acknowledgement consumed a wake above its sequence"
+  assert_signal_wake_for "$(cat "$state/.wake-queue")" second.status \
+    "a stale acknowledgement consumed a wake above its sequence"
   [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$second_generation" ] \
     || fail "a stale acknowledgement retired the newer recovery episode"
 

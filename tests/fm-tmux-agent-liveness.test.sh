@@ -47,24 +47,44 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# Stand-in "harness" binaries. Each must be a real executable whose own file
+# name is the harness name, because that name is the executable identity the
+# kernel records and the classifier reads. A symlink to a system binary is NOT
+# portable: Ubuntu 25.10 ships coreutils as the uutils multicall binary, which
+# refuses to run under a name that does not match the utility it was asked for
+# ("Security violation: Requested utility `claude-link` does not match
+# executable name"), so a `sleep` symlink exits instantly there and the pane
+# never exists at all. Compiling our own tiny spinner keeps the identity equal
+# to the harness name on every platform, and unlike a copy of a signed system
+# binary it is not killed by macOS arm64 code-signing validation. Where no C
+# compiler exists the symlink fallback still covers the platforms whose `sleep`
+# tolerates being renamed.
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -n "$CC_BIN" ]; then
+  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c"
+fi
+# A stand-in that is a real executable when a compiler exists, and a symlink to
+# the system sleep otherwise.
+make_stand_in() {  # <path>
+  if [ -n "$CC_BIN" ] && "$CC_BIN" -o "$1" "$LAB/spin.c" 2>/dev/null; then
+    return 0
+  fi
+  ln -sf "$SLEEP_BIN" "$1"
+}
+make_stand_in "$LAB/bin/claude-link"
+make_stand_in "$LAB/bin/pi"
+make_stand_in "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+make_stand_in "$LAB/bin/muse-bin-0.1.0-R708.1"
+make_stand_in "$LAB/bin/musescore"
+make_stand_in "$LAB/bin/amuse"
+make_stand_in "$LAB/bin/muse-binary"
+make_stand_in "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -179,9 +199,7 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # real executable file rather than a symlink, because macOS takes the title
 # from the resolved target's name, so it is skipped where no C compiler exists.
 
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
-  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
   "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
   "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
   new_window titled "$LAB/bin/claude/2.1.220"
@@ -268,8 +286,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+make_stand_in "$LAB/bin/cursor-agent"
+make_stand_in "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the

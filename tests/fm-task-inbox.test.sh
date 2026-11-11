@@ -510,7 +510,7 @@ SH
 # waiting". The hidden second link must bring the instruction back, with its age
 # intact so it still rings and escalates.
 test_worker_deletion_is_repaired() {
-  local state rec rec2 gone action
+  local state rec rec2 action
   state="$TMP_ROOT/worker-deletes/state"; mkdir -p "$state"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction one")
   rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction two")
