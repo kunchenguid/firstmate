@@ -84,7 +84,13 @@ LOCK="${TMPDIR:-/tmp}/fm-tern-autostart.$(id -u).lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
   pid=$(cat "$LOCK/pid" 2>/dev/null || true)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    exit 0
+    # The pid alone is not proof: this lock dir survives a crash, and macOS recycles
+    # pids, so an unrelated live process could block autostart forever with no message.
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'fm-tern-autostart'; then
+      log "another autostart run is already in progress (pid $pid); nothing to do"
+      exit 0
+    fi
+    log "pid $pid holds the lock but is not fm-tern-autostart (recycled pid); treating the lock as stale"
   fi
   rm -rf "$LOCK"
   mkdir "$LOCK" 2>/dev/null || { log "could not take $LOCK; giving up"; exit 1; }
