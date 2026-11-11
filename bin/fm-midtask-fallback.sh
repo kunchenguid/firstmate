@@ -306,17 +306,30 @@ worker_finished_or_waiting() {
   esac
 }
 
+lock_same_incarnation() {
+  local lock=$1 meta=$2 key=$3
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$meta" ] || [ "$(incarnation_key "$meta")" != "$key" ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+}
+
 report_no_candidate() {
-  local id=$1 reason=$2 epoch line
-  status_has_key "$id" needs-decision midtask-fallback && return 0
-  epoch=$(date +%s)
-  line="needs-decision [at=$epoch] [key=midtask-fallback]: no eligible next profile after ${reason}; the current profile stays"
-  append_status "$id" "$line"
-  printf '%s\n' 'no eligible candidate'
+  local id=$1 reason=$2 meta=$3 key=$4 epoch line lock
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  lock_same_incarnation "$lock" "$meta" "$key" || return 1
+  if ! status_has_key "$id" needs-decision midtask-fallback; then
+    epoch=$(date +%s)
+    line="needs-decision [at=$epoch] [key=midtask-fallback]: no eligible next profile after ${reason}; the current profile stays"
+    append_status "$id" "$line"
+    printf '%s\n' 'no eligible candidate'
+  fi
+  fm_lock_release "$lock"
 }
 
 cmd_bind() {
-  local id source='' rule='' mode array meta
+  local id source='' rule='' mode array meta key_before lock
   [ "$#" -ge 1 ] || usage
   id=$(task_id_or_die "$1")
   shift
@@ -340,6 +353,7 @@ cmd_bind() {
   [ "$source" != rule ] || [ -n "$rule" ] || usage
   meta=$(meta_path "$id")
   [ -f "$meta" ] || die "no task record for $id"
+  key_before=$(incarnation_key "$meta")
   mode=$(fallback_mode) || return 1
   if [ "$mode" = off ]; then
     printf '%s\n' 'mid-task fallback: off'
@@ -366,7 +380,10 @@ cmd_bind() {
     || die "the matched profile set is empty or has no harness"
   printf '%s\n' "$array" | jq -e 'all(.[]; (.harness | IN("pi", "pi-signed") | not) or ((.provider // "") | length) > 0)' >/dev/null \
     || die "pi and pi-signed profiles need a provider to enable mid-task fallback"
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  lock_same_incarnation "$lock" "$meta" "$key_before" || die "task $id was retired or replaced"
   printf 'dispatch_array=%s\ndispatch_fallback=on\n' "$array" >> "$meta"
+  fm_lock_release "$lock"
   printf 'bound: %s\n' "$id"
 }
 
@@ -409,6 +426,7 @@ cmd_consider() {
   esac
   array=$(fm_meta_get "$meta" dispatch_array)
   [ -n "$array" ] || return 0
+  key_before=$(incarnation_key "$meta")
   if [ -n "$snapshot" ] && [ "$(jq -r '.shared_quota // false' "$DISPATCH_FILE")" = true ]; then
     snapshot=''
   fi
@@ -449,7 +467,7 @@ cmd_consider() {
   last_match=$wild_match
   [ "$exact_match" -lt 0 ] || last_match=$exact_match
   if [ "$last_match" -lt 0 ]; then
-    report_no_candidate "$id" "a $reason"
+    report_no_candidate "$id" "a $reason" "$meta" "$key_before"
     return 2
   fi
   while IFS=$'\t' read -r idx harness model effort provider qscope; do
@@ -479,7 +497,7 @@ cmd_consider() {
     break
   done <<< "$rows"
   if [ -z "$ch" ]; then
-    report_no_candidate "$id" "a $reason"
+    report_no_candidate "$id" "a $reason" "$meta" "$key_before"
     return 2
   fi
   if already_switched "$meta" "$cur_h" "$cur_m" "$cur_e" "$ch" "$cm" "$ce"; then
@@ -487,13 +505,16 @@ cmd_consider() {
   fi
   epoch=$(date +%s)
   note='The previous run stopped on a usage limit. Continue this task from the existing local copy, including uncommitted work.'
-  key_before=$(incarnation_key "$meta")
   gen_before=$(fm_meta_get "$meta" spawn_gen)
   "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"
   control_rc=$?
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
-  if [ ! -f "$meta" ] || [ "$(incarnation_key "$meta")" != "$key_before" ] \
+  if ! lock_same_incarnation "$lock" "$meta" "$key_before"; then
+    printf 'task %s was retired or replaced; nothing recorded\n' "$id" >&2
+    return 1
+  fi
+  if [ "$(fm_meta_get "$meta" dispatch_fallback)" != on ] \
+    || [ "$(fm_meta_get "$meta" dispatch_array)" != "$array" ] \
     || { [ "$control_rc" -ne 0 ] && [ "$(fm_meta_get "$meta" spawn_gen)" != "$gen_before" ]; }; then
     fm_lock_release "$lock"
     printf 'task %s was retired or replaced; nothing recorded\n' "$id" >&2
