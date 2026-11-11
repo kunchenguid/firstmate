@@ -916,6 +916,71 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
+test_handling_handoff_superseded_by_a_newer_watcher_stands_down() {
+  local home bin newer_pid
+  home=$(make_home host-supersession away)
+  bin="$home/host-bin"
+  mkdir -p "$bin"
+  for f in "$ROOT"/bin/*; do
+    ln -s "$f" "$bin/${f##*/}"
+  done
+  rm -f "$bin/fm-watch-arm.sh"
+  cat > "$bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+case "${1:-arm}" in
+  --handling-delivered)
+    printf 'handling-delivered\tgeneration=%s\twatcher=%s\n' "${2:-}" "${4:-}" >> "$FM_HOME/handoff.log"
+    exit 3
+    ;;
+  --stop) exit 0 ;;
+esac
+out="$FM_HOME/newer-watcher.out"
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  FM_WATCH_HANDLING_SUCCESSOR=1 nohup "$FM_REPO/bin/fm-watch.sh" >"$out" 2>&1 &
+else
+  nohup "$FM_REPO/bin/fm-watch.sh" >"$out" 2>&1 &
+fi
+newer=$!
+i=0
+while [ "$i" -lt 200 ]; do
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null)" = "$newer" ] && break
+  sleep 0.05
+  i=$((i + 1))
+done
+printf '%s\n' "$newer" > "$FM_HOME/newer-watcher.pid"
+printf 'watcher: started pid=999999 (beacon fresh) recovery-generation=fixture.0.supersede\n'
+trap 'exit 0' TERM
+wait "$newer"
+rc=$?
+cat "$out" 2>/dev/null || true
+exit "$rc"
+SH
+  chmod +x "$bin/fm-watch-arm.sh"
+  HOST="$bin/fm-supervision-host.sh" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "supersession: the host never started a watcher cycle: $(cat "$home/host.out" 2>/dev/null)"
+  append_status "$home" 'step one'
+  wait_until_deadline 60 host_exited "$home" || fail "supersession: the host did not stand down: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  expect_code 0 "$(cat "$home/host.rc")" "a superseded handling handoff must stand down with exit 0"
+  assert_re '^supervision-host stood down: a newer watcher cycle owns this home.s lock; the handling handoff is superseded$' "$home/host.out" \
+    "the host must name the newer watcher as the reason it stood down"
+  assert_grep 'handling-superseded\tgeneration=fixture.0.supersede\twatcher=999999' "$home/state/.supervision-host.log" \
+    "the ledger must record the superseded handling handoff"
+  assert_grep 'handling-delivered	generation=fixture.0.supersede	watcher=999999' "$home/handoff.log" \
+    "the host must confirm the successor generation and watcher it handed handling to"
+  assert_no_re 'could not be confirmed' "$home/host.out" "a superseded handoff must not take the restoration-failure path"
+  assert_no_re '	to-main	' "$home/state/.supervision-host.log" "a superseded handoff must not hand the wake to main"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "the superseded handoff must not start an engine turn"
+  newer_pid=$(cat "$home/newer-watcher.pid" 2>/dev/null)
+  [ -n "$newer_pid" ] || fail "the newer watcher did not record its pid"
+  kill -0 "$newer_pid" 2>/dev/null || fail "the host stopped the newer watcher that owned the lock"
+  [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" = "$newer_pid" ] \
+    || fail "the newer watcher no longer owns the lock after the host stood down"
+  stop_home_processes "$home"
+  pass "host: a handling handoff superseded by a newer watcher stands down and leaves that watcher running"
+}
+
 fm_test_run \
   test_park_exit_probe_uses_half_second_child_sleeps \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
@@ -945,4 +1010,5 @@ fm_test_run \
   test_next_host_clears_a_turn_its_killed_predecessor_left \
   test_report_without_acknowledgement_hands_the_wake_to_main \
   test_return_during_a_failed_turn_still_hands_its_outcomes_to_main \
-  test_incomplete_engine_result_hands_the_wake_to_main
+  test_incomplete_engine_result_hands_the_wake_to_main \
+  test_handling_handoff_superseded_by_a_newer_watcher_stands_down

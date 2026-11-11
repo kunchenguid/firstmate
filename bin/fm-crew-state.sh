@@ -106,10 +106,12 @@
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
-#      failed -> failed, cancelled -> unknown (no verdict unless the green
-#      delivery safeguard below applies). A cancelled outcome takes precedence
-#      over an interrupted step's failed status or outstanding gate findings;
-#      it does not rewrite historical events or backlog records.
+#      handed_off/handed-off -> done (PR left open for review, resolved from
+#      the run's own pr field), failed -> failed, cancelled -> unknown (no
+#      verdict unless the green delivery safeguard below applies). A cancelled
+#      outcome takes precedence over an interrupted step's failed status or
+#      outstanding gate findings; it does not rewrite historical events or
+#      backlog records.
 #      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
 #      vocabulary), read identically to a clean passed. passed-with-skips is
