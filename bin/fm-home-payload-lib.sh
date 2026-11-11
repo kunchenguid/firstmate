@@ -110,8 +110,8 @@ try:
             # the return succeeded or failed, so it is not evidence.
             sys.exit(0)
         if old.get("leased") is not True:
-            # The slot was already unleased, so only another holder taking it
-            # shows that this attempt transferred the slot away.
+            # An unleased slot shows this attempt transferred it only when a
+            # lease or a new process owner took it.
             owner_fields = ("owner_pid", "owner_started_at")
             old_owner = tuple(old.get(key, 0) for key in owner_fields)
             current_owner = tuple(current.get(key, 0) for key in owner_fields)
@@ -130,14 +130,16 @@ PYPOOL
 }
 
 # A staged return is only put back when the pool still owes this home its slot.
-# The saved pool entry decides on evidence of a lease transition: a held lease
-# that is still held means the return never took effect, while a lease this home
-# held that is released or reassigned, or a slot another holder acquired, means
-# the return already committed and the payload must stay out. An unchanged slot
-# that was never leased is not evidence either way, so the home keeps its
-# payload for the retry. An unreadable or contradictory pool reads as an error,
-# never as a guess, because either wrong answer strips a live home or re-marks a
-# leasable slot.
+# The saved pool entry decides on evidence that the slot left this home: a lease
+# this home held that is released or reassigned, or a slot another holder
+# acquired, means the return already committed and the payload must stay out,
+# while a lease that is still held means the return never took effect. A slot
+# that was never leased proves a transfer only through a new lease or a
+# different process owner, because an ordinary `treehouse get` records
+# owner_pid and owner_started_at without a lease; an unchanged or cleared owner
+# keeps its payload for the retry. An unreadable or contradictory pool reads as
+# an error, never as a guess, because either wrong answer strips a live home or
+# re-marks a leasable slot.
 # Returns 0 when the staging is settled as committed, 2 when it must be
 # restored, and 1 when the pool cannot be reconciled.
 fm_home_payload_reconcile() {
