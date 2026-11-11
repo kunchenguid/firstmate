@@ -1864,6 +1864,175 @@ test_required_captain_hold_tests_fail_without_tasks_axi() {
   pass "all four required captain-hold tests fail when tasks-axi is unavailable"
 }
 
+# The superseded-wait check is opt-in through config/paused-wait-supersession;
+# cases arm it unless asked for the flag-absent default.
+make_superseded_pause_case() {  # <name> <status-line> [armed|unarmed]
+  local name=$1 status_line=$2 arm=${3:-armed} dir state window key sig
+  dir=$(make_case "$name"); state="$dir/state"; window="test:fm-superseded"
+  mkdir -p "$dir/config"
+  [ "$arm" = unarmed ] || : > "$dir/config/paused-wait-supersession"
+  printf 'idle at declared wait\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused.meta"
+  printf '%s\n' "$status_line" > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle at declared wait')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$dir"
+}
+
+superseded_pause_round() {  # <dir> <crew-state-line> <exit|absorb> [busy]
+  local dir=$1 crew_state=$2 mode=$3 busy=${4:-no} state="$1/state" out="$1/watch.out" pid
+  local command=zsh busy_max=999999
+  case "$busy" in
+    yes|recent) command=grok; [ "$busy" = yes ] && busy_max=1; printf 'working\nCtrl+c:cancel\n' > "$dir/pane.txt" ;;
+  esac
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-superseded \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+    FM_FAKE_CREW_STATE="$crew_state" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$dir/crew-state.log" \
+    FM_BUSY_TURN_MAX_SECS="$busy_max" FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$out" 2>&1 &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+  else
+    wait_poll_cycle "$state" "$pid" 100 || { reap "$pid"; return 1; }
+    reap "$pid"
+  fi
+}
+
+test_declared_wait_surfaces_superseding_state() {
+  local dir state window
+  dir=$(make_superseded_pause_case gate-unreported 'paused: waiting for validation run R')
+  state="$dir/state"; window=test:fm-superseded
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit \
+    || fail "idle paused run parked at an unreported human gate did not surface"
+  grep -F "stale: $window (paused wait superseded: run R is parked at a human-owed gate with no open decision)" \
+    "$dir/watch.out" >/dev/null || fail "gate wake did not identify the run and missing decision"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the idle gate wake"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
+    || fail "the same declaration and run re-alarmed inside the cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "the same declaration and run produced a duplicate wake"
+
+  dir=$(make_superseded_pause_case gate-reported 'paused: waiting for validation run R')
+  state="$dir/state"
+  printf 'needs-decision [key=nm-R-review]: decide the ask-user finding\npaused: waiting for validation run R\n' > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
+    || fail "an already-open decision did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "gate with an open needs-decision generated a stale wake"
+
+  dir=$(make_superseded_pause_case gate-working 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: working · source: run-step · validating (running) · run: R' absorb \
+    || fail "a working validation run did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "working run generated a stale wake"
+
+  dir=$(make_superseded_pause_case gate-terminal 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R' exit \
+    || fail "terminal validation run did not supersede the declared wait"
+  grep -F 'paused wait superseded: current run R is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "terminal wake did not identify the superseded wait"
+
+  dir=$(make_superseded_pause_case gate-terminal-pr 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R1 · pr=https://example.test/1' exit \
+    || fail "terminal run with PR did not supersede the declared wait"
+  grep -F 'current run R1 is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "PR suffix obscured the first terminal run id"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first terminal wake"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R2 · pr=https://example.test/2' exit \
+    || fail "second terminal run with PR did not supersede the declared wait"
+  grep -F 'current run R2 is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "different terminal run shared the first run's throttle"
+
+  dir=$(make_superseded_pause_case gate-busy-recent 'paused: waiting for validation run R')
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit recent \
+    || fail "recent busy paused run parked at an unreported human gate did not surface"
+  grep -F 'run R is parked at a human-owed gate' "$dir/watch.out" >/dev/null \
+    || fail "recent busy gate wake did not identify the run"
+
+  dir=$(make_superseded_pause_case gate-busy-old 'paused: waiting for validation run R')
+  state="$dir/state"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit yes \
+    || fail "old busy paused run parked at an unreported human gate did not surface"
+  grep -F 'run R is parked at a human-owed gate' "$dir/watch.out" >/dev/null \
+    || fail "old busy gate wake did not identify the run"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the busy gate wake"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb yes \
+    || fail "the repeated busy poll failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the busy gate repeated inside the cadence"
+
+  pass "declared waits surface unreported gates and terminal runs once, while working runs and answered gates keep the pause cadence on idle and busy paths"
+}
+
+# Absent config/paused-wait-supersession the same superseding states keep main's
+# declared-wait handling: no superseded wake, nothing queued, and no crew-state
+# read beyond the one the idle declared-wait recheck already spends (none on the
+# busy paths), counted through the stub's read log.
+test_superseded_wait_check_is_opt_in() {
+  local c n crew_state busy reads got dir state
+  for c in "idle-gate|state: parked · source: run-step · ask-user: authority decision · run: R|no|1" \
+           "idle-terminal|state: done · source: run-step · run: R|no|1" \
+           "busy-recent|state: parked · source: run-step · ask-user: authority decision · run: R|recent|0" \
+           "busy-old|state: parked · source: run-step · ask-user: authority decision · run: R|yes|0"; do
+    IFS='|' read -r n crew_state busy reads <<< "$c"
+    dir=$(make_superseded_pause_case "unarmed-$n" 'paused: waiting for validation run R' unarmed)
+    state="$dir/state"
+    [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
+    superseded_pause_round "$dir" "$crew_state" absorb "$busy" \
+      || fail "$n: flag-absent watcher round failed"
+    ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
+      || fail "$n: flag-absent watcher surfaced a superseded wait"
+    [ ! -s "$state/.wake-queue" ] || fail "$n: flag-absent watcher queued a wake"
+    got=0
+    [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
+    [ "$got" = "$reads" ] || fail "$n: flag-absent watcher read crew state $got times, want $reads"
+  done
+  pass "without config/paused-wait-supersession superseding states keep the declared-wait cadence and spend no extra crew-state read"
+}
+
+# The flag scopes the check to the foreground watcher: while the away-mode flag
+# exists, a busy paused worker whose run is parked at an unreported human gate
+# gets no superseded wake and no crew-state read, exactly as with the flag absent.
+test_superseded_wait_check_skips_away_mode() {
+  local c busy mode arm got dir out
+  for c in recent:absorb yes:exit; do
+    busy=${c%%:*} mode=${c#*:} out=''
+    for arm in unarmed armed; do
+      dir=$(make_superseded_pause_case "away-busy-$busy-$arm" 'paused: waiting for validation run R' "$arm")
+      date '+%s' > "$dir/state/.afk"
+      [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$dir/state/paused.meta"
+      superseded_pause_round "$dir" \
+        'state: parked · source: run-step · ask-user: authority decision · run: R' "$mode" "$busy" \
+        || fail "busy-$busy $arm: away-mode watcher round failed: $(cat "$dir/watch.out")"
+      ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
+        || fail "busy-$busy $arm: away-mode watcher surfaced a superseded wait"
+      got=0
+      [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
+      [ "$got" = 0 ] || fail "busy-$busy $arm: away-mode watcher read crew state $got times, want 0"
+      if [ "$arm" = unarmed ]; then
+        out=$(cat "$dir/watch.out")
+      else
+        [ "$(cat "$dir/watch.out")" = "$out" ] \
+          || fail "busy-$busy: armed away-mode output differs from flag-absent: $(cat "$dir/watch.out") vs $out"
+      fi
+    done
+  done
+  pass "with the away-mode flag present an armed busy paused worker at a human gate behaves exactly as with the flag absent: no superseded wake and no crew-state read"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1873,6 +2042,9 @@ fm_test_run \
   test_required_captain_hold_tests_fail_without_tasks_axi \
   test_nonterminal_stale_not_working_surfaced \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
+  test_declared_wait_surfaces_superseding_state \
+  test_superseded_wait_check_is_opt_in \
+  test_superseded_wait_check_skips_away_mode \
   test_exited_declared_pause_is_bounded_but_live_gate_surfaces \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
