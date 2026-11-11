@@ -458,7 +458,7 @@ fm_afk_contract_render_readback() {  # <path>
 fm_afk_contract_render_announcement() {  # <path>
   local path=$1 expected words mandate_text
   if [ "$(fm_afk_contract_record_mode "$path")" = quiet ]; then
-    printf 'Quiet mode recorded at %s: %s Only an explicit /quiet off ends it.\n' \
+    printf 'Quiet mode recorded at %s: %s Use /quiet off to end it; on a supervision-host home, /afk replaces it with away.\n' \
       "$(fm_afk_contract_read_field "$path" confirmed)" "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
     return 0
   fi
