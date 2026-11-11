@@ -37,6 +37,7 @@ begin() {
 printf '%s\n' "$#" >> "$CONTROL_CALLS"
 printf '%s\n' "$@" >> "$CONTROL_CALLS"
 [ -z "${CONTROL_RM_META:-}" ] || rm -f -- "$CONTROL_RM_META"
+[ -z "${CONTROL_REPLACE_META:-}" ] || printf 'kind=ship\nharness=claude\nmodel=claude-sonnet-5\neffort=high\nworktree=/replaced/work\nspawn_gen=sNEW\n' > "$CONTROL_REPLACE_META"
 exit "${CONTROL_RC:-0}"
 EOF
   chmod +x "$CASE/bin/control"
@@ -101,6 +102,7 @@ invoke() {
   CONTROL_CALLS="$CASE/control-calls" \
   CONTROL_RC="$CONTROL_RC" \
   CONTROL_RM_META="${CONTROL_RM_META:-}" \
+  CONTROL_REPLACE_META="${CONTROL_REPLACE_META:-}" \
   FM_LIMIT_MESSAGE_DIR="$CASE/limits" \
     "$SCRIPT" "$@"
 }
@@ -382,6 +384,42 @@ unset CONTROL_RM_META
 [ ! -e "$CASE/state/$ID.meta" ] || fail "retired task record was recreated"
 grep -q 'blocked' "$CASE/state/$ID.status" && fail "retired task got a blocked report" || true
 ok "task retired during relaunch is not recorded"
+
+# A task retired during a relaunch that succeeds gets no record and no report.
+begin control-retired-success
+write_pair true high
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+CONTROL_RC=0
+CONTROL_RM_META="$CASE/state/$ID.meta"
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json" 2>&1)
+rc=$?
+unset CONTROL_RM_META
+[ "$rc" -eq 1 ] || fail "retired task exited $rc: $out"
+[ ! -e "$CASE/state/$ID.meta" ] || fail "retired task record was recreated by the success path"
+grep -q 'switched' "$CASE/state/$ID.status" && fail "retired task got a switched report" || true
+ok "task retired during a successful relaunch is not recorded"
+
+# A task record replaced by a new incarnation during the relaunch is not written to.
+for rcase in 1 0; do
+  begin "control-replaced-$rcase"
+  write_pair true high
+  write_meta
+  invoke bind "$ID" --rule 0 >/dev/null
+  printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
+  quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+  CONTROL_RC=$rcase
+  CONTROL_REPLACE_META="$CASE/state/$ID.meta"
+  out=$(invoke consider "$ID" --snapshot "$CASE/snap.json" 2>&1)
+  rc=$?
+  unset CONTROL_REPLACE_META
+  [ "$rc" -eq 1 ] || fail "replaced task (control rc $rcase) exited $rc: $out"
+  grep -q '^midtask_switch' "$CASE/state/$ID.meta" && fail "replaced task (control rc $rcase) got the old run's switch record" || true
+  grep -q 'blocked\|switched' "$CASE/state/$ID.status" && fail "replaced task (control rc $rcase) got a report" || true
+done
+ok "task replaced by a new incarnation during relaunch is not recorded"
 
 # A blocked report after a needs-decision report is still written.
 begin decision-then-blocked
