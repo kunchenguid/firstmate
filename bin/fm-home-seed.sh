@@ -609,11 +609,6 @@ seed_treehouse_return() {
 seed_return_treehouse_home() {
   local home=$1 abs_home
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
-  fm_home_payload_recover "$abs_home" "$FM_HOME" "$SEED_ID" || return 0
-  if [ "$FM_HOME_PAYLOAD_RETIRED" = 1 ]; then
-    fm_home_payload_finalize "$abs_home" "$FM_HOME" "$SEED_ID"
-    return 0
-  fi
   validate_home_assignment "$SEED_ID" "$abs_home" || return 0
   validate_existing_parent_binding "$abs_home" || return 0
   if [ -e "$abs_home/$SUB_HOME_MARKER" ] \
@@ -635,7 +630,7 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
-  fm_home_payload_finalize "$abs_home" "$FM_HOME" "$SEED_ID"
+
 }
 
 seed_remove_created_home() {
@@ -956,7 +951,6 @@ seed_home() {
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
   validate_existing_parent_binding "$home" || return 1
-  fm_home_payload_finalize "$home" "$FM_HOME" "$id" || return 1
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
     if [ -f "$SEED_PARENT_BRIEF" ]; then
