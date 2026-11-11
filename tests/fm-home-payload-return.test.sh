@@ -163,6 +163,7 @@ prepare_retry() {
 prepare_retry
 printf() {
   [ "$1" != 'committed=1\n' ] || return 1
+  # shellcheck disable=SC2059  # Reinject the forwarded format string verbatim.
   builtin printf "$@"
 }
 fm_home_payload_return "$home" mate "$parent" return_slot success
@@ -209,6 +210,7 @@ fm_home_worktree_lock_forget "$home" next "$parent"
 rm -rf "$home/data" "$home/state"
 prepare_retry
 printf() {
+  # shellcheck disable=SC2059  # Reinject the forwarded format string verbatim.
   builtin printf "$@"
   if [ "$1" = 'committed=1\n' ]; then
     kill -KILL "$BASHPID"
