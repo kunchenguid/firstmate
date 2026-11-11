@@ -393,12 +393,14 @@ test_a_details_view_shows_the_type_badge_its_card_shows() {
   pass "a Details view shows the type badge its card shows, a credential card included"
 }
 
-# Oracle: the WAI-ARIA Authoring Practices modal dialog pattern - Shift+Tab on
-# the first focusable control wraps to the last, Tab on the last wraps to the
-# first, Tab anywhere else keeps its default move, and Escape closes the dialog
-# and returns focus to the control that opened it. The view's markup puts Close
-# before the body, so Close is the first control and the body's last link the
-# last. Per CSS overflow, the page behind the open view does not scroll.
+# Oracles: the WAI-ARIA Authoring Practices modal dialog pattern - Tab and
+# Shift+Tab cycle through the dialog's tab stops, wrapping from the last to the
+# first and back, and Escape closes the dialog and returns focus to the control
+# that opened it; WCAG 2.1.1 Keyboard, as axe-core's scrollable-region-focusable
+# rule checks it - every region that scrolls is reachable from the keyboard.
+# The view's markup orders its stops as the title region, Close, then the body
+# region with its links in reading order. Per CSS overflow, the page behind the
+# open view does not scroll.
 test_details_keeps_keyboard_focus_inside_and_closes_on_escape() {
   local home out
   home=$(make_home call-details-keys)
@@ -408,20 +410,57 @@ test_details_keeps_keyboard_focus_inside_and_closes_on_escape() {
      "options":[{"value":"go","label":"Go ahead"}]}
   ]')
   printf '%s' "$out" | jq -e '
-    .call.keys as $k
+    {region:"title", overflow_y:"auto"} as $title
+    | {region:"body", overflow_y:"auto"} as $body
+    | .call.keys as $k
     | .error == "" and $k.card == "A linked call"
       and $k.opened == {open:true, focus:{label:"Close", card:null, visible:true}, page_overflow:"hidden"}
-      and ($k.steps | length) == 4
-      and ($k.steps[0] | .key == "Tab" and .shift and .prevented and .open
-        and .focus.label == "https://example.com/b")
-      and ($k.steps[1] | .key == "Tab" and (.shift | not) and .prevented and .open
-        and .focus.label == "Close")
-      and ($k.steps[2] | .key == "Tab" and (.shift | not) and (.prevented | not) and .open)
-      and ($k.steps[3] | .key == "Escape" and .prevented and (.open | not)
-        and .focus == {label:"Details", card:"A linked call", visible:true}
-        and .page_overflow == null)
-  ' >/dev/null || fail "the Details view let Tab leave it, or Escape did not close it and return focus to the card: $out"
-  pass "the Details view keeps Tab and Shift+Tab inside it and closes on Escape, returning focus to the card"
+      and $k.forward == [
+        {prevented:false, at:$body},
+        {prevented:false, at:{label:"https://example.com/a"}},
+        {prevented:false, at:{label:"https://example.com/b"}},
+        {prevented:true, at:$title},
+        {prevented:false, at:{label:"Close"}}]
+      and $k.backward == [
+        {prevented:false, at:$title},
+        {prevented:true, at:{label:"https://example.com/b"}},
+        {prevented:false, at:{label:"https://example.com/a"}},
+        {prevented:false, at:$body},
+        {prevented:false, at:{label:"Close"}}]
+      and $k.escape == {prevented:true, open:false,
+        focus:{label:"Details", card:"A linked call", visible:true}, page_overflow:null}
+  ' >/dev/null || fail "the Details view let Tab leave it or skip a scrolling region, or Escape did not close it and return focus to the card: $out"
+  pass "the Details view keeps Tab and Shift+Tab inside it, reaches each scrolling region, and closes on Escape, returning focus to the card"
+}
+
+# Same oracles as above, for a view with no link: Close is then not the only
+# tab stop, so Tab from it reaches the body region that scrolls the context and
+# options instead of being held on Close.
+test_a_details_view_without_links_still_tabs_to_its_scrolling_regions() {
+  local home out
+  home=$(make_home call-details-keys-nolink)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"plain","type":"credential","repo":"sample","title":"A plain call",
+     "decide":"Which token should the deploy use?",
+     "context":["No link appears anywhere in this view."],
+     "options":[],"allow_freeform":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    {region:"title", overflow_y:"auto"} as $title
+    | {region:"body", overflow_y:"auto"} as $body
+    | .call.keys as $k
+    | .error == "" and $k.card == "A plain call"
+      and $k.opened.focus.label == "Close"
+      and $k.forward == [
+        {prevented:false, at:$body},
+        {prevented:true, at:$title},
+        {prevented:false, at:{label:"Close"}}]
+      and $k.backward == [
+        {prevented:false, at:$title},
+        {prevented:true, at:$body},
+        {prevented:false, at:{label:"Close"}}]
+  ' >/dev/null || fail "Tab in a Details view with no link did not reach its scrolling regions: $out"
+  pass "a Details view with no link still tabs from Close to its scrolling body and title regions"
 }
 
 # Oracle: the GFM autolink rule - a trailing ")" belongs to the URL only when
@@ -531,6 +570,7 @@ test_every_captains_call_card_takes_the_tallest_cards_height
 test_every_captains_call_card_opens_a_full_screen_details_view
 test_a_details_view_shows_the_type_badge_its_card_shows
 test_details_keeps_keyboard_focus_inside_and_closes_on_escape
+test_a_details_view_without_links_still_tabs_to_its_scrolling_regions
 test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation
 test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details
 test_a_freeform_only_first_card_still_deals_the_next_card

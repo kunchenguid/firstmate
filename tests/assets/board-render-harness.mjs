@@ -28,15 +28,20 @@
 // card_badges and meta_badges are the badges on the card's top row and in the
 // view's header, and focus is where keyboard focus landed once the view closed:
 // {label, card, visible}, card being the title of the card that holds the
-// focused element. call.keys opens the first card's Details view and presses
-// keys on the page: {card, opened, steps:[{key, shift, prevented, open, focus,
-// page_overflow}]} (null for no cards), page_overflow being the body's overflow
-// resolved from the built page's stylesheet. call.advance answers the first
-// card, opens its Details before the deal's timer fires, fires it, then closes
-// the view: {answered, shown, focus} (null for fewer than two cards). The page's
-// static markup is an element tree, so an element starts hidden as its markup
-// declares; focus moves only to an element with no hidden ancestor, as in a
-// browser, the harness performs no key's default action, and timers fire only
+// focused element. call.keys opens the first card's Details view, walks its Tab
+// cycle forward and then backward from the focused control, and presses Escape:
+// {card, opened, forward:[step], backward:[step], escape} (null for no cards),
+// where opened and escape are {open, focus, page_overflow} (escape also carries
+// prevented), page_overflow being the body's overflow resolved from the built
+// page's stylesheet, and a step is {prevented, at}: whether the page cancelled
+// that Tab, and what then holds focus - a control as {label}, or a region as
+// {region, overflow_y}, region naming the part of the view it holds ("title" or
+// "body") and overflow_y resolved from the stylesheet. call.advance answers the
+// first card, opens its Details before the deal's timer fires, fires it, then
+// closes the view: {answered, shown, focus} (null for fewer than two cards). The
+// page's static markup is an element tree, so an element starts hidden as its
+// markup declares; focus moves only to an element with no hidden ancestor, as in
+// a browser; Tab is the only key with a default action; and timers fire only
 // when the harness fires them.
 import { readFileSync } from "node:fs";
 
@@ -355,25 +360,53 @@ const details = eachPage((card) => {
   return view;
 });
 
-// Open the first card's Details view, then press Shift+Tab, Tab, Tab and Escape
-// on the page in turn. Each step records whether the page cancelled the key's
-// default action, where focus is, whether the view is open, and the page's
-// resolved overflow.
+// Open the first card's Details view, press Tab until focus is back on the
+// control it started on, Shift+Tab the same way, then press Escape. A Tab the
+// page does not cancel takes the browser's default move: focus goes to the next
+// (Shift: previous) rendered tab stop in document order - a link with an href,
+// an enabled button or input, or an element with tabindex="0".
+const holds = (n, target) => {
+  for (let t = target; t; t = t.parentNode) if (t === n) return true;
+  return false;
+};
+const tabStop = (n) => n.rendered() && (n.attributes.tabindex === "0" || (n.tagName === "a" && !!n.href)
+  || ((n.tagName === "button" || n.tagName === "input") && !n.disabled));
 const keys = (() => {
   if (!decisionCards().length) return null;
   showFirst();
   const card = decisionCards().find((c) => !c.hidden);
   const modal = byId.get("bb-modal");
   const state = () => ({ open: modal.hidden === false, focus: focusNow(), page_overflow: styleOf(document.body, "overflow") });
+  const at = (f) => f.children.length
+    ? { region: holds(f, byId.get("bb-modal-body")) ? "body" : holds(f, byId.get("bb-modal-title")) ? "title" : null,
+        overflow_y: styleOf(f, "overflow-y") }
+    : { label: f.textContent };
   const press = (key, shift) => {
     const ev = { type: "keydown", key, shiftKey: shift, prevented: false, preventDefault() { this.prevented = true; } };
     for (const fn of documentListeners.keydown || []) fn(ev);
-    return { key, shift, prevented: ev.prevented, ...state() };
+    if (key === "Tab" && !ev.prevented) {
+      const stops = [];
+      const walk = (n) => n.children.forEach((c) => { if (tabStop(c)) stops.push(c); walk(c); });
+      walk(page);
+      stops[stops.indexOf(document.activeElement) + (shift ? -1 : 1)]?.focus();
+    }
+    return ev.prevented;
+  };
+  const cycle = (shift) => {
+    const start = document.activeElement;
+    const steps = [];
+    for (let i = 0; i < 20; i++) {
+      steps.push({ prevented: press("Tab", shift), at: at(document.activeElement) });
+      if (document.activeElement === start) break;
+    }
+    return steps;
   };
   card.querySelectorAll(".bb-detailsbtn")[0].dispatch("click");
   const opened = state();
-  const steps = [["Tab", true], ["Tab", false], ["Tab", false], ["Escape", false]].map(([key, shift]) => press(key, shift));
-  return { card: titleOf(card), opened, steps };
+  const forward = cycle(false);
+  const backward = cycle(true);
+  const escaped = press("Escape", false);
+  return { card: titleOf(card), opened, forward, backward, escape: { prevented: escaped, ...state() } };
 })();
 
 const callWide = pageCall();

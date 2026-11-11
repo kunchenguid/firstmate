@@ -428,14 +428,14 @@ body.bb-modal-open { overflow: hidden; }
 <div class="bb-modal" id="bb-modal" role="dialog" aria-modal="true" aria-labelledby="bb-modal-title" hidden>
   <div class="bb-modal__head">
     <div class="bb-modal__headin">
-      <div class="bb-modal__heading">
+      <div class="bb-modal__heading" tabindex="0">
         <div class="bb-modal__meta" id="bb-modal-meta"></div>
         <h2 class="bb-modal__title" id="bb-modal-title"></h2>
       </div>
       <button type="button" class="fm-btn fm-btn--sm bb-detailsbtn bb-modal__close" id="bb-modal-close">Close</button>
     </div>
   </div>
-  <div class="bb-modal__body" id="bb-modal-scroll">
+  <div class="bb-modal__body" id="bb-modal-scroll" tabindex="0">
     <div class="bb-modal__bodyin" id="bb-modal-body"></div>
   </div>
 </div>
@@ -680,7 +680,7 @@ __FM_BEARINGS_BOARD_DATA__
     if (ev.key === "Escape") { ev.preventDefault(); closeDetails(); return; }
     if (ev.key !== "Tab") return;
     /* keep keyboard focus inside the open view */
-    var focusable = Array.prototype.filter.call(modal.querySelectorAll("a[href], button"),
+    var focusable = Array.prototype.filter.call(modal.querySelectorAll("a[href], button, [tabindex]"),
       function (n) { return !n.disabled; });
     if (!focusable.length) return;
     var first = focusable[0], last = focusable[focusable.length - 1];
