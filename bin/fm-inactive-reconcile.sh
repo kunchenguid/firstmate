@@ -22,6 +22,13 @@
 # pre-validation `done: {summary}` still reads done (the pipeline handoff),
 # while a CI-ready or direct-PR/local-only done whose head lives only in the
 # disposable copy reads blocked and is not a terminal inactive outcome.
+# Neither path refreshes remote-tracking refs before that gate: it runs under
+# the child's meta lock inside a scan budget of at most 30 seconds, which a
+# fetch bounded at 30 seconds per remote does not fit. The home's own
+# bin/fm-pr-check.sh, which runs when the child's ready report is registered,
+# and on each watcher sweep when config/pr-register-scan is on, refreshes the
+# child's copy before it refuses, and a later scan publishes the done once that
+# fetch shows its head.
 # A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them

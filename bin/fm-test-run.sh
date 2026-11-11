@@ -302,7 +302,7 @@ family_for_basename() {
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
-    fm-timeout-lib.test.sh|\
+    fm-timeout-lib.test.sh|fm-remote-inherit-generation.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-tap-verify.test.sh|\
@@ -391,7 +391,8 @@ family_for_basename() {
     fm-calm-pi-queue-retention-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
-    fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh)
+    fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
+    fm-claude-tool-exclude-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -405,7 +406,7 @@ family_for_basename() {
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
-    fm-project-capacity.test.sh|\
+    fm-project-capacity.test.sh|fm-lane-capacity-integration.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -446,7 +447,8 @@ family_for_basename() {
       printf '%s\n' hc
       ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
-    fm-busy-state.test.sh|fm-capacity.test.sh|fm-classify-corr-token.test.sh|\
+    fm-busy-state.test.sh|fm-capacity.test.sh|fm-capacity-auto.test.sh|fm-lane-vitals.test.sh|\
+    fm-classify-corr-token.test.sh|\
     fm-claude-account-quota.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
@@ -767,6 +769,7 @@ tests/fm-calm-claude-mod-plugin.test.sh 77
 tests/fm-calm-claude-mod.test.sh 2527
 tests/fm-calm-pi-extension.test.sh 56463
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
+tests/fm-capacity-auto.test.sh 36243
 tests/fm-check-unregister.test.sh 469
 tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
@@ -774,6 +777,7 @@ tests/fm-classify-decision-key.test.sh 4362
 tests/fm-claude-account-quota.test.sh 2492
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
 tests/fm-claude-stop-autoarm.test.sh 61189
+tests/fm-claude-tool-exclude-live.test.sh 75
 tests/fm-claude-trust.test.sh 12010
 tests/fm-cmux-claude-composer-live-e2e.test.sh 77
 tests/fm-codex-continuity-live-e2e.test.sh 108
@@ -830,7 +834,10 @@ tests/fm-install-herdr.test.sh 1000
 tests/fm-jev-mem-guard.test.sh 336
 tests/fm-kimi-harness.test.sh 58917
 tests/fm-kimi-trust-prompt-live-e2e.test.sh 60
+tests/fm-lane-capacity-integration.test.sh 48000
+tests/fm-lane-vitals.test.sh 5077
 tests/fm-launch-prompt-signals-live-e2e.test.sh 50
+tests/fm-lavish-url.test.sh 30000
 tests/fm-lint-workflows.test.sh 872
 tests/fm-live-gate.test.sh 7452
 tests/fm-live-lab-isolation.test.sh 6459
@@ -877,6 +884,7 @@ tests/fm-remote-backlog-handoff.test.sh 82063
 tests/fm-remote-doctor.test.sh 14460
 tests/fm-remote-entrypoint.test.sh 134
 tests/fm-remote-herdr-guard.test.sh 3140
+tests/fm-remote-herdr-identity.test.sh 6158
 tests/fm-remote-job-orphan-reap.test.sh 2985
 tests/fm-remote-job-process-start.test.sh 11871
 tests/fm-remote-job.test.sh 81046
@@ -920,6 +928,7 @@ tests/fm-startup-memory-budget.test.sh 8086
 tests/fm-startup-network.test.sh 72106
 tests/fm-stat-shadowing.test.sh 75
 tests/fm-stow-cascade.test.sh 3058
+tests/fm-stow-guard.test.sh 30000
 tests/fm-subagent-pretool-check.test.sh 998
 tests/fm-supervision-events.test.sh 673
 tests/fm-supervision-host-attended-live-e2e.test.sh 49
@@ -1494,6 +1503,11 @@ families_for_unmapped_bin() {
 families_for_changed_path() {
   local path=$1 fixture_ref capture_ref
   case "$path" in
+    bin/fm-remote*|bin/fm-secondmate*)
+      printf '%s\n' "__script__:fm-remote-inherit-generation.test.sh"
+      ;;
+  esac
+  case "$path" in
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -1659,6 +1673,14 @@ families_for_changed_path() {
       ;;
     bin/fm-capacity.sh)
       printf '%s\n' "__script__:fm-capacity.test.sh"
+      printf '%s\n' "__script__:fm-capacity-auto.test.sh"
+      printf '%s\n' "__script__:fm-project-capacity.test.sh"
+      printf '%s\n' "__script__:fm-lane-capacity-integration.test.sh"
+      ;;
+    bin/fm-lane-vitals-lib.sh)
+      printf '%s\n' "__script__:fm-lane-vitals.test.sh"
+      printf '%s\n' "__script__:fm-capacity-auto.test.sh"
+      printf '%s\n' "__script__:fm-lane-capacity-integration.test.sh"
       ;;
     bin/fm-env-lib.sh)
       # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
@@ -1670,6 +1692,9 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-read-repetition.test.sh
       printf '%s\n' __script__:fm-read-repetition-live.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      ;;
+    tests/fixtures/fm-claude-request-capture.py)
+      printf '%s\n' __script__:fm-claude-tool-exclude-live.test.sh
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
@@ -1828,6 +1853,10 @@ families_for_changed_path() {
     .agents/skills/harness-adapters/SKILL.md|.agents/skills/harness-adapters/references/*)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    .agents/skills/lavish-url/assets/*|.agents/skills/lavish-url/enhancers/*)
+      # The layers bin/fm-lavish-url.sh injects into every snapshot.
+      printf '%s\n' "__script__:fm-lavish-url.test.sh"
       ;;
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit

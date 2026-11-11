@@ -62,9 +62,11 @@ printf '%s\n' "$ID" > "$HOME_DIR/.fm-secondmate-home"
 printf '# Charter\n\nStand by until steering arrives.\n' > "$HOME_DIR/data/charter.md"
 git -C "$HOME_DIR" init -q
 
+ACCOUNT_HOME="$TMP_ROOT/account-home"
+mkdir -p "$ACCOUNT_HOME"
 ctl() {
   PATH="$FAKEBIN:$BASE_PATH" TMUX='' FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     "$ROOT/bin/fm-remote-secondmate-control.sh" "$@"
 }
 
