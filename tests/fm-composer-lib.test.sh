@@ -2020,3 +2020,18 @@ test_wrapped_draft_with_mode_glyph_continuation_is_preserved() {
 }
 test_wrapped_draft_with_mode_glyph_continuation_is_preserved
 test_ruled_row_over_footer_is_still_empty
+
+# A ruled first row whose typed continuation opens with a mode-hint glyph is a
+# real wrapped draft, not border furniture over a footer.
+test_ruled_first_row_with_mode_glyph_continuation_is_pending() {
+  local screen out rule
+  rule=$(printf '─%.0s' $(seq 1 60))
+  screen=$(printf '%s\n' "❯ $rule" '⏸ pause playback')
+  out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = pending ] || fail "ruled first row over a typed mode-glyph row must read pending, got '$out'"
+  out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = "$rule ⏸ pause playback" ] \
+    || fail "ruled first row and mode-glyph continuation must be extracted in full, got '$out'"
+  pass "a ruled first row over a typed mode-glyph continuation stays a pending draft"
+}
+test_ruled_first_row_with_mode_glyph_continuation_is_pending

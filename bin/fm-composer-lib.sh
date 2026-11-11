@@ -1571,7 +1571,29 @@ _fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
   _fm_composer_row_is_rule_furniture "${text#*"$glyph"}" || return 1
   next=$(_fm_composer_screen_row "$(($2 + 1))" "$1")
   fm_composer_normalize_trim_var next
-  ! _fm_composer_row_is_ordinary_continuation "$next"
+  _fm_composer_row_is_ordinary_continuation "$next" && return 1
+  # A typed row that merely opens with a mode glyph (`⏸ pause playback`) is the
+  # draft's continuation; only a row shaped like claude's mode footer closes it.
+  _fm_composer_row_is_mode_hint "$next" && ! _fm_composer_row_is_mode_footer "$next" && return 1
+  return 0
+}
+
+# _fm_composer_row_is_mode_hint: 0 when the trimmed <row> opens with a mode-hint
+# glyph (FM_COMPOSER_MODE_HINT_RE).
+_fm_composer_row_is_mode_hint() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" \
+    "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_row_is_mode_footer: 0 when the mode-hint <row> is shaped like
+# claude's permission-mode footer: the doubled `⏵⏵` opener or the `shift+tab`
+# cycle hint. Anything else is read as typed text, the safe direction, because a
+# draft read as pending never has a message injected over it.
+_fm_composer_row_is_mode_footer() {  # <trimmed-row>
+  case "$1" in
+    '⏵⏵'*|*'shift+tab'*) return 0 ;;
+  esac
+  return 1
 }
 
 # _fm_composer_row_is_ordinary_continuation: 0 when the trimmed <row> is plain
