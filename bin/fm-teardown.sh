@@ -3244,6 +3244,13 @@ collect_descendant_task_locks() {
   done < <(printf '%s\n' "${child_ids[@]}" | LC_ALL=C sort)
 }
 
+# Acquisition order, which every other holder of these locks must match so
+# they cannot cycle: a home's task-set lock before its own per-task locks
+# (bin/fm-wake-lib.sh's fm_task_set_lock_path owns why), parent home before
+# child home, each control lock before its matching metadata lock, sorted by id
+# within a home, and no descendant holder ever reaches back for an ancestor
+# lock. bin/fm-spawn.sh takes the same task-set lock before its own per-task
+# locks when it publishes a fresh record.
 preflight_descendant_task_locks() {
   local home=$1
   DESCENDANT_TASK_STATES=()

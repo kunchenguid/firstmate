@@ -1327,7 +1327,7 @@ The [home-lock library](../bin/fm-home-worktree-lock-lib.sh) owns receipt valida
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
 A returned slot is an ordinary pool checkout again, so a successful retirement return or attempt-owned seed-rollback return clears the retired home's payload (`data/`, `state/`, `config/`, `projects/`, and both identity markers), while a failed return puts the whole home back for the preserved retry; a slot that kept the payload would refuse the next seed in it as already marked for a mate that no longer exists.
 A return stages that payload before releasing the slot; recovery restores it only while the original pool lease is still held, and leaves released or reassigned slots untouched.
-A committed return retains its recovery record until parent retirement records are finalized, so a retry completes records-only cleanup without requiring the retired home markers.
+A committed return keeps its recovery record until that id's retirement records are finalized, or until the same id is reseeded into that home, so a retry completes records-only cleanup without requiring the retired home markers and a fresh seed is never mistaken for the home the record retired.
 The [payload library](../bin/fm-home-payload-lib.sh) owns that cleanup.
 
 ### Project modes and backlog handoff
