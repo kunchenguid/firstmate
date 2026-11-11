@@ -2003,6 +2003,36 @@ test_superseded_wait_check_is_opt_in() {
   pass "without config/paused-wait-supersession superseding states keep the declared-wait cadence and spend no extra crew-state read"
 }
 
+# The flag scopes the check to the foreground watcher: while the away-mode flag
+# exists, a busy paused worker whose run is parked at an unreported human gate
+# gets no superseded wake and no crew-state read, exactly as with the flag absent.
+test_superseded_wait_check_skips_away_mode() {
+  local c busy mode arm got dir out
+  for c in recent:absorb yes:exit; do
+    busy=${c%%:*} mode=${c#*:} out=''
+    for arm in unarmed armed; do
+      dir=$(make_superseded_pause_case "away-busy-$busy-$arm" 'paused: waiting for validation run R' "$arm")
+      date '+%s' > "$dir/state/.afk"
+      [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$dir/state/paused.meta"
+      superseded_pause_round "$dir" \
+        'state: parked · source: run-step · ask-user: authority decision · run: R' "$mode" "$busy" \
+        || fail "busy-$busy $arm: away-mode watcher round failed: $(cat "$dir/watch.out")"
+      ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
+        || fail "busy-$busy $arm: away-mode watcher surfaced a superseded wait"
+      got=0
+      [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
+      [ "$got" = 0 ] || fail "busy-$busy $arm: away-mode watcher read crew state $got times, want 0"
+      if [ "$arm" = unarmed ]; then
+        out=$(cat "$dir/watch.out")
+      else
+        [ "$(cat "$dir/watch.out")" = "$out" ] \
+          || fail "busy-$busy: armed away-mode output differs from flag-absent: $(cat "$dir/watch.out") vs $out"
+      fi
+    done
+  done
+  pass "with the away-mode flag present an armed busy paused worker at a human gate behaves exactly as with the flag absent: no superseded wake and no crew-state read"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -2014,6 +2044,7 @@ fm_test_run \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
   test_declared_wait_surfaces_superseding_state \
   test_superseded_wait_check_is_opt_in \
+  test_superseded_wait_check_skips_away_mode \
   test_exited_declared_pause_is_bounded_but_live_gate_surfaces \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \

@@ -2437,10 +2437,11 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # OFF unless the home creates config/paused-wait-supersession: absent the flag it
 # returns before any read, so the watcher spends no crew-state read here and
 # keeps the unchanged declared-wait cadence and wording. This applies to the
-# foreground watcher only; away mode keeps today's declared-wait pause cadence.
+# foreground watcher only: while the away-mode flag exists it also returns before
+# any read, so away mode keeps today's declared-wait pause cadence on every path.
 paused_wait_superseded() {  # <window> <task>
   local win=$1 task=$2 line statusf key last run state reason rest part
-  [ -e "$CONFIG/paused-wait-supersession" ] || return 1
+  [ -e "$CONFIG/paused-wait-supersession" ] && ! afk_present || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   status_is_paused "$last" || return 1
