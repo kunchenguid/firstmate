@@ -3522,21 +3522,6 @@ if [ "$HARNESS" = kiro ]; then
     kiro_hook_path_validate "$STATE" "$ID" || exit 1
   fi
 fi
-# Quota pre-flight (bin/fm-quota-preflight.sh owns it): advisory only. In a home
-# with dispatch profiles, a ship or scout launch whose candidate quota-axi
-# already reports exhausted_now prints one quota-preflight: notice, so the
-# dispatcher can move it to the next same-group candidate before it stalls.
-if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-  preflight_args=("$HARNESS" "${MODEL:-default}" --effort "${EFFORT:-default}")
-  dispatch_provider= dispatch_scope= dispatch_quota=
-  if [ -f "$DISPATCH_RECORD" ] && command -v jq >/dev/null 2>&1; then
-    dispatch_quota=$(jq -r '[.profile.provider // "", .profile.quota_scope // ""] | @tsv' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_quota=
-    IFS=$'\t' read -r dispatch_provider dispatch_scope <<<"$dispatch_quota" || true
-    [ -z "$dispatch_provider" ] || preflight_args+=(--provider "$dispatch_provider")
-    [ -z "$dispatch_scope" ] || preflight_args+=(--quota-scope "$dispatch_scope")
-  fi
-  FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-quota-preflight.sh" "${preflight_args[@]}" >&2 || true
-fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
@@ -3591,6 +3576,26 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   else
     unset CLAUDE_CONFIG_DIR
   fi
+fi
+# Quota pre-flight (bin/fm-quota-preflight.sh owns it): advisory only. In a home
+# with dispatch profiles, a ship or scout launch whose candidate quota-axi
+# already reports exhausted_now prints one quota-preflight: notice, so the
+# dispatcher can move it to the next same-group candidate before it stalls.
+if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  preflight_args=("$HARNESS" "${MODEL:-default}" --effort "${EFFORT:-default}")
+  dispatch_provider= dispatch_scope= dispatch_quota=
+  if [ -f "$DISPATCH_RECORD" ] && command -v jq >/dev/null 2>&1; then
+    dispatch_quota=$(jq -r '[.profile.provider // "", .profile.quota_scope // ""] | @tsv' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_quota=
+    IFS=$'\t' read -r dispatch_provider dispatch_scope <<<"$dispatch_quota" || true
+    [ -z "$dispatch_provider" ] || preflight_args+=(--provider "$dispatch_provider")
+    [ -z "$dispatch_scope" ] || preflight_args+=(--quota-scope "$dispatch_scope")
+  fi
+  [ -z "$WORKER_ACCOUNT_PROVIDER" ] || preflight_args+=(--account-lane "$WORKER_ACCOUNT_PROVIDER")
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    preflight_args+=(--account "$WORKER_ACCOUNT_DECLARED")
+    [ -z "$WORKER_ACCOUNT_ROOT" ] || preflight_args+=(--account-root "$WORKER_ACCOUNT_ROOT")
+  fi
+  FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-quota-preflight.sh" "${preflight_args[@]}" >&2 || true
 fi
 
 secondmate_registry_value() {

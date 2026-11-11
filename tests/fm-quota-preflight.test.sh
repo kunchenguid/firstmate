@@ -21,6 +21,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 SNAP="$TMP_ROOT/quota.json"
+SNAP_ACCOUNTS="$TMP_ROOT/quota-accounts.json"
 cat > "$SNAP" <<'EOF'
 {"schemaVersion":5,"providers":[
  {"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[
@@ -31,6 +32,14 @@ cat > "$SNAP" <<'EOF'
  {"provider":"agy","quotaSemantics":{"status":"known","effectiveAvailability":[
    {"scope":"gemini","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}},
    {"scope":"claude_gpt","status":"known","effectivePercentRemaining":60,"runway":{"status":"through_reset"}}]}}
+]}
+EOF
+cat > "$SNAP_ACCOUNTS" <<'EOF'
+{"schemaVersion":6,"providers":[
+ {"provider":"claude","accountKey":"account-a","quotaSemantics":{"status":"known","effectiveAvailability":[
+   {"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}},
+ {"provider":"claude","accountKey":"account-b","quotaSemantics":{"status":"known","effectiveAvailability":[
+   {"scope":"all_models","status":"known","effectivePercentRemaining":40,"runway":{"status":"through_reset"}}]}}
 ]}
 EOF
 
@@ -52,6 +61,12 @@ EOF
 
 preflight() {  # <args...>
   env FM_QUOTA_PREFLIGHT=on FM_CONFIG_OVERRIDE="$CONFIG" bash "$PREFLIGHT" "$@" --snapshot "$SNAP"
+}
+
+preflight_snapshot() {  # <snapshot> <args...>
+  local snapshot=$1
+  shift
+  env FM_QUOTA_PREFLIGHT=on FM_CONFIG_OVERRIDE="$CONFIG" bash "$PREFLIGHT" "$@" --snapshot "$snapshot"
 }
 
 test_exhausted_candidate_gets_one_notice() {
@@ -84,6 +99,33 @@ test_declared_provider_and_scope_apply() {
   pass "fm-quota-preflight: the declared provider, effort, and quota scope bind safely"
 }
 
+test_account_scoped_preflight() {
+  local out
+  out=$(preflight_snapshot "$SNAP_ACCOUNTS" claude sonnet --provider claude --lane account-a)
+  assert_contains "$out" "provider claude is exhausted_now at all_models" \
+    "an explicit schema-6 lane should select its own exhausted account"
+  out=$(preflight_snapshot "$SNAP_ACCOUNTS" claude sonnet --provider claude --lane account-b)
+  [ -z "$out" ] || fail "a healthy explicit account lane must stay quiet, got: $out"
+
+  mkdir -p "$TMP_ROOT/fakebin" "$TMP_ROOT/claude-account-root"
+  cat > "$TMP_ROOT/fakebin/quota-axi" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$CLAUDE_CONFIG_DIR" > "$TMP_ROOT/account-root-seen"
+printf '%s\\n' "\$*" > "$TMP_ROOT/account-args-seen"
+cat "$SNAP"
+EOF
+  chmod +x "$TMP_ROOT/fakebin/quota-axi"
+  out=$(env PATH="$TMP_ROOT/fakebin:$PATH" FM_QUOTA_PREFLIGHT=on FM_CONFIG_OVERRIDE="$CONFIG" \
+    bash "$PREFLIGHT" claude fable --provider claude --account-root "$TMP_ROOT/claude-account-root")
+  assert_contains "$out" "provider claude is exhausted_now at model:fable" \
+    "account-root preflight should use the selected account snapshot"
+  [ "$(cat "$TMP_ROOT/account-root-seen")" = "$TMP_ROOT/claude-account-root" ] \
+    || fail "Claude quota preflight did not set the selected account root"
+  assert_contains "$(cat "$TMP_ROOT/account-args-seen")" "--provider claude --profile-only --json" \
+    "Claude account-root preflight should request the profile-only quota snapshot"
+  pass "fm-quota-preflight: explicit lanes and account roots select the launched account"
+}
+
 test_quiet_without_evidence() {
   local out rc
   out=$(preflight pi some/unknown-model); rc=$?
@@ -104,4 +146,5 @@ test_quiet_without_evidence() {
 
 test_exhausted_candidate_gets_one_notice
 test_declared_provider_and_scope_apply
+test_account_scoped_preflight
 test_quiet_without_evidence

@@ -42,10 +42,16 @@ shift
 PROVIDER=
 QUOTA_SCOPE=
 EFFORT=
+ACCOUNT=
+ACCOUNT_ROOT=
+ACCOUNT_LANE=
 SNAPSHOT=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --effort) EFFORT=${2:-}; shift 2 || exit 0 ;;
+    --account) ACCOUNT=${2:-}; shift 2 || exit 0 ;;
+    --account-root) ACCOUNT_ROOT=${2:-}; shift 2 || exit 0 ;;
+    --account-lane|--lane) ACCOUNT_LANE=${2:-}; shift 2 || exit 0 ;;
     --provider) PROVIDER=${2:-}; shift 2 || exit 0 ;;
     --quota-scope) QUOTA_SCOPE=${2:-}; shift 2 || exit 0 ;;
     --snapshot) SNAPSHOT=${2:-}; shift 2 || exit 0 ;;
@@ -55,6 +61,12 @@ done
 [ "${FM_QUOTA_PREFLIGHT:-on}" != off ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 [ "$MODEL" != default ] || MODEL=
+if [ -z "$ACCOUNT_ROOT" ] && [ -n "$ACCOUNT" ]; then
+  case "$ACCOUNT" in
+    ordinary) ACCOUNT_ROOT="${HOME:-}/.claude" ;;
+    /*) ACCOUNT_ROOT=$ACCOUNT ;;
+  esac
+fi
 
 CONFIG="${FM_CONFIG_OVERRIDE:-${FM_HOME:+$FM_HOME/config}}"
 RULES=
@@ -93,18 +105,29 @@ if [ -n "$SNAPSHOT" ]; then
   snap=$(cat "$SNAPSHOT" 2>/dev/null) || exit 0
 else
   command -v quota-axi >/dev/null 2>&1 || exit 0
+  quota_command=(quota-axi --json)
+  if [ -n "$ACCOUNT_ROOT" ]; then
+    case "$HARNESS" in
+      claude)
+        quota_command=(env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$ACCOUNT_ROOT" quota-axi --provider claude --profile-only --json)
+        ;;
+      pi|pi-signed)
+        quota_command=(env -u QUOTA_AXI_SNAPSHOT PI_CODING_AGENT_DIR="$ACCOUNT_ROOT" quota-axi --json)
+        ;;
+    esac
+  fi
   if command -v timeout >/dev/null 2>&1; then
-    snap=$(timeout "${FM_QUOTA_PREFLIGHT_TIMEOUT:-10}" quota-axi --json 2>/dev/null) || exit 0
+    snap=$(timeout "${FM_QUOTA_PREFLIGHT_TIMEOUT:-10}" "${quota_command[@]}" 2>/dev/null) || exit 0
   else
-    snap=$(quota-axi --json 2>/dev/null) || exit 0
+    snap=$("${quota_command[@]}" 2>/dev/null) || exit 0
   fi
 fi
 printf '%s' "$snap" | fm_quota_json_valid || exit 0
 
-printf '%s' "$snap" | jq -r --arg h "$HARNESS" --arg m "$MODEL" --arg p "$PROVIDER" --arg qs "$QUOTA_SCOPE" \
+printf '%s' "$snap" | jq -r --arg h "$HARNESS" --arg m "$MODEL" --arg p "$PROVIDER" --arg qs "$QUOTA_SCOPE" --arg lane "$ACCOUNT_LANE" \
   "$FM_QUOTA_ROW_JQ"'
   . as $q |
-  (quota_row($q; $p; quota_lane($h; $m))) as $row |
+  (quota_row($q; $p; (if $lane == "" then quota_lane($h; $m) else $lane end))) as $row |
   if $row == null then empty else
     [ ($row.quotaSemantics.effectiveAvailability // [])[]
       | select(quota_scope_applies($m; $qs))

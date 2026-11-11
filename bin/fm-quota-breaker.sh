@@ -127,10 +127,17 @@ for meta in "$STATE"/*.meta; do
     ''|ship|scout) ;;
     *) continue ;;
   esac
+  case "$(tail -n 1 "$STATE/$id.status" 2>/dev/null)" in
+    'done '*|'done['*|'failed '*|'failed['*) continue ;;
+  esac
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || continue
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" in
+    alive|unverified) ;;
+    *) continue ;;
+  esac
   tail=$(fm_backend_capture "$backend" "$target" 60 2>/dev/null) || continue
   verdict=$(printf '%s\n' "$tail" | fm_quota_breaker_classify "$RATE_REPEATS")
   [ -n "$verdict" ] || continue

@@ -93,7 +93,26 @@ for a in "$@"; do
 done
 case "${1:-}" in
   capture-pane) cat "$FM_FAKE_DIR/pane.${target##*:}" 2>/dev/null; exit 0 ;;
-  display-message) printf 'pi\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*)
+        if [ -f "$FM_FAKE_DIR/cmd.${target##*:}" ]; then
+          cat "$FM_FAKE_DIR/cmd.${target##*:}"
+        else
+          printf 'pi\n'
+        fi
+        ;;
+      *) printf 'pi\n' ;;
+    esac
+    exit 0
+    ;;
+  list-windows)
+    for pane in "$FM_FAKE_DIR"/pane.*; do
+      [ -f "$pane" ] || continue
+      printf '%s\n' "${pane##*.}"
+    done
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -125,6 +144,10 @@ test_scan_reports_once_per_incarnation() {
   add_task "$dir" t1 ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
   add_task "$dir" t2 scout 'all good, still working'
   add_task "$dir" sm1 secondmate 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
+  add_task "$dir" dead ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
+  printf 'zsh\n' > "$dir/fake/cmd.fm-dead"
+  add_task "$dir" done ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
+  printf 'done [at=2026-11-11T18:00:00Z]: completed\n' > "$dir/home/state/done.status"
 
   out=$(scan "$dir")
   [ -z "$out" ] || fail "the breaker must stay off without config/quota-breaker, got: $out"
@@ -135,6 +158,10 @@ test_scan_reports_once_per_incarnation() {
     "a stalled ship should be reported with its task, class, and profile"
   [ "$(printf '%s\n' "$out" | grep -c '^quota-breaker ')" = 1 ] \
     || fail "only the stalled ship should be reported, not a healthy scout or a second mate, got: $out"
+  assert_not_contains "$out" "quota-breaker dead" \
+    "a shell-only worker with residual quota text must not be reported"
+  assert_not_contains "$out" "quota-breaker done" \
+    "a terminal task with residual quota text must not be reported"
 
   out=$(scan "$dir")
   [ -z "$out" ] || fail "the same stall must not be reported twice inside the realert window, got: $out"
