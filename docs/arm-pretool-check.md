@@ -154,7 +154,7 @@ Prose may improve without changing adapter behavior.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
-- Auggie blocks on exit 2 and passes stderr to the agent; it also honors the default stdout `decision=deny` object.
+- Auggie's documented hook contract consumes exit 2, stderr, and the default stdout `decision=deny` object; live blocking remains [unverified](verification/auggie.md#not-verified).
 - OpenCode throws only when the checker exits 2.
 - Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
 
