@@ -11,7 +11,9 @@
 # nothing reports it until someone looks. A run of those cost hours of lanes.
 # The relaunch decision itself stays with firstmate, because choosing the next
 # candidate is the quota-array-dispatch procedure (its "Quota circuit breaker"
-# section); this script only turns the stall into a typed notification.
+# section); this script only turns the stall into a typed notification. The wake
+# carries the task's brief path so firstmate can re-resolve its original group
+# and exclude the tripped candidate without persisting another group identity.
 #
 # THE GATE (config/quota-breaker). Absent means off. A present file enables the
 # breaker; its optional lines are
@@ -26,7 +28,9 @@
 # `scan` (run by bin/fm-watch.sh on its check sweep when the gate exists) reads
 # the last 60 rows of every local ship and scout endpoint in this home and
 # classifies them. Each tripped worker prints one line:
-#   quota-breaker <task-id> <class> harness=<h> model=<m>: <matched row>
+#   quota-breaker <task-id> <class> harness=<h> model=<m> brief=<path>: <matched row>
+# The waking firstmate re-resolves that brief against crew-dispatch.json as at
+# intake, keeping the replacement inside the task's original dispatch group.
 # which the watcher queues as one `check: quota-breaker` notification each.
 # state/<task-id>.quota-breaker remembers the last report (class, spawn
 # generation, time), so one stall is reported once per realert window and a
@@ -73,19 +77,49 @@ breaker_hard_match() {
   printf '%s\t%s\n' "$2" "$(printf '%s' "$row" | sed 's/^[[:space:]]*//' | cut -c1-200)"
 }
 
+breaker_refusal_is_current() {
+  local rows=$1 ere=$2 line found=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if printf '%s\n' "$line" | grep -qE -- "$ere"; then
+      found=1
+    elif [ "$found" -eq 1 ]; then
+      return 1
+    fi
+  done <<< "$rows"
+  [ "$found" -eq 1 ]
+}
+
 # fm_quota_breaker_classify [repeats]: stdin pane tail -> "<class>\t<row>".
 fm_quota_breaker_classify() {
-  local repeats=${1:-5} tail bottom row count
+  local repeats=${1:-5} tail content row count
   tail=$(cat)
-  bottom=$(printf '%s\n' "$tail" | grep -v '^[[:space:]]*$' | tail -n 15)
-  breaker_hard_match "$bottom" zai-1308 '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1308\\?"|Usage limit reached for 5 hour' && return 0
-  breaker_hard_match "$bottom" zai-1310 '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1310\\?"|Weekly/Monthly Limit Exhausted' && return 0
-  breaker_hard_match "$bottom" antigravity-429 'Quota reached\. (Please wait|Next: switch models)|RESOURCE_EXHAUSTED' && return 0
-  breaker_hard_match "$bottom" codex-usage-limit "The usage limit has been reached|You've hit your usage limit" && return 0
-  breaker_hard_match "$bottom" claude-usage-limit "Claude (AI )?usage limit reached|5-hour limit reached|You've hit your limit" && return 0
-  count=$(printf '%s\n' "$bottom" | grep -cE '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1302\\?"|Rate limit reached for requests')
-  if [ "${count:-0}" -ge "$repeats" ]; then
-    row=$(printf '%s\n' "$bottom" | grep -E 'Rate limit reached for requests|"1302"' | tail -n 1)
+  content=$(printf '%s\n' "$tail" \
+    | grep -v '^[[:space:]]*$' \
+    | grep -Ev '^[[:space:]]*([─━╭╰│❯›⟩→❭>$%#?]|~/|/|[0-9]+(\.[0-9]+)?%/|\(auto\))' || true)
+  if breaker_refusal_is_current "$content" '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1308\\?"|Usage limit reached for 5 hour'; then
+    breaker_hard_match "$content" zai-1308 '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1308\\?"|Usage limit reached for 5 hour'
+    return 0
+  fi
+  if breaker_refusal_is_current "$content" '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1310\\?"|Weekly/Monthly Limit Exhausted'; then
+    breaker_hard_match "$content" zai-1310 '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1310\\?"|Weekly/Monthly Limit Exhausted'
+    return 0
+  fi
+  if breaker_refusal_is_current "$content" 'Quota reached\. (Please wait|Next: switch models)|RESOURCE_EXHAUSTED'; then
+    breaker_hard_match "$content" antigravity-429 'Quota reached\. (Please wait|Next: switch models)|RESOURCE_EXHAUSTED'
+    return 0
+  fi
+  if breaker_refusal_is_current "$content" "The usage limit has been reached|You've hit your usage limit"; then
+    breaker_hard_match "$content" codex-usage-limit "The usage limit has been reached|You've hit your usage limit"
+    return 0
+  fi
+  if breaker_refusal_is_current "$content" "Claude (AI )?usage limit reached|5-hour limit reached|You've hit your limit"; then
+    breaker_hard_match "$content" claude-usage-limit "Claude (AI )?usage limit reached|5-hour limit reached|You've hit your limit"
+    return 0
+  fi
+  count=$(printf '%s\n' "$content" | grep -cE '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1302\\?"|Rate limit reached for requests')
+  if [ "${count:-0}" -ge "$repeats" ] \
+    && breaker_refusal_is_current "$content" '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1302\\?"|Rate limit reached for requests'; then
+    row=$(printf '%s\n' "$content" | grep -E 'Rate limit reached for requests|"1302"' | tail -n 1)
     printf '%s\t%s (x%s)\n' zai-1302 "$(printf '%s' "$row" | sed 's/^[[:space:]]*//' | cut -c1-160)" "$count"
   fi
   return 0
@@ -104,6 +138,7 @@ if [ -z "${FM_HOME:-}" ] || [ ! -d "$FM_HOME" ]; then
 fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 [ -d "$STATE" ] || { echo "error: state dir '$STATE' is missing" >&2; exit 1; }
 [ -f "$CONFIG/quota-breaker" ] || exit 0
 while IFS= read -r line || [ -n "$line" ]; do
@@ -118,6 +153,8 @@ done < "$CONFIG/quota-breaker"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -141,6 +178,9 @@ for meta in "$STATE"/*.meta; do
     *) continue ;;
   esac
   tail=$(fm_backend_capture "$backend" "$target" 60 2>/dev/null) || continue
+  case "$(fm_busy_classify_meta "$meta" "$id" "$STATE" "$tail")" in
+    busy\ *) continue ;;
+  esac
   verdict=$(printf '%s\n' "$tail" | fm_quota_breaker_classify "$RATE_REPEATS")
   [ -n "$verdict" ] || continue
   class=${verdict%%$'\t'*}
@@ -169,8 +209,8 @@ for meta in "$STATE"/*.meta; do
     fm_lock_release "$breaker_lock"
     continue
   fi
-  printf 'quota-breaker %s %s harness=%s model=%s: %s\n' "$id" "$class" \
-    "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$row"
+  printf 'quota-breaker %s %s harness=%s model=%s brief=%s: %s\n' "$id" "$class" \
+    "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$DATA/$id/brief.md" "$row"
   fm_lock_release "$breaker_lock"
 done
 exit 0

@@ -876,7 +876,7 @@ The file may be empty or hold these lines, each optional:
 Blank lines and lines that start with `#` are ignored, and an unusable value keeps its default.
 
 Each sweep checks that the task is still live and nonterminal, then reads the recent output of every local ship and scout and matches the providers' own refusal text: Z.AI's 5-hour (`1308`) and weekly or monthly (`1310`) caps, Antigravity's `Quota reached` and Gemini's `RESOURCE_EXHAUSTED`, Codex and Claude usage limits, and a run of Z.AI request rate limits (`1302`).
-A tripped worker queues one `check: quota-breaker: <task> <class> harness=<h> model=<m>: <refusal>` notification, and the `quota-array-dispatch` skill owns the relaunch on the next candidate of the same dispatch group.
+A tripped worker queues one `check: quota-breaker: <task> <class> harness=<h> model=<m> brief=<path>: <refusal>` notification. The waking firstmate re-resolves that brief against `config/crew-dispatch.json` as at intake, excludes the tripped candidate, and the `quota-array-dispatch` skill owns the relaunch on the next candidate of the same dispatch group.
 The breaker only notifies; it never stops or relaunches a worker itself.
 `bin/fm-quota-breaker.sh` owns the exact signatures, with coverage in [`tests/fm-quota-breaker.test.sh`](../tests/fm-quota-breaker.test.sh).
 

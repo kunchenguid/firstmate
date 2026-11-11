@@ -43,8 +43,8 @@ It never removes this skill's authority, and its `ambiguous`, `escalate`, and `e
 
 ## Quota circuit breaker
 
-A `check: quota-breaker: <task> <class> ...` notification means that worker's pane shows a hard provider quota or rate-limit refusal ([`bin/fm-quota-breaker.sh`](../../../bin/fm-quota-breaker.sh) owns the classes and the opt-in gate), so the worker is stalled, not working.
-Treat it as concrete evidence that the named candidate is ineligible now: rerun this skill's intake for the task's own matched group (the rule or default it was dispatched from), excluding that candidate, and relaunch the worker with `bin/fm-control.sh <task> relaunch --harness <h> --model <m> --effort <e> --note <what happened>` on the selected candidate.
+A `check: quota-breaker: <task> <class> ... brief=<path>` notification means that worker's pane shows a hard provider quota or rate-limit refusal ([`bin/fm-quota-breaker.sh`](../../../bin/fm-quota-breaker.sh) owns the classes and the opt-in gate), so the worker is stalled, not working.
+Use the supplied brief path to re-resolve the task against `config/crew-dispatch.json` as at intake, recover its matched dispatch group, exclude the tripped candidate, and relaunch the worker with `bin/fm-control.sh <task> relaunch --harness <h> --model <m> --effort <e> --note <what happened>` on the selected candidate.
 Never cross into another rule's group to find a candidate; when no candidate in the group remains eligible, report that blocker instead.
 A `quota-preflight:` notice printed by `bin/fm-spawn.sh` ([`bin/fm-quota-preflight.sh`](../../../bin/fm-quota-preflight.sh)) is the same evidence one step earlier: quota-axi already reports that launch's candidate `exhausted_now`, so relaunch it on the next eligible same-group candidate before it reaches its first request.
 

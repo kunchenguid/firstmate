@@ -56,6 +56,15 @@ test_classify_ignores_recovered_and_single_rate_limits() {
   got=$(classify "$rows")
   [ -z "$got" ] || fail "a refusal scrolled past 15 rows of later output must not trip, got: $got"
 
+  rows='Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
+  for i in $(seq 1 6); do rows="$rows"$'\n'"progress line $i"; done
+  got=$(classify "$rows")
+  [ -z "$got" ] || fail "a refusal followed by six progress rows must not trip, got: $got"
+  rows=$'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}\n────\n? for shortcuts                                                         Gemini 3.8 Flash · low'
+  got=$(classify "$rows")
+  [ "${got%%$'\t'*}" = zai-1308 ] \
+    || fail "furniture after a refusal must not hide a stalled worker, got: $got"
+
   rows=
   for i in 1 2 3 4; do rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'; done
   for i in $(seq 1 15); do rows="$rows"$'\n'"progress line $i"; done
@@ -154,7 +163,7 @@ test_scan_reports_once_per_incarnation() {
 
   : > "$dir/home/config/quota-breaker"
   out=$(scan "$dir")
-  assert_contains "$out" "quota-breaker t1 zai-1308 harness=pi model=zai/glm-5.3-flash:" \
+  assert_contains "$out" "quota-breaker t1 zai-1308 harness=pi model=zai/glm-5.3-flash brief=$dir/home/data/t1/brief.md:" \
     "a stalled ship should be reported with its task, class, and profile"
   [ "$(printf '%s\n' "$out" | grep -c '^quota-breaker ')" = 1 ] \
     || fail "only the stalled ship should be reported, not a healthy scout or a second mate, got: $out"
