@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "read_config_from": {
+    "claude": false
+  },
+  "attribution": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '<FIRSTMATE_HOME>/bin/fm-devin-primary.sh' session-start",
+            "timeout": 120,
+            "fail_closed": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '<FIRSTMATE_HOME>/bin/fm-devin-primary.sh' stop",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '<FIRSTMATE_HOME>/bin/fm-devin-primary.sh' session-end",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^ask_user_question$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf %s '{\"decision\":\"block\",\"reason\":\"Firstmate on Devin: never open a question dialog; ask in plain text and end the turn.\"}'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # fm-devin-primary.sh - the single owner of a Devin primary's hook mechanics:
 # the quiet-daemon ensure, and the SessionStart / Stop / SessionEnd hook
-# entrypoints a Devin primary registers in its own Devin config
-# (captain-private; the repo ships no tracked Devin hook files).
+# entrypoints a Devin primary registers in its own Devin config. The config
+# shape and launch command are documented in docs/configuration.md "Devin
+# primary", with a copyable placeholder config in
+# docs/examples/devin-primary-config.json.
 #
 # A Devin primary is ALWAYS daemon-supervised: Devin cannot be woken from
 # inside the model, so the quiet-mode daemon (bin/fm-supervise-daemon.sh,
@@ -20,8 +22,9 @@
 #                 Then verify a live identity-matched daemon holds this home
 #                 (fm_afk_daemon_owns_supervision, bin/fm-wake-lib.sh - the
 #                 same predicate the turn-end guard uses). Exit 0 with one line
-#                 naming the daemon pid and supervised pane; non-zero with
-#                 fm-afk-launch's diagnostic otherwise.
+#                 "<mode> daemon running: pid N supervising pane P", where
+#                 <mode> is the record's real mode (fm_afk_mode); non-zero
+#                 with fm-afk-launch's diagnostic otherwise.
 #   session-start Devin SessionStart hook. Reads the event JSON on stdin
 #                 (source: startup|resume). Outside a genuine primary checkout
 #                 (fm_primary_scope_matches, bin/fm-primary-scope-lib.sh) it is
@@ -40,15 +43,16 @@
 #                 genuine primary or when this session does not own the lock
 #                 (fm_session_lock_owned_by_self). Self-heals once per stop:
 #                 when no live identity-matched daemon holds this home it runs
-#                 `ensure` and logs the result to stderr. Then pipes the
-#                 payload to `bin/fm-turnend-guard.sh --devin`; a returned
-#                 block object is passed through (prefixed with the ensure
-#                 outcome when self-heal ran) after incrementing a per-turn
-#                 counter state/.devin-stop-blocks.<prompt_id>, capped at
-#                 FM_DEVIN_STOP_MAX_BLOCKS (default 3), so a persistently
-#                 unhealthy daemon can never wedge the session. Counter files
-#                 older than a day are pruned. An allow is silent and removes
-#                 this turn's counter.
+#                 `ensure` and logs the result to stderr; a successful restart
+#                 has just proved a live daemon, so that stop is allowed
+#                 without waiting for the new watcher's first beacon.
+#                 Otherwise it pipes the payload to
+#                 `bin/fm-turnend-guard.sh --devin` and passes a returned block
+#                 object through (prefixed with the failed ensure outcome when
+#                 self-heal ran). The guard owns the per-turn block cap
+#                 (state/.turnend-blocks keyed on prompt_id,
+#                 FM_TURNEND_MAX_BLOCKS), so a persistently unhealthy daemon
+#                 can never wedge the session.
 #   session-end   Devin SessionEnd hook. Only when this session owns the lock,
 #                 runs `bin/fm-afk-launch.sh stop`; never fails loudly, always
 #                 exits 0.
@@ -160,16 +164,17 @@ cmd_ensure() {
   local pid target
   pid=$(cat "$STATE/.supervise-daemon.lock/pid" 2>/dev/null || printf 'unknown')
   target=$(supervised_pane)
-  printf 'quiet daemon running: pid %s supervising pane %s\n' "$pid" "$target"
+  printf '%s daemon running: pid %s supervising pane %s\n' "$(fm_afk_mode "$STATE")" "$pid" "$target"
 }
 
 # Print one warning line when no configured wedge-alarm channel can reach the
 # captain, or nothing. Mirrors the channel parsing owned by
 # wedge_alarm_configured_channels / wedge_alarm_notify in
 # bin/fm-supervise-daemon.sh: FM_WEDGE_ALARM_CHANNEL wins (one directive), else
-# the non-empty non-comment lines of config/wedge-alarm, else "auto".
+# the non-empty non-comment lines of config/wedge-alarm, else "auto"; any `off`
+# directive, in any position, disables every channel.
 wedge_alarm_warnings() {
-  local ch line found='' off=0 auto=0 herdr=0 other=0
+  local ch line found='' off=0 herdr=0 other=0
   if [ -n "${FM_WEDGE_ALARM_CHANNEL:-}" ]; then
     found=$FM_WEDGE_ALARM_CHANNEL
   elif [ -f "$CONFIG/wedge-alarm" ]; then
@@ -186,19 +191,18 @@ wedge_alarm_warnings() {
   while IFS= read -r ch; do
     case "$ch" in
       off) off=1 ;;
-      auto|default) auto=1 ;;
+      auto|default) ;;
       herdr) herdr=1 ;;
       *) other=1 ;;
     esac
   done <<EOF
 $found
 EOF
-  if [ "$off" -eq 1 ] && [ "$auto" -eq 0 ] && [ "$herdr" -eq 0 ] && [ "$other" -eq 0 ]; then
+  if [ "$off" -eq 1 ]; then
     printf '%s\n' 'WARNING: config/wedge-alarm disables every wedge-alarm channel; if the daemon cannot deliver an escalation nobody is notified - see docs/wedge-alarm.md.'
     return 0
   fi
-  if [ "$other" -eq 0 ] && [ "$herdr" -eq 0 ] && [ "$off" -eq 0 ] \
-    && [ "$(uname)" != Darwin ]; then
+  if [ "$other" -eq 0 ] && [ "$herdr" -eq 0 ] && [ "$(uname)" != Darwin ]; then
     printf '%s\n' 'WARNING: config/wedge-alarm names no working channel on this platform (auto is none off macOS); a wedged daemon escalation would only leave a marker file - see docs/wedge-alarm.md.'
     return 0
   fi
@@ -217,7 +221,7 @@ cmd_session_start() {
 
   # The pane check comes first so a refused launch never leaves a lock behind.
   if ! supervisor_pane_addressable; then
-    emit_block "Firstmate on Devin: this primary is not inside a tmux or Herdr pane the daemon can supervise (no TMUX_PANE, no Herdr pane id, no FM_SUPERVISOR_TARGET). Relaunch it inside tmux or Herdr, for example through config/devin-firstmate.sh."
+    emit_block "Firstmate on Devin: this primary is not inside a tmux or Herdr pane the daemon can supervise (no TMUX_PANE, no Herdr pane id, no FM_SUPERVISOR_TARGET). Relaunch it as \`devin --config <path-to-primary-config.json>\` from inside a tmux pane or Herdr tab in the firstmate home - see docs/configuration.md \"Devin primary\"."
   fi
 
   if ! lock_diag=$("$SCRIPT_DIR/fm-lock.sh" 2>&1); then
@@ -228,8 +232,8 @@ cmd_session_start() {
     emit_block "Firstmate on Devin: the quiet daemon could not be started - there is no other supervision path on this harness. fm-afk-launch reported: $ensure_out"
   fi
   # ensure_out holds its own stdout plus stderr; keep only the success line.
-  ensure_out=$(printf '%s\n' "$ensure_out" | grep 'quiet daemon running' | tail -n 1)
-  [ -n "$ensure_out" ] || ensure_out='quiet daemon running'
+  ensure_out=$(printf '%s\n' "$ensure_out" | grep ' daemon running: ' | tail -n 1)
+  [ -n "$ensure_out" ] || ensure_out='daemon running'
 
   warn=$(wedge_alarm_warnings)
 
@@ -245,15 +249,8 @@ cmd_session_start() {
   exit 0
 }
 
-# Per-turn block counter, keyed on the Stop payload's prompt_id so a new turn
-# gets a fresh budget; prune files older than a day.
-devin_stop_counter_prune() {
-  [ -d "$STATE" ] || return 0
-  find "$STATE" -maxdepth 1 -name '.devin-stop-blocks.*' -mtime +0 -delete 2>/dev/null || true
-}
-
 cmd_stop() {
-  local payload prompt_id counter count max_blocks heal heal_note guard_out reason
+  local payload heal='' guard_out reason
   payload=$(cat 2>/dev/null || true)
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -262,47 +259,26 @@ cmd_stop() {
   . "$SCRIPT_DIR/fm-session-lock-lib.sh"
   fm_session_lock_owned_by_self "$STATE" || exit 0
 
-  if command -v jq >/dev/null 2>&1; then
-    prompt_id=$(printf '%s' "$payload" | jq -r '.prompt_id // .session_id // "unknown"' 2>/dev/null || printf 'unknown')
-  else
-    prompt_id=unknown
-  fi
-  prompt_id=$(printf '%s' "$prompt_id" | tr -cd 'A-Za-z0-9._-')
-  [ -n "$prompt_id" ] || prompt_id=unknown
-
-  devin_stop_counter_prune
-  max_blocks=${FM_DEVIN_STOP_MAX_BLOCKS:-3}
-  case "$max_blocks" in ''|*[!0-9]*|0) max_blocks=3 ;; esac
-  counter="$STATE/.devin-stop-blocks.$prompt_id"
-  count=$(cat "$counter" 2>/dev/null || printf '0')
-  case "$count" in ''|*[!0-9]*) count=0 ;; esac
-  [ "$count" -lt "$max_blocks" ] || exit 0
-
   # Self-heal once per stop: a missing daemon is exactly the failure the Stop
-  # hook exists to restart, and the attempt result rides in the block reason.
-  heal=
-  heal_note=
+  # hook exists to restart. A successful ensure has just verified a live
+  # identity-matched daemon, so the stop is allowed before the new watcher's
+  # first beacon; a failed attempt rides in the block reason.
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if ! fm_afk_daemon_owns_supervision "$STATE"; then
     if heal=$(cmd_ensure 2>&1); then
-      heal_note="quiet daemon restart attempt: $heal. "
       printf 'fm-devin-primary stop: %s\n' "$heal" >&2
-    else
-      heal_note="quiet daemon restart attempt FAILED: $heal. "
-      printf 'fm-devin-primary stop: ensure failed: %s\n' "$heal" >&2
+      exit 0
     fi
+    heal="daemon restart attempt FAILED: ${heal:-no diagnostic}. "
+    printf 'fm-devin-primary stop: %s\n' "$heal" >&2
   fi
 
   guard_out=$(printf '%s' "$payload" | "$SCRIPT_DIR/fm-turnend-guard.sh" --devin 2>/dev/null || true)
-  if [ -z "$guard_out" ]; then
-    rm -f "$counter" 2>/dev/null || true
-    exit 0
-  fi
-  printf '%s\n' "$((count + 1))" > "$counter" 2>/dev/null || true
-  if [ -n "$heal_note" ] && command -v jq >/dev/null 2>&1; then
+  [ -n "$guard_out" ] || exit 0
+  if [ -n "$heal" ] && command -v jq >/dev/null 2>&1; then
     reason=$(printf '%s' "$guard_out" | jq -r 'if type == "object" then (.reason // "") else "" end' 2>/dev/null || true)
-    [ -n "$reason" ] && guard_out=$(jq -cn --arg r "$heal_note$reason" '{decision:"block",reason:$r}')
+    [ -n "$reason" ] && guard_out=$(jq -cn --arg r "$heal$reason" '{decision:"block",reason:$r}')
   fi
   printf '%s\n' "$guard_out"
   exit 0

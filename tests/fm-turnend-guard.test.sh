@@ -2665,9 +2665,10 @@ test_hook_no_afk_ignores_poll_derived_grace() {
 #
 # bin/fm-devin-primary.sh's Stop hook pipes each Devin Stop payload to the
 # guard with --devin. Devin blocks a turn end through a printed
-# {"decision":"block","reason":...} object (exit stays 0 either way), and the
-# caller bounds the loop with its own per-turn counter, so the guard ignores
-# stop_hook_active and allows by exiting 0 with no output.
+# {"decision":"block","reason":...} object (exit stays 0 either way). The
+# guard ignores stop_hook_active, bounds the loop with the shared
+# state/.turnend-blocks counter keyed on prompt_id, and allows by exiting 0
+# with no output.
 
 run_hook_devin() {  # <dir> [payload]
   local dir=$1 payload=${2:-'{"stop_hook_active":false}'} home
@@ -2696,7 +2697,32 @@ test_hook_devin_ignores_stop_hook_active() {
   expect_code 0 "$status" "--devin must keep exit 0 while blocking a continuation's stop"
   decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
   [ "$decision" = block ] || fail "--devin let stop_hook_active silence a real block: $out"
-  pass "fm-turnend-guard --devin: the caller's per-turn cap bounds the loop, not stop_hook_active"
+  pass "fm-turnend-guard --devin: the per-turn cap bounds the loop, not stop_hook_active"
+}
+
+test_hook_devin_caps_blocks_per_prompt() {
+  local dir home out i
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-cap")
+  home=$(cd "$dir" && pwd)
+  for i in 1 2 3; do
+    out=$(printf '%s' '{"prompt_id":"p-1","stop_hook_active":true}' \
+      | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+    [ "$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)" = block ] \
+      || fail "--devin block $i of 3 was not a block object: $out"
+  done
+  out=$(printf '%s' '{"prompt_id":"p-1","stop_hook_active":true}' \
+    | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+  [ -z "$out" ] || fail "--devin blocked past FM_TURNEND_MAX_BLOCKS in one turn: $out"
+  out=$(printf '%s' '{"prompt_id":"p-2","stop_hook_active":false}' \
+    | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+  [ "$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)" = block ] \
+    || fail "--devin did not give a new prompt a fresh block budget: $out"
+  rm -f "$dir/state/task1.meta"
+  out=$(printf '%s' '{"prompt_id":"p-2","stop_hook_active":false}' \
+    | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+  [ -z "$out" ] || fail "--devin blocked with nothing in flight: $out"
+  [ ! -e "$dir/state/.turnend-blocks" ] || fail "--devin allow did not reset state/.turnend-blocks"
+  pass "fm-turnend-guard --devin: blocks are capped per prompt_id and reset on allow"
 }
 
 test_hook_devin_allows_silently_when_nothing_in_flight() {
@@ -2823,5 +2849,6 @@ test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
 test_hook_devin_blocks_with_json_when_unhealthy
 test_hook_devin_ignores_stop_hook_active
+test_hook_devin_caps_blocks_per_prompt
 test_hook_devin_allows_silently_when_nothing_in_flight
 test_hook_devin_allows_with_live_daemon_and_fresh_beacon

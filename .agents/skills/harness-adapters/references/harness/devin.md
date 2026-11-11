@@ -44,6 +44,7 @@ The shared slash-command settling path also handles `/quit` autocomplete.
 ## Primary integration
 
 A Devin primary is supported only under the quiet daemon, through `bin/fm-devin-primary.sh` hooks (`SessionStart`, `Stop`, `SessionEnd`) plus a `PreToolUse` `^ask_user_question$` block, `read_config_from.claude=false`, and `attribution=false` in the primary's own Devin config, launched inside tmux or Herdr.
+[`docs/configuration.md`](../../../../../docs/configuration.md#devin-primary) owns the launch command and the config shape, with a placeholder config in [`docs/examples/devin-primary-config.json`](../../../../../docs/examples/devin-primary-config.json).
 The daemon owns watcher continuity; [the Devin protocol](../../../../../docs/supervision-protocols/devin.md) owns the operating rules, and [the turn-end guard](../../../../../docs/turnend-guard.md#harness-integrations) owns the Stop-hook mechanics.
 A Devin secondmate is still refused by `bin/fm-spawn.sh`.
 ACP, quota-provider integration, and native Fusion subagent accounting remain separate follow-ups.

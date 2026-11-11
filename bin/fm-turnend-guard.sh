@@ -21,10 +21,12 @@
 # duplicate Cursor also loads, and this guard stands down. Devin calls it with
 # --devin from bin/fm-devin-primary.sh's Stop hook: Devin blocks a turn end
 # through a printed {"decision":"block","reason":...} object on stdout (exit 2
-# blocks too, but the JSON form carries the reason identically), the caller
-# bounds the loop with its own per-turn block counter, so this mode ignores
-# stop_hook_active, allows by exiting 0 with no output, and prints the block
-# object with exit 0. A Devin primary is always daemon-supervised, so the
+# blocks too, but the JSON form carries the reason identically). This mode
+# ignores stop_hook_active and bounds the loop with the same
+# state/.turnend-blocks counter agy uses (FM_TURNEND_MAX_BLOCKS, reset on
+# allow), keyed on the payload's prompt_id so each turn gets a fresh budget; it
+# allows by exiting 0 with no output and prints the block object with exit 0.
+# A Devin primary is always daemon-supervised, so the
 # shared away/quiet daemon predicate below (fm_afk_daemon_owns_supervision plus
 # a beacon inside AFK_GRACE) is its supervision proof.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
@@ -226,6 +228,35 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+TURNEND_BLOCKS="$STATE/.turnend-blocks"
+TURN_KEY=
+if [ "$DEVIN_MODE" -eq 1 ]; then
+  TURN_KEY=$(printf '%s' "$PAYLOAD" | jq -r '.prompt_id // .session_id // ""' 2>/dev/null | tr -d '\n' || true)
+fi
+turnend_blocks_reset() {
+  [ "$AGY_MODE" -eq 1 ] || [ "$DEVIN_MODE" -eq 1 ] || return 0
+  rm -f "$TURNEND_BLOCKS" 2>/dev/null || true
+}
+# Charge one bounded block against state/.turnend-blocks, or return 1 once
+# FM_TURNEND_MAX_BLOCKS (default 3) are spent. A stored turn key that differs
+# from TURN_KEY starts a fresh budget, so Devin's per-prompt turns never
+# inherit an earlier turn's blocks; agy's key is always empty.
+turnend_blocks_charge() {
+  local max_blocks cur_blocks stored_key
+  max_blocks=${FM_TURNEND_MAX_BLOCKS:-3}
+  case "$max_blocks" in ''|*[!0-9]*|0) max_blocks=3 ;; esac
+  cur_blocks=$(sed -n 1p "$TURNEND_BLOCKS" 2>/dev/null || true)
+  stored_key=$(sed -n 2p "$TURNEND_BLOCKS" 2>/dev/null || true)
+  case "$cur_blocks" in ''|*[!0-9]*) cur_blocks=0 ;; esac
+  [ "$stored_key" = "$TURN_KEY" ] || cur_blocks=0
+  [ "$cur_blocks" -lt "$max_blocks" ] || return 1
+  mkdir -p "$STATE" 2>/dev/null || true
+  if [ -n "$TURN_KEY" ]; then
+    printf '%s\n%s\n' "$((cur_blocks + 1))" "$TURN_KEY" > "$TURNEND_BLOCKS"
+  else
+    printf '%s\n' "$((cur_blocks + 1))" > "$TURNEND_BLOCKS"
+  fi
+}
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -236,14 +267,14 @@ budget_reset() {
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
-  [ "$AGY_MODE" -eq 1 ] && rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+  turnend_blocks_reset
   allow_exit
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  turnend_blocks_reset
   if [ "$AGY_MODE" -eq 1 ]; then
-    rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
     printf '{}\n'
     exit 0
   fi
@@ -275,23 +306,15 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
 fi
 
 block_stop() {
-  local afk x_mode reason rule msg max_blocks cur_blocks
+  local afk x_mode reason rule msg
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+  if [ "$AGY_MODE" -eq 1 ] || [ "$DEVIN_MODE" -eq 1 ]; then
+    turnend_blocks_charge || allow_exit
+  fi
   if [ "$AGY_MODE" -eq 1 ]; then
-    max_blocks=${FM_TURNEND_MAX_BLOCKS:-3}
-    case "$max_blocks" in ''|*[!0-9]*|0) max_blocks=3 ;; esac
-    cur_blocks=$(cat "$STATE/.turnend-blocks" 2>/dev/null || printf '0')
-    case "$cur_blocks" in ''|*[!0-9]*) cur_blocks=0 ;; esac
-    if [ "$cur_blocks" -ge "$max_blocks" ]; then
-      printf '{}\n'
-      exit 0
-    fi
-    cur_blocks=$((cur_blocks + 1))
-    mkdir -p "$STATE" 2>/dev/null || true
-    printf '%s\n' "$cur_blocks" > "$STATE/.turnend-blocks"
     reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --harness agy --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
       || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   elif [ "$DEVIN_MODE" -eq 1 ]; then

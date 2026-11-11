@@ -1340,7 +1340,7 @@ An agy secondmate or primary runs the tracked project-scope `.agents/hooks.json`
 kiro (Kiro CLI, V2 engine only) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate because it has no primary supervision protocol; it is claude-shaped, so its per-task turn-end and busy hooks live in a firstmate-owned agent config the spawn writes under `state/<id>.kiro-home` and reaches by relocating `KIRO_HOME` (never the worktree's own `.kiro/`), with the `--trust-all-tools` modal suppressed by a seeded `chat.disableTrustAllConfirmation` setting; [`docs/verification/kiro.md`](verification/kiro.md) owns that evidence, and the v3/KAS engine is out of scope and unsupported on Amazon Linux 2.
 A kiro hook command must be one unquoted token, so a kiro spawn refuses before launch when that per-task home path contains whitespace or a shell-special character (such as a quote or `$`) and asks for an `FM_HOME` or `FM_STATE_OVERRIDE` free of them.
 
-devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
+devin is verified for crewmate and scout launches, and as a primary only under the quiet daemon (see [Devin primary](#devin-primary)); a secondmate is still refused.
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and, unless the home sets `config/keep-ai-trailers` (see "Commit attribution"), Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
@@ -1380,6 +1380,26 @@ Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-gua
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 
 Claude uses [hook-owned tokenless re-arm cycles](watcher-continuity.md#claude-stop-hook), Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints unless the home opts in to its [native Stop park](#codex-native-stop-park-configcodex-stop-park), Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+
+### Devin primary
+
+A Devin primary is always supervised by the quiet daemon, because Devin cannot be woken from inside the model.
+Launch it as `devin --config <path-to-primary-config.json>` from inside a tmux pane or Herdr tab, with the firstmate home as the working directory.
+The config path is the captain's choice; a gitignored file under the home's `config/` keeps it out of the tracked tree.
+Without a tmux or Herdr pane the `SessionStart` hook refuses the session, because the daemon has nowhere to type wakes.
+
+The config is a Devin `config.json` (version 1).
+[`docs/examples/devin-primary-config.json`](examples/devin-primary-config.json) is the minimum shape; replace `<FIRSTMATE_HOME>` with the home's absolute path and add your own model and permission settings.
+It registers four hooks:
+
+- `SessionStart` runs `bin/fm-devin-primary.sh session-start` with `fail_closed` set, so a hook failure refuses the session instead of starting it blind.
+- `Stop` runs `bin/fm-devin-primary.sh stop`, the turn-end guard described in [`docs/turnend-guard.md`](turnend-guard.md#harness-integrations).
+- `SessionEnd` runs `bin/fm-devin-primary.sh session-end`, which stops the daemon this session owns.
+- `PreToolUse` with matcher `^ask_user_question$` blocks the question dialog, because a held dialog wedges the turn and the daemon's wake delivery with it.
+
+`read_config_from.claude` is `false` so Devin does not import the repo's Claude Code hooks, which would run Claude's own supervision on a Devin session.
+`attribution` is `false` so Devin adds no `Co-Authored-By` trailer or `Generated with Devin` line to commits; drop it if the home keeps AI trailers (see [Commit attribution](#commit-attribution)).
+[`docs/supervision-protocols/devin.md`](supervision-protocols/devin.md) owns the primary's operating rules.
 
 ### Choose the worker harness
 

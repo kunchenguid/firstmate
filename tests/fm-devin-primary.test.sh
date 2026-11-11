@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-devin-primary.test.sh - the Devin primary hook owner
 # (bin/fm-devin-primary.sh): the SessionStart lock/pane/daemon contract, the
-# Stop-hook guard passthrough and per-turn block cap, and the SessionEnd
+# Stop-hook self-heal, guard passthrough and per-turn block cap, the
+# documented example config, and the SessionEnd
 # ownership gate.
 #
 # Every hook runs inside a devin-named fake process (a bash symlink named
@@ -160,38 +161,110 @@ test_session_start_ensures_daemon_and_warns_on_wedge_alarm() {
   pass "fm-devin-primary session-start: lock, quiet daemon, wedge warning, and context injection"
 }
 
+# Run the stop hook as the lock-owning devin session.
+run_owned_stop() {  # <home> <payload>
+  env -u TMUX_PANE \
+    FM_HOME="$1" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" FM_TURNEND_MAX_BLOCKS=3 \
+    "$NAMED_DEVIN" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s" "$1" | bash "$0" stop 2> "$FM_HOME/stop-err"
+    ' "$SCRIPT" "$2"
+}
+
+test_stop_allows_after_a_successful_heal() {
+  local dir out rc
+  dir=$(make_home "$TMP_ROOT/stop-heal")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_owned_stop "$dir" '{"prompt_id":"p-heal","session_id":"s-1","stop_hook_active":false}'); rc=$?
+  expect_code 0 "$rc" "a healed stop must exit 0"
+  [ -z "$out" ] || fail "a stop whose self-heal proved a live daemon still blocked on the stale beacon: $out"
+  kill -0 "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" 2>/dev/null \
+    || fail "the stop self-heal did not leave a live daemon"
+  assert_contains "$(cat "$dir/stop-err" 2>/dev/null)" "quiet daemon running" "the healed stop did not log the ensure result"
+  pass "fm-devin-primary stop: a successful self-heal allows the stop"
+}
+
 test_stop_passes_guard_block_and_respects_cap() {
   local dir payload out rc i
   dir=$(make_home "$TMP_ROOT/stop-block")
   : > "$dir/state/task1.meta"
-  : > "$dir/state/.afk"
+  run_hook ensure "$dir" '' >/dev/null
+  expect_code 0 "$(run_hook_rc "$dir")" "ensure failed: $(run_hook_err "$dir")"
   payload='{"prompt_id":"p-cap","session_id":"s-1","stop_hook_active":false}'
   for i in 1 2 3; do
-    out=$(env -u TMUX_PANE \
-      FM_HOME="$dir" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
-      FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" FM_DEVIN_STOP_MAX_BLOCKS=3 \
-      "$NAMED_DEVIN" -c '
-        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-        printf "%s" "$1" | bash "$0" stop
-      ' "$SCRIPT" "$payload" 2>/dev/null); rc=$?
+    out=$(run_owned_stop "$dir" "$payload"); rc=$?
     expect_code 0 "$rc" "stop $i must exit 0 while passing a block through"
     assert_contains "$out" '"decision":"block"' "stop $i did not pass the guard's block through: $out"
-    [ "$(cat "$dir/state/.devin-stop-blocks.p-cap" 2>/dev/null)" = "$i" ] \
-      || fail "stop $i left counter $(cat "$dir/state/.devin-stop-blocks.p-cap" 2>/dev/null), expected $i"
-    if [ "$i" -eq 1 ]; then
-      assert_contains "$out" "quiet daemon restart attempt" "a self-healed stop block lost the ensure report: $out"
-    fi
+    assert_contains "$out" "TURN WOULD END BLIND" "stop $i block lost the guard banner: $out"
   done
-  out=$(env -u TMUX_PANE \
-    FM_HOME="$dir" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
-    FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" FM_DEVIN_STOP_MAX_BLOCKS=3 \
-    "$NAMED_DEVIN" -c '
-      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-      printf "%s" "$1" | bash "$0" stop
-    ' "$SCRIPT" "$payload" 2>/dev/null); rc=$?
+  out=$(run_owned_stop "$dir" "$payload"); rc=$?
   expect_code 0 "$rc" "the capped stop must still exit 0"
   [ -z "$out" ] || fail "the 4th stop produced output past the per-turn cap: $out"
+  out=$(run_owned_stop "$dir" '{"prompt_id":"p-next","session_id":"s-1","stop_hook_active":false}')
+  assert_contains "$out" '"decision":"block"' "a new turn did not get a fresh block budget: $out"
   pass "fm-devin-primary stop: guard block passes through as JSON and the per-turn cap fails open"
+}
+
+test_stop_reports_a_failed_heal_in_the_block() {
+  local dir out
+  dir=$(make_home "$TMP_ROOT/stop-heal-fail")
+  : > "$dir/state/task1.meta"
+  out=$(env -u TMUX_PANE \
+    FM_HOME="$dir" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY=/nonexistent/fm-no-daemon \
+    "$NAMED_DEVIN" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s" "$1" | bash "$0" stop 2>/dev/null
+    ' "$SCRIPT" '{"prompt_id":"p-fail","session_id":"s-1","stop_hook_active":false}')
+  assert_contains "$out" '"decision":"block"' "a stop whose self-heal failed did not block: $out"
+  assert_contains "$out" "daemon restart attempt FAILED" "the block lost the failed ensure report: $out"
+  pass "fm-devin-primary stop: a failed self-heal rides in the block reason"
+}
+
+test_session_start_warns_when_off_is_mixed_with_a_channel() {
+  local dir out ctx
+  dir=$(make_home "$TMP_ROOT/start-off-mixed")
+  printf '%s\n' 'command:true' 'off' > "$dir/config/wedge-alarm"
+  out=$(run_hook session-start "$dir" '{"source":"startup"}')
+  expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
+  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
+  assert_contains "$ctx" "disables every wedge-alarm channel" "off beside another channel did not warn that every channel is off: $ctx"
+  pass "fm-devin-primary session-start: any off directive warns that every wedge-alarm channel is off"
+}
+
+test_session_start_names_a_kept_away_record() {
+  local dir out ctx
+  dir=$(make_home "$TMP_ROOT/start-away")
+  env -u TMUX_PANE FM_HOME="$dir" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" FM_AFK_MODE=away \
+    bash -c '"$0" enter && "$0" start' "$CODE_ROOT/bin/fm-afk-launch.sh" >/dev/null 2>&1 \
+    || fail "could not start away mode for the fixture"
+  [ "$(head -n 1 "$dir/state/.afk" 2>/dev/null)" = away ] || fail "the fixture did not record away mode"
+  out=$(run_hook session-start "$dir" '{"source":"startup"}')
+  expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
+  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
+  assert_contains "$ctx" "away daemon running" "a kept away record was not named as away: $ctx"
+  assert_not_contains "$ctx" "quiet daemon" "a kept away record was labelled quiet: $ctx"
+  pass "fm-devin-primary session-start: an existing away record is reported as away"
+}
+
+test_example_config_hooks_run_the_wrapper() {
+  local dir config cmd out
+  dir=$(make_home "$TMP_ROOT/example-config")
+  config=$(sed "s|<FIRSTMATE_HOME>|$CODE_ROOT|g" "$ROOT/docs/examples/devin-primary-config.json")
+  [ "$(printf '%s' "$config" | jq -r '.version')" = 1 ] || fail "the example config is not a version 1 Devin config"
+  [ "$(printf '%s' "$config" | jq -r '.read_config_from.claude')" = false ] || fail "the example config imports Claude config"
+  [ "$(printf '%s' "$config" | jq -r '.hooks.SessionStart[0].hooks[0].fail_closed')" = true ] \
+    || fail "the example SessionStart hook does not fail closed"
+  cmd=$(printf '%s' "$config" | jq -r '.hooks.SessionStart[0].hooks[0].command')
+  out=$(env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET FM_HOME="$dir" \
+    "$NAMED_DEVIN" -c 'printf "%s" "{\"source\":\"startup\"}" | bash -c "$0"' "$cmd")
+  assert_contains "$out" "devin --config" "the example SessionStart hook did not reach the wrapper's pane refusal: $out"
+  cmd=$(printf '%s' "$config" | jq -r '.hooks.PreToolUse[] | select(.matcher == "^ask_user_question$") | .hooks[0].command')
+  [ "$(bash -c "$cmd" | jq -r '.decision')" = block ] || fail "the example PreToolUse hook does not block ask_user_question"
+  pass "fm-devin-primary: the documented example config runs the wrapper and blocks the question dialog"
 }
 
 test_stop_silent_outside_lock_ownership() {
@@ -222,6 +295,11 @@ test_session_end_noop_without_lock_ownership() {
 test_session_start_blocks_on_foreign_lock
 test_session_start_blocks_without_a_pane
 test_session_start_ensures_daemon_and_warns_on_wedge_alarm
+test_session_start_warns_when_off_is_mixed_with_a_channel
+test_session_start_names_a_kept_away_record
+test_example_config_hooks_run_the_wrapper
+test_stop_allows_after_a_successful_heal
 test_stop_passes_guard_block_and_respects_cap
+test_stop_reports_a_failed_heal_in_the_block
 test_stop_silent_outside_lock_ownership
 test_session_end_noop_without_lock_ownership
