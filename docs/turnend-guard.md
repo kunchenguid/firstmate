@@ -313,7 +313,9 @@ The registrations in detail:
   In primary or persistent secondmate homes, the hook parks synchronously on `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host), keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
 - Devin registers `SessionStart`, `Stop`, and `SessionEnd` hooks in the primary's own Devin config, whose shape [`docs/configuration.md`](configuration.md#devin-primary) owns, and delegates every turn boundary to `bin/fm-devin-primary.sh stop`.
   That wrapper stays silent outside a genuine primary or a session that does not hold the lock, and re-ensures the daemon once per stop when none holds the home.
-  A successful restart allows that stop, because it has just proved a live daemon whose watcher has not yet had time to beat; otherwise the wrapper pipes the payload to `bin/fm-turnend-guard.sh --devin` and passes its block object through.
+  A successful restart allows that stop, because it has just proved a live daemon whose watcher has not yet had time to beat.
+  A pending away-return catch-up gate (`state/.afk-return-catchup`) also allows the stop, because no daemon can start until `bin/fm-afk-return.sh check` clears it; the first stop after that restarts quiet daemon supervision.
+  Otherwise the wrapper pipes the payload to `bin/fm-turnend-guard.sh --devin` and passes its block object through.
   The guard bounds blocking with the same `state/.turnend-blocks` counter agy uses, capped at `FM_TURNEND_MAX_BLOCKS` (default 3) and reset on allow, but keyed on the payload's `prompt_id` so each turn starts a fresh budget; past the cap it fails open silently, so a persistently unhealthy daemon cannot wedge the session.
 
 ### Claude and Codex blocking

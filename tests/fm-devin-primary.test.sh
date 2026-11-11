@@ -186,6 +186,31 @@ test_stop_allows_after_a_successful_heal() {
   pass "fm-devin-primary stop: a successful self-heal allows the stop"
 }
 
+test_away_return_catchup_defers_the_daemon() {
+  local dir out rc ctx
+  dir=$(make_home "$TMP_ROOT/catchup")
+  : > "$dir/state/task1.meta"
+  printf 'pending\n' > "$dir/state/.afk-return-catchup"
+  out=$(run_hook session-start "$dir" '{"source":"startup"}'); rc=$(run_hook_rc "$dir")
+  expect_code 0 "$rc" "session-start failed during catch-up: $(run_hook_err "$dir")"
+  assert_not_contains "$out" '"decision":"block"' "session-start refused the session while the away-return gate was pending: $out"
+  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
+  assert_contains "$ctx" "bin/fm-afk-return.sh check" "session-start context did not name the catch-up gate's check: $ctx"
+  [ ! -e "$dir/state/.supervise-daemon.lock" ] || fail "session-start launched a daemon while the catch-up gate was pending"
+  out=$(run_owned_stop "$dir" '{"prompt_id":"p-catchup","session_id":"s-1","stop_hook_active":false}'); rc=$?
+  expect_code 0 "$rc" "a stop during catch-up must exit 0"
+  [ -z "$out" ] || fail "a stop during catch-up blocked on a daemon that cannot start: $out"
+  assert_contains "$(cat "$dir/stop-err" 2>/dev/null)" "bin/fm-afk-return.sh check" "the catch-up stop did not log the gate's instruction"
+  [ ! -e "$dir/state/.supervise-daemon.lock" ] || fail "a stop launched a daemon while the catch-up gate was pending"
+  rm -f "$dir/state/.afk-return-catchup"
+  out=$(run_owned_stop "$dir" '{"prompt_id":"p-after","session_id":"s-1","stop_hook_active":false}')
+  [ -z "$out" ] || fail "the first stop after the gate cleared did not heal and allow: $out"
+  [ "$(head -n 1 "$dir/state/.afk" 2>/dev/null)" = quiet ] || fail "the stop after the gate cleared did not restore quiet mode"
+  kill -0 "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" 2>/dev/null \
+    || fail "the stop after the gate cleared did not leave a live daemon"
+  pass "fm-devin-primary: a pending away-return gate defers the daemon, then the next stop restores quiet supervision"
+}
+
 test_stop_passes_guard_block_and_respects_cap() {
   local dir payload out rc i
   dir=$(make_home "$TMP_ROOT/stop-block")
@@ -301,5 +326,6 @@ test_example_config_hooks_run_the_wrapper
 test_stop_allows_after_a_successful_heal
 test_stop_passes_guard_block_and_respects_cap
 test_stop_reports_a_failed_heal_in_the_block
+test_away_return_catchup_defers_the_daemon
 test_stop_silent_outside_lock_ownership
 test_session_end_noop_without_lock_ownership

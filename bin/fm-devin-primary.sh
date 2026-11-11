@@ -19,6 +19,10 @@
 #                 bin/fm-afk-launch.sh start (which reads the record's mode, so
 #                 an existing away record stays away). Otherwise run
 #                 `FM_AFK_MODE=quiet bin/fm-afk-launch.sh enter` then `start`.
+#                 While the away return's catch-up gate
+#                 (state/.afk-return-catchup) is pending, fm-afk-launch refuses
+#                 every entry, so ensure exits 3 with a line naming
+#                 bin/fm-afk-return.sh check instead of launching.
 #                 Then verify a live identity-matched daemon holds this home
 #                 (fm_afk_daemon_owns_supervision, bin/fm-wake-lib.sh - the
 #                 same predicate the turn-end guard uses). Exit 0 with one line
@@ -33,7 +37,9 @@
 #                 the ancestry walk finds it), refuses the session with a
 #                 "decision":"block" when the lock is held by another live
 #                 session or the primary is not inside an addressable tmux or
-#                 Herdr pane, runs `ensure`, warns (never blocks) when
+#                 Herdr pane, runs `ensure` (a pending away-return catch-up
+#                 gate admits the session with that gate's instruction instead
+#                 of a daemon), warns (never blocks) when
 #                 config/wedge-alarm names no reachable channel, and injects
 #                 the result as SessionStart additionalContext that ends with
 #                 "Run bin/fm-session-start.sh now, once." The same summary
@@ -45,7 +51,10 @@
 #                 when no live identity-matched daemon holds this home it runs
 #                 `ensure` and logs the result to stderr; a successful restart
 #                 has just proved a live daemon, so that stop is allowed
-#                 without waiting for the new watcher's first beacon.
+#                 without waiting for the new watcher's first beacon. While
+#                 the away return's catch-up gate is pending the daemon cannot
+#                 start and the captain is present working the return, so the
+#                 stop is allowed with the gate's instruction on stderr.
 #                 Otherwise it pipes the payload to
 #                 `bin/fm-turnend-guard.sh --devin` and passes a returned block
 #                 object through (prefixed with the failed ensure outcome when
@@ -133,6 +142,10 @@ cmd_ensure() {
   local out
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if [ -e "$STATE/.afk-return-catchup" ]; then
+    echo "away return catch-up is pending, so the daemon stays down until its gate clears: work the return brief and run bin/fm-afk-return.sh check; quiet daemon supervision restarts at the next Stop after that" >&2
+    return 3
+  fi
   if [ -e "$STATE/.afk" ] && [ -f "$STATE/.afk-contract" ]; then
     if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start 2>&1); then
       printf '%s\n' "$out" >&2
@@ -212,7 +225,7 @@ EOF
 }
 
 cmd_session_start() {
-  local lock_diag ensure_out warn summary
+  local lock_diag ensure_out ensure_rc warn summary
   cat >/dev/null 2>&1 || true
   mkdir -p "$STATE" 2>/dev/null || true
   # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -228,12 +241,17 @@ cmd_session_start() {
     emit_block "Firstmate on Devin: this session could not take this home's session lock ($lock_diag). If another firstmate session owns this home, exit it first."
   fi
 
-  if ! ensure_out=$(cmd_ensure 2>&1); then
-    emit_block "Firstmate on Devin: the quiet daemon could not be started - there is no other supervision path on this harness. fm-afk-launch reported: $ensure_out"
-  fi
-  # ensure_out holds its own stdout plus stderr; keep only the success line.
-  ensure_out=$(printf '%s\n' "$ensure_out" | grep ' daemon running: ' | tail -n 1)
-  [ -n "$ensure_out" ] || ensure_out='daemon running'
+  ensure_out=$(cmd_ensure 2>&1)
+  ensure_rc=$?
+  case "$ensure_rc" in
+    0)
+      # ensure_out holds its own stdout plus stderr; keep only the success line.
+      ensure_out=$(printf '%s\n' "$ensure_out" | grep ' daemon running: ' | tail -n 1)
+      [ -n "$ensure_out" ] || ensure_out='daemon running'
+      ;;
+    3) ;;
+    *) emit_block "Firstmate on Devin: the quiet daemon could not be started - there is no other supervision path on this harness. fm-afk-launch reported: $ensure_out" ;;
+  esac
 
   warn=$(wedge_alarm_warnings)
 
@@ -250,7 +268,7 @@ cmd_session_start() {
 }
 
 cmd_stop() {
-  local payload heal='' guard_out reason
+  local payload heal='' heal_rc guard_out reason
   payload=$(cat 2>/dev/null || true)
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -266,7 +284,9 @@ cmd_stop() {
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if ! fm_afk_daemon_owns_supervision "$STATE"; then
-    if heal=$(cmd_ensure 2>&1); then
+    heal=$(cmd_ensure 2>&1)
+    heal_rc=$?
+    if [ "$heal_rc" -eq 0 ] || [ "$heal_rc" -eq 3 ]; then
       printf 'fm-devin-primary stop: %s\n' "$heal" >&2
       exit 0
     fi
