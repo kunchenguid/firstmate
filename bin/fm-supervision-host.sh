@@ -1315,7 +1315,12 @@ while :; do
     exit_to_main "the successor watcher cycle could not be verified before handling; this wake is yours"
   fi
   if [ -n "$SUCCESSOR_GENERATION" ]; then
-    if ! "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1; then
+    "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1
+    HANDOFF_RC=$?
+    if [ "$HANDOFF_RC" -eq 3 ]; then
+      log_line "handling-superseded\tgeneration=$SUCCESSOR_GENERATION\twatcher=$SUCCESSOR_WATCHER"
+      stand_down "a newer watcher cycle owns this home's lock; the handling handoff is superseded"
+    elif [ "$HANDOFF_RC" -ne 0 ]; then
       exit_to_main "the handling handoff to the successor watcher could not be confirmed; this wake is yours"
     fi
   fi
