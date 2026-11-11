@@ -1490,7 +1490,7 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
 # be the harness's own idle suggestion (claude's rotating dim hint, codex's
 # `Use /skills ...`), so it must read `unknown` rather than a false `pending`.
 _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
-  local screen=$1 styled=$2 row=$3 raw content plain next state
+  local screen=$1 styled=$2 row=$3 raw content plain next glyph state
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" 0)
   next=$(_fm_composer_row_content "$(_fm_composer_screen_row "$((row + 1))" "$screen")" 0)
@@ -1505,6 +1505,12 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
+  if fm_composer_leading_agent_glyph_var glyph "$plain" \
+     && _fm_composer_row_is_rule_furniture "${plain#*"$glyph"}" \
+     && _fm_composer_row_is_mode_footer "$next"; then
+    content=$glyph
+    plain=$glyph
+  fi
   _fm_composer_bare_row_strip_furniture_var content
   _fm_composer_bare_row_strip_furniture_var plain
   state=$(fm_composer_classify_content 0 "$content" \
