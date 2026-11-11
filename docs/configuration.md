@@ -1551,7 +1551,7 @@ Neither fallback is unrestricted execution, and Firstmate does not change vendor
 ## Worker tool exclusions (config/crew-exclude-tools)
 
 The optional local, gitignored `config/crew-exclude-tools` hides named tools from this home's ship and scout workers, for example to keep an MCP server's write tools out of reach while its read tools stay available, or to stop sending the schemas of tools a worker never calls with every model request.
-The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored.
+The contract is runtime-neutral: a runtime must support hiding the listed tool names or refuse the launch, and a non-empty list is never silently ignored by the launch (Claude name typos are the exception, see [Validation](#validation)).
 With no file, or a file with no entries, every launch on every runtime is unchanged.
 
 Create the file with one tool name per line, such as `mcp__<server>__<tool>` for an MCP tool.
@@ -1573,7 +1573,7 @@ A relaunch validates the list and the replacement runtime's support before stopp
 ### Trimming Claude tool schemas
 
 Claude Code sends every enabled tool's schema with each model call, and a long-lived worker resends them on every turn.
-List a tool the workers do not use to remove its schema from that fixed cost, for example `Workflow`, `ScheduleWakeup`, or the artifact tools.
+List a tool the workers do not use to remove its schema from that fixed cost, for example `Workflow` or the artifact tools; the measured examples are in `docs/verification/runtime-backends.md`.
 Claude Code can supply a built-in `Artifact` tool when the artifacts MCP server is disallowed, so hide both `mcp__<artifacts-server>` and `Artifact` to remove every artifact schema.
 Only a name that matches a tool present in the worker's session has any effect; [Validation](#validation) explains why Claude names go unchecked, so confirm the saving from a worker's first request or `/context`.
 The measured effect on a Claude Code 2.1.319 worker launch is recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md).
