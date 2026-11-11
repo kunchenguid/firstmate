@@ -83,14 +83,14 @@ Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-lo
 
 ```sh
 gh auth login
-git clone https://github.com/kunchenguid/aman-crew
-cd aman-crew
+git clone https://github.com/kunchenguid/firstmate
+cd firstmate
 ```
 
-Aman Crew is the repository and product name; `firstmate` stays the name of the agent you talk to and of everything an installation already uses.
-An existing clone keeps working untouched: an `origin` still pointing at `github.com/kunchenguid/firstmate` resolves through GitHub's rename redirect, and `/updatefirstmate` follows whatever `origin` already points at.
+Aman Crew is the product name; `firstmate` stays the name of the agent you talk to, of the repository path above, and of everything an installation already uses.
+An existing clone keeps working untouched: `/updatefirstmate` follows whatever `origin` already points at.
 Every `fm-*` command, `FM_*` variable, `FM_HOME` layout, configuration file name and key, skill name, and state path is unchanged.
-A `maintainer` scope in `config/firstmate-role` that names the repository's former path still matches the renamed repository, so that file needs no edit ([Firstmate role](docs/configuration.md#firstmate-role-configfirstmate-role)).
+If the repository path is ever renamed to `aman-crew`, both paths keep working: GitHub redirects the former path, and a `maintainer` scope in `config/firstmate-role` naming either path matches the other, so that file needs no edit ([Firstmate role](docs/configuration.md#firstmate-role-configfirstmate-role)).
 
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 
@@ -264,10 +264,10 @@ MIT - see [LICENSE](LICENSE).
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=kunchenguid%2Faman-crew&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=kunchenguid%2Ffirstmate&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kunchenguid/aman-crew&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kunchenguid/aman-crew&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kunchenguid/aman-crew&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kunchenguid/firstmate&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kunchenguid/firstmate&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kunchenguid/firstmate&type=date&legend=top-left" />
  </picture>
 </a>

@@ -105,7 +105,7 @@ Refresh the CI-derived hints by downloading the per-shard timing artifacts from 
 
 ```sh
 for run in <run-id> <run-id> <run-id>; do
-  gh-axi run download "$run" -R kunchenguid/aman-crew --dir "/tmp/fm-serial/$run"
+  gh-axi run download "$run" -R kunchenguid/firstmate --dir "/tmp/fm-serial/$run"
 done
 jq -r '.scripts[] | select(.exit == 0) | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*/fm-test-timing-portable-serial-*/*.json \
   | awk -F'\t' '$2 > m[$1] { m[$1] = $2 } END { for (p in m) print p, m[p] }' \
