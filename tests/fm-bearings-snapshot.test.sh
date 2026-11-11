@@ -1753,8 +1753,12 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
 - [x] done-pr-nondelivery - Closed without merge https://github.com/o/r/pull/5 (repo: firstmate) (kind: ship) (done 2026-07-12)
 - [x] cleaned-open-pr - Idle worker cleaned up (repo: firstmate) (kind: ship) (done 2026-07-12)
   PR not confirmed merged https://github.com/o/r/pull/11
+
+## In flight
 - [ ] retained-open-pr - Retained for captain call (repo: firstmate) (kind: ship)
   Deliverable of the finished work: PR not confirmed merged https://github.com/o/r/pull/12
+
+## Done
 - [x] scout-pr-no-report - Scout without report https://github.com/o/r/pull/6 (repo: firstmate) (kind: scout) (merged 2026-07-12)
 - [x] ship-reported-path - Ship naming data/ship-reported-path/report.md (repo: firstmate) (kind: ship) (reported 2026-07-12)
 - [x] reported-scout - Report with $report_pr context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
