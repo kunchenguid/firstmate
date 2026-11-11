@@ -412,6 +412,27 @@ test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details() {
   pass "closing Details after a queued answer dealt the next card focuses that card's Details button"
 }
 
+# A card with no options is answered in the captain's own words, so it has no
+# option to pick; answering it still deals the next card. A decision card always
+# gains the injected reconcile option, so the freeform-only card here is a
+# credential card, which gains none.
+test_a_freeform_only_first_card_still_deals_the_next_card() {
+  local home out
+  home=$(make_home call-freeform-first)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"credential.first","type":"credential","repo":"sample","title":"Name the release",
+     "decide":"What should the release be called?","options":[],"allow_freeform":true},
+    {"key":"merge.second","type":"merge","repo":"sample","title":"Merge: second","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and .call.advance == {answered:"Name the release", shown:"Merge: second",
+        focus:{label:"Details", card:"Merge: second", visible:true}}
+  ' >/dev/null || fail "answering a freeform-only first card in its own words did not deal the next card: $out"
+  pass "a freeform-only first card answered in its own words deals the next card"
+}
+
 test_an_empty_captains_call_still_shows_its_empty_state() {
   local home out
   home=$(make_home call-empty)
@@ -457,6 +478,7 @@ test_every_captains_call_card_takes_the_tallest_cards_height
 test_every_captains_call_card_opens_a_full_screen_details_view
 test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation
 test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details
+test_a_freeform_only_first_card_still_deals_the_next_card
 test_an_empty_captains_call_still_shows_its_empty_state
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

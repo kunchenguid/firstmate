@@ -370,13 +370,16 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-// Answer the first card, open its Details before the deal's timer fires, let a
-// frame pass and the timer fire, then close the view.
+// Answer the first card - its first option, or its note when it offers no
+// option - open its Details before the deal's timer fires, let a frame pass and
+// the timer fire, then close the view.
 const advance = (() => {
   if (decisionCards().length < 2) return null;
   showFirst();
   const card = decisionCards().find((c) => !c.hidden);
-  firstWhere(card, (c) => c.tagName === "input" && c.type === "radio").checked = true;
+  const option = firstWhere(card, (c) => c.tagName === "input" && c.type === "radio");
+  if (option) option.checked = true;
+  else firstWhere(card, (c) => c.tagName === "input" && c.name === "note").value = "answered in own words";
   firstWhere(card, (c) => c.tagName === "form").dispatch("submit");
   card.querySelectorAll(".bb-detailsbtn")[0].dispatch("click");
   flushFrames();
