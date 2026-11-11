@@ -113,6 +113,14 @@ except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError)
 PYPOOL
 }
 
+# A staged return is only put back when the pool still owes this home its slot.
+# The saved pool entry decides: an unchanged held lease means the return never
+# took effect, so the caller restores the payload, while a released or
+# reassigned slot means the return already committed and the payload must stay
+# out. An unreadable or contradictory pool reads as an error, never as a guess,
+# because either wrong answer strips a live home or re-marks a leasable slot.
+# Returns 0 when the staging is settled as committed, 2 when it must be
+# restored, and 1 when the pool cannot be reconciled.
 fm_home_payload_reconcile() {
   local home=$1 staging=$2 rc=0
   fm_home_payload_committed "$staging/$FM_HOME_PAYLOAD_RECORD" && return 0
