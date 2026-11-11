@@ -87,8 +87,9 @@
 #     Write the record now, with no separate confirmation step, then print the
 #     entry announcement and the read-back. Exit 0 on success and 2 on a usage
 #     error. --words-file keeps the file's bytes verbatim, trailing newlines
-#     included. With no words while a record stands, this is a refresh that
-#     leaves the standing record untouched; new words replace the mandate,
+#     included. With no words while a record of the requested posture stands,
+#     this refresh leaves it untouched (AWAY OR QUIET above owns transitions);
+#     new words replace the mandate,
 #     carry the original session entry forward, and archive the superseded
 #     record. A replacement is staged before the prior record is archived and
 #     replaced. `propose` and `confirm` were retired with the wait-for-go gate.
