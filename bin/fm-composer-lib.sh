@@ -247,13 +247,28 @@ fm_composer_normalize_trim_var() {  # <varname>
 
 # fm_composer_kiro_scope: 0 when the caller has named the pane's harness as kiro
 # through FM_COMPOSER_HARNESS, the one input that turns on the kiro-only composer
-# rules (the near-gray ghost ceiling in fm_composer_strip_ghost and the hinted
-# idle row, FM_COMPOSER_HINTED_IDLE_RE_DEFAULT). A caller that knows its target's
+# rule (the hinted idle row, FM_COMPOSER_HINTED_IDLE_RE_DEFAULT; the grey ghost
+# ceiling is fm_composer_gray_ghost_scope). A caller that knows its target's
 # recorded harness sets it for its reads (bin/fm-send.sh, bin/fm-control.sh, the
-# watcher's and process-event re-rings); an unset or other value leaves every
-# read exactly as it was before kiro existed.
+# watcher's and process-event re-rings, the supervise daemon's primary reads);
+# an unset or other value leaves every read exactly as it was before kiro existed.
 fm_composer_kiro_scope() {
   [ "${FM_COMPOSER_HARNESS:-}" = kiro ]
+}
+
+# fm_composer_gray_ghost_scope: 0 when the named harness draws its idle
+# placeholder in a grey above the shared ghost ceiling, which turns on the
+# near-gray ceiling and the palette-grey test in fm_composer_strip_ghost. kiro
+# (see below) and devin: Devin 3000.12.43 draws `Ask Devin to build features,
+# fix bugs, or work on your code` in 256-colour 38;5;244 (grey level 128, one
+# step above the shared 128 ceiling), where 3000.11.1 drew it dim; its typed
+# text is the default foreground (verified live in tmux). The hinted idle row
+# stays kiro-only (fm_composer_kiro_scope).
+fm_composer_gray_ghost_scope() {
+  case "${FM_COMPOSER_HARNESS:-}" in
+    kiro|devin) return 0 ;;
+  esac
+  return 1
 }
 
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
@@ -272,7 +287,7 @@ fm_composer_kiro_scope() {
 #     fleet reality, where real typed input is bright and only de-emphasised UI
 #     is dark; the SGR-2 signal above stays theme-independent. A 256-colour
 #     foreground (38;5;n) is NOT luminance-tested - it is palette-dependent and
-#     no fleet harness except kiro (below) uses it for ghost text, so it is kept
+#     no fleet harness except kiro and devin (below) uses it for ghost text, so it is kept
 #     (real text wins: under-stripping merely defers, which the max-defer alarm
 #     surfaces, while over-stripping would inject over real input).
 # Raising FM_COMPOSER_GHOST_LUMA_MAX is not free: muse draws its `⟩` prompt glyph
@@ -288,8 +303,8 @@ fm_composer_kiro_scope() {
 # backend's identity probe attributes to Command Code is read with a fixed
 # ceiling of 160 in its place (fm_composer_classify_screen).
 #
-# KIRO ONLY: when the caller names the pane's harness as kiro
-# (FM_COMPOSER_HARNESS=kiro, see fm_composer_kiro_scope), a NEAR-ACHROMATIC run
+# KIRO AND DEVIN ONLY: when the caller names the pane's harness as kiro or devin
+# (FM_COMPOSER_HARNESS, see fm_composer_gray_ghost_scope), a NEAR-ACHROMATIC run
 # gets a higher ceiling, because kiro draws its idle placeholder in a grey above
 # the 128 default. Every other harness, and a read with no harness named, keeps
 # exactly the rules above: the wider ceiling read Claude's grey slash-command
@@ -322,7 +337,7 @@ fm_composer_kiro_scope() {
 # runs alike pass through or drop intact without locale-dependent classes.
 fm_composer_strip_ghost() {
   local grayscope=0
-  fm_composer_kiro_scope && grayscope=1
+  fm_composer_gray_ghost_scope && grayscope=1
   LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v grayscope="$grayscope" \
     -v graylumamax="${FM_COMPOSER_GHOST_GRAY_LUMA_MAX:-180}" \
     -v grayspreadmax="${FM_COMPOSER_GHOST_GRAY_SPREAD_MAX:-12}" '
@@ -343,7 +358,7 @@ fm_composer_strip_ghost() {
       return p + 1
     }
     # ceiling_for: the luminance ceiling that applies to one truecolor run.
-    # Outside the kiro scope (grayscope 0) that is always lumamax. Inside it, a
+    # Outside the gray-ghost scope (grayscope 0) that is always lumamax. Inside it, a
     # NEAR-ACHROMATIC run (max channel minus min channel within grayspreadmax)
     # takes the HIGHER of graylumamax and lumamax, so the gray ceiling only ever
     # raises the applicable ceiling and never reduces an operator-set one.
@@ -357,7 +372,7 @@ fm_composer_strip_ghost() {
     }
     # palette_gray_level: the channel level of a 256-colour index in the 232-255
     # greyscale ramp, and -1 for EVERY other index and for every index outside
-    # the kiro scope. A ramp entry has r == g == b, so its level IS its luminance.
+    # the gray-ghost scope. A ramp entry has r == g == b, so its level IS its luminance.
     #
     # The ramp alone is deliberate, not an oversight. It is the only index range
     # whose RGB is fixed by definition rather than by a theme, so it needs no
@@ -375,7 +390,7 @@ fm_composer_strip_ghost() {
       return (lv >= 0 && lv < ceiling_for(lv, lv, lv)) ? 1 : 0
     }
     # fg38_is_dark: 1 when the SGR 38 foreground starting at param p is a
-    # TRUECOLOR (38;2 / 38:2), or in the kiro scope a PALETTE GREY (38;5 / 38:5),
+    # TRUECOLOR (38;2 / 38:2), or in the gray-ghost scope a PALETTE GREY (38;5 / 38:5),
     # whose luminance is below the ceiling that applies to it; 0 otherwise (any
     # other palette index, a bright colour, or a malformed run).
     function fg38_is_dark(a, p, k,   spec, nf, f, r, g, b) {
