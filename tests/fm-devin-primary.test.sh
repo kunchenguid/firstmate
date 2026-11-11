@@ -141,7 +141,7 @@ test_session_start_blocks_without_a_pane() {
   pass "fm-devin-primary session-start: no addressable pane blocks the session"
 }
 
-test_session_start_ensures_daemon_and_warns_on_wedge_alarm() {
+test_session_start_ensures_daemon_and_injects_context() {
   local dir out rc ctx
   dir=$(make_home "$TMP_ROOT/start-happy")
   out=$(run_hook session-start "$dir" '{"source":"startup"}'); rc=$(run_hook_rc "$dir")
@@ -155,13 +155,9 @@ test_session_start_ensures_daemon_and_warns_on_wedge_alarm() {
     || fail "session-start did not enter quiet mode: $(cat "$dir/state/.afk" 2>/dev/null)"
   kill -0 "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" 2>/dev/null \
     || fail "the ensure did not leave a live daemon"
-  if [ "$(uname)" != Darwin ]; then
-    assert_contains "$ctx" "WARNING" "session-start context lost the wedge-alarm warning: $ctx"
-    assert_contains "$ctx" "config/wedge-alarm" "wedge-alarm warning did not name the config: $ctx"
-  fi
   run_hook_err "$dir" | grep -q "lock acquired" \
     || fail "session-start did not echo its summary to stderr"
-  pass "fm-devin-primary session-start: lock, quiet daemon, wedge warning, and context injection"
+  pass "fm-devin-primary session-start: lock, quiet daemon, and context injection"
 }
 
 # Run the stop hook as the lock-owning devin session.
@@ -259,17 +255,6 @@ test_stop_reports_a_failed_heal_in_the_block() {
   assert_contains "$out" '"decision":"block"' "a stop whose self-heal failed did not block: $out"
   assert_contains "$out" "daemon restart attempt FAILED" "the block lost the failed ensure report: $out"
   pass "fm-devin-primary stop: a failed self-heal rides in the block reason"
-}
-
-test_session_start_warns_when_off_is_mixed_with_a_channel() {
-  local dir out ctx
-  dir=$(make_home "$TMP_ROOT/start-off-mixed")
-  printf '%s\n' 'command:true' 'off' > "$dir/config/wedge-alarm"
-  out=$(run_hook session-start "$dir" '{"source":"startup"}')
-  expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
-  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
-  assert_contains "$ctx" "disables every wedge-alarm channel" "off beside another channel did not warn that every channel is off: $ctx"
-  pass "fm-devin-primary session-start: any off directive warns that every wedge-alarm channel is off"
 }
 
 # Print the pid in <home>'s daemon lock, waiting briefly for a just-launched
@@ -453,8 +438,7 @@ test_session_end_noop_without_lock_ownership() {
 
 test_session_start_blocks_on_foreign_lock
 test_session_start_blocks_without_a_pane
-test_session_start_ensures_daemon_and_warns_on_wedge_alarm
-test_session_start_warns_when_off_is_mixed_with_a_channel
+test_session_start_ensures_daemon_and_injects_context
 test_session_start_names_a_kept_away_record
 test_session_start_replaces_a_daemon_for_another_pane
 test_session_start_replacement_keeps_an_undelivered_check_alert

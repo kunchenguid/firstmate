@@ -316,7 +316,10 @@ The registrations in detail:
   A successful restart allows that stop, because it has just proved a live daemon whose watcher has not yet had time to beat.
   While an away-return catch-up gate (`state/.afk-return-catchup`) is pending no daemon can start, so the wrapper skips the restart and prefixes the guard's block with `bin/fm-afk-return.sh check` as the unblock action; the first stop after the gate clears restarts quiet daemon supervision.
   Otherwise the wrapper pipes the payload to `bin/fm-turnend-guard.sh --devin` and passes its block object through.
-  The guard bounds blocking with the same `state/.turnend-blocks` counter agy uses, capped at `FM_TURNEND_MAX_BLOCKS` (default 3) and reset on allow, but keyed on the payload's `prompt_id` so each turn starts a fresh budget; past the cap it fails open silently, so a persistently unhealthy daemon cannot wedge the session.
+  The guard bounds blocking with the same `state/.turnend-blocks` counter agy uses, capped at `FM_TURNEND_MAX_BLOCKS` (default 3) and reset on allow, but keyed on the payload's `session_id`.
+  A new turn gets a fresh budget only when its stop is not a continuation (`stop_hook_active` false) and carries a new `prompt_id`, so a forced continuation never refills the budget even if `prompt_id` rotates or is absent.
+  [Devin 3000.12.43 evidence](verification/devin.md#primary-stop-hook-payload) shows `prompt_id` stable and `stop_hook_active` true across blocked continuations.
+  Past the cap it fails open silently, so a persistently unhealthy daemon cannot wedge the session.
 
 ### Claude and Codex blocking
 

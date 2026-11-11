@@ -22,9 +22,11 @@
 # --devin from bin/fm-devin-primary.sh's Stop hook: Devin blocks a turn end
 # through a printed {"decision":"block","reason":...} object on stdout (exit 2
 # blocks too, but the JSON form carries the reason identically). This mode
-# ignores stop_hook_active and bounds the loop with the same
+# never lets stop_hook_active alone allow and bounds the loop with the same
 # state/.turnend-blocks counter agy uses (FM_TURNEND_MAX_BLOCKS, reset on
-# allow), keyed on the payload's prompt_id so each turn gets a fresh budget; it
+# allow), keyed on the payload's session_id. A new turn gets a fresh budget only
+# when its stop is not a continuation (stop_hook_active false) AND carries a new
+# prompt_id, so a rotating or absent prompt_id can never extend the budget; it
 # allows by exiting 0 with no output and prints the block object with exit 0.
 # A Devin primary is always daemon-supervised, so the
 # shared away/quiet daemon predicate below (fm_afk_daemon_owns_supervision plus
@@ -230,29 +232,36 @@ FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 TURNEND_BLOCKS="$STATE/.turnend-blocks"
 TURN_KEY=
+PROMPT_KEY=
 if [ "$DEVIN_MODE" -eq 1 ]; then
-  TURN_KEY=$(printf '%s' "$PAYLOAD" | jq -r '.prompt_id // .session_id // ""' 2>/dev/null | tr -d '\n' || true)
+  TURN_KEY=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // ""' 2>/dev/null | tr -d '\n' || true)
+  PROMPT_KEY=$(printf '%s' "$PAYLOAD" | jq -r '.prompt_id // ""' 2>/dev/null | tr -d '\n' || true)
 fi
 turnend_blocks_reset() {
   [ "$AGY_MODE" -eq 1 ] || [ "$DEVIN_MODE" -eq 1 ] || return 0
   rm -f "$TURNEND_BLOCKS" 2>/dev/null || true
 }
 # Charge one bounded block against state/.turnend-blocks, or return 1 once
-# FM_TURNEND_MAX_BLOCKS (default 3) are spent. A stored turn key that differs
-# from TURN_KEY starts a fresh budget, so Devin's per-prompt turns never
-# inherit an earlier turn's blocks; agy's key is always empty.
+# FM_TURNEND_MAX_BLOCKS (default 3) are spent. A stored session key that
+# differs from TURN_KEY starts a fresh budget. Within a session, Devin's budget
+# resets only on a non-continuation stop with a new prompt_id, so a forced
+# continuation never refills it whatever its prompt_id; agy's keys are empty.
 turnend_blocks_charge() {
-  local max_blocks cur_blocks stored_key
+  local max_blocks cur_blocks stored_key stored_prompt
   max_blocks=${FM_TURNEND_MAX_BLOCKS:-3}
   case "$max_blocks" in ''|*[!0-9]*|0) max_blocks=3 ;; esac
   cur_blocks=$(sed -n 1p "$TURNEND_BLOCKS" 2>/dev/null || true)
   stored_key=$(sed -n 2p "$TURNEND_BLOCKS" 2>/dev/null || true)
+  stored_prompt=$(sed -n 3p "$TURNEND_BLOCKS" 2>/dev/null || true)
   case "$cur_blocks" in ''|*[!0-9]*) cur_blocks=0 ;; esac
   [ "$stored_key" = "$TURN_KEY" ] || cur_blocks=0
+  if [ "$STOP_HOOK_ACTIVE" != true ] && [ -n "$PROMPT_KEY" ] && [ "$PROMPT_KEY" != "$stored_prompt" ]; then
+    cur_blocks=0
+  fi
   [ "$cur_blocks" -lt "$max_blocks" ] || return 1
   mkdir -p "$STATE" 2>/dev/null || true
-  if [ -n "$TURN_KEY" ]; then
-    printf '%s\n%s\n' "$((cur_blocks + 1))" "$TURN_KEY" > "$TURNEND_BLOCKS"
+  if [ -n "$TURN_KEY" ] || [ -n "$PROMPT_KEY" ]; then
+    printf '%s\n%s\n%s\n' "$((cur_blocks + 1))" "$TURN_KEY" "$PROMPT_KEY" > "$TURNEND_BLOCKS"
   else
     printf '%s\n' "$((cur_blocks + 1))" > "$TURNEND_BLOCKS"
   fi

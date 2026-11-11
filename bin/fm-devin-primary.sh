@@ -44,9 +44,8 @@
 #                 session or the primary is not inside an addressable tmux or
 #                 Herdr pane, runs `ensure` (a pending away-return catch-up
 #                 gate admits the session with that gate's instruction instead
-#                 of a daemon), warns (never blocks) when
-#                 config/wedge-alarm names no reachable channel, and injects
-#                 the result as SessionStart additionalContext that ends with
+#                 of a daemon), and injects the result as SessionStart
+#                 additionalContext that ends with
 #                 "Run bin/fm-session-start.sh now, once." The same summary
 #                 goes to stderr.
 #   stop          Devin Stop hook. Reads the event JSON on stdin
@@ -62,10 +61,11 @@
 #                 object through, prefixed with the ensure outcome when
 #                 self-heal ran: a pending away-return catch-up gate names
 #                 `bin/fm-afk-return.sh check` as the unblock action, since no
-#                 daemon can start until that gate clears. The guard owns the per-turn block cap
-#                 (state/.turnend-blocks keyed on prompt_id,
-#                 FM_TURNEND_MAX_BLOCKS), so a persistently unhealthy daemon
-#                 can never wedge the session.
+#                 daemon can start until that gate clears. The guard owns the
+#                 block cap (state/.turnend-blocks keyed on session_id,
+#                 FM_TURNEND_MAX_BLOCKS); only a non-continuation stop
+#                 (stop_hook_active false) with a new prompt_id refills it, so
+#                 a persistently unhealthy daemon can never wedge the session.
 #   session-end   Devin SessionEnd hook. Only when this session owns the lock,
 #                 runs `bin/fm-afk-launch.sh stop`; never fails loudly, always
 #                 exits 0.
@@ -94,7 +94,6 @@ case "$FM_HOME" in
     ;;
 esac
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_HOME
 
 usage() {
@@ -175,52 +174,8 @@ cmd_ensure() {
   printf '%s daemon running: pid %s supervising pane %s\n' "$(fm_afk_mode "$STATE")" "$pid" "$target"
 }
 
-# Print one warning line when no configured wedge-alarm channel can reach the
-# captain, or nothing. Mirrors the channel parsing owned by
-# wedge_alarm_configured_channels / wedge_alarm_notify in
-# bin/fm-supervise-daemon.sh: FM_WEDGE_ALARM_CHANNEL wins (one directive), else
-# the non-empty non-comment lines of config/wedge-alarm, else "auto"; any `off`
-# directive, in any position, disables every channel.
-wedge_alarm_warnings() {
-  local ch line found='' off=0 herdr=0 other=0
-  if [ -n "${FM_WEDGE_ALARM_CHANNEL:-}" ]; then
-    found=$FM_WEDGE_ALARM_CHANNEL
-  elif [ -f "$CONFIG/wedge-alarm" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [ -n "$line" ] || continue
-      case "$line" in '#'*) continue ;; esac
-      found="${found:+$found
-}$line"
-    done < "$CONFIG/wedge-alarm"
-  fi
-  [ -n "$found" ] || found='auto'
-  while IFS= read -r ch; do
-    case "$ch" in
-      off) off=1 ;;
-      auto|default) ;;
-      herdr) herdr=1 ;;
-      *) other=1 ;;
-    esac
-  done <<EOF
-$found
-EOF
-  if [ "$off" -eq 1 ]; then
-    printf '%s\n' 'WARNING: config/wedge-alarm disables every wedge-alarm channel; if the daemon cannot deliver an escalation nobody is notified - see docs/wedge-alarm.md.'
-    return 0
-  fi
-  if [ "$other" -eq 0 ] && [ "$herdr" -eq 0 ] && [ "$(uname)" != Darwin ]; then
-    printf '%s\n' 'WARNING: config/wedge-alarm names no working channel on this platform (auto is none off macOS); a wedged daemon escalation would only leave a marker file - see docs/wedge-alarm.md.'
-    return 0
-  fi
-  if [ "$herdr" -eq 1 ] && ! command -v herdr >/dev/null 2>&1; then
-    printf '%s\n' 'WARNING: config/wedge-alarm names the herdr channel but herdr is not on PATH; a wedged daemon escalation may never reach the captain - see docs/wedge-alarm.md.'
-  fi
-}
-
 cmd_session_start() {
-  local lock_diag ensure_out ensure_rc warn summary
+  local lock_diag ensure_out ensure_rc summary
   cat >/dev/null 2>&1 || true
   mkdir -p "$STATE" 2>/dev/null || true
   # shellcheck source=bin/fm-primary-scope-lib.sh
@@ -248,11 +203,7 @@ cmd_session_start() {
     *) emit_block "Firstmate on Devin: the quiet daemon could not be started - there is no other supervision path on this harness. fm-afk-launch reported: $ensure_out" ;;
   esac
 
-  warn=$(wedge_alarm_warnings)
-
-  summary="Firstmate on Devin: lock acquired; $ensure_out."
-  [ -n "$warn" ] && summary="$summary $warn"
-  summary="$summary Run bin/fm-session-start.sh now, once."
+  summary="Firstmate on Devin: lock acquired; $ensure_out. Run bin/fm-session-start.sh now, once."
   if command -v jq >/dev/null 2>&1; then
     jq -cn --arg c "$summary" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
   else

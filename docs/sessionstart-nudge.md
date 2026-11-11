@@ -385,7 +385,7 @@ Native stdout context injection gates the ordered digest into model context befo
 
 Devin is a nudge-tier harness.
 Its primary registers a `SessionStart` hook in its own Devin config, invoking `bin/fm-devin-primary.sh session-start`; [`docs/configuration.md`](configuration.md#devin-primary) owns the launch command and config shape.
-That hook takes the session lock, ensures the quiet daemon, warns on a missing wedge-alarm channel, and returns `additionalContext` that ends with "Run bin/fm-session-start.sh now, once."
+That hook takes the session lock, ensures the quiet daemon, and returns `additionalContext` that ends with "Run bin/fm-session-start.sh now, once."
 The hook-enforced daemon is what makes a Devin primary safe; the nudge only asks the model to take the helm.
 A `block` decision refuses the session locally, so a lock refusal or a pane-less launch fails closed instead of starting blind.
 
