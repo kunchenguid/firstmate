@@ -619,8 +619,6 @@ META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
-DESCENDANT_TASK_KINDS=()
-DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
@@ -3162,7 +3160,7 @@ preflight_firstmate_home_process_event_tree() {
 }
 
 collect_descendant_task_locks() {
-  local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
+  local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock control_lock meta_lock
   local -a child_ids
   sub_state="$home/state"
   if [ -L "$sub_state" ]; then
@@ -3209,6 +3207,25 @@ collect_descendant_task_locks() {
   [ "${#child_ids[@]}" -gt 0 ] || return 0
   while IFS= read -r child_id; do
     child_meta="$sub_state/$child_id.meta"
+    control_lock="$sub_state/.control-$child_id.lock"
+    meta_lock=$(fm_meta_lock_path "$child_meta") || {
+      echo "REFUSED: descendant task $child_id has an invalid metadata lock path; forced teardown changed nothing" >&2
+      return 1
+    }
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "REFUSED: descendant task $child_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_LOCK_PATHS+=("$control_lock")
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      echo "REFUSED: descendant task $child_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_LOCK_PATHS+=("$meta_lock")
+    [ -f "$child_meta" ] || {
+      echo "REFUSED: descendant task $child_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
+      return 1
+    }
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_home=
@@ -3219,70 +3236,20 @@ collect_descendant_task_locks() {
     fi
     DESCENDANT_TASK_STATES+=("$sub_state")
     DESCENDANT_TASK_IDS+=("$child_id")
-    DESCENDANT_TASK_KINDS+=("$child_kind")
-    DESCENDANT_TASK_HOMES+=("$child_home")
     if [ "$child_kind" = secondmate ]; then
-      fm_home_payload_recover "$child_home" "$home" "$child_id" || return 1
-      [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || continue
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
+      [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] && [ -d "$child_home" ] || continue
       collect_descendant_task_locks "$child_home" || return 1
     fi
   done < <(printf '%s\n' "${child_ids[@]}" | LC_ALL=C sort)
 }
 
 preflight_descendant_task_locks() {
-  local home=$1 i state task_id meta control_lock meta_lock kind child_wt child_home
+  local home=$1
   DESCENDANT_TASK_STATES=()
   DESCENDANT_TASK_IDS=()
-  DESCENDANT_TASK_KINDS=()
-  DESCENDANT_TASK_HOMES=()
   DESCENDANT_TREEHOUSE_LOCK_PATHS=()
-  collect_descendant_task_locks "$home" || return 1
-  # Acquisition order, which every other holder of these locks must match so
-  # they cannot cycle: each home's task-set lock first (parent home before child
-  # home, during collection above), then per-task locks in that same
-  # parent-before-child preorder, sorted by id within each home, each control
-  # lock before its matching metadata lock. No child lock holder ever reaches
-  # back for a parent lock. bin/fm-spawn.sh takes the same task-set lock before
-  # its own per-task locks when it publishes a fresh record.
-  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
-    state=${DESCENDANT_TASK_STATES[$i]}
-    task_id=${DESCENDANT_TASK_IDS[$i]}
-    meta="$state/$task_id.meta"
-    control_lock="$state/.control-$task_id.lock"
-    meta_lock=$(fm_meta_lock_path "$meta") || {
-      echo "REFUSED: descendant task $task_id has an invalid metadata lock path; forced teardown changed nothing" >&2
-      return 1
-    }
-    if ! fm_lock_try_acquire "$control_lock"; then
-      echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
-      return 1
-    fi
-    DESCENDANT_LOCK_PATHS+=("$control_lock")
-    if ! fm_lock_try_acquire "$meta_lock"; then
-      echo "REFUSED: descendant task $task_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
-      return 1
-    fi
-    DESCENDANT_LOCK_PATHS+=("$meta_lock")
-    [ -f "$meta" ] || {
-      echo "REFUSED: descendant task $task_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
-      return 1
-    }
-    kind=$(meta_value "$meta" kind)
-    [ -n "$kind" ] || kind=ship
-    [ "$kind" = "${DESCENDANT_TASK_KINDS[$i]}" ] || {
-      echo "REFUSED: descendant task $task_id changed kind while forced teardown acquired its locks; forced teardown changed nothing" >&2
-      return 1
-    }
-    if [ "$kind" = secondmate ]; then
-      child_wt=$(meta_value "$meta" worktree)
-      child_home=$(meta_value "$meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
-      [ "$child_home" = "${DESCENDANT_TASK_HOMES[$i]}" ] || {
-        echo "REFUSED: descendant task $task_id changed home while forced teardown acquired its locks; forced teardown changed nothing" >&2
-        return 1
-      }
-    fi
-  done
+  collect_descendant_task_locks "$home"
 }
 
 preflight_descendant_treehouse_slots() {
@@ -3747,7 +3714,6 @@ if [ "$KIND" = secondmate ]; then
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   SECONDHOME_RETIRED=$FM_HOME_PAYLOAD_RETIRED
   if [ "$SECONDHOME_RETIRED" = 0 ] && [ "$FORCE" = "--force" ]; then
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_treehouse_slots || exit 1
