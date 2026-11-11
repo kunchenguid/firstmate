@@ -79,6 +79,106 @@ if (["turn-end", "progress"].includes(process.env.MODE)) {
 EOF
 }
 
+test_pi_stream_extension_activation_and_lifecycle() {
+  local rec id=stream-pi state ext out version option enabled label
+  for label in disabled zero negative malformed leading maximum overflow verified newer malformed-version older; do
+    version=1.2.0 option=300 enabled=1
+    case "$label" in
+      disabled) option='' enabled=0 ;;
+      zero) option=0 enabled=0 ;;
+      negative) option=-1 enabled=0 ;;
+      malformed) option=invalid enabled=0 ;;
+      leading) option=00300 ;;
+      maximum) option=999999999 ;;
+      overflow) option=1000000000 enabled=0 ;;
+      newer) version=1.3.0 enabled=0 ;;
+      malformed-version) version=not-a-version enabled=0 ;;
+      older) version=0.82.0 enabled=0 ;;
+    esac
+    rec=$(make_spawn_case "stream-$label" pi "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/pi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf '%s\\n' '$version'; fi
+exit 0
+SH
+    chmod +x "$FAKEBIN_DIR/pi"
+    out=$(FM_STREAM_SILENT_MAX_SECS="$option" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "stream spawn should succeed: $out"
+    case "$label" in
+      newer|older|malformed-version)
+        printf '%s\n' "$out" | grep -Fx "warning: pi model-stream observation unavailable for version $version; verified version: 1.2.0; existing busy bound remains active" >/dev/null || fail "missing exact version warning"
+        ;;
+    esac
+    state="$HOME_DIR/state"
+    ext="$state/$id.pi-ext.ts"
+    STREAM_STATE="$state" STREAM_ID="$id" STREAM_ENABLED="$enabled" EXT_PATH="$ext" node --input-type=module <<'JS' || fail "generated stream lifecycle failed for $label"
+import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+const { default: extension } = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+extension({on: (name, fn) => { handlers[name] = fn; }, events: { on() {} }});
+const state = process.env.STREAM_STATE, id = process.env.STREAM_ID;
+const marker = state + "/" + id + ".model-stream";
+let idle = true;
+const ctx = {isIdle: () => idle};
+let clock = 10000;
+Date.now = () => clock;
+const fire = async (name, event = {}) => { await handlers[name]?.(event, ctx); };
+const assert = (ok, message) => { if (!ok) throw new Error(message); };
+await fire("agent_start");
+await fire("context", {messages: []});
+if (process.env.STREAM_ENABLED !== "1") {
+  assert(!existsSync(marker), "disabled/unverified worker produced stream evidence");
+  for (const name of ["context", "message_update", "message_end", "tool_execution_start"]) {
+    assert(!handlers[name], "unverified worker installed stream handler " + name);
+  }
+} else {
+  assert(existsSync(marker), "foreground context did not open stream evidence");
+  const initial = readFileSync(marker, "utf8");
+  await fire("message_update", {message: {role: "assistant", content: [{type:"text",text:""}]}});
+  assert(readFileSync(marker,"utf8") === initial, "empty event refreshed stream");
+  await fire("message_update", {message: {role: "assistant", content: [{type:"thinking",thinking:"reason"}]}});
+  const progressed = readFileSync(marker,"utf8");
+  assert(progressed !== initial, "thinking did not advance progress");
+  await fire("message_update", {message: {role: "assistant", content: [{type:"text",text:"token"}]}});
+  assert(readFileSync(marker,"utf8") === progressed, "unthrottled content event");
+  clock += 1001;
+  await fire("message_update", {message: {role: "assistant", content: [{type:"toolCall",name:"bash",arguments:{command:"true"}}]}});
+  assert(readFileSync(marker,"utf8") !== progressed, "tool arguments did not advance progress");
+  const last = readFileSync(marker,"utf8");
+  clock += 1001;
+  await fire("message_update", {message: {role: "assistant", content: [{type:"toolCall",name:"bash",arguments:{command:"true"}}]}});
+  assert(readFileSync(marker,"utf8") === last, "unchanged content refreshed progress after throttle");
+  idle = false;
+  await fire("agent_settled");
+  assert(readFileSync(marker,"utf8") === last, "continuing settlement closed active request");
+  idle = true;
+  await fire("message_end", {message: {role:"user"}});
+  assert(existsSync(marker), "user message end closed assistant stream");
+  await fire("message_end", {message: {role:"assistant"}});
+  assert(!existsSync(marker), "assistant end left stream open");
+  clock += 1001;
+  await fire("message_update", {message: {role:"assistant", content:[{type:"text",text:"late"}]}});
+  assert(!existsSync(marker), "late event resurrected closed stream");
+  await fire("context", {messages: []});
+  assert(existsSync(marker), "retry did not open new stream");
+  const retry = readFileSync(marker,"utf8");
+  const closing = fire("message_end", {message: {role:"assistant"}});
+  const opening = fire("context", {messages: []});
+  await Promise.all([closing, opening]);
+  assert(existsSync(marker) && readFileSync(marker,"utf8") !== retry, "overlapping close/open lost new request");
+  await fire("tool_execution_start");
+  assert(!existsSync(marker), "tool phase retained stream");
+  await fire("context", {messages: []});
+  await fire("agent_settled");
+  assert(!existsSync(marker), "settlement retained stream");
+}
+JS
+  done
+  pass "generated Pi wiring gates stream observation and clears model phases without accepting late updates"
+}
+
 test_pi_extension_semantic_lifecycle() {
   local rec id=busy-pi-1 out state ext
   rec=$(make_spawn_case pi-lifecycle pi "$id")
@@ -187,6 +287,118 @@ oc_exec_started() {  # <sessionID>
 
 oc_exec_terminal() {  # <sessionID> <succeeded|interrupted|failed>
   printf '{"type":"session.execution.%s","properties":{"sessionID":"%s"}}' "$2" "$1"
+}
+
+# drive_oc_plugin_unordered <plugin-path> <events-json-lines...>: fire every
+# event through hooks.event WITHOUT awaiting between calls - the dispatch shape
+# a turn's terminal busy/idle burst (~1ms apart) hits in production - then run
+# the queued fm-busy-event.sh children one at a time, last-queued first. The
+# driver interposes on child_process.execFile only to schedule the real
+# applies; a plugin that lets events race therefore lands the FIRST event's
+# apply last, deterministically, so the record order inverts exactly when the
+# plugin fails to serialize.
+drive_oc_plugin_unordered() {
+  local plugin=$1
+  shift
+  PLUGIN_PATH="$plugin" node --input-type=module - "$@" 2>&1 <<'EOF'
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+const cp = createRequire(import.meta.url)("node:child_process");
+const realExecFile = cp.execFile;
+const pending = [];
+cp.execFile = (file, args, options, callback) => {
+  if (typeof options === "function") { callback = options; options = undefined; }
+  pending.push({ file, args, options, callback });
+};
+const runJob = (job) => new Promise((resolve) => {
+  const done = (...a) => { job.callback?.(...a); resolve(); };
+  if (job.options === undefined) realExecFile(job.file, job.args, done);
+  else realExecFile(job.file, job.args, job.options, done);
+});
+const drain = async (calls) => {
+  while (true) {
+    for (let i = 0; !pending.length && calls.some((p) => !p.done) && i < 2000; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    const job = pending.pop();
+    if (!job) break;
+    await runJob(job);
+  }
+  await Promise.all(calls);
+};
+setTimeout(() => { console.error("drive_oc_plugin_unordered: drain timed out"); process.exit(1); }, 30000).unref();
+const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
+const hooks = await mod.FmBusyState({});
+const calls = process.argv.slice(2).map((arg) => {
+  const p = Promise.resolve(hooks.event({ event: JSON.parse(arg) }));
+  p.done = false;
+  p.then(() => { p.done = true; }, () => { p.done = true; });
+  return p;
+});
+await drain(calls);
+EOF
+}
+
+# drive_oc_plugin_setup_entry <plugin-path> <server-event> <setup-event>:
+# fire <server-event> through the OpenCode 2 plugin's server hook without
+# awaiting, deliver <setup-event> through the default export's setup()
+# event.subscribe stream, and drain applies last-queued-first like
+# drive_oc_plugin_unordered. Both entry points share one ordered queue and one
+# session latch, so the setup event must apply after the server event's apply.
+drive_oc_plugin_setup_entry() {
+  local plugin=$1 server_ev=$2 setup_ev=$3
+  PLUGIN_PATH="$plugin" SERVER_EV="$server_ev" SETUP_EV="$setup_ev" node --input-type=module 2>&1 <<'EOF'
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+const cp = createRequire(import.meta.url)("node:child_process");
+const realExecFile = cp.execFile;
+const pending = [];
+cp.execFile = (file, args, options, callback) => {
+  if (typeof options === "function") { callback = options; options = undefined; }
+  pending.push({ file, args, options, callback });
+};
+const runJob = (job) => new Promise((resolve) => {
+  const done = (...a) => { job.callback?.(...a); resolve(); };
+  if (job.options === undefined) realExecFile(job.file, job.args, done);
+  else realExecFile(job.file, job.args, job.options, done);
+});
+setTimeout(() => { console.error("drive_oc_plugin_setup_entry: drain timed out"); process.exit(1); }, 30000).unref();
+const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
+const hooks = await mod.FmBusyState({});
+const queued = [];
+const waiters = [];
+let delivered = false;
+let processed;
+const processedP = new Promise((r) => { processed = r; });
+// next() returning the queued event or parking on a waiter; the next() call
+// AFTER the delivered event means the subscription finished handling it, so
+// it resolves `processed` and parks forever (the test exits anyway).
+const stream = { [Symbol.asyncIterator]() { return { next() {
+  if (queued.length) return Promise.resolve({ value: queued.shift(), done: false });
+  if (delivered) { processed(); return new Promise(() => {}); }
+  return new Promise((r) => waiters.push(r));
+} }; } };
+await mod.default.setup({ event: { subscribe: () => stream } });
+const serverCall = Promise.resolve(hooks.event({ event: JSON.parse(process.env.SERVER_EV) }));
+serverCall.done = false;
+serverCall.then(() => { serverCall.done = true; }, () => { serverCall.done = true; });
+const event = JSON.parse(process.env.SETUP_EV);
+delivered = true;
+const waiter = waiters.shift();
+if (waiter) waiter({ value: event, done: false }); else queued.push(event);
+const calls = [serverCall, processedP];
+processedP.done = false;
+processedP.then(() => { processedP.done = true; }, () => { processedP.done = true; });
+while (true) {
+  for (let i = 0; !pending.length && calls.some((p) => !p.done) && i < 2000; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+  const job = pending.pop();
+  if (!job) break;
+  await runJob(job);
+}
+await Promise.all(calls);
+EOF
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -334,6 +546,88 @@ SH
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy opencode-plugin" ] || fail "another session's terminal event must not clear the latched busy, got '$out'"
   pass "opencode plugin classifies from session.execution.* (OpenCode 2), scoped to the latched worker session"
+}
+
+# Live finding (opencode 1.19.3): every turn end emits session.status busy
+# then session.status idle/session.idle ~1ms apart, and the hook is not
+# awaited - so the applies used to race on the record lock and a late busy
+# could win the last write, leaving the worker recorded busy until its next
+# turn (5 of 13 observed turns). Reproduced live on opencode 1.18.32: 4 of 4
+# real `opencode run` turns ended state=busy. These drives fire the pair
+# unawaited and run the real applies in reverse spawn order, so the record
+# ends busy deterministically whenever the plugin fails to serialize.
+test_opencode_plugin_applies_events_in_emission_order() {
+  local rec id=busy-oc-ord out state plugin
+  rec=$(make_spawn_case oc-order opencode "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-1.18.32}"
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  assert_present "$plugin" "opencode 1.x spawn did not write the busy-state plugin"
+
+  out=$(drive_oc_plugin_unordered "$plugin" \
+    "$(oc_status ses_main busy)" \
+    "$(oc_status ses_main idle)") || fail "unordered session.status drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "a terminal busy must not out-write its session.status idle, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin_unordered "$plugin" \
+    "$(oc_status ses_main busy)" \
+    "$(oc_idle ses_main)") || fail "unordered session.idle drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "session.idle no longer touches the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "a terminal busy must not out-write its session.idle, got '$out'"
+  pass "opencode 1.x plugin applies a terminal busy/idle burst in emission order"
+}
+
+test_opencode_plugin_v2_applies_events_in_emission_order() {
+  local rec id=busy-oc-ord2 out state plugin
+  rec=$(make_spawn_case oc-order2 opencode "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/opencode" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-2.0.21}"
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/opencode"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "opencode spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  assert_present "$plugin" "opencode spawn did not write the busy-state plugin"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin_unordered "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    "$(oc_exec_terminal ses_main succeeded)") || fail "unordered execution drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a terminal event no longer touches the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "a started event must not out-write its terminal event, got '$out'"
+
+  # The OpenCode 2 plugin has two entry points - the server hook and the
+  # setup() event.subscribe stream - which must feed one ordered queue and
+  # one session latch, or a burst split across them races exactly the same
+  # way. Started via the server hook, terminal via the subscription.
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin_setup_entry "$plugin" \
+    "$(oc_exec_started ses_main)" \
+    "$(oc_exec_terminal ses_main succeeded)") || fail "cross-entry drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a subscription terminal event no longer touches the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "the setup subscription and server hook must share one ordered queue, got '$out'"
+  pass "opencode 2.x plugin applies events in emission order across its server hook and setup subscription"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>
@@ -1031,6 +1325,7 @@ test_raw_secondmate_launch_writes_no_busy_wiring
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
 test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook
 test_secondmate_claude_spawn_leaves_local_settings_untouched
+test_pi_stream_extension_activation_and_lifecycle
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
@@ -1041,6 +1336,8 @@ test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_opencode_plugin_v2_execution_lifecycle
+test_opencode_plugin_applies_events_in_emission_order
+test_opencode_plugin_v2_applies_events_in_emission_order
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle

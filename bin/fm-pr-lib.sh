@@ -17,6 +17,12 @@
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
+# Registered poll generations bind to their original hashes and file objects,
+# so a repository template update does not invalidate an armed poll. The watcher
+# executes the current repository poll with validated data, never the registered
+# state-file copy. Control relaunch metadata may follow the preserved PR identity
+# fields.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -480,7 +486,8 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+      control_relaunch_tx=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        # Lifecycle and relay fields may be appended after the PR identity.
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
@@ -775,7 +782,11 @@ fm_pr_poll_artifacts_content_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
+  # Authenticate the published generation against its registration below, not
+  # against a template that may have changed during a repository update.
+  # The watcher executes this repository's current poll with validated data;
+  # it never executes the registered state-file bytes.
+  [ -f "$template" ] && [ ! -L "$template" ] || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
@@ -799,7 +810,7 @@ fm_pr_poll_artifacts_content_valid() {
 # A registration armed before a volume remount can name a device number the
 # kernel has since reassigned (fm_pr_file_identity). This proves that is the
 # only difference: every artifact passes fm_pr_poll_artifacts_content_valid, so
-# the check is byte-identical to the template, both hashes match, and the three
+# both hashes match the registered generation, and the three
 # poll artifacts are private, single-link, and on the state directory's live
 # device; both recorded identities name one device; each recorded inode equals
 # its live inode; and that recorded device differs from the live one. A
@@ -1581,4 +1592,132 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
+}
+
+# --- degraded ready-PR marker -------------------------------------------------
+# A ready PR/MR that degraded after its ready report - GitHub required checks
+# turning failing, GitLab leaving an active merge train or a failing head
+# pipeline - wakes once per observed head/pipeline identity. The marker below
+# carries the identity that last woke, so the same degraded state stays silent
+# on later polls while a changed identity (a new head, a new failing pipeline)
+# wakes again. The identity is what the static poll (bin/fm-pr-poll.sh) emits
+# after its "degraded " prefix, and both sides validate it so a forged or
+# malformed line can never enter the marker.
+fm_pr_poll_degraded_identity_valid() {  # <identity>
+  local identity=${1-} value
+  local LC_ALL=C
+  case $identity in
+    head=*)
+      value=${identity#head=}
+      [ "${#value}" -eq 40 ] || return 1
+      case $value in
+        *[!0-9a-f]*) return 1 ;;
+      esac
+      ;;
+    pipeline=*)
+      value=${identity#pipeline=}
+      case $value in
+        [1-9]*) ;;
+        *) return 1 ;;
+      esac
+      case $value in
+        *[!0-9]*) return 1 ;;
+      esac
+      [ "${#value}" -le 18 ] || return 1
+      ;;
+    train=on|train=dropped) ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_pr_poll_degraded_marker_matches() {  # <marker> <device> <provider> <host> <path> <number> <identity>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6 expected_identity=$7
+  local version provider host path number identity
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-degraded-notified-v1 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ] \
+    && [ "$identity" = "$expected_identity" ]
+}
+
+fm_pr_poll_degraded_already_notified() {  # <state> <id> <provider> <host> <path> <number> <identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 identity=$7 marker state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_degraded_identity_valid "$identity" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  if [ "$identity" = train=on ]; then
+    marker="$state/$id.pr-poll-train"
+  else
+    marker="$state/$id.pr-poll-degraded"
+  fi
+  fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
+    "$provider" "$host" "$path" "$number" "$identity"
+}
+
+fm_pr_poll_degraded_mark_notified() {  # <state> <id> <provider> <host> <path> <number> <identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 identity=$7 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_degraded_identity_valid "$identity" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  if [ "$identity" = train=on ]; then
+    marker="$state/$id.pr-poll-train"
+  else
+    marker="$state/$id.pr-poll-degraded"
+  fi
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-degraded.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-degraded-notified-v1 "$provider" "$host" "$path" "$number" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_degraded_marker_matches "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$identity" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$identity"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed at teardown alongside the other per-task PR-poll artifacts
+# (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
+fm_pr_poll_degraded_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-degraded"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker" || return 1
+  }
+  fm_pr_poll_train_clear "$state" "$id"
+}
+
+# Forgets that the merge request was seen on its merge train; the watcher calls
+# it after waking for a drop, so only a later re-queue arms the next drop wake.
+fm_pr_poll_train_clear() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-train"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker"
+  }
 }

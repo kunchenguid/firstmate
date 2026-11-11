@@ -21,8 +21,11 @@
 # must present the current gen; an event or record carrying any other gen is
 # a stale incarnation and is rejected (written events) or classified unknown
 # (read records). seq is a strictly increasing integer per gen, advanced
-# under the writer's lock, so an out-of-order apply can never regress a
-# newer record.
+# under the writer's lock: it records apply order, not harness emission order,
+# and cannot stop a late apply from overwriting a newer harness event.
+# OpenCode's emission-order queue is owned by the generated plugins in
+# bin/fm-spawn.sh; tests/fm-busy-adapter-wiring.test.sh covers unawaited bursts
+# and the OpenCode 2 server/setup entry points.
 #
 # Semantic sources written by adapters (fm_busy_sources_for_harness owns the
 # per-harness trust table; a record whose source is not trusted for the
@@ -30,7 +33,8 @@
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   omp-ext          omp (Oh My Pi) per-task extension (agent_start/agent_end without willContinue)
-#   opencode-plugin  OpenCode per-task plugin (session.status)
+#   opencode-plugin  OpenCode per-task plugin (2.x session.execution.*;
+#                    1.x session.status/session.idle, also accepted by 2.x)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   devin-hook       Devin UserPromptSubmit / Stop / SessionEnd hooks; manual
 #                    cancellation emits no Stop, so control invalidates to unknown.
@@ -216,6 +220,85 @@ fm_busy_gen_path() {  # <state-dir> <id>
   printf '%s/%s.busy-gen' "$1" "$2"
 }
 
+# Optional Pi model-stream contract. The busy writer owns every mutation under
+# its incarnation lock. model-stream is active evidence; model-stream-order
+# retains the latest request and active/closed phase after the marker is cleared.
+#   order: v1 gen=<token> request=<positive uint> phase=<active|closed>
+#   stream / model-progress: v1 gen=<token> request=<uint> rev=<uint> ts=<epoch>
+# Requests strictly increase within a generation. Progress/close must match the
+# open request; closed and older requests cannot reopen or refresh evidence.
+# model-progress is separate from native progress and is read ONLY by opted-in
+# watchers. Missing, malformed, locked, idle, foreign, or stale evidence conveys
+# no model-phase observation, leaving the general busy bound applicable.
+fm_busy_pi_stream_version_supported() {
+  [ "${1:-}" = 1.2.0 ]
+}
+
+fm_busy_stream_seconds() {  # <configured seconds>; off/invalid prints 0
+  local value=${1:-}
+  case "$value" in ''|*[!0-9]*) printf '0'; return ;; esac
+  [ "${#value}" -le 9 ] || { printf '0'; return; }
+  printf '%s' "$((10#$value))"
+}
+
+fm_busy_stream_uint_valid() {
+  case "${1:-}" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 15 ]
+}
+
+fm_busy_stream_order_read() {  # <state-dir> <id>
+  local line version gen request phase extra
+  line=$(cat "$1/$2.model-stream-order" 2>/dev/null) || return 1
+  read -r version gen request phase extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  gen=${gen#gen=} request=${request#request=} phase=${phase#phase=}
+  fm_busy_token_valid "$gen" && fm_busy_stream_uint_valid "$request" || return 1
+  case "$phase" in active|closed) : ;; *) return 1 ;; esac
+  [ "$line" = "v1 gen=$gen request=$request phase=$phase" ] || return 1
+  printf '%s %s %s' "$gen" "$request" "$phase"
+}
+
+fm_busy_stream_record_read() {  # <record path>
+  local line version gen request rev ts extra
+  line=$(cat "$1" 2>/dev/null) || return 1
+  read -r version gen request rev ts extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  gen=${gen#gen=} request=${request#request=} rev=${rev#rev=} ts=${ts#ts=}
+  fm_busy_token_valid "$gen" && fm_busy_stream_uint_valid "$request" &&
+    fm_busy_stream_uint_valid "$rev" && fm_busy_stream_uint_valid "$ts" || return 1
+  [ "$line" = "v1 gen=$gen request=$request rev=$rev ts=$ts" ] || return 1
+  printf '%s %s %s %s' "$gen" "$request" "$rev" "$ts"
+}
+
+fm_busy_stream_read() {  # <state-dir> <id> <harness>; gen request rev ts
+  local state=$1 id=$2 harness=$3 snapshot gen request rev ts order current
+  case "$harness" in pi|pi-signed) : ;; *) return 1 ;; esac
+  [ ! -e "$state/$id.busy-state.lock" ] || return 1
+  current=$(fm_busy_current_gen "$state" "$id") || return 1
+  order=$(fm_busy_stream_order_read "$state" "$id") || return 1
+  snapshot=$(fm_busy_stream_record_read "$state/$id.model-stream") || return 1
+  read -r gen request rev ts <<< "$snapshot"
+  [ "$gen" = "$current" ] && [ "$order" = "$gen $request active" ] || return 1
+  case "$(fm_busy_record_read "$state" "$id")" in 'busy pi-ext '*) : ;; *) return 1 ;; esac
+  [ ! -e "$state/$id.busy-state.lock" ] &&
+    [ "$(fm_busy_current_gen "$state" "$id")" = "$current" ] &&
+    [ "$(fm_busy_stream_order_read "$state" "$id")" = "$order" ] &&
+    [ "$(fm_busy_stream_record_read "$state/$id.model-stream")" = "$snapshot" ] || return 1
+  printf '%s' "$snapshot"
+}
+
+fm_busy_model_progress_ts() {  # <state-dir> <id> <harness>
+  local snapshot gen request rev ts current
+  case "$3" in pi|pi-signed) : ;; *) return 1 ;; esac
+  [ ! -e "$1/$2.busy-state.lock" ] || return 1
+  current=$(fm_busy_current_gen "$1" "$2") || return 1
+  snapshot=$(fm_busy_stream_record_read "$1/$2.model-progress") || return 1
+  read -r gen request rev ts <<< "$snapshot"
+  [ "$gen" = "$current" ] && [ ! -e "$1/$2.busy-state.lock" ] &&
+    [ "$(fm_busy_current_gen "$1" "$2")" = "$current" ] || return 1
+  printf '%s' "$ts"
+}
+
 # fm_busy_token_valid: conservative token charset shared by gen, source, and
 # event fields. Anything else is malformed.
 fm_busy_token_valid() {  # <value>
@@ -256,6 +339,7 @@ fm_busy_sources_for_harness() {  # <harness>
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
     cortex) adapter=cortex-hook ;;
+    hermes) adapter=hermes-hook ;;
     commandcode) adapter=commandcode-mod ;;
     polytoken) adapter=polytoken-hook ;;
     kiro) adapter=kiro-hook ;;

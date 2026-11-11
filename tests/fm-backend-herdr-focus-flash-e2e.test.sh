@@ -15,7 +15,7 @@
 # On a future release whose explicit close preserves focus, Part A records
 # that and Parts B and C keep outcome-only assertions, so no version is guessed.
 # Every CLI operation is routed through one guarded named non-default lab, and
-# lab teardown verifies that the default fleet session is byte-identical.
+# lab teardown verifies that the configured fleet session is byte-identical.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -405,5 +405,5 @@ else
   pass "version floor: an unconfigured home stays projected on herdr $LIVE_VERSION and the explicit opt-in agrees"
 fi
 
-printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s default-session-tripwire=armed\n' \
+printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s fleet-session-tripwire=armed\n' \
   "$LIVE_VERSION" "$LIVE_PROTOCOL" "$STEAL_LIVE" "$FLOOR_VERDICT"

@@ -970,6 +970,113 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# A captain hold is released only in an attended session: the away posture
+# record and the away daemon flag each refuse --release, through `answer` and
+# the keyed-answer intake alike, before anything is written. No record and a
+# quiet record both release, and a closing answer is not gated by posture.
+test_release_is_attended_only() {
+  local home show out rc
+  home=$(make_home release-attended)
+  tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample >/dev/null \
+    || fail "could not create the held work item"
+  run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
+    || fail "could not hold the work item for the captain"
+  printf 'Not urgent; ship it as planned.\n' > "$home/go.txt"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter \
+    --words 'merge green work' >/dev/null 2>&1 || fail "away entry failed"
+
+  rc=0
+  run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release \
+    >/dev/null 2>"$home/away.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "answer --release succeeded while the away record exists"
+  assert_grep "attended session" "$home/away.err" \
+    "the away refusal did not name the attended-session requirement"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "held: yes" "the away refusal lifted the hold"
+  assert_not_contains "$show" "Resolution mode" "the away refusal wrote a resolution record"
+
+  out=$(printf 'sample-widget\tgo\t\trelease\n' \
+    | run_captain "$home" answers --source "away release fixture") \
+    && fail "the keyed-answer intake released held work while away"
+  assert_contains "$out" "refused: sample-widget" "the intake did not report the away refusal"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "held: yes" "the intake lifted the hold while away"
+
+  run_captain "$home" hold sample-question --title "Pick the widget colour" \
+    --reason "captain must pick the colour" --repo sample >/dev/null \
+    || fail "could not hold the question for the captain"
+  printf 'Blue.\n' > "$home/blue.txt"
+  run_captain "$home" answer sample-question --decision-file "$home/blue.txt" >/dev/null \
+    || fail "a closing answer was refused while away"
+  show=$(tasks_in "$home" show sample-question --full)
+  assert_contains "$show" "state: done" "a closing answer while away did not close the question"
+
+  rm -f "$home/state/.afk-contract"
+  printf 'away\n%s\n' "$(date +%s)" > "$home/state/.afk"
+  rc=0
+  run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "answer --release succeeded while the away daemon flag exists"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "held: yes" "the daemon-flag refusal lifted the hold"
+
+  rm -f "$home/state/.afk"
+  run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "answer --release failed with no away record"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "held: no" "an attended release kept the hold"
+  assert_contains "$show" "Resolution mode: released" "an attended release recorded no release"
+
+  run_captain "$home" hold sample-widget --reason "second captain go needed" >/dev/null \
+    || fail "could not re-hold the released work item"
+  printf 'quiet\n%s\n' "$(date +%s)" > "$home/state/.afk"
+  FM_AFK_MODE=quiet FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "quiet entry failed"
+  printf 'Still ship it.\n' > "$home/go-quiet.txt"
+  run_captain "$home" answer sample-widget --decision-file "$home/go-quiet.txt" --release >/dev/null \
+    || fail "answer --release failed in quiet mode"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "held: no" "a quiet-mode release kept the hold"
+  pass "a captain hold is released only in an attended session: away refuses, quiet and no record release"
+}
+
+# A release that waits behind another task action must recheck the away posture
+# once it holds the task control lock: the captain can enter away mode during
+# the wait, and the release then refuses with the hold still in place.
+test_release_rechecks_away_after_waiting_on_task_lock() {
+  local home show rc holder i
+  home=$(make_home release-race)
+  tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample >/dev/null \
+    || fail "could not create the held work item"
+  run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
+    || fail "could not hold the work item for the captain"
+  printf 'Ship it.\n' > "$home/go-race.txt"
+
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_lock_acquire_wait "$2" && : > "$3" && sleep 30' _ \
+    "$ROOT" "$home/state/.control-sample-widget.lock" "$home/control-held" &
+  holder=$!
+  for i in $(seq 1 100); do [ -e "$home/control-held" ] && break; sleep 0.1; done
+  [ -e "$home/control-held" ] || fail "the task control lock was not taken"
+
+  rc=0
+  run_captain "$home" answer sample-widget --decision-file "$home/go-race.txt" --release \
+    >/dev/null 2>"$home/race.err" &
+  local release_pid=$!
+  sleep 1
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter \
+    --words 'merge green work' >/dev/null 2>&1 || fail "away entry failed"
+  kill "$holder" 2>/dev/null || true
+  pkill -P "$holder" 2>/dev/null || true
+  rm -rf "$home/state/.control-sample-widget.lock"
+  wait "$release_pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a release that waited on the task lock lifted the hold after away entry"
+  assert_grep "attended session" "$home/race.err" "the late refusal did not name the attended-session requirement"
+  show=$(tasks_in "$home" show sample-widget --full)
+  assert_contains "$show" "held: yes" "the waiting release lifted the hold while the away record exists"
+  pass "a release waiting on the task lock rechecks the away posture under the lock"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -1460,6 +1567,26 @@ EOF
     --origin quoted-origin >/dev/null || fail "quoted-record hold failed"
   assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
     <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "body prose was incorrectly counted as a resolution record"
+
+  run_captain "$mate" hold dated-call --title "Choose the dated release" \
+    --reason "dated choice pending" --repo sample --until 2099-01-01 >/dev/null \
+    || fail "dated mate hold failed"
+  assert_grep 'needs-decision [key=captain-hold-dated-call-1] [until=2099-01-01]: captain hold dated-call: dated choice pending' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "a dated hold did not publish its structured deferral date"
+  # Re-holding A -> B -> A keeps one key, and the parent fold reads that key's
+  # latest line, so the final A must reach the channel; an exact retry of the
+  # latest state stays suppressed.
+  run_captain "$mate" hold dated-call --reason "dated choice pending" --until 2099-02-01 >/dev/null \
+    || fail "re-dated mate hold failed"
+  run_captain "$mate" hold dated-call --reason "dated choice pending" --until 2099-01-01 >/dev/null \
+    || fail "restored-date mate hold failed"
+  assert_equals 'needs-decision [key=captain-hold-dated-call-1] [until=2099-01-01]: captain hold dated-call: dated choice pending' \
+    "$(grep -F 'captain-hold-dated-call-1' "$channel" | tail -n 1 | sed -E 's/ \[at=[0-9]+\]//')" \
+    "a hold restored to an earlier date did not reach the parent channel"
+  run_captain "$mate" hold dated-call --reason "dated choice pending" --until 2099-01-01 >/dev/null \
+    || fail "retried dated mate hold failed"
+  assert_equals 3 "$(grep -c 'captain-hold-dated-call-1' "$channel")" \
+    "an exact retry of the latest hold state duplicated the parent line: $(cat "$channel")"
 
   run_captain "$mate" hold mate-call --title "Choose the mate release" \
     --reason "release choice pending" --repo sample >/dev/null \
@@ -4285,7 +4412,7 @@ test_complete_refuses_an_entry_held_for_another_origin() {
 }
 
 test_hold_origins_follow_backend_holds() {
-  local home phase timing failure id shown origin out parent channel occurrence until_args=()
+  local home phase timing failure id shown origin out parent channel occurrence until_args=() until_field
   for phase in new active released; do
     for timing in plain dated; do
       home=$(make_home "origin-failure-$phase-$timing")
@@ -4371,7 +4498,9 @@ SH
           assert_grep 'held: yes' "$home/before-origin-write" "the origin write did not follow a live hold"
           assert_grep 'hold_kind: captain' "$home/before-origin-write" "the origin write did not follow a captain hold"
           assert_present "$home/parent-before-origin-write" "the verified hold was not published before the origin write"
-          assert_grep "needs-decision [key=captain-hold-$id-$occurrence]: captain hold $id: Choose for B" \
+          until_field=''
+          [ "$timing" != dated ] || until_field=' [until=2099-01-01]'
+          assert_grep "needs-decision [key=captain-hold-$id-$occurrence]$until_field: captain hold $id: Choose for B" \
             <(sed -E 's/ \[at=[0-9]+\]//' "$home/parent-before-origin-write") \
             "the origin-write failure stranded the hold without its parent event"
           assert_equals 1 "$(grep -Fc "needs-decision [key=captain-hold-$id-$occurrence]" "$channel")" \
@@ -5000,6 +5129,8 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_release_is_attended_only
+test_release_rechecks_away_after_waiting_on_task_lock
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due

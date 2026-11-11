@@ -64,7 +64,13 @@
 # tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
 # with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
 # WORK item resumes without closing - and restores resolution-first body
-# ordering. An exact retry also completes unfinished ordering normalization and
+# ordering. `--release` is attended-only: while the away-posture record exists
+# (state/.afk-contract, or the daemon flag state/.afk, read as away; a quiet
+# record is a present captain) it is refused before anything is written, so an
+# unattended supervisor cannot free held work with its own words and then steer
+# it; the captain releases the hold in an attended session. A closing answer
+# without `--release` is not gated by posture. An exact retry also completes
+# unfinished ordering normalization and
 # is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
@@ -83,7 +89,9 @@
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A key that names no task, a task that is
+# resumes; anything else is skipped. A `release` line while the away-posture
+# record exists is reported as `refused:` under the same attended-only rule as
+# `answer --release` and feeds nothing. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
@@ -210,7 +218,12 @@
 # <n> is the count of resolution records the body already carries plus one, so
 # a released and re-held task opens and closes a distinct parent decision with
 # no new persisted state, and an exact retry republishes the same line, which
-# the channel deduplicates. A main home has no channel and publishes nothing.
+# the channel deduplicates against that key's latest line, so a hold re-dated
+# back to an earlier `--until` is still delivered. A `hold --until` adds the
+# structured `[until=YYYY-MM-DD]` field to that line, which the parent watcher's
+# open-decision reminders read to keep the relayed key quiet until that date
+# (bin/fm-watch.sh open_decision_reminder_tick). A main home has no channel and
+# publishes nothing.
 # The hold or answer is already durable in the backlog, so a channel that
 # cannot be written is reported as `actionable:` on stderr rather than undoing
 # the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
@@ -240,13 +253,19 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 PARENT_HOLD_PUBLISHED=0
-publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
-  local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
+publish_parent_hold() {  # <task-id> <occurrence> <verb> <note> [until-date]
+  local id=$1 occurrence=$2 verb=$3 note=$4 until=${5:-} head rc=0
   PARENT_HOLD_PUBLISHED=0
+  head="$verb [key=captain-hold-$id-$occurrence]"
+  [ -z "$until" ] || head="$head [until=$until]"
   fm_parent_channel_report "$FM_HOME" "$STATE" \
-    "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
+    "$head: captain hold $id: $(fm_parent_channel_clean_note "$note")" \
+    "captain-hold-$id-$occurrence" || rc=$?
   case "$rc" in
     0|1) PARENT_HOLD_PUBLISHED=1 ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
@@ -266,6 +285,7 @@ captain_hold_cleanup() {
     fm_lock_release "$CAPTAIN_CONTROL_LOCK" || true
     CAPTAIN_CONTROL_LOCK_HELD=0
   fi
+  fm_afk_contract_lock_release || true
 }
 trap captain_hold_cleanup EXIT
 
@@ -1176,7 +1196,7 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
@@ -1244,6 +1264,20 @@ apply_pending_retained_artifact() {  # <task-id>
   esac
 }
 
+# A captain hold is released only in an attended session. The away daemon flag
+# (state/.afk, bin/fm-wake-lib.sh fm_afk_mode) and the posture record
+# (state/.afk-contract, bin/fm-afk-contract.sh mode) are both read: either one
+# reading away refuses, a quiet record is a present captain, and no record is
+# attended. The check runs before any write, so a refusal leaves the hold and
+# the body untouched.
+RELEASE_AWAY_REASON='the away-posture record exists, and a captain hold is released only by the captain in an attended session; retry --release after the return archives the record'
+release_attended() {
+  if [ -e "$STATE/.afk" ] && [ "$(fm_afk_mode "$STATE")" = away ]; then
+    return 1
+  fi
+  ! fm_afk_contract_away_present "$STATE"
+}
+
 close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
@@ -1288,8 +1322,15 @@ command_answer() {
     shift
   done
   validate_slug task-id "$id"
+  if [ "$release" = 1 ] && ! release_attended; then
+    fail "task $id stays held: $RELEASE_AWAY_REASON"
+  fi
   load_decision "$decision_file"
   acquire_task_control_lock "$id"
+  if [ "$release" = 1 ]; then
+    fm_afk_contract_lock_hold "$STATE" || fail "task $id stays held: the away-posture record is locked"
+    release_attended || fail "task $id stays held: $RELEASE_AWAY_REASON"
+  fi
   require_tasks_axi
   task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   show=$TASK_SHOW_OUTPUT
@@ -1539,6 +1580,11 @@ command_answers() {
         continue
         ;;
     esac
+    if [ "$release_flag" = --release ] && ! release_attended; then
+      printf 'refused: %s (%s)\n' "$key" "$RELEASE_AWAY_REASON"
+      skipped=$((skipped + 1))
+      continue
+    fi
     resolve_rc=0
     id=$(resolve_entry "$origin" "$key" 2>"$err") || resolve_rc=$?
     id=${id%% *}

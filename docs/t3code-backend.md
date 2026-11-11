@@ -157,7 +157,7 @@ That deferral is itself bounded by `FM_BUSY_TURN_MAX_SECS`, measured from the la
 T3 launches Claude with the `user,project,local` setting sources, so the worktree `.claude/settings.local.json` busy hooks fire as on every other backend.
 T3 starts every agent with the T3 server's own environment, not a login shell's.
 Codex runs each command through `/bin/zsh -lc` in that environment, so the Firstmate toolchain must survive the login shell's startup files, and a startup file that rebuilds `PATH` when a marker variable is missing hides it from every Codex worker; Claude's shell tool restores its own login-shell snapshot and is unaffected.
-A remote secondmate is unaffected by this backend: it always runs on the remote host's Herdr, and `--backend t3code` on one is refused.
+Remote secondmate backend support is defined in [`remote-secondmates.md`](remote-secondmates.md#refused-and-unsupported-launches); T3 Code remains unsupported there.
 
 Cleanup keeps all shared Firstmate safety checks.
 Before the slot returns to the pool, or before a secondmate home is removed, teardown interrupts any active run, archives the thread with `t3_thread_organize`, and requires T3 to read back `archived:true` with no active run, so no live thread can act in a slot another task may lease.
@@ -227,9 +227,9 @@ Resolve ambiguity by explicitly setting both `FM_SUPERVISOR_BACKEND=t3code` and 
 Injection is a `t3_thread_send` only into a settled supervisor thread, one the [thread status table](#restart-and-liveness-behavior) reads idle/alive with no pending request; any other row, including `blocked` and an unreadable thread, defers the digest exactly as a busy pane does on every other backend.
 An unknown native busy verdict defers new-turn delivery but does not prove that work resumed.
 Away housekeeping keeps an overdue stale alert pending and buffers one possible-wedge report while the verdict remains unknown, including a failed run or a transient thread-read failure.
-Delivered warnings stay suppressed while the same unknown condition persists.
-If a fresh daemon entry discards a queued, undelivered warning, it clears that warning's reported marker and preserves its stale timer, so the next housekeeping pass queues exactly one replacement.
-Refreshing a live daemon preserves the queue; a failed start restores the previous queue and reported markers.
+Within the same away session, delivered warnings stay suppressed while the same unknown condition persists.
+The [stale-artifact lifecycle](../.agents/skills/afk/SKILL.md#stale-artifact-lifecycle) owns session-boundary cleanup and recheck-window resets.
+Refreshing a live daemon preserves the queue and episode markers; a failed start restores the previous queue and episode markers.
 Confirmed busy activity, a missing thread, or an idle verdict after the unknown condition was reported clears the stale and reported markers without another report, so a later unknown condition can report again.
 Declared external-wait rechecks also survive native uncertainty; the worker's declaration still controls their cadence.
 `stale_window_is_busy` and `housekeeping` in `bin/fm-supervise-daemon.sh` own stale tracking; `fm_afk_clear_stale_artifacts` in `bin/fm-afk-start.sh` and the launcher in `bin/fm-afk-launch.sh` own queue discard and startup rollback.
