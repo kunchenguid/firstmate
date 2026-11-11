@@ -971,6 +971,7 @@ test_watcher_successor_busy_reset_failure_surfaces() {
   dir=$(busy_case "successor-reset-failure-$mode")
   busy_steer_check "$dir"
   rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "queued successor")
+  age_path "$rec"
   mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
   block_busy_reset "$dir"
   capture=$(idle_capture "$dir")
@@ -1149,6 +1150,7 @@ test_watcher_successor_escalation_stays_quiet() {
   busy_steer_check "$dir" "$(idle_capture "$dir")"
   grep -q 'Firstmate instruction waiting' "$dir/send.log" || fail "predecessor did not ring"
   rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "queued successor")
+  age_path "$rec"
   mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
   case "$mode" in
     busy)

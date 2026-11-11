@@ -3496,6 +3496,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle endpoint; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
+FM_TASK_INBOX_BUSY_BOUND_SECS=900   # minimum age in seconds of the oldest unhandled message before busy deferrals raise a stuck-busy stale wake, in addition to FM_TASK_INBOX_BUSY_MAX; 1..999999999, at most 9 decimal digits, otherwise 900; policy: bin/fm-task-inbox-lib.sh
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script; a cut check wakes with its output so far plus `timed out after <seconds>s`
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
