@@ -255,6 +255,7 @@ If a task's thread no longer reads back, release the task by hand:
 3. For a worker, return its slot with `treehouse return --force <worktree>` from its project.
    A secondmate has no separate task worktree, but its home may itself be leased: preserve its durable records and unlanded work, then return a pooled home with `treehouse return --force <home>` from the Firstmate code root, or remove a standalone home by hand.
    Clear the retired home's payload before the return, once its records and unlanded work are preserved; the slot is leasable the moment the return succeeds, and the next seed refuses one still marked for a mate that no longer exists. [Provision a local home](configuration.md#provision-a-local-home) owns which paths must go.
+   A durable home's Git worktree lock and `firstmate-home-lock` receipt live in the worktree's administrative gitdir outside the checkout, so clearing the payload leaves them behind and `treehouse return --force` never removes them; release the owned lock and forget its receipt before the return - `git -C <home> worktree unlock <home>`, then `rm "$(git -C <home> rev-parse --absolute-git-dir)/firstmate-home-lock"` - or the next seed refuses the slot as foreign-locked or still marked for the retired mate.
    Remove its line from the parent's `data/secondmates.md`.
 4. Remove the task record, `state/<id>.meta`, and its other `state/<id>.*` files.
 
