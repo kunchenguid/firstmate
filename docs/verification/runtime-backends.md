@@ -3519,6 +3519,7 @@ Verified at `2026-10-03T19:20:07Z` on commit `23b0232908a5adc7fbf7339ef48c34a091
 A real Claude worker opened an `AskUserQuestion` panel, and Firstmate's `UserPromptSubmit` hook reported busy.
 Four due inbox checks using the original `origin/main` watcher at `1f3e769616fdf9f31f85f4c3e6a9f71606634238` against that live pane each read `busy=yes` and added zero wakes.
 With `FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2`, two distinct processes sourcing the fixed watcher and calling `inbox_steer_check` against the same pane produced one wake containing `stuck-busy after 2 consecutive busy-deferred due doorbells`.
+That two-check recipe predates the message-age bound: the watcher now also requires the oldest unhandled message to be at least `FM_TASK_INBOX_BUSY_BOUND_SECS` old (default `900`), so repeating it needs `FM_TASK_INBOX_BUSY_BOUND_SECS=1` or a record aged past the bound, and the wake then ends with `oldest unhandled message <n>s old`.
 A third check left exactly one wake total; the question panel remained open and the instruction remained unhandled.
 Lab teardown completed with exit `0`, including the default-session tripwire.
 The zero grace accelerates only the experiment; the normal grace remains unchanged.

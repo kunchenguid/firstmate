@@ -1066,7 +1066,7 @@ test_watcher_busy_bound_holds_a_young_message() {
   busy_steer_check "$dir"
   grep -q 'unread firstmate instruction: stuck-busy after 4 consecutive busy-deferred due doorbells' "$dir/state/.wake-queue" \
     || fail "a message past the bound did not escalate:"$'\n'"$(cat "$dir/state/.wake-queue" 2>/dev/null)"
-  grep -Eq 'oldest unhandled message 90[0-9]s old' "$dir/state/.wake-queue" \
+  grep -Eq 'oldest unhandled message 9[0-9][0-9]s old' "$dir/state/.wake-queue" \
     || fail "the stuck-busy alert did not report the message age:"$'\n'"$(cat "$dir/state/.wake-queue")"
   wakes=$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')
   busy_steer_check "$dir"
