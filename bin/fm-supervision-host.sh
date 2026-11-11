@@ -123,7 +123,12 @@
 # 27000, under the tracked 28800-second registration) it stops this home's
 # watcher and exits with one "supervision-host: cycle boundary" line, which the
 # owner delivers as an ordinary wake; main drains, acknowledges, and ends its
-# turn, and that turn end starts the next park. The verified Codex asynchronous owner sets
+# turn, and that turn end starts the next park. When that stop leaves an
+# acknowledged episode, the host hands it back as announced downtime before
+# the line. If that hand-back cannot take the marker lock within
+# FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND (default 2 seconds) or the marker
+# write fails, the host prints a watcher FAILED line and exits 1, and it does
+# not print the boundary line. The verified Codex asynchronous owner sets
 # FM_CODEX_MODEL_FREE_PARK=1: its boundary resets the quiet timer while keeping
 # the watcher and recovery generation alive, with no output to the model.
 # All other owners keep the bounded lifecycle. The boundary is checked on
@@ -180,7 +185,8 @@
 # the boundary), FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
-# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
+# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1),
+# FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND (2; any other value is 2).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
 # 3.2), while durable timestamps still use epoch time. This is not a portable
 # monotonic-clock guarantee. Arm exit probes use ordinary 0.5-second child
@@ -242,6 +248,7 @@ TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
 POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
+HANDBACK_LOCK_BOUND=$(numeric_or "${FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND:-}" 2)
 WARM_COMPACT_TICK=$(numeric_or "${FM_WARM_COMPACT_TICK:-}" 60)
 COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
@@ -560,7 +567,11 @@ boundary_exit() {
   ARM_OUT=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  hand_back_acknowledged_episode
+  if ! hand_back_acknowledged_episode; then
+    log_line "boundary	downtime-unrestored"
+    printf 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime\n'
+    exit 1
+  fi
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
 }
@@ -704,7 +715,7 @@ emit() {  # [line...]
 hand_back_acknowledged_episode() {
   fm_recovery_marker_read "$STATE/.watcher-down" || return 0
   case "$FM_RECOVERY_MARKER_TOKEN" in
-    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" >/dev/null 2>&1 || true ;;
+    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" "$HANDBACK_LOCK_BOUND" >/dev/null 2>&1 ;;
   esac
 }
 

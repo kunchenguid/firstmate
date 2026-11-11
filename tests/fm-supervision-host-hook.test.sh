@@ -393,6 +393,110 @@ test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode() 
   pass "host+hook: a park boundary over an acknowledged episode still rewakes main without a resurface"
 }
 
+
+seed_acked_downtime() {  # <home>
+  local acknowledged
+  printf 'acked:downtime:seeded.1\n' > "$1/state/.watcher-down.seed"
+  mv -f "$1/state/.watcher-down.seed" "$1/state/.watcher-down" \
+    || fail "fixture: could not acknowledge a downtime episode"
+  acknowledged=$(cat "$1/state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+}
+
+
+hold_marker_lock() {  # <home>
+  FM_HOME="$1" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.1; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1/state/.watcher-down.lock" \
+    "$1/marker-lock-held" "$1/release-marker-lock" \
+    >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$1/marker-lock.pid"
+  wait_until 50 test -e "$1/marker-lock-held" \
+    || fail "fixture: the downtime-marker lock was not taken"
+}
+
+
+release_marker_lock() {  # <home>
+  local pid
+  : > "$1/release-marker-lock"
+  pid=$(cat "$1/marker-lock.pid" 2>/dev/null || true)
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+}
+
+
+assert_park_boundary_handback_failure_notifies() {  # <home> <label>
+  expect_code 2 "$(cat "$1/hook.rc")" "$2: the Stop hook must deliver the failure notice: $(cat "$1/hook.err" 2>/dev/null)"
+  assert_grep 'firstmate watcher auto-arm FAILED' "$1/hook.err" "$2: the failure notice must reach main"
+  assert_grep 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime' "$1/hook.err" \
+    "$2: the notice must carry the host failure"
+  assert_grep 'exited 1 without a wake' "$1/hook.err" "$2: the notice must report the host exit"
+  assert_no_re 'cycle boundary' "$1/hook.err" "$2: a failed hand-back must not be delivered as the boundary wake"
+  assert_re '^acked:' "$1/state/.watcher-down" "$2: the acknowledged episode must stay closed"
+  assert_re 'outcome=failed ' "$1/state/.claude-autoarm-epoch" "$2: the failure notice must be committed"
+}
+
+
+# A live holder of the recovery-marker lock must not keep the park open until
+# an outside timeout. The hand-back gives up and the Stop hook delivers the
+# failure notice while that holder still owns the lock.
+test_park_boundary_handback_reports_a_lock_wait_that_expires() {
+  local home
+  home=$(make_primary_home hook-boundary-lock)
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND=1 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary lock: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  seed_acked_downtime "$home"
+  watcher_live "$home" || fail "boundary lock: the watcher exited before the boundary"
+  hold_marker_lock "$home"
+  echo 60 > "$home/park-clock"
+  wait_until 40 hook_exited "$home" \
+    || fail "boundary lock: the park did not end while the marker lock was held: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  [ -e "$home/release-marker-lock" ] && fail "boundary lock: the holder was released before the hook returned"
+  assert_park_boundary_handback_failure_notifies "$home" "boundary lock"
+  release_marker_lock "$home"
+  : > "$home/session.stop"
+  pass "host+hook: a park-boundary hand-back that cannot take the marker lock delivers the failure notice"
+}
+
+
+# A failed marker write used to be hidden, the host still exited 0 with the
+# boundary line, and the Stop hook dropped that wake because the marker stayed
+# acknowledged.
+test_park_boundary_handback_reports_a_failed_marker_write() {
+  local home real_mktemp
+  home=$(make_primary_home hook-boundary-write)
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary write: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  seed_acked_downtime "$home"
+  watcher_live "$home" || fail "boundary write: the watcher exited before the boundary"
+  : > "$home/fail-downtime-write"
+  echo 60 > "$home/park-clock"
+  wait_until 40 hook_exited "$home" \
+    || fail "boundary write: the Stop hook never returned: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_park_boundary_handback_failure_notifies "$home" "boundary write"
+  : > "$home/session.stop"
+  pass "host+hook: a park-boundary hand-back that cannot write the marker delivers the failure notice"
+}
+
 # The live failure (2026-10-17): after the engine handled a routine wake, the
 # host parked on the handling successor it started for that wake, and that
 # successor never resurfaced a durable row appended later. Five captain inbox
@@ -728,6 +832,8 @@ fm_test_run \
   test_handoff_retry_respects_the_receiving_pane \
   test_handoff_retry_reaches_the_receiving_herdr_pane \
   test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode \
+  test_park_boundary_handback_reports_a_lock_wait_that_expires \
+  test_park_boundary_handback_reports_a_failed_marker_write \
   test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main \
   test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn \
   test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails \

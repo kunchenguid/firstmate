@@ -1351,7 +1351,7 @@ fm_recovery_transition() {
       _fm_recovery_marker_handling_settled "$marker"
       ;;
     handback)
-      _fm_recovery_marker_publish "$marker" downtime "" handback
+      _fm_recovery_marker_publish "$marker" downtime "$bound" handback
       ;;
     release-lock)
       [ -n "$target" ] || return 1
@@ -1386,8 +1386,8 @@ fm_recovery_marker_publish() {
   fm_recovery_transition "$1" publish "${2:-downtime}"
 }
 
-fm_recovery_marker_handback() {
-  fm_recovery_transition "$1" handback
+fm_recovery_marker_handback() {  # <marker> [lock-bound-seconds]
+  fm_recovery_transition "$1" handback "" "" "${2:-}"
 }
 
 fm_recovery_marker_ack() {
