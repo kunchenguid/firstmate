@@ -19,6 +19,8 @@ _FM_AGENT_PROCESS_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-hermes-process-lib.sh
+. "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-hermes-process-lib.sh"
 unset _FM_AGENT_PROCESS_LIB_DIR
 
 # fm_agent_process_classify_name: the single owner of the process-name
@@ -56,7 +58,13 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # daemon), so a `*polytoken*` glob never claims an unrelated command.
     # cortex (Cortex Code) is anchored too (verified, cortex 1.1.104: a
     # Bun-compiled single binary, comm=cortex).
-    agy|devin|command-code|polytoken|cortex) printf 'agent' ;;
+    agy|devin|command-code|polytoken|cortex|hermes) printf 'agent' ;;
+    # kiro (Kiro CLI) is anchored for the same reason as muse, omp, and agy: its
+    # live foreground process name is the bare word `kiro-cli` (verified,
+    # kiro-cli 2.21.4: a toolbox/aim-sandbox wrapper whose comm and tmux
+    # #{pane_current_command} both read kiro-cli), and a glob would claim
+    # unrelated commands containing that fragment.
+    kiro-cli) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -105,6 +113,10 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     [ "$by_argv0" != agent ] || { printf 'agent'; return 0; }
   else
     by_argv0=$by_name
+  fi
+  if fm_hermes_process_matches "$args" "$pid"; then
+    printf 'agent'
+    return 0
   fi
   if [ -n "$pid" ] && fm_gemini_pid_is_gemini "$pid"; then
     printf 'agent'

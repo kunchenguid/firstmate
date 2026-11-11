@@ -51,7 +51,7 @@ Three exclusions keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
-- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, and `killshell` are allowed.
+- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, `killshell`, `manage_subagents` (`managesubagents`), and `manage_task` (`managetask`) are allowed.
   These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
   A Claude primary's optional local deny list may still remove them from the schema.
   The shipped guard stays narrower on purpose so it can never be the reason a runaway task cannot be stopped.
@@ -167,6 +167,7 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 - Default deny mode also writes `{"decision":"deny","reason":"[subagent-dispatch] ..."}` to stdout for Grok.
 - `--claude` suppresses stdout completely, because Claude Code ignores a PreToolUse deny when stdout is nonempty.
   This is the same verified quirk recorded in [`arm-pretool-check.md`](arm-pretool-check.md), and the tracked Claude hook therefore passes `--claude`.
+- `--agy` reads the tool name from `.toolCall.name`, `.tool_name`, or `.toolName` in stdin JSON, suppresses stderr, and emits `{"decision":"deny","reason":"[subagent-dispatch] ..."}` on stdout with exit 0 when denied.
 - Malformed or empty stdin, invalid JSON, a payload with no tool name, and missing `jq` for stdin transport all fail open with exit 0 and no output.
 
 The deny message names the real dispatch path.
@@ -181,11 +182,19 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
+| Antigravity | present (`invoke_subagent`, `define_subagent`) | Scoped guard wired and live-verified via `.agents/hooks.json` PreToolUse hook (`bin/fm-subagent-pretool-check.sh --agy`). |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+
+### Antigravity, verified and wired
+
+Antigravity CLI exposes multi-agent and task delegation tools, including `invoke_subagent` and `define_subagent`.
+In `.agents/hooks.json`, a PreToolUse hook matching `.*` invokes `bin/fm-subagent-pretool-check.sh --agy`.
+In primary and secondmate homes, delegation creation is denied with `{"decision":"deny","reason":"[subagent-dispatch] ..."}` while observation tools `manage_subagents` and `manage_task` remain permitted.
+Linked crewmate worktrees and foreign checkouts stand down cleanly.
 
 ### Codex, verified not applicable
 

@@ -42,8 +42,9 @@
 # line, 3 target not found (or an ambiguous label, which full ids never are),
 # 4 server unreachable. Passive reads pass --autostart=false so a probe never
 # starts a server; spawn, cleanup, and the control plane's absence recheck let
-# the CLI start a missing personal server, because a stopped server ends every
-# session on it and a started one then answers "not found" with authority.
+# the CLI start a missing personal server so it can prove whether the recorded
+# block restored as a shell or is authoritatively missing.
+# FM_BACKEND_REX_NO_AUTOSTART=1 withholds that start (fm_backend_rex_cli).
 #
 # Viewport: Rex has no viewport-only read, so the visible viewport is DERIVED
 # as the last `size.rows` lines of the styled `format` read, which always ends
@@ -113,17 +114,26 @@ fm_backend_rex_tool_check() {
   return 0
 }
 
-# fm_backend_rex_cli: one CLI call that may start a missing personal server.
+# fm_backend_rex_cli: one CLI call that may start a missing personal server,
+# unless FM_BACKEND_REX_NO_AUTOSTART=1 prevents calls from starting one. A remote second mate's host-local control plane sets it
+# (bin/fm-remote-secondmate-control.sh): there an automatic start creates an
+# exit-empty server, and only remote readiness may start the persistent one.
 fm_backend_rex_cli() {  # <rex-args...>
   local bin
   bin=$(fm_backend_rex_bin) || return 1
-  "$bin" "$@"
+  if [ "${FM_BACKEND_REX_NO_AUTOSTART:-}" = 1 ]; then
+    "$bin" --autostart=false "$@"
+  else
+    "$bin" "$@"
+  fi
 }
 
 # fm_backend_rex_read: one CLI call that never starts a server; an unreachable
 # server exits 4 instead.
 fm_backend_rex_read() {  # <rex-args...>
-  fm_backend_rex_cli --autostart=false "$@"
+  local bin
+  bin=$(fm_backend_rex_bin) || return 1
+  "$bin" --autostart=false "$@"
 }
 
 # fm_backend_rex_failure_class: classify a failed call from its exit status
@@ -180,6 +190,23 @@ fm_backend_rex_version_check() {  # [start|read]
     return 1
   fi
   return 0
+}
+
+# fm_backend_rex_local_server_ensure: Rex's process and cwd views are only
+# authoritative on the machine running Firstmate. A Unix socket endpoint is
+# local to this machine; other endpoint transports do not prove locality and
+# are refused conservatively before spawn leases a worktree or opens a tab.
+fm_backend_rex_local_server_ensure() {
+  local endpoint
+  endpoint=$(fm_backend_rex_server_endpoint) || {
+    echo "error: could not determine the Rex server endpoint; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+    return 1
+  }
+  case "$endpoint" in
+    unix://*) return 0 ;;
+  esac
+  echo "error: Rex server endpoint '$endpoint' is not proven to be on this machine; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+  return 1
 }
 
 # fm_backend_rex_container_ensure: the spawn-time gate (tool, CLI, server).
@@ -675,16 +702,79 @@ fm_backend_rex_process_kind() {  # <pid> <name> <path> <argv0>
   printf '%s' "$kind"
 }
 
+# fm_backend_rex_descendant_harness_pids: the pids of <pid>'s live
+# descendants that the shared classifier names a verified harness, one per
+# line, from the local process table; fails when the table cannot be read.
+# Rex reports a block's foreground process and its ancestors only, so a
+# harness a login shell launched through a wrapper in the shell's own process
+# group (a fish function, a bash shim) sits below a shell foreground.
+fm_backend_rex_descendant_harness_pids() {  # <pid>
+  local root=$1 comms args pid name line
+  comms=$(LC_ALL=C ps -axo pid=,ppid=,comm= 2>/dev/null) && [ -n "$comms" ] || return 1
+  args=$(LC_ALL=C ps -axo pid=,args= 2>/dev/null) || return 1
+  while IFS=$'\t' read -r pid name line; do
+    [ -n "$pid" ] || continue
+    [ "$(fm_agent_process_classify "$name" "${line%%[[:space:]]*}" "$line" "$pid")" != agent ] || printf '%s\n' "$pid"
+  done <<EOF
+$({ printf '%s\n--\n' "$comms"; printf '%s\n' "$args"; } | awk -v root="$root" '
+  $0 == "--" { phase = 2; next }
+  {
+    line = $0
+    gsub(/\t/, " ", line)
+    if (phase != 2) {
+      n++; pid[n] = $1; ppid[n] = $2
+      sub(/^[ ]*[0-9]+[ ]+[0-9]+[ ]+/, "", line)
+      comm[n] = line
+    } else {
+      p = $1
+      sub(/^[ ]*[0-9]+[ ]*/, "", line)
+      argv[p] = line
+    }
+  }
+  END {
+    want[root] = 1
+    changed = 1
+    while (changed) {
+      changed = 0
+      for (i = 1; i <= n; i++) {
+        if ((ppid[i] in want) && !(pid[i] in want)) { want[pid[i]] = 1; changed = 1 }
+      }
+    }
+    for (i = 1; i <= n; i++) {
+      if ((pid[i] in want) && pid[i] != root) printf "%s\t%s\t%s\n", pid[i], comm[i], argv[pid[i]]
+    }
+  }')
+EOF
+}
+
+# fm_backend_rex_shell_harness_pids: after fm_backend_rex_process_chain, the
+# harness pids running below a shell foreground (see
+# fm_backend_rex_descendant_harness_pids); nothing for any other foreground.
+# Fails when the foreground is a shell and the process table cannot be read.
+fm_backend_rex_shell_harness_pids() {
+  local role pid name path argv0
+  while IFS=$'\t' read -r role pid name path argv0; do
+    [ "$role" = foreground ] || continue
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$(fm_backend_rex_process_kind "$pid" "$name" "$path" "$argv0")" = shell ] || return 0
+    fm_backend_rex_descendant_harness_pids "$pid"
+    return
+  done <<EOF
+$FM_BACKEND_REX_CHAIN
+EOF
+}
+
 # fm_backend_rex_agent_state: the recovery-grade agent/endpoint state (the
 # vocabulary is owned by bin/fm-backend.sh's fm_backend_agent_state), from
 # Rex's structured process view. A verified harness anywhere in the
 # foreground process or its ancestors is `alive` (a harness running a pager
-# or an interactive shell escape is still there); a shell foreground with no
-# harness above it is `dead`; anything else is `ambiguous`. A structured
-# not-found is `missing`; an unreachable server or a bad read is
-# `unreadable`. Read-only: it never starts a server.
+# or an interactive shell escape is still there), and so is one running below
+# a shell foreground; a shell foreground with no harness above or below it is
+# `dead`; anything else is `ambiguous`. A structured not-found is `missing`;
+# an unreachable server or a bad read is `unreadable`. Read-only: it never
+# starts a server.
 fm_backend_rex_agent_state() {  # <target>
-  local role pid name path argv0 kind fg_kind='' seen=0
+  local role pid name path argv0 kind fg_kind='' seen=0 below
   if ! fm_backend_rex_process_chain "$1"; then
     case "$FM_BACKEND_REX_READ_CLASS" in
       missing) printf 'missing' ;;
@@ -714,25 +804,31 @@ EOF
     fi
     return 0
   fi
-  case "$fg_kind" in
-    shell) printf 'dead' ;;
-    *) printf 'ambiguous' ;;
-  esac
+  [ "$fg_kind" = shell ] || { printf 'ambiguous'; return 0; }
+  below=$(fm_backend_rex_shell_harness_pids) || { printf 'ambiguous'; return 0; }
+  if [ -n "$below" ]; then
+    printf 'alive'
+  else
+    printf 'dead'
+  fi
 }
 
-# fm_backend_rex_live_pids: the block's foreground pid and its ancestors' pids
-# as a JSON array, from the process view; fails when the block cannot be read.
+# fm_backend_rex_live_pids: the block's foreground pid, its ancestors' pids,
+# and any harness pids below a shell foreground, as a JSON array, from the
+# process view; fails when the block cannot be read.
 fm_backend_rex_live_pids() {  # <target>
+  local below
   fm_backend_rex_process_chain "$1" || return 1
-  printf '%s\n' "$FM_BACKEND_REX_CHAIN" | cut -f2 \
+  below=$(fm_backend_rex_shell_harness_pids) || below=
+  { printf '%s\n' "$FM_BACKEND_REX_CHAIN" | cut -f2; printf '%s\n' "$below"; } \
     | jq -Rsc 'split("\n") | map(select(test("^[0-9]+$")) | tonumber)' 2>/dev/null
 }
 
 # fm_backend_rex_owner_trusted: THE trust rule for an OSC 7501 record. A record
-# counts only while its reporting process is the block's foreground process or
-# one of its ancestors: without shell integration a `working` record outlives
-# the command that reported it (verified live), so no self-report outranks the
-# process view.
+# counts only while its reporting process is the block's foreground process,
+# one of its ancestors, or a harness running below a shell foreground: without
+# shell integration a `working` record outlives the command that reported it
+# (verified live), so no self-report outranks the process view.
 fm_backend_rex_owner_trusted() {  # <target> <owner-pid>
   local live
   case "$2" in ''|*[!0-9]*) return 1 ;; esac
@@ -749,7 +845,7 @@ fm_backend_rex_trusted_record() {  # <target>
   live=$(fm_backend_rex_live_pids "$1") || return 0
   jq -rn --argjson s "$status" --argjson live "$live" --arg mark "$FM_BACKEND_REX_MARK_APP" '
     def clean: tostring | gsub("[\t\r\n]"; " ");
-    [$s.records[]? | select((.app // "") != $mark
+    [$s.records[]? | select((.app // "") as $a | $a != $mark and ($a | startswith($mark + "-") | not)
       and (.owner.pid as $p | $p != null and ($live | index($p)) != null))] as $trusted
     | first(("working", "blocked", "error", "done", "idle") as $want
         | $trusted[] | select(.state == $want)
@@ -1163,9 +1259,10 @@ fm_backend_rex_wait_transition() {  # <session> <timeout_secs> <state_dir> <wind
     owner=$(printf '%s' "$line" | cut -f5)
     msg=$(printf '%s' "$line" | cut -f6)
     fm_backend_rex_id_valid block "$block" || continue
-    # Firstmate's own records (bin/fm-rex-marks.sh, the wedge alarm) are never
-    # the worker's state; rex-eventwait.lua drops them too.
-    [ "$app" != "$FM_BACKEND_REX_MARK_APP" ] || continue
+    # Firstmate's own records (bin/fm-rex-marks.sh, the wedge alarm, and the
+    # bin/fm-osc7501.sh bridge's app=firstmate-<harness> root record) are
+    # never the worker's state; rex-eventwait.lua drops them too.
+    case "$app" in "$FM_BACKEND_REX_MARK_APP" | "$FM_BACKEND_REX_MARK_APP"-*) continue ;; esac
     case "$(fm_transition_policy "$to")" in
       actionable|absorb)
         fm_backend_rex_owner_trusted "$session:${block#block:}" "$owner" || continue
@@ -1204,6 +1301,8 @@ fm_backend_rex_wait_transition() {  # <session> <timeout_secs> <state_dir> <wind
 # Firstmate's own records (app=firstmate, id=fm and its validation-progress
 # child id=fm/validate on a worker pane, id=fm-wedge on the supervisor pane)
 # never overwrite a harness's report and a harness never overwrites them.
+# Those records, and the worker-side bridge's app=firstmate-<harness> root
+# record (bin/fm-osc7501.sh), never count as the worker's own state.
 # Clearing id=fm also removes id=fm/validate. A worker record's title is the
 # task's tab label, which Rex shows as the record's label. Rex drops a `working` or `blocked` record when its
 # owning process exits or at the next OSC 133 prompt mark, while `done` and

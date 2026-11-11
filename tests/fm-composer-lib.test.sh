@@ -364,6 +364,102 @@ test_composer_footer_zone_refuses_rather_than_allows() {
   pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
 }
 
+# Claude Code 2.1.291 marks the selected row of its slash-command popup with the
+# same `❯` its composer uses, where 2.1.289 drew that row unmarked. The popup
+# renders below the composer's closing rule, so the marked row became a second
+# bare composer and the typed command's own read-back was the whole popup list.
+# The screens are real captures (Herdr 0.8.2, Claude Code 2.1.291 on Haiku 4.5),
+# reduced to the composer, its rules, and the first popup rows with their SGR
+# bytes intact. `slash-only` is the case where the selected row is NOT the typed
+# text, `truncated-name` the one where the row opens with `…` instead of `/`,
+# and `exit-typed-with-notice` carries the notification row Claude draws between
+# the rule and the popup when it runs inside another Claude session.
+test_claude_slash_popup_marked_row_is_not_a_second_composer() {
+  local dir=$ROOT/tests/captures/claude-2.1.291-slash-popup pair name want screen out
+  local claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  for pair in \
+    'exit-typed:/exit' \
+    'exit-typed-with-notice:/exit' \
+    'no-mistakes-typed:/no-mistakes' \
+    'slash-only:/' \
+    'truncated-name:/claude-md-management:claude-md-improver'
+  do
+    name=${pair%%:*}
+    want=${pair#*:}
+    screen=$(cat "$dir/$name.ansi")
+    out=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" = "$want" ] || fail "$name: the composer content must be '$want', not the popup list, got '$out'"
+    out=$(LC_ALL=C FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" = "$want" ] || fail "$name under LC_ALL=C: the composer content must be '$want', got '$out'"
+    assert_screen "$name typed on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+    assert_screen "$name typed on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  done
+  screen=$(cat "$dir/idle.ansi")
+  assert_screen "an idle composer with no popup stays empty" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  pass "fm_composer_extract_selected_content: Claude 2.1.291's marked popup row is not read as the composer"
+}
+
+test_claude_slash_popup_demotion_only_ever_refuses() {
+  # The popup demotion falls back to the envelope above the marked row, so it
+  # may only fire when that envelope holds typed `/` text and the row has the
+  # popup shape (`/name` or a truncated `…name`, a gap, then a description).
+  # Anything else keeps the old reading, and none of these may ever read empty.
+  local screen out style claude_idle original
+  local rule='────────────────────────'
+  local dir=$ROOT/tests/captures/claude-2.1.291-slash-popup
+  local typed=$'\e[38;2;177;185;249m/exit\e[0m'
+  claude_idle=$(printf 'claude\tidle')
+  original=$(cat "$dir/exit-typed.ansi")
+  # 1. An EMPTY composer with a popup-shaped row below it: a popup cannot be
+  #    open over an empty composer, so the row is not demoted to the empty
+  #    envelope above it.
+  screen=$rule$'\n❯'"$NBSP"$'\n'"$rule"$'\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+  assert_screen "an empty composer above a popup-shaped row" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    '/exit Exit the CLI'*) ;;
+    *) fail "the lower row must stay the composer read when the envelope is empty, got '$out'" ;;
+  esac
+  # 2. A numbered-choice dialog row has neither the `/` opening nor the gap.
+  screen=$rule$'\n❯'"$NBSP"$'/exit\n'"$rule"$'\n  ❯ 1. Yes\n    2. No'
+  assert_screen "a numbered choice below a typed command" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    '1. Yes'*) ;;
+    *) fail "a numbered-choice row must stay a bare candidate, got '$out'" ;;
+  esac
+  # 3. A single-spaced `/draft` row has no description gap: a live draft.
+  screen=$rule$'\n❯'"$NBSP"$'/exit\n'"$rule"$'\n  ❯ /draft'
+  assert_screen "a one-word slash draft below a typed command" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = '/draft' ] || fail "a one-word slash draft must stay the composer read, got '$out'"
+  # 4. The envelope's typed text must itself open with `/`.
+  screen=$rule$'\n❯ fix the login bug\n'"$rule"$'\n  ❯ /exit    Exit the CLI'
+  assert_screen "typed prose above a popup-shaped row" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    '/exit Exit the CLI'*) ;;
+    *) fail "typed prose must not license the popup demotion, got '$out'" ;;
+  esac
+  # 5. The envelope's `/` must survive the ghost strip the verdict reads. The
+  #    real 2.1.291 capture with its typed `/exit` restyled dark grey (the
+  #    112;112;112 Claude 2.1.283 drew it in) or SGR 2 dim strips to a bare
+  #    `❯`, so that envelope is no fallback and the marked row keeps its read.
+  for style in $'\e[38;2;112;112;112m' $'\e[2m'; do
+    screen=${original/"$typed"/"$style/exit"$'\e[0m'}
+    [ "$screen" != "$original" ] || fail "the capture's typed /exit was not restyled"
+    assert_screen "a ghost-styled typed command on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+    assert_screen "a ghost-styled typed command on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  done
+  # 6. A bordered box is no borderless row to fall back to, so a marked row
+  #    directly below one still reads pending.
+  screen=$'transcript line\n╭───────────────────────────╮\n│ ❯ /exit                   │\n╰───────────────────────────╯\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+  assert_screen "a typed command in a box above a marked row on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "a typed command in a box above a marked row on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  pass "fm_composer_classify_screen: the popup demotion needs typed slash text and the popup row shape, and never reads empty"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -1453,6 +1549,130 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+# KIRO-ONLY near-gray ghost text: kiro draws its idle placeholder in a
+# NEAR-ACHROMATIC truecolor above the 128 ghost ceiling, so it survived the strip
+# and read as real typed content - a composer that never reports empty, which
+# makes every steer defer forever on the exact `pending` skip. The wider ceiling
+# applies only when the caller names the harness kiro (FM_COMPOSER_HARNESS);
+# test_composer_widening_is_kiro_only below proves every other read is unchanged.
+#   kiro ghost      38;2;158;158;158  luma 158.0  spread   0  -> must STRIP
+#   grey real text  38;2;206;207;210  luma 207.0  spread   4  -> must SURVIVE
+#   muse real glyph 38;2;90;160;255   luma 149.9  spread 165  -> must SURVIVE
+test_kiro_near_gray_ghost_is_stripped_and_real_text_survives() {
+  local out
+  out=$(printf '%s' "${ESC}[38;2;158;158;158mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "kiro's near-gray placeholder (luma 158.0, spread 0) must strip as ghost text, got '$out'"
+
+  # NON-REGRESSION: near-gray REAL typed text is separated from the placeholder
+  # by luminance alone (207.0 vs 158.0). Stripping it would delete input.
+  out=$(printf '%s' "${ESC}[38;2;206;207;210mdeploy the thing${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: near-gray real text (luma 207.0, spread 4) must survive the kiro strip, got '$out'"
+
+  # NON-REGRESSION: a strongly chromatic glyph (muse's, spread 165) is out of the
+  # near-gray ceiling's reach at any luminance.
+  out=$(printf '%s' "${ESC}[38;2;90;160;255m⟩${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = '⟩' ] \
+    || fail "NON-REGRESSION: a chromatic glyph (luma 149.9, spread 165) must survive the kiro strip, got '$out'"
+
+  # The gray ceiling raises the applicable ceiling and never lowers an
+  # operator-set one: luma 190 is above the 180 gray default but below a raised
+  # FM_COMPOSER_GHOST_LUMA_MAX, so the knob keeps applying to gray text.
+  out=$(printf '%s' "${ESC}[38;2;190;190;190mplaceholder text${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro FM_COMPOSER_GHOST_LUMA_MAX=200 fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "a near-gray run at luma 190 must strip under FM_COMPOSER_GHOST_LUMA_MAX=200, got '$out'"
+
+  pass "fm_composer_strip_ghost: on kiro, near-gray ghost strips while near-gray real text and a chromatic glyph survive"
+}
+
+# A kiro pane with no COLORTERM gets the SAME grey in the 256-colour encoding:
+# 38;5;247, xterm grey level 158, where a truecolor pane gets 38;2;158;158;158.
+# Only palette indices with a fixed grey RGB are tested, and only on kiro.
+test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive() {
+  local out
+  out=$(printf '%s' "${ESC}[38;5;247mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "kiro's 256-colour placeholder (38;5;247, grey level 158) must strip as ghost text, got '$out'"
+
+  out=$(printf '%s' "${ESC}[38:5:247mask a question or describe a task${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "the colon form 38:5:247 must strip the same grey on kiro, got '$out'"
+
+  # SCOPE GUARD: only the 232-255 ramp is luminance-tested. The 6x6x6 cube's
+  # r==g==b diagonal is arithmetically grey (145 computes to level 175) and is
+  # deliberately NOT tested, because kiro has not been measured drawing ghost
+  # text there and widening the predicate reintroduces the palette-dependence
+  # problem the 38;5 carve-out exists for.
+  out=$(printf '%s' "${ESC}[38;5;145mplaceholder text${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'placeholder text' ] \
+    || fail "SCOPE GUARD: a cube-diagonal grey outside 232-255 (38;5;145) must be untouched, got '$out'"
+
+  # NON-REGRESSION: a grey above the ceiling is real input, and a CHROMATIC or
+  # theme-remapped (0-15) index carries no fixed grey to measure.
+  out=$(printf '%s' "${ESC}[38;5;253mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a bright palette grey (38;5;253, level 218) must survive, got '$out'"
+  out=$(printf '%s' "${ESC}[38;5;33mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a chromatic palette index (38;5;33) must survive, got '$out'"
+  out=$(printf '%s' "${ESC}[38;5;8mdeploy the thing${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ "$out" = 'deploy the thing' ] \
+    || fail "NON-REGRESSION: a theme-remapped index (38;5;8) must survive, got '$out'"
+
+  pass "fm_composer_strip_ghost: on kiro, palette greys strip while bright, chromatic and theme-remapped indexes survive"
+}
+
+# The kiro widening must not reach any other harness, nor a read that names no
+# harness: Claude draws a typed slash command in grey 38;2;112;112;112, which the
+# herdr payload proof reads with FM_COMPOSER_GHOST_LUMA_MAX=0, and the wider gray
+# ceiling stripped it, so a typed /exit was judged unsent. Each case is first
+# shown to diverge under the kiro scope, so none of them can pass vacuously.
+test_composer_widening_is_kiro_only() {
+  local out h hinted screen
+  local saved=${FM_COMPOSER_HARNESS-__unset__}
+  unset FM_COMPOSER_HARNESS
+
+  out=$(printf '%s' "${ESC}[38;2;112;112;112m/exit${ESC}[0m" \
+    | FM_COMPOSER_HARNESS=kiro FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "fixture drift: the kiro scope must strip grey 112 at FM_COMPOSER_GHOST_LUMA_MAX=0, or the Claude case is vacuous, got '$out'"
+  for h in '' claude codex rovo grok; do
+    out=$(printf '%s' "${ESC}[38;2;112;112;112m/exit${ESC}[0m" \
+      | FM_COMPOSER_HARNESS=$h FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_strip_ghost)
+    [ "$out" = '/exit' ] \
+      || fail "harness '${h:-none}': Claude's grey typed /exit must survive with FM_COMPOSER_GHOST_LUMA_MAX=0, got '$out'"
+    out=$(printf '%s' "${ESC}[38;2;158;158;158mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=$h fm_composer_strip_ghost)
+    [ "$out" = 'ask a question' ] \
+      || fail "harness '${h:-none}': a near-gray run above the shared ceiling must survive outside kiro, got '$out'"
+    out=$(printf '%s' "${ESC}[38;5;240mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=$h fm_composer_strip_ghost)
+    [ "$out" = 'ask a question' ] \
+      || fail "harness '${h:-none}': a dark palette grey must stay untested outside kiro, got '$out'"
+  done
+  out=$(printf '%s' "${ESC}[38;5;240mask a question${ESC}[0m" | FM_COMPOSER_HARNESS=kiro fm_composer_strip_ghost)
+  [ -z "${out//[[:space:]]/}" ] \
+    || fail "fixture drift: the kiro scope must strip a dark palette grey, got '$out'"
+
+  # The hinted idle row reads empty only on kiro; on every other read it is
+  # ordinary bare-composer text, exactly as before kiro existed.
+  hinted=$'transcript line\n'"${ESC}[39m›  ask a question or describe a task ↵"
+  screen="$hinted"$'\n /copy to clipboard'
+  FM_COMPOSER_HARNESS=kiro assert_screen "kiro hinted idle row on tmux" empty "$CAPS_TMUX" "$hinted" 1
+  FM_COMPOSER_HARNESS=kiro assert_screen "kiro hinted idle row cursorless" empty "$CAPS_STYLED" "$screen"
+  for h in '' claude codex; do
+    FM_COMPOSER_HARNESS=$h assert_screen "hinted row on tmux, harness '${h:-none}'" pending "$CAPS_TMUX" "$hinted" 1
+    FM_COMPOSER_HARNESS=$h assert_screen "hinted row cursorless, harness '${h:-none}'" pending "$CAPS_STYLED" "$screen"
+  done
+
+  [ "$saved" = __unset__ ] || FM_COMPOSER_HARNESS=$saved
+  pass "composer widening: the near-gray ceiling, palette greys, and hinted idle row apply on kiro only"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -1468,6 +1688,8 @@ test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
+test_claude_slash_popup_marked_row_is_not_a_second_composer
+test_claude_slash_popup_demotion_only_ever_refuses
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
@@ -1682,3 +1904,6 @@ test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
+test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
+test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
+test_composer_widening_is_kiro_only

@@ -41,26 +41,101 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
-test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
-  local home fallback_bin tool tool_path status watcher_pid
-  home=$(make_home perl-fallback)
-  fallback_bin="$home/fallback-bin"
-  mkdir -p "$home/root/bin" "$fallback_bin"
+# Copy the checkpoint into <home>/root/bin and build <home>/fixture-bin, a
+# PATH holding only the named host tools, so stubs decide which timeout runs.
+make_isolated_checkpoint() {  # <home> <tool...>
+  local home=$1 tool tool_path
+  shift
+  mkdir -p "$home/root/bin" "$home/fixture-bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
-  for tool in bash dirname mktemp rm perl grep cat; do
-    tool_path=$(command -v "$tool") || fail "could not locate $tool for the Perl fallback fixture"
-    ln -s "$tool_path" "$fallback_bin/$tool"
+  for tool in "$@"; do
+    tool_path=$(command -v "$tool") || fail "could not locate $tool for the isolated checkpoint fixture"
+    ln -s "$tool_path" "$home/fixture-bin/$tool"
   done
+}
+
+write_non_gnu_timeout_stub() {  # <path>
+  cat > "$1" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'uutils 0.12.0'
+  exit 0
+fi
+exit 137
+SH
+  chmod +x "$1"
+}
+
+# A GNU stub records its name and arguments, then reports a timeout.
+write_gnu_timeout_stub() {  # <path>
+  cat > "$1" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'timeout (GNU coreutils) 9.5'
+  exit 0
+fi
+printf '%s' "${0##*/}" >> "$FM_HOME/timeout-calls"
+printf ' %s' "$@" >> "$FM_HOME/timeout-calls"
+printf '\n' >> "$FM_HOME/timeout-calls"
+exit 124
+SH
+  chmod +x "$1"
+}
+
+expect_gnu_timeout_call() {  # <home> <command-name> <label>
+  local home=$1 name=$2 label=$3 status
+  status=0
+  PATH="$home/fixture-bin" FM_HOME="$home" FM_SIGNAL_GRACE=1 \
+    "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
+  expect_code 124 "$status" "$label checkpoint exit"
+  assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
+    "$label did not return a quiet checkpoint"
+  [ "$(cat "$home/timeout-calls" 2>/dev/null)" = "$name --signal=INT --kill-after=5s 1 $home/root/bin/fm-watch.sh" ] \
+    || fail "$label did not run $name with the watcher bound: $(cat "$home/timeout-calls" 2>/dev/null)"
+}
+
+test_gnu_timeout_runs_the_watcher_bound() {
+  local home
+  home=$(make_home gnu-timeout)
+  make_isolated_checkpoint "$home" bash dirname mktemp rm grep cat
+  write_gnu_timeout_stub "$home/fixture-bin/timeout"
+  write_gnu_timeout_stub "$home/fixture-bin/gtimeout"
+  expect_gnu_timeout_call "$home" timeout "GNU timeout"
+  pass "GNU timeout runs the watcher with the INT signal and kill-after bound"
+}
+
+test_non_gnu_timeout_uses_gnu_gtimeout() {
+  local home
+  home=$(make_home non-gnu-timeout-gtimeout)
+  make_isolated_checkpoint "$home" bash dirname mktemp rm grep cat
+  write_non_gnu_timeout_stub "$home/fixture-bin/timeout"
+  write_gnu_timeout_stub "$home/fixture-bin/gtimeout"
+  expect_gnu_timeout_call "$home" gtimeout "GNU gtimeout"
+  pass "non-GNU timeout yields to GNU gtimeout with the INT signal and kill-after bound"
+}
+
+test_non_gnu_timeout_falls_back_to_perl_before_escalating() {
+  local home fallback_bin status watcher_pid
+  home=$(make_home non-gnu-timeout)
+  fallback_bin="$home/fixture-bin"
+  make_isolated_checkpoint "$home" bash dirname mktemp rm perl grep cat
+  write_non_gnu_timeout_stub "$fallback_bin/timeout"
   cat > "$home/root/bin/fm-watch.sh" <<'PL'
 #!/usr/bin/env perl
 use strict;
 use warnings;
-$SIG{INT} = 'IGNORE';
+$SIG{INT} = sub {
+  open my $int_file, '>', "$ENV{FM_HOME}/int-received" or die "open INT marker: $!";
+  close $int_file;
+};
 open my $pid_file, '>', "$ENV{FM_HOME}/watcher.pid" or die "open pid file: $!";
 printf {$pid_file} "%s\n", $$;
 close $pid_file;
-sleep 7;
+my $cleanup_deadline = time + 7;
+while ((my $left = $cleanup_deadline - time) > 0) {
+  sleep $left;
+}
 open my $cleanup_file, '>', "$ENV{FM_HOME}/cleanup-reached" or die "open cleanup marker: $!";
 print {$cleanup_file} "reached\n";
 close $cleanup_file;
@@ -80,14 +155,15 @@ PL
   expect_code 124 "$status" "Perl fallback checkpoint exit"
   assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
     "Perl fallback did not return a quiet checkpoint"
+  [ -e "$home/int-received" ] || fail "the Perl fallback did not deliver INT to the watcher"
   [ -e "$home/cleanup-reached" ] || fail "the Perl fallback killed the watcher before its 8-second cleanup bound"
-  [ ! -e "$home/natural-exit" ] || fail "the INT-ignoring watcher exited naturally instead of being killed"
-  [ -s "$home/watcher.pid" ] || fail "the INT-ignoring watcher did not start"
+  [ ! -e "$home/natural-exit" ] || fail "the INT-surviving watcher exited naturally instead of being killed"
+  [ -s "$home/watcher.pid" ] || fail "the INT-surviving watcher did not start"
   watcher_pid=$(cat "$home/watcher.pid")
   if kill -0 "$watcher_pid" 2>/dev/null; then
-    fail "the INT-ignoring watcher survived the Perl fallback escalation"
+    fail "the watcher survived the Perl fallback KILL escalation"
   fi
-  pass "Perl fallback honors the cleanup bound before escalating an INT-ignoring direct watcher"
+  pass "non-GNU timeout falls back to Perl and honors the cleanup bound before escalating"
 }
 
 test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
@@ -345,7 +421,9 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
-test_perl_timeout_fallback_honors_cleanup_bound_before_escalating
+test_gnu_timeout_runs_the_watcher_bound
+test_non_gnu_timeout_uses_gnu_gtimeout
+test_non_gnu_timeout_falls_back_to_perl_before_escalating
 test_announced_recovery_is_not_reannounced_by_next_checkpoint
 test_never_announced_recovery_is_announced_once
 test_queue_append_during_checkpoint_still_resurfaces

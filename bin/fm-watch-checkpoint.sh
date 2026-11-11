@@ -111,6 +111,22 @@ run_with_perl_timeout() {  # <seconds> <signal> <kill-after-seconds> <command...
   ' "$@"
 }
 
+TIMEOUT_COMMAND=''
+
+# Only GNU coreutils timeout is trusted with --signal/--kill-after; another
+# implementation named timeout (for example uutils) falls through to perl.
+find_gnu_timeout() {
+  local candidate
+  for candidate in timeout gtimeout; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" --version 2>/dev/null | grep -q 'GNU coreutils'; then
+      TIMEOUT_COMMAND=$candidate
+      return
+    fi
+  done
+  TIMEOUT_COMMAND=perl
+}
+
 run_bounded() {  # <seconds> <signal> <kill-after-seconds> <command...>
   local seconds=$1 signal=$2 kill_after=$3 cleanup_lock_bound
   shift 3
@@ -124,20 +140,13 @@ run_bounded() {  # <seconds> <signal> <kill-after-seconds> <command...>
     [ "$cleanup_lock_bound" -gt "$kill_after" ] || cleanup_lock_bound=$kill_after
     kill_after=$cleanup_lock_bound
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    if [ "$kill_after" -gt 0 ]; then
-      timeout --signal="$signal" --kill-after="${kill_after}s" "$seconds" "$@"
-    else
-      timeout --signal="$signal" "$seconds" "$@"
-    fi
-  elif command -v gtimeout >/dev/null 2>&1; then
-    if [ "$kill_after" -gt 0 ]; then
-      gtimeout --signal="$signal" --kill-after="${kill_after}s" "$seconds" "$@"
-    else
-      gtimeout --signal="$signal" "$seconds" "$@"
-    fi
-  else
+  [ -n "$TIMEOUT_COMMAND" ] || find_gnu_timeout
+  if [ "$TIMEOUT_COMMAND" = perl ]; then
     run_with_perl_timeout "$seconds" "$signal" "$kill_after" "$@"
+  elif [ "$kill_after" -gt 0 ]; then
+    "$TIMEOUT_COMMAND" --signal="$signal" --kill-after="${kill_after}s" "$seconds" "$@"
+  else
+    "$TIMEOUT_COMMAND" --signal="$signal" "$seconds" "$@"
   fi
 }
 

@@ -577,7 +577,7 @@ test_unverified_harness_is_refused() {
 
 test_backend_key_capability_matrix() {
   local backend key
-  for backend in tmux herdr zellij cmux paseo rex; do
+  for backend in tmux herdr zellij cmux paseo rex tern; do
     # C-u is the composer clear muse's interrupt needs; every session provider
     # but Orca normalizes it (bin/backends/*.sh).
     for key in Escape Enter C-c C-u; do
@@ -639,22 +639,33 @@ test_orca_refuses_an_escape_harness_interrupt() {
 
 test_unverified_state_backends_refuse_stop_verbs() {
   local dir out rc backend
-  for backend in zellij cmux; do
+  for backend in zellij cmux tern; do
     dir=$(new_case "nostate-$backend")
-    if [ "$backend" = zellij ]; then
-      add_task "$dir" t1 claude ship zellij "sess:7"
-      {
-        echo "zellij_session=sess"
-        echo "zellij_tab_id=1"
-        echo "zellij_pane_id=7"
-      } >> "$dir/home/state/t1.meta"
-    else
-      add_task "$dir" t1 claude ship cmux "ws1:surface1"
-      {
-        echo "cmux_workspace_id=ws1"
-        echo "cmux_surface_id=surface1"
-      } >> "$dir/home/state/t1.meta"
-    fi
+    case "$backend" in
+      zellij)
+        add_task "$dir" t1 claude ship zellij "sess:7"
+        {
+          echo "zellij_session=sess"
+          echo "zellij_tab_id=1"
+          echo "zellij_pane_id=7"
+        } >> "$dir/home/state/t1.meta"
+        ;;
+      cmux)
+        add_task "$dir" t1 claude ship cmux "ws1:surface1"
+        {
+          echo "cmux_workspace_id=ws1"
+          echo "cmux_surface_id=surface1"
+        } >> "$dir/home/state/t1.meta"
+        ;;
+      tern)
+        add_task "$dir" t1 claude ship tern "9007199254740993:9223372036854775807"
+        {
+          echo "tern_session_id=9007199254740993"
+          echo "tern_tab_id=9007199254740995"
+          echo "tern_block_id=9223372036854775807"
+        } >> "$dir/home/state/t1.meta"
+        ;;
+    esac
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 1 "$rc" "exit on $backend should refuse"$'\n'"$out"
     assert_contains "$out" "no recovery-grade agent-state classifier" \
@@ -673,7 +684,7 @@ test_unverified_state_backends_refuse_stop_verbs() {
 # relaunch onto commandcode there while the running agent is untouched.
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
   local dir out rc backend meta_before
-  for backend in zellij cmux orca; do
+  for backend in zellij cmux orca tern; do
     dir=$(new_case "cc-relaunch-$backend")
     case "$backend" in
       zellij)
@@ -683,6 +694,10 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
       cmux)
         add_task "$dir" t1 claude ship cmux "ws1:surface1"
         printf 'cmux_workspace_id=ws1\ncmux_surface_id=surface1\n' >> "$dir/home/state/t1.meta"
+        ;;
+      tern)
+        add_task "$dir" t1 claude ship tern "9007199254740993:9223372036854775807"
+        printf 'tern_session_id=9007199254740993\ntern_tab_id=9007199254740995\ntern_block_id=9223372036854775807\n' >> "$dir/home/state/t1.meta"
         ;;
       orca)
         add_task "$dir" t1 claude ship orca "term-1"
@@ -707,12 +722,34 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
   pass "fm-control relaunch: commandcode off tmux and herdr is refused before the running agent is stopped"
 }
 
+test_hermes_profile_refusals_preserve_running_worker() {
+  local dir out rc before
+  dir=$(new_case hermes-preflight)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  before=$(cat "$dir/home/state/t1.meta")
+  out=$(run_control "$dir" t1 relaunch --harness hermes --model unsupported --note x); rc=$?
+  expect_code 1 "$rc" "Hermes must refuse a model override before stopping: $out"
+  assert_contains "$out" 'profile-owned' 'Hermes model diagnostic missing'
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail 'invalid Hermes model stopped the current worker'
+  mkdir -p "$dir/profile"
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s/config.yaml"\n' "$dir/profile" > "$dir/fakebin/hermes"
+  chmod +x "$dir/fakebin/hermes"
+  printf '{"pid":%s,"gateway_state":"running","restart_requested":false,"active_agents":1,"updated_at":"%s"}\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "$dir/profile/gateway_state.json"
+  out=$(run_control "$dir" t1 relaunch --harness hermes --note x); rc=$?
+  expect_code 1 "$rc" "Hermes must refuse a mid-turn gateway before stopping: $out"
+  assert_contains "$out" 'gateway' 'Hermes gateway diagnostic missing'
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail 'Hermes gateway refusal stopped the current worker'
+  [ "$(cat "$dir/home/state/t1.meta")" = "$before" ] || fail 'Hermes preflight changed task metadata'
+  pass 'fm-control relaunch: Hermes profile model and gateway refusals preserve the current worker'
+}
+
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
   fm_control_backend_state_verified rex || fail "rex has a recovery-grade classifier"
   local backend
-  for backend in zellij orca cmux paseo; do
+  for backend in zellij orca cmux paseo tern; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
@@ -1305,6 +1342,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
+test_hermes_profile_refusals_preserve_running_worker
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused

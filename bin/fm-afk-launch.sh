@@ -18,7 +18,7 @@
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
-# mode) on a claude, cursor, opencode, omp, grok, or codex primary whose home
+# mode) on a claude, cursor, opencode, omp, grok, codex, or agy primary whose home
 # runs the supervision host (fm_supervision_host_enabled: by default on
 # Claude, by config/supervision-host elsewhere), where the host runs the away
 # session; `enter` there adds one line when the host has no
@@ -103,7 +103,7 @@
 # Supported backends: herdr, tmux, and rex for `start`; t3code only through
 # `start-native` (T3 hosts no terminal to create, so the daemon runs as the
 # captain's own tracked background job, which means a Codex captain on t3code
-# has no away mode). Others (zellij, orca, cmux, paseo) have no verified
+# has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
 # non-visible-launch primitive here yet and refuse loudly. On rex the daemon
 # runs in a dedicated Rex session of its own, so the captain's session gains no
 # tab and keeps its focus.
@@ -238,7 +238,7 @@ fm_afk_launch_primary_harness() {
 # home runs it (docs/supervision-host.md).
 fm_afk_launch_host_primary() {  # <harness>
   case "$1" in
-    claude|cursor|opencode|omp|grok|codex) return 0 ;;
+    claude|cursor|opencode|omp|grok|codex|agy) return 0 ;;
   esac
   return 1
 }
@@ -633,11 +633,15 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
-    "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* || result=1
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-* || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$backup"/.subsuper-reported-stale-*; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$backup"/.subsuper-stale-* "$backup"/.subsuper-reported-stale-* "$backup"/.subsuper-dialog-* "$backup"/.subsuper-paused-* "$backup"/.subsuper-pause-until-due-*; do
     artifact=${artifact##*/}
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
@@ -799,7 +803,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; do
     artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
@@ -858,7 +862,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-*; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; do
     artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
@@ -935,6 +939,18 @@ fm_afk_launch_stop() {
   # posture ends only once every daemon-side artifact is down.
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
+    result=1
+  fi
+  # The session's per-task supervision markers are episode state that ends with
+  # it: left behind, the NEXT session's first housekeeping reads the stale/pause
+  # clocks as its own and reports a possible wedge whose duration never
+  # happened. A wait that still stands is re-declared and re-windowed fresh.
+  if ! rm -f "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* \
+    "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; then
+    fm_afk_launch_log "failed to clear the session's per-task supervision markers"
     result=1
   fi
   if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then

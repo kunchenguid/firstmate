@@ -89,9 +89,11 @@ triage_log() {
 }
 
 # Exit after reporting one actionable wake. Tests override this callback.
+# An optional cadence kind lets actionable work retain heartbeat delivery while
+# resetting idle backoff; omitted kinds keep the wake reason's existing accounting.
 wake() {
   local output_status=0
-  case "$1" in
+  case "${2:-$1}" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
