@@ -3221,6 +3221,7 @@ case "$ARG3" in
   RAW_LAUNCH=1
   LAUNCH=$ARG3
   HARNESS=""
+  harness_src='the raw launch command'
   for word in $LAUNCH; do
     case "$word" in [A-Za-z_]*=*) continue ;; *)
       HARNESS=$(basename "$word")
@@ -3249,21 +3250,24 @@ case "$ARG3" in
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
     harness_src='config/crew-harness'
   fi
-  refuse_primary_only_harness "$HARNESS" "$harness_src"
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
-    exit 1
-  }
   ;;
 *)
   HARNESS=$ARG3
-  refuse_primary_only_harness "$HARNESS" 'the explicit harness argument'
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
-    exit 1
-  }
+  harness_src='the explicit harness argument'
   ;;
 esac
+
+refuse_primary_only_harness "$HARNESS" "$harness_src"
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+    if [ -z "$ARG3" ]; then
+      echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
+    else
+      echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
+    fi
+    exit 1
+  }
+fi
 
 case "$DISPATCH_OVERRIDE" in *[![:print:]]*) echo 'error: --dispatch-override must be a printable reason' >&2; exit 1 ;; esac
 DISPATCH_RECORD="$DATA/$ID/dispatch-resolution.json"

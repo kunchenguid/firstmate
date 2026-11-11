@@ -797,34 +797,47 @@ test_spawn_unverified_secondmate_harness_refused() {
 # auggie is verified as a primary only: an auggie secondmate, whether resolved
 # from config or passed explicitly, is refused with that reason before any meta.
 test_spawn_auggie_secondmate_refused_as_primary_only() {
-  local w sm fakebin err rc how
-  for how in config explicit; do
-    w="$TMP_ROOT/spawn-auggie-$how"
-    sm="$w/sm"
-    mkdir -p "$w/home/config" "$w/home/state"
-    make_seeded_home "$sm" sm
-    fakebin=$(make_noop_tmux "$w/tmux")
-    err="$w/spawn.err"
-    rc=0
-    set -- sm "$sm" --secondmate
-    if [ "$how" = config ]; then
-      printf 'auggie\n' > "$w/home/config/secondmate-harness"
-    else
-      set -- sm "$sm" auggie --secondmate
-    fi
-    PATH="$fakebin:$BASE_PATH" TMUX='' \
-      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" HOME="$w/home/user-home" CLAUDE_CONFIG_DIR='' \
-      FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
-      FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
-      FM_SPAWN_NO_GUARD=1 \
-      "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
+  local w sm fakebin err rc how kind
+  for kind in secondmate ship scout; do
+    for how in config explicit raw; do
+      w="$TMP_ROOT/spawn-auggie-$kind-$how"
+      sm="$w/sm"
+      mkdir -p "$w/home/config" "$w/home/state"
+      make_seeded_home "$sm" sm
+      fakebin=$(make_noop_tmux "$w/tmux")
+      err="$w/spawn.err"
+      rc=0
+      set -- sm "$sm"
+      case "$how" in
+        config)
+          if [ "$kind" = secondmate ]; then
+            printf 'auggie\n' > "$w/home/config/secondmate-harness"
+          else
+            printf 'auggie\n' > "$w/home/config/crew-harness"
+          fi
+          ;;
+        explicit) set -- "$@" auggie ;;
+        raw) set -- "$@" 'auggie --model test-model' ;;
+      esac
+      case "$kind" in
+        secondmate) set -- "$@" --secondmate ;;
+        ship) set -- "$@" --mode no-mistakes --yolo off ;;
+        scout) set -- "$@" --scout ;;
+      esac
+      PATH="$fakebin:$BASE_PATH" TMUX='' \
+        FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" HOME="$w/home/user-home" CLAUDE_CONFIG_DIR='' \
+        FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+        FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+        FM_SPAWN_NO_GUARD=1 \
+        "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
 
-    [ "$rc" -ne 0 ] || fail "auggie $how: spawn should have failed"
-    assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
-      "auggie $how: error names the primary-only boundary"
-    [ -e "$w/home/state/sm.meta" ] && fail "auggie $how: a meta was written despite the abort"
+      [ "$rc" -ne 0 ] || fail "auggie $kind $how: spawn should have failed"
+      assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
+        "auggie $kind $how: error names the primary-only boundary"
+      [ -e "$w/home/state/sm.meta" ] && fail "auggie $kind $how: a meta was written despite the abort"
+    done
   done
-  pass "B6b spawn: an auggie secondmate is refused as a primary-only harness, from config or explicitly"
+  pass "B6b spawn: configured, explicit, and raw auggie workers are refused for every task kind"
 }
 
 test_spawn_cursor_secondmate_launches_with_its_primary_contract() {

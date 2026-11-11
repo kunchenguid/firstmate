@@ -262,6 +262,34 @@ SH
   pass "session-lock: an auggie node bundle is identified from its package script, and only from it"
 }
 
+test_auggie_live_argv_preserves_script_spaces() {
+  local dir
+  if [ ! -r "/proc/$$/cmdline" ]; then
+    printf 'ok - session-lock: spaced argv # SKIP requires readable /proc cmdline\n'
+    return
+  fi
+  dir="$TMP_ROOT/Agent Tools"
+  mkdir -p "$dir/bin" "$dir/state"
+  ln -s /bin/bash "$dir/bin/node"
+  cat > "$dir/bin/auggie" <<'SH'
+set -eu
+. "$1"
+state=$2
+printf '%s\n' "$$" > "$state/.lock"
+[ "$(fm_harness_ancestry_pid)" = "$$" ] || exit 11
+fm_harness_pid_alive "$$" || exit 12
+fm_session_lock_pid_blocks_reclaim "$$" || exit 13
+fm_session_lock_inspect "$state"
+[ "$FM_LOCK_INSPECT_STATE" = held ] || exit 14
+[ "$FM_LOCK_INSPECT_LIVE_HARNESS" = true ] || exit 15
+fm_session_lock_owned_by_self "$state" || exit 16
+SH
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+    "$dir/bin/node" "$dir/bin/auggie" "$LIB" "$dir/state" \
+    || fail "auggie: a live script path with spaces lost its session-lock identity"
+  pass "session-lock: spaced live argv retains auggie ancestry, liveness, reclaim protection, and inspection"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -1722,6 +1750,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_auggie_node_bundle_is_identified_by_its_package_script
+test_auggie_live_argv_preserves_script_spaces
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
