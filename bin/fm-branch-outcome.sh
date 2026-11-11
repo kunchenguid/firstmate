@@ -286,7 +286,7 @@ capture_status_position() { # <task>
   size_after=${size_after//[[:space:]]/}
   ident_after=$(_fm_open_decisions_file_ident "$f") || return 0
   case "$size:$size_after" in *[!0-9:]*) return 0 ;; esac
-  [ "$size" = "$size_after" ] && [ "$ident" = "$ident_after" ] || return 0
+  [ "$size" = "$size_after" ] && _fm_status_ident_same "$ident" "$ident_after" || return 0
   case "$ident" in *$'\t'*|*$'\n'*|'') return 0 ;; esac
   CAPTURED_STATUS_ENDPOINT=$size
   CAPTURED_STATUS_IDENT=$ident
