@@ -42,10 +42,10 @@
 # upstream, github, or origin, reduced to lowercase host/owner/repo; a local-path remote
 # is resolved one hop through that repository's own origin, and left as
 # path:<abs> when unreadable. An unknown target never permits. A scope or
-# consent naming a repository path this project was published under before a
-# rename matches the current path (fm_role_repo_canon), so a config file
-# written before the rename and a remote left on the former path both keep
-# working; the comparison widens, the reported target does not.
+# consent naming either path of a recorded repository rename matches the other
+# (fm_role_repo_canon), so neither an unedited config file nor a remote left on
+# the other path has to be touched when the rename lands; the comparison
+# widens, the reported target does not.
 #
 # Public functions:
 #   fm_role_file <config-dir>            - the role file path
@@ -97,12 +97,14 @@ fm_role_scope_norm() {
   printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-# fm_role_repo_canon <identity> - fold a repository path this project has been
-# published under before onto the one it is published under now, so a scope or
-# a task consent written before a rename still names the same repository and an
-# unedited config file keeps working. Only a recorded rename folds; every other
-# identity, including a path:<abs> local identity, is returned unchanged.
-# Record a rename by adding one case line.
+# fm_role_repo_canon <identity> - fold the two repository paths of a recorded
+# rename onto one canonical identity, so a scope or a task consent naming
+# either one still names the same repository. The pair may be recorded before
+# the rename lands, so the canonical side is only a comparison representative
+# and says nothing about which path is live today; fm_role_identity_match
+# canonicalizes both sides, so matching is symmetric either way. Only a
+# recorded rename folds; every other identity, including a path:<abs> local
+# identity, is returned unchanged. Record a rename by adding one case line.
 fm_role_repo_canon() {
   case $1 in
   github.com/kunchenguid/firstmate) printf 'github.com/kunchenguid/aman-crew\n' ;;
