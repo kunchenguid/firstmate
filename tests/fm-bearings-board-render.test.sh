@@ -342,9 +342,15 @@ test_every_captains_call_card_opens_a_full_screen_details_view() {
     (.call.details | length) == 2
       and all(.call.details[];
         .button == {tag:"button", type:"button", label:"Details", controls:"dialog"}
-          and .was_closed and .open and .closed_after and .prompts == 0)
+          and .was_closed and .open and .closed_after and .prompts == 0
+          and .focus == {label:"Details", card:.title, visible:true})
       and ([.call.details[] | .title] == ["An explained call", "Merge: plain"])
-  ' >/dev/null || fail "a card lacked a Details button, or it did not open and close a full-screen view without queuing anything: $out"
+  ' >/dev/null || fail "a card lacked a Details button, or it did not open and close a full-screen view without queuing anything and hand focus back to its button: $out"
+  # Oracle: CSS Flexbox - a flex row lays every item on one line unless
+  # flex-wrap is wrap, and a card that hides overflow then clips the last item.
+  printf '%s' "$out" | jq -e '
+    all(.call.details[]; .button_row == {buttons:["Queue answer","Details"], display:"flex", flex_wrap:"wrap"})
+  ' >/dev/null || fail "the answer row holding Details does not wrap, so a narrow card clips Details: $out"
   printf '%s' "$out" | jq -e '
     .call.details[0] as $d
     | $d.ctx_rows == [["about","One-line about."],["decide","One-line question?"]]
@@ -384,6 +390,26 @@ test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation() 
       and .call.details[0].context == [$p, $m]
   ' >/dev/null || fail "a Details paragraph cut a URL at its own parenthesis or linked trailing punctuation or Markdown markers: $out"
   pass "a Details link keeps a balanced closing parenthesis and leaves trailing punctuation and Markdown markers as text"
+}
+
+# Oracle: the WAI-ARIA dialog pattern - closing a dialog returns focus to the
+# control that opened it, or to a logical control when that one is gone. Here
+# the queued answer has dealt the next card, so the opener is hidden.
+test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details() {
+  local home out
+  home=$(make_home call-details-advance)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"merge.first","type":"merge","repo":"sample","title":"Merge: first","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]},
+    {"key":"merge.second","type":"merge","repo":"sample","title":"Merge: second","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and .call.advance == {answered:"Merge: first", shown:"Merge: second",
+        focus:{label:"Details", card:"Merge: second", visible:true}}
+  ' >/dev/null || fail "closing Details after the deal advanced left focus off the shown card's Details button: $out"
+  pass "closing Details after a queued answer dealt the next card focuses that card's Details button"
 }
 
 test_an_empty_captains_call_still_shows_its_empty_state() {
@@ -430,6 +456,7 @@ test_full_snapshot_question_reaches_the_rendered_decision
 test_every_captains_call_card_takes_the_tallest_cards_height
 test_every_captains_call_card_opens_a_full_screen_details_view
 test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation
+test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details
 test_an_empty_captains_call_still_shows_its_empty_state
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

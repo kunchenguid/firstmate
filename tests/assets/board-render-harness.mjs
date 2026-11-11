@@ -17,11 +17,20 @@
 // within the viewport width, and a hidden element takes no space - so height
 // assertions test how the page sizes its cards, not real font metrics. "wide"
 // pages after the initial render and web fonts load; "narrow" pages again after
-// the window narrows and fires resize. Each details view is what one card's
-// Details button opened: {button, was_closed, open, title, ctx_rows, context,
-// none, options:[{label, rec, hint, details}], links, closed_after, prompts},
-// where button.controls is the declared role of the element the button's
-// aria-controls names, and open and closed state are read from that element.
+// the window narrows and fires resize. Each details view is what the Details
+// button of one shown card opened, paging from the first card: {button,
+// button_row, was_closed, open, title, ctx_rows, context, none, options:[{label,
+// rec, hint, details}], links, closed_after, focus, prompts}, where
+// button.controls is the declared role of the element the button's
+// aria-controls names, open and closed state are read from that element,
+// button_row is the row holding the button - its buttons' labels and its
+// display and flex-wrap resolved from the built page's stylesheet - and focus
+// is where keyboard focus landed once the view closed: {label, card, visible},
+// card being the title of the card that holds the focused element. call.advance
+// answers the first card, opens its Details before the deal's timer fires,
+// fires it, then closes the view: {answered, shown, focus} (null for fewer than
+// two cards). Focus moves only to an element with no hidden ancestor, as in a
+// browser, and timers fire only when the harness fires them.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -87,6 +96,11 @@ class Node {
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   dispatch(type) { for (const fn of this.listeners[type] || []) fn({ type, preventDefault() {} }); }
   scrollIntoView(opts) { scrolls.push({ id: this.id, opts }); }
+  rendered() {
+    for (let n = this; n; n = n.parentNode) if (n.hidden) return false;
+    return true;
+  }
+  focus() { if (this.rendered()) globalThis.document.activeElement = this; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -114,8 +128,40 @@ const sectionHeading = new Map(
     (body.match(/class="[^"]*\bfm-sign--eyebrow\b[^"]*"[^>]*>([\s\S]*?)<\/span>/)?.[1] ?? "")
       .replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim(),
   ]));
+// The built page's own stylesheet outside any @media block, as rules in source
+// order: each one's selector list and declarations.
+const css = (html.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? "")
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/@import\s+url\([^)]*\)[^;]*;/g, "")
+  .replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, "");
+const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({
+  selectors: sel.split(",").map((x) => x.trim()),
+  decls: new Map(body.split(";").map((d) => d.split(":")).filter((d) => d.length > 1)
+    .map(([k, ...v]) => [k.trim(), v.join(":").trim()])),
+}));
+// One property of a rendered element, from the rules whose selector is a plain
+// [tag].class compound the element matches; more classes, then later source
+// order, win. Pseudo-classes, combinators and attribute selectors are outside
+// this model, so a property set only through them resolves to null.
+const styleOf = (node, prop) => {
+  const classes = node.className.split(/\s+/);
+  let best = null;
+  for (const r of rules) {
+    if (!r.decls.has(prop)) continue;
+    for (const sel of r.selectors) {
+      const m = sel.match(/^([a-z][a-z0-9]*)?((?:\.[\w-]+)+)$/);
+      if (!m || (m[1] && m[1] !== node.tagName)) continue;
+      const need = m[2].slice(1).split(".");
+      if (!need.every((c) => classes.includes(c))) continue;
+      const rank = need.length + (m[1] ? 0.5 : 0);
+      if (!best || rank >= best.rank) best = { rank, value: r.decls.get(prop) };
+    }
+  }
+  return best?.value ?? null;
+};
 const scrolls = [];
 const prompts = [];
+const timers = [];
 
 const byId = new Map();
 const dataNode = new Node("script");
@@ -125,6 +171,7 @@ dataNode.textContent = html
 byId.set("bearings-data", dataNode);
 
 globalThis.document = {
+  activeElement: null,
   createElement: (tag) => new Node(tag),
   // Lazily mint an element the first time the page asks for it, but, as in a
   // browser, only for an id its static markup declares; any other id is null.
@@ -155,9 +202,21 @@ globalThis.window = {
   requestAnimationFrame: (fn) => { frames.push(fn); },
 };
 globalThis.TextEncoder = TextEncoder;
+// A submitted form's entries: each named input's value, a radio only when checked.
+globalThis.FormData = class {
+  constructor(form) {
+    this.entries = new Map();
+    const walk = (n) => n.children.forEach((c) => {
+      if (c.tagName === "input" && c.name && (c.type !== "radio" || c.checked)) this.entries.set(c.name, c.value);
+      walk(c);
+    });
+    walk(form);
+  }
+  get(name) { return this.entries.has(name) ? this.entries.get(name) : null; }
+};
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
-new Function(script)();
+new Function("setTimeout", script)((fn) => { timers.push(fn); });
 
 const badgesOf = (row) =>
   row.children
@@ -171,28 +230,46 @@ await Promise.resolve();
 flushFrames();
 
 // Page through Captain's Call from the first card with the back and next
-// buttons, recording the card each step shows.
+// buttons, calling <visit> on the card each step shows.
 const deck = byId.get("bb-call");
 const decisionCards = () => deck.children.filter((c) => c.className.split(/\s+/).includes("bb-decision"));
-const pageCall = () => {
+const titleOf = (card) => card.querySelectorAll(".bb-decision__title")[0]?.textContent ?? "";
+const showFirst = () => {
   const prev = byId.get("bb-stack-prev");
+  for (let i = 0; i < 100 && !prev.disabled; i++) prev.dispatch("click");
+};
+const eachPage = (visit) => {
   const next = byId.get("bb-stack-next");
   const pages = [];
   if (!decisionCards().length) return pages;
-  for (let i = 0; i < 100 && !prev.disabled; i++) prev.dispatch("click");
+  showFirst();
   for (let i = 0; i < 100; i++) {
-    const shown = decisionCards().filter((c) => !c.hidden);
-    pages.push(...shown.map((c) => {
-      const title = c.querySelectorAll(".bb-decision__title")[0]?.textContent ?? "";
-      return { title, height: c.getBoundingClientRect().height, natural: c.naturalHeight() };
-    }));
+    pages.push(...decisionCards().filter((c) => !c.hidden).map(visit));
     if (next.disabled) break;
     next.dispatch("click");
   }
   return pages;
 };
-// Open each card's Details view with its button, record what the full-screen
-// view shows, then close it again with its Close button.
+const pageCall = () => eachPage((c) => ({ title: titleOf(c), height: c.getBoundingClientRect().height, natural: c.naturalHeight() }));
+const firstWhere = (n, pred) => {
+  for (const c of n.children) {
+    if (pred(c)) return c;
+    const hit = firstWhere(c, pred);
+    if (hit) return hit;
+  }
+  return null;
+};
+// Where keyboard focus is: the focused element's label, the title of the card
+// that holds it, and whether it is rendered.
+const focusNow = () => {
+  const f = document.activeElement;
+  if (!f) return null;
+  let card = f;
+  while (card && !card.className.split(/\s+/).includes("bb-decision")) card = card.parentNode;
+  return { label: f.textContent, card: card ? titleOf(card) : null, visible: f.rendered() };
+};
+// Open each shown card's Details view with its button, record what the
+// full-screen view shows, then close it again with its Close button.
 const linksIn = (n, out = []) => {
   for (const c of n.children) {
     if (c.tagName === "a" && c.href) out.push(c.href);
@@ -200,7 +277,7 @@ const linksIn = (n, out = []) => {
   }
   return out;
 };
-const details = decisionCards().map((card) => {
+const details = eachPage((card) => {
   const btn = card.querySelectorAll(".bb-detailsbtn")[0];
   if (!btn) return { button: null };
   const controls = btn.attributes["aria-controls"] ?? null;
@@ -209,9 +286,15 @@ const details = decisionCards().map((card) => {
   const text = (n) => n.textContent;
   const wasClosed = modal?.hidden === true;
   const before = prompts.length;
+  const row = btn.parentNode;
   btn.dispatch("click");
   const view = {
     button: { tag: btn.tagName, type: btn.type, label: btn.textContent, controls: roleOf(controls) },
+    button_row: {
+      buttons: row.children.filter((c) => c.tagName === "button").map(text),
+      display: styleOf(row, "display"),
+      flex_wrap: styleOf(row, "flex-wrap"),
+    },
     was_closed: wasClosed,
     open: modal?.hidden === false,
     title: byId.get("bb-modal-title").textContent,
@@ -228,6 +311,7 @@ const details = decisionCards().map((card) => {
   };
   byId.get("bb-modal-close").dispatch("click");
   view.closed_after = modal?.hidden === true;
+  view.focus = focusNow();
   view.prompts = prompts.length - before;
   return view;
 });
@@ -286,6 +370,22 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
+// Answer the first card, open its Details before the deal's timer fires, let a
+// frame pass and the timer fire, then close the view.
+const advance = (() => {
+  if (decisionCards().length < 2) return null;
+  showFirst();
+  const card = decisionCards().find((c) => !c.hidden);
+  firstWhere(card, (c) => c.tagName === "input" && c.type === "radio").checked = true;
+  firstWhere(card, (c) => c.tagName === "form").dispatch("submit");
+  card.querySelectorAll(".bb-detailsbtn")[0].dispatch("click");
+  flushFrames();
+  while (timers.length) timers.shift()();
+  byId.get("bb-modal-close").dispatch("click");
+  const shown = decisionCards().find((c) => !c.hidden);
+  return { answered: titleOf(card), shown: shown ? titleOf(shown) : null, focus: focusNow() };
+})();
+
 process.stdout.write(
   JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText,
-    call: { wide: callWide, narrow: callNarrow, empty: callEmpty, details } }) + "\n");
+    call: { wide: callWide, narrow: callNarrow, empty: callEmpty, details, advance } }) + "\n");

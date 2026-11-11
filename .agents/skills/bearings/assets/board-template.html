@@ -232,7 +232,9 @@ button.bb-stat--call:hover { background: var(--rust-100); border-color: var(--ru
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
 .bb-opt:has(input:checked) { border-color: var(--rust-500); background: var(--rust-050); box-shadow: inset 0 0 0 1px var(--rust-500); }
-.bb-decision__foot { display: flex; align-items: center; gap: 10px; }
+/* the answer row wraps, so on a narrow card the queued badge or the limit
+   message moves Details to a row of its own instead of clipping it */
+.bb-decision__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .bb-queued {
   display: none; align-items: center; gap: 6px;
   font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
@@ -261,7 +263,9 @@ button.bb-stat--call:hover { background: var(--rust-100); border-color: var(--ru
   max-width: 820px; margin: 0 auto; padding: 16px 28px;
   display: flex; align-items: flex-start; gap: 16px;
 }
-.bb-modal__heading { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+/* a long title scrolls inside the heading, capped at a share of the view, so
+   Close beside it stays in view and the body keeps room to read */
+.bb-modal__heading { flex: 1 1 auto; min-width: 0; max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .bb-modal__meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .bb-modal__title { margin: 0; font-size: var(--fs-h3); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
 .bb-modal__close { flex: none; }
@@ -570,7 +574,7 @@ __FM_BEARINGS_BOARD_DATA__
   var modalBody = document.getElementById("bb-modal-body");
   var modalScroll = document.getElementById("bb-modal-scroll");
   var modalClose = document.getElementById("bb-modal-close");
-  var modalOpener = null;
+  var detailsButtons = [];
   modal.hidden = true;
   /* Only https:// URLs become links; trailing sentence punctuation stays text. */
   var URL_RE = /https:\/\/[^\s<>"'`]+/g;
@@ -611,7 +615,7 @@ __FM_BEARINGS_BOARD_DATA__
       if (n) n.inert = on;
     });
   }
-  function openDetails(item, opener) {
+  function openDetails(item) {
     modalMeta.textContent = "";
     if (item.type === "merge") modalMeta.appendChild(badge("online", "checks green"));
     else modalMeta.appendChild(badge("solid", item.type === "credential" ? "credential" : "decision"));
@@ -653,20 +657,21 @@ __FM_BEARINGS_BOARD_DATA__
     }
     modalBody.appendChild(optSec);
 
-    modalOpener = opener || null;
     modal.hidden = false;
     if (modalScroll) modalScroll.scrollTop = 0;
     if (document.body && document.body.classList) document.body.classList.add("bb-modal-open");
     setPageInert(true);
-    if (modalClose.focus) modalClose.focus();
+    modalClose.focus();
   }
   function closeDetails() {
     if (modal.hidden) return;
     modal.hidden = true;
     if (document.body && document.body.classList) document.body.classList.remove("bb-modal-open");
     setPageInert(false);
-    if (modalOpener && modalOpener.focus) modalOpener.focus();
-    modalOpener = null;
+    /* Focus returns to the Details button of the card now shown: the one that
+       opened the view, or, when an answer queued just before opening has since
+       dealt the next card, that card's. */
+    detailsButtons[active].focus();
   }
   modalClose.addEventListener("click", closeDetails);
   if (document.addEventListener) {
@@ -755,13 +760,17 @@ __FM_BEARINGS_BOARD_DATA__
     detailsBtn.type = "button";
     detailsBtn.setAttribute("aria-haspopup", "dialog");
     detailsBtn.setAttribute("aria-controls", "bb-modal");
-    detailsBtn.addEventListener("click", function () { openDetails(item, detailsBtn); });
+    detailsBtn.addEventListener("click", function () { openDetails(item); });
     foot.appendChild(detailsBtn);
+    detailsButtons.push(detailsBtn);
     form.appendChild(foot);
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       answerLimit.classList.remove("is-visible");
+      /* the queued badge or limit message this submit shows can wrap the
+         answer row, so the stack height is read again */
+      queueFit();
       var fd = new FormData(form);
       var value = fd.get("answer");
       var note = (fd.get("note") || "").trim();
@@ -822,7 +831,7 @@ __FM_BEARINGS_BOARD_DATA__
      height is read with every card laid out at once - the inactive ones
      invisible and the active one never hidden, so a focused answer field
      keeps its focus - and is re-read whenever wrapping can change: on
-     resize and once web fonts load. */
+     resize, once web fonts load, and on each answer submit. */
   function fitStackHeight() {
     var tallest = 0;
     cards.forEach(function (c) {
