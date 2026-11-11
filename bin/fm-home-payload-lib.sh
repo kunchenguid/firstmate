@@ -7,8 +7,7 @@
 # routine retirement into a pool slot no secondmate can ever lease again.
 # Cleanup is return-only, because that is the point where the caller has already
 # decided the home is retired; removal paths delete the whole home and never
-# reach here. fm_home_payload_prune deletes the paths outright, while
-# fm_home_payload_return stages the same paths first so a failed or interrupted
+# reach here. fm_home_payload_return stages the paths so a failed or interrupted
 # return can put them back: a handled INT/TERM/HUP restores the staging it
 # moved, and a return that is killed outright leaves a record naming the home in
 # that staging directory.
@@ -16,8 +15,8 @@
 # every later teardown refuses it as "not a seeded secondmate home" while its
 # records stay stranded in the parent's staging directory.
 # A refusal returns before anything moves, so there is nothing to put back.
-# A payload path that carries tracked files is left in place and refuses either
-# entry point, so a home whose tree tracks any of them keeps its checkout intact
+# A payload path that carries tracked files is left in place and refuses the
+# return, so a home whose tree tracks any of them keeps its checkout intact
 # instead of being dirtied into a failed return.
 # The home-lock library owns Git lock ownership; this library owns only the
 # payload cleanup that makes the returned slot reusable.
@@ -41,11 +40,27 @@ fm_home_payload_check() {
   fi
 }
 
-fm_home_payload_prune() {
-  local home=$1
-  fm_home_payload_check "$home" || return 1
-  rm -rf -- "$home/data" "$home/state" "$home/config" "$home/projects" || return 1
-  rm -f -- "$home/.fm-secondmate-home" "$home/.fm-secondmate-parent" || return 1
+fm_home_payload_check_devices() {
+  python3 - "$1" "$2" "${FM_HOME_PAYLOAD_PATHS[@]}" <<'PYDEV'
+import os
+import sys
+
+source, destination, *paths = sys.argv[1:]
+try:
+    device = os.stat(destination).st_dev
+    if os.stat(source).st_dev != device:
+        raise ValueError(f"payload staging requires the same filesystem: {source} and {destination}")
+    for path in [os.path.join(source, name) for name in paths]:
+        try:
+            entry = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if entry.st_dev != device:
+            raise ValueError(f"payload staging requires the same filesystem: {path} and {destination}")
+except (OSError, ValueError) as error:
+    print(f"error: cannot move durable home payload: {error}", file=sys.stderr)
+    sys.exit(1)
+PYDEV
 }
 
 # A return that already committed its slot must never take its payload back: the
@@ -175,6 +190,7 @@ fm_home_payload_finalize() {
 
 fm_home_payload_restore() {  # <home> <staging> [<lock-receipt>]
   local home=$1 staging=$2 receipt=${3:-} path
+  fm_home_payload_check_devices "$staging" "$home" || return 1
   for path in "${FM_HOME_PAYLOAD_PATHS[@]}"; do
     if [ -e "$staging/$path" ] || [ -L "$staging/$path" ]; then
       [ ! -e "$home/$path" ] && [ ! -L "$home/$path" ] || {
@@ -244,6 +260,7 @@ fm_home_payload_return() (
   fm_home_payload_check "$home" || return 1
   fm_home_worktree_lock_check "$home" "$id" "$parent" || return 1
   staging=$(mktemp -d "$parent/state/.home-return.XXXXXX") || return 1
+  fm_home_payload_check_devices "$home" "$staging" || { rmdir "$staging"; return 1; }
   if [ "$FM_HOME_LOCK_LINKED" = 1 ] && [ -f "$FM_HOME_LOCK_RECEIPT" ]; then
     receipt=$FM_HOME_LOCK_RECEIPT
     cp -p "$receipt" "$staging/receipt" || { rmdir "$staging"; return 1; }
