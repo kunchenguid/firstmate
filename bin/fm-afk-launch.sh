@@ -75,7 +75,7 @@
 #                              announcement and the read-back. With no words
 #                              while away it is a refresh; new words replace
 #                              the mandate. On Pi this is the whole entry.
-#   fm-afk-launch.sh start [--replace-mismatched]
+#   fm-afk-launch.sh start [--replace-mismatched] [--keep-escalations]
 #                              Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
@@ -90,6 +90,12 @@
 #                              archiving the posture record, and a fresh daemon
 #                              is launched for this pane, keeping the escalation
 #                              buffer the old daemon could not deliver.
+#                              With --keep-escalations (the Devin primary's
+#                              ensure on an existing posture, which restarts a
+#                              daemon that died within the same session) the
+#                              escalation buffer and its .since sidecar are kept
+#                              for the restarted daemon instead of being
+#                              cleared as a fresh entry's start clears them.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
@@ -797,9 +803,14 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
-fm_afk_launch_start() {  # [--replace-mismatched]
-  local captain_target captain_backend backup artifact had_afk=0 result replace=0 keep=''
-  [ "${1:-}" != --replace-mismatched ] || replace=1
+fm_afk_launch_start() {  # [--replace-mismatched] [--keep-escalations]
+  local captain_target captain_backend backup artifact had_afk=0 result replace=0 keep='' arg
+  for arg in "$@"; do
+    case "$arg" in
+      --replace-mismatched) replace=1 ;;
+      --keep-escalations) keep=--keep-escalations ;;
+    esac
+  done
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
@@ -1067,8 +1078,10 @@ fm_afk_launch_main() {
       fm_afk_launch_log "'$1' was retired with the wait-for-go gate: /afk is itself the go, so run 'enter' to write the record in the same turn"
       (exit 2) ;;
     start)
-      case "${2:-}" in
-        ''|--replace-mismatched) fm_afk_launch_start "${2:-}" || fm_afk_launch_quiet_rollback $? ;;
+      shift
+      case "$*" in
+        ''|--replace-mismatched|--keep-escalations|'--replace-mismatched --keep-escalations'|'--keep-escalations --replace-mismatched')
+          fm_afk_launch_start "$@" || fm_afk_launch_quiet_rollback $? ;;
         *) fm_afk_launch_usage >&2; (exit 2) ;;
       esac ;;
     start-native) fm_afk_launch_start_native || fm_afk_launch_quiet_rollback $? ;;

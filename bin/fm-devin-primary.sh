@@ -139,7 +139,9 @@ cmd_ensure() {
     return 3
   fi
   if [ -e "$STATE/.afk" ] && [ -f "$STATE/.afk-contract" ]; then
-    if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start --replace-mismatched 2>&1); then
+    # Same posture: a buffer left by a daemon that died or is being replaced
+    # holds wakes it acked but never delivered; the restarted daemon owns them.
+    if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start --replace-mismatched --keep-escalations 2>&1); then
       printf '%s\n' "$out" >&2
       return 1
     fi

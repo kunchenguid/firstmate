@@ -358,6 +358,37 @@ test_session_start_replacement_keeps_an_undelivered_check_alert() {
   pass "fm-devin-primary session-start: replacing a dead pane's daemon keeps its undelivered check alert"
 }
 
+# The Stop hook's self-heal restarts a daemon that already died within the same
+# posture; no live daemon is left to replace, so it is the plain restart path
+# that must keep the dead daemon's undelivered buffer.
+test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert() {
+  local dir old new alert since i
+  dir=$(make_home "$TMP_ROOT/ensure-dead-buffer")
+  old=$(start_earlier_daemon "$dir" test-pane devin quiet)
+  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  kill -KILL "$old" 2>/dev/null || true
+  i=0
+  while kill -0 "$old" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  ! kill -0 "$old" 2>/dev/null || fail "the earlier daemon survived SIGKILL"
+  alert='check: fm-pr-check task-8: PR #13 merged'
+  since=$(( $(date +%s) - 120 ))
+  printf '%s\n' "$alert" > "$dir/state/.subsuper-escalations"
+  printf '%s\n' "$since" > "$dir/state/.subsuper-escalations.since"
+  env -u TMUX_PANE FM_HOME="$dir" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" \
+    "$NAMED_DEVIN" -c 'bash "$0" ensure' "$SCRIPT" >/dev/null 2>&1 \
+    || fail "ensure could not restart the dead daemon"
+  new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+    fail "ensure did not leave a fresh live daemon (old $old, new ${new:-none})"
+  fi
+  [ "$(cat "$dir/state/.subsuper-escalations" 2>/dev/null)" = "$alert" ] \
+    || fail "restarting the dead daemon dropped the undelivered check alert: '$(cat "$dir/state/.subsuper-escalations" 2>/dev/null)'"
+  [ "$(cat "$dir/state/.subsuper-escalations.since" 2>/dev/null)" = "$since" ] \
+    || fail "restarting the dead daemon did not keep the buffer's since-stamp"
+  pass "fm-devin-primary ensure: restarting a daemon that died within the posture keeps its undelivered check alert"
+}
+
 test_session_start_replaces_a_daemon_for_another_harness() {
   local dir old new out ctx
   dir=$(make_home "$TMP_ROOT/start-stale-harness")
@@ -427,6 +458,7 @@ test_session_start_warns_when_off_is_mixed_with_a_channel
 test_session_start_names_a_kept_away_record
 test_session_start_replaces_a_daemon_for_another_pane
 test_session_start_replacement_keeps_an_undelivered_check_alert
+test_ensure_restart_of_a_dead_daemon_keeps_an_undelivered_check_alert
 test_session_start_replaces_a_daemon_for_another_harness
 test_example_config_hooks_run_the_wrapper
 test_stop_allows_after_a_successful_heal
