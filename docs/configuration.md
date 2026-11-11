@@ -2064,7 +2064,7 @@ Profile `floor` values stay dispatch-time checks.
 
 - When the file exists, bootstrap validates it with `jq`.
 - Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-- Malformed JSON, malformed rules, an empty or malformed profile array, a malformed `preferred_provider`, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+- Malformed JSON, malformed rules, an empty or malformed profile array, a malformed `preferred_provider`, a malformed `mid_task_fallback`, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 - Bootstrap enables resolver-only checks for `approval`, `min_confidence`, `floor`, and present `provider` declarations when `TYPESAFE_API_KEY` is non-empty in the environment or the home's `.env`, or when the home's valid `config/dispatch-credential-sources.json` names a `typesafe` source, regardless of `FM_DISPATCH_PROVIDER`.
   Bootstrap only checks that declaration; it never reads the key or runs the source's tool.
   An OpenRouter key or OpenRouter declaration alone does not enable these bootstrap checks; the resolver validates those declarations itself before any request.
