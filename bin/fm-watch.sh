@@ -84,6 +84,10 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          A capture that renders nothing is not a wedge either:
+#                          the poll ends the episode at the empty-capture route
+#                          and waits for content, so a pruned endpoint is neither
+#                          reported once nor escalated.
 #                          Where config/wedge-evidence-guards lists operator
 #                          guards, a live pane about to escalate whose guard
 #                          answers CRITICAL defers a bounded run of windows
