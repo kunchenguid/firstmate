@@ -619,6 +619,8 @@ META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
+DESCENDANT_TASK_KINDS=()
+DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
@@ -1302,10 +1304,7 @@ teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 # even under --force.
 if [ "$BACKEND" = t3code ]; then
   fm_backend_runtime_check t3code || exit 1
-  if [ "$TEARDOWN_META_KIND" = secondmate ]; then
-    fm_home_payload_recover "$(fm_meta_get "$META" home)" "$FM_HOME" "$ID" || exit 1
-    [ "$FM_HOME_PAYLOAD_RETIRED" = 1 ] || t3code_secondmate_lsof_check "$ID" "$(fm_meta_get "$META" home)" || exit 1
-  fi
+  [ "$TEARDOWN_META_KIND" != secondmate ] || t3code_secondmate_lsof_check "$ID" "$(fm_meta_get "$META" home)" || exit 1
 fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
@@ -2895,18 +2894,8 @@ safe_rm_rf_child_worktree() {
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} lock_parent=${4:-$FM_HOME} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
-  FM_HOME_PAYLOAD_RETIRED=0
-  if [ ! -e "$home" ]; then
-    fm_home_payload_recover "$home" "$lock_parent" "$expected_id" || return 1
-    return 0
-  fi
+  [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
-  # A return that was killed outright leaves this home's payload staged in the
-  # parent's state directory. Recover it before the seeded-home check below, so
-  # an interrupted retirement retries instead of refusing a home whose identity
-  # is still sitting in that staging directory.
-  fm_home_payload_recover "$abs_home_path" "$lock_parent" "$expected_id" || return 1
-  [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || return 0
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
@@ -2971,6 +2960,7 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 remove_firstmate_home() {  # <home> <label> <task-id> <backend> [<lock-parent>]
   local home=$1 label=$2 expected_id=${3:-} backend=${4:-} lock_parent=${5:-$FM_HOME} abs_home_path process_event_backup removal_rc=0
   [ -n "$home" ] || return 0
+  [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id" "$lock_parent") || return 1
   [ -n "$abs_home_path" ] || return 0
   # A T3 secondmate's home carries the environment its spawn wrote there.
@@ -2999,11 +2989,6 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend> [<lock-parent>]
     }
     fm_home_payload_return "$abs_home_path" "$expected_id" "$lock_parent" \
       teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      fm_home_payload_recover "$abs_home_path" "$lock_parent" "$expected_id" || return 1
-      if [ "$FM_HOME_PAYLOAD_RETIRED" = 1 ]; then
-        [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
-        return 0
-      fi
       echo "error: treehouse return failed for $label $abs_home_path; preserving the home and its records for retry (lease may still be held)" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
@@ -3151,8 +3136,6 @@ preflight_firstmate_home_process_event_tree() {
       child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      fm_home_payload_recover "$child_home" "$home" "$child_id" || return 1
-      [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || continue
       preflight_firstmate_home_process_event_tree "$child_home" "child firstmate home for $child_id" || return 1
     done
   fi
@@ -3160,7 +3143,7 @@ preflight_firstmate_home_process_event_tree() {
 }
 
 collect_descendant_task_locks() {
-  local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock control_lock meta_lock
+  local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
   local -a child_ids
   sub_state="$home/state"
   if [ -L "$sub_state" ]; then
@@ -3207,25 +3190,6 @@ collect_descendant_task_locks() {
   [ "${#child_ids[@]}" -gt 0 ] || return 0
   while IFS= read -r child_id; do
     child_meta="$sub_state/$child_id.meta"
-    control_lock="$sub_state/.control-$child_id.lock"
-    meta_lock=$(fm_meta_lock_path "$child_meta") || {
-      echo "REFUSED: descendant task $child_id has an invalid metadata lock path; forced teardown changed nothing" >&2
-      return 1
-    }
-    if ! fm_lock_try_acquire "$control_lock"; then
-      echo "REFUSED: descendant task $child_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
-      return 1
-    fi
-    DESCENDANT_LOCK_PATHS+=("$control_lock")
-    if ! fm_lock_try_acquire "$meta_lock"; then
-      echo "REFUSED: descendant task $child_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
-      return 1
-    fi
-    DESCENDANT_LOCK_PATHS+=("$meta_lock")
-    [ -f "$child_meta" ] || {
-      echo "REFUSED: descendant task $child_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
-      return 1
-    }
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_home=
@@ -3236,27 +3200,68 @@ collect_descendant_task_locks() {
     fi
     DESCENDANT_TASK_STATES+=("$sub_state")
     DESCENDANT_TASK_IDS+=("$child_id")
-    if [ "$child_kind" = secondmate ]; then
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
-      [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] && [ -d "$child_home" ] || continue
-      collect_descendant_task_locks "$child_home" || return 1
-    fi
+    DESCENDANT_TASK_KINDS+=("$child_kind")
+    DESCENDANT_TASK_HOMES+=("$child_home")
+    [ "$child_kind" != secondmate ] \
+      || collect_descendant_task_locks "$child_home" \
+      || return 1
   done < <(printf '%s\n' "${child_ids[@]}" | LC_ALL=C sort)
 }
 
-# Acquisition order, which every other holder of these locks must match so
-# they cannot cycle: a home's task-set lock before its own per-task locks
-# (bin/fm-wake-lib.sh's fm_task_set_lock_path owns why), parent home before
-# child home, each control lock before its matching metadata lock, sorted by id
-# within a home, and no descendant holder ever reaches back for an ancestor
-# lock. bin/fm-spawn.sh takes the same task-set lock before its own per-task
-# locks when it publishes a fresh record.
 preflight_descendant_task_locks() {
-  local home=$1
+  local home=$1 i state task_id meta control_lock meta_lock kind child_wt child_home
   DESCENDANT_TASK_STATES=()
   DESCENDANT_TASK_IDS=()
+  DESCENDANT_TASK_KINDS=()
+  DESCENDANT_TASK_HOMES=()
   DESCENDANT_TREEHOUSE_LOCK_PATHS=()
-  collect_descendant_task_locks "$home"
+  collect_descendant_task_locks "$home" || return 1
+  # Acquisition order, which every other holder of these locks must match so
+  # they cannot cycle: each home's task-set lock first (parent home before child
+  # home, during collection above), then per-task locks in that same
+  # parent-before-child preorder, sorted by id within each home, each control
+  # lock before its matching metadata lock. No child lock holder ever reaches
+  # back for a parent lock. bin/fm-spawn.sh takes the same task-set lock before
+  # its own per-task locks when it publishes a fresh record.
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    control_lock="$state/.control-$task_id.lock"
+    meta_lock=$(fm_meta_lock_path "$meta") || {
+      echo "REFUSED: descendant task $task_id has an invalid metadata lock path; forced teardown changed nothing" >&2
+      return 1
+    }
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_LOCK_PATHS+=("$control_lock")
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      echo "REFUSED: descendant task $task_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_LOCK_PATHS+=("$meta_lock")
+    [ -f "$meta" ] || {
+      echo "REFUSED: descendant task $task_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
+      return 1
+    }
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    [ "$kind" = "${DESCENDANT_TASK_KINDS[$i]}" ] || {
+      echo "REFUSED: descendant task $task_id changed kind while forced teardown acquired its locks; forced teardown changed nothing" >&2
+      return 1
+    }
+    if [ "$kind" = secondmate ]; then
+      child_wt=$(meta_value "$meta" worktree)
+      child_home=$(meta_value "$meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      [ "$child_home" = "${DESCENDANT_TASK_HOMES[$i]}" ] || {
+        echo "REFUSED: descendant task $task_id changed home while forced teardown acquired its locks; forced teardown changed nothing" >&2
+        return 1
+      }
+    fi
+  done
 }
 
 preflight_descendant_treehouse_slots() {
@@ -3337,9 +3342,8 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
-      [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || continue
       [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" "$home" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
@@ -3482,8 +3486,6 @@ preflight_firstmate_home_herdr_children() {  # <home>
       child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      fm_home_payload_recover "$child_home" "$home" "$child_id" || return 1
-      [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ] || continue
       preflight_firstmate_home_herdr_children "$child_home" || return 1
     fi
   done
@@ -3536,7 +3538,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot child_retired
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3547,13 +3549,6 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
-    child_retired=0
-    if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
-      fm_home_payload_recover "$child_home" "$home" "$child_id" || return 1
-      child_retired=$FM_HOME_PAYLOAD_RETIRED
-    fi
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -3588,7 +3583,7 @@ cleanup_firstmate_home_children() {
           child_rex_home=$(meta_value "$child_meta" home)
           [ -n "$child_rex_home" ] || child_rex_home=$child_wt
         fi
-        [ "$child_retired" = 1 ] || ( unset FM_ROOT_OVERRIDE; FM_HOME="$child_rex_home" FM_ROOT="$child_rex_home" STATE="$child_rex_home/state" \
+        ( unset FM_ROOT_OVERRIDE; FM_HOME="$child_rex_home" FM_ROOT="$child_rex_home" STATE="$child_rex_home/state" \
           fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
@@ -3600,11 +3595,8 @@ cleanup_firstmate_home_children() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ]; then
-        fm_home_payload_recover "$child_home" "$home" "$child_id" || return 1
-        if [ "$FM_HOME_PAYLOAD_RETIRED" = 0 ]; then
-          cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
-        fi
+      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+        cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" "$home" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
@@ -3667,9 +3659,6 @@ cleanup_firstmate_home_children() {
     teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
-    if [ "$child_kind" = secondmate ]; then
-      fm_home_payload_finalize "$child_home" "$home" "$child_id" || return 1
-    fi
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -3719,8 +3708,8 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_validate || exit 1
   pending_replies_recovery_validate initial || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
-  SECONDHOME_RETIRED=$FM_HOME_PAYLOAD_RETIRED
-  if [ "$SECONDHOME_RETIRED" = 0 ] && [ "$FORCE" = "--force" ]; then
+  if [ "$FORCE" = "--force" ]; then
+    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_treehouse_slots || exit 1
@@ -3731,7 +3720,7 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ] && [ "${SECONDHOME_RETIRED:-0}" = 0 ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
     for child_meta in "$SUB_STATE"/*.meta; do
@@ -3744,11 +3733,11 @@ if [ "$KIND" = secondmate ] && [ "${SECONDHOME_RETIRED:-0}" = 0 ] && [ "$FORCE" 
   secondmate_unresolved_pending_replies_refuse || exit 1
 fi
 
-if [ "$KIND" = secondmate ] && [ "${SECONDHOME_RETIRED:-0}" = 0 ]; then
+if [ "$KIND" = secondmate ]; then
   preflight_firstmate_home_process_event_tree "$HOME_PATH" "secondmate home" || exit 1
 fi
 
-if [ "$KIND" = secondmate ] && [ "${SECONDHOME_RETIRED:-0}" = 0 ] && [ "$FORCE" = "--force" ]; then
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
@@ -4135,7 +4124,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
-  [ "${SECONDHOME_RETIRED:-0}" = 1 ] || ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
+  ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
@@ -4287,9 +4276,6 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
-fi
-if [ "$KIND" = secondmate ]; then
-  fm_home_payload_finalize "$HOME_PATH" "$FM_HOME" "$ID" || exit 1
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
