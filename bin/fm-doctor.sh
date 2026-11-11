@@ -49,7 +49,8 @@
 #   verb        the first rule that matches decides: exit (exit status), match
 #               (an ERE against any stdout or stderr line), or field+equals (a dotted JSON
 #               path); otherwise the entry's default, or warn. A verb that hits
-#               its bound is warn.
+#               its bound is warn. JSON verbs also warn on a nonzero exit or
+#               output that is not a JSON object, before applying field rules.
 # Statuses: ok, warn, fail, info, skip. The verdict is fail when any check
 # fails, warn when any warns, ok otherwise.
 #
@@ -344,17 +345,23 @@ MODEL=$(jq -n \
     def rule_hit($v; $json):
       if has("exit") then $v.rc == .exit
       elif has("match") then .match as $m | any(($v.stdout | lines_of) + ($v.stderr | lines_of) | .[]; test($m))
-      else .field as $f | .equals as $e | ($json != null) and (($json | getpath($f | split(".")) | tostring) == $e)
+      else .field as $f | .equals as $e | ($json != null) and ((try ($json | getpath($f | split(".")) | tostring) catch "unreadable") == $e)
       end;
     def verb_check($c; $v):
       if $v == null then {status: "skip", evidence: "owner did not run"}
       elif $v.timedout then {status: "warn", evidence: "\($c.command | join(" ")) did not answer within \($v.timeout)s"}
+      elif $c.parse == "json" and $v.rc != 0 then
+        {status: "warn", evidence: "\($c.command | join(" ")) exited \($v.rc)",
+         detail: (($v.stdout | lines_of) + ($v.stderr | lines_of | map("stderr: " + .)))}
+      elif $c.parse == "json" and ((try ($v.stdout | fromjson | type == "object") catch false) != true) then
+        {status: "warn", evidence: "\($c.command | join(" ")) did not return a JSON object",
+         detail: (($v.stdout | lines_of) + ($v.stderr | lines_of | map("stderr: " + .)))}
       else
         (if $c.parse == "json" then (try ($v.stdout | fromjson) catch null) else null end) as $json
         | ((first($c.rules[] | select(rule_hit($v; $json)) | .status)) // ($c.default // "warn")) as $status
         | (if $c.parse == "json" and $json != null then
              [$c.rules[] | select(has("field")) | .field] | unique
-             | map(. as $f | "\($f)=\($json | getpath($f | split(".")) | tostring)") | join(" ")
+             | map(. as $f | "\($f)=\(try ($json | getpath($f | split(".")) | tostring) catch "unreadable")") | join(" ")
            else (($v.stdout | lines_of) + ($v.stderr | lines_of) | .[0] // "exit \($v.rc), no output") end) as $ev
         | {status: $status, evidence: ($ev | trunc),
            detail: (($v.stdout | lines_of) + ($v.stderr | lines_of | map("stderr: " + .)))}

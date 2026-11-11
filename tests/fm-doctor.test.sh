@@ -330,6 +330,26 @@ test_network_checks() {
   pass "--network adds a fresh auth probe and reads the last finished network report"
 }
 
+test_dead_primary_readiness() {
+  local dir dead_pid
+  dir=$(new_case dead-primary)
+  # A reaped child supplies a real, gone owner without touching any live primary.
+  bash -c 'exit 0' &
+  dead_pid=$!
+  wait "$dead_pid"
+  printf '%s\n' "$dead_pid" > "$dir/home/state/.lock"
+  doctor "$dir" --json --area supervision
+  assert_status "$DOCTOR_OUT" supervision/ready warn "dead primary"
+  printf '%s\n' "$DOCTOR_OUT" | jq -e '
+    .verdict == "warn" and any(.checks[];
+      .id == "supervision/ready" and
+      (.detail[0] | fromjson | .lock.state == "stale" and
+        .can_receive == false and .wake_consumer.state == "unknown"))
+  ' >/dev/null || fail "dead primary did not exercise the stale/false/unknown path: $DOCTOR_OUT"
+  [ "$DOCTOR_RC" -eq 0 ] || fail "dead primary warning must allow exit 0"
+  pass "real readiness owner reports a dead primary as a doctor warning"
+}
+
 test_readiness_warnings() {
   local dir label status rc output
   # The readiness JSON is the owner-to-doctor contract. Vary its fields
@@ -356,7 +376,14 @@ SH
 cannot-receive|warn|0|{"can_receive":false,"lock":{"state":"held"},"wake_consumer":{"state":"unknown"}}
 stale-lock|warn|0|{"can_receive":"unknown","lock":{"state":"stale"},"wake_consumer":{"state":"unknown"}}
 failed|warn|1|
+failed-healthy|warn|1|{"can_receive":true,"lock":{"state":"held"},"wake_consumer":{"state":"healthy"}}
 unreadable|warn|0|not JSON
+empty|warn|0|
+null|warn|0|null
+array|warn|0|[]
+scalar|warn|0|true
+wrong-fields|warn|0|{"lock":true,"wake_consumer":42}
+stale-healthy|warn|0|{"can_receive":true,"lock":{"state":"stale"},"wake_consumer":{"state":"healthy"}}
 healthy|ok|0|{"can_receive":true,"lock":{"state":"held"},"wake_consumer":{"state":"healthy"}}
 ROWS
   pass "readiness warns for unavailable, stale, failed, or unreadable reports and accepts healthy reports"
@@ -502,6 +529,7 @@ test_tangle_is_rendered
 test_unmapped_line_fails
 test_invalid_inventories_fail
 test_network_checks
+test_dead_primary_readiness
 test_readiness_warnings
 test_memory_budget_status
 test_supported_harnesses
