@@ -269,20 +269,84 @@ test_session_start_warns_when_off_is_mixed_with_a_channel() {
   pass "fm-devin-primary session-start: any off directive warns that every wedge-alarm channel is off"
 }
 
+# Print the pid in <home>'s daemon lock, waiting briefly for a just-launched
+# stub daemon to write it.
+wait_daemon_pid() {  # <home>
+  local i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$1/state/.supervise-daemon.lock/pid-identity" ]; do
+    i=$((i + 1))
+    sleep 0.05
+  done
+  cat "$1/state/.supervise-daemon.lock/pid" 2>/dev/null
+}
+
 test_session_start_names_a_kept_away_record() {
-  local dir out ctx
+  local dir out ctx before
   dir=$(make_home "$TMP_ROOT/start-away")
   env -u TMUX_PANE FM_HOME="$dir" FM_SUPERVISOR_TARGET=test-pane FM_SUPERVISOR_BACKEND=tmux \
     FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" FM_AFK_MODE=away \
     bash -c '"$0" enter && "$0" start' "$CODE_ROOT/bin/fm-afk-launch.sh" >/dev/null 2>&1 \
     || fail "could not start away mode for the fixture"
   [ "$(head -n 1 "$dir/state/.afk" 2>/dev/null)" = away ] || fail "the fixture did not record away mode"
+  before=$(wait_daemon_pid "$dir")
   out=$(run_hook session-start "$dir" '{"source":"startup"}')
   expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
   ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
   assert_contains "$ctx" "away daemon running" "a kept away record was not named as away: $ctx"
   assert_not_contains "$ctx" "quiet daemon" "a kept away record was labelled quiet: $ctx"
+  [ "$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)" = "$before" ] \
+    || fail "session-start replaced a live daemon that already supervised this pane and harness"
   pass "fm-devin-primary session-start: an existing away record is reported as away"
+}
+
+# Start a daemon for <home> the way an earlier primary would have: through the
+# real launch path, for <pane> under <harness>, in <mode>. Prints its pid.
+start_earlier_daemon() {  # <home> <pane> <harness> <mode>
+  env -u TMUX_PANE FM_HOME="$1" FM_SUPERVISOR_TARGET="$2" FM_SUPERVISOR_BACKEND=tmux \
+    FM_AFK_LAUNCH_ENTRY="$STUB_DAEMON" FM_TEST_HARNESS="$3" FM_AFK_MODE="$4" \
+    bash -c '"$0" enter && "$0" start' "$CODE_ROOT/bin/fm-afk-launch.sh" >/dev/null 2>&1 \
+    || fail "could not start the earlier $3 daemon for the fixture"
+  wait_daemon_pid "$1"
+}
+
+test_session_start_replaces_a_daemon_for_another_pane() {
+  local dir old new out ctx
+  dir=$(make_home "$TMP_ROOT/start-stale-pane")
+  old=$(start_earlier_daemon "$dir" dead-pane devin away)
+  kill -0 "$old" 2>/dev/null || fail "the earlier daemon is not running"
+  out=$(run_hook session-start "$dir" '{"source":"startup"}')
+  expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
+  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
+  new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
+  ! kill -0 "$old" 2>/dev/null || fail "the daemon supervising the dead pane is still running"
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+    fail "session-start did not leave a fresh live daemon (old $old, new ${new:-none})"
+  fi
+  assert_contains "$ctx" "away daemon running: pid $new supervising pane test-pane" "the context did not report the fresh daemon's recorded pane: $ctx"
+  [ "$(head -n 1 "$dir/state/.afk" 2>/dev/null)" = away ] || fail "the restart did not keep away mode"
+  [ -f "$dir/state/.afk-contract" ] || fail "the restart archived the away record"
+  [ -z "$(ls -A "$dir/state/afk-contracts" 2>/dev/null)" ] || fail "the restart archived an away record under state/afk-contracts"
+  pass "fm-devin-primary session-start: a live daemon for another pane is replaced and the away record survives"
+}
+
+test_session_start_replaces_a_daemon_for_another_harness() {
+  local dir old new out ctx
+  dir=$(make_home "$TMP_ROOT/start-stale-harness")
+  : > "$dir/config/supervision-host-off"
+  old=$(start_earlier_daemon "$dir" test-pane claude quiet)
+  kill -0 "$old" 2>/dev/null || fail "the earlier claude daemon is not running"
+  out=$(run_hook session-start "$dir" '{"source":"startup"}')
+  expect_code 0 "$(run_hook_rc "$dir")" "session-start failed: $(run_hook_err "$dir")"
+  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty' 2>/dev/null)
+  new=$(cat "$dir/state/.supervise-daemon.lock/pid" 2>/dev/null)
+  ! kill -0 "$old" 2>/dev/null || fail "the daemon judging the pane as claude is still running"
+  if [ -z "$new" ] || [ "$new" = "$old" ] || ! kill -0 "$new" 2>/dev/null; then
+    fail "session-start did not leave a fresh live daemon (old $old, new ${new:-none})"
+  fi
+  assert_contains "$ctx" "quiet daemon running: pid $new supervising pane test-pane" "the context did not report the fresh quiet daemon: $ctx"
+  [ "$(cut -f5 "$dir/state/.afk-daemon-terminal" 2>/dev/null)" = devin ] \
+    || fail "the fresh daemon's record does not name the devin harness: $(cat "$dir/state/.afk-daemon-terminal" 2>/dev/null)"
+  pass "fm-devin-primary session-start: a live daemon launched for another primary harness is replaced"
 }
 
 test_example_config_hooks_run_the_wrapper() {
@@ -332,6 +396,8 @@ test_session_start_blocks_without_a_pane
 test_session_start_ensures_daemon_and_warns_on_wedge_alarm
 test_session_start_warns_when_off_is_mixed_with_a_channel
 test_session_start_names_a_kept_away_record
+test_session_start_replaces_a_daemon_for_another_pane
+test_session_start_replaces_a_daemon_for_another_harness
 test_example_config_hooks_run_the_wrapper
 test_stop_allows_after_a_successful_heal
 test_stop_passes_guard_block_and_respects_cap

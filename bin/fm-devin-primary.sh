@@ -14,11 +14,15 @@
 # bin/fm-turnend-guard.sh --devin.
 #
 # Subcommands:
-#   ensure        Make sure daemon supervision is up for this home. If
-#                 state/.afk and its record already exist, run
-#                 bin/fm-afk-launch.sh start (which reads the record's mode, so
-#                 an existing away record stays away). Otherwise run
-#                 `FM_AFK_MODE=quiet bin/fm-afk-launch.sh enter` then `start`.
+#   ensure        Make sure daemon supervision is up for this home and this
+#                 pane. If state/.afk and its record already exist, run
+#                 bin/fm-afk-launch.sh start --replace-mismatched (which reads
+#                 the record's mode, so an existing away record stays away).
+#                 Otherwise run `FM_AFK_MODE=quiet bin/fm-afk-launch.sh enter`
+#                 then that `start`. --replace-mismatched restarts a live
+#                 daemon left behind for another pane or primary harness (a
+#                 crashed Devin, a Claude primary's quiet daemon) without
+#                 ending the posture, so wakes never go to a dead pane.
 #                 While the away return's catch-up gate
 #                 (state/.afk-return-catchup) is pending, fm-afk-launch refuses
 #                 every entry, so ensure exits 3 with a line naming
@@ -27,8 +31,9 @@
 #                 (fm_afk_daemon_owns_supervision, bin/fm-wake-lib.sh - the
 #                 same predicate the turn-end guard uses). Exit 0 with one line
 #                 "<mode> daemon running: pid N supervising pane P", where
-#                 <mode> is the record's real mode (fm_afk_mode); non-zero
-#                 with fm-afk-launch's diagnostic otherwise.
+#                 <mode> is the record's real mode (fm_afk_mode) and P the
+#                 captain pane the daemon terminal record names; non-zero with
+#                 fm-afk-launch's diagnostic otherwise.
 #   session-start Devin SessionStart hook. Reads the event JSON on stdin
 #                 (source: startup|resume). Outside a genuine primary checkout
 #                 (fm_primary_scope_matches, bin/fm-primary-scope-lib.sh) it is
@@ -125,18 +130,6 @@ supervisor_pane_addressable() {
   return 1
 }
 
-# Print the pane the daemon supervises, for the ensure success line and the
-# session-start context. Falls back to "unknown" rather than failing.
-supervised_pane() {
-  if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
-    printf '%s\n' "$FM_SUPERVISOR_TARGET"
-    return 0
-  fi
-  # shellcheck source=bin/fm-supervisor-target-lib.sh
-  . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
-  discover_supervisor_target 2>/dev/null || printf 'unknown\n'
-}
-
 cmd_ensure() {
   local out
   # shellcheck source=bin/fm-wake-lib.sh
@@ -146,7 +139,7 @@ cmd_ensure() {
     return 3
   fi
   if [ -e "$STATE/.afk" ] && [ -f "$STATE/.afk-contract" ]; then
-    if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start 2>&1); then
+    if ! out=$("$SCRIPT_DIR/fm-afk-launch.sh" start --replace-mismatched 2>&1); then
       printf '%s\n' "$out" >&2
       return 1
     fi
@@ -155,7 +148,7 @@ cmd_ensure() {
       printf '%s\n' "$out" >&2
       return 1
     fi
-    if ! out=$(FM_AFK_MODE=quiet "$SCRIPT_DIR/fm-afk-launch.sh" start 2>&1); then
+    if ! out=$(FM_AFK_MODE=quiet "$SCRIPT_DIR/fm-afk-launch.sh" start --replace-mismatched 2>&1); then
       printf '%s\n' "$out" >&2
       return 1
     fi
@@ -175,7 +168,8 @@ cmd_ensure() {
   fi
   local pid target
   pid=$(cat "$STATE/.supervise-daemon.lock/pid" 2>/dev/null || printf 'unknown')
-  target=$(supervised_pane)
+  target=$(cut -f4 "$STATE/.afk-daemon-terminal" 2>/dev/null)
+  [ -n "$target" ] || target=unknown
   printf '%s daemon running: pid %s supervising pane %s\n' "$(fm_afk_mode "$STATE")" "$pid" "$target"
 }
 
