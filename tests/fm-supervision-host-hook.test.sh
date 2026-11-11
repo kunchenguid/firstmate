@@ -497,6 +497,60 @@ SH
   pass "host+hook: a park-boundary hand-back that cannot write the marker delivers the failure notice"
 }
 
+test_queued_close_survives_a_failed_park_boundary_handback() {
+  local home real_mktemp real_node park=120 turn=3 grace=1
+  home=$(make_home hook-queued-close away)
+  git init -q "$home"
+  : > "$home/AGENTS.md"
+  ln -s "$ROOT/bin" "$home/bin"
+  ln -s "$ROOT/.agents" "$home/.agents"
+  real_mktemp=$(command -v mktemp)
+  real_node=$(command -v node)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  mkfifo "$home/render-release"
+  cat > "$home/fakebin/node" <<SH
+#!/usr/bin/env bash
+if [ "\${2:-}" = wake-prompt ]; then
+  : > "\$FM_HOME/render-held"
+  read -r _ < "\$FM_HOME/render-release"
+fi
+exec "$real_node" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp" "$home/fakebin/node"
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "queued close: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  append_status "$home" 'arrives with just enough margin'
+  wait_until 300 test -e "$home/render-held" \
+    || fail "queued close: the host never reached the wake render: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "queued close: the close is not queued"
+  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed"
+  mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
+    || fail "fixture: could not acknowledge a downtime episode"
+  : > "$home/fail-downtime-write"
+  echo $((park - turn - grace)) > "$home/park-clock"
+  exec 3<> "$home/render-release"
+  printf 'release\n' >&3
+  wait_until 150 hook_exited "$home" \
+    || fail "queued close: the Stop hook never returned: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  exec 3>&-
+  assert_park_boundary_handback_failure_notifies "$home" "queued close"
+  assert_no_re 'demo.status' "$home/hook.err" "queued close: the failure branch must not print the close"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "queued close: the close must stay queued for main"
+  main_drain "$home" | grep -q 'demo.status' || fail "queued close: main's drain does not present the close"
+  : > "$home/session.stop"
+  pass "host+hook: a queued close survives a failed park-boundary hand-back"
+}
+
 # The live failure (2026-10-17): after the engine handled a routine wake, the
 # host parked on the handling successor it started for that wake, and that
 # successor never resurfaced a durable row appended later. Five captain inbox
@@ -834,6 +888,7 @@ fm_test_run \
   test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode \
   test_park_boundary_handback_reports_a_lock_wait_that_expires \
   test_park_boundary_handback_reports_a_failed_marker_write \
+  test_queued_close_survives_a_failed_park_boundary_handback \
   test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main \
   test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn \
   test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails \
