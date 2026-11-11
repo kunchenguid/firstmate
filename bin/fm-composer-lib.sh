@@ -1582,12 +1582,13 @@ _fm_composer_row_is_mode_hint() {  # <trimmed-row>
 }
 
 # _fm_composer_row_is_mode_footer: 0 when the mode-hint <row> is shaped like
-# claude's permission-mode footer: the doubled `⏵⏵` opener or the `shift+tab`
-# cycle hint. Anything else is read as typed text, the safe direction, because a
-# draft read as pending never has a message injected over it.
+# claude's permission-mode footer: the doubled `⏵⏵` opener, the `⏸ plan mode
+# on` form, or the `shift+tab` cycle hint. Anything else is read as typed text,
+# the safe direction, because a draft read as pending never has a message
+# injected over it.
 _fm_composer_row_is_mode_footer() {  # <trimmed-row>
   case "$1" in
-    '⏵⏵'*|*'shift+tab'*) return 0 ;;
+    '⏵⏵'*|'⏸ plan mode on'|*'shift+tab'*) return 0 ;;
   esac
   return 1
 }
