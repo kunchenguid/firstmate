@@ -38,6 +38,10 @@ printf '%s\n' "$#" >> "$CONTROL_CALLS"
 printf '%s\n' "$@" >> "$CONTROL_CALLS"
 [ -z "${CONTROL_RM_META:-}" ] || rm -f -- "$CONTROL_RM_META"
 [ -z "${CONTROL_REPLACE_META:-}" ] || printf 'kind=ship\nharness=claude\nmodel=claude-sonnet-5\neffort=high\nworktree=/replaced/work\nspawn_gen=sNEW\n' > "$CONTROL_REPLACE_META"
+if [ -n "${CONTROL_RESPAWN_META:-}" ]; then
+  grep -v '^dispatch_' "$CONTROL_RESPAWN_META" > "$CONTROL_RESPAWN_META.tmp"
+  mv "$CONTROL_RESPAWN_META.tmp" "$CONTROL_RESPAWN_META"
+fi
 exit "${CONTROL_RC:-0}"
 EOF
   chmod +x "$CASE/bin/control"
@@ -103,6 +107,7 @@ invoke() {
   CONTROL_RC="$CONTROL_RC" \
   CONTROL_RM_META="${CONTROL_RM_META:-}" \
   CONTROL_REPLACE_META="${CONTROL_REPLACE_META:-}" \
+  CONTROL_RESPAWN_META="${CONTROL_RESPAWN_META:-}" \
   FM_LIMIT_MESSAGE_DIR="$CASE/limits" \
     "$SCRIPT" "$@"
 }
@@ -420,6 +425,25 @@ for rcase in 1 0; do
   grep -q 'blocked\|switched' "$CASE/state/$ID.status" && fail "replaced task (control rc $rcase) got a report" || true
 done
 ok "task replaced by a new incarnation during relaunch is not recorded"
+
+# A fresh spawn with the same worktree, branch and project but no fallback binding gets nothing.
+for rcase in 1 0; do
+  begin "control-respawned-$rcase"
+  write_pair true high
+  write_meta
+  invoke bind "$ID" --rule 0 >/dev/null
+  printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
+  quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40
+  CONTROL_RC=$rcase
+  CONTROL_RESPAWN_META="$CASE/state/$ID.meta"
+  out=$(invoke consider "$ID" --snapshot "$CASE/snap.json" 2>&1)
+  rc=$?
+  unset CONTROL_RESPAWN_META
+  [ "$rc" -eq 1 ] || fail "respawned task (control rc $rcase) exited $rc: $out"
+  grep -q '^midtask_switch' "$CASE/state/$ID.meta" && fail "respawned task (control rc $rcase) got the old run's switch record" || true
+  grep -q 'blocked\|switched' "$CASE/state/$ID.status" && fail "respawned task (control rc $rcase) got a report" || true
+done
+ok "task respawned without the fallback binding is not recorded"
 
 # A blocked report after a needs-decision report is still written.
 begin decision-then-blocked
