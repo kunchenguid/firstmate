@@ -433,6 +433,10 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# The watcher's per-endpoint marker family list, so retiring a freed endpoint
+# names exactly the markers the watcher itself would name.
+# shellcheck source=bin/fm-watch-key-lib.sh
+. "$SCRIPT_DIR/fm-watch-key-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -507,6 +511,51 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
+}
+
+# teardown_retire_endpoint_markers: drop the watcher's per-endpoint marker family
+# for an endpoint whose task record is gone.
+#
+# Those markers are keyed on the endpoint, never on the task, and removing the
+# record is the only event that can retire them: the watcher's pane sweep
+# enumerates endpoints FROM the records (recorded_windows in bin/fm-watch.sh), so
+# once state/<id>.meta is gone the endpoint is never visited again and every
+# marker it left behind outlives the task forever. bin/fm-watch-key-lib.sh owns
+# the family list this consumes.
+#
+# Call it only after the record is gone, so the endpoint has already left that
+# enumeration and a concurrent poll cannot re-mark it, and only for an endpoint
+# NO other record names: two tasks can share one endpoint, and dropping the
+# survivor's watcher history is the cross-endpoint collision the v3 key exists to
+# prevent. Best effort by contract - an orphaned marker is inert, so a failure
+# warns and never fails a cleanup that has already proved the work landed.
+teardown_retire_endpoint_markers() {  # <state-dir> <task-id> <endpoint>
+  local state=$1 id=$2 endpoint=${3:-} meta other
+  [ -n "$endpoint" ] || return 0
+  [ -d "$state" ] || return 0
+  # A record that still stands has not retired its endpoint, so its watcher
+  # history is still in use.
+  if [ -e "$state/$id.meta" ]; then
+    return 0
+  fi
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    other=$(fm_backend_target_of_meta "$meta" 2>/dev/null) || other=
+    if [ "$other" = "$endpoint" ]; then
+      return 0
+    fi
+  done
+  watcher_endpoint_markers_clear "$state" "$endpoint"
+}
+
+teardown_finalize_removed_endpoint() {  # <state-dir> <task-id> <endpoint>
+  local state=$1 id=$2 endpoint=${3:-}
+  teardown_retire_endpoint_markers "$state" "$id" "$endpoint" || \
+    echo "warning: some watcher markers for $id's endpoint ${endpoint:-none} survived cleanup; they are inert" >&2
+  # fm-watcher-retirement-lock-q1: this post-removal prune closes queued rows
+  # created before removal; publication and retirement are not one lock boundary,
+  # so a concurrent append remains a residual race for the outer fix.
+  fm_wake_queue_prune_task "$state" "$id" "$endpoint" 2>/dev/null || true
 }
 
 teardown_export_records() {  # <state> <task-id>
@@ -1157,7 +1206,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp endpoint
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -1224,7 +1273,9 @@ remote_secondmate_teardown() {
   mv -f -- "$tmp" "$SECONDMATE_REG"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   teardown_retire_status "$STATE" "$ID" || return 1
+  endpoint=$(fm_backend_target_of_meta "$META" 2>/dev/null) || endpoint=
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
+  teardown_finalize_removed_endpoint "$STATE" "$ID" "$endpoint"
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
     "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
     "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
@@ -3643,6 +3694,7 @@ cleanup_firstmate_home_children() {
     teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
+    teardown_finalize_removed_endpoint "$sub_state" "$child_id" "$child_t"
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -4261,6 +4313,7 @@ else
     exit 1
   fi
 fi
+teardown_finalize_removed_endpoint "$STATE" "$ID" "$T"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

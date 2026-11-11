@@ -75,10 +75,18 @@
 #   (ah) hung fetch                                               -> bounded, REFUSE
 #   (ai) commits held only by the no-mistakes gate                -> REFUSE, gate not fetched
 #   (aj) file saved during the refresh, work landed                -> REFUSE, file intact
+#
+# Watcher per-endpoint markers retire with the task record that named them:
+#   (ak) landed scout cleanup, endpoint freed                        -> markers gone
+#   (al) a second record still names that endpoint                   -> markers kept
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The marker family list under test, read from its production owner rather than
+# restated here, so a family added there is asserted here without an edit.
+# shellcheck source=bin/fm-watch-key-lib.sh
+. "$ROOT/bin/fm-watch-key-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -90,6 +98,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_MV_FOR_TEST=$(command -v mv)
+export REAL_MV_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -6433,6 +6443,133 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+# --- watcher per-endpoint markers retire with the task record -----------------
+# Those markers are keyed on the endpoint, never on the task, and once
+# state/<id>.meta is gone nothing can ever reach them again: the watcher's pane
+# sweep enumerates its endpoints FROM the task records (recorded_windows in
+# bin/fm-watch.sh). A marker left behind is inert clutter that outlives its task
+# forever - 31 orphans across 8 freed endpoints had accumulated in one live home's
+# state/ before this was covered. Removing the record is therefore what retires
+# them, and a record that still names the endpoint is what keeps them: two tasks
+# can share one endpoint, and dropping the survivor's watcher history is the
+# cross-endpoint collision the v3 key exists to prevent.
+
+seed_endpoint_markers() {  # <state-dir> <window> <body>
+  local state=$1 window=$2 body=$3 marker
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    printf '%s\n' "$body" > "$marker"
+  done < <(watcher_endpoint_markers "$state" "$window")
+}
+
+assert_endpoint_markers_present() {  # <state-dir> <window> <label>
+  local state=$1 window=$2 label=$3 marker missing=0
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    [ -e "$marker" ] || missing=$((missing + 1))
+  done < <(watcher_endpoint_markers "$state" "$window")
+  [ "$missing" -eq 0 ] || fail "$label: cleanup dropped $missing watcher markers of a still-recorded endpoint"
+}
+
+test_cleanup_retires_the_freed_endpoints_watcher_markers() {
+  local case_dir state window key marker rc legacy_key
+  case_dir=$(make_case watcher-markers-retired)
+  state="$case_dir/state"
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  window="firstmate:fm-task-x1"
+  key=$(window_key "$window")
+  seed_endpoint_markers "$state" "$window" "history of $key"
+  # Legacy-suffix orphans for the same endpoint, of the kind the v3 key rotation
+  # left inert: retiring a freed endpoint must not become the thing that starts
+  # matching them.
+  legacy_key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'legacy orphan\n' > "$state/.hash-$legacy_key"
+  printf 'legacy orphan\n' > "$state/.stale-$legacy_key"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "watcher-markers: cleanup of a landed scout copy failed: $(cat "$case_dir/stderr")"
+  assert_absent "$state/task-x1.meta" "watcher-markers: the task record survived cleanup"
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    assert_absent "$marker" "watcher-markers: a freed endpoint kept a watcher marker"
+  done < <(watcher_endpoint_markers "$state" "$window")
+  assert_present "$state/.hash-$legacy_key" "watcher-markers: retirement removed a legacy orphan"
+  assert_present "$state/.stale-$legacy_key" "watcher-markers: retirement removed a legacy orphan"
+  pass "cleanup retires every watcher marker family of the endpoint it freed and leaves legacy orphans inert"
+}
+
+test_cleanup_keeps_watchers_markers_of_a_shared_endpoint() {
+  local case_dir state window rc
+  case_dir=$(make_case watcher-markers-shared)
+  state="$case_dir/state"
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  window="firstmate:fm-task-x1"
+  seed_endpoint_markers "$state" "$window" 'shared endpoint history'
+  # A second live record naming the SAME endpoint, on its own copy so the
+  # exclusive-slot gate is not what keeps this cleanup honest.
+  mkdir -p "$case_dir/wt2"
+  fm_write_meta "$state/task-x2.meta" \
+    "window=$window" \
+    "endpoint_task_id=task-x2" \
+    "worktree=$case_dir/wt2" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x2"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "shared-endpoint: cleanup failed: $(cat "$case_dir/stderr")"
+  assert_absent "$state/task-x1.meta" "shared-endpoint: the retired task record survived"
+  assert_present "$state/task-x2.meta" "shared-endpoint: the surviving task record was removed"
+  assert_endpoint_markers_present "$state" "$window" "shared-endpoint"
+  pass "cleanup of one task keeps every watcher marker of an endpoint a second task record still names"
+}
+
+test_cleanup_prunes_wake_queued_after_pre_removal_prune() {
+  local case_dir state window rc
+  case_dir=$(make_case watcher-wake-pruned)
+  state="$case_dir/state"
+  window="firstmate:fm-task-x1"
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append stale "$2" "stale: $2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$window" \
+    || fail "wake-pruned: could not seed the stale wake"
+  cat > "$case_dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_MV_FOR_TEST:?}
+dest=${!#}
+case "$dest" in
+  */state/.wake-queue)
+    "$real" "$@" || exit $?
+    if [ ! -e "${FM_TEST_WAKE_INJECTED:?}" ]; then
+      : > "$FM_TEST_WAKE_INJECTED"
+      printf '999\t999\tstale\tfirstmate:fm-task-x1\tstale: firstmate:fm-task-x1\n' >> "$dest"
+    fi
+    ;;
+  *) exec "$real" "$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/mv"
+  rc=0
+  FM_TEST_WAKE_INJECTED="$case_dir/wake-injected" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "wake-pruned: teardown failed: $(cat "$case_dir/stderr")"
+  if [ -e "$state/.wake-queue" ] && awk -F '\t' -v window="$window" \
+      '$3 == "stale" && $4 == window { found=1 } END { exit found ? 0 : 1 }' \
+      "$state/.wake-queue"; then
+    fail "wake-pruned: stale wake injected after the first prune survived record removal"
+  fi
+  pass "teardown prunes a stale wake appended after its pre-removal cleanup"
+}
+
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
@@ -6592,3 +6729,6 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_cleanup_retires_the_freed_endpoints_watcher_markers
+test_cleanup_keeps_watchers_markers_of_a_shared_endpoint
+test_cleanup_prunes_wake_queued_after_pre_removal_prune
