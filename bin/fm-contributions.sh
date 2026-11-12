@@ -591,6 +591,9 @@ terminal_hold_event() { # task canonical-url
     | .pending += [{token:"closed",type:"closed",source:.url,head:.observation.head,body:"PR closed without merging"}]' \
     "$TMP/terminal.json" > "$TMP/terminal-event.json"
   [ -s "$TMP/terminal-event.json" ] || return 0
+  # The held list is the poll-start snapshot; a settlement earlier in this poll
+  # may have closed or released this task since.
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" 2>/dev/null || return 0
   write_record "$task" "$TMP/terminal-event.json"
   publish_pending "$task" "$url" "$TMP/terminal-event.json"
 }

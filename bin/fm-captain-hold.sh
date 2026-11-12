@@ -1876,7 +1876,11 @@ command_settle_pr() {
   validate_slug task-id "$id"
   policy="$DATA/$id/hold-pr-policy.json"
   [ -f "$policy" ] || return 0
-  acquire_task_control_lock "$id"
+  # An answer can hold this lock for minutes while it waits on the away record;
+  # the poll that calls this is cut after 30 seconds, so a busy task defers.
+  CAPTAIN_CONTROL_LOCK="$STATE/.control-$id.lock"
+  fm_lock_acquire_wait_bounded "$CAPTAIN_CONTROL_LOCK" 1 2>/dev/null || return 0
+  CAPTAIN_CONTROL_LOCK_HELD=1
   [ -f "$policy" ] || return 0
   [ ! -L "$DATA/$id" ] && [ ! -L "$policy" ] || fail 'unsafe PR policy path'
   jq -e --arg task "$id" '.schema == "fm-hold-pr.v1" and .task == $task

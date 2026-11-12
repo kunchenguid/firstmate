@@ -339,10 +339,11 @@ It records evidence before applying the declared task transition, under the task
 A retry uses that evidence to finish an interrupted transition without writing a second resolution.
 The existing parent channel receives the resolution before the declaration is retired.
 A `release` declaration follows the attended-only rule of [Answering a call](#answering-a-call-answer): while the home is away or the away-posture record is locked the hold stays unchanged, and a later poll applies the declaration after the captain returns.
+When another command holds the task, for example a captain answer in progress, settlement leaves the declaration unchanged and a later poll applies it.
 Linking a follow-up PR to the held task keeps its declaration valid.
 A declaration that can no longer settle is removed, and the observer prints one diagnostic line when the question changed or the PR ended in the other terminal state.
 A successful settlement prints nothing, so it causes no wake.
-`tests/fm-contributions.test.sh` exercises merged and unmerged closure, default-off behavior, unrelated work, superseded declarations, away deferral, follow-up links, closure reports, and interrupted settlement.
+`tests/fm-contributions.test.sh` exercises merged and unmerged closure, default-off behavior, unrelated work, superseded declarations, away deferral, busy-task deferral, follow-up links, closure reports for a task with two closed PRs, and interrupted settlement.
 
 ## Card hygiene: a landed subject is not a live call
 
