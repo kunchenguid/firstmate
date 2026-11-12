@@ -35,24 +35,29 @@
 #   fm_trace_context_session_effective <effective-state-file>
 #     Echoes the normalized frozen decision only when its session binding matches
 #     the current lock, defaulting to off when the state is absent, stale, or invalid.
-#   fm_trace_context_resolve <config-dir> <meta-file>
-#     Echoes the traceparent to inject AND record, or nothing when the
-#     capability is off or when entropy or self-validation fails. It ALWAYS
-#     returns 0: telemetry is omitted safely and never aborts the spawn. The
-#     task's recorded carrier wins so recovery keeps identity; otherwise a
-#     fresh root is minted, never derived from this process's environment.
+#   fm_trace_context_resolve <state-dir> <meta-file>
+#     Echoes the traceparent to inject AND record, or nothing when the frozen
+#     per-session decision for <state-dir> is off or when entropy or
+#     self-validation fails. It reads only that frozen decision (bound to the
+#     session lock), never the live file or FM_TRACE_CONTEXT, so no caller needs
+#     to force an env override. It ALWAYS returns 0: telemetry is omitted safely
+#     and never aborts the spawn. The task's recorded carrier wins so recovery
+#     keeps identity; otherwise a fresh root is minted, never derived from this
+#     process's environment.
 #
 # Enablement (see docs/configuration.md for the schema):
 #   config/trace-context   presence flag under the home's config dir enables it.
 #   FM_TRACE_CONTEXT        env override: 1/on/true/yes enables, any other
 #                           non-empty value disables, and unset OR empty defers
 #                           to the file.
-#   Each locked home session resolves these inputs once into
-#   state/.trace-context-effective. The record is atomically published through a
-#   same-directory temporary file and bound to state/.lock; a failed publication
-#   cannot reactivate a stale on decision. Every spawn reads only that frozen
-#   on/off value, so later config and environment edits take effect only after a
-#   new home session starts.
+#   Each locked home session resolves these inputs once, through
+#   fm_trace_context_enabled, into state/.trace-context-effective. The record is
+#   atomically published through a same-directory temporary file and bound to
+#   state/.lock; a failed publication cannot reactivate a stale on decision.
+#   fm_trace_context_resolve reads only that frozen on/off value (via
+#   fm_trace_context_session_effective), so later config and environment edits
+#   take effect only after a new home session starts. fm_trace_context_enabled
+#   is the session-start input resolver only; no spawn-time caller reads it.
 #   At launch, the primary propagates config/trace-context into the secondmate
 #   home (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh) and passes its
 #   frozen on/off decision into the new process as a non-empty FM_TRACE_CONTEXT
@@ -120,9 +125,11 @@ fm_trace_context_hex() {  # <byte-count>
   printf '%s' "$hex"
 }
 
-# True when the capability is enabled for this home. The env override wins so a
-# spawn can be forced on or off without touching the file; otherwise the
-# presence of config/trace-context decides, and its absence is the default-off.
+# True when the capability is enabled for this home. This is the session-start
+# input resolver only (see fm_trace_context_session_start); spawn-time callers
+# read the frozen decision, not this. The env override wins so a session can be
+# started on or off without touching the file; otherwise the presence of
+# config/trace-context decides, and its absence is the default-off.
 fm_trace_context_enabled() {  # <config-dir>
   local config_dir=$1 v
   # A non-empty value is an explicit override; unset OR empty defers to the file
@@ -212,12 +219,15 @@ fm_trace_context_mint() {
 }
 
 # Public entry point. Echo the single carrier to inject and record, or nothing.
-# Always returns 0 so a spawn is never aborted by a telemetry decision. The
-# recorded value wins so recovery keeps one task identity; otherwise a fresh
+# Always returns 0 so a spawn is never aborted by a telemetry decision. Gates on
+# the FROZEN per-session decision for <state-dir> (state/.trace-context-effective
+# bound to state/.lock), not on the live file or environment, so a later config
+# or FM_TRACE_CONTEXT edit cannot revive telemetry the session decided against.
+# The recorded value wins so recovery keeps one task identity; otherwise a fresh
 # root is minted, never derived from this process's environment.
-fm_trace_context_resolve() {  # <config-dir> <meta-file>
-  local config_dir=$1 meta=$2 existing
-  fm_trace_context_enabled "$config_dir" || return 0
+fm_trace_context_resolve() {  # <state-dir> <meta-file>
+  local state_dir=$1 meta=$2 existing
+  [ "$(fm_trace_context_session_effective "$state_dir/.trace-context-effective")" = on ] || return 0
   existing=$(fm_trace_context_recorded "$meta")
   if fm_trace_context_valid "$existing"; then
     printf '%s' "$existing"
