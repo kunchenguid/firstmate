@@ -857,7 +857,19 @@ fm_lock_reap_dead_directory() {
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
   base=${lock_abs##*/}
   if (
-    cd -- "$lock_abs" 2>/dev/null || exit 1
+    # A failed cd is permanent only while the same real directory remains.
+    # A concurrent reaper's removal or replacement must stay retriable.
+    if [ "$_FM_UNAME" = Darwin ]; then
+      identity_stat=(/usr/bin/stat -f '%d:%i')
+    else
+      identity_stat=(stat -c '%d:%i')
+    fi
+    directory_identity=$("${identity_stat[@]}" "$lock_abs" 2>/dev/null) || exit 1
+    if ! cd -- "$lock_abs" 2>/dev/null; then
+      [ ! -L "$lock_abs" ] && [ -d "$lock_abs" ] \
+        && [ "$directory_identity" = "$("${identity_stat[@]}" "$lock_abs" 2>/dev/null)" ] && exit 2
+      exit 1
+    fi
     [ ! -L "$lock_abs" ] && [ . -ef "$lock_abs" ] || exit 1
     directory_pid=$(cat ./pid 2>/dev/null || true)
     fm_lock_holder_alive "$lock_abs" "$directory_pid" && exit 1

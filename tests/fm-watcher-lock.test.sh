@@ -1250,6 +1250,146 @@ PY
   pass "unreapable real-directory locks refuse promptly naming the wedged path"
 }
 
+test_lock_real_directory_permission_refusal() {
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "SKIP permission refusal: root bypasses directory search permissions"
+    return
+  fi
+  # Triage #8275 requires a prompt named refusal. Missing search permission
+  # must not turn either session claim path back into an unbounded wait.
+  python3 - "$LIB" "$ROOT/bin/fm-lock.sh" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "inaccessible directory-lock refusal"
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+lib, script, root, dead = sys.argv[1:]
+fixture = Path(root) / 'permission-refusal'
+fixture.mkdir()
+harness = fixture / 'claude'
+harness.symlink_to(shutil.which('bash'))
+for mode in ('library', 'new-session', 'own-session'):
+    for suffix in ('', '.steal'):
+        home = fixture / (mode + suffix)
+        state = home / 'state'
+        state.mkdir(parents=True)
+        lock = state / '.lock.acquire'
+        wedged = Path(str(lock) + suffix)
+        for path in (lock, Path(str(lock) + '.steal')):
+            path.mkdir()
+            (path / 'pid').write_text(dead + '\n')
+            os.utime(path, (1, 1))
+        wedged.chmod(0o600)
+        try:
+            probe = subprocess.run(['bash', '-c', 'cd -- "$1"', '_', str(wedged)],
+                                   capture_output=True, timeout=5)
+            if probe.returncode == 0:
+                print('SKIP permission refusal: filesystem does not enforce search permissions')
+                sys.exit(0)
+            env = dict(os.environ, FM_HOME=str(home), FM_STATE_OVERRIDE=str(state))
+            for name in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'):
+                env.pop(name, None)
+            if mode == 'library':
+                command = ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable',
+                           '_', lib, str(lock)]
+            else:
+                command = [str(harness), '-c', 'if [ "$2" = own-session ]; then '
+                           'printf "%s\\n" "$$" > "$FM_HOME/state/.lock"; fi; '
+                           'bash "$1"; rc=$?; exit "$rc"', '_', script, mode]
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+            assert result.returncode == 1, (mode, suffix, result)
+            assert 'cannot reclaim lock directory ' + str(wedged) in result.stderr, result.stderr
+            assert 'lock acquired:' not in result.stdout, result.stdout
+            assert wedged.is_dir() and not wedged.is_symlink()
+            assert not list(state.glob('*.owner.*')), list(state.iterdir())
+        finally:
+            wedged.chmod(0o700)
+        assert (wedged / 'pid').read_text() == dead + '\n'
+PY
+  pass "inaccessible primary and steal directories refuse by name on both session claim paths"
+}
+
+test_lock_inaccessible_directory_replacement_is_retriable() {
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "SKIP permission replacement: root bypasses directory search permissions"
+    return
+  fi
+  # Pause immediately after a real cd failure. A concurrent removal or
+  # successor publication must not be diagnosed as a stable blocked directory.
+  python3 - "$LIB" "$TMP_ROOT" <<'PY' || fail "inaccessible directory replacement safety"
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+lib, root = sys.argv[1:]
+for suffix in ('', '.steal'):
+    for replacement in ('removed', 'directory', 'symlink'):
+        state = Path(root) / ('permission-replacement-' + replacement + suffix)
+        state.mkdir()
+        lock = state / ('.lock.acquire' + suffix)
+        lock.mkdir()
+        os.utime(lock, (1, 1))
+        lock.chmod(0o600)
+        probe = subprocess.run(['bash', '-c', 'cd -- "$1"', '_', str(lock)],
+                               capture_output=True, timeout=5)
+        if probe.returncode == 0:
+            lock.chmod(0o700)
+            print('SKIP permission replacement: filesystem does not enforce search permissions')
+            sys.exit(0)
+        old = state / 'old-directory'
+        ready, resume = state / 'ready', state / 'resume'
+        child = subprocess.Popen(
+            ['bash', '-c', '''
+. "$1"
+cd() {
+  if [ "${1:-}" = -- ] && [ "${2:-}" = "$lock_path" ]; then
+    builtin cd "$@" && return 0
+    : > "$ready"
+    while [ ! -e "$resume" ]; do sleep 0.01; done
+    return 1
+  fi
+  builtin cd "$@"
+}
+if fm_lock_reap_dead_directory "$lock_path"; then exit 10; fi
+[ -z "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ] || exit 11
+''', '_', lib],
+            env=dict(os.environ, FM_STATE_OVERRIDE=str(state), lock_path=str(lock),
+                     ready=str(ready), resume=str(resume)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), 'real failed cd was never reached'
+            lock.rename(old)
+            if replacement != 'removed':
+                owner = state / 'successor' if replacement == 'symlink' else lock
+                owner.mkdir()
+                (owner / 'pid').write_text(str(os.getpid()) + '\n')
+                (owner / 'record').write_text('preserve successor\n')
+                if replacement == 'symlink':
+                    lock.symlink_to(owner)
+            resume.touch()
+            out, err = child.communicate(timeout=5)
+            assert child.returncode == 0, (replacement, out, err)
+            if replacement == 'removed':
+                assert not lock.exists()
+            else:
+                assert (lock / 'pid').read_text() == str(os.getpid()) + '\n'
+                assert (lock / 'record').read_text() == 'preserve successor\n'
+                assert lock.is_symlink() == (replacement == 'symlink')
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            (old if old.exists() else lock).chmod(0o700)
+PY
+  pass "failed directory entry stays retriable after concurrent removal or replacement"
+}
+
 test_lock_real_directory_default_wait() {
   python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "ordinary directory-lock wait"
 import os
@@ -2699,6 +2839,8 @@ test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_real_directory_residue
 test_lock_real_directory_live_nested_owner
 test_lock_real_directory_named_refusal
+test_lock_real_directory_permission_refusal
+test_lock_inaccessible_directory_replacement_is_retriable
 test_lock_real_directory_default_wait
 test_lock_failed_create_discards_owner
 test_session_lock_real_directory_residue
