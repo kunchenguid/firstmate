@@ -1574,7 +1574,21 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo slot_root identity created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
+  local home_root legacy_root=${TREEHOUSE_ROOT:-$HOME/.treehouse}
+  home_root=$(
+    # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+    FM_STATE_OVERRIDE="$SCRIPT_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
+    fm_treehouse_home_root "$FM_HOME"
+  ) || home_root=
+  if [ -n "$home_root" ]; then
+    treehouse_pool_root_report "$home_root/.treehouse"
+    [ "$legacy_root" != "$home_root/.treehouse" ] || return 0
+  fi
+  treehouse_pool_root_report "$legacy_root"
+}
+
+treehouse_pool_root_report() {
+  local root=$1 state pool records slot repo slot_root identity created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
   local -a seen_repos=() seen_pools=()
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac

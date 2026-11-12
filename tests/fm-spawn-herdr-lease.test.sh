@@ -26,7 +26,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 # the foreground cwd with it. The fake treehouse opens that nested shell for
 # the interactive form, which is exactly what must not be used.
 make_lease_case() {
-  local name=$1 harness=${2:-codex} dir home proj wt fb d
+  local name=$1 harness=${2:-codex} origin=${3:-} dir home proj wt fb d
   dir="$TMP_ROOT/$name"
   home="$dir/home"
   proj="$dir/project"
@@ -35,7 +35,11 @@ make_lease_case() {
   fb="$dir/fakebin"
   mkdir -p "$d" "$fb" "$dir/user-home"
   fm_test_spawn_home "$home" "$harness"
-  fm_git_init_commit "$proj"
+  if [ -n "$origin" ]; then
+    git clone -q "$origin" "$proj"
+  else
+    fm_git_init_commit "$proj"
+  fi
   git clone -q "$proj" "$wt"
   fm_test_spawn_brief "$home" "$name" "Exercise the Herdr task-copy lease for $name."
   printf '%s' "$proj" > "$d/cwd"
@@ -47,6 +51,10 @@ make_lease_case() {
 set -u
 D=$FM_FAKE_DIR
 printf '%s\n' "$*" >> "$D/treehouse-log"
+if [ "${1:-}" = --root ]; then
+  printf '%s\n' "$2" > "$D/treehouse-root"
+  shift 2
+fi
 case "$*" in
   'get --lease '*) [ ! -f "$D/lease-fails" ] || { echo 'lease failed' >&2; exit 1; }
     printf '%s\n' "$FM_FAKE_SLOT" ;;
@@ -159,6 +167,29 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   [ "$(cat "$dir/fake/cd-sends")" = 1 ] || fail "an immediately ready pane received a redundant cd"
   assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
   pass "a fresh herdr spawn leases the copy and moves the pane's top-level shell into it"
+}
+
+test_homes_lease_from_distinct_roots() {
+  local first second dir id out status expected root first_root=
+  fm_git_init_commit "$TMP_ROOT/pool-origin"
+  first=$(make_lease_case pool-first codex "$TMP_ROOT/pool-origin")
+  second=$(make_lease_case pool-second codex "$TMP_ROOT/pool-origin")
+  for dir in "$first" "$second"; do
+    id=${dir##*/}
+    expected=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_home_root "$2"' _ "$ROOT" "$dir/home") \
+      || fail "could not resolve the expected home root"
+    out=$(run_lease_spawn "$dir" "$id")
+    status=$?
+    expect_code 0 "$status" "spawn should lease from its own home root"$'\n'"$out"
+    root=$(cat "$dir/fake/treehouse-root") || fail "the lease did not receive a worktree root"
+    assert_equals "$expected" "$root" "Herdr leased from the wrong home root"
+    if [ -z "$first_root" ]; then
+      first_root=$root
+    else
+      [ "$root" != "$first_root" ] || fail "homes cloning one origin leased from the same pool root"
+    fi
+  done
+  pass "Herdr homes cloning one origin lease from distinct home roots"
 }
 
 test_failed_lease_refuses_without_a_record() {
@@ -294,6 +325,7 @@ test_dropped_worktree_entry
 test_never_moving_worktree_entry
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell
+test_homes_lease_from_distinct_roots
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
 test_rolled_back_spawn_after_launch_names_the_lease_it_keeps

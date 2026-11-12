@@ -5566,7 +5566,12 @@ spawn_send_key() { # <target> <key>
 # outlives its pane, so an aborted spawn returns it (spawn_abort_cleanup) and
 # bin/fm-teardown.sh returns it for a finished task.
 spawn_lease_herdr_slot() {
-  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+  local pool_root
+  pool_root=$(fm_treehouse_home_root "$FM_HOME") || {
+    echo "error: could not resolve the Treehouse worktree root for home $FM_HOME" >&2
+    exit 1
+  }
+  WT=$(cd "$PROJ_ABS" && treehouse --root "$pool_root" get --lease --lease-holder "$ID") || {
     echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS; $(spawn_endpoint_hint)" >&2
     exit 1
   }

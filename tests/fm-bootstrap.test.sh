@@ -1747,7 +1747,7 @@ SH
 }
 
 test_treehouse_pool_report_is_read_only_and_classifies_pools() {
-  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls i out
+  local case_dir home root home_root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls i out
   case_dir="$TMP_ROOT/pool-report"
   home="$case_dir/home"
   root="$case_dir/pools"
@@ -1827,16 +1827,24 @@ JSON
   cat > "$root/leased/treehouse-state.json" <<JSON
 {"worktrees":[{"path":"$leased_repo","created_at":"2020-01-01T00:00:00Z","leased":true,"lease_id":"lease-1","lease_holder":"secondmate-home","leased_at":"2026-10-01T00:00:00Z"}]}
 JSON
+  home_root=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_home_root "$2"' _ "$ROOT" "$home") \
+    || fail "could not resolve the home's pool root"
+  home_root="$home_root/.treehouse"
+  mkdir -p "$home_root/current"
+  cat > "$home_root/current/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$registered","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
   mkdir -p "$home/config"
   : > "$home/config/treehouse-pool-report"
-  before=$(find "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
+  before=$(find "$home_root" "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
   : > "$jq_count_file"
   out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" treehouse)" FM_TEST_JQ_COUNT="$jq_count_file" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   jq_calls=$(wc -l < "$jq_count_file")
-  after=$(find "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
+  after=$(find "$home_root" "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
   [ "$before" = "$after" ] || fail "pool report modified pool or repository files"
+  [ ! -e "$home/state" ] || fail "detect-only pool reporting created the home's state directory"
   assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
   assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
   assert_contains "$out" "unregistered pool $root/nested" "a slot inside a parent repository was mistaken for its own checkout"
@@ -1854,11 +1862,13 @@ JSON
   assert_contains "$out" "unowned slot older than 30d: $fractional_repo" "fractional timestamp with offset was not reported"
   assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
   assert_not_contains "$out" "unowned slot older than 30d: $leased_repo" "durably leased slot was reported stale"
+  assert_contains "$out" "unowned slot older than 30d: $registered" "old unowned slot in the home's current pool was not reported"
+  assert_contains "$out" "scanned 1 pools under $home_root" "the report did not identify the home pool it scanned"
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
 }
 
 test_treehouse_pool_report_needs_its_flag() {
-  local case_dir home root fakebin real_jq jq_log out baseline
+  local case_dir home root home_root fakebin real_jq jq_log out baseline
   case_dir="$TMP_ROOT/pool-report-flag-absent"
   home="$case_dir/home"
   root="$case_dir/pools"
@@ -1877,10 +1887,16 @@ SH
 {"worktrees":[{"path":"$case_dir/missing","created_at":"2020-01-01T00:00:00Z"}]}
 JSON
   printf '%s\n' '{"worktrees":[]}' > "$root/project-leftover/treehouse-state.json"
+  home_root=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_home_root "$2"' _ "$ROOT" "$home") \
+    || fail "could not resolve the home's pool root"
+  home_root="$home_root/.treehouse"
+  mkdir -p "$home_root/project-leftover"
+  printf '%s\n' '{"worktrees":[]}' > "$home_root/project-leftover/treehouse-state.json"
   : > "$jq_log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   ! grep -qF "$root" "$jq_log" || fail "bootstrap without config/treehouse-pool-report read Treehouse state: $(cat "$jq_log")"
+  ! grep -qF "$home_root" "$jq_log" || fail "bootstrap without config/treehouse-pool-report read the home's pool"
   baseline=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$case_dir/no-pools" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "TREEHOUSE_POOL_REPORT" "bootstrap printed a pool report without its flag"
@@ -1889,6 +1905,14 @@ JSON
   out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $root/project-leftover" "the same fixture did not report once the flag exists"
+  assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $home_root/project-leftover" "the home pool did not report once the flag exists"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$case_dir/no-pools" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $home_root/project-leftover" "a missing legacy pool hid the home pool"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$home_root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_equals 1 "$(printf '%s\n' "$out" | grep -cF "TREEHOUSE_POOL_REPORT: test-leftover pool $home_root/project-leftover")" \
+    "the same current and legacy pool was reported twice"
   pass "bootstrap reads and reports Treehouse pools only when config/treehouse-pool-report exists"
 }
 
