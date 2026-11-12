@@ -157,8 +157,9 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
-Decision presentation uses question, the full title and hold reason; summary
-  also retains that text unless bounded to make room for a deferral note.
+Decision presentation uses question, the full title and hold reason; local rows
+  also retain that text in summary unless bounded to make room for a deferral
+  note; secondmate rows keep the bounded text their home summary carried.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
