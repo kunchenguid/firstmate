@@ -74,6 +74,12 @@
 #       There is no bash fallback, because a monitor-mode
 #       watchdog cannot replace the caller.
 #
+#   fm_exec_timed_mechanism
+#       Prints what fm_exec_timed would bound a command with on this PATH:
+#       "perl", else the path of a GNU coreutils timeout or gtimeout. Returns
+#       1 and prints nothing when fm_exec_timed would refuse. Readiness checks
+#       ask this rather than probing for the tools themselves.
+#
 #   fm_timed_out <status>
 #       0 iff <status> is how fm_run_timed or fm_exec_timed reports the bound.
 #
@@ -334,8 +340,27 @@ fm_timed_out() {  # <status>
 # waitpid(WNOHANG) against wall-clock deadlines rather than using alarm+die,
 # which keeps the bound off perl's platform-dependent syscall-restart signal
 # semantics and off the drift of counting sleep intervals.
+fm_exec_timed_mechanism() {
+  local name timeout_path
+  if command -v perl >/dev/null 2>&1; then
+    printf 'perl\n'
+    return 0
+  fi
+  for name in timeout gtimeout; do
+    timeout_path=$(type -P "$name" 2>/dev/null) || continue
+    [ -x "$timeout_path" ] || continue
+    case "$("$timeout_path" --version 2>/dev/null)" in
+      *'GNU coreutils'*)
+        printf '%s\n' "$timeout_path"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
-  local seconds=${1:-} grace=${2:-} value owner timeout_path name
+  local seconds=${1:-} grace=${2:-} value owner mechanism timeout_path
   local refusal='none of perl, timeout, or gtimeout is available'
   for value in "$seconds" "$grace"; do
     case "$value" in
@@ -352,7 +377,8 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
   unset FM_EXEC_TIMED_OWNER_PID
-  if command -v perl >/dev/null 2>&1; then
+  mechanism=$(fm_exec_timed_mechanism) || mechanism=
+  if [ "$mechanism" = perl ]; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
       my ($bound, $grace, $owner, $shell_parent) = (shift, shift, shift, shift);
       # exec preserves the shell PID, including in Bash 3.2 subshells where
@@ -405,15 +431,11 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
         select undef, undef, undef, 0.05;
       }
     ' -- "$seconds" "$grace" "$owner" "$PPID" "$@"
-  fi
-  for name in timeout gtimeout; do
-    timeout_path=$(type -P "$name" 2>/dev/null) || continue
-    [ -x "$timeout_path" ] || continue
-    case "$("$timeout_path" --version 2>/dev/null)" in
-      *'GNU coreutils'*) exec "$timeout_path" -k "$grace" "$seconds" "$@" ;;
-    esac
+  elif [ -n "$mechanism" ]; then
+    exec "$mechanism" -k "$grace" "$seconds" "$@"
+  elif timeout_path=$(fm_external_timeout_path); then
     refusal="perl is unavailable and $timeout_path is not GNU coreutils"
-  done
+  fi
   printf 'fm_exec_timed: cannot bound %s within %ss: %s\n' "${1##*/}" "$seconds" "$refusal" >&2
   exit 127
 }

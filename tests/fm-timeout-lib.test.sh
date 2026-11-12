@@ -415,15 +415,52 @@ SH
   [ ! -e "$dir/ran" ] || fail 'the command ran with only non-GNU timeout available'
   for name in gtimeout timeout; do
     printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "timeout (GNU coreutils) 9.7"; exit 0; fi\nprintf "%%s\\n" "$@" > "%s"\nexit 7\n' \
-      "$dir/argv" > "$fb/$name"
+      "$dir/argv-$name" > "$fb/$name"
     chmod +x "$fb/$name"
+    rm -f "$dir"/argv-*
     rc=0
     exec_timed "$fb" 5 2 bash -c 'exit 0' || rc=$?
     [ "$rc" -eq 7 ] || fail "GNU $name was not selected (rc=$rc)"
-    [ "$(cat "$dir/argv")" = $'-k\n2\n5\nbash\n-c\nexit 0' ] \
+    [ "$(cat "$dir/argv-$name" 2>/dev/null)" = $'-k\n2\n5\nbash\n-c\nexit 0' ] \
       || fail "GNU $name did not receive the grace, bound, and command unchanged"
   done
+  [ ! -e "$dir/argv-gtimeout" ] || fail 'gtimeout ran although a GNU timeout precedes it'
   pass 'fm_exec_timed refuses non-GNU timeout and selects GNU timeout or gtimeout without Perl'
+}
+
+attended_unready() {  # <path> <home>: print why the attended host is unready
+  (
+    . "$ROOT/bin/fm-supervision-engine-lib.sh"
+    PATH=$1
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$2/engine" fm_supervision_host_attended_ready "$2/config" claude >/dev/null 2>&1
+    printf '%s\n' "$FM_SUPERVISION_HOST_UNREADY"
+  )
+}
+
+test_attended_readiness_requires_what_exec_timed_accepts() {
+  local dir fb tool why
+  dir="$TMP_ROOT/attended-ready"
+  fb="$dir/bin"
+  mkdir -p "$fb" "$dir/config"
+  printf 'claude\n' > "$dir/config/supervision-host"
+  for tool in bash dirname; do
+    ln -s "$(command -v "$tool")" "$fb/$tool"
+  done
+  for tool in "$fb/node" "$fb/jq" "$dir/engine"; do
+    printf '#!/bin/sh\nexit 0\n' > "$tool"
+    chmod +x "$tool"
+  done
+  printf '#!/bin/sh\necho "timeout (uutils coreutils) 0.12.0"\n' > "$fb/timeout"
+  chmod +x "$fb/timeout"
+  why=$(attended_unready "$fb" "$dir")
+  assert_contains "$why" 'can bound the engine turn' 'a host with only non-GNU timeout was not reported unready for the turn bound'
+  printf '#!/bin/sh\necho "timeout (GNU coreutils) 9.7"\n' > "$fb/gtimeout"
+  chmod +x "$fb/gtimeout"
+  why=$(attended_unready "$fb" "$dir")
+  case "$why" in
+    *'can bound the engine turn'*) fail "GNU gtimeout did not satisfy the turn bound: $why" ;;
+  esac
+  pass 'the attended host is unready without Perl or GNU timeout, exactly where fm_exec_timed refuses'
 }
 
 external_timeout_bin() {  # <name>
@@ -480,7 +517,7 @@ external_timeout_caller() {  # <caller> <path> <home> <script> [args...]
 }
 
 test_external_timeout_callers_preserve_status_and_kill_the_group() {
-  local name fb caller dir rc pid
+  local name fb caller dir rc pid i
   for name in timeout gtimeout; do
     fb=$(external_timeout_bin "$name") || { echo 'skip: no external timeout installed'; return; }
     "$fb/$name" --version
@@ -518,10 +555,15 @@ SH
       [ "$rc" -eq 124 ] || fail "$caller/$name did not report the deadline (rc=$rc)"
       [ ! -s "$dir/out" ] || fail "$caller/$name ran past the deadline"
       for pid in "$(cat "$dir/parent")" "$(cat "$dir/child")"; do
-        case "$(ps -o stat= -p "$pid" 2>/dev/null)" in
-          ''|*Z*) ;;
-          *) kill -KILL "$pid" 2>/dev/null || true; fail "$caller/$name left process $pid alive" ;;
-        esac
+        i=0
+        while :; do
+          case "$(ps -o stat= -p "$pid" 2>/dev/null)" in
+            ''|*Z*) break ;;
+          esac
+          i=$((i + 1))
+          [ "$i" -lt 250 ] || { kill -KILL "$pid" 2>/dev/null || true; fail "$caller/$name left process $pid alive"; }
+          sleep 0.02
+        done
       done
       pass "$caller preserves status and output and times out its process group through $name"
     done
@@ -1170,6 +1212,7 @@ test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
 test_exec_timed_requires_gnu_timeout_without_perl
+test_attended_readiness_requires_what_exec_timed_accepts
 test_external_timeout_kills_a_term_ignoring_command_after_the_grace
 test_external_timeout_callers_preserve_status_and_kill_the_group
 test_external_timeout_reaps_a_term_ignoring_descendant

@@ -143,7 +143,7 @@ EOF
 
 # fm_supervision_host_attended_ready <config-dir> <primary-harness>
 # 0 when the attended host's configured engine, executable, node, jq, turn
-# bound (perl, timeout, or gtimeout), and primary's mirror writer are ready;
+# bound (perl, or GNU coreutils timeout or gtimeout), and primary's mirror writer are ready;
 # otherwise 1, with FM_SUPERVISION_HOST_UNREADY naming why. The host's
 # attended acceptor runs it on every attended close; the mirror's contents are
 # checked later, by the feed that renders the wake.
@@ -159,9 +159,8 @@ fm_supervision_host_attended_ready() {
     FM_SUPERVISION_HOST_UNREADY="node is missing"
   elif ! command -v jq >/dev/null 2>&1; then
     FM_SUPERVISION_HOST_UNREADY="jq is missing"
-  elif ! command -v perl >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1 \
-    && ! command -v gtimeout >/dev/null 2>&1; then
-    FM_SUPERVISION_HOST_UNREADY="none of perl, timeout, or gtimeout can bound the engine turn"
+  elif ! ( . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh" && fm_exec_timed_mechanism ) >/dev/null 2>&1; then
+    FM_SUPERVISION_HOST_UNREADY="neither perl nor a GNU coreutils timeout or gtimeout can bound the engine turn"
   elif ! "$(dirname "${BASH_SOURCE[0]}")/fm-host-mirror.sh" verified "$2"; then
     FM_SUPERVISION_HOST_UNREADY="no verified dialog mirror for $2"
   fi
