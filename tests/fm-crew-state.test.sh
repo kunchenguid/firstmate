@@ -1583,8 +1583,26 @@ test_terminal_passed_with_override() {
   assert_contains "$out" "source: run-step" "passed-with-override -> run-step source"
   assert_contains "$out" "run passed: PR merged" "passed-with-override run reports merged only after the PR record says merged"
   assert_not_contains "$out" "state: unknown" "passed-with-override must not fall through to unknown"
+  assert_contains "$out" "(passed with approved exception - ci: live checks not all passed: Lint (fail))" "passed-with-override keeps the approved CI exception and its recorded reason visible, unlike a clean pass"
   assert_not_contains "$out" "outcome: passed-with-override" "passed-with-override must not surface as a raw unmapped outcome detail"
-  pass "terminal passed-with-override run reads done like a clean pass"
+
+  # A real Test override reason is multi-line, encoded in the TOON value with
+  # literal \n escapes (no-mistakes v1.106.1 run records); only its first line
+  # is shown so the crew-state answer stays one line.
+  local test_reason='  test_override_reason: "live validation verdict: inconclusive\nTest exception approved: no operator reason supplied"'
+  FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/feat-override | grep -v '^ci_override_reason:')
+$test_reason"
+  out=$(run_crew_state "$d" feat-override)
+  assert_contains "$out" "state: done" "Test-override run -> done"
+  assert_contains "$out" "(passed with approved exception - test: live validation verdict: inconclusive)" "passed-with-override surfaces the first line of a recorded Test override reason"
+  assert_not_contains "$out" "Test exception approved" "a multi-line override reason must not spill past its first line"
+  assert_equals 1 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "the override detail keeps crew-state to one line"
+
+  FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/feat-override | grep -v '^ci_override_reason:')"
+  out=$(run_crew_state "$d" feat-override)
+  assert_contains "$out" "state: done" "reasonless override run -> done"
+  assert_contains "$out" "(passed with approved exception)" "passed-with-override with no recorded reason still reads qualified, not clean"
+  pass "terminal passed-with-override run reads done with the approved exception kept visible"
 }
 
 test_terminal_passed_with_skips() {
