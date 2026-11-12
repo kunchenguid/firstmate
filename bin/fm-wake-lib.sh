@@ -264,12 +264,20 @@ fm_watch_beacon_tick() {
 }
 
 # fm_watch_beacon_progress
-# The call a sweep inside a supervision cycle makes: it refreshes whatever
-# beacon the owning watcher exported, and does nothing outside a watcher, so a
-# library that also runs under a test or a one-shot command never invents
-# liveness evidence of its own.
+# The call a sweep inside a supervision cycle makes: when invoked by the owning
+# watcher process itself, it refreshes the liveness beacon ($BEAT). When invoked
+# by a child subprocess (e.g. a display sweep or helper command), it updates a
+# separate progress marker ($FM_WATCH_PROGRESS_PATH) instead of the beacon, so a
+# frozen watcher parent (e.g. SIGSTOP) never has its beacon kept fresh by child
+# activity. Outside a watcher, it does nothing so no library invents liveness.
 fm_watch_beacon_progress() {
   [ -n "${FM_WATCH_BEACON_PATH:-}" ] || return 0
+  if [ -n "${FM_WATCHER_PID:-}" ] && [ "$$" != "$FM_WATCHER_PID" ]; then
+    if [ -n "${FM_WATCH_PROGRESS_PATH:-}" ]; then
+      fm_watch_beacon_tick "$FM_WATCH_PROGRESS_PATH"
+    fi
+    return 0
+  fi
   fm_watch_beacon_tick "$FM_WATCH_BEACON_PATH"
 }
 

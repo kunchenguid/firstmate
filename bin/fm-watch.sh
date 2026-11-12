@@ -3496,6 +3496,27 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
   watcher_waited fm_backend_capture "$@"
 }
 
+# watcher_wait_child_progress <pid>
+# Wait for a child sweep process while advancing the watcher liveness beacon
+# ($BEAT) as the child reports progress. Child subprocesses update
+# $PROGRESS_MARKER instead of touching $BEAT directly, so a frozen watcher parent
+# (e.g. SIGSTOP) cannot execute this loop and stops refreshing $BEAT.
+watcher_wait_child_progress() {
+  local pid=$1 last_seen=0 current
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ -e "$PROGRESS_MARKER" ]; then
+      current=$(fm_path_mtime "$PROGRESS_MARKER" 2>/dev/null || true)
+      if [ -n "$current" ] && [ "$current" != "$last_seen" ]; then
+        last_seen=$current
+        fm_watch_beacon_tick "$BEAT"
+      fi
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  wait "$pid" 2>/dev/null || true
+  fm_watch_beacon_tick "$BEAT"
+}
+
 # The event wait's scratch directory, given to it as TMPDIR. A stop kills the
 # wait before its own cleanup removes its reader FIFO, so the watcher owns the
 # directory and removes it after each wait and in watcher_cleanup.
@@ -3767,11 +3788,17 @@ BEAT="$STATE/.last-watcher-beat"
 # long cycle (below). A test or observer that wants to count completed poll
 # cycles waits on this, never on the beacon.
 CYCLE_MARK="$STATE/.watch-cycle"
+# Child sweep progress marker: child subprocesses update this rather than BEAT
+# directly, so a frozen watcher parent (e.g. SIGSTOP) stops refreshing the
+# beacon regardless of child activity.
+PROGRESS_MARKER="$STATE/.last-watcher-progress"
 # Sweeps inside a cycle refresh this same beacon between units
 # (fm_watch_beacon_progress); exporting it is what tells those libraries a live
 # watcher owns them, so the same code stays inert in a one-shot command.
 FM_WATCH_BEACON_PATH=$BEAT
-export FM_WATCH_BEACON_PATH
+FM_WATCH_PROGRESS_PATH=$PROGRESS_MARKER
+FM_WATCHER_PID=$$
+export FM_WATCH_BEACON_PATH FM_WATCH_PROGRESS_PATH FM_WATCHER_PID
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
@@ -4149,14 +4176,24 @@ while :; do
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
-  [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
+  if [ -e "$CONFIG/herdr-project-groups" ]; then
+    fm_watch_beacon_progress
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync >/dev/null 2>&1 &
+    FM_ACTIVE_CHECK_PID=$!
+    watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
+    FM_ACTIVE_CHECK_PID=
+  fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
   # "Attention marks"): display and desktop notification only, never a wake.
   # Off (no config file and no cached record) costs two file tests and a glob.
   if [ -e "$CONFIG/rex-status-marks" ] || [ -e "$CONFIG/rex-tint" ] \
     || compgen -G "$STATE/.rex-mark-*" >/dev/null || compgen -G "$STATE/.rex-progress-*" >/dev/null \
     || compgen -G "$STATE/.rex-tint-*" >/dev/null; then
-    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 || true
+    fm_watch_beacon_progress
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 &
+    FM_ACTIVE_CHECK_PID=$!
+    watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
+    FM_ACTIVE_CHECK_PID=
   fi
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
