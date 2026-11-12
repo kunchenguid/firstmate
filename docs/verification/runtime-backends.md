@@ -3787,10 +3787,11 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 - A spawn with a real harness rather than the stand-in.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
+
 ## Treehouse worktree pools
 
-Treehouse is the worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `paseo`, `rex`, `t3code`, `tern`).
-Verified on 2026-09-19 with treehouse v2.3.0 on macOS.
+[`configuration.md`](../configuration.md#treehouse-worktree-pools) owns current pool placement and legacy-pool handling; [`bin/fm-spawn.sh`](../../bin/fm-spawn.sh) owns backend-specific acquisition mechanics.
+The following provider observations were recorded on 2026-09-19 with treehouse v2.3.0 on macOS.
 
 Treehouse keys a pool by the repository's resolved origin, not by the clone, so separate clones of one repository share one pool under one root.
 Two clones of one origin, each acquiring under the same root, land in the same pool directory, and a slot returned by one clone is handed to the other while its checkout is still a linked worktree of the first:
@@ -3822,7 +3823,7 @@ wait
 # gitdir: .../home-b/projects/proj/.git/worktrees/proj
 ```
 
-`bin/fm-spawn.sh` does not lease; it sends the interactive form into the worker's shell, and that form honors the same flag:
+The interactive acquisition form also honors the same flag:
 
 ```sh
 (cd home-a/projects/proj && printf 'pwd -P\nexit\n' | treehouse --root "$ROOT_A" get)
@@ -3837,8 +3838,8 @@ A return resolves its pool from the worktree path it is given, which is what lea
 ```
 
 The global `--root` flag is the capability this rests on, and it is a floor rather than a preference: `treehouse --help` on v2.0.1 lists only `--help` and `--version`, so acquisition on that build cannot be separated per home at all.
-`bin/fm-bootstrap.sh` probes the capability instead of a version and reports `OUTDATED: treehouse` when either it or the durable lease is absent; `bin/fm-install-treehouse.sh` owns the exact CI pin.
+[`bin/fm-bootstrap.sh`](../../bin/fm-bootstrap.sh) owns capability probing and its diagnostics; [`bin/fm-install-treehouse.sh`](../../bin/fm-install-treehouse.sh) owns the exact CI pin.
 
-`bin/fm-wake-lib.sh`'s `fm_treehouse_home_root` owns the root derivation and the reason only acquisition carries it.
+`bin/fm-wake-lib.sh`'s `fm_treehouse_home_root` owns root derivation and command scoping.
 `tests/fm-treehouse-pool-isolation-live-e2e.test.sh` is the guard that refreshes this record; it accepts either the historical foreign-slot collision or a vendor that relinks the returned slot to the acquirer, and always requires per-home roots to acquire without contention.
 `tests/fm-treehouse-home-root.test.sh` pins the firstmate half - the derivation, the real spawn's acquisition command, and the real seed's lease - with no provider installed; `tests/fm-bootstrap.test.sh` owns the bootstrap capability gate alongside every other tool gate.

@@ -1897,15 +1897,18 @@ fm_local_firstmate_state_dirs() {  # <first-state>
 # get` allocates below <root>/.treehouse, so homes that pass different roots
 # never see each other's slots.
 #
-# The root is a pure function of the home's own resolved path, so every process
-# that knows the home derives the identical root however that home was spelled on
-# the way in. It is deliberately NOT derived from a marker inside the home, such
-# as .fm-secondmate-home: a marker can be rewritten or restored, and a root that
-# moves orphans the pool it already allocated. The base is the parent of the
-# local root Firstmate home, so every local home derives its pool outside the
-# homes while retaining one stable machine-local base.
+# The home identity comes from its resolved path, not the mutable secondmate id
+# in .fm-secondmate-home, so alternate spellings of one home use one namespace.
+# The base is the parent of the local root Firstmate home, resolved through
+# fm_firstmate_root_home's parent-binding walk above. Pool placement therefore
+# also depends on that local parent chain; changing it can change the base.
 #
-# Only `get` takes this. `treehouse return <path>` resolves the pool from the
+# Acquisition uses `treehouse --root <root> get`, with --lease for a durable
+# lease. Inspect from the project clone with `treehouse --root <root> status`;
+# `prune` and `destroy` also need the intended root. For an existing worktree,
+# select the root containing its recorded path, which may be a legacy root,
+# rather than assuming the current home-derived root contains it.
+# `treehouse return <path>` resolves the pool from the
 # path it is handed, so every worktree leased under a previously shared root
 # stays returnable and nothing has to be migrated;
 # tests/fm-treehouse-pool-isolation-live-e2e.test.sh pins both halves against the

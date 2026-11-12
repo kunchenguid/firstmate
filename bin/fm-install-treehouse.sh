@@ -9,16 +9,14 @@
 # Usage:
 #   fm-install-treehouse.sh <destination-directory>
 #
-# Pins Treehouse v2.3.0, the version exercised by the local real-Herdr suite.
-# The floor is a capability, not a preference: firstmate gives every home its own
-# worktree root through the global `--root` flag (bin/fm-wake-lib.sh's
-# fm_treehouse_home_root), and v2.0.1 has no such flag, so every spawn in this
-# lane would fail to acquire a worktree on the older pin.
+# FM_TREEHOUSE_CI_VERSION below owns the pin. The build must support the
+# capabilities checked by bin/fm-bootstrap.sh, including the global --root
+# flag used for per-home pool isolation (bin/fm-wake-lib.sh).
 set -eu
 
 FM_TREEHOUSE_CI_VERSION=2.3.0
 FM_TREEHOUSE_CI_TAG="v${FM_TREEHOUSE_CI_VERSION}"
-# Bounded download ceiling (bytes). Official 2.3.0 archives are under 8 MiB.
+# Bounded download ceiling (bytes).
 FM_TREEHOUSE_CI_MAX_BYTES=15000000
 FM_TREEHOUSE_CI_REPO=kunchenguid/treehouse
 
@@ -72,7 +70,7 @@ fi
 [ "$ACTUAL_SHA256" = "$SHA256" ] || die "checksum mismatch for $ARCHIVE (expected $SHA256, got $ACTUAL_SHA256)"
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
-# Archive layout: a single `treehouse` binary at the archive root (verified for v2.3.0).
+# Prefer the archive-root binary, then accept the versioned-directory layout.
 if [ -f "$TMP/treehouse" ]; then
   BIN="$TMP/treehouse"
 elif [ -f "$TMP/treehouse-v${FM_TREEHOUSE_CI_VERSION}/treehouse" ]; then
@@ -86,7 +84,7 @@ mkdir -p "$DESTINATION"
 install -m 0755 "$BIN" "$DESTINATION/treehouse"
 
 installed_version=$("$DESTINATION/treehouse" --version 2>/dev/null | tr -d '[:space:]')
-# treehouse prints "v2.3.0" (leading v) on --version.
+# Accept the pin with or without the leading v printed by --version.
 case "$installed_version" in
   "v${FM_TREEHOUSE_CI_VERSION}"|"${FM_TREEHOUSE_CI_VERSION}") ;;
   *)
