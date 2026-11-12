@@ -109,6 +109,14 @@ fm_native_grant_check() {  # <file> <task-id> <harness> <pane> <ledger>
     FM_NATIVE_GRANT_ERROR="grant '$file' is not exactly one flat JSON object"
     return 1
   fi
+  # A plain parse keeps only the last copy of a repeated key, so an earlier
+  # nested copy would hide from the flat-object check above; the stream sees
+  # every copy, and any event below the top level means a nested value.
+  if ! jq -ne --stream '[inputs | select((.[0] | length) > 1)] | length == 0' \
+      <<<"$snap" >/dev/null 2>&1; then
+    FM_NATIVE_GRANT_ERROR="grant '$file' is not exactly one flat JSON object"
+    return 1
+  fi
   # Every top-level key occurrence, in file order and JSON-encoded, so a
   # repeated key (which a plain parse silently collapses to its last value) is
   # counted twice and no key text is ever word-split or globbed.
