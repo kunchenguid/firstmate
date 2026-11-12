@@ -623,6 +623,11 @@ fm_backend_target_of_meta() {  # <meta-file>
 # valid only when their window name itself is exactly fm-<task-id>.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# --allow-unrecorded-worktree is bin/fm-teardown.sh's records-only opt-in: a
+# record that names NO worktree - no worktree= line, or exactly one empty one -
+# then validates, except for Orca, whose removal is keyed on its own worktree
+# identity. Two or more worktree= lines stay ambiguous and refuse under the
+# opt-in too. Every other caller omits it and keeps the unconditional refusal.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -700,8 +705,8 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
   echo "A pool slot handed on to another task since is still safe to name: cleanup reads that slot's own .fm-slot-owner claim and then leaves the slot untouched, while a slot with no claim is proved only by that worktree listing."
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [--allow-unrecorded-worktree]
+  local meta=$1 id=$2 allow_unrecorded_worktree=${3:-} backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
@@ -717,11 +722,15 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
-  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
-    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
-    fm_backend_worktree_identity_repair_hint "$meta" >&2
-    return 1
-  }
+  if ! worktree=$(fm_backend_meta_exact_value "$meta" worktree); then
+    worktree=
+    if [ "$allow_unrecorded_worktree" != --allow-unrecorded-worktree ] \
+       || [ "$(grep -c '^worktree=' "$meta" 2>/dev/null || true)" -gt 1 ]; then
+      echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
+      fm_backend_worktree_identity_repair_hint "$meta" >&2
+      return 1
+    fi
+  fi
   project=$(fm_backend_meta_exact_value "$meta" project) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous project identity; preserving task state." >&2
     return 1
@@ -738,6 +747,10 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   esac
   if [ -z "$backend" ] || ! fm_backend_is_known "$backend"; then
     echo "REFUSED: task $id has a missing, ambiguous, or unknown backend identity; preserving task state." >&2
+    return 1
+  fi
+  if [ -z "$worktree" ] && [ "$backend" = orca ]; then
+    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1
   fi
   binding_count=$(grep -c '^endpoint_task_id=' "$meta" 2>/dev/null || true)
