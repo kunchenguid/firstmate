@@ -164,6 +164,145 @@ EOF
   pass "unacknowledged recovery is announced at most once per generation and the successor stays alive"
 }
 
+# T4/T5: exercise the publication/recovery boundary through the real Pi host,
+# arm and watcher. A captured result stays unhandled throughout repeated
+# reconciles, including simultaneous publishers; an idle source is the
+# empty-queue control. Only a genuinely new result may wake the successor.
+run_repeated_rearm_case() {
+  local mode=$1 dir repo home claims fakebin out status
+  dir=$(make_case "repeated-rearm-$mode")
+  repo="$dir/root"
+  home="$dir/home"
+  claims="$home/procevent-claims"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/state" "$home/config"
+  fm_test_track_watcher_state "$home/state"
+  fm_test_track_procevent_home "$home" "$claims"
+  install_pi_watch_extension_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+export FM_ROOT_OVERRIDE="$ROOT"
+export PATH="$fakebin:\$PATH"
+exec "$ROOT/bin/fm-watch-arm.sh" "\$@"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  cat > "$dir/idle-source.sh" <<'SH'
+#!/usr/bin/env bash
+while [ "$SECONDS" -lt 180 ]; do sleep 0.1; done
+exit 1
+SH
+  chmod +x "$dir/idle-source.sh"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_PROCEVENT_CLAIM_ROOT="$claims" \
+    "$ROOT/bin/fm-procevent.sh" register lavish idle -- "$dir/idle-source.sh" \
+    >/dev/null || fail "could not register idle source"
+  out=$(
+    TEST_MODE="$mode" PRODUCTION_ROOT="$ROOT" \
+      PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STATE_OVERRIDE="$home/state" \
+      FM_PROCEVENT_CLAIM_ROOT="$claims" \
+      PATH="$fakebin:$PATH" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
+const exec = promisify(execFile);
+const state = process.env.FM_STATE_OVERRIDE;
+const root = process.env.PRODUCTION_ROOT;
+const captured = process.env.TEST_MODE === "captured";
+const prompts = [];
+let tool;
+const pi = {
+  on() {}, registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  async sendUserMessage(message) { prompts.push(String(message)); },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const read = (name) => existsSync(`${state}/${name}`) ? readFileSync(`${state}/${name}`, "utf8").trim() : "";
+const rows = () => read(".wake-queue").split("\n").filter(Boolean).map((row) => row.split("\t"));
+const deliveries = () => prompts.filter((message) => message.includes("FIRSTMATE WATCHER WAKE:"));
+async function waitFor(predicate, description) {
+  for (let i = 0; i < 200; i++) {
+    if (predicate()) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out: ${description}; prompts=${prompts.join(" || ")}; marker=${read(".watcher-down")}`);
+}
+async function command(script, ...args) {
+  return exec("bash", [`${root}/bin/${script}`, ...args], { env: { ...process.env, FM_ROOT_OVERRIDE: root } });
+}
+function capture(seq) {
+  mkdirSync(`${state}/procevent-inbox`, { recursive: true });
+  writeFileSync(`${state}/procevent-inbox/review.${seq}.result`, "session:\n  status: feedback\nprompts[1]{tag,prompt}:\n  feedback,repair\n", { mode: 0o600 });
+  writeFileSync(`${state}/procevent-inbox/review.${seq}.adapter`, "lavish\n", { mode: 0o600 });
+}
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+try {
+  const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+  mod.default(pi);
+  if (!tool) throw new Error("Pi watch tool was not registered");
+  if (captured) capture(1);
+  await Promise.all([command("fm-procevent.sh", "reconcile"), command("fm-procevent.sh", "reconcile")]);
+  if (!captured) writeFileSync(`${state}/.watcher-down`, "pending:downtime:empty.1.fixture\n", { mode: 0o600 });
+  await tool.execute("initial-arm", {}, undefined, undefined, {});
+  await waitFor(() => deliveries().length >= 1 && read(".watcher-down").startsWith("announced:handling:"), "first delivery and handling successor");
+  const successor = read(".watch.lock/pid");
+  const beat = statSync(`${state}/.last-watcher-beat`).mtimeMs;
+  for (let cycle = 0; cycle < 4; cycle++) {
+    // Two publishers enter the real source/queue serialization together.
+    await Promise.all([command("fm-procevent.sh", "reconcile"), command("fm-procevent.sh", "reconcile")]);
+    await tool.execute(`rearm-${cycle}`, {}, undefined, undefined, {});
+    await sleep(1200);
+    if (deliveries().length !== 1) throw new Error(`recovery flood for one unresolved result: ${deliveries().length} announcements`);
+    if (rows().length !== (captured ? 1 : 0)) throw new Error(`duplicate queued result: ${JSON.stringify(rows())}`);
+    if (captured && existsSync(`${state}/procevent-inbox/review.1.handled`)) throw new Error("publication acknowledged the result");
+  }
+  if (read(".watch.lock/pid") !== successor) throw new Error("quiet handling successor was replaced");
+  process.kill(Number(successor), 0);
+  if (statSync(`${state}/.last-watcher-beat`).mtimeMs <= beat) throw new Error("successor beacon did not advance");
+  if (captured && rows()[0][3] !== "procevent:review:1") throw new Error("result identity was lost");
+  const sources = await command("fm-procevent.sh", "list");
+  if (!/^idle\s+lavish\s+live\s+0$/m.test(sources.stdout)) throw new Error(`idle long-poll source was not live: ${sources.stdout}`);
+  console.log(`REPEATED_REARM_${process.env.TEST_MODE}: announcements=1 rows=${rows().length} cycles=4 concurrent-publishers=2 beacon=advanced`);
+
+  // New logical work must reopen recovery even while the first is unhandled.
+  capture(2);
+  await command("fm-procevent.sh", "reconcile");
+  await waitFor(() => deliveries().length >= 2 && read(".watcher-down").startsWith("announced:handling:"), "distinct result delivery");
+  if (deliveries().length !== 2 || !rows().some((row) => row[3] === "procevent:review:2")) throw new Error("distinct result was swallowed");
+  if (captured) await command("fm-procevent.sh", "handled", "review", "1");
+  await command("fm-procevent.sh", "handled", "review", "2");
+  const drain = await command("fm-wake-drain.sh");
+  const ack = drain.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`drain did not offer acknowledgement: ${drain.stderr}`);
+  await command("fm-wake-drain.sh", "--ack-through", ack[1], "--recovery-generation", ack[2]);
+  if (rows().length || !read(".watcher-down").startsWith("acked:")) throw new Error("handling and row acknowledgement did not settle recovery");
+  await command("fm-procevent.sh", "reconcile");
+  if (rows().length) throw new Error("handled result was republished");
+  console.log(`REPEATED_REARM_${process.env.TEST_MODE}: distinct-result=delivered marker=acked queue=empty`);
+  process.exit(0);
+} catch (error) {
+  console.error(error);
+  process.exit(1);
+}
+EOF
+  )
+  status=$?
+  [ "${FM_TEST_EVIDENCE:-0}" != 1 ] || printf '%s\n' "$out"
+  expect_code 0 "$status" "repeated reconcile/re-arm ($mode): $out"
+  pass "repeated reconcile/re-arm ($mode) announces once, delivers new work and settles after acknowledgement"
+}
+
+test_repeated_rearm_with_no_new_actionable_result_announces_once() {
+  run_repeated_rearm_case captured
+}
+
+test_repeated_rearm_with_empty_queue_announces_once() {
+  run_repeated_rearm_case empty
+}
+
 # T2: a handling successor must enter its poll loop and surface a real crew
 # event within a bounded startup-and-poll budget instead of sitting in a
 # pre-loop wait that refreshes the liveness beacon and then exits with a
@@ -305,6 +444,8 @@ test_handling_successor_resurfaces_a_row_appended_during_startup() {
   pass "a handling successor resurfaces a row appended during startup"
 }
 
+test_repeated_rearm_with_no_new_actionable_result_announces_once
+test_repeated_rearm_with_empty_queue_announces_once
 test_handling_successor_does_not_go_blind
 test_handling_successor_resurfaces_a_row_appended_during_startup
 test_unacknowledged_recovery_is_announced_once_per_generation
