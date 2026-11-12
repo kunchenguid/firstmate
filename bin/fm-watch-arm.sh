@@ -155,7 +155,6 @@ fi
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
 # remains authoritative for an opted-in home.
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 fm_watch_settings_load
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
