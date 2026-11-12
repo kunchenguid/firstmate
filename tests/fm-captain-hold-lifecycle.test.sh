@@ -4415,8 +4415,7 @@ test_complete_refuses_an_entry_held_for_another_origin() {
 # already-held task again with the second origin only adds that origin to the
 # same call: the captain's reason, deferral date, hold-set stamp, and parent
 # decision stay as the first hold recorded them, both reviews complete and
-# verify against one decision, and an origin never added is still refused. The
-# refusal offers to add the origin only while the call is still actively held.
+# verify against one decision, and an origin never added is still refused.
 test_one_active_hold_serves_several_origins() {
   local home parent channel o id=sample-shared-call shown stamp parent_before reason_before
   home=$(make_home shared-origin)
@@ -4449,8 +4448,8 @@ test_one_active_hold_serves_several_origins() {
   if run_captain "$home" complete review-b "$id" > "$home/active.out" 2> "$home/active.err"; then
     fail "complete accepted the active call for a review never added"
   fi
-  assert_grep "was held for origin review-a, not review-b; hold a task for review-b, add review-b to this open call with hold --origin, or list the right one" \
-    "$home/active.err" "the active-hold refusal does not offer to add the origin"
+  assert_grep "was held for origin review-a, not review-b; hold a task for review-b or list the right one" \
+    "$home/active.err" "the active-hold refusal does not name the recorded origin"
 
   FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
     --reason "different words from B" --until 2099-06-01 --origin review-b >/dev/null \
@@ -4487,10 +4486,8 @@ test_one_active_hold_serves_several_origins() {
   if run_captain "$home" complete review-c "$id" > "$home/closed.out" 2> "$home/closed.err"; then
     fail "complete accepted the answered call for an origin never added"
   fi
-  assert_grep "was held for origins review-a, review-b, not review-c; hold a task for review-c, or list the right one" \
-    "$home/closed.err" "the closed-call refusal does not keep the plain wording"
-  assert_no_grep "add review-c to this open call" "$home/closed.err" \
-    "the closed-call refusal offers to add an origin to a call that is no longer open"
+  assert_grep "was held for origins review-a, review-b, not review-c" "$home/closed.err" \
+    "the answered-call refusal does not name every recorded origin"
   pass "one active captain hold serves several origins without changing or duplicating the call"
 }
 
@@ -4545,6 +4542,67 @@ test_same_origin_rehold_retries_and_updates_a_shared_call() {
   pass "a same-origin re-hold retries publication and updates the call while keeping its other origins"
 }
 
+# An answer whose close fails leaves the call open with its resolution record
+# between the hold-set stamp and the origins it already records. A second
+# review that shares the call then adds its origin beside those origins, so
+# both reviews still verify before and after the answer is retried.
+test_origin_added_after_an_interrupted_answer_keeps_the_others() {
+  local home o id=sample-interrupted-shared-call shown
+  home=$(make_home interrupted-answer-shared-origin)
+  for o in review-a review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold "$id" --title "Publish the interrupted change" \
+    --reason "captain must decide for A" --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the call for the first review"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the first review could not complete against its call"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ -f "$FM_HOME/fail-close" ]; then
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/fail-close"
+  printf 'Publish it.\n' > "$home/answer.txt"
+  if run_captain "$home" answer "$id" --decision-file "$home/answer.txt" \
+    > "$home/answer.out" 2> "$home/answer.err"; then
+    fail "the forced answer close failure reported success"
+  fi
+  rm "$home/fail-close"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "the interrupted answer released the call"
+  assert_contains "$shown" 'Resolution recorded by fm-captain-hold.' "the interrupted answer left no resolution record"
+  assert_contains "$shown" 'Captain hold origin: review-a' "the interrupted answer dropped the first origin"
+
+  run_captain "$home" hold "$id" --reason "words from B" --origin review-b >/dev/null \
+    || fail "could not add the second review to the interrupted call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  for o in review-a review-b; do
+    assert_equals 1 "$(printf '%s\n' "$shown" | grep -o "Captain hold origin: $o" | wc -l | tr -d ' ')" \
+      "adding the second review did not keep exactly one $o origin"
+  done
+  run_captain "$home" complete review-b "$id" >/dev/null \
+    || fail "the second review could not complete against the interrupted call"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null \
+      || fail "adding the second review after the interrupted answer broke verification for $o"
+  done
+
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not finish the interrupted answer"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null || fail "the finished answer no longer verifies $o"
+  done
+  pass "an origin added after an interrupted answer keeps the origins the call records"
+}
+
 # A deferral whose --until date has passed is still the captain's open call:
 # tasks-axi reports it as not held, but it keeps its captain annotations. A
 # second review that finds it shares it as it would share a held call, and a
@@ -4581,8 +4639,8 @@ test_expired_deferral_serves_several_origins() {
   if run_captain "$home" complete review-b "$id" > "$home/expired.out" 2> "$home/expired.err"; then
     fail "complete accepted the deferred call for a review never added"
   fi
-  assert_grep "add review-b to this open call with hold --origin" "$home/expired.err" \
-    "the passed-deferral refusal does not offer to add the origin"
+  assert_grep "was held for origin review-a, not review-b; hold a task for review-b or list the right one" \
+    "$home/expired.err" "the passed-deferral refusal does not name the recorded origin"
 
   FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
     --reason "words from B" --origin review-b >/dev/null \
@@ -4800,9 +4858,13 @@ SH
       run_captain "$home" complete origin-b "$id" >/dev/null \
         || fail "a successful hold could not complete B"
       run_captain "$home" verify origin-b >/dev/null || fail "a successful hold could not verify B"
-      assert_not_contains "$shown" 'Captain hold origin: origin-a' "a new lifecycle retained the old association"
-      if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
-        fail "$phase $timing reassociation still certified A"
+      if [ "$phase" = released ]; then
+        assert_contains "$shown" 'Captain hold origin: origin-a' \
+          "$phase $timing adding B to the open call dropped the origin it already records"
+        run_captain "$home" complete origin-a "$id" >/dev/null \
+          || fail "$phase $timing adding B to the open call invalidated completion for A"
+      elif run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
+        fail "$phase $timing hold for B certified the unrelated A"
       fi
     done
   done
@@ -5344,6 +5406,7 @@ test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
 test_one_active_hold_serves_several_origins
 test_same_origin_rehold_retries_and_updates_a_shared_call
+test_origin_added_after_an_interrupted_answer_keeps_the_others
 test_expired_deferral_serves_several_origins
 test_lapsed_deferral_rehold_restarts_its_age
 test_uninventoried_report_decision_refuses_completion

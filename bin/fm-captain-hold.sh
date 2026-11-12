@@ -885,14 +885,6 @@ task_identity() {
   printf '%s' "$id"
 }
 
-# The origins the current call recorded are the origin lines directly beneath
-# its hold-set stamp. An origin line further down belongs to an earlier,
-# answered call.
-call_hold_origins() {  # <decoded-task-body>; prints one origin per line
-  body_hold_origins "$(printf '%s\n' "$1" | sed 1d \
-    | awk '!/^Captain hold origin: / { exit } { print }')"
-}
-
 # With <keep-existing>=1 (the same active call) the origin is added to those
 # this call already recorded; a new lifecycle is a new call, so they are
 # replaced.
@@ -904,7 +896,7 @@ write_hold_origin() {  # <task-id> <shown-body> <origin> <keep-existing>
   [ -n "$(body_hold_set_timestamp "$body")" ] \
     || fail "task $id lost its hold-set stamp before its origin was recorded"
   if [ "$keep" = 1 ]; then
-    origins=$(call_hold_origins "$body")
+    origins=$(body_hold_origins "$body")
   fi
   origins=$(printf '%s\n%s\n' "$origins" "$origin" | awk 'NF && !seen[$0]++')
   rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
@@ -1078,7 +1070,7 @@ archived_entry() {  # <origin-or-empty> <entry>; prints the archived id
 # origin was recorded, so completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
   local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id resolve_err archived archived_status
-  local stored_origin matched held_for open_hint
+  local stored_origin matched held_for
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
@@ -1111,10 +1103,6 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   id=${resolved%% *}
   how=${resolved##* }
   verify_hold_durable "$id"
-  open_hint=''
-  if is_open_captain_call "$TASK_SHOW_OUTPUT"; then
-    open_hint=", add $origin to this open call with hold --origin"
-  fi
   id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
   validate_slug backend-task-id "$id"
   stored=$(body_hold_origins "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
@@ -1135,7 +1123,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
         case "$stored" in
           *$'\n'*) held_for="origins $(printf '%s\n' "$stored" | paste -sd, - | sed 's/,/, /g')" ;;
         esac
-        fail "captain-held task $id was held for $held_for, not $origin; hold a task for $origin$open_hint, or list the right one"
+        fail "captain-held task $id was held for $held_for, not $origin; hold a task for $origin or list the right one"
       fi
     fi
     origin_state=recorded
@@ -1227,7 +1215,7 @@ command_hold() {
     decoded_body=$(decode_shown_value "$(show_field "$show" body)") \
       || fail "could not decode the existing body for $id"
     if [ -n "$(body_hold_set_timestamp "$decoded_body")" ] \
-      && ! grep -Fqx -- "$origin" <<< "$(call_hold_origins "$decoded_body")"; then
+      && ! grep -Fqx -- "$origin" <<< "$(body_hold_origins "$decoded_body")"; then
       write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 1 || exit $?
       printf '%s\n' "$id"
       return 0

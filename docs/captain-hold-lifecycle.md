@@ -75,9 +75,12 @@ Repeat and edge cases:
   With an origin the call already records, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
   An open call that has no hold-set timestamp yet also takes the normal re-hold, which records the timestamp.
   Only an open call takes a further origin this way: a closed call is refused, and re-holding a released call starts a new lifecycle.
+  The call's origins are every `Captain hold origin:` line in its body, including those below a resolution record that an interrupted `answer` left.
+  On an open call, `--origin` only adds an origin and never replaces one; to correct a wrong origin, release the call and hold it again.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
   If the subsequent origin write fails, the command returns nonzero, but the successful captain hold and its stamp remain with the previous association (or with no recorded origin for a new task).
+  The call is then open, so a retry adds the new origin beside that association.
   Parent publication is attempted before that write in a secondmate home, so an origin-write failure cannot skip delivery; a channel failure retains the existing `actionable:` diagnostic.
   Re-running `hold` retries origin publication without duplicating the parent decision.
 - If an incomplete hold leaves a stamp above an earlier answer, the [completion durability boundary](#recording-a-reviewed-inventory-complete) applies.
@@ -559,7 +562,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
 - One open call, held or deferred past its date, serves several origins.
   `hold --origin` adds a new origin without changing the reason, `--until` date, stamp, or parent decision, and a same-origin re-hold still retries publication and updates the call.
-  An origin never added is refused, and the refusal suggests `hold --origin` only while the call is open.
+  An origin never added is refused.
+  An origin added after an interrupted `answer` keeps the origins the call already records.
 - An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
 
 ### Answers, stamps, and deferral
