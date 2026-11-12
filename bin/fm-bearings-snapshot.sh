@@ -10,8 +10,10 @@
 # projected model. The projection is view-specific: it DROPS fields from the bearings
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
-# Open decision rows retain the full title and hold reason in summary unless a
-# deferral note needs space. The question always retains all recorded options.
+# Local open decision rows retain the full title and hold reason in summary unless
+# a deferral note needs space. Secondmate rows build summary from the title and
+# reason their home summary already bounded. The question always retains all
+# recorded options.
 #
 # By default the canonical snapshot performs bounded concurrent remote-ledger reads
 # for registered remote homes under one shared collection budget and may atomically
