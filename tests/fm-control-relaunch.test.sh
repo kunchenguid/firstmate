@@ -622,6 +622,26 @@ test_traced_relaunch_keeps_an_armed_pr_poll_authenticated() {
   pass "fm-control relaunch: a traced replacement keeps an armed PR poll authenticated"
 }
 
+# A relaunch continues the same task, so its validation runs stay attributable:
+# the task start carries forward, and a record older than task_started= derives
+# it from the spawn generation it was first launched with.
+test_relaunch_carries_the_task_start() {
+  local dir out rc
+  dir=$(new_case task-start rl43)
+  add_ship_task "$dir" rl43 claude
+  printf '%s\n' 'spawn_gen=s1700000000.1.1' >> "$dir/home/state/rl43.meta"
+  out=$(run_control "$dir" rl43 relaunch --note "continuing after a stall"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a legacy record should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 task_started)" = 1700000000 ] \
+    || fail "a legacy record must derive its task start from its prior spawn generation"
+  [ "$(meta_field "$dir" rl43 spawn_gen)" != s1700000000.1.1 ] || fail "a relaunch must mint a new spawn generation"
+  out=$(run_control "$dir" rl43 relaunch --note "continuing again"); rc=$?
+  expect_code 0 "$rc" "a second relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 task_started)" = 1700000000 ] || fail "the task start must survive every relaunch"
+  [ "$(grep -c '^task_started=' "$dir/home/state/rl43.meta")" = 1 ] || fail "the task start must be recorded once"
+  pass "fm-control relaunch: the task start carries across relaunches"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -3349,3 +3369,5 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+
+test_relaunch_carries_the_task_start
