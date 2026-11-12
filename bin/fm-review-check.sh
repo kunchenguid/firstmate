@@ -68,6 +68,9 @@ MODE=$(fm_dod_meta_value "$META" mode)
 WT=$(fm_dod_meta_value "$META" worktree)
 PROJECT=$(fm_dod_meta_value "$META" project)
 DONE_LINE="done: review $URL uploaded for review"
+# No remote-ref refresh here: a forge=external done is decided by
+# fm_dod_accept_external_review_done, whose optional backup-remote check reads
+# a push the worker made from this same copy.
 if ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
   exit 1
