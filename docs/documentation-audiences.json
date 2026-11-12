@@ -154,6 +154,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fleet-reset/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
