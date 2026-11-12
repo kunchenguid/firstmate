@@ -63,8 +63,11 @@
 # is a strict total order and two replies recorded in the same second are both
 # readable. One reply per note: a second one is refused.
 # `ready` is the read-only primary-readiness projection (lock, wake-consumer
-# health, away posture, observation time). It never acquires the session lock
-# and never infers liveness from a lock file, a session, or a pane.
+# health, away posture, observation time, and pending-note age).
+# Its stable `fm-primary-ready.v1` schema always includes the additive
+# `oldest_pending_note_age_seconds` field, which is null when no note is pending.
+# It never acquires the session lock and never infers liveness from a lock file,
+# a session, or a pane.
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
@@ -932,20 +935,42 @@ cmd_ready() {
 
   python3 - "$lock_state" "$lock_pid" "$live_harness" \
     "$consumer_state" "$consumer_reason" "$beacon_age" \
-    "$posture" "$can_receive" "$observed" "$FM_HOME" <<'PY'
+    "$posture" "$can_receive" "$observed" "$FM_HOME" "$INBOX" "$(date +%s)" <<'PY'
 import json, sys
+from datetime import datetime, timezone
 from pathlib import Path
 (lock_state, lock_pid, live_harness, consumer_state, consumer_reason,
- beacon_age, posture, can_receive, observed, home) = sys.argv[1:11]
+ beacon_age, posture, can_receive, observed, home, inbox, now) = sys.argv[1:13]
 live_val = True if live_harness == "true" else False if live_harness == "false" else None
 recv = True if can_receive == "true" else False if can_receive == "false" else "unknown"
 pid_val = int(lock_pid) if lock_pid.isdigit() else None
 age_val = int(beacon_age) if beacon_age.isdigit() else None
+now_val = int(now)
+
+def note_timestamp(path):
+    try:
+        headers = path.read_text(encoding="utf-8", errors="replace").split("\n--", 1)[0]
+    except FileNotFoundError:
+        return None
+    for line in headers.splitlines():
+        if line.startswith("at="):
+            try:
+                return int(datetime.strptime(line[3:], "%Y-%m-%dT%H:%M:%SZ")
+                           .replace(tzinfo=timezone.utc).timestamp())
+            except ValueError:
+                return None
+    return None
+
+pending_timestamps = [timestamp for path in Path(inbox).glob("*.note")
+                      if not path.name.startswith(".")
+                      for timestamp in [note_timestamp(path)] if timestamp is not None]
+oldest_pending_note_age = now_val - min(pending_timestamps) if pending_timestamps else None
 home_label = "/".join(Path(home).parts[-2:]) if home else home
 json.dump({
     "schema": "fm-primary-ready.v1",
     "home": home_label,
     "observed_at": observed,
+    "oldest_pending_note_age_seconds": oldest_pending_note_age,
     "lock": {
         "state": lock_state,
         "pid": pid_val,
