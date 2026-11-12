@@ -34,7 +34,7 @@
 # preserves focus exactly when the dying workspace sits behind the focused
 # one or the focused one is last (upstream issue #1621, fixed by PR #1912);
 # both fixes first shipped in Herdr 0.8.0, which is the version floor for
-# default-on projection (FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION). Projected cleanup
+# default-on projection (FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION). Projected pane cleanup
 # therefore serializes under the session lock, repositions a doomed workspace
 # behind the focused one when needed, and ends its verified lone idle shell
 # so Herdr removes the emptied workspace through the focus-preserving
@@ -2194,7 +2194,8 @@ fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
 # empty projection tab after a pane close left the tab behind. The caller must
 # already have proven the tab is the matching agent-free task tab and must hold
 # the presentation lock. A live viewer of the target tab is never displaced;
-# a non-target close restores the exact prior focus after the close.
+# a non-target close attempts to restore the exact prior focus even when its
+# response or immediate absence check is unreadable.
 fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <workspace> <tab>
   local session=$1 workspace=$2 tab=$3 before active_tab info target_tab target_workspace pane_count
   local foreground_rc=0 skip_restore=0 close_status=0 after

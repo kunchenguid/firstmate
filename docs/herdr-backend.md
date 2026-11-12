@@ -300,17 +300,16 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 ### Cleanup and focus safety
 
 Normal task metadata remains the sole endpoint authority after creation.
-Cleanup closes only the exact recorded task pane or, when that pane is already gone, the exact bound empty projected tab, and never calls `workspace close`.
+Task cleanup closes only the exact recorded task pane and never calls `workspace close`.
 For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
 If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
-When Herdr leaves the exact projected tab empty after that pane disappears, locked session-start cleanup may close that exact empty tab, but never an ambiguous or non-empty tab.
-Closing the last empty tab also removes that workspace in current Herdr: the product deletes a workspace that no longer has any tab. Cleanup never calls `workspace close` itself and never closes a workspace that still has another tab.
+For a projected tab left empty after its pane disappears, see [Startup cleanup of restored projections](#startup-cleanup-of-restored-projections).
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
 Both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter header of `bin/backends/herdr.sh`.
 
-Projected cleanup therefore:
+Projected pane cleanup therefore:
 
 - Runs under the same session lock.
 - Refuses to delete the tab a live foreground client is viewing.
@@ -366,7 +365,8 @@ After every close path, only a structured not-found response counts as gone.
 A present or unknown result retains every record with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
-Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate; session-start cleanup may instead retire a version 2 journal after its exact bound empty tab is confirmed gone. A journal bound to any other pane or tab, or a version 1 attempt whose workspace is still present or unreadable, stays for that sweep.
+Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate.
+A journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for [startup cleanup](#startup-cleanup-of-restored-projections).
 
 ### Restart recovery
 
@@ -425,7 +425,8 @@ A candidate must meet all of these conditions:
 - A version 2 journal additionally must bind this exact physical home, named session, workspace, and tab, and it must bind the pane when one remains.
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane, or exactly one empty tab and zero panes left by a completed pane close.
-- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab. An unbound version 1 journal never authorizes closing an empty tab, so that tab is preserved.
+- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab.
+  An unbound version 1 journal never authorizes closing an empty tab, so that tab is preserved.
 
 Firstmate then cleans up the candidate in this order:
 
@@ -438,6 +439,9 @@ Firstmate then cleans up the candidate in this order:
 7. Call the existing exact-pane focus-preserving close helper for a one-pane candidate, or the exact empty-tab focus-preserving close helper for an empty-tab candidate.
    Neither helper grants cleanup authority to an ambiguous object.
 8. Retire the matching journal only after the exact pane or empty tab is positively confirmed gone.
+
+Empty-tab cleanup attempts to restore the exact prior focus even if the close response or immediate absence check is unreadable.
+Closing the last empty tab also removes its workspace in Herdr; cleanup never issues `workspace close` or closes a workspace that still has another tab.
 
 The process proof requires all of these:
 
@@ -454,7 +458,7 @@ An unconfirmed close retains the journal.
 A confirmed close may retire it even when focus restoration reported an error after the close.
 A second run finds no matching title or journal and is a no-op.
 
-Any of these preserves the candidate and lets session startup continue with at most a concise warning:
+Before closure, any of these preserves the candidate and lets session startup continue with at most a concise warning:
 
 - A malformed or missing title or token.
 - A duplicate token.
@@ -485,7 +489,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
-  Session start removes only the exact home-local, uniquely journal-correlated one-pane idle-shell or bound empty-tab shape above.
+  Session-start cleanup is limited to the [proof above](#startup-cleanup-of-restored-projections).
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
@@ -496,7 +500,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
-| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
+| `tests/fm-herdr-session-cleanup.test.sh` | Portable cleanup coverage for idle-shell panes and bound empty tabs, including focus restoration after uncertain closes. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
@@ -563,7 +567,7 @@ For each ship and scout task recorded in the home with Herdr endpoint metadata, 
 | `fm_sort` | pane | `<group order>.<group>.<status rank>.<task>`, at most 80 characters. |
 | `fm_group_order` | projected workspace | `<group order>.<group>`, the key that [placement](#placement-inside-the-group) compares. |
 
-Workspace tokens go only to the task's own projected workspace: an exact version 2 [presentation journal](#presentation-journal) binding the task's recorded session, workspace, and tab, with a pane binding while one remains, whose live workspace holds that single-task projection.
+Workspace tokens go only to the task's own projected workspace: an exact version 2 [presentation journal](#presentation-journal) binding the task's recorded session, workspace, and pane, whose live workspace holds that single pane.
 A flat-layout task tab shares its workspace with other tasks, so it gets pane tokens only.
 
 The display status comes from the task's status log through the shared classifier that `bin/fm-classify-lib.sh` owns, in this rank order:

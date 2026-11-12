@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Retire stale restored-shell Herdr presentation children at locked session start.
+# Retire stale restored Herdr presentation children at locked session start.
 #
 # Usage: fm-herdr-session-cleanup.sh
 #
@@ -9,18 +9,11 @@
 # is additionally serialized by the existing state/.spawn-<task>.lock and the
 # shared named-session Herdr presentation lock, in that order.
 #
-# A visible title is discovery only. Cleanup requires the exact current
-# "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
-# the named-session snapshot, exactly one matching home-local journal, one tab,
-# one pane, absent task metadata, no registered agent, and a process proof that
-# the pane contains only one idle recognized shell with no child process. A
-# version 2 journal must also bind the exact workspace, tab, and pane.
-# Topology is first checked from one locked API snapshot, then every mutation
-# prerequisite is immediately rechecked before the existing exact-pane
-# focus-preserving close helper is called.
-# The script never closes a workspace. It removes only the matching journal,
-# and only after the exact pane is confirmed gone. Every error warns and returns
-# success so session startup continues conservatively.
+# Candidate eligibility, process proof, focus safety, and journal retirement
+# are owned by docs/herdr-backend.md "Startup cleanup of restored projections".
+# This script never calls workspace close: it targets only a proven idle-shell
+# pane or the exact bound empty tab, then confirms absence before retiring its
+# matching journal. Errors return success so session startup can continue.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
