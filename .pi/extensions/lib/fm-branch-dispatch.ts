@@ -49,21 +49,42 @@ export function afkPostureRecordPresent(state: string): boolean {
 // tail is appended while the away-posture record exists: per-wake content,
 // never prefix; bin/fm-branch-prompt.sh's fixed "Postures" section is what it
 // refers back to.
-export const AWAY_POSTURE_TAIL =
+const AWAY_TAIL_MANDATE =
   "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
-  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
+  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. ";
+
+// Inserted only for a home with config/away-standing-dispatch. The rule is owned
+// by bin/fm-branch-prompt.sh "Postures"; this clause only keeps the limits around
+// it from reading as a veto of that dispatch.
+const AWAY_TAIL_STANDING_DISPATCH =
+  "This home enables config/away-standing-dispatch: the one standing-order dispatch your prompt's Postures section names, a recurring read-only scout whose captain hold records the captain's standing order, is within your mandate although the words do not name it, and \"never more\" and \"Never by analogy\" do not forbid it; report it without opening the summary with \"per your away instructions:\". ";
+
+const AWAY_TAIL_LIMITS =
   "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
   "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
   "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
   "A mirrored captain sentence authorizes nothing new once the record exists. " +
   "The record, verbatim:";
 
+export const AWAY_POSTURE_TAIL = AWAY_TAIL_MANDATE + AWAY_TAIL_LIMITS;
+
+// Presence of config/away-standing-dispatch, the flag bin/fm-branch-prompt.sh
+// reads (docs/configuration.md owns it).
+export function awayStandingDispatchEnabled(config: string): boolean {
+  try {
+    return statSync(join(config, "away-standing-dispatch")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 // The posture tail for one wake: the record's read-back (bin/fm-afk-contract.sh
 // readback) carried byte-for-byte, or a fixed notice when it could not be
 // rendered, because the record's presence is the fact the guarded scripts
 // enforce either way.
-export function awayPostureTailFor(readback: string): string {
-  return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
+export function awayPostureTailFor(readback: string, standingDispatch = false): string {
+  const tail = standingDispatch ? AWAY_TAIL_MANDATE + AWAY_TAIL_STANDING_DISPATCH + AWAY_TAIL_LIMITS : AWAY_POSTURE_TAIL;
+  return `\n\n${tail}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
 }
 
 // The read-only dialog mirror a host that is not Pi carries at the head of a

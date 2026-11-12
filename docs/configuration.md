@@ -441,6 +441,7 @@ The optional local, gitignored `config/away-standing-dispatch` presence flag opt
 With it present, the actor may dispatch a recurring read-only scout item whose captain hold records the captain's standing order to start it while away, once the hold date arrives, unless the away words explicitly forbid it.
 `bin/fm-branch-prompt.sh` "Postures" owns the exact rule and its limits.
 With the file absent, the emitted branch prompt is the one without that exception, and empty or silent away words spawn nothing.
+The per-wake away tail (`awayPostureTailFor` in `.pi/extensions/lib/fm-branch-dispatch.ts`) reads the same flag and adds one clause saying that dispatch is within the mandate only when the file is present; with it absent the tail is unchanged.
 The flag is read each time the prompt is generated, so a new branch conversation or engine session picks up a change.
 The flag is a home-local preference and is not inherited by secondmate homes.
 

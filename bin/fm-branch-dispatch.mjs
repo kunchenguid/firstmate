@@ -35,6 +35,8 @@
 //     prompt, so the host hands the wake to main. --away appends the away tail with the
 //     record read-back from <path>; a missing or empty read-back prints the
 //     tail's fixed unavailable notice instead.
+//     The tail names the opt-in standing-order dispatch only when this home has
+//     config/away-standing-dispatch (docs/configuration.md).
 //
 // The state directory is FM_STATE_OVERRIDE, else $FM_HOME/state, else the
 // repository's own state/. Exit 0 on success, 2 on invalid use, 3 when a
@@ -58,6 +60,12 @@ function stateDir() {
   if (process.env.FM_STATE_OVERRIDE) return process.env.FM_STATE_OVERRIDE;
   const home = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   return path.join(home, "state");
+}
+
+function configDir() {
+  if (process.env.FM_CONFIG_OVERRIDE) return process.env.FM_CONFIG_OVERRIDE;
+  const home = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+  return path.join(home, "config");
 }
 
 function scopeLines(scope, heartbeat) {
@@ -124,7 +132,7 @@ if (command === "scope") {
       process.exit(3);
     }
   }
-  const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : "";
+  const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile), dispatch.awayStandingDispatchEnabled(configDir())) : "";
   process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror)}\n`);
 } else {
   usage();
