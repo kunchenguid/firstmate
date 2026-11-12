@@ -859,7 +859,7 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
 
 # The origins a hold was recorded for live in the held task's own body, one
 # line each, so `complete` can tell a call held for this origin from one held
-# for another. One active call may carry several origins when more than one
+# for another. One open call may carry several origins when more than one
 # review found it. Omitting --origin leaves any existing association intact.
 body_hold_origins() {  # <decoded-task-body>; prints one origin per line
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | awk 'NF && !seen[$0]++'
@@ -885,7 +885,7 @@ task_identity() {
   printf '%s' "$id"
 }
 
-# With <keep-existing>=1 (the same active call) the origin is added to those
+# With <keep-existing>=1 (the same open call) the origin is added to those
 # this call already recorded; a new lifecycle is a new call, so they are
 # replaced.
 write_hold_origin() {  # <task-id> <shown-body> <origin> <keep-existing>
