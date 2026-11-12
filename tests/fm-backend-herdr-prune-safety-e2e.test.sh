@@ -123,7 +123,7 @@ pass "fixed: container_ensure adopts the label-colliding startup workspace and r
 
 TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-prunesafety-e2e "$LIVE_CWD" "$SEEDED_TAB_ID") \
   || fail "create_task failed"
-read -r NEW_TAB_ID NEW_PANE_ID <<EOF
+read -r NEW_TAB_ID NEW_PANE_ID _ <<EOF
 $TASK_IDS
 EOF
 if [ -z "$NEW_TAB_ID" ] || [ -z "$NEW_PANE_ID" ]; then
@@ -161,7 +161,7 @@ HAPPY_SEEDED=${HAPPY_RAW#*$'\t'}
 
 HAPPY_TASK_IDS=$(fm_backend_herdr_create_task "$HAPPY_CONTAINER" fm-prunesafety-happy "$HAPPY_CWD" "$HAPPY_SEEDED") \
   || fail "happy-path create_task failed"
-read -r _HAPPY_TAB HAPPY_PANE <<EOF
+read -r _HAPPY_TAB HAPPY_PANE _ <<EOF
 $HAPPY_TASK_IDS
 EOF
 [ -n "$HAPPY_PANE" ] || fail "happy-path create_task did not return a pane id"

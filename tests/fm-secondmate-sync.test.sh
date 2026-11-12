@@ -626,9 +626,9 @@ case "\$cmd \$sub" in
     ;;
   "pane get")
     if [ "\$arg" = "${stale#*:}" ]; then
-      printf '{"result":{"pane":{"pane_id":"${stale#*:}"}}}\n'
+      printf '{"result":{"pane":{"pane_id":"${stale#*:}","terminal_id":"term-stale"}}}\n'
     elif [ "\$arg" = "${fresh#*:}" ]; then
-      printf '{"result":{"pane":{"pane_id":"${fresh#*:}"}}}\n'
+      printf '{"result":{"pane":{"pane_id":"${fresh#*:}","terminal_id":"term-fresh"}}}\n'
     else
       printf '{"error":{"code":"pane_not_found","message":"missing"}}\n' >&2
       exit 0
@@ -669,6 +669,7 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
   {
     printf 'window=%s\n' "$stale"
     printf 'backend=herdr\n'
+    printf 'herdr_terminal_id=term-stale\n'
     printf 'kind=secondmate\n'
     printf 'harness=claude\n'
     printf 'home=%s/sm-instr\n' "$w"
@@ -681,8 +682,8 @@ set -u
 id=\${1:-}
 meta="\$FM_HOME/state/\$id.meta"
 [ -f "\$meta" ] || exit 1
-sed -i.bak "s/^window=.*/window=$fresh/" "\$meta" 2>/dev/null || \
-  sed -i "s/^window=.*/window=$fresh/" "\$meta"
+sed -i.bak -e "s/^window=.*/window=$fresh/" -e "s/^herdr_terminal_id=.*/herdr_terminal_id=term-fresh/" "\$meta" 2>/dev/null || \
+  sed -i -e "s/^window=.*/window=$fresh/" -e "s/^herdr_terminal_id=.*/herdr_terminal_id=term-fresh/" "\$meta"
 rm -f "\$meta.bak"
 exit 0
 SH
