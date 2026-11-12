@@ -242,10 +242,12 @@ An unbound source feeds nothing, so the path is opt-in per source.
 
 Two channels feed that one intake today, and both are ordinary callers rather than special cases.
 
-`bin/fm-send.sh --resolve-key` is the chat channel:
+`bin/fm-send.sh --resolve-key --answer` is the chat channel that closes.
+The script header owns the assertion that the message is the answer.
 
-- For a key the status log still owns, that script's header owns the status-log close.
-- A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
+- A key open in the status log is closed there.
+  The script header owns that close.
+- A key that names a still-open captain-held task is fed as one keyed line, including when that same key is still open in the status log.
   The script tries the key as a task id first, then the legacy derived identity.
 
 `bin/fm-procevent.sh` is the captured-result channel:

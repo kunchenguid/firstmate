@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--answer] [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -155,11 +155,19 @@
 # change ordinary sends.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
-# before the message) when this send answers an open keyed needs-decision: or
-# blocked: record in the target task's state/<id>.status. fm-send itself
-# appends the closing resolved line to that status file, so the captain-facing
-# OPEN DECISIONS record closes at answer time and never depends on the busy
-# worker writing a matching resolved line. For ordinary keys the payload is
+# before the message) together with --answer when this message is the answer
+# to an open keyed needs-decision: or blocked: record in the target task's
+# state/<id>.status, or to a captain-held task that key names. --answer is
+# the sender's assertion that the message is that answer. --resolve-key
+# without --answer refuses before sending and closes nothing: naming a key
+# is not that assertion, so a work instruction that only references the
+# decision cannot close it. That refusal prints two resends, one that adds
+# --answer and one that delivers the same text with no key. A send with
+# neither flag still delivers and closes nothing. On an asserted answer
+# fm-send itself appends the closing resolved line to that status file, so
+# the captain-facing OPEN DECISIONS record closes at answer time and never
+# depends on the busy worker writing a matching resolved line. For ordinary
+# keys the payload is
 # "resolved [key=<key>]: answered: <capped excerpt>" before the emission-time
 # handling owned by bin/fm-classify-lib.sh. A reserved key
 # (pending-reply-* today; bin/fm-classify-lib.sh's reserved-key guard) is
@@ -202,27 +210,28 @@
 # to the branch (contract: bin/fm-lease-lib.sh); which findings firstmate may
 # decide at all remains ask-user-authority's judgment for either actor.
 #
-# Chat is also a channel that carries keyed captain answers, so the same flag
-# feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
+# Chat is also a channel that carries keyed captain answers, so the same flags
+# feed bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
 # a captain-held task in this home - the key as a task id itself, or through
 # the legacy `<task>-decision-<key>` identity for pre-collapse rows. fm-send
 # closes nothing itself; it hands the intake `<task-id>\t<answer>\t<label>`
 # exactly as every other channel does, and the intake owns what that means.
-# This is what lets an answer reach a decision that has already been
-# transferred from the live status log to its durable captain-held task, which
-# the status ledger alone can no longer close.
+# This reaches a decision transferred from the live status log to its durable
+# captain-held task, which the status ledger alone can no longer close, and
+# it also reaches a key that is still open in both records.
 #
-# Each named key must therefore currently be open in ONE of the two ledgers: open
-# in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# a still-open captain-held task resolved as above. A key in neither is refused
-# before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key; a
-# delivered answer whose closing append fails exits nonzero with the exact
-# manual close command, leaving the decision open to re-surface (the safe
-# direction). A send without the flag never closes anything: a routine steer,
-# working:, or done: event still cannot clear a captain decision. The flag is
-# refused with --key, with an explicit backend target (no task ledger in this
-# home), and with an empty message.
+# Each named key must be open in this home's status log per status_open_decisions
+# (bin/fm-classify-lib.sh), or name a still-open captain-held task resolved as
+# above, or both. A key open in both is closed in both by this one send. A key
+# in neither is refused before sending, so a mistyped key cannot deliver an
+# answer while silently orphaning the decision. A failed or unconfirmed send
+# never closes a key; a delivered answer whose closing append fails exits
+# nonzero with the exact manual close command, leaving the decision open to
+# re-surface (the safe direction). A send without these flags never closes
+# anything: a routine steer, working:, or done: event still cannot clear a
+# captain decision. The flags are refused with --key, with an explicit backend
+# target (no task ledger in this home), with an empty message, and --answer
+# without --resolve-key.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -516,6 +525,7 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+RESOLVE_ANSWER_ASSERTED=0
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -545,6 +555,14 @@ while :; do
     ;;
   --resolve-key=*)
     fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+    shift
+    ;;
+  --answer)
+    [ "$RESOLVE_ANSWER_ASSERTED" = 0 ] || {
+      echo "error: duplicate --answer" >&2
+      exit 1
+    }
+    RESOLVE_ANSWER_ASSERTED=1
     shift
     ;;
   --fire-and-forget)
@@ -604,12 +622,11 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
-# Which ledger each answered key belongs to. A key still open in the status log
-# is owned by the status log: fm-captain-hold's `complete` closes that live copy
-# at the moment it transfers a decision to its durable captain-held task, so
-# "still open in status" and "already held" are the two sides of one transfer,
-# never both at once. Checking the backlog only for keys the status log no
-# longer owns also keeps the common path free of any backlog read.
+# Which ledgers each answered key still has open. A key can be open in the
+# status log, in a captain-held task, or in both at once. `complete` closes
+# the status copy when it transfers a decision, but a hold that never ran
+# that transfer leaves both open. An asserted answer closes every ledger
+# that is still open for that key.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
 RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
@@ -724,28 +741,54 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
+  if [ "$RESOLVE_ANSWER_ASSERTED" != 1 ]; then
+    resolve_quoted_message=$(fm_send_quoted_message "$@")
+    resolve_resend_prefix="$(fm_send_resend_env)$(fm_send_resend_exe)"
+    resolve_answer_args=
+    for k in $RESOLVE_KEYS; do
+      resolve_answer_args="$resolve_answer_args --resolve-key $k"
+    done
+    {
+      echo "error: --resolve-key closes a decision only when --answer asserts that this message is the answer; nothing was sent."
+      printf '  resend as the answer:\n'
+      printf '    %s %s%s --answer %s\n' \
+        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_answer_args" "$resolve_quoted_message"
+      printf '    %s %s %s   # deliver without closing anything\n' \
+        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_quoted_message"
+    } >&2
+    exit 1
+  fi
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   resolve_resend_args=
   resolve_refused_keys=
   for k in $RESOLVE_KEYS; do
+    resolve_key_owned=0
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
       RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
       resolve_resend_args="$resolve_resend_args --resolve-key $k"
-      continue
+      resolve_key_owned=1
       ;;
     esac
-    # Not open in the status log. A decision already transferred to its durable
-    # captain-held task is exactly this case, and it is answerable - just
-    # through the other ledger - so check there before refusing.
+    # A captain-held task for this key is answerable whether or not the status
+    # log still has it open. Both records close when both are open.
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
-      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
-      resolve_resend_args="$resolve_resend_args --resolve-key $k"
+      case " $RESOLVE_HOLD_KEYS " in
+      *" $resolved_hold_id "*) ;;
+      *) RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id" ;;
+      esac
+      if [ "$resolve_key_owned" = 0 ]; then
+        resolve_resend_args="$resolve_resend_args --resolve-key $k"
+      fi
+      resolve_key_owned=1
+    fi
+    if [ "$resolve_key_owned" = 1 ]; then
       continue
     fi
     resolve_refused_keys="${resolve_refused_keys}${resolve_refused_keys:+ }$k"
     resolve_resend_args="$resolve_resend_args --resolve-key '<key>'"
   done
+  resolve_resend_args="$resolve_resend_args --answer"
   # Nothing owns a refused key, so refuse rather than deliver. Sending the
   # answer anyway would leave the decision open behind an answer the operator
   # believes settled it - the orphaned decision --resolve-key exists to
@@ -817,6 +860,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
   done
 fi
 
+if [ "$RESOLVE_ANSWER_ASSERTED" = 1 ] && [ -z "$RESOLVE_KEYS" ]; then
+  echo "error: --answer asserts that this message answers a decision, so it requires --resolve-key" >&2
+  exit 1
+fi
+
 # Close each answered decision in this home's ledger, only after the answer is
 # durably sent: enqueued on the inbox plane, submit-confirmed on the typed
 # plane. An append failure exits nonzero with the manual close
@@ -875,6 +923,13 @@ fm_send_feed_resolved_holds() { # <answer-text>
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
+}
+
+fm_send_close_all_resolved() { # <answer-text>
+  local rc=0
+  fm_send_feed_resolved_holds "$1" || rc=1
+  fm_send_close_resolved_keys "$1" || rc=1
+  return "$rc"
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used to
@@ -1129,8 +1184,7 @@ else
       fi
     fi
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_all_resolved "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     exit 0
   fi
@@ -1221,8 +1275,7 @@ else
     # The answer is durably sent: close each answered decision at enqueue time
     # (answerer-closes; see the header contract).
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_all_resolved "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
@@ -1363,8 +1416,7 @@ else
   # Delivery is fully confirmed: close each answered decision in this home's
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
-    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-    fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_close_all_resolved "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
