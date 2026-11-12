@@ -54,8 +54,7 @@ It works in this order:
 3. It invokes the underlying tasks-axi hold operation.
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
-6. When `--origin` is supplied, it records the origin on the task only after the backend hold succeeds.
-   On a still-active captain hold the origin is added beside the ones that call already records; on a new lifecycle it replaces any previous association.
+6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -67,9 +66,11 @@ Repeat and edge cases:
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
   Each association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
+  The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is date-expired.
 - One call found by several investigations or reviews stays one held task.
-  Re-running `hold --origin` for each further origin while the hold is active adds that origin idempotently, keeps the hold-set timestamp, and publishes no second parent decision.
-  The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
+  While the hold is still active, `hold --origin` only adds that origin beside the ones the call records, idempotently, and skips steps 2 to 5.
+  The recorded reason, `--until` date, hold-set timestamp, and parent decision stay unchanged; the new `--reason` and `--until` are ignored.
+  Only an active call takes a further origin this way: a closed call is refused, and re-holding a released or date-expired call starts a new lifecycle.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
   If the subsequent origin write fails, the command returns nonzero, but the successful captain hold and its stamp remain with the previous association (or with no recorded origin for a new task).
