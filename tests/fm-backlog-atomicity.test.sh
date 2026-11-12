@@ -512,7 +512,7 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
-interrupt_kimi_readiness() {  # <case-dir>
+fail_kimi_readiness() {  # <case-dir>
   local case_dir=$1 home
   home=$(home_of "$case_dir")
   mkdir -p "$home/.kimi-code"
@@ -527,12 +527,6 @@ esac
 case "\${1:-}" in
   display-message) printf 'firstmate\\n'; exit 0 ;;
   capture-pane)
-    if [ ! -f "$case_dir/kimi-interrupted" ]; then
-      : > "$case_dir/kimi-interrupted"
-      spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
-      case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
-      kill -TERM "\$spawn_pid"
-    fi
     printf 'shell starting\\n$ \\n'
     exit 0
     ;;
@@ -1529,23 +1523,34 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
   pass "a signal-deferred spawn bounds its verification so an unresponsive tasks-axi cannot hold the meta lock forever"
 }
 
-test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
+test_dispatch_failed_kimi_readiness_cleans_resources_before_rollback() {
   local case_dir home id out rc=0
   id=atomic-dispatch-kimi-readiness-signal-b5
   case_dir=$(make_home dispatch-kimi-readiness-signal "$id")
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
-  interrupt_kimi_readiness "$case_dir"
+  fail_kimi_readiness "$case_dir"
 
   out=$(HOME="$home" FM_KIMI_READY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     run_spawn "$case_dir" "$id" "$case_dir/project" --harness kimi \
       --mode no-mistakes --yolo off) || rc=$?
-  [ "$rc" -ne 0 ] || fail "Kimi readiness interruption was reported as success"
+  [ "$rc" -ne 0 ] || fail "Kimi readiness failure was reported as success"
   assert_absent "$home/state/$id.meta" \
-    "Kimi readiness interruption retained an unconfirmed task record"
+    "Kimi readiness failure retained an unconfirmed task record"
+  assert_absent "$home/state/$id.kimi-turnend-token" \
+    "Kimi readiness failure retained its turn-end token record"
+  assert_absent "$case_dir/wt/.fm-kimi-turnend" \
+    "Kimi readiness failure retained its worktree turn-end pointer"
+  if [ -d "$home/.kimi-code/fm-turn-end.d" ] &&
+    find "$home/.kimi-code/fm-turn-end.d" -type f -print -quit | grep -q .; then
+    fail "Kimi readiness failure retained its global turn-end token"
+  fi
+  if grep -Fq "fm-$id" "$case_dir/fakebin/.spawn-window" 2>/dev/null; then
+    fail "Kimi readiness failure left its pane open"
+  fi
   [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "Kimi readiness interruption committed unconfirmed work In flight: $out"
-  pass "Kimi readiness interruptions fail before backlog commit"
+    || fail "Kimi readiness failure committed unconfirmed work In flight: $out"
+  pass "Kimi readiness failures clean resources before backlog rollback"
 }
 
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight() {
@@ -1985,25 +1990,89 @@ test_recovery_reports_an_owned_row_read_failure() {
   pass "session start reports owned backlog rows it cannot read"
 }
 
-test_orca_cleanup_recovery_never_transitions_the_backlog() {
-  local case_dir id meta out
-  id=atomic-orca-cleanup-recovery-b8
-  case_dir=$(make_home orca-cleanup-recovery)
+# A cleanup-only record names what a spawn left behind without ever committing
+# its row In flight: an aborted Orca spawn, or a launched endpoint that failed
+# its brief-delivery gate. Healing that queued row In flight at session start
+# and then closing it at teardown is the false Done that silently loses a work
+# item that never ran, and a relaunch would commit the row while republishing
+# the marker, leaving a worker whose teardown never closes it.
+test_cleanup_only_records_never_transition_the_backlog() {
+  local case_dir id meta out reason rc data
+  for reason in orca delivery-unconfirmed; do
+    id=atomic-cleanup-only-$reason-b8
+    case_dir=$(make_home "cleanup-only-$reason")
+    add_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=$reason"
+    meta="$(home_of "$case_dir")/state/$id.meta"
+
+    out=$(run_bootstrap "$case_dir")
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "session start treated a $reason cleanup record as a launched worker: $out"
+    assert_present "$meta" "session start removed the $reason cleanup record"
+
+    rc=0
+    out=$(run_spawn "$case_dir" "$id" --relaunch) || rc=$?
+    [ "$rc" -ne 0 ] || fail "relaunch accepted a $reason cleanup record: $out"
+    assert_contains "$out" "record is cleanup-only" \
+      "relaunch of a $reason cleanup record did not name the refusal"
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "a refused relaunch of a $reason cleanup record moved its item"
+    assert_present "$meta" "a refused relaunch removed the $reason cleanup record"
+
+    out=$(run_teardown "$case_dir" "$id") \
+      || fail "$reason cleanup record teardown failed: $out"
+    [ "$(row_state "$case_dir" "$id")" = queued ] \
+      || fail "$reason cleanup record teardown completed work that never launched"
+    assert_absent "$meta" "$reason cleanup record teardown retained its task record"
+    assert_contains "$out" "Backlog: $id was left unchanged" \
+      "$reason cleanup record teardown did not say its item was left alone"
+  done
+
+  id=atomic-cleanup-unknown-b8
+  case_dir=$(make_home cleanup-unknown)
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=orca"
-  meta="$(home_of "$case_dir")/state/$id.meta"
-
+  write_task_meta "$case_dir" "$id" ship local-only \
+    "spawn_gen=spawn-cleanup-unknown" "cleanup_recovery=typo"
   out=$(run_bootstrap "$case_dir")
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "session start treated cleanup recovery as a launched worker: $out"
-  assert_present "$meta" "session start removed the cleanup recovery record"
-
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "unknown cleanup reason exempted a worker record from reconciliation: $out"
   out=$(run_teardown "$case_dir" "$id") \
-    || fail "cleanup recovery teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = queued ] \
-    || fail "cleanup recovery teardown completed work that never launched"
-  assert_absent "$meta" "cleanup recovery teardown retained its task record"
-  pass "Orca cleanup recovery is excluded from backlog lifecycle transitions"
+    || fail "unknown cleanup reason task teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "unknown cleanup reason exempted teardown from its backlog transition: $out"
+
+  id=atomic-delivery-pending-b8
+  case_dir=$(make_home delivery-pending)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only
+  printf 'cleanup_recovery=delivery-unconfirmed\n' \
+    > "$(home_of "$case_dir")/state/$id.delivery-unconfirmed"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "in_flight" ] \
+    || fail "session start changed a delivery-pending row: $out"
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "delivery-pending marker teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "in_flight" ] \
+    || fail "delivery-pending marker let teardown close an unconfirmed task: $out"
+  assert_absent "$(home_of "$case_dir")/state/$id.delivery-unconfirmed" \
+    "teardown retained a consumed delivery-pending marker"
+
+  # A manual-backend home is told by hand what to do with the row, so the
+  # reminder there must not ask for a close either.
+  id=atomic-cleanup-only-manual-b8
+  case_dir=$(make_home cleanup-only-manual)
+  printf '%s\n' manual > "$(home_of "$case_dir")/config/backlog-backend"
+  data="$case_dir/manual-data"
+  mv "$(home_of "$case_dir")/data" "$data"
+  write_task_meta "$case_dir" "$id" ship local-only "cleanup_recovery=delivery-unconfirmed"
+  out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
+    || fail "manual-backend cleanup record teardown failed: $out"
+  assert_not_contains "$out" "move $id to Done" \
+    "manual-backend teardown asked for a never-delivered item to be closed"
+  assert_contains "$out" "Backlog: $id was left unchanged" \
+    "manual-backend teardown did not say the item was left alone"
+  pass "cleanup-only records never transition the backlog, relaunch, or ask for a close"
 }
 
 test_recovery_marks_an_owned_record_in_flight() {
@@ -3148,7 +3217,7 @@ test_fm_tasks_axi_fallback_bounds_the_call_without_a_timeout_binary
 test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through
 test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call
 test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child
-test_dispatch_interruption_during_kimi_readiness_fails_before_commit
+test_dispatch_failed_kimi_readiness_cleans_resources_before_rollback
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
@@ -3167,7 +3236,7 @@ test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
 test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
-test_orca_cleanup_recovery_never_transitions_the_backlog
+test_cleanup_only_records_never_transition_the_backlog
 test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record

@@ -22,7 +22,9 @@
 # A close that fails is fatal and loud, preserves its pending-close record, and
 # is retried by the next session start. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
-# data/backlog.md; those cases print the manual follow-up. A configured
+# data/backlog.md; those cases print the manual follow-up. A cleanup-only
+# record (bin/fm-backlog-transition-lib.sh) runs no transition in any home and
+# says its item was never dispatched instead. A configured
 # non-markdown adapter remains active without a markdown file; any active
 # automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
@@ -691,7 +693,24 @@ if [ "$TEARDOWN_META_KIND" = secondmate ]; then
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
 fi
-TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
+TEARDOWN_CLEANUP_RECOVERY=$(fm_backlog_record_cleanup_reason "$META" || true)
+TEARDOWN_DELIVERY_PENDING="$STATE/$ID.delivery-unconfirmed"
+if [ -e "$TEARDOWN_DELIVERY_PENDING" ] || [ -L "$TEARDOWN_DELIVERY_PENDING" ]; then
+  if ! fm_backlog_record_present "$TEARDOWN_DELIVERY_PENDING" "delivery cleanup marker" "$STATE"; then
+    echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  fi
+  TEARDOWN_PENDING_REASON=$(fm_backlog_record_cleanup_reason "$TEARDOWN_DELIVERY_PENDING") || {
+    echo "error: teardown refused: invalid delivery cleanup marker $TEARDOWN_DELIVERY_PENDING" >&2
+    exit 1
+  }
+  if [ "$TEARDOWN_PENDING_REASON" != delivery-unconfirmed ] ||
+    { [ -n "$TEARDOWN_CLEANUP_RECOVERY" ] && [ "$TEARDOWN_CLEANUP_RECOVERY" != "$TEARDOWN_PENDING_REASON" ]; }; then
+    echo "error: teardown refused: conflicting delivery cleanup state for $ID" >&2
+    exit 1
+  fi
+  TEARDOWN_CLEANUP_RECOVERY=$TEARDOWN_PENDING_REASON
+fi
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
 TEARDOWN_LEGACY_ACCEPTED=0
@@ -726,7 +745,7 @@ case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
     esac
     ;;
 esac
-if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
+if [ -z "$TEARDOWN_CLEANUP_RECOVERY" ]; then
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
     TEARDOWN_BACKLOG_APPLIES=1
   else
@@ -1882,7 +1901,12 @@ backlog_done_args() {
 backlog_refresh_reminder() {
   local backlog_display root backend=markdown
   [ "$KIND" = secondmate ] && return 0
-  [ "$CLEANUP_RECOVERY" = orca ] && return 0
+  # A cleanup-only record never owned its row, so no home - automatic or
+  # manual - is told to move it to Done.
+  if [ -n "$CLEANUP_RECOVERY" ]; then
+    printf '%s\n' "Backlog: $ID was left unchanged ($BACKLOG_SKIP_REASON). Dispatch it again when it is due; if this worker did finish the work after all, close the item by hand."
+    return 0
+  fi
   if root=$(fm_backlog_root "$DATA"); then
     backend=$(fm_tasks_axi_backend "$root") || return 2
   fi
@@ -4033,6 +4057,10 @@ teardown_legacy_stamp_rollback() {
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
+  elif [ "$CLEANUP_RECOVERY" = delivery-unconfirmed ]; then
+    BACKLOG_SKIP_REASON="its spawn never confirmed brief delivery, so it never became a backlog worker"
+  elif [ -n "$CLEANUP_RECOVERY" ]; then
+    BACKLOG_SKIP_REASON="cleanup-only record ($CLEANUP_RECOVERY) is not a launched backlog worker"
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
@@ -4261,6 +4289,30 @@ fi
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
+if [ -e "$TEARDOWN_DELIVERY_PENDING" ] || [ -L "$TEARDOWN_DELIVERY_PENDING" ]; then
+  TEARDOWN_META_CLEANUP_RECOVERY=$(fm_backlog_record_cleanup_reason "$META" || true)
+  if [ "$TEARDOWN_META_CLEANUP_RECOVERY" != delivery-unconfirmed ]; then
+    TEARDOWN_META_TMP="$STATE/.$ID.meta.delivery-unconfirmed.${BASHPID:-$$}"
+    if ! awk -F= '$1 != "cleanup_recovery"' "$META" >"$TEARDOWN_META_TMP" ||
+      ! printf 'cleanup_recovery=delivery-unconfirmed\n' >>"$TEARDOWN_META_TMP" ||
+      ! fm_backlog_atomic_transition publish "$TEARDOWN_META_TMP" "$META" "task record" "$STATE" ||
+      [ "$(fm_backlog_record_cleanup_reason "$META" || true)" != delivery-unconfirmed ]; then
+      rm -f -- "$TEARDOWN_META_TMP" 2>/dev/null || true
+      TEARDOWN_META_TMP=
+      fm_lock_release "$META_LOCK"
+      META_LOCK_HELD=0
+      echo "error: $ID cleanup finished but its task record could not retain delivery cleanup state" >&2
+      exit 1
+    fi
+    TEARDOWN_META_TMP=
+  fi
+  fm_backlog_atomic_transition remove "$TEARDOWN_DELIVERY_PENDING" "delivery cleanup marker" "$STATE" || {
+    fm_lock_release "$META_LOCK"
+    META_LOCK_HELD=0
+    echo "error: $ID cleanup finished but its delivery cleanup marker could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  }
+fi
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
