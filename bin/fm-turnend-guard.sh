@@ -37,15 +37,13 @@
 # regularly unheld at a turn boundary with nothing wrong. A live
 # identity-matched daemon holding this home, plus a fresh beacon, is what
 # proves supervision there - see fm_afk_daemon_owns_supervision in
-# bin/fm-wake-lib.sh. The beacon freshness test there uses AFK_GRACE
-# (fm_poll_derived_grace, docs/turnend-guard.md "Guard grace and the poll
-# cadence"), not the flat $GRACE every other check on this page uses: the
-# daemon starts a fresh one-shot watcher only after it finishes handling the
-# previous wake, and that handling can legitimately run past a flat 300s
-# window under load (a slow registered check, a busy supervisor pane) with the
-# daemon perfectly healthy throughout. The strict watcher predicate and $GRACE
-# are unchanged everywhere else, including for a dead daemon pid or a beacon
-# older than AFK_GRACE, which still block.
+# bin/fm-wake-lib.sh. That beacon test reads the shared fm_beacon_grace
+# (docs/turnend-guard.md "Guard grace and the poll cadence"), the same value
+# $GRACE uses: the daemon starts a fresh one-shot watcher only after it
+# finishes handling the previous wake, and that handling can legitimately run
+# past a flat 300s window under load (a slow registered check, a busy
+# supervisor pane) with the daemon perfectly healthy throughout. A dead daemon
+# pid or a beacon older than that grace still blocks.
 #
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
@@ -257,10 +255,9 @@ fi
 # identity-matched daemon holding this home is the right owner to test for.
 # The beacon half of the predicate still applies: a daemon that stops
 # restarting its watcher still blocks once the beacon passes grace, and a home
-# with no daemon and no watcher blocks exactly as before. It uses AFK_GRACE
-# (poll-cadence-derived, see the comment above) instead of the flat $GRACE
-# every other check on this page uses, so a daemon that is genuinely still
-# cycling - just slower than a fixed 300s window - is not misread as down.
+# with no daemon and no watcher blocks exactly as before. AFK_GRACE carries the
+# same shared grace $GRACE uses, so a daemon that is genuinely still cycling -
+# just slower than a fixed 300s window - is not misread as down.
 AFK_GRACE=$(fm_beacon_grace)
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   && fm_afk_daemon_owns_supervision "$STATE"; then
