@@ -2127,9 +2127,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   # persist - the cap-marker write whose own rollback also failed, the
   # escalation-count write whose failed write left the ceiling that count
   # bounds unenforceable, or the cap-fire counter reset whose failed reset
-  # leaves the saturated counter standing. Within FM_ROLLBACK_SENTINEL_TTL_SECS the wedge path is silent -
-  # no wake, no marker write - so the operator observes one failure per
-  # wedge-event instead of a wake-queue flood under persistent fs failure.
+  # leaves the saturated counter standing. For FM_ROLLBACK_SENTINEL_TTL_SECS it
+  # suppresses wedge escalations and further cap-state writes to prevent a
+  # wake-queue flood under persistent fs failure.
   # Read only where the cap is configured: with FM_WEDGE_MAX_ESCALATIONS at its
   # default 0 neither this sentinel nor the cap marker below is ever written, so
   # a leftover from an earlier configured run must not keep silencing a window
