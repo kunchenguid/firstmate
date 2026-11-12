@@ -253,6 +253,15 @@ The legacy `state/.afk` daemon flag has no effect on Pi.
 
 ### Attended and away authority
 
+The away posture is a mandate this session has to carry out, so an entry is refused when this session does not own the fleet lock and inspection proves another live session holds it.
+The check and the record write are one critical section against the fleet lock's acquisition boundary, so the record cannot land just after another session took the lock (`bin/fm-afk-contract.sh` owns that mechanism); when that boundary cannot be taken within its bound, the entry likewise refuses and changes nothing.
+Free, stale, unreadable, malformed, and otherwise unclassifiable locks do not block entry; uncertainty is not proof of a foreign holder.
+The refusal reports the lock pid and its current process start time and age when available, or marks those details unknown; these are live observations, not an identity saved at lock acquisition.
+The command never stops the holder, leaving that decision to the operator.
+A session that owns no lock but sees no proven live holder can still enter away mode.
+The quiet path is settled before that check, and a quiet entry never takes it: quiet mode is presentation only and holds nothing, so a read-only session can still enter it when there is no standing away record.
+The paths a quiet entry can take are owned by [Quiet mode](supervision-host.md#quiet-mode) and the [quiet skill](../.agents/skills/quiet/SKILL.md).
+
 While the away-posture record `state/.afk-contract` exists:
 
 - The branch takes every actionable row.

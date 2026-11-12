@@ -41,6 +41,12 @@
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
 #                             fm-inbox.sh ready, from the same inspect helper.
+#
+# state/.lock is published only while this script holds state/.lock.acquire, the
+# fleet lock's acquisition boundary. A reader that must act on whether the lock
+# is held takes that same boundary for its check and its action, so the verdict
+# cannot be overtaken by an acquisition; bin/fm-session-lock-lib.sh
+# (fm_session_lock_claim_path) owns the path and states the contract.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,7 +100,7 @@ rm -f "$probe" 2>/dev/null || {
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-CLAIM_LOCK="$STATE/.lock.acquire"
+CLAIM_LOCK=$(fm_session_lock_claim_path "$STATE")
 CLAIM_LOCK_HELD=0
 LEASE_LOCK="$STATE/.fm-lease-command.lock"
 LEASE_LOCK_HELD=0

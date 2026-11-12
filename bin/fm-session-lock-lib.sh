@@ -6,15 +6,19 @@
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock and its
 # state/.lock-session sidecar; bin/fm-claude-stop-autoarm.sh uses it to prove a
 # Stop hook fires inside the lock-owning primary session before it may arm or
-# rewake. Two signals decide ownership, either one sufficient: the recorded pid
-# is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
-# signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# rewake; bin/fm-afk-contract.sh uses it to tell a read-only session from a
+# foreign live holder before it records an away mandate. Two signals decide
+# ownership, either one sufficient: the recorded pid is a member of this
+# process's contiguous harness ancestry, or the trusted Claude session id below
+# matches the id recorded beside a live lock. Neither signal ever fails open: no
+# id, no sidecar, an untrusted id, or a different recorded id leaves the
+# ancestry verdict exactly as it was.
 # A second decision is owned here too: fm_session_lock_pid_blocks_reclaim
 # answers whether a recorded owner may be reclaimed, so recovery callers
 # delegate that question instead of re-deriving liveness from the fields.
 # This file is sourced by scripts and has no side effects on source.
+# It is also the one owner of the fleet lock's acquisition-boundary path, which
+# a reader holds around a verdict it must act on (the section below).
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
 # deliberately not added to the tables below: Cursor's installed names are
@@ -28,6 +32,22 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-omp-process-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
+
+# --- the fleet lock's acquisition boundary -----------------------------------
+# bin/fm-lock.sh publishes state/.lock only while it holds state/.lock.acquire,
+# and bin/fm-startup-network.sh holds that same lock as the lease a takeover
+# waits for. It is therefore the boundary any reader must hold when an action
+# depends on the lock's verdict: with it held, no other session can publish a
+# new state/.lock underneath that action, so a verdict cannot go stale between
+# a check and the write the check authorized. This printer is the one owner of
+# the path, so no reader can serialize on a different file than the publisher
+# writes under.
+# The hold itself is not here: this file stays a side-effect-free identity
+# owner, and each caller takes the boundary through the shared lock primitive
+# with the bound its own contract needs.
+fm_session_lock_claim_path() {  # <state> -> the acquisition boundary path
+  printf '%s/.lock.acquire\n' "$1"
+}
 
 # Known harness command names; extend when a new adapter is verified. omp and
 # agy are anchored exactly like pi: their process names are the bare words `omp`
@@ -977,4 +997,98 @@ fm_session_lock_inspect() {  # <state>
       fi
       ;;
   esac
+}
+
+# --- naming a live lock holder -----------------------------------------------
+# The read-only classification above says WHETHER a live session holds the
+# lock. These two helpers say WHO it is, in the terms an operator can act on:
+# the pid, the process start time, and the process age, all read live from the
+# process itself, not remembered from when the lock was taken. A pid can be
+# recycled, so the current process's start time and age are useful context, but
+# this helper does not compare them with an identity captured at lock time.
+#
+# Nothing here is stored in state/.lock: each summary is a live observation,
+# which cannot establish whether a process reusing the pid acquired the lock.
+
+# Read the live process $1's start time and age. Sets:
+#   FM_SESSION_LOCK_HOLDER_STARTED  the process start time, or empty
+#   FM_SESSION_LOCK_HOLDER_AGE      the process age, or empty
+# Returns 1 when the process cannot be inspected at all, so the caller can say
+# "started unknown; age unknown" instead of guessing.
+# shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+FM_SESSION_LOCK_HOLDER_STARTED=
+# shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+FM_SESSION_LOCK_HOLDER_AGE=
+fm_session_lock_process_liveness() {  # <pid>
+  local pid=$1 out started age
+  local -a fields
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_STARTED=
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_AGE=
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # One read of both fields, so the start time and the age describe the same
+  # observation of the same process. lstart is five whitespace-separated
+  # fields and etime is the last one. LC_ALL=C pins the date format, and
+  # COLUMNS is pinned wide so the ambient terminal width can never truncate
+  # a field (the same reason fm_pid_identity pins both).
+  out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o etime= 2>/dev/null) || return 1
+  out=${out%%$'\n'*}
+  [ -n "$out" ] || return 1
+  read -r -a fields <<< "$out"
+  [ "${#fields[@]}" -ge 6 ] || return 1
+  started="${fields[0]} ${fields[1]} ${fields[2]} ${fields[3]} ${fields[4]}"
+  age=${fields[5]}
+  case "$age" in ''|*[!0-9:-]*) return 1 ;; esac
+  case "$age" in *[0-9]*) ;; *) return 1 ;; esac
+  case "$started" in ''|*[[:cntrl:]]*) return 1 ;; esac
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_STARTED=$started
+  # shellcheck disable=SC2034 # Output globals, read by fm_session_lock_holder_summary.
+  FM_SESSION_LOCK_HOLDER_AGE=$age
+  return 0
+}
+
+# True when this session may record a fleet mutation against the home whose
+# state dir is $1: it owns the lock, or no live session holds it.
+#
+# A live session that holds the lock and is not this one is a foreign holder:
+# the session is read-only, and a read-only session must not record a
+# mandate it cannot carry out. The holder is named in the refusal, with its
+# start time and age, so the operator can act on it. Stopping the holder is
+# never automatic.
+#
+# A caller whose refusal must be authoritative holds the acquisition boundary
+# (fm_session_lock_claim_path) across this check and the write it authorizes,
+# because with that boundary held the verdict cannot be overtaken. This
+# function alone does not promise it: it reads a snapshot.
+#
+# A lock this session cannot classify - unreadable, malformed, or owned by a
+# process it cannot inspect - is not proof of a foreign holder, so it does not
+# refuse. The refusal is for a PROVEN live holder, never a guess.
+fm_session_lock_may_record() {  # <state-dir>
+  local state=$1 summary
+  if fm_session_lock_owned_by_self "$state"; then
+    return 0
+  fi
+  fm_session_lock_inspect "$state"
+  [ "$FM_LOCK_INSPECT_STATE" = held ] || return 0
+  summary=$(fm_session_lock_holder_summary "$FM_LOCK_INSPECT_PID") \
+    || summary="pid $FM_LOCK_INSPECT_PID, started unknown; age unknown"
+  printf 'another live firstmate session holds the lock (%s); this session does not own the fleet lock, so it must not record a mandate it cannot carry out. Stopping the holder is a decision for the operator, never for this script.\n' "$summary" >&2
+  return 1
+}
+
+# Print one line naming the live process $1: its pid, its start time, and its
+# age. The start time and age are "started unknown; age unknown" when the
+# process cannot be inspected, never a guess.
+fm_session_lock_holder_summary() {  # <pid>
+  local pid=$1
+  fm_session_pid_valid "$pid" || return 1
+  if fm_session_lock_process_liveness "$pid"; then
+    printf 'pid %s, started %s, age %s\n' "$pid" "$FM_SESSION_LOCK_HOLDER_STARTED" "$FM_SESSION_LOCK_HOLDER_AGE"
+  else
+    printf 'pid %s, started unknown; age unknown\n' "$pid"
+  fi
 }
