@@ -97,6 +97,12 @@
 # structural check that refused the observation. A later good read clears the
 # record's error, so the unavailable line is the copy that outlives it.
 # FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# config/hold-pr-settle opts into applying declared captain-hold PR policies
+# after terminal observation, including retained final observations. The policy
+# and evidence transition are owned by fm-captain-hold.sh. Unmerged closure also
+# becomes one durable `closed` pending event per PR, acknowledged like a review.
+# With the flag absent, neither settlement nor this extra notification runs.
+#
 # A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
@@ -560,6 +566,27 @@ publish_pending() { # task canonical-url record-file
     | [.token, .type, (.source // "-"), (.age // "-")] | @tsv' "$record")
 }
 
+terminal_hold_event() { # task canonical-url
+  local task=$1 url=$2
+  [ -f "$CONFIG/hold-pr-settle" ] || return 0
+  jq -e --arg url "$url" '.records[] | select(.url == $url and .kind == "pr"
+    and .error == null and .retired == null and (.observation.state | IN("merged","closed")))' \
+    "$DATA/$task/contributions.json" > "$TMP/terminal.json" || return 0
+  if [ -f "$DATA/$task/hold-pr-policy.json" ] \
+    && ! "$SCRIPT_DIR/fm-captain-hold.sh" settle-pr "$task" "$url"; then
+    printf 'contributions: PR hold settlement failed for %s %s\n' "$task" "$url"
+  fi
+  # Closure is actionable even when no policy says it answers the question.
+  jq 'select(.observation.state == "closed")
+    | {token:"closed",type:"closed",source:.url,head:.observation.head,body:"PR closed without merging"} as $event
+    | if (.seen | index($event.token)) == null then
+        .seen += [$event.token] | .pending += [$event]
+      else . end' "$TMP/terminal.json" > "$TMP/terminal-event.json"
+  [ -s "$TMP/terminal-event.json" ] || return 0
+  write_record "$task" "$TMP/terminal-event.json"
+  publish_pending "$task" "$url" "$TMP/terminal-event.json"
+}
+
 settle_final() { # canonical-url task... : copy the URL's final observation to every owner
   local url=$1 task
   shift
@@ -623,8 +650,12 @@ poll() {
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 3 ] || continue
     case "${row[0]}" in
-      settled) ;;
-      final) settle_final "${row[@]:1}" ;;
+      settled|final)
+        [ "${row[0]}" != final ] || settle_final "${row[@]:1}"
+        if [ -f "$CONFIG/hold-pr-settle" ]; then
+          for task in "${row[@]:2}"; do terminal_hold_event "$task" "${row[1]}"; done
+        fi
+        ;;
       *) (IFS=$'\t'; printf '%s\n' "${row[*]:1}") >> "$TMP/live.tsv" ;;
     esac
   done < "$TMP/known.tsv"
@@ -684,6 +715,7 @@ poll() {
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
+      terminal_hold_event "$task" "$url"
     done
   done < "$TMP/known.tsv"
 }
