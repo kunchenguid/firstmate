@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session), and [launch environment forwarding](#launch-environment-forwarding-configlaunch-env-forward) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1948,6 +1948,41 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Launch environment forwarding (config/launch-env-forward)
+
+Do not assume a value newly exported into the primary firstmate process's own environment reaches a worker: a long-lived backend daemon or session (a tmux server, for example) captures its own environment once and keeps it, so a later change to the launching process's environment - even from the same launcher script - never arrives on its own (measured 08.09.2026: `SUPABASE_DB_URL` exported by a launcher script into firstmate's process failed a worker's push hook twice, on 04.09.2026 and 08.09.2026, until exported by hand inside the worker).
+The optional local, gitignored `config/launch-env-forward` closes that gap explicitly, for ship, scout, secondmate, and raw-command launches alike, including relaunches.
+It is a distinct opt-in from `config/launch-env-allowlist` above: the allowlist only permits already-present ambient names through the exec-boundary filter and never copies a value from the invoking Firstmate process, while `launch-env-forward` does exactly that, deliberately, for the names it lists.
+Absent means no change: nothing is copied, matching every home that predates this option.
+
+Create the file with one environment variable **name** per line, in the same format as `launch-env-allowlist` (never a value, assignment, wildcard, or shell command; blank lines and `#` comments allowed).
+Values come only from the environment `bin/fm-spawn.sh` was started with, captured before the script assigns anything, so a spawn-internal shell variable of the same name (`ID`, `MODEL`) is never forwarded.
+Names Firstmate sets, pins, or removes for the worker itself are refused before any pane is created: every `FM_*` name, `GOTMPDIR`, `TRACEPARENT`, `COMPACT_ADVISER_DISABLE`, `LAVISH_AXI_HOST`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `DISABLE_AUTOUPDATER`, `GIT_CONFIG_NOSYSTEM`, and the internal `SPAWN_CALLER_ENV`.
+A Claude [worker account pin](#worker-account-pin-configclaude-account-configpi-account) still sheds the credential names it ranks above the pinned login (`ANTHROPIC_API_KEY` and similar) after a forwarded export.
+
+Values are never typed into the pane.
+For each listed name set in that environment, `bin/fm-spawn.sh` writes one quoted `export NAME=value` line, ahead of the launch line, into the private launch file it already stages for every pane launch (mode 0600, in a 0700 directory owned by this user); the pane receives only `. '<file>'`.
+The pane unlinks the file before the worker starts and refuses the worker if it cannot; the spawn waits for that unlink and otherwise removes the file itself, as it does after a failed send or an interrupt.
+The quoting reads the same in sh, bash, and fish, including backslashes and newlines.
+Because every export sits on its own line, a shell that rejects the launch line (fish cannot parse the allowlist's `${NAME+...}` syntax) reports only that line, never one carrying a value.
+This holds for every pane backend, because they all source the same launch file.
+`backend=t3code` has no pane and no launch file, so a spawn refuses there whenever the file lists any name.
+
+A listed name that is unset in that environment is never invented: with `launch-env-allowlist` enabled the cleared environment drops it, and without the allowlist the worker keeps whatever the pane shell already has for that name, so the launch command is unchanged.
+For a Muse worker, a listed `META_API_KEY` is decided by the invoking value alone: set and non-empty passes the credential check, anything else counts as missing, with no fallback to the tmux environment.
+When `launch-env-allowlist` is also enabled, every forwarded name is added to its retained set automatically, so the export is not then stripped by the exec-boundary filter.
+With an [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session), a forwarded name takes the invoking environment's value instead of the session's.
+
+What this does not hide:
+
+- The value lives in the pane shell's and the worker's process environment, readable by the same user.
+- A pane shell with tracing enabled (`set -x`) prints the export while sourcing the file.
+- With `launch-env-allowlist` enabled, the value passes through `/usr/bin/env` arguments, like every allowlisted value (#7064).
+
+A remote secondmate does not receive forwarded values: its commands run on the remote host under `env -i` with a fixed set of variables.
+The file is inherited into secondmate homes through the same [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md) as `launch-env-allowlist`.
+Regression coverage lives in [`tests/fm-launch-env-forward.test.sh`](../tests/fm-launch-env-forward.test.sh), the relaunch case in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh); [`tests/fm-backend-tmux-smoke.test.sh`](../tests/fm-backend-tmux-smoke.test.sh) shows the staleness gap and, against a real tmux server, sources a hand-built launch file with the same layout and checks that the worker sees the value while the pane's whole scrollback does not contain it. The launch file `fm-spawn` actually writes is covered by `tests/fm-launch-env-forward.test.sh` with a fake pane.
 
 ## Project capacity (config/project-capacity)
 

@@ -725,6 +725,65 @@ SH
   done
 }
 
+# config/launch-env-forward beside a configured tmux source: a forwarded name
+# takes the caller's value even where the session holds another, and one the
+# session lacks no longer blocks the launch (bin/fm-spawn.sh --help).
+test_orca_forwarded_names_win_over_tmux_source() {
+  local case_dir home id=orca-env-forward fb out status staged result
+  case_dir="$TMP_ROOT/$id"
+  home="$case_dir/home"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects"
+  touch "$home/state/.last-watcher-beat"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  printf 'scoped-source\n' > "$home/config/launch-env-tmux-session"
+  printf 'GH_TOKEN\nGH_CONFIG_DIR\nFWD_TEST_FORWARD\n' > "$home/config/launch-env-allowlist"
+  printf 'GH_CONFIG_DIR\nFWD_TEST_FORWARD\n' > "$home/config/launch-env-forward"
+  fm_git_init_commit "$case_dir/project"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Verify forwarded names beside the controlled Orca environment source.
+
+## Firstmate spec
+Execute read-only environment checks.
+EOF
+  cat > "$case_dir/probe.sh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${GH_TOKEN-unset}" "${GH_CONFIG_DIR-unset}" "${FWD_TEST_FORWARD-unset}"
+EOF
+  fb=$(make_orca_fakebin "$case_dir")
+  cat > "$fb/tmux" <<'EOF'
+#!/usr/bin/env python3
+import sys
+data={'GH_TOKEN':'session-token','GH_CONFIG_DIR':'session-gh'}
+if sys.argv[1:5] != ['-u','show-environment','-t','=scoped-source']: sys.exit(2)
+for name in ([sys.argv[5]] if len(sys.argv)>5 else data):
+ if name not in data: sys.exit(1)
+ print(name+'='+data[name])
+EOF
+  chmod +x "$fb/tmux"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" \
+    FM_TEST_ORCA_LOG="$case_dir/terminal.log" FM_TEST_ORCA_CONSUME=1 \
+    GH_CONFIG_DIR=caller-gh FWD_TEST_FORWARD=caller-forward-secret \
+    PATH="$fb:$PATH" "$SPAWN" "$id" "$case_dir/project" \
+    --mode direct-PR --yolo off --backend orca --harness "/bin/sh '$case_dir/probe.sh'" 2>&1)
+  status=$?
+  expect_code 0 "$status" "a forwarded name the session lacks must not block the Orca launch: $out"
+  staged=$(sed -n "s/^[^']*'\([^']*\/launch\.[^'\/]*\.sh\)'.*$/\1/p" "$case_dir/terminal.log" | tail -1)
+  [ -f "$staged.copy" ] || fail "Orca did not receive the staged launch path"
+  assert_not_contains "$(cat "$case_dir/terminal.log")" caller-forward-secret "a forwarded value leaked into terminal input"
+  cp "$staged.copy" "$staged"
+  result=$(env -i HOME="$case_dir/user-home" PATH="$PATH" TERM=xterm GH_CONFIG_DIR=pane-gh \
+    /bin/sh -c ". '$staged'") || fail "the forwarded Orca launch failed"
+  [ "$result" = $'session-token\ncaller-gh\ncaller-forward-secret' ] \
+    || fail "forwarded names did not win over the tmux source"$'\n'"actual: $result"
+  [ ! -e "$staged" ] || fail "the launch file survived sourcing"
+  pass "Orca with a tmux source takes forwarded names from the caller, even ones the session lacks"
+}
+
 # tmux versions differ on whether they keep invalid UTF-8, so pin the adapter
 # itself: whatever bytes tmux reports must reach the shell assignment unchanged.
 test_orca_snapshot_keeps_raw_bytes_tmux_reports() {
@@ -870,6 +929,7 @@ PY
 
 test_orca_source_preserves_values_without_utf8_locale
 test_orca_launch_uses_controlled_tmux_environment
+test_orca_forwarded_names_win_over_tmux_source
 test_orca_allowlist_without_source_warns
 test_orca_spawn_waits_for_a_slow_pane_before_a_later_failure
 test_orca_unrun_launch_file_is_reclaimed

@@ -355,6 +355,25 @@ EOF
   pass "muse spawn refuses a META_API_KEY that cannot reach the worker"
 }
 
+# config/launch-env-forward listing META_API_KEY makes the caller's value the
+# only answer: an empty one is missing even when the tmux session holds a key
+# the forwarded (empty) export would then override.
+test_spawn_forwarded_empty_key_ignores_tmux_key() {
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case forward-empty-key)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  printf 'META_API_KEY\n' > "$home/config/launch-env-forward"
+  out=$(FM_TEST_MUSE_KEY='' FM_TEST_MUSE_WORKER_KEY=present \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "muse spawn fell back to the tmux key while forwarding an empty META_API_KEY"
+  assert_contains "$out" "no worker-reachable credential" "muse spawn did not name the missing credential"
+  assert_absent "$home/state/$id.meta" "refused muse spawn still published task metadata"
+  pass "a forwarded META_API_KEY decides the muse preflight alone, without the tmux fallback"
+}
+
 test_spawn_accepts_stored_credential() {
   local rec case_dir home proj wt fakebin id status
   rec=$(make_spawn_case stored-cred)
@@ -972,6 +991,7 @@ test_spawn_launch_shape
 test_spawn_maps_effort_and_model
 test_spawn_refuses_without_credential
 test_spawn_refuses_caller_only_environment_credential
+test_spawn_forwarded_empty_key_ignores_tmux_key
 test_spawn_accepts_stored_credential
 test_spawn_resolves_relative_xdg_roots
 test_spawn_refuses_secondmate

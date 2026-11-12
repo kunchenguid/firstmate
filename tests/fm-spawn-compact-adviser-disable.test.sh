@@ -295,6 +295,9 @@ case "${1:-}" in
           staged=${payload#". '"}
           staged=${staged%"'"}
           [ ! -f "$staged" ] || { payload=$(cat "$staged"); printf '%s\n' "$payload" > "$D/launch"; }
+          printf '%s\n' "$staged" > "$D/staged-path"
+          printf '%s\n' ". '$staged'" >> "$D/source-lines"
+          [ "${FM_FAKE_CONSUME_LAUNCH:-0}" != 1 ] || rm -f -- "$staged"
           ;;
       esac
       printf '%s\n' "$payload" >> "$D/literal"
@@ -386,6 +389,53 @@ $launch") \
   pass "relaunch rebuilds the compact-adviser switch for the replacement agent in both allowlist postures"
 }
 
+# config/launch-env-forward on a relaunch: the rebuilt launch file carries the
+# caller's value on its own export line, the pane input never does, and the
+# stub pane unlinks the file as a sourcing shell would.
+test_relaunch_carries_forwarded_value() {
+  local dir home proj wt id=relaunch-forward-a1 out status launch preamble seen secret=fm-relaunch-secret-88
+  dir="$TMP_ROOT/relaunch-forward"
+  home="$dir/home"
+  proj="$dir/proj"
+  wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/fake" "$dir/user-home"
+  touch "$home/state/.last-watcher-beat"
+  printf 'FWD_RELAUNCH_VALUE\n' > "$home/config/launch-env-forward"
+  make_relaunch_stub "$dir"
+  fm_git_worktree "$proj" "$wt" wt-relaunch-forward
+  fm_test_spawn_brief "$home" "$id"
+  : > "$dir/fake/literal"
+  : > "$dir/fake/keys"
+  printf 'codex' > "$dir/fake/command"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+  printf '%s\n' "window=fmses:fm-$id" "endpoint_task_id=$id" "worktree=$wt" "project=$proj" \
+    harness=codex kind=ship mode=no-mistakes yolo=off "tasktmp=$dir/tasktmp" model=default effort=default \
+    > "$home/state/$id.meta"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake" FM_FAKE_CONSUME_LAUNCH=1 \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 FWD_RELAUNCH_VALUE="$secret" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$id" relaunch --note 'replacement continues the same task' 2>&1)
+  status=$?
+  expect_code 0 "$status" "relaunch with launch-env-forward should succeed: $out"
+  # The stub logs the staged file's content as the literal it stands for, so
+  # check the real pane input: the source line and the keys.
+  assert_not_contains "$(cat "$dir/fake/source-lines" "$dir/fake/keys")" "$secret" "the forwarded value reached pane input on relaunch"
+  launch=$(cat "$dir/fake/launch" 2>/dev/null)
+  case "$launch" in
+    "command rm -- '"*) ;;
+    *) fail "the relaunch launch file does not unlink itself first: $launch" ;;
+  esac
+  [ ! -e "$(cat "$dir/fake/staged-path")" ] || fail "the relaunch launch file survived"
+  install_env_probe "$dir/fakebin" codex FWD_RELAUNCH_VALUE
+  preamble=$(grep '^export ' "$dir/fake/keys")
+  seen=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" TERM=xterm TMUX=synthetic-pane \
+    /bin/sh -c "$preamble
+$(printf '%s\n' "$launch" | sed 1d)") || fail "the relaunch launch failed to run"
+  assert_equals "$secret" "$seen" "a relaunched agent must receive the forwarded value"
+  pass "relaunch carries a forwarded value through the private launch file only"
+}
+
 # A command-prefix assignment only covers the first simple command. A raw
 # compound launch such as `cd <dir> && <probe>` must still start the probe with
 # both required environment values, so execute the pane's launch under a
@@ -462,4 +512,5 @@ test_secondmate_launch
 test_launch_exports_task_inbox
 test_launch_exports_active_home
 test_relaunch_rebuilds_the_switch
+test_relaunch_carries_forwarded_value
 test_raw_compound_launch_command_carries_the_switch

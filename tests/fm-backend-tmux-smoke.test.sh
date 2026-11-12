@@ -277,6 +277,73 @@ pass "real tmux: fm_backend_target_exists rejects a missing session while anothe
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- environment staleness (measured 08.09.2026) and the fix channel --------
+# A real tmux server captures its environment once and keeps it; a variable
+# exported into the CALLING shell afterward - even into the exact process that
+# then runs `tmux new-window` - never reaches a freshly created window on its
+# own (docs/configuration.md "Launch environment forwarding
+# (config/launch-env-forward)"). bin/fm-spawn.sh's fix never tries to patch
+# that, and never types the value either: it writes the export into the
+# private launch file (0600 in a 0700 directory) that the pane sources and
+# unlinks, so the pane's own shell and the worker get the value while the
+# pane's text, scrollback included, only ever shows the file path.
+ENV_WINDOW="fm-envcheck"
+ENV_TARGET="$SESSION:$ENV_WINDOW"
+FM_SMOKE_STALE_VAR=set-after-server-start
+export FM_SMOKE_STALE_VAR
+fm_backend_tmux_create_task "$SESSION" "$ENV_WINDOW" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed to create the env-check window"
+SHELL_READY=false
+for _ in $(seq 1 100); do
+  tmux send-keys -t "$ENV_TARGET" C-c
+  tmux send-keys -t "$ENV_TARGET" -l "printf 'shell-%s\\n' ready"
+  tmux send-keys -t "$ENV_TARGET" Enter
+  if wait_for_capture_text "$ENV_TARGET" "shell-ready" 10; then
+    SHELL_READY=true
+    break
+  fi
+done
+[ "$SHELL_READY" = true ] || fail "the env-check tmux shell did not become ready"
+tmux send-keys -t "$ENV_TARGET" "clear && printf 'ambient=%s\\n' \"\${FM_SMOKE_STALE_VAR:-unset}\"" Enter
+wait_for_capture_text "$ENV_TARGET" "ambient=" || fail "the ambient-environment probe did not complete"
+out=$(fm_backend_tmux_capture "$ENV_TARGET" 20) || fail "fm_backend_tmux_capture failed after the ambient probe"
+case "$out" in
+  *"ambient=unset"*) : ;;
+  *) fail "real tmux: a variable exported into the calling shell after the server started should NOT reach a fresh window on its own (this is the measured gap config/launch-env-forward closes)"$'\n'"$out" ;;
+esac
+pass "real tmux: ordinary ambient inheritance does not carry a post-server-start export into a freshly created window"
+
+ENV_SECRET="fm-smoke-secret-4417 'q' \\ \$HOME"
+ENV_LAUNCH_DIR="$SHIM_DIR/launch-env"
+ENV_LAUNCH_FILE="$ENV_LAUNCH_DIR/launch.1.sh"
+(umask 077 && mkdir "$ENV_LAUNCH_DIR")
+ENV_SECRET_QUOTED="'$(printf '%s' "$ENV_SECRET" | sed "s/[\\\\']/'\\\\&'/g")'"
+ENV_SECRET_SUM=$(printf '%s' "$ENV_SECRET" | cksum)
+# Same layout as bin/fm-spawn.sh writes: unlink line, one export line per
+# value, then the launch line.
+(umask 077 && printf '%s\n' "command rm -- '$ENV_LAUNCH_FILE' || return 1 2>/dev/null || exit 1" \
+  "export FM_SMOKE_STALE_VAR=$ENV_SECRET_QUOTED" \
+  "sh -c 'printf \"worker=%s\\n\" \"\$(printf %s \"\$FM_SMOKE_STALE_VAR\" | cksum)\"'" > "$ENV_LAUNCH_FILE")
+[ "$(stat -c '%a' "$ENV_LAUNCH_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_LAUNCH_FILE")" = 600 ] || fail "the smoke launch file is not private"
+fm_backend_tmux_send_literal "$ENV_TARGET" ". '$ENV_LAUNCH_FILE'" || fail "fm_backend_tmux_send_literal failed to send the source line"
+fm_backend_tmux_send_key "$ENV_TARGET" Enter || fail "fm_backend_tmux_send_key failed to submit the source line"
+wait_for_capture_text "$ENV_TARGET" "worker=" || fail "the sourced launch file did not start the worker"
+# The typed probe spells its marker apart so only its output matches "pane=".
+tmux send-keys -t "$ENV_TARGET" "printf 'pa%s=%s\\n' ne \"\$(printf %s \"\$FM_SMOKE_STALE_VAR\" | cksum)\"" Enter
+wait_for_capture_text "$ENV_TARGET" "pane=" || fail "the pane-shell probe did not complete"
+out=$(tmux capture-pane -p -J -S - -t "$ENV_TARGET") || fail "tmux capture-pane over the whole history failed"
+case "$out" in
+  *"worker=$ENV_SECRET_SUM"*"pane=$ENV_SECRET_SUM"*) : ;;
+  *) fail "real tmux: the value in the sourced private launch file should reach the worker and the pane shell"$'\n'"$out" ;;
+esac
+case "$out" in
+  *fm-smoke-secret-4417*) fail "real tmux: the forwarded value appeared in the pane's history"$'\n'"$out" ;;
+esac
+[ ! -e "$ENV_LAUNCH_FILE" ] || fail "real tmux: the sourced launch file was not unlinked"
+pass "real tmux: a value in the sourced private launch file reaches pane shell and worker, never the pane's history, despite the ambient gap above"
+
+fm_backend_tmux_kill "$ENV_TARGET"
+
 # --- container resolution under a grouped session ---------------------------
 
 # An external client attached through a grouped session (`new-session -t`) is

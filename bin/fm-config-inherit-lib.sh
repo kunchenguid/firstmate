@@ -93,7 +93,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist launch-env-forward claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
 
 # firstmate-role additionally carries a proof-of-state receipt: a scoped role
 # grant (or its recorded absence) authorizes a secondmate home only while
@@ -143,6 +143,20 @@ fm_config_source_present() {
     elsif ($! == ENOENT) { print 0 }
     else { die "error: cannot inspect configuration source at $ARGV[0]: $!\n" }
   ' -- "$1"
+}
+
+# fm_config_env_name_list <path>
+# Parse a config file of blank lines, `#` comments, and one POSIX environment
+# variable name per line. Prints each valid name on its own line; returns
+# nonzero for any other content. The single owner of this format, shared by
+# config/launch-env-allowlist and config/launch-env-forward (bin/fm-spawn.sh
+# --help), which use it for two different purposes.
+fm_config_env_name_list() {
+  jq -Rrs '
+    split("\n") | map(select(. != "" and (startswith("#") | not))) |
+    if all(.[]; test("^[A-Za-z_][A-Za-z0-9_]*$")) then .[]
+    else error("expected environment names only") end
+  ' "$1" 2>/dev/null
 }
 
 fm_inherit_file_mode() {

@@ -839,6 +839,7 @@ tests/fm-kimi-harness.test.sh 58917
 tests/fm-kimi-trust-prompt-live-e2e.test.sh 60
 tests/fm-lane-capacity-integration.test.sh 48000
 tests/fm-lane-vitals.test.sh 5077
+tests/fm-launch-env-forward.test.sh 67846
 tests/fm-launch-prompt-signals-live-e2e.test.sh 50
 tests/fm-lavish-url.test.sh 30000
 tests/fm-lint-workflows.test.sh 872
@@ -922,7 +923,7 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 49
 tests/fm-sessionstart-nudge.test.sh 71802
 tests/fm-shared-captain-inheritance.test.sh 7991
 tests/fm-spawn-compact-adviser-disable-remote.test.sh 38561
-tests/fm-spawn-compact-adviser-disable.test.sh 21654
+tests/fm-spawn-compact-adviser-disable.test.sh 57341
 tests/fm-spawn-dispatch-profile.test.sh 197548
 tests/fm-spawn-orca-worktree.test.sh 2400
 tests/fm-spawn-pool-base-freshen.test.sh 68652
