@@ -925,6 +925,13 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
+fm_send_close_all_resolved() { # <answer-text>
+  local rc=0
+  fm_send_feed_resolved_holds "$1" || rc=1
+  fm_send_close_resolved_keys "$1" || rc=1
+  return "$rc"
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used to
 # scope the codex `$<skill>` popup-settle below and the kiro composer rules
 # above. A task selector carries meta. An explicit backend-target escape hatch
@@ -1177,8 +1184,7 @@ else
       fi
     fi
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_all_resolved "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     exit 0
   fi
@@ -1254,8 +1260,7 @@ else
     # The answer is durably sent: close each answered decision at enqueue time
     # (answerer-closes; see the header contract).
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_all_resolved "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
@@ -1396,8 +1401,7 @@ else
   # Delivery is fully confirmed: close each answered decision in this home's
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
-    fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
-    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_close_all_resolved "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
