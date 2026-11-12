@@ -33,6 +33,14 @@ done
 for args in 'node /tmp/server.js /opt/hermes-agent/ui-tui/dist/entry.js' 'python3 -c tui_gateway.entry' 'node -e hermes' 'hermes-helper'; do
   ! fm_hermes_process_matches "$args" || fail "false identity: $args"
 done
+# An empty argv must be a clean non-match under set -u, including bash 3.2 where
+# expanding an empty array is an unbound-variable error.
+for shell_bin in /bin/bash "$BASH"; do
+  [ -x "$shell_bin" ] || continue
+  # shellcheck disable=SC2016 # $1 expands in the child shell
+  "$shell_bin" -c 'set -u; . "$1"; ! fm_hermes_process_matches ""' _ "$ROOT/bin/fm-hermes-process-lib.sh" 2>&1 \
+    || fail "empty args not a clean non-match under $shell_bin"
+done
 # Use a real interpreter process so kernel-name loss and argv loss are
 # independent regressions, not expectations encoded into a fake harness.
 mkdir -p "$TMP_ROOT/process/tui_gateway"
