@@ -9,7 +9,13 @@
 # to fix it; the merged wake itself is unchanged.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
-# head is that named head and is already stored on the forge.
+# head is that named head and is already stored on the forge. Registration is
+# the gate caller that refreshes the copy's remote-tracking refs before it
+# refuses (FM_DOD_REFRESH_REMOTES), because a no-mistakes pipeline pushes from
+# its own gate clone and nothing else fetches that push into the copy; the
+# fetch also leaves the refs that the gate's other callers read. The
+# merge-time re-record (FM_PR_CHECK_MERGE=1) refreshes the same way, while
+# bin/fm-pr-merge.sh holds that one task's control lock.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
 # own registration, so a later repository update does not invalidate it; task and
 # PR data live only in a private sidecar and are never interpolated into shell
@@ -33,21 +39,35 @@
 #
 # scan records every task whose status reports a PR that nobody recorded, so
 # merge monitoring never depends on the supervisor remembering this command.
-# bin/fm-watch.sh runs it at the start of each check sweep. A candidate is a
-# task record that is not a secondmate or scout and has no pr= line, or has the
-# reported pr= but no valid published poll; its PR is
-# the first "PR <url>" token in the newest done: line that names a supported PR
-# URL, whatever the rest of the line says. A URL without the "PR " prefix is
-# prose and never counts. Each candidate is recorded through the ordinary
-# path above, so every refusal still applies. A refusal prints one line naming
-# the task, the URL, and the reason, once per task and URL
-# (state/<task>.pr-register-refused), and the scan retries silently on later
-# sweeps, so a draft later marked ready is recorded without help. Each sweep
+# bin/fm-watch.sh runs it at the start of each check sweep. A task reports a PR
+# only when its newest crew-declared status line (last_crew_status_line in
+# bin/fm-classify-lib.sh) is a done: line in a ready shape
+# (fm_dod_ready_note_url in bin/fm-dod-lib.sh) naming a supported PR URL, so
+# prose around the URL, a line saying the PR is not ready, and any later crew
+# line each leave nothing to record. A candidate is a task record that is not a
+# secondmate or scout and has no pr= line, has the reported pr= but no valid
+# published poll, or has a pr= that its status log named and the reported PR now
+# replaces; a pr= the log never named is the supervisor's own choice and stays,
+# and a merged or retired pr= is never replaced. Each candidate is recorded
+# through the ordinary path above, so every refusal still applies. A refusal
+# queues a check wake and prints one line naming the task, the URL, and the
+# reason, once per task and URL (state/<task>.pr-register-refused), and the scan
+# retries silently on later sweeps, so a draft later marked ready is recorded
+# without help. The wake is queued before the once-only marker is written, so a
+# stop between the two repeats a notice rather than losing it. Each sweep
 # starts just after the last task the previous sweep attempted
 # (state/.pr-check-scan-cursor), so a registration that hangs or is refused
 # cannot take the whole budget on every sweep. Registrations
 # stop FM_CHECK_TIMEOUT (default 30) minus 5 seconds after the scan starts; a
-# registration cut at that bound prints nothing and is retried.
+# registration cut at that bound reports the same way that the PR merge watch
+# could not be armed, once per task and URL (state/<task>.pr-register-timed-out),
+# and is retried.
+# A registration's remote-ref refresh ends 5 seconds before that bound
+# (FM_DOD_REFRESH_DEADLINE), so a registration still refused after it reports
+# that refusal instead of being cut. Once that time has passed, the sweep
+# starts no further registration, so the cursor stays on the last task that
+# had a full turn; the first registration of a sweep still runs, and with no
+# time left to fetch it decides on the last-known refs.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -71,26 +91,13 @@ DEGRADED_WATCH_ENABLED=0
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 pr_check_reported_url() {  # <status-file>
-  local line token found=
+  local line url
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
-  while IFS= read -r line; do
-    [ "$(status_line_verb "$line")" = "done" ] || continue
-    while IFS= read -r token; do
-      token=${token#*PR }
-      while :; do
-        case "$token" in
-          *[\).,\;:\'\"]) token=${token%?} ;;
-          *) break ;;
-        esac
-      done
-      if fm_pr_url_parse "$token"; then
-        found=$FM_PR_URL
-        break
-      fi
-    done < <(status_line_note "$line" | grep -oE '(^|[^[:alnum:]_])PR https://[^[:space:]]+' || true)
-  done < <(grep -E '^[[:space:]]*done' "$1" | grep -F 'PR https://' || true)
-  [ -n "$found" ] || return 1
-  printf '%s\n' "$found"
+  line=$(last_crew_status_line "$1")
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  url=$(fm_dod_ready_note_url "$(status_line_note "$line")") || return 1
+  fm_pr_url_parse "$url" || return 1
+  printf '%s\n' "$FM_PR_URL"
 }
 
 pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line for last-id, wrapping
@@ -104,7 +111,8 @@ pr_check_pr_retired() {  # <id> <recorded-url>
 }
 
 pr_check_scan() {
-  local budget start meta id kind url recorded left marker err rc tmp candidates='' cursor_file cursor
+  local budget start meta id kind url recorded replaces left refused timed_out marker note line err rc tmp candidates='' cursor_file cursor
+  local refresh_deadline attempted now
   budget=${FM_CHECK_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   budget=$((budget - 5))
@@ -120,35 +128,56 @@ pr_check_scan() {
     url=$(pr_check_reported_url "$STATE/$id.status") || continue
     recorded=$(grep '^pr=' "$meta" | tail -1 | cut -d= -f2- || true)
     pr_check_pr_retired "$id" "$recorded" && continue
-    [ -z "$recorded" ] || { [ "$recorded" = "$url" ] && ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } || continue
-    candidates="$candidates$id $url"$'\n'
+    replaces=
+    if [ "$recorded" = "$url" ]; then
+      ! fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || continue
+    elif [ -n "$recorded" ]; then
+      fm_dod_status_names_pr "$STATE/$id.status" "$recorded" || continue
+      replaces=$recorded
+    fi
+    candidates="$candidates$id $url $replaces"$'\n'
   done
   cursor_file="$STATE/.pr-check-scan-cursor"
   cursor=$(cat "$cursor_file" 2>/dev/null || true)
   candidates=$(printf '%s' "$candidates" | pr_check_rotate "$cursor")
-  while IFS=' ' read -r id url; do
+  refresh_deadline=$((start + budget - 5))
+  attempted=0
+  while IFS=' ' read -r id url replaces; do
     [ -n "$id" ] || continue
-    left=$((start + budget - $(date +%s)))
+    now=$(date +%s)
+    left=$((start + budget - now))
     [ "$left" -gt 0 ] || break
-    marker="$STATE/$id.pr-register-refused"
+    [ "$attempted" = 0 ] || [ "$now" -lt "$refresh_deadline" ] || break
+    attempted=1
+    refused="$STATE/$id.pr-register-refused"
+    timed_out="$STATE/$id.pr-register-timed-out"
     printf '%s\n' "$id" > "$cursor_file" 2>/dev/null || true
     rc=0
-    err=$(fm_run_timed "$left" env FM_PR_CHECK_SCAN=1 bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1 >/dev/null) || rc=$?
+    # The grace lets a registration cut at the bound run its cleanup trap.
+    err=$( (fm_exec_timed "$left" 2 env FM_PR_CHECK_SCAN=1 FM_PR_CHECK_SCAN_REPLACES="$replaces" \
+      FM_DOD_REFRESH_DEADLINE="$refresh_deadline" \
+      bash "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url") 2>&1 >/dev/null) || rc=$?
     if [ "$rc" -eq 0 ]; then
-      rm -f -- "$marker"
+      rm -f -- "$refused" "$timed_out"
       continue
     fi
-    [ "$rc" -ne 124 ] || continue
+    if fm_timed_out "$rc"; then
+      marker=$timed_out
+      note="its PR merge watch could not be armed: registration timed out after ${left}s, and later sweeps keep retrying"
+    else
+      marker=$refused
+      err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+      note="it was not recorded: ${err:-registration failed}"
+    fi
     if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = "$url" ]; then
       continue
     fi
-    tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX") || continue
-    if ! { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
-      rm -f -- "$tmp"
-      continue
+    line="$id reported $url in a done line, but $note"
+    fm_wake_append check pr-register "check: pr-register: $line" || continue
+    if tmp=$(mktemp "$STATE/.pr-register-refused.XXXXXX"); then
+      { printf '%s\n' "$url" > "$tmp" && mv -f -- "$tmp" "$marker"; } || rm -f -- "$tmp"
     fi
-    err=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
-    printf '%s reported %s in a done line, but it was not recorded: %s\n' "$id" "$url" "${err:-registration failed}"
+    printf '%s\n' "$line"
   done <<EOF_SCAN
 $candidates
 EOF_SCAN
@@ -306,6 +335,7 @@ case "$PROVIDER:$MODE" in
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
+FM_DOD_REFRESH_REMOTES=1
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
@@ -317,6 +347,8 @@ BASELINE_BACKUP=
 BASELINE_BACKUP_COMPLETE=0
 META_LOCK=
 META_LOCK_HELD=0
+MERGE_NOTICE_LOCK=
+MERGE_NOTICE_LOCK_HELD=0
 PR_POLL_PUBLISH_LOCK=
 PR_POLL_PUBLISH_LOCK_HELD=0
 CONTROL_LOCK=
@@ -341,6 +373,10 @@ pr_check_cleanup() {
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
   fi
+  if [ "$MERGE_NOTICE_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$MERGE_NOTICE_LOCK" || true
+    MERGE_NOTICE_LOCK_HELD=0
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -361,6 +397,8 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 # (bin/fm-pr-merge.sh already holds it) nor reads or rewrites the baseline: it
 # records before any forge call, and the marker it leaves is keyed to the PR
 # identity, so it can only ever match the PR it was written for.
+BASELINE_TRAIN=0
+BASELINE_DEGRADED=
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   CONTROL_LOCK="$STATE/.control-$ID.lock"
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
@@ -377,9 +415,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
     fi
     exit 1
   fi
-  BASELINE_TRAIN=0
   BASELINE_TRAIN_UNKNOWN=0
-  BASELINE_DEGRADED=
   while IFS= read -r baseline_line; do
     case $baseline_line in
       ontrain) BASELINE_TRAIN=1 ;;
@@ -404,10 +440,25 @@ META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 # A scan gathers its candidates before it registers them, so the supervisor may
-# have recorded another PR meanwhile; that choice is never overwritten.
+# have recorded another PR meanwhile; that choice is never overwritten. Only the
+# exact pr= the scan chose to replace gives way, and only while its merge is
+# unrecorded: the merge-notification lock bin/fm-merge-outcome-lib.sh records a
+# merge under is held from that recheck through the pr= write, so a replacement
+# never interleaves with the record of the PR it replaces.
 if [ "${FM_PR_CHECK_SCAN:-}" = 1 ]; then
   RECORDED_PR=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] || exit 0
+  if [ -n "${FM_PR_CHECK_SCAN_REPLACES:-}" ] && [ "$RECORDED_PR" = "$FM_PR_CHECK_SCAN_REPLACES" ]; then
+    MERGE_NOTICE_LOCK="$STATE/$ID.pr-poll-merge-notified.lock"
+    fm_lock_acquire_wait "$MERGE_NOTICE_LOCK"
+    MERGE_NOTICE_LOCK_HELD=1
+    pr_check_pr_retired "$ID" "$RECORDED_PR" && exit 0
+    if [ "$RECORDED_PR" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ]; then
+      reported=$(pr_check_reported_url "$STATE/$ID.status") || exit 0
+      [ "$reported" = "$URL" ] || exit 0
+    fi
+  fi
+  [ -z "$RECORDED_PR" ] || [ "$RECORDED_PR" = "$URL" ] \
+    || [ "$RECORDED_PR" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ] || exit 0
 fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
@@ -430,7 +481,7 @@ fm_pr_metadata_identity_parse "$META_TMP" || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 
 # Keep the current registration recoverable until all replacement files commit.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && { [ "$DEGRADED_WATCH_ENABLED" = 1 ] || { [ "${FM_PR_CHECK_SCAN:-}" = 1 ] && [ "${RECORDED_PR:-}" = "${FM_PR_CHECK_SCAN_REPLACES:-}" ] && [ -n "${RECORDED_PR:-}" ]; }; }; then
   BASELINE_BACKUP=$(mktemp -d "$STATE/.fm-pr-baseline.XXXXXX") || exit 1
   restore_baselines() {
     local artifact backup
@@ -467,6 +518,11 @@ fm_pr_metadata_identity_parse "$META" || { [ -z "${BASELINE_BACKUP:-}" ] || base
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
+if [ "$MERGE_NOTICE_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$MERGE_NOTICE_LOCK"
+  MERGE_NOTICE_LOCK_HELD=0
+fi
+
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || { [ -z "${BASELINE_BACKUP:-}" ] || baseline_failure; exit 1; }
 PR_POLL_PUBLISH_LOCK_HELD=1
