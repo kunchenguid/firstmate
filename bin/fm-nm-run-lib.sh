@@ -23,15 +23,17 @@
 # The no-mistakes forms route host reads through the opt-in home resolver below.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
+  local timeout_options=()
+  [ "${FM_CHECK_OWNED_GROUP:-0}" != 1 ] || timeout_options=(--foreground -k 1)
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
+    timeout)  ( cd "$dir" && timeout "${timeout_options[@]}" "$timeout_secs" "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "${timeout_options[@]}" "$timeout_secs" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; local $SIG{ALRM} = sub { kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "${FM_CHECK_OWNED_GROUP:-0}" "$@" ) ;;
     *)        return 1 ;;
   esac
 }
