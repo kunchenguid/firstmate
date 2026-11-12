@@ -232,7 +232,7 @@ numeric_or() {  # <value> <default>
   case "$1" in ''|0*|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
 }
 
-GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+GRACE=$(fm_beacon_grace)
 ENGINE_GRACE=$(numeric_or "${FM_SUPERVISION_ENGINE_GRACE:-}" 30)
 PARK_SECONDS=$(numeric_or "${FM_SUPERVISION_HOST_PARK_SECONDS:-}" 27000)
 [ "$PARK_SECONDS" -lt 28800 ] 2>/dev/null || PARK_SECONDS=27000

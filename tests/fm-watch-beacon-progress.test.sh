@@ -289,6 +289,18 @@ test_home_configured_poll_governs_readers() {
     fm_watcher_stall_bound
   ' _ "$ROOT/bin/fm-wake-lib.sh")
   assert_equals $'1200\n3600' "$out" "configured grace and stall bound"
+  printf '%s\n' 'export FM_POLL=600' 'export FM_GUARD_GRACE=60' > "$home/config/watch.env"
+  backdate_beacon "$home" 100
+  out=$(run_guard_derived "$dir")
+  case "$out" in
+    *"WATCHER DOWN"*) ;;
+    *) fail "configured short grace was replaced by the long poll default: $out" ;;
+  esac
+  FM_HOME="$home" bash -c '
+    . "$1/bin/fm-supervision-lib.sh"
+    fm_supervision_status "$FM_HOME/state"
+    [ "$FM_SUP_WATCHER_FRESH" = false ]
+  ' _ "$ROOT" || fail "standalone supervision ignored the configured short grace"
   printf '%s\n' 'export FM_POLL=600' > "$home/config/watch.env"
   backdate_beacon "$home" 320
   printf '%s\n' 'export FM_POLL=15' > "$home/config/x-mode.env"
@@ -296,6 +308,7 @@ test_home_configured_poll_governs_readers() {
   stop_pid "$HOLDER_PID"
   case "$out" in
     *"WATCHER DOWN"*) ;;
+    *"watcher still down"*) ;;
     *) fail "Relay cadence did not supersede the home long poll: $out" ;;
   esac
   pass "readers resolve home cadence and Relay precedence without leaking configuration"

@@ -261,7 +261,7 @@ fi
 # (poll-cadence-derived, see the comment above) instead of the flat $GRACE
 # every other check on this page uses, so a daemon that is genuinely still
 # cycling - just slower than a fixed 300s window - is not misread as down.
-AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+AFK_GRACE=$(fm_beacon_grace)
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   && fm_afk_daemon_owns_supervision "$STATE"; then
   allow_supervised_stop

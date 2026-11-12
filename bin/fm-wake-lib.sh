@@ -2324,7 +2324,7 @@ fm_pid_descends_from() {  # <pid> <ancestor>
 # Claude session (the Stop payload's session_id) also finds a claim recorded
 # under another session not open.
 fm_autoarm_claim_open() {  # <state-dir> [grace] [claude-session]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session=${3:-} epoch current lock_pid lock_identity recorded
+  local state=$1 grace=${2:-$(fm_beacon_grace)} session=${3:-} epoch current lock_pid lock_identity recorded
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
@@ -2416,7 +2416,7 @@ fm_autoarm_session_matches() {  # <state-dir> <identity> [recorded-session-id]
 # (the ledger holds a claim open to this session), and 1 when the micro-mutex
 # is contended, the mandatory identity cannot be computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace] [claude-session]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} claude_session=${3:-} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
+  local state=$1 grace=${2:-$(fm_beacon_grace)} claude_session=${3:-} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
@@ -2610,7 +2610,7 @@ fm_autoarm_rekey_session() {  # <state-dir> <old-pid> <new-pid>
 #      and the watcher beacon are older than the guard grace (the same stuck
 #      proof as fm_autoarm_claim_open).
 fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  local state=$1 grace=${2:-$(fm_beacon_grace)} epoch lock role pid owner outcome recorded current
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
@@ -2661,7 +2661,7 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # TERM and the ledger graft below, keeping the documented bounded
 # upgrade-window residual instead of the deadlock.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
+  local state=$1 grace=${2:-$(fm_beacon_grace)} lock steal epoch lock_pid recorded current owner line1 tmp i
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
