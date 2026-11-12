@@ -78,9 +78,13 @@ backend_detect=app-terminal
 window=<session>:<address>
 hc_session=<session>
 hc_terminal=<address>
+hc_core=<core id>
 ```
 
 `backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
+
+`hc_core` is the id `hc server status` reports for that core; it lets a structured not-found prove the terminal gone (see "Lifecycle control").
+A core that reports no id still takes the task, and the record then carries no `hc_core`.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
@@ -102,6 +106,13 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
 | Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
+
+## Lifecycle control
+
+`bin/fm-control.sh` drives hc tasks like tmux, Herdr, and Rex tasks: `interrupt`, `exit`, and `relaunch` in the same terminal.
+An agent that exits returns its terminal to the login shell, which reads `dead` and is adopted by the next relaunch.
+A terminal is proven gone when it is finished and still carries the task's labels, or when the core whose id the record names answers not-found; the relaunch then opens one fresh terminal in the recorded worktree.
+`relaunch --backend hc` moves a task from another backend onto hc ([`agent-control.md`](agent-control.md#moving-a-task-to-another-backend)).
 
 ## Limits
 
