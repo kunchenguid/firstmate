@@ -221,6 +221,49 @@ test_derived_grace_follows_the_poll_cadence() {
   pass "the shared beacon grace derives from the poll cadence and honours an explicit override"
 }
 
+test_standalone_supervision_uses_derived_grace() {
+  local dir home
+  dir=$(make_home standalone-supervision)
+  home=$(case_home "$dir")
+  fm_write_meta "$home/state/task.meta" "kind=ship"
+  : > "$home/state/.last-watcher-beat"
+  backdate_beacon "$home" 320
+  FM_HOME="$home" bash -c '
+    set -eu
+    unset FM_GUARD_GRACE
+    . "$1"
+    FM_POLL=300
+    fm_supervision_status "$2"
+    [ "$FM_SUP_WATCHER_FRESH" = true ]
+    fm_supervision_needed "$2"
+    if fm_supervision_unhealthy "$2"; then exit 1; fi
+    FM_POLL=15
+    fm_supervision_status "$2"
+    [ "$FM_SUP_WATCHER_FRESH" = false ]
+    fm_supervision_unhealthy "$2"
+  ' _ "$ROOT/bin/fm-supervision-lib.sh" "$home/state" \
+    || fail "standalone supervision did not distinguish the 360s and 300s grace windows"
+  pass "standalone supervision predicates share the poll-derived grace"
+}
+
+test_progress_throttle_has_a_fixed_interval() {
+  local dir home beat
+  dir=$(make_home fixed-progress-interval)
+  home=$(case_home "$dir")
+  beat="$home/state/.last-watcher-beat"
+  FM_HOME="$home" FM_BEACON_TICK_INTERVAL=999999 bash -c '
+    set -eu
+    . "$1"
+    fm_watch_beacon_tick "$2" 999999
+    SECONDS=$((SECONDS + 2))
+    touch -t 200001010000 "$2"
+    fm_watch_beacon_tick "$2" 999999
+    [ "$(fm_path_age "$2")" -le 1 ]
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$beat" \
+    || fail "an optional interval suppressed real progress refreshes"
+  pass "progress refresh keeps a fixed cadence regardless of unused interval inputs"
+}
+
 test_working_long_cycle_keeps_the_beacon_fresh() {
   local dur home out grace=4 max_age i age
   dur=$(make_home working-cycle)
@@ -374,6 +417,8 @@ test_explicit_heartbeat_cadence_still_governs() {
 fm_test_run \
   test_progress_refresh_is_throttled_and_inert_outside_a_watcher \
   test_derived_grace_follows_the_poll_cadence \
+  test_standalone_supervision_uses_derived_grace \
+  test_progress_throttle_has_a_fixed_interval \
   test_working_long_cycle_keeps_the_beacon_fresh \
   test_working_long_cycle_raises_no_alarm_and_accepts_a_successor \
   test_stalled_holder_still_trips_the_banner \
