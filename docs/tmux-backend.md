@@ -63,6 +63,7 @@ Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `comp` remain ambiguous.
 AGY, Devin, and Command Code are anchored to the exact `agy`, `devin`, and `command-code` identities for the same reason, so unrelated names containing any of those fragments remain ambiguous.
+AGY's other process names, `antigravity` and `exe`, count only with agy CLI evidence in argv[0] through `bin/fm-agy-process-lib.sh`, so the Antigravity IDE remains ambiguous; [agy verification](verification/agy.md) owns that evidence.
 Polytoken is anchored to the exact `polytoken` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
 Cortex is anchored to the exact `cortex` identity for the same reason.
 Hermes uses anchored native TUI script or Python module argv through `bin/fm-hermes-process-lib.sh`; [Hermes verification](verification/hermes.md) owns the current process and composer evidence.
