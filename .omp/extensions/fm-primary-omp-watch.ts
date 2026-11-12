@@ -41,11 +41,20 @@
 // omp emits session_shutdown for ordinary same-process replacements (/new,
 // /resume, /fork) as well as terminal quit. This extension binds one generation
 // per session activation. Only the active live generation may start, stop,
-// rearm, or clear the arm child. An owning replacement session_start (or fresh
-// factory bind) arms its new generation without a model turn. A replacement
+// rearm, or clear the arm child. An owning replacement session_start (or the
+// first factory bind, while no live generation exists) arms its new generation
+// without a model turn. A replacement
 // handoff carries actionable closes that were still pending delivery; its
 // durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
+//
+// Subagent session safety (stated once here):
+// omp re-binds this factory for a subagent session (task tool, eval agent(),
+// /tan clone) on the same evaluated module, so module state - including the
+// active generation - is shared with the primary. Its lifecycle events carry
+// ctx.agent.kind === "sub". A factory bind activates its generation only when
+// no live generation exists, and subagent session_start stands down, so the
+// inactive child closure cannot claim or retire the primary's generation.
 //
 // Delivery versus consumption (stated once here):
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
@@ -556,9 +565,19 @@ const cleanupOnProcessExit = () => {
 };
 process.once("exit", cleanupOnProcessExit);
 
+function subagentContext(ctx: unknown): boolean {
+  if (!ctx || typeof ctx !== "object" || !("agent" in ctx)) return false;
+  const agent = ctx.agent;
+  return !!agent && typeof agent === "object" && "kind" in agent && agent.kind === "sub";
+}
+
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
-  activateGeneration(generation);
+  // omp re-binds this factory for each subagent session on the same evaluated
+  // module (see the header contract). A rebind for a subagent session must
+  // not displace the live primary generation, so the bind activates its own
+  // generation only when none is live.
+  if (!activeGeneration || activeGeneration.stopping) activateGeneration(generation);
 
   async function sendWake(
     owner: SessionGeneration,
@@ -1107,7 +1126,8 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    if (subagentContext(ctx)) return;
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
@@ -1115,6 +1135,7 @@ export default function (pi: ExtensionAPI) {
     activateOwnedWatch(generation);
   });
   pi.on?.("session_shutdown", async () => {
+    if (!generationIsLive(generation)) return;
     // omp carries no shutdown reason (verified: `reason` is undefined), so the
     // replacement handoff is always persisted when anything is pending; a
     // terminal quit then merely replays an already-drained wake next start.
