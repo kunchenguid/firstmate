@@ -29,6 +29,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 case "${1:-}" in
   -h|--help) sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -128,11 +130,7 @@ else
         ;;
     esac
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    snap=$(timeout "${FM_QUOTA_PREFLIGHT_TIMEOUT:-10}" "${quota_command[@]}" 2>/dev/null) || exit 0
-  else
-    snap=$("${quota_command[@]}" 2>/dev/null) || exit 0
-  fi
+  snap=$(fm_run_timed "${FM_QUOTA_PREFLIGHT_TIMEOUT:-10}" "${quota_command[@]}" 2>/dev/null) || exit 0
 fi
 printf '%s' "$snap" | fm_quota_json_valid || exit 0
 

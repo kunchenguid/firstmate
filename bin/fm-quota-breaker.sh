@@ -3,7 +3,8 @@
 # hard provider quota or rate-limit refusal and wake its firstmate to relaunch
 # it on the next candidate of the same dispatch group.
 #
-# Usage: fm-quota-breaker.sh scan
+# Usage: fm-quota-breaker.sh scan [--durable]
+#        fm-quota-breaker.sh ack <task-id> <class> <epoch> <spawn-gen>
 #        fm-quota-breaker.sh classify     (reads a captured pane on stdin)
 #
 # WHY. A worker whose provider refuses with a hard quota error does not fail:
@@ -32,9 +33,12 @@
 # The waking firstmate re-resolves that brief against crew-dispatch.json as at
 # intake, keeping the replacement inside the task's original dispatch group.
 # which the watcher queues as one `check: quota-breaker` notification each.
-# state/<task-id>.quota-breaker remembers the last report (class, spawn
-# generation, time), so one stall is reported once per realert window and a
-# relaunched incarnation that hits the same wall is reported afresh.
+# state/<task-id>.quota-breaker remembers the last acknowledged report (class,
+# spawn generation, time), so one stall is reported once per realert window and
+# a relaunched incarnation that hits the same wall is reported afresh.
+# In `scan --durable` mode, state/<task-id>.quota-breaker.pending is written
+# before output; the watcher acknowledges it only after the wake queue append,
+# so a failed append remains retryable instead of consuming the realert window.
 #
 # `classify` prints `<class><TAB><matched row>` for a pane tail on stdin, or
 # nothing. Classes and their verbatim provider signatures (the pane renders the
@@ -82,8 +86,11 @@ breaker_refusal_is_current() {
   while IFS= read -r line || [ -n "$line" ]; do
     if printf '%s\n' "$line" | grep -qE -- "$ere"; then
       found=1
-    elif [ "$found" -eq 1 ]; then
-      return 1
+    else
+      # A recovery after an older refusal must not hide a later refusal. Keep
+      # only the verdict for the last pane row, rather than returning at the
+      # first progress row after any earlier match.
+      found=0
     fi
   done <<< "$rows"
   [ "$found" -eq 1 ]
@@ -95,7 +102,8 @@ fm_quota_breaker_classify() {
   tail=$(cat)
   content=$(printf '%s\n' "$tail" \
     | grep -v '^[[:space:]]*$' \
-    | grep -Ev '^[[:space:]]*([─━╭╰│❯›⟩→❭>$%#?]|~/|/|[0-9]+(\.[0-9]+)?%/|\(auto\))' || true)
+    | grep -Ev '^[[:space:]]*([─━╭╰│❯›⟩→❭>$%#?]|~/|/|[0-9]+(\.[0-9]+)?%/|\(auto\))' \
+    | tail -n 15 || true)
   if breaker_refusal_is_current "$content" '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1308\\?"|Usage limit reached for 5 hour'; then
     breaker_hard_match "$content" zai-1308 '\\?"code\\?"[[:space:]]*:[[:space:]]*\\?"1308\\?"|Usage limit reached for 5 hour'
     return 0
@@ -125,10 +133,19 @@ fm_quota_breaker_classify() {
   return 0
 }
 
-case "${1:-}" in
+ACTION=${1:-}
+DURABLE=0
+case "$ACTION" in
   -h|--help) usage; exit 0 ;;
   classify) fm_quota_breaker_classify "${2:-$RATE_REPEATS}"; exit 0 ;;
-  scan) ;;
+  scan)
+    [ "${2:-}" = --durable ] && DURABLE=1
+    [ "$#" -le 2 ] || { usage >&2; exit 2; }
+    ;;
+  ack)
+    [ "$#" -eq 5 ] || { usage >&2; exit 2; }
+    ACK_ID=$2 ACK_CLASS=$3 ACK_EPOCH=$4 ACK_GEN=$5
+    ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -157,6 +174,34 @@ done < "$CONFIG/quota-breaker"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+if [ "$ACTION" = ack ]; then
+  pending_record="$STATE/$ACK_ID.quota-breaker.pending"
+  breaker_lock="$STATE/.quota-breaker-$ACK_ID.lock"
+  fm_lock_try_acquire "$breaker_lock" || exit 0
+  if [ -f "$pending_record" ] \
+    && [ "$(sed -n 's/^class=//p' "$pending_record")" = "$ACK_CLASS" ] \
+    && [ "$(sed -n 's/^spawn_gen=//p' "$pending_record")" = "$ACK_GEN" ] \
+    && [ "$(sed -n 's/^epoch=//p' "$pending_record")" = "$ACK_EPOCH" ]; then
+    ack_tmp=$(mktemp "$STATE/.$ACK_ID.quota-breaker.XXXXXX") || {
+      fm_lock_release "$breaker_lock"
+      exit 1
+    }
+    if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\npending=0\n' \
+      "$ACK_CLASS" "$ACK_GEN" "$ACK_EPOCH" > "$ack_tmp" \
+      || ! mv -f -- "$ack_tmp" "$STATE/$ACK_ID.quota-breaker"; then
+      rm -f -- "$ack_tmp"
+      fm_lock_release "$breaker_lock"
+      exit 1
+    fi
+    rm -f -- "$pending_record" || {
+      fm_lock_release "$breaker_lock"
+      exit 1
+    }
+  fi
+  fm_lock_release "$breaker_lock"
+  exit 0
+fi
 
 now=$(date +%s)
 for meta in "$STATE"/*.meta; do
@@ -204,28 +249,59 @@ for meta in "$STATE"/*.meta; do
     fm_lock_release "$breaker_lock"
     continue
   }
+  pending_record="$STATE/$id.quota-breaker.pending"
+  pending_epoch=
+  pending_exists=0
+  if [ "$DURABLE" = 1 ] \
+    && [ -f "$pending_record" ] \
+    && [ "$(sed -n 's/^class=//p' "$pending_record")" = "$class" ] \
+    && [ "$(sed -n 's/^spawn_gen=//p' "$pending_record")" = "$gen" ]; then
+    pending_exists=1
+    pending_epoch=$(sed -n 's/^epoch=//p' "$pending_record")
+  fi
   if [ -f "$record" ] \
      && [ "$(sed -n 's/^class=//p' "$record")" = "$class" ] \
      && [ "$(sed -n 's/^spawn_gen=//p' "$record")" = "$gen" ]; then
     last=$(sed -n 's/^epoch=//p' "$record")
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
-    if [ $((now - last)) -lt "$REALERT" ]; then
+    if [ "$pending_exists" = 0 ] && [ $((now - last)) -lt "$REALERT" ]; then
       fm_lock_release "$breaker_lock"
       continue
     fi
   fi
-  breaker_tmp=$(mktemp "$STATE/.$id.quota-breaker.XXXXXX") || {
-    fm_lock_release "$breaker_lock"
-    continue
-  }
-  if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\n' "$class" "$gen" "$now" > "$breaker_tmp" \
-    || ! mv -f -- "$breaker_tmp" "$record"; then
-    rm -f -- "$breaker_tmp"
-    fm_lock_release "$breaker_lock"
-    continue
+  if [ "$DURABLE" = 1 ]; then
+    if [ "$pending_exists" = 0 ]; then
+      pending_epoch=$now
+      pending_tmp=$(mktemp "$STATE/.$id.quota-breaker.pending.XXXXXX") || {
+        fm_lock_release "$breaker_lock"
+        continue
+      }
+      if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\n' "$class" "$gen" "$pending_epoch" > "$pending_tmp" \
+        || ! mv -f -- "$pending_tmp" "$pending_record"; then
+        rm -f -- "$pending_tmp"
+        fm_lock_release "$breaker_lock"
+        continue
+      fi
+    fi
+  else
+    breaker_tmp=$(mktemp "$STATE/.$id.quota-breaker.XXXXXX") || {
+      fm_lock_release "$breaker_lock"
+      continue
+    }
+    if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\npending=0\n' "$class" "$gen" "$now" > "$breaker_tmp" \
+      || ! mv -f -- "$breaker_tmp" "$record"; then
+      rm -f -- "$breaker_tmp"
+      fm_lock_release "$breaker_lock"
+      continue
+    fi
   fi
-  printf 'quota-breaker %s %s harness=%s model=%s brief=%s: %s\n' "$id" "$class" \
-    "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$DATA/$id/brief.md" "$row"
+  if [ "$DURABLE" = 1 ]; then
+    printf 'quota-breaker %s %s harness=%s model=%s brief=%s: %s [quota-breaker-epoch=%s generation=%s]\n' "$id" "$class" \
+      "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$DATA/$id/brief.md" "$row" "$pending_epoch" "$gen"
+  else
+    printf 'quota-breaker %s %s harness=%s model=%s brief=%s: %s\n' "$id" "$class" \
+      "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$DATA/$id/brief.md" "$row"
+  fi
   fm_lock_release "$breaker_lock"
 done
 exit 0

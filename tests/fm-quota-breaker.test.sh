@@ -74,6 +74,14 @@ test_classify_ignores_recovered_and_single_rate_limits() {
 
   rows=
   for i in 1 2 3 4; do rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'; done
+  rows="$rows"$'\n''provider recovered and started another turn'
+  for i in 1 2 3 4 5; do rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'; done
+  got=$(classify "$rows")
+  [ "${got%%$'\t'*}" = zai-1302 ] \
+    || fail "a later current rate-limit storm must trip even after an older recovered refusal, got: $got"
+
+  rows=
+  for i in 1 2 3 4; do rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'; done
   got=$(classify "$rows")
   [ -z "$got" ] || fail "four request rate limits are retries under the default of five, got: $got"
   rows="$rows"$'\n''Error: 429: {"code":"1302","message":"Rate limit reached for requests"}'
@@ -147,8 +155,13 @@ scan() {  # <case>
     bash "$BREAKER" scan 2>&1
 }
 
+scan_durable() {  # <case>
+  env PATH="$1/fakebin:$PATH" FM_HOME="$1/home" FM_FAKE_DIR="$1/fake" FM_BACKEND=tmux \
+    bash "$BREAKER" scan --durable 2>&1
+}
+
 test_scan_reports_once_per_incarnation() {
-  local dir out
+  local dir out epoch gen
   dir=$(make_case scan)
   add_task "$dir" t1 ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
   add_task "$dir" t2 scout 'all good, still working'
@@ -174,6 +187,22 @@ test_scan_reports_once_per_incarnation() {
 
   out=$(scan "$dir")
   [ -z "$out" ] || fail "the same stall must not be reported twice inside the realert window, got: $out"
+
+  # The watcher uses durable mode: a pending report remains retryable until the
+  # wake append is acknowledged, rather than consuming the suppression window.
+  dir=$(make_case durable)
+  : > "$dir/home/config/quota-breaker"
+  add_task "$dir" t1 ship 'Error: 429: {"code":"1308","message":"Usage limit reached for 5 hour."}'
+  out=$(scan_durable "$dir")
+  assert_contains "$out" '[quota-breaker-epoch=' "durable scans identify the pending wake"
+  [ -f "$dir/home/state/t1.quota-breaker.pending" ] \
+    || fail "durable scan did not persist a pending notification before the wake append"
+  epoch=$(sed -n 's/^epoch=//p' "$dir/home/state/t1.quota-breaker.pending")
+  gen=$(sed -n 's/^spawn_gen=//p' "$dir/home/state/t1.quota-breaker.pending")
+  env FM_HOME="$dir/home" "$BREAKER" ack t1 zai-1308 "$epoch" "$gen" \
+    || fail "acknowledging a queued quota wake failed"
+  [ ! -e "$dir/home/state/t1.quota-breaker.pending" ] \
+    || fail "acknowledging a queued quota wake left the pending record behind"
 
   # A relaunch records a new spawn generation; the replacement hitting the same
   # wall is news.

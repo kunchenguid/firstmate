@@ -1199,20 +1199,36 @@ resolve_relaunch_profile() {
 # empty when the replacement starts fresh anyway.
 FRESH_SESSION_PATH=
 resolve_fresh_session() {
-  local identity='' bound_agent='' ref='' plan
+  local identity='' bound_agent='' ref='' plan herdr_state
   FRESH_SESSION_PATH=
   [ "$FRESH_SESSION" = 1 ] || return 0
   # Only Herdr records a per-pane session a replacement resumes
   # (bin/fm-spawn.sh relaunch_resume_args); everywhere else a relaunch is
   # already a fresh conversation.
   [ "$BACKEND" = herdr ] || return 0
+  # A Pi replacement can resume only when Herdr's registration belongs to Pi.
+  # If that registration is live but unreadable, treating it as absent is not
+  # a freshness proof: fm-spawn may read it successfully a moment later and
+  # resume the old conversation.
+  case "$TARGET_HARNESS" in
+    pi|pi-signed) ;;
+    *) return 0 ;;
+  esac
   fm_backend_source herdr >/dev/null 2>&1 \
     || die "task $ID's herdr adapter could not be loaded to read its bound session; refusing --fresh-session rather than resuming the old conversation"
-  if fm_backend_herdr_parse_target "$T" \
-     && identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null); then
-    bound_agent=${identity%%$'\t'*}
-    ref=${identity#*$'\t'}
-  fi
+  fm_backend_herdr_parse_target "$T" \
+    || die "task $ID's herdr endpoint could not be parsed for --fresh-session; refusing before stopping anything"
+  herdr_state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || herdr_state=unknown
+  case "$herdr_state" in
+    no-agent|dead) return 0 ;;
+    live|stale-agent) ;;
+    *) die "task $ID's herdr agent registration could not be verified for --fresh-session; refusing before stopping anything" ;;
+  esac
+  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || die "task $ID's herdr agent registration could not be read for --fresh-session; refusing before stopping anything"
+  bound_agent=${identity%%$'\t'*}
+  ref=${identity#*$'\t'}
   plan=$(fm_control_fresh_session_plan "$TARGET_HARNESS" "$bound_agent" "$ref") \
     || die "task $ID's pane is bound to session '$ref', which the $TARGET_HARNESS replacement would resume and which is not a file that can be moved aside; refusing --fresh-session before stopping anything"
   if [ "$plan" = archive ]; then

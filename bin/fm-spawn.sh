@@ -3583,7 +3583,9 @@ fi
 # dispatcher can move it to the next same-group candidate before it stalls.
 if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
   preflight_args=("$HARNESS" "${MODEL:-default}" --effort "${EFFORT:-default}")
-  [ -z "$WORKER_ACCOUNT_PROVIDER" ] || preflight_args+=(--account-lane "$WORKER_ACCOUNT_PROVIDER")
+  # fm-quota-preflight derives the schema-6 account lane from harness/model;
+  # WORKER_ACCOUNT_PROVIDER is the provider passed to the runner, not always
+  # the quota row key (codex-native maps to codex-home).
   if [ -n "$WORKER_ACCOUNT" ]; then
     preflight_args+=(--account "$WORKER_ACCOUNT_DECLARED")
     [ -z "$WORKER_ACCOUNT_ROOT" ] || preflight_args+=(--account-root "$WORKER_ACCOUNT_ROOT")
