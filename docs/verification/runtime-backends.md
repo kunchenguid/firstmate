@@ -3437,7 +3437,7 @@ The bun global package (`bun install -g @oh-my-pi/pi-coding-agent`) installs `~/
 `ompd`, `comp`, and another script followed by an `omp` argument never match.
 `tests/fm-omp-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin these shapes with real processes; the former also drives `bin/fm-harness.sh` and `bin/fm-lock.sh` from a bun-run script.
 
-The token-free guard refreshes the installed-omp evidence and spends no model tokens: it starts omp in JSON-RPC mode with no prompt, and a loaded extension runs `bin/fm-harness.sh` and `bin/fm-lock.sh` from inside that process.
+The token-free guard refreshes the installed-omp evidence and spends no model tokens: it starts omp in JSON-RPC mode with no prompt, and a loaded extension runs `bin/fm-harness.sh` and `bin/fm-lock.sh` from inside that process; the guard passes only when the saved lock names that process's pid.
 
 ```text
 FM_OMP_IDENTITY_LIVE=1 bash tests/fm-omp-primary-live-e2e.test.sh
