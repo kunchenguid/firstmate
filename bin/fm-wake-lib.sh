@@ -669,6 +669,16 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
+# A junction's readlink spelling follows the mount table, so on a Cygwin-family
+# host a caller-spelled owner path is matched by identity. Other hosts keep the
+# string compare alone.
+fm_lock_junction_resolves_to() {  # <lock-path> <owner-directory>
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*) [ -L "$1" ] && [ "$1" -ef "$2" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_lock_discard_owner() {
   local ownerdir=$1
   [ -n "$ownerdir" ] || return 0
@@ -683,7 +693,7 @@ fm_lock_discard_staged_owners() {
   for owner in "$lockdir.owner.$scope."*; do
     [ -d "$owner" ] && [ ! -L "$owner" ] || continue
     fm_lock_points_to_owner "$lockdir" "$owner" && continue
-    [ -L "$lockdir" ] && [ "$lockdir" -ef "$owner" ] && continue
+    fm_lock_junction_resolves_to "$lockdir" "$owner" && continue
     pid=$(cat "$owner/pid" 2>/dev/null || true)
     [ -z "$pid" ] || [ "$pid" = "$mypid" ] || continue
     fm_lock_discard_owner "$owner"
@@ -819,7 +829,7 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
-    if [ -L "$lockdir" ] && [ "$lockdir" -ef "$ownerdir" ]; then
+    if fm_lock_junction_resolves_to "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
   fi
