@@ -719,7 +719,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
 # It is the brief's only "first action", so the ship Setup steps cannot claim
 # a competing one.
 test_crewmate_scaffolds_open_with_status_then_work() {
-  local home id brief second next count
+  local home id brief second lead next count
   home="$TMP_ROOT/opening-home"
   mkdir -p "$home/data"
   for kind in ship scout; do
@@ -731,11 +731,15 @@ test_crewmate_scaffolds_open_with_status_then_work() {
     fi
     brief="$home/data/$id/brief.md"
     second=$(sed -n 2p "$brief")
+    lead='Your first action'
     next='then begin the first unit of work'
-    [ "$kind" = ship ] && next='then run the numbered Setup steps and begin the first unit of work'
+    if [ "$kind" = ship ]; then
+      lead='Once the Setup isolation check passes, your first action'
+      next='then run the numbered Setup steps and begin the first unit of work'
+    fi
     # shellcheck disable=SC2016 # The backticks are literal brief text.
     case "$second" in
-      *"our first action is to append a \`working:\` status line with the rule 4 command under Rules, $next in the same turn; ending this opening turn with no work product is a stall, not a finish.") ;;
+      "$lead is to append a \`working:\` status line with the rule 4 command under Rules, $next in the same turn; ending this opening turn with no work product is a stall, not a finish.") ;;
       *) fail "$kind scaffold does not open with the status-then-work instruction (got: $second)" ;;
     esac
     count=$(grep -ci 'first action' "$brief")
