@@ -848,7 +848,7 @@ cmd_ready() {
   need_python
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$SELF_DIR/fm-session-lock-lib.sh"
-  load_wake_lib || true
+  FM_WAKE_READ_ONLY=1 load_wake_lib || true
   local lock_state=unknown lock_pid="" live_harness=unknown
   local consumer_state=unknown consumer_reason="" beacon_age=""
   local posture=unknown can_receive=unknown observed
