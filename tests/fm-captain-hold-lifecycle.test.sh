@@ -2948,6 +2948,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     || fail "could not release the approved merge"
   show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
   assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  configure_merged_github "$home"
   run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
     2> "$home/approved-teardown.err" \
     || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
@@ -3492,6 +3493,7 @@ SH
 test_merge_approval_releases_before_zero_done_retention() {
   local home id archive repo wt pr show
   home=$(make_home zero-done-retention)
+  configure_merged_github "$home"
   id=sample-zero-retention-merge
   archive="$home/data/done-archive.md"
   repo="$home/projects/sample"
