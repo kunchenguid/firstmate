@@ -1712,7 +1712,8 @@ For pool declarations, see [several Claude accounts](#several-claude-accounts-co
 
 Before launch or relaunch, Firstmate loads the token through the shared credential-source adapter and requires `claude auth status` to report `authMethod` as `oauth_token`.
 The check proves only that the token loads and is the auth method Claude will use; an expired or revoked token is not detected before launch.
-The launch loads the token again into `CLAUDE_CODE_OAUTH_TOKEN`; it exists only in process memory and the worker's environment, never in arguments, files, or logs.
+The launch loads the token again into `CLAUDE_CODE_OAUTH_TOKEN`; it exists only in process memory and the worker's environment, never in arguments, files, or logs, including inherited shell tracing.
+If that second read fails, Claude does not start, even if the pre-launch check succeeded.
 A missing, unreadable, unsupported, or malformed source, or a check that does not report `authMethod` as `oauth_token`, refuses the launch without falling back to the config directory's stored login.
 The source file without its matching pin also refuses.
 On relaunch with an expired token, the check passes, the running worker is stopped, and the replacement fails on its first request; the local copy and its commits are kept, so store a fresh token and relaunch.
@@ -1779,13 +1780,13 @@ Use the secondmate's registered identifier for `<id>`.
 These private files use the same [file format and provider selection](#file-format-and-provider-selection), sign-in checks, and refusal rules as the home-wide worker pins.
 
 The matching per-secondmate file overrides the primary home's matching worker pin for that secondmate alone.
-An absent per-secondmate file preserves the existing home-wide pin or unpinned behavior exactly.
+An absent per-secondmate pin preserves the existing home-wide pin or unpinned behavior; for Claude, its [token-source declaration](#claude-token-source-configclaude-account-credential-sourcejson) must also be absent.
 Other secondmates and ordinary workers remain unchanged.
 A pin for another runner does not apply, and `pi` and `pi-signed` share `pi-account`.
 An empty, malformed, unreadable, or unusable per-secondmate pin refuses with its path and reason rather than falling back to the primary's account.
 
 For example, `config/secondmate-accounts/work/claude-account` containing `/home/me/.claude-work` selects that existing Claude login for the local secondmate named `work`.
-Removing that file restores the primary home's account selection on the next launch.
+Removing that file restores the primary home's account selection on the next launch, provided its matching token-source declaration is also absent.
 Every spawn, control-plane relaunch, and automatic recovery reads the durable setting again, never a previous task record or ambient account choice.
 After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
 The relaunch checks the selected pin before stopping the current agent.

@@ -9,10 +9,13 @@
 #   CLAUDE_CONFIG_DIR=<root> quota-axi --provider claude --profile-only --json
 # where <root> is the entry's own directory, or ~/.claude for `ordinary`.
 # --profile-only reads only that root's credential file (no Keychain, refresh,
-# fallback, or cache), so each row is that account's own quota and never the
-# ambient account's; a root quota-axi cannot read there, such as an `ordinary`
+# fallback, or cache), so each row measures the selected root's stored login;
+# a root quota-axi cannot read there, such as an `ordinary`
 # login kept in the macOS Keychain, is reported unmeasured. QUOTA_AXI_SNAPSHOT
 # is removed from each read so a fixture for one account cannot answer for all.
+# An optional tab-separated token-source filename is excluded from the root
+# and output account label; see docs/configuration.md "Several Claude accounts"
+# for the relationship between a token source and the measured login.
 # quota-axi exits nonzero when it cannot measure a provider, for example when
 # the vendor rate-limits the quota endpoint, yet still prints a valid snapshot
 # naming that state; such a snapshot is kept, so the account is reported

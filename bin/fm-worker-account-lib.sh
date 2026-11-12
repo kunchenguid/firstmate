@@ -134,10 +134,11 @@ fm_worker_account_read() {
 }
 
 # fm_worker_account_config <harness> <config-dir> [<secondmate-id>]
-# Prints the directory containing the applicable pin. Only a missing per-mate
-# file falls back to the home pin; unreadable or malformed files still select
-# the override so the ordinary parser refuses them. Non-pinnable runners and
-# ordinary workers keep the supplied directory unchanged.
+# Prints the directory containing the applicable pin. A missing per-mate pin
+# falls back to the home pin, except for Claude with an orphaned token source:
+# that source must reach validation rather than silently inherit a login.
+# Unreadable or malformed pins still select the override for parser refusal.
+# Non-pinnable runners and ordinary workers keep the supplied directory unchanged.
 fm_worker_account_config() {
   local harness=$1 config=$2 mate=${3:-} file candidate rc
   if [ -z "$mate" ] || ! file=$(fm_worker_account_file "$harness"); then
