@@ -746,20 +746,26 @@ CANARY_SUITES='fm-watch-checkpoint fm-fleet-ledger fm-herdr-groups fm-pr-health 
 
 # Build a checkout the canary's steps can run in: the real runner, a passing
 # stand-in for each issue-listed suite, and stand-ins for the tools the setup
-# steps reach outside the repository.
+# steps reach outside the repository. The runner itself runs on the host PATH:
+# stock macOS has no timeout and its sleep rejects --version, and the runner
+# would otherwise pick the timeout stand-in as its bounding mechanism.
 canary_fixture() {
   local root suite tool
   root=$(fm_test_tmproot fm-ci-canary) || return 1
   mkdir -p "$root/repo/bin" "$root/repo/tests" "$root/stubs" "$root/runner-temp"
-  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$root/repo/bin/"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$root/repo/bin/"
+  cp "$ROOT/bin/fm-test-run.sh" "$root/repo/bin/fm-test-run.real.sh"
+  # shellcheck disable=SC2016  # wrapper text, expanded when the wrapper runs
+  printf '#!/usr/bin/env bash\nPATH=${PATH#"%s/stubs:"} exec "%s/repo/bin/fm-test-run.real.sh" "$@"\n' "$root" "$root" \
+    >"$root/repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$root/repo/tests/"
   for suite in $CANARY_SUITES; do
     printf '#!/usr/bin/env bash\necho "ok - stand-in suite"\n' >"$root/repo/tests/$suite.test.sh"
   done
-  for tool in npm tasks-axi tmux; do
+  for tool in npm tasks-axi tmux timeout sleep; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$root/stubs/$tool"
   done
-  chmod +x "$root/repo/bin/fm-test-run.sh" "$root/repo/tests/"*.test.sh "$root/stubs/"*
+  chmod +x "$root/repo/bin/"fm-test-run*.sh "$root/repo/tests/"*.test.sh "$root/stubs/"*
   printf '%s\n' "$root"
 }
 
