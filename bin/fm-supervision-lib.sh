@@ -12,6 +12,10 @@
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
 
+if ! command -v fm_poll_derived_grace >/dev/null 2>&1; then
+  . "${BASH_SOURCE[0]%/*}/fm-wake-lib.sh"
+fi
+
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
   if [ "$(uname)" = Darwin ]; then

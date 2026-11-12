@@ -216,7 +216,7 @@ fm_beacon_grace() {
   printf '%s\n' "${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}"
 }
 
-# fm_watch_beacon_tick <beat-path> [min-interval-seconds]
+# fm_watch_beacon_tick <beat-path>
 # Throttled, fork-free refresh of the watcher liveness beacon, for the sweeps a
 # single supervision cycle runs between its one top-of-cycle touch.
 # bin/fm-watch.sh touches the beacon at the top of each cycle, and one cycle's own
@@ -234,13 +234,11 @@ fm_beacon_grace() {
 # The throttle reads $SECONDS, a bash builtin, so a call costs no fork; the
 # interval only bounds how often a tight loop rewrites the file. A forked
 # subshell inherits the last tick, so it never re-touches ahead of the schedule.
-FM_BEACON_TICK_INTERVAL=${FM_BEACON_TICK_INTERVAL:-1}
 _FM_BEACON_TICK_AT=
 fm_watch_beacon_tick() {
-  local beat=$1 interval=${2:-$FM_BEACON_TICK_INTERVAL}
-  case "$interval" in ''|*[!0-9]*|0) interval=1 ;; esac
+  local beat=$1
   if [ -n "$_FM_BEACON_TICK_AT" ] && [ "$SECONDS" -ge "$_FM_BEACON_TICK_AT" ] \
-    && [ $((SECONDS - _FM_BEACON_TICK_AT)) -lt "$interval" ]; then
+    && [ $((SECONDS - _FM_BEACON_TICK_AT)) -lt 1 ]; then
     return 0
   fi
   _FM_BEACON_TICK_AT=$SECONDS
