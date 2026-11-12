@@ -76,12 +76,13 @@ SH
 # Runs fm-send.sh with the stubs on PATH against the given home (which holds
 # state/<id>.meta). FM_ROOT_OVERRIDE points at the same non-repo home so
 # fm-guard's tangle check stays silent; guard noise goes to stderr (discarded).
-# FM_SEND_SETTLE=0 keeps the run fast. Truncates the log first; returns fm-send's
+# FM_SEND_SETTLE=0 keeps the run fast. HOME and CLAUDE_CONFIG_DIR point inside
+# TMP_ROOT so the Claude skill and command lookup never sees the real user. Truncates the log first; returns fm-send's
 # exit code.
 run_send() {
   local fb=$1 home=$2 log=$3; shift 3
   : > "$log"
-  env PATH="$fb:$PATH" \
+  env PATH="$fb:$PATH" HOME="$TMP_ROOT/user" CLAUDE_CONFIG_DIR="$TMP_ROOT/user/claude-config" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" "$@" 2>/dev/null
 }
@@ -268,8 +269,171 @@ test_marked_send_preserves_trailing_newlines() {
   pass "fm-send: marked secondmate payload preserves trailing newline bytes in its record"
 }
 
+# expect_command_first <log> <command> <rest> <msg>: the typed bytes are the
+# command, then marker+corr opening its arguments, then the caller's rest.
+expect_command_first() {
+  local got corr
+  got=$(cat "$1")
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ -n "$corr" ] || fail "$4: no corr in typed bytes"$'\n'"$got"
+  [ "$got" = "$2 ${FM_FROMFIRST_MARK}corr=$corr${3:+ $3}" ] \
+    || fail "$4"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)"
+}
+
+# expect_marker_first <log> <text> <msg>: today's marker-first typed bytes.
+expect_marker_first() {
+  case "$(cat "$1")" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" $2") : ;;
+    *) fail "$3"$'\n'"$(cat "$1")" ;;
+  esac
+}
+
+test_claude_secondmate_slash_command_leads_typed_bytes() {
+  local dir fb log home rc got corr long user_root acct plugin
+  dir="$TMP_ROOT/sm-slash"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-slash)
+  user_root="$TMP_ROOT/user/claude-config"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain" alpha claude
+  mkdir -p "$home/.claude/skills/sharpen" "$user_root/commands"
+  printf -- '---\nname: sharpen\n---\n' > "$home/.claude/skills/sharpen/SKILL.md"
+  printf 'Tidy up.\n' > "$user_root/commands/tidy.md"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-pending-reply-lib.sh"
+
+  run_send "$fb" "$home" "$log" "domain" "/sharpen tighten the plan"; rc=$?
+  expect_code 0 "$rc" "a slash command to a local claude secondmate should succeed"
+  [ ! -d "$home/state/domain.inbox" ] || fail "a slash command must stay on the typed plane"
+  expect_command_first "$log" /sharpen "tighten the plan" \
+    "an installed project skill must be typed command-first with marker and corr opening its arguments"
+  got=$(cat "$log")
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ -f "$(fm_pending_reply_path "$home/state" "$corr")" ] \
+    || fail "the typed slash command must carry the corr of its parent pending-reply record"$'\n'"$got"
+
+  FM_PENDING_REPLY_EXISTING_CORR=$corr run_send "$fb" "$home" "$log" "domain" "/sharpen tighten the plan"; rc=$?
+  expect_code 0 "$rc" "a recovery resend of the slash command should succeed"
+  [ "$(cat "$log")" = "/sharpen ${FM_FROMFIRST_MARK}corr=$corr tighten the plan" ] \
+    || fail "a resend must keep the same corr in the command-first bytes"$'\n'"$(cat "$log")"
+
+  run_send "$fb" "$home" "$log" "domain" "/tidy"; rc=$?
+  expect_code 0 "$rc" "a bare installed command to a local claude secondmate should succeed"
+  got=$(cat "$log")
+  corr=$(fm_pending_reply_extract_corr "$got")
+  [ "${got% }" = "/tidy ${FM_FROMFIRST_MARK}corr=$corr" ] \
+    || fail "a bare installed command must be typed as the command followed by marker and corr"$'\n'"$got"
+
+  run_send "$fb" "$home" "$log" "domain" "/model sonnet"; rc=$?
+  expect_code 0 "$rc" "a built-in to a local claude secondmate should succeed"
+  expect_marker_first "$log" "/model sonnet" "a built-in must keep the marker in front"
+  run_send "$fb" "$home" "$log" "domain" "/nosuchcmd x"; rc=$?
+  expect_code 0 "$rc" "an unknown command to a local claude secondmate should succeed"
+  expect_marker_first "$log" "/nosuchcmd x" "an unknown command must keep the marker in front"
+
+  long=$(printf 'word %.0s' $(seq 1 160))
+  run_send "$fb" "$home" "$log" "domain" "/sharpen $long"; rc=$?
+  expect_code 0 "$rc" "a long slash command to a local claude secondmate should succeed"
+  expect_marker_first "$log" "/sharpen $long" \
+    "typed bytes over Claude's 800-character paste threshold must keep the marker in front"
+
+  if command -v jq >/dev/null 2>&1; then
+    plugin="$TMP_ROOT/plugin-cache/pstack/1.0"
+    mkdir -p "$plugin/skills/sharpen" "$user_root/plugins"
+    printf -- '---\nname: sharpen\n---\n' > "$plugin/skills/sharpen/SKILL.md"
+    printf '{"version":2,"plugins":{"pstack@market":[{"scope":"user","installPath":"%s"}]}}\n' "$plugin" \
+      > "$user_root/plugins/installed_plugins.json"
+    run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+    expect_code 0 "$rc" "a plugin skill send without enabledPlugins should succeed"
+    expect_marker_first "$log" "/pstack:sharpen tighten the plan" \
+      "a plugin skill with no enabledPlugins entry must keep the marker in front"
+    printf '{"enabledPlugins":{"pstack@market":false}}\n' > "$user_root/settings.json"
+    run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+    expect_code 0 "$rc" "a disabled plugin skill send should succeed"
+    expect_marker_first "$log" "/pstack:sharpen tighten the plan" \
+      "a disabled plugin skill must keep the marker in front"
+    printf '{"enabledPlugins":{"pstack@market":true}}\n' > "$user_root/settings.json"
+    run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+    expect_code 0 "$rc" "an enabled plugin skill send should succeed"
+    expect_command_first "$log" /pstack:sharpen "tighten the plan" \
+      "an enabled plugin skill must be typed command-first"
+    mkdir -p "$home/.claude"
+    printf '{"enabledPlugins":{"pstack@market":false}}\n' > "$home/.claude/settings.json"
+    run_send "$fb" "$home" "$log" "domain" "/pstack:sharpen tighten the plan"; rc=$?
+    expect_code 0 "$rc" "a project-disabled plugin skill send should succeed"
+    expect_marker_first "$log" "/pstack:sharpen tighten the plan" \
+      "a plugin the secondmate home's settings disable must keep the marker in front even when the user enables it"
+    rm -f "$home/.claude/settings.json"
+  else
+    echo "skip: jq missing, plugin skill cases not run" >&2
+  fi
+
+  acct="$TMP_ROOT/acct-root"
+  mkdir -p "$acct/commands"
+  printf 'Account only.\n' > "$acct/commands/acctonly.md"
+  run_send "$fb" "$home" "$log" "domain" "/acctonly now"; rc=$?
+  expect_code 0 "$rc" "a command absent from the default roots should succeed"
+  expect_marker_first "$log" "/acctonly now" "a command outside the searched roots must keep the marker in front"
+  fm_write_secondmate_meta "$home/state/acct.meta" "$home" "sess:fm-acct" alpha claude
+  printf 'account=%s\n' "$acct" >> "$home/state/acct.meta"
+  run_send "$fb" "$home" "$log" "acct" "/acctonly now"; rc=$?
+  expect_code 0 "$rc" "a command in the meta account root should succeed"
+  expect_command_first "$log" /acctonly "now" "the meta account= root must be searched"
+  pass "fm-send: a local claude secondmate installed skill or command is typed command-first, while built-ins, unknown commands, and long text keep the marker in front"
+}
+
+test_other_marked_messages_keep_marker_first() {
+  local dir fb log home rc got
+  dir="$TMP_ROOT/sm-slash-others"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home sm-slash-others)
+  fm_write_secondmate_meta "$home/state/echo.meta" "$home" "sess:fm-echo" alpha echo
+  fm_write_secondmate_meta "$home/state/cdx.meta" "$home" "sess:fm-cdx" alpha codex
+  fm_write_secondmate_meta "$home/state/cl.meta" "$home" "sess:fm-cl" alpha claude
+  fm_write_meta "$home/state/crew.meta" \
+    "window=sess:fm-crew" "worktree=$home/wt" "project=$home/p" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+
+  run_send "$fb" "$home" "$log" "echo" "/audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a slash command to a non-claude secondmate should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" /audit the ledger") : ;;
+    *) fail "a non-claude secondmate slash command must keep the marker in front"$'\n'"$got" ;;
+  esac
+
+  run_send "$fb" "$home" "$log" "cdx" "\$audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a skill invocation to a codex secondmate should succeed"
+  got=$(cat "$log")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" \$audit the ledger") : ;;
+    *) fail "a codex secondmate skill invocation must keep the marker in front"$'\n'"$got" ;;
+  esac
+
+  run_send "$fb" "$home" "$log" "crew" "/audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a slash command to a claude crewmate should succeed"
+  [ "$(cat "$log")" = "/audit the ledger" ] \
+    || fail "a claude crewmate slash command must stay unmarked"$'\n'"$(cat "$log")"
+
+  run_send "$fb" "$home" "$log" "cl" --fire-and-forget 0123456789abcdef "/audit the ledger"; rc=$?
+  expect_code 0 "$rc" "a fire-and-forget slash command to a claude secondmate should succeed"
+  got=$(record_body "$home/state/cl.inbox/001.msg")
+  [ "$got" = "${FM_FROMFIRST_MARK}delivery=0123456789abcdef /audit the ledger" ] \
+    || fail "a fire-and-forget slash command must ride the inbox with the marker in front"$'\n'"$got"
+
+  run_send "$fb" "$home" "$log" "cl" "audit the ledger"; rc=$?
+  expect_code 0 "$rc" "plain text to a claude secondmate should succeed"
+  got=$(record_body "$home/state/cl.inbox/002.msg")
+  case "$got" in
+    "${FM_FROMFIRST_MARK}corr="[a-f0-9]*" audit the ledger") : ;;
+    *) fail "plain text to a claude secondmate must ride the inbox with the marker in front"$'\n'"$got" ;;
+  esac
+  pass "fm-send: every other marked message, and every unmarked one, keeps today's bytes"
+}
+
 test_secondmate_target_is_marked
 test_exact_secondmate_task_id_is_marked
+test_claude_secondmate_slash_command_leads_typed_bytes
+test_other_marked_messages_keep_marker_first
 test_crewmate_target_is_not_marked
 test_explicit_window_is_not_marked
 test_key_path_is_not_marked
