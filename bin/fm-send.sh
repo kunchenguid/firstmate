@@ -931,8 +931,10 @@ fm_send_feed_mate_holds() { # <answer-text>
   budget=${FM_SEND_REMOTE_BUDGET:-30}
   case "$budget" in '' | *[!0-9]* | 0) budget=30 ;; esac
   if [ "$TARGET_BACKEND" = remote ]; then
-    out=$(fm_run_timed "$budget" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh answers "$TARGET_REMOTE_ID" "$lines" </dev/null 2>&1) || rc=$?
+    # The keyed lines ride stdin, like send-stdin, so a large batch never has to
+    # fit one command-line argument.
+    out=$(printf '%s' "$lines" | fm_run_timed "$budget" "$SCRIPT_DIR/fm-on.sh" --stdin "$TARGET_REMOTE_ID" \
+      fm-remote-secondmate-control.sh answers "$TARGET_REMOTE_ID" 2>&1) || rc=$?
   else
     mate_home=$(fm_meta_get "$TARGET_META" home)
     marker=

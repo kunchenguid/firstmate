@@ -1319,6 +1319,65 @@ test_mate_hold_transferred_call_still_closes_in_mate_home() {
   pass "fm-send --resolve-key: a mate call already transferred to a captain-held task still closes in the mate's home"
 }
 
+# A large batch of mate calls answered with one long answer, sent to a REMOTE
+# mate, must reach the mate's intake through stdin (an argument that large would
+# bust the transport's per-argument limit). The ssh stub records each call's argv
+# and stdin; the recorded keyed lines are then fed to the real intake in the
+# mate's home, where every call must close.
+test_remote_mate_hold_large_batch_rides_stdin() {
+  local dir fb ssh_log home rc err i task show n_args big_lines line
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold-big call-a call-b call-c call-d
+  dir="$TMP_ROOT/remote-mate-hold-big"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+n=$(( $(cat "$FM_SSH_LOG.count" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$n" > "$FM_SSH_LOG.count"
+cat > "$FM_SSH_LOG.stdin.$n"
+printf '%s\n' "$*" >> "$FM_SSH_LOG"
+exit 0
+SH
+  home=$(setup_remote_home remote-mate-hold-big)
+  for task in call-a call-b call-c call-d; do
+    printf 'needs-decision [key=captain-hold-%s-1]: captain hold %s\n' "$task" "$task" >> "$home/state/rsm.status"
+  done
+  err="$dir/send.err"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$dir/send.log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
+    "$SEND" rsm \
+      --resolve-key captain-hold-call-a-1 --resolve-key captain-hold-call-b-1 \
+      --resolve-key captain-hold-call-c-1 --resolve-key captain-hold-call-d-1 \
+      "$(head -c 40000 /dev/zero | tr '\0' 'x')" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a large remote mate-hold batch should send: $(head -c 400 "$err")"
+  # The answers call is the one whose base64 argv (the last ssh word) names the answers verb.
+  n_args=0 i=0
+  while read -r line; do
+    i=$((i + 1))
+    if [ "$(printf '%s' "${line##* }" | base64 -d 2>/dev/null | tr '\0' ' ')" = 'fm-remote-secondmate-control.sh answers rsm ' ]; then n_args=$i; break; fi
+  done < "$ssh_log"
+  [ "$n_args" -gt 0 ] || n_args=
+  [ -n "$n_args" ] || fail "no answers call crossed the transport: $(cat "$ssh_log")"
+  big_lines="$ssh_log.stdin.$n_args"
+  [ "$(wc -c < "$big_lines" | tr -d ' ')" -gt 131072 ] \
+    || fail "the keyed batch should exceed 128 KiB, got $(wc -c < "$big_lines")"
+  [ "$(wc -c < "$ssh_log" | tr -d ' ')" -lt 8192 ] \
+    || fail "the transport command line carried the batch instead of stdin"
+  for task in call-a call-b call-c call-d; do
+    grep -q "^$task	" "$big_lines" || fail "keyed line for $task missing from the stdin batch"
+  done
+  PATH="$MH_FB:$PATH" FM_HOME="$MH_MATE" FM_STATE_OVERRIDE="$MH_MATE/state" \
+    FM_DATA_OVERRIDE="$MH_MATE/data" FM_CONFIG_OVERRIDE="$MH_MATE/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answers --source "test relay" < "$big_lines" >/dev/null 2>&1 \
+    || fail "the mate's intake rejected the transported batch"
+  for task in call-a call-b call-c call-d; do
+    show=$(cd "$MH_MATE" && tasks-axi show "$task" --full)
+    assert_contains "$show" "state: done" "the large batch left $task open in the mate's home"
+  done
+  pass "fm-send --resolve-key: a large remote mate-hold batch rides stdin and closes every call"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
@@ -1353,3 +1412,4 @@ test_mate_hold_feed_failure_keeps_exit_status
 test_steer_to_mate_with_open_holds_prints_one_notice
 test_mate_hold_older_answer_skips_a_reheld_call
 test_mate_hold_transferred_call_still_closes_in_mate_home
+test_remote_mate_hold_large_batch_rides_stdin

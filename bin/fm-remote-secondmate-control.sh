@@ -8,7 +8,7 @@
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh send-stdin <id> [fire-and-forget]  # message on stdin
-#   fm-remote-secondmate-control.sh answers <id> <keyed-lines>
+#   fm-remote-secondmate-control.sh answers <id>  # keyed lines on stdin
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -43,7 +43,7 @@
 # stops the remote Herdr service or removes a sibling secondmate's workspace or panes.
 #
 # `answers` feeds this host's own bin/fm-captain-hold.sh keyed-answer intake with
-# the keyed lines the parent's fm-send --resolve-key built
+# the keyed lines (read from stdin) the parent's fm-send --resolve-key built
 # for calls the secondmate holds in its own backlog, so a call the captain
 # answered closes in this home at enqueue time instead of waiting for its model
 # turn. It is the same one intake every channel feeds; the leg only runs it with
@@ -438,9 +438,10 @@ cmd_send_stdin() {
 }
 
 cmd_answers() {
-  local id=$1 lines=$2
+  local id=$1 lines
   validate_id "$id"
   validate_home "$id"
+  IFS= read -r -d '' lines < /dev/stdin || :
   [ -n "$lines" ] || die "no keyed answer lines were supplied"
   printf '%s' "$lines" | FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
@@ -584,7 +585,7 @@ case "${1:-}" in
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   send-stdin) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_send_stdin "$@" ;;
-  answers) shift; [ "$#" -eq 2 ] || usage; cmd_answers "$@" ;;
+  answers) shift; [ "$#" -eq 1 ] || usage; cmd_answers "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
