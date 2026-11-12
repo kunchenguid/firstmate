@@ -335,6 +335,18 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
     | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
 }
 
+# fm_backend_cmux_workspace_id_for_ref: the live workspace id behind a short ref
+# such as workspace:12, or empty. cmux prints that ref the instant it creates a
+# workspace, while the new workspace's title can take up to a second to show in
+# the list, so the ref is the only identity usable right after creation. Only the
+# default id format lists the ref beside the uuid id (--id-format uuids nulls it),
+# so this reads that format.
+fm_backend_cmux_workspace_id_for_ref() {  # <ref>
+  local ref=$1
+  fm_backend_cmux_cli workspace list --json 2>/dev/null \
+    | jq -r --arg want "$ref" '.workspaces[]? | select(.ref == $want) | .id' 2>/dev/null | head -1
+}
+
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
   local wsid=$1
   fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
@@ -348,10 +360,12 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # so no separate new-surface call is needed). --focus false is passed for
 # defense in depth though verified to already be the default (finding:
 # workspace/surface/pane create all default focus to false) - no
-# focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
-# <surface_id>" on success.
+# focus-restore dance is needed, unlike zellij. The new workspace is resolved
+# through the ref cmux prints on creation, falling back to its title only when no
+# ref was printed, because the title is not always listed yet. Echoes
+# "<workspace_id> <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out ref wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
@@ -362,7 +376,10 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+  ref=$(printf '%s\n' "$out" | sed -n 's/^OK \(workspace:[0-9][0-9]*\)$/\1/p' | head -1)
+  wsid=
+  [ -z "$ref" ] || wsid=$(fm_backend_cmux_workspace_id_for_ref "$ref")
+  [ -n "$wsid" ] || wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
   [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
