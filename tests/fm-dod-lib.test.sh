@@ -638,7 +638,7 @@ test_pr_based_dod_renders_the_suite_record_step() {
   local mode out
   for mode in direct-PR no-mistakes; do
     out="$TMP_ROOT/dod-suite-$mode.md"
-    fm_dod_block "$mode" dod-suite-task fm/dod-suite-task none feature/hub '' "$TMP_ROOT/home/data" > "$out"
+    fm_dod_block "$mode" dod-suite-task fm/dod-suite-task none feature/hub '' auto "$TMP_ROOT/home/data" > "$out"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
     assert_grep "Write the result to \`$TMP_ROOT/home/data/dod-suite-task/suite-result\` with exactly these lines" "$out" \
       "$mode: DoD must name the suite record at the data directory it was given"
@@ -648,6 +648,11 @@ test_pr_based_dod_renders_the_suite_record_step() {
     assert_grep 'a record made against an older base is refused at merge' "$out" \
       "$mode: DoD must say a stale record is refused"
   done
+  out="$TMP_ROOT/dod-suite-manual.md"
+  fm_dod_block no-mistakes dod-suite-task fm/dod-suite-task none '' '' manual "$TMP_ROOT/home/data" > "$out"
+  # shellcheck disable=SC2016
+  assert_grep "Write the result to \`$TMP_ROOT/home/data/dod-suite-task/suite-result\` with exactly these lines" "$out" \
+    "pr=manual: the hand-written-PR DoD must carry the suite record step"
   out="$TMP_ROOT/dod-suite-default.md"
   fm_dod_block direct-PR dod-suite-task > "$out"
   assert_grep 'git merge-base HEAD origin/<default branch>' "$out" \
