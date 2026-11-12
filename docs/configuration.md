@@ -2166,6 +2166,7 @@ The scaffold's standard setup, rules, and definition-of-done text is the same in
 The optional local, gitignored `config/dispatch-never-send` keeps values you name from ever leaving the machine in a resolver request.
 It has no default entries, and an absent file changes nothing.
 Like `config/crew-dispatch.json`, it is inherited into secondmate homes, so a secondmate's resolver withholds the same values.
+`bin/fm-route-domain.py` applies the same list to its Jev routing request: matched text in the task and secondmate scopes is withheld, and a secondmate id that matches sends nothing and reports the router unavailable.
 
 Each non-blank line not beginning with `#` is one literal value, matched case-insensitively.
 Every entry is trimmed of surrounding whitespace, and any run of whitespace, in the entry or in the checked text, counts as one space, so a value the brief wraps across lines still matches.
@@ -3586,7 +3587,7 @@ FM_DISPATCH_PROVIDER=   # typesafe, openrouter, systemone, or openai; absent pre
 FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter, systemone, and openai
 FM_DISPATCH_BASE_URL=   # http(s) base of a System One-compatible host; required for systemone
 FM_DISPATCH_API_KEY=    # optional systemone key; absent sends no Authorization header
-TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment, .env, or the declared credential source ("Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment, .env, or the declared credential source; absent means typed dispatch resolution is off and bin/fm-route-domain.sh reports unavailable ("Typed dispatch resolution")
 TYPESAFE_BASE=          # optional TypeSafe base; see "Typed dispatch resolution"
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment, .env, or the declared credential source
 OPENAI_API_KEY=         # OpenAI dispatch key, from the environment or .env
