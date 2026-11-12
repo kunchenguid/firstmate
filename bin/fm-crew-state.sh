@@ -108,10 +108,12 @@
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
-#      failed -> failed, cancelled -> unknown (no verdict unless the green
-#      delivery safeguard below applies). A cancelled outcome takes precedence
-#      over an interrupted step's failed status or outstanding gate findings;
-#      it does not rewrite historical events or backlog records.
+#      handed_off/handed-off -> done (PR left open for review, resolved from
+#      the run's own pr field), failed -> failed, cancelled -> unknown (no
+#      verdict unless the green delivery safeguard below applies). A cancelled
+#      outcome takes precedence over an interrupted step's failed status or
+#      outstanding gate findings; it does not rewrite historical events or
+#      backlog records.
 #      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
 #      vocabulary), read identically to a clean passed. passed-with-skips is
@@ -1193,7 +1195,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
         fi
         case "$(strip_quotes "$(nm_field status)")" in
-          pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled) ;;
+          pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled|handed_off) ;;
           *) emit unknown run-step "selected run status unverified; run ids: $candidate_ids" ;;
         esac
         if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
@@ -1299,6 +1301,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     case "$COARSE_STATUS" in
       running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      handed_off) RUN_STATE="done"; RUN_DETAIL="run handed off: PR open for review" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
         # and no ci log, so the orphaned-monitor shape cannot be recognized
@@ -1337,6 +1340,11 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        # `handed_off` is the terminal outcome of `no-mistakes axi handoff`: green
+        # checks ended CI monitoring with the PR left open for human review. It is
+        # a passing run, not an unknown one, and passed_pr_detail resolves the PR
+        # it opened from the run's own pr field.
+        handed_off|handed-off) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1370,6 +1378,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        handed_off|handed-off) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1446,7 +1455,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       if [ "$RUN_SOURCE" = coarse ]; then
         case "$LEDGER_STATUS" in
-          completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
+          completed|failed|cancelled|handed_off) TERMINAL_PR=$NEWEST_PR ;;
         esac
       elif [ "$NEWEST_ROW_AGREES" = 1 ] || [ -z "$NEWEST_STATUS" ]; then
         TERMINAL_PR=$RUN_PR

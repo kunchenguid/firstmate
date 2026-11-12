@@ -611,10 +611,25 @@ case "${1:-}" in
 esac
 
 if [ "$mode" = handling-delivered ]; then
-  fm_pid_alive "$handling_watcher_pid" \
-    && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
-    && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
-  exit $?
+  # A confirmation names the watcher that delivered the prompt. Two outcomes are
+  # not failures of continuity:
+  #   0  the named watcher is still alive and owns this home's lock: begin handling
+  #   3  it is gone or no longer the lock owner, but another live watcher owns the
+  #      lock, so a newer cycle owns the episode. docs/watcher-continuity.md
+  #      ("Actionable wake ordering") owns that supersession contract, and the
+  #      drain transitions the recovery marker itself, so nothing is lost.
+  # Only a lock no live watcher owns is a real lapse and stays rejected.
+  if fm_pid_alive "$handling_watcher_pid" \
+    && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME"; then
+    fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
+    exit $?
+  fi
+  handling_lock_owner=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ -n "$handling_lock_owner" ] && fm_pid_alive "$handling_lock_owner" \
+    && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_lock_owner" "$FM_HOME"; then
+    exit 3
+  fi
+  exit 1
 fi
 
 # Home-scoped stop: only the watcher pid recorded in THIS home's lock. Waits

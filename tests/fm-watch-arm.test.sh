@@ -1717,7 +1717,11 @@ test_reaper_stops_a_tracked_watcher() {
 # A handling-delivery confirmation for an episode the drain already
 # acknowledged must succeed as a no-op when the generation matches: the pid is
 # alive and holds the lock, so the handling is already retired, not rejected.
-# A mismatched generation, a dead pid, and a lock mismatch stay rejections.
+# A mismatched generation and a lock mismatch stay rejections. A delivering
+# watcher that is gone while a live successor owns the lock is superseded, not
+# rejected, because a newer cycle owns the episode and the drain transitions
+# the recovery marker itself (docs/watcher-continuity.md "Actionable wake
+# ordering"); only a lock no live watcher owns is a real lapse.
 test_handling_delivered_accepts_already_acked_generation() {
   local dir home state pid identity generation status dead
   dir=$(make_case handling-delivered-acked)
@@ -1730,6 +1734,7 @@ test_handling_delivered_accepts_already_acked_generation() {
     || fail "could not read the fixture watcher identity"
   printf '%s' "$home" > "$state/.watch.lock/fm-home"
   printf '%s' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s' "$pid" > "$state/.watch.lock/pid"
   printf '%s' "$identity" > "$state/.watch.lock/pid-identity"
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
@@ -1756,7 +1761,7 @@ test_handling_delivered_accepts_already_acked_generation() {
   wait "$dead" 2>/dev/null || true
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
     --watcher-pid "$dead" 2>/dev/null
-  expect_code 1 "$?" "a dead watcher pid must stay rejected"
+  expect_code 3 "$?" "a gone delivering watcher with a live lock owner must report supersession"
   printf 'foreign-identity\n' > "$state/.watch.lock/pid-identity"
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
     --watcher-pid "$pid" 2>/dev/null
@@ -1765,6 +1770,9 @@ test_handling_delivered_accepts_already_acked_generation() {
   expect_code 1 "$status" "a lock mismatch must stay rejected"
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$dead" 2>/dev/null
+  expect_code 1 "$?" "a gone delivering watcher with no live lock owner must stay rejected"
   pass "watch-arm: an already-acknowledged handling confirmation succeeds as a no-op"
 }
 

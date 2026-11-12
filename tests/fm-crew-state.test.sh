@@ -712,6 +712,22 @@ outcome: passed
 EOF
 }
 
+# A run whose green CI monitoring ended with its PR left open for human review
+# (`no-mistakes axi handoff`) reports status handed_off and outcome handed-off.
+# Both words are terminal and passing; neither may read as an unknown run.
+run_handed_off() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: handed_off
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: handed-off
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -1668,6 +1684,51 @@ test_terminal_passed_with_open_pr_does_not_claim_merged() {
   assert_not_contains "$out" "merged/closed" "open PR must not get the old merged/closed label"
   assert_not_contains "$out" "PR merged" "open PR must not be reported merged"
   pass "terminal passed run with open PR does not claim merged"
+}
+
+test_handed_off_run_reads_as_passed_with_open_pr() {
+  local scenario failures=0
+  for scenario in outcome status selected coarse; do
+    (
+      reset_fakes
+      local d out
+      d=$(new_case "handed-off-$scenario")
+      make_repo_on_branch "$d/wt" fm/feat-dhand
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/feat-dhand.meta" "window=fm:fm-feat-dhand" \
+        "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/1"
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      case "$scenario" in
+        outcome)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)" ;;
+        status)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand | sed '/^outcome:/d')" ;;
+        selected)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)"
+          FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+          FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-dhand,handed_off,$FM_FAKE_RUN_HEAD,\"https://github.com/o/r/pull/1\""
+          ;;
+        coarse)
+          FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+          FM_FAKE_RUNS_LIST="  handed_off  fm/feat-dhand $FM_FAKE_RUN_HEAD  2026-09-26 17:00"
+          ;;
+      esac
+      out=$(run_crew_state "$d" feat-dhand)
+      assert_contains "$out" "state: done" "$scenario: a handed-off run is a passing run: $out"
+      assert_not_contains "$out" "unrecognized run status" "$scenario: handed_off must be a recognized ledger status word"
+      assert_not_contains "$out" "state: unknown" "$scenario: a handed-off run must never read as unknown"
+      if [ "$scenario" = coarse ]; then
+        assert_contains "$out" "run handed off: PR open for review" "$scenario: a handed-off ledger row reports the open PR"
+      else
+        assert_contains "$out" "run passed: PR open" "$scenario: a handed-off run reports its open PR"
+      fi
+      pass "$scenario: a handed-off run reads as passed with its open PR"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures handed-off run regressions"
 }
 
 test_terminal_passed_run_pr_overrides_stale_metadata() {
@@ -6798,6 +6859,7 @@ test_terminal_passed_with_skips
 test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged
+test_handed_off_run_reads_as_passed_with_open_pr
 test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
