@@ -2326,6 +2326,28 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Create-response recovery
+
+Recovery regressions were exercised on 2026-11-10 with macOS 27.0, Bash 3.2.57, and Node v24.9.0, using fake Orca responses and real temporary Git repositories.
+This is deterministic adapter verification, not a live Orca timeout injection.
+The current behavior and preservation limits are documented in [the Orca backend guide](../orca-backend.md#current-lifecycle-and-safety).
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-orca.test.sh tests/fm-spawn-orca-worktree.test.sh
+```
+
+Recovery output excerpt:
+
+```text
+ok - Orca create response timeout adopts the matching worktree without recreating
+ok - Concurrent Orca creates recover and clean up only their own random attempt identities
+ok - Orca recovery rejects foreign, ambiguous, incomplete and unsafe identities before adoption
+ok - Orca recovery waits until the exact Git root is readable and clean
+ok - Orca recovery bounds inventory calls and preserves an unconfirmed allocation at the deadline
+ok - Orca create preserves non-timeout errors
+ok - Orca create parses stdout JSON when a successful create also writes stderr
+```
+
 ### Orca environment source
 
 The environment source was verified on 2026-10-14 on macOS 15.6.1 with tmux 3.6a, Bash 5.3.20, Bash 3.2.57, and zsh 5.9.
