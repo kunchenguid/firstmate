@@ -50,11 +50,13 @@
 # hold preserves the existing timestamp, while re-holding released work starts
 # a new lifecycle. A task already closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
-# `complete` and `verify` check. Repeating `hold --origin` on a still-active
-# captain hold only adds that origin beside the ones the call records, so one
-# call found by several reviews serves each of them: the recorded reason,
-# `--until` date, hold-set stamp, and parent decision stay as they are, and the
-# new `--reason` and `--until` are ignored. A new lifecycle replaces the origins.
+# `complete` and `verify` check. `hold --origin` with an origin a still-active
+# captain hold does not record yet only adds that origin beside the ones the
+# call records, so one call found by several reviews serves each of them: the
+# recorded reason, `--until` date, hold-set stamp, and parent decision stay as
+# they are, and the new `--reason` and `--until` are ignored. With an origin the
+# call already records it is a normal re-hold that keeps the other origins. A
+# new lifecycle replaces the origins.
 # The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
 # readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
@@ -877,10 +879,17 @@ task_identity() {
   printf '%s' "$id"
 }
 
+# The origins the current call recorded are the origin lines directly beneath
+# its hold-set stamp. An origin line further down belongs to an earlier,
+# answered call.
+call_hold_origins() {  # <decoded-task-body>; prints one origin per line
+  body_hold_origins "$(printf '%s\n' "$1" | sed 1d \
+    | awk '!/^Captain hold origin: / { exit } { print }')"
+}
+
 # With <keep-existing>=1 (the same active call) the origin is added to those
-# this call already recorded: the origin lines directly beneath its hold-set
-# stamp. An origin line further down belongs to an earlier, answered call, and
-# a new lifecycle is a new call, so both are replaced.
+# this call already recorded; a new lifecycle is a new call, so they are
+# replaced.
 write_hold_origin() {  # <task-id> <shown-body> <origin> <keep-existing>
   local id=$1 body=$2 origin=$3 keep=$4 stamp rest origins='' stored new_body tmp
   body=$(decode_shown_value "$body") \
@@ -889,8 +898,7 @@ write_hold_origin() {  # <task-id> <shown-body> <origin> <keep-existing>
   [ -n "$(body_hold_set_timestamp "$body")" ] \
     || fail "task $id lost its hold-set stamp before its origin was recorded"
   if [ "$keep" = 1 ]; then
-    origins=$(body_hold_origins "$(printf '%s\n' "$body" | sed 1d \
-      | awk '!/^Captain hold origin: / { exit } { print }')")
+    origins=$(call_hold_origins "$body")
   fi
   origins=$(printf '%s\n%s\n' "$origins" "$origin" | awk 'NF && !seen[$0]++')
   rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
@@ -1131,7 +1139,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local preserve_hold_set=0 stored_reason original_body='' hold_status=0 decoded_body
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1209,9 +1217,14 @@ command_hold() {
   fi
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
   if [ "$preserve_hold_set" = 1 ] && [ -n "$origin" ]; then
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 1 || exit $?
-    printf '%s\n' "$id"
-    return 0
+    decoded_body=$(decode_shown_value "$(show_field "$show" body)") \
+      || fail "could not decode the existing body for $id"
+    if [ -n "$(body_hold_set_timestamp "$decoded_body")" ] \
+      && ! grep -Fqx -- "$origin" <<< "$(call_hold_origins "$decoded_body")"; then
+      write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 1 || exit $?
+      printf '%s\n' "$id"
+      return 0
+    fi
   fi
   original_body=$(show_field "$show" body)
   write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
@@ -1240,7 +1253,7 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
   if [ -n "$origin" ]; then
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 0 || exit $?
+    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" "$preserve_hold_set" || exit $?
   fi
   printf '%s\n' "$id"
 }
