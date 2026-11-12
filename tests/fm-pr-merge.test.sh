@@ -4053,6 +4053,7 @@ test_github_behind_updates_and_rechecks_before_merge() {
 
   case_dir=$(make_case github-behind-unknown-after-waived-red)
   add_gh_mocks "$case_dir" "$old_head"
+  write_github_required "$case_dir" classic:ci
   jq '.mergeStateStatus = "BEHIND"' "$case_dir/github-view.json" > "$case_dir/github-view-after-update.json"
   mv "$case_dir/github-view-after-update.json" "$case_dir/github-view.json"
   jq --arg head "$new_head" '.mergeStateStatus = "CLEAN" | .headRefOid = $head | .mergeable = "UNKNOWN" | .statusCheckRollup[0].conclusion = "FAILURE"' \
