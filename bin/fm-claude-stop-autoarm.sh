@@ -212,7 +212,7 @@ esac
 # FM_POLL seconds between touches (docs/turnend-guard.md "Guard grace and the
 # poll cadence"). fm_poll_derived_grace (bin/fm-wake-lib.sh) is the single
 # owner of that max(300, poll+60) derivation.
-GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+GRACE=$(fm_beacon_grace)
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
