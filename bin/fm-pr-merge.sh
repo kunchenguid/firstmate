@@ -1136,8 +1136,8 @@ github_checks_not_green() {
   ' 2>/dev/null || return 1
 }
 
-FM_PR_GITHUB_REQUIRED=
-FM_PR_GITHUB_REQUIRED_ERROR=
+# Keep null classic-check handling local to merging; review parking uses
+# the shared reader in bin/fm-pr-lib.sh.
 github_read_required_contexts() {
   local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
   FM_PR_GITHUB_REQUIRED='[]'
@@ -1206,26 +1206,6 @@ github_read_required_contexts() {
     unique_by([.context, .app_id]) | group_by(.context)
     | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
   [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
-}
-
-github_required_checks_missing() {
-  local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
-    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | .statusCheckRollup as $reported
-    | $required
-    | map(. as $requirement
-      | select(any($reported[];
-          if $requirement.app_id == null then
-            (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
-          elif .__typename == "CheckRun" then
-            .name == $requirement.context
-            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
-          else
-            .context == $requirement.context
-          end) | not)
-      | .context) | unique[]
-  ' 2>/dev/null || return 1
 }
 
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
