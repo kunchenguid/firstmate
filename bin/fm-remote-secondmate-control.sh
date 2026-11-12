@@ -43,7 +43,7 @@
 # stops the remote Herdr service or removes a sibling secondmate's workspace or panes.
 #
 # `answers` feeds this host's own bin/fm-captain-hold.sh keyed-answer intake with
-# the `<task>\t<answer>\t<label>` lines the parent's fm-send --resolve-key built
+# the keyed lines the parent's fm-send --resolve-key built
 # for calls the secondmate holds in its own backlog, so a call the captain
 # answered closes in this home at enqueue time instead of waiting for its model
 # turn. It is the same one intake every channel feeds; the leg only runs it with

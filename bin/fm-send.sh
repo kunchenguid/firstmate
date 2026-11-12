@@ -206,10 +206,13 @@
 # SECONDMATE's ledger names a call held in that mate's own backlog, which only
 # the mate's home can close. After the answer is durably delivered, fm-send
 # therefore also hands the mate home's own bin/fm-captain-hold.sh keyed-answer
-# intake one `<task>\t<answer>\t` line per such key (a local mate
+# intake one `<task>\t<answer>\t\t\t<n>` line per such key, including a key
+# `complete` already transferred to a captain-held task in this home (a local mate
 # through a direct call into its recorded home, a remote mate through
 # fm-remote-secondmate-control.sh `answers`), so the call closes in the mate's
-# home within seconds instead of waiting for its model to read the message. That
+# home within seconds instead of waiting for its model to read the message. The
+# `<n>` makes the intake close only that occurrence, so an answer to an earlier
+# call never closes a newer re-hold of the same task. That
 # is one more channel feeding the one intake: fm-send decides nothing about the
 # close. It is best-effort and never changes the exit status, because the answer
 # is already delivered and a resend would duplicate it; a feed that could not run
@@ -909,17 +912,20 @@ OPEN
 # own keyed-answer intake (see the header). Best-effort by design: the answer is
 # already delivered, so a failure here is a notice, never a nonzero exit.
 fm_send_feed_mate_holds() { # <answer-text>
-  local note=$1 k task lines='' budget out rc=0 mate_home marker
+  local note=$1 k task n lines='' budget out rc=0 mate_home marker
   [ "$MARK_FROM_FIRSTMATE" = 1 ] || return 0
-  [ -n "$RESOLVE_STATUS_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  for k in $RESOLVE_STATUS_KEYS; do
+  # Every key this send accepted, whether the status log still owned it or
+  # `complete` had already transferred it to a captain-held task here: a refused
+  # key stops the send before delivery, so RESOLVE_KEYS is exactly that set.
+  for k in $RESOLVE_KEYS; do
     case "$k" in captain-hold-?*-[0-9]*) ;; *) continue ;; esac
-    case "${k##*-}" in '' | *[!0-9]*) continue ;; esac
+    n=${k##*-}
+    case "$n" in '' | *[!0-9]*) continue ;; esac
     task=${k#captain-hold-}
     task=${task%-*}
     [ -n "$task" ] || continue
-    lines="${lines}${task}"$'\t'"${note}"$'\t'$'\n'
+    lines="${lines}${task}"$'\t'"${note}"$'\t'$'\t'$'\t'"${n}"$'\n'
   done
   [ -n "$lines" ] || return 0
   budget=${FM_SEND_REMOTE_BUDGET:-30}
@@ -947,7 +953,7 @@ fm_send_feed_mate_holds() { # <answer-text>
   fi
   out=$(printf '%s' "$out" | tr '\n' ' ')
   if [ "$rc" -ne 0 ]; then
-    echo "notice: the answer was delivered to $TARGET_TASK_ID, but its own record of the held call(s) was not closed now (rc=$rc: ${out:-no output}); the mate closes them when it reads the answer. Do not resend." >&2
+    echo "notice: the answer was delivered to $TARGET_TASK_ID, but its own record of the held call(s) was not closed now (rc=$rc: ${out:-no output}); the mate handles them when it reads the answer. Do not resend." >&2
   fi
 }
 
