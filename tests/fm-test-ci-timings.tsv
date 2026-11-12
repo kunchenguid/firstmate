@@ -176,6 +176,7 @@ tests/fm-mail.test.sh	11369
 tests/fm-merge-local.test.sh	9152
 tests/fm-muse-harness.test.sh	57793
 tests/fm-muse-signals-live-e2e.test.sh	192
+tests/fm-nm-bounded-owned.test.sh	3712
 tests/fm-nm-test-contract.test.sh	2851
 tests/fm-no-mistakes-required.test.sh	392
 tests/fm-omp-harness.test.sh	78150
@@ -335,7 +336,7 @@ tests/fm-wake-queue.test.sh	217334
 tests/fm-warm-compact-herdr-live-e2e.test.sh	253
 tests/fm-warm-compact.test.sh	562
 tests/fm-watch-arm.test.sh	313703
-tests/fm-watch-beacon-progress.test.sh	45000
+tests/fm-watch-beacon-progress.test.sh	30149
 tests/fm-watch-checkpoint.test.sh	25895
 tests/fm-watch-inbox-meta.test.sh	516
 tests/fm-watch-open-decisions.test.sh	16297
