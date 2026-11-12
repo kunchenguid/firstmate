@@ -11,8 +11,8 @@
 #
 # They also hold the outside pull request gate the maintainer approved in
 # DOP-167 (keep public CI within GitHub's 40-job limit): a PR from an author
-# without write access runs only the quick checks and a failing Full suite
-# verdict until the full-ci label is added, the label and later pushes run the
+# without write access runs the quick checks, the non-blocking Ubuntu canary,
+# and a failing Full suite verdict until full-ci is added; later pushes run the
 # whole suite, any other label neither starts nor cancels a run, and close main
 # pushes keep only the newest run.
 #
@@ -332,7 +332,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # one-off number the policy removed.
 FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate full-suite'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
-HEAVY_TIER_JOBS='tests-herdr tests-hc'
+HEAVY_TIER_JOBS='tests-herdr tests-hc tests-ubuntu-26-canary'
 
 # Print the one timeout every listed job shares; fail on any disagreement.
 tier_timeout() {  # <tier> <job>...
@@ -415,19 +415,19 @@ test_only_the_full_ci_label_joins_the_pr_group() {
   pass "only the full-ci label joins and supersedes the PR's group; other labels cancel nothing"
 }
 
-QUICK_JOBS='test-coverage invariants full-suite'
+UNGATED_JOBS='test-coverage tests-ubuntu-26-canary invariants full-suite'
 
-# DOP-167 direction A: an outside PR without the label runs only the quick
-# checks and the Full suite verdict, which fails naming the label.
-test_outside_pr_without_label_runs_only_quick_checks() {
+# The canary must exercise outside PRs before full-ci approval; the required
+# Full suite verdict still fails naming the label.
+test_outside_pr_without_label_runs_quick_checks_and_canary() {
   local action association actual out
   # The associations open fork PRs to firstmate carried on 2026-10-29.
   for association in CONTRIBUTOR FIRST_TIME_CONTRIBUTOR NONE; do
     for action in opened synchronize reopened; do
       actual=$(jobs_running_under action="$action" association="$association" | tr '\n' ' ') \
         || fail "could not resolve outside $association $action jobs"
-      [ "$actual" = "$QUICK_JOBS " ] \
-        || fail "an unlabelled outside PR ($association, $action) must run only $QUICK_JOBS, ran: $actual"
+      [ "$actual" = "$UNGATED_JOBS " ] \
+        || fail "an unlabelled outside PR ($association, $action) must run $UNGATED_JOBS, ran: $actual"
     done
   done
   if out=$(run_full_suite_verdict); then
@@ -435,7 +435,7 @@ test_outside_pr_without_label_runs_only_quick_checks() {
   fi
   printf '%s\n' "$out" | grep -q 'full-ci' \
     || fail "the Full suite failure must name the full-ci label, got:"$'\n'"$out"
-  pass "an unlabelled outside PR runs only the quick checks and a failing Full suite naming full-ci"
+  pass "an unlabelled outside PR runs quick checks, the canary, and a failing Full suite naming full-ci"
 }
 
 # DOP-167: the full-ci label and every later push run the whole suite, and the
@@ -519,7 +519,7 @@ test_unrelated_label_never_masks_an_earlier_failure() {
       case "$expect:$name" in
         all-failed:*) want=failure ;;
         waiting:'Full suite') want=failure ;;
-        waiting:'Test coverage guard'|waiting:'Repo invariants') want=success ;;
+        waiting:'Test coverage guard'|waiting:'Repo invariants'|waiting:'Ubuntu 26.04 canary') want=success ;;
         waiting:*) want=skipped ;;
       esac
       [ "$conclusion" = "$want" ] \
@@ -593,9 +593,9 @@ test_normal_tier_shares_one_budget() {
   pass "normal tier jobs share one $normal minute budget"
 }
 
-# Heavy tier: Herdr alone carries a job-level last-resort backstop above the
-# normal tier, while its family-run step owns a tighter tripwire so the
-# always() cleanup and timing upload still run after a hang.
+# Heavy tier: the real backend lanes and multi-suite canary carry a backstop
+# above the normal tier. Backend family-run steps have a tighter tripwire so
+# their always() cleanup and timing upload still run after a hang.
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
   local normal heavy step
   # shellcheck disable=SC2086
@@ -606,7 +606,7 @@ test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
     || fail "heavy tier backstop ($heavy) must exceed the normal tier ($normal)"
   [ "$heavy" -ge 60 ] && [ "$heavy" -le 75 ] \
     || fail "heavy tier backstop must stay a 60-75 minute last resort, got $heavy"
-  # Each heavy lane's family-run step owns the same 20-minute tripwire shape:
+  # Each real backend lane's family-run step owns the same 20-minute tripwire shape:
   # its own timeout, an always() cleanup step that must come after it, and a
   # bound below the shared job backstop.
   while read -r lane run_step cleanup_step; do
@@ -723,12 +723,29 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+test_ubuntu_canary_failure_is_non_blocking() {
+  ruby -ryaml - "$CI_WORKFLOW" <<'RUBY' || fail "Ubuntu canary isolation contract"
+jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+canary = jobs.fetch("tests-ubuntu-26-canary")
+raise "canary must use Ubuntu 26.04" unless canary.fetch("runs-on") == "ubuntu-26.04"
+raise "canary failures must be tolerated" unless canary.fetch("continue-on-error") == true
+raise "canary must not wait for required jobs" unless Array(canary["needs"]).empty?
+jobs.each do |id, job|
+  raise "#{id} must not depend on the canary" if Array(job["needs"]).include?("tests-ubuntu-26-canary")
+  next if id == "tests-ubuntu-26-canary" || id == "macos-stock-bash"
+  raise "#{id} must remain pinned to Ubuntu 24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
+end
+RUBY
+  pass "Ubuntu 26.04 canary failures cannot affect required jobs, whose Linux pins stay unchanged"
+}
+
+test_ubuntu_canary_failure_is_non_blocking
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_keep_only_the_newest_run
 test_only_the_full_ci_label_joins_the_pr_group
-test_outside_pr_without_label_runs_only_quick_checks
+test_outside_pr_without_label_runs_quick_checks_and_canary
 test_full_ci_label_runs_the_whole_suite
 test_trusted_runs_are_unchanged
 test_unrelated_label_starts_no_job
