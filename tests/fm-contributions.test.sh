@@ -2178,7 +2178,7 @@ test_forge_release_waits_for_an_attended_session() {
 }
 
 test_forge_release_waits_for_the_away_record_lock() {
-  local home out lock holder_pid i
+  local home out lock holder_pid i started
   home=$(new_home hold-away-lock)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
@@ -2198,11 +2198,14 @@ test_forge_release_waits_for_the_away_record_lock() {
   while [ "$i" -lt 100 ] && [ ! -s "$home/holder.ready" ]; do sleep 0.05; i=$((i + 1)); done
   [ -s "$home/holder.ready" ] || { kill "$holder_pid" 2>/dev/null || true; fail 'the fixture never took the away-record lock'; }
   printf 'merged\n' > "$home/forge/state"
-  out=$(with_home "$home" env FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1 "$ROOT/bin/fm-contributions.sh" poll)
+  started=$SECONDS
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll)
   i=$?
   touch "$home/release"
   wait "$holder_pid" || fail 'the lock holder failed'
   [ "$i" -eq 0 ] || fail 'locked poll failed'
+  # The watcher cuts a check after 30 seconds; a merge may hold this lock longer.
+  [ $((SECONDS - started)) -lt 20 ] || fail "a busy away-record lock held the poll for $((SECONDS - started))s"
   [ -z "$out" ] || fail "a release deferred by the lock produced poll output: $out"
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'a merged PR released a captain hold while the away record was locked'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'unlocked poll failed'

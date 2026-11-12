@@ -1903,7 +1903,7 @@ command_settle_pr() {
   observed=$(printf '%s' "$evidence" | jq -r .checked_at)
   action=$(jq -r .action "$policy")
   if [ "$action" = release ]; then
-    fm_afk_contract_lock_hold "$STATE" 2>/dev/null && release_attended || return 0
+    release_attended && fm_afk_contract_lock_hold "$STATE" 1 2>/dev/null && release_attended || return 0
   fi
   occurrence=$(jq -r .occurrence "$policy")
   fingerprint=$(jq -r .fingerprint "$policy")
