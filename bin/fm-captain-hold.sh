@@ -46,12 +46,13 @@
 # semantics (`--until` is the optional hold deferral), so the create waives
 # Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
 # date or registering a `types.custom` captain issue type. The command records
-# a UTC `Captain hold set:` timestamp in the task body: repeating an active
-# hold preserves the existing timestamp, while re-holding released work starts
-# a new lifecycle. A task already closed is refused rather than reopened.
+# a UTC `Captain hold set:` timestamp in the task body: repeating an open
+# captain call (still held, or deferred past its `--until` date) preserves the
+# existing timestamp, while re-holding released work starts a new lifecycle. A
+# task already closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
-# `complete` and `verify` check. `hold --origin` with an origin a still-active
-# captain hold does not record yet only adds that origin beside the ones the
+# `complete` and `verify` check. `hold --origin` with an origin an open captain
+# call does not record yet only adds that origin beside the ones the
 # call records, so one call found by several reviews serves each of them: the
 # recorded reason, `--until` date, hold-set stamp, and parent decision stay as
 # they are, and the new `--reason` and `--until` are ignored. With an origin the
@@ -860,12 +861,13 @@ body_hold_origins() {  # <decoded-task-body>; prints one origin per line
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | awk 'NF && !seen[$0]++'
 }
 
-# Only a call still held for the captain right now can take another origin; an
-# expired deferral or a lifted hold is re-held as a new lifecycle instead.
-is_active_captain_hold() {  # <shown-task>
+# An open captain call is one still held for the captain or deferred past its
+# date: tasks-axi keeps hold_kind through an expired date gate but clears it on
+# release. Only an open call keeps its timestamp and origins and can take
+# another origin; a released call is re-held as a new lifecycle instead.
+is_open_captain_call() {  # <shown-task>
   [ "$(show_field "$1" state)" != "done" ] \
-    && [ "$(show_field_value "$1" hold_kind)" = captain ] \
-    && [ "$(show_field_value "$1" held)" = yes ]
+    && [ "$(show_field_value "$1" hold_kind)" = captain ]
 }
 
 task_identity() {
@@ -1072,7 +1074,7 @@ archived_entry() {  # <origin-or-empty> <entry>; prints the archived id
 # origin was recorded, so completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
   local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id resolve_err archived archived_status
-  local stored_origin matched held_for active_hint
+  local stored_origin matched held_for open_hint
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
@@ -1105,9 +1107,9 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   id=${resolved%% *}
   how=${resolved##* }
   verify_hold_durable "$id"
-  active_hint=''
-  if is_active_captain_hold "$TASK_SHOW_OUTPUT"; then
-    active_hint=", add $origin to this active hold with hold --origin"
+  open_hint=''
+  if is_open_captain_call "$TASK_SHOW_OUTPUT"; then
+    open_hint=", add $origin to this open call with hold --origin"
   fi
   id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
   validate_slug backend-task-id "$id"
@@ -1129,7 +1131,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
         case "$stored" in
           *$'\n'*) held_for="origins $(printf '%s\n' "$stored" | paste -sd, - | sed 's/,/, /g')" ;;
         esac
-        fail "captain-held task $id was held for $held_for, not $origin; hold a task for $origin$active_hint, or list the right one"
+        fail "captain-held task $id was held for $held_for, not $origin; hold a task for $origin$open_hint, or list the right one"
       fi
     fi
     origin_state=recorded
@@ -1178,7 +1180,7 @@ command_hold() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
-    if is_active_captain_hold "$show"; then
+    if is_open_captain_call "$show"; then
       preserve_hold_set=1
     fi
     if [ -n "$title" ]; then
