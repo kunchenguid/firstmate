@@ -643,6 +643,9 @@ test_pr_based_dod_renders_the_suite_record_step() {
     assert_grep "Write the result to \`$TMP_ROOT/home/data/dod-suite-task/suite-result\` with exactly these lines" "$out" \
       "$mode: DoD must name the suite record at the data directory it was given"
     # shellcheck disable=SC2016
+    assert_grep '`head=` followed by the output of `git rev-parse HEAD`' "$out" \
+      "$mode: DoD must bind the record to the exact commit the suite ran on"
+    # shellcheck disable=SC2016
     assert_grep '`base=` followed by the output of `git merge-base HEAD origin/feature/hub`' "$out" \
       "$mode: DoD must bind the record to the task's base branch"
     assert_grep 'a record made against an older base is refused at merge' "$out" \

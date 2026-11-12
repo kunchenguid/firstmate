@@ -145,7 +145,9 @@
 # <data>/<task-id>/suite-result (bin/fm-dod-lib.sh tells it how and
 # bin/fm-pr-lib.sh's fm_pr_suite_record_path owns the location): suite=pass
 # with base=<sha> equal to that same live base tip, so a record made against
-# an older base is refused as stale; suite=fail refuses; and suite=none with a
+# an older base is refused as stale, and head=<sha> naming the tested commit
+# equal to the live pull request head, so a record made before a later push is
+# refused; suite=fail refuses; and suite=none with a
 # non-empty reason= is the explicit no-suite escape, accepted and reported as
 # a worker attestation. A missing, unreadable, or unparsable record, or a
 # compare that cannot be read, refuses. The record is read once and that copy
@@ -1163,7 +1165,7 @@ github_checks_not_green() {
 # repository code runs on the supervisor.
 github_unchecked_base_refusals() {  # <base> <live-head>
   local base=$1 head=$2 position line behind='' tip='' record contents
-  local suite='' recorded_base='' reason=''
+  local suite='' recorded_base='' recorded_head='' reason=''
   if ! position=$(gh api "repos/$PR_OWNER/$PR_REPO/compare/$(github_urlencode_path_segment "$base")...$head?per_page=1" \
       --jq '"behind_by=" + (.behind_by | tostring), "base_sha=" + (.base_commit.sha | tostring)' 2>/dev/null) \
     || [ -z "$position" ]; then
@@ -1196,10 +1198,15 @@ FIELDS
   contents=$(cat "$record" 2>/dev/null) || contents=
   suite=$(printf '%s\n' "$contents" | sed -n 's/^suite=//p' | tail -n 1 | tr -d '\000-\037')
   recorded_base=$(printf '%s\n' "$contents" | sed -n 's/^base=//p' | tail -n 1 | tr -d '\000-\037')
+  recorded_head=$(printf '%s\n' "$contents" | sed -n 's/^head=//p' | tail -n 1 | tr -d '\000-\037')
   reason=$(printf '%s\n' "$contents" | sed -n 's/^reason=//p' | tail -n 1 | tr -d '\000-\037')
   case "$suite" in
     pass)
-      if ! fm_pr_head_valid "$recorded_base"; then
+      if ! fm_pr_head_valid "$recorded_head"; then
+        printf '  - the recorded full-suite result at %s names no tested head commit: have the worker re-run the suite and record it\n' "$record"
+      elif [ "$recorded_head" != "$head" ]; then
+        printf '  - the recorded full-suite result tested head %s but the pull request head is now %s: re-run the suite on the current head and record it\n' "$recorded_head" "$head"
+      elif ! fm_pr_head_valid "$recorded_base"; then
         printf '  - the recorded full-suite result at %s names no base commit: have the worker re-run the suite and record it\n' "$record"
       elif [ "$recorded_base" != "$tip" ]; then
         printf '  - the recorded full-suite result ran against base %s but %s is now at %s: rebase and re-validate\n' "$recorded_base" "$base" "$tip"

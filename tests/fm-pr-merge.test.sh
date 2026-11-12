@@ -174,8 +174,12 @@ assert_logged_gh_merge() {
 }
 
 add_gh_mocks() {
-  local case_dir=$1 head=$2
+  local case_dir=$1 head=$2 record="$1/home/data/task-x1/suite-result"
   write_github_live_json "$case_dir" "$head"
+  # make_case's default passing record predates the head: bind it to this one.
+  if [ -f "$record" ] && [ "$(cat "$record")" = "$(printf '%s\n' 'suite=pass' "base=$SUITE_BASE" 'ran=fixture suite')" ]; then
+    printf '%s\n' 'suite=pass' "head=$head" "base=$SUITE_BASE" 'ran=fixture suite' > "$record"
+  fi
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -5588,9 +5592,20 @@ test_unchecked_base_refuses_without_a_current_passing_suite_record() {
 
   case_dir=$(make_case unchecked-stale)
   add_gh_mocks "$case_dir" "$head"
-  write_suite_record "$case_dir" 'suite=pass' 'base=ffffffffffffffffffffffffffffffffffffffff' 'ran=fixture suite'
+  write_suite_record "$case_dir" 'suite=pass' "head=$head" 'base=ffffffffffffffffffffffffffffffffffffffff' 'ran=fixture suite'
   assert_unchecked_base_refused "$case_dir" 92 \
     "ran against base ffffffffffffffffffffffffffffffffffffffff but main is now at $SUITE_BASE" unchecked-stale
+
+  case_dir=$(make_case unchecked-head-mismatch)
+  add_gh_mocks "$case_dir" "$head"
+  write_suite_record "$case_dir" 'suite=pass' 'head=cccccccccccccccccccccccccccccccccccccccc' "base=$SUITE_BASE" 'ran=fixture suite'
+  assert_unchecked_base_refused "$case_dir" 104 \
+    "tested head cccccccccccccccccccccccccccccccccccccccc but the pull request head is now $head" unchecked-head-mismatch
+
+  case_dir=$(make_case unchecked-no-head)
+  add_gh_mocks "$case_dir" "$head"
+  write_suite_record "$case_dir" 'suite=pass' "base=$SUITE_BASE" 'ran=fixture suite'
+  assert_unchecked_base_refused "$case_dir" 105 'names no tested head commit' unchecked-no-head
 
   case_dir=$(make_case unchecked-fail)
   add_gh_mocks "$case_dir" "$head"
@@ -5622,7 +5637,7 @@ test_unchecked_base_refuses_without_a_current_passing_suite_record() {
   add_gh_mocks "$case_dir" "$head"
   : > "$case_dir/github-compare-fail"
   assert_unchecked_base_refused "$case_dir" 98 'could not be read, so a stale base cannot be ruled out' unchecked-compare-unreadable
-  pass "fm-pr-merge refuses a no-required-checks base that is behind, stale, failing, unrecorded, or unreadable"
+  pass "fm-pr-merge refuses a no-required-checks base that is behind, stale, tested at another head, failing, unrecorded, or unreadable"
 }
 
 test_unchecked_base_accepts_an_attested_no_suite_reason() {
@@ -5692,7 +5707,7 @@ test_unchecked_base_reads_the_suite_record_once() {
   case_dir=$(make_case unchecked-torn-record)
   add_gh_mocks "$case_dir" "$head"
   record="$case_dir/home/data/task-x1/suite-result"
-  write_suite_record "$case_dir" 'suite=pass' 'base=ffffffffffffffffffffffffffffffffffffffff' 'ran=fixture suite'
+  write_suite_record "$case_dir" 'suite=pass' "head=$head" 'base=ffffffffffffffffffffffffffffffffffffffff' 'ran=fixture suite'
   for tool in awk cat grep head sed tail; do
     real=$(command -v "$tool")
     cat > "$case_dir/fakebin/$tool" <<SH

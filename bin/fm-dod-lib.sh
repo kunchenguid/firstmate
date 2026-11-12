@@ -564,6 +564,7 @@ Firstmate's merge guard executes none of this repository's code, so on a base br
 1. Run \`git fetch origin\`, then run the project's full test suite or gate on the exact tree you are shipping - the command its AGENTS.md, CONTRIBUTING.md, or README names, never a targeted subset or a "docs-only, nothing to run" skip.
 2. Write the result to \`$record\` with exactly these lines, \`suite=pass\` only when the whole run passed:
    \`suite=pass\` or \`suite=fail\`
+   \`head=\` followed by the output of \`git rev-parse HEAD\`
    \`base=\` followed by the output of \`git merge-base HEAD $base_ref\`
    \`ran=\` followed by the command you ran
    Write those lines to a temporary file in the same directory first, then \`mv\` it onto the record, so the merge never reads a half-written record.

@@ -154,9 +154,9 @@ run_pr_merge() {  # <home> <id> <url>
   local home=$1
   shift
   # The base branch reports no required checks, so the merge also reads the
-  # worker's recorded full-suite result: a passing one against the compare tip.
+  # worker's recorded full-suite result: a passing one against the compare tip and the head the fake gh reports.
   mkdir -p "$home/data/$1"
-  printf '%s\n' 'suite=pass' 'base=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'ran=fixture suite' \
+  printf '%s\n' 'suite=pass' 'head=1111111111111111111111111111111111111111' 'base=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'ran=fixture suite' \
     > "$home/data/$1/suite-result"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

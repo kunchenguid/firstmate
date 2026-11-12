@@ -370,10 +370,10 @@ SH
 }
 
 # The fake base reports no required checks, so a merge also reads the worker's
-# recorded full-suite result: a passing one against the compare tip.
+# recorded full-suite result: a passing one against the compare tip and the head the fake gh reports.
 write_suite_record() {  # <dir> <task-id>
   mkdir -p "$1/home/data/$2"
-  printf '%s\n' 'suite=pass' 'base=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'ran=fixture suite' \
+  printf '%s\n' 'suite=pass' 'head=0123456789abcdef0123456789abcdef01234567' 'base=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'ran=fixture suite' \
     > "$1/home/data/$2/suite-result"
 }
 
