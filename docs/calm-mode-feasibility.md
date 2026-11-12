@@ -17,7 +17,7 @@ Pi 0.81.1 was installed when Calm was first built, and Pi 0.82.0 was the later r
 The inspected Pi CHANGELOG shows no relevant presentation API introduced at either version, so those versions remain verification evidence rather than compatibility bounds.
 The exported classes used by the adapters (`AssistantMessageComponent` and `InteractiveMode`) are undocumented internals with no stated version guarantee.
 `tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
-This host tracks Pi latest, so the version the evidence is pinned to moves; the [2026-09-07 record](#2026-09-07-pi-0851-renderer-and-export-dom-verification) owns the currently pinned version and the renderer comparison behind it.
+This host tracks Pi latest, so the version the evidence is pinned to moves; the [2026-10-28 record](#2026-10-28-pi-140-codemode-renderer-verification) owns the current `codemode` renderer evidence, while the [2026-09-07 record](#2026-09-07-pi-0851-renderer-and-export-dom-verification) owns the earlier general renderer comparison.
 
 ### Built-in tool override constraints
 
@@ -86,7 +86,7 @@ The persisted assistant message, provider context, tool execution, export data, 
 Collapsed thinking-only assistant messages now render zero rows, thinking before visible assistant text adds no spacing beyond the text-only baseline, and expanding thinking still renders the original reasoning.
 
 The disconfirming checks deliberately retain supported boundaries.
-An arbitrary third-party custom tool and a built-in read image remain visible because Pi exposes neither a global tool renderer nor image-row control.
+An arbitrary third-party custom tool remains visible under the named renderer scope documented below, and a built-in read image remains visible because Pi exposes no image-row control.
 Expanded thinking remains visible by design, while re-collapsing it returns to zero-height Calm presentation.
 Ordinary user-role near misses remain visible, including quoted current markers, ASCII-only labels, unrelated text before a marker, unrelated text after U+2063, and image-bearing input.
 
@@ -219,6 +219,8 @@ No other `.pi/extensions` file registers or supplies a tool. Commands, lifecycle
 
 The taxonomy was derived from Pi 0.81.1's installed public declarations, documentation, examples, `interactive-mode.js`, and its exported component implementations.
 The test fixture enumerates every class below through the centralized policy, and the interactive fixture exercises the screenshot classes, current user-role operational input, and legacy synthetic presentation entries.
+Pi 1.4.0's `registerToolRenderer` can choose renderers for calls to any tool, including tools that are not registered yet.
+Calm registers behavior only for Pi's `codemode` extension tool without registering or replacing that tool; a build without the API reports the adapter as unavailable rather than claiming arbitrary custom-tool coverage.
 
 | Policy class | Pi transcript path | Calm result (baseline verified on Pi 0.81.1 through 0.82.0; newer evidence noted per row) |
 | --- | --- | --- |
@@ -226,8 +228,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | Each settled text block follows the cross-harness preservation contract in [`calm.md`](calm.md); hidden blocks are removed from the shallow presentation copy before layout, a `toolUse` message carrying only short narration occupies zero rows (verified on Pi 0.84.1), and a still-streaming `pending` message is never filtered. |
 | `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
-| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, `fm_branch_outcomes`, and `fm_branch_processed` hidden; other arbitrary custom tools remain an unsupported boundary. |
-| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
+| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, `fm_branch_outcomes`, and `fm_branch_processed` retain the earlier baseline; Pi's `codemode` tool is hidden through `registerToolRenderer` (rendering and TUI verified on installed Pi 1.4.0); other arbitrary custom tools remain unsupported. |
+| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools retain the earlier baseline; `codemode` results also hide on installed Pi 1.4.0; other arbitrary custom results remain unsupported. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
@@ -242,15 +244,16 @@ The test fixture enumerates every class below through the centralized policy, an
 | `project-trust-warning` | Non-persisted startup `Text` row | Unsupported boundary; remains visible. |
 | `synthetic-user` | Firstmate extension `sendUserMessage`, terminal-injected input, Firstmate-generated Pi positional brief, or the already non-displayed session-start nudge | Canonically classified text-only operational user messages stay ordinary semantic user messages but render through the zero-height adapter under Calm; legacy entries stay gaplessly controllable, and the session-start nudge retains its existing non-displayed custom-message path. |
 | `synthetic-assistant` | No authoritative Firstmate source found | Policy-hidden, but Pi exposes no generic assistant-role renderer. |
-| `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic renderer exists; never claimed as covered. |
+| `unknown` | Future or unclassified transcript component | Policy-hidden, but no generic transcript-component renderer exists; never claimed as covered. |
 
-The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or generic custom-tool wrapper.
+The installed extension API has no supported global transcript filter, user-message renderer, assistant-message renderer, chat-container API, or image-child renderer.
+The named tool-renderer resolver above does not provide those generic transcript boundaries.
 Pi 0.81.1 through 0.82.0, Pi 0.84.4, and Pi 0.85.1 export `AssistantMessageComponent` and `InteractiveMode`, so Calm uses separate idempotent, API-probed adapters for assistant thinking layout and the complete operational-user transcript row while leaving all message data and non-Calm rendering unchanged; see the [compatibility contract](calm.md#pi-compatibility) for how a future Pi lacking one of those exports is handled.
 General component replacement, ANSI cursor erasure, provider-context mutation, and installed-file patching remain rejected as unsupported or preservation-breaking workarounds.
 
 ## Cross-harness verification record
 
-The original five-harness inspection was performed on 2026-07-22, with every integration surface rechecked and Pi reverified at 0.81.1 on 2026-07-23 for the latest Calm presentation change.
+The original five-harness inspection was performed on 2026-07-22, with every integration surface rechecked and Pi reverified at 0.81.1 on 2026-07-23 for that July Calm presentation change.
 
 ```text
 $ claude --version
@@ -270,14 +273,15 @@ grok 0.2.106 (bde89716f679)
 | Claude Code 2.1.272 (superseding the 2.1.218 row, which found no transcript-row renderer in project hooks or the plugin CLI) | Feasible through the early-access Claude Code mods surface (function hooks), default-off behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, and initially shipped with the plugin name `firstmate-calm` (now `fm`; see [`calm.md`](calm.md#the-calm-mod)). | A `ui.render` hook draws per-component transcript rows and the working row, `$.ui.invalidate` redraws the transcript, and `$.ui.blit` animates a `Raster`; the [2026-09-15 record](#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod) owns the spike-verified working animation, gapless hiding and retroactive redraw of tool, narration, and operational rows, the persisted per-home toggle, and the three bounded gaps: an early-access API that may change, main-screen scrollback keeping pre-toggle copies, and 256-color Raster paint. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
-| Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
+| Pi (baseline verified 0.81.1 through 0.82.0; named tool resolver verified 1.4.0) | Partially feasible with two API-probed exported-class adapters and a named tool-renderer resolver. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, expansion redraws, and renderer selection for named tools; Calm uses the Pi 1.4.0 resolver only for `codemode`, while exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, and generic user, status, and image-child filtering remain unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
 They do not claim that a harness can never add the missing renderer API, and the Claude Code row is the first that changed for exactly that reason.
-For the duplicate-turn fix and the latest presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
+For the duplicate-turn fix and the 2026-09-15 presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, cmux, and Paseo runtime surfaces continue to transport the same input selected by the harness adapter.
-Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod changes drawings only; every producer and non-Pi transport remains unchanged.
+During the Claude Code port, Pi's Calm implementation changed only to consume the shared sprite core, while the Claude Code mod changed drawings only.
+The later `codemode` adapter is likewise presentation-only and changes no producer or non-Pi transport.
 
 ## Queued operational-row retention
 
@@ -299,7 +303,7 @@ The same real-Pi reproduction then delivered the notification exactly once in a 
 
 ## Regression coverage
 
-`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; its rendered HTML export check accepts either omission or default-hidden hook rows for legacy synthetic messages while rejecting visible leakage.
+`tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins, `fm_watch_arm_pi`, and Pi's `codemode` renderer; its rendered HTML export check accepts either omission or default-hidden hook rows for legacy synthetic messages while rejecting visible leakage.
 `tests/fm-pi-branch-extension.test.sh` verifies both `fm_branch_outcomes` and `fm_branch_processed` call headers against pre-0.99 and 0.99+ Pi stock rendering, plus Calm toggling, capability-probed all-line versus collapsed stock result output, exact expanded output, and export rendering for outcomes.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
 It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts no Calm status row, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
@@ -308,6 +312,7 @@ The operational provider path covers Calm loaded on, loaded off, default prefere
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 Queued-row coverage drives Pi's real listing and restore methods over a stand-in session for each capability-check branch, including a hidden row kept when the classifier cannot answer again and a refused continuation that re-queues instead of dropping, and repeats Escape in a real Pi TUI with Calm on, with a captain message queued beside the notification, and with Calm off.
+The bounded Pi 1.4.0 `codemode` case drives a real partial-row timer through `/export` and confirms the row is synchronously repainted hidden when Calm resumes, as recorded in the [2026-10-28 verification](#2026-10-28-pi-140-codemode-renderer-verification).
 `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` is the default-on, token-free guard that probes a running Pi session for every member the check requires and fails naming the installed Pi version.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 [`tests/fm-pi-primary-types.test.sh`](../tests/fm-pi-primary-types.test.sh) owns the strict production-consumer typecheck and its dependency contract.
@@ -671,6 +676,20 @@ not ok - Pi 0.87.1 lacks the queue-retention capability Calm needs to hide queue
 ```
 
 With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Firstmate notification`.
+
+## 2026-10-28 Pi 1.4.0 codemode renderer verification
+
+Pi 1.4.0's named renderer resolver lets Calm wrap only the `codemode` call and result presentation without registering the tool, replacing its execution function, or changing stored messages.
+The component regression compares partial, completed, and error rows in collapsed and expanded states, proves Calm-off parity with Pi's original renderer, hides every state under Calm, restores stock rendering on toggle, and preserves original HTML export content.
+The bounded real-Pi fixture holds the real partial renderer's first timer invalidation until `/export`, observes stock rendering during the export window, and then observes the same live row synchronously repaint hidden when Calm resumes.
+
+```text
+$ pi --version
+1.4.0
+
+$ FM_CALM_CODEMODE_RACE_ONLY=1 tests/fm-calm-pi-extension.test.sh
+ok - real Pi partial codemode invalidation during export is synchronously repainted hidden when Calm resumes
+```
 
 ## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
 
