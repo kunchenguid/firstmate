@@ -35,6 +35,7 @@ This record owns concurrent isolation evidence for the portable parallel candida
 - `tests/fm-grok-harness.test.sh`
 - `tests/fm-herdr-lab.test.sh`
 - `tests/fm-lint.test.sh`
+- `tests/fm-park.test.sh`
 - `tests/fm-pi-primary-types.test.sh`
 - `tests/fm-pr-merge.test.sh`
 - `tests/fm-review-diff.test.sh`
@@ -100,6 +101,14 @@ It keeps every file, its tmux server, and its locks under its own lab home (`TMU
 - Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json <path>` (run `fm-isolation-1794275806759-92916`, 2026-11-10T01:56:46Z to 02:23:48Z, macOS arm64 with GNU Bash 5.3.9 and tmux 3.6a)
 - Result: `FM_ISOLATION_SUMMARY total=27 failed=0 concurrency=4 duration_ms=1622103`
 - `tests/fm-start-check.test.sh` exit 0 (237931 ms).
+
+## 2026-11-10: Review parking suite added
+
+`tests/fm-park.test.sh` keeps all state under `fm_test_tmproot` and drives a fake tmux binary, so it shares no global state.
+
+- Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json <path>` on macOS arm64 with Bash 5.3 and tmux, run under `caffeinate -i`
+- Result: `FM_ISOLATION_SUMMARY total=27 failed=0 concurrency=4 duration_ms=1372646`
+- `tests/fm-park.test.sh` exit 0 (188248 ms).
 
 ## Family concurrency proofs
 
