@@ -7736,7 +7736,13 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  # The parent's five operational overrides must be ABSENT for the secondmate,
+  # not merely empty: consumers may deliberately distinguish the two (for
+  # example bin/fm-check-unregister.sh refuses an explicitly empty override),
+  # including inherited non-empty values. env -u keeps the pane line fish-parseable;
+  # sh -c preserves raw commands starting with shell builtins (e.g. exec).
+  # Keep all -u options before assignments for BSD env compatibility.
+  LAUNCH="env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model sh -c $(shell_quote "$LAUNCH")"
 else
   # A ship or scout works for the active home itself.
   LAUNCH="export FM_HOME=$(shell_quote "$FM_HOME"); $LAUNCH"
@@ -7901,8 +7907,9 @@ if [ "$BACKEND" = t3code ]; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
   fi
   if [ "$KIND" = secondmate ]; then
-    # The secondmate launch prefix above, value for value, plus the supervisor
-    # identity its own away daemon cannot discover from inside a T3 thread.
+    # Unlike the pane launch prefix above, T3's config keeps the five
+    # operational overrides set-but-empty. Add the supervisor identity its own
+    # away daemon cannot discover from inside a T3 thread.
     T3CODE_ENV+=(FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \
       "FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$FM_HOME" "FM_HOME=$PROJ_ABS" "FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE" \
       "FM_SUPERVISION_MODEL=$supervision_model" FM_SUPERVISOR_BACKEND=t3code "FM_SUPERVISOR_TARGET=$T")

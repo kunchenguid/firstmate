@@ -703,7 +703,7 @@ test_secondmate_standalone_clone_home_is_trusted() {
     || fail "the secondmate could not read its charter from the record"
   # The pane must read the SAME store the registration wrote, or the trust would
   # land somewhere it never looks and the dialog would appear anyway.
-  assert_grep "CLAUDE_CONFIG_DIR='$case_dir/claude-config'" "$case_dir/launch.log" \
+  assert_contains "$(fm_test_launch_command "$launch")" "CLAUDE_CONFIG_DIR='$case_dir/claude-config'" \
     "the launch command did not point the secondmate at the store that was trusted"
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a standalone-clone home"
 }

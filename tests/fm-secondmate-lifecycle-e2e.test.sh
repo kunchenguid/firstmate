@@ -110,6 +110,37 @@ phase_seed() {
   pass "seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only"
 }
 
+# Public contract: the emitted pane file must run from fish too. The oracle is
+# the agent's environment: inherited overrides must be absent, not empty. This
+# rejects a POSIX unset prefix that lets the agent run with poisoned overrides.
+assert_fish_secondmate_launch() {  # <launch-file> <agent-line>
+  local launch_file=$1 agent_line=$2 v prefix
+  if command -v fish >/dev/null 2>&1; then
+    rm -f "$TMP_ROOT/launched-env.txt"
+    # shellcheck disable=SC2016 # fish expands argv when it sources the file.
+    FM_ROOT_OVERRIDE="$TMP_ROOT/ovr" FM_STATE_OVERRIDE="$TMP_ROOT/ovr" \
+      FM_DATA_OVERRIDE="$TMP_ROOT/ovr" FM_PROJECTS_OVERRIDE="$TMP_ROOT/ovr" \
+      FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" PATH="$TMP_ROOT/probe-bin:$PATH" \
+      fish -c 'source "$argv[1]"' -- "$launch_file" \
+      || fail "staged secondmate launch failed in fish"
+    assert_present "$TMP_ROOT/launched-env.txt" "fish did not launch the agent"
+    for v in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; do
+      assert_no_regex "^$v=" "$TMP_ROOT/launched-env.txt" "$v reached the secondmate from fish"
+    done
+    assert_grep "FM_HOME=$SUB_ABS" "$TMP_ROOT/launched-env.txt" "fish secondmate lost its home"
+  else
+    # This checks the emitted shell interface, not implementation source. The
+    # opaque sh -c argument may legitimately contain POSIX shell syntax.
+    prefix=${agent_line%% sh -c *}
+    # shellcheck disable=SC2016 # Literal shell tokens fish rejects.
+    case "$prefix" in
+      unset\ * | *'; unset '* | *'$('* | *'${'* | *'`'* | *'case '* | *'while '* | *'esac'* | *'done'*)
+        fail "secondmate pane prefix uses syntax fish cannot parse: $prefix" ;;
+    esac
+    echo "skip: fish not found (secondmate pane launch); only a static syntax check ran"
+  fi
+}
+
 phase_spawn() {
   : > "$LOG"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
@@ -124,8 +155,33 @@ phase_spawn() {
   # Launch ran in the subhome, with the persistent charter and cleared overrides,
   # and never ran a project-style treehouse get.
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
-  assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
-  assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
+  assert_grep 'env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=' "$LOG" "launch did not clear operational overrides"
+  # The launch prefix must remove the parent's operational overrides, not leave
+  # them set-but-empty: bin/fm-check-unregister.sh deliberately refuses an
+  # explicitly empty FM_STATE_OVERRIDE. Run the staged agent command through a
+  # fake harness binary that records the launched process environment, with all
+  # five inherited non-empty, and assert none of them reach that environment.
+  local launch_file agent_line probe_bin probe_env v
+  launch_file=$(sed -n "s/.* -l \\. '\\([^']*\\)'.*/\\1/p" "$LOG" | head -1)
+  [ -n "$launch_file" ] && [ -f "$launch_file" ] || fail "staged secondmate launch file not found in the tmux log"
+  agent_line=$(grep -F 'FM_SUPERVISION_MODEL=' "$launch_file" | head -1)
+  [ -n "$agent_line" ] || fail "staged launch file held no agent command line"
+  probe_bin="$TMP_ROOT/probe-bin"
+  probe_env="$TMP_ROOT/launched-env.txt"
+  mkdir -p "$probe_bin"
+  printf '#!/usr/bin/env bash\nenv > "%s"\n' "$probe_env" > "$probe_bin/codex"
+  chmod +x "$probe_bin/codex"
+  FM_ROOT_OVERRIDE="$TMP_ROOT/ovr" FM_STATE_OVERRIDE="$TMP_ROOT/ovr" \
+    FM_DATA_OVERRIDE="$TMP_ROOT/ovr" FM_PROJECTS_OVERRIDE="$TMP_ROOT/ovr" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" FM_HOME="$SUB_ABS" \
+    PATH="$probe_bin:$PATH" bash -c "$agent_line" \
+    || fail "the staged secondmate agent command failed to run"
+  for v in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; do
+    assert_no_regex "^$v=" "$probe_env" "$v reached the launched secondmate environment (must be absent, not empty)"
+  done
+  assert_grep "FM_HOME=$SUB_ABS" "$probe_env" "launched secondmate environment lost FM_HOME"
+  assert_grep 'FM_SUPERVISION_MODEL=' "$probe_env" "launched secondmate environment lost FM_SUPERVISION_MODEL"
+  assert_fish_secondmate_launch "$launch_file" "$agent_line"
   assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
@@ -215,13 +271,32 @@ phase_recovery() {
     || fail "could not retire the fake endpoint before recovery"
   rm -f "$HOME_DIR/state/design.meta"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-spawn.sh" design "echo relaunch" --secondmate >/dev/null 2>&1 \
+    "$ROOT/bin/fm-spawn.sh" design "exec '$TMP_ROOT/probe-bin/codex' --flag" --secondmate >/dev/null 2>&1 \
     || fail "recovery respawn failed"
   local meta="$HOME_DIR/state/design.meta"
   assert_grep "home=$SUB_ABS" "$meta" "respawn did not preserve the persistent home from the registry"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "respawn did not preserve the project list from the registry"
   assert_grep 'window=firstmate:fm-design' "$meta" "respawn did not reconstruct the direct-report window"
-  pass "recovery: respawns from the durable registry and persistent home"
+  # Regression oracle: raw launches are shell expressions, so exec must run as
+  # a builtin, not be looked up as an external executable. Execute the emitted
+  # pane command with poisoned inherited overrides, just as for the template.
+  local launch_file agent_line v
+  launch_file=$(sed -n "s/.* -l \\. '\\([^']*\\)'.*/\\1/p" "$LOG" | tail -1)
+  [ -n "$launch_file" ] && [ -f "$launch_file" ] || fail "raw launch file not found"
+  agent_line=$(grep -F 'FM_SUPERVISION_MODEL=' "$launch_file" | head -1)
+  [ -n "$agent_line" ] || fail "raw launch file held no agent command"
+  rm -f "$TMP_ROOT/launched-env.txt"
+  FM_ROOT_OVERRIDE="$TMP_ROOT/ovr" FM_STATE_OVERRIDE="$TMP_ROOT/ovr" \
+    FM_DATA_OVERRIDE="$TMP_ROOT/ovr" FM_PROJECTS_OVERRIDE="$TMP_ROOT/ovr" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" bash -c "$agent_line" \
+    || fail "raw builtin-first secondmate command failed"
+  assert_present "$TMP_ROOT/launched-env.txt" "raw exec did not run the agent"
+  for v in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; do
+    assert_no_regex "^$v=" "$TMP_ROOT/launched-env.txt" "$v reached the raw secondmate environment"
+  done
+  assert_grep "FM_HOME=$SUB_ABS" "$TMP_ROOT/launched-env.txt" "raw secondmate lost its home"
+  assert_fish_secondmate_launch "$launch_file" "$agent_line"
+  pass "recovery: respawns from the durable registry and persistent home, executes raw builtin launch"
 }
 
 phase_teardown() {

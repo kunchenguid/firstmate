@@ -1651,7 +1651,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
-  launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape and seeded-home --approve"
@@ -1678,7 +1678,7 @@ test_pi_seeded_secondmate_preapproves_project_trust() {
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
     status=$?
     expect_code 0 "$status" "$harness seeded secondmate spawn should succeed"
-    launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+    launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")")
     assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
       "$harness secondmate must launch the probed executable"
     assert_contains "$launch" "--approve" \
@@ -1721,7 +1721,7 @@ test_pi_approve_probe_omits_unsupported_flag() {
       run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
     status=$?
     expect_code 0 "$status" "$harness without --approve must still spawn"
-    launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+    launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")")
     assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
       "$harness without --approve must still launch the probed executable"
     assert_not_contains "$launch" "--approve" \
@@ -2379,7 +2379,7 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
   status=$?
   expect_code 0 "$status" "secondmate claude spawn should succeed"$'\n'"$out"
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
-  assert_attribution_policy "$launch" "claude secondmate"
+  assert_attribution_policy "$(fm_test_launch_command "$launch")" "claude secondmate"
   pass "a claude secondmate launch carries the attribution-off policy too"
 }
 
@@ -2527,7 +2527,7 @@ SH
   result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
     FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
     /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
-  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
+  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm"$'\nunset' ] \
     || fail "secondmate's environment lost filtering or explicit home assignments: $result"
   # Exercise the same inheritance owner used by local and remote transfers;
   # removal must restore absence downstream as well as copying an opt-in.
@@ -2924,7 +2924,7 @@ test_codex_permission_modes() {
         "${args[@]}" --model gpt-5 --effort high)
       status=$?
       expect_code 0 "$status" "Codex $kind spawn under $mode should succeed: $out"
-      launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+      launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")")
       flags="codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' "
       if [ "$mode" = restricted ]; then
         flags+='--sandbox workspace-write --ask-for-approval on-request '
