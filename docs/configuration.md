@@ -2709,7 +2709,7 @@ The active primary-harness supervision protocol owns how that sourced cadence re
 **Apply cadence changes**
 
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
-While a legacy daemon flag is active the daemon owns the watcher and its default cadence applies; on Pi the away-posture record alone leaves the ordinary Relay watcher cadence active, and daemon-backed Relay cadence remains a deferred follow-up.
+While a legacy daemon flag is active the daemon owns the watcher, and the watcher it starts is a direct `bin/fm-watch.sh` launch, so that one-shot watcher loads `config/watch.env` and `config/x-mode.env` (above) like any other; on Pi the away-posture record alone leaves the ordinary Relay watcher cadence active, and full daemon-backed Relay handling remains a deferred follow-up.
 
 When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
 Steady-state off is silent and writes nothing.
