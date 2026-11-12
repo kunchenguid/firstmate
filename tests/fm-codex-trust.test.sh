@@ -369,7 +369,7 @@ PYTEST
   pass "fm-codex-trust: updates parsed project tables across TOML representations"
 }
 
-test_shared_test_entries_isolate_codex_store() {
+test_test_helpers_scope_codex_store_isolation() {
   local rec helper mode
   rec=$(make_case test-isolation)
   read_case "$rec"
@@ -378,38 +378,43 @@ test_shared_test_entries_isolate_codex_store() {
   cp "$CASE_DIR/expected-config" "$CASE_DIR/user-home/.codex/config.toml"
   cp "$CASE_DIR/expected-config" "$CASE_DIR/ambient-codex/config.toml"
   for helper in lib fixtures secondmate-helpers; do
-    for mode in unset custom; do
+    for mode in unset empty custom; do
       (
         export HOME="$CASE_DIR/user-home"
-        if [ "$mode" = custom ]; then
-          export CODEX_HOME="$CASE_DIR/ambient-codex"
-        else
-          unset CODEX_HOME
-        fi
+        case "$mode" in
+          custom) export CODEX_HOME="$CASE_DIR/ambient-codex" ;;
+          empty) export CODEX_HOME='' ;;
+          unset) unset CODEX_HOME ;;
+        esac
         bash -eu -c '
+          inherited=${CODEX_HOME-unset}
           . "$1"
+          if [ "$6" != secondmate-helpers ]; then
+            [ "${CODEX_HOME-unset}" = "$inherited" ] || fail "general helper replaced the caller Codex home"
+            exit 0
+          fi
           "$2" "$3" "$4" >/dev/null
           "$5" - "$CODEX_HOME/config.toml" "$3" <<"PYCHILD"
 import sys, tomllib
 with open(sys.argv[1], "rb") as handle:
     assert tomllib.load(handle)["projects"][sys.argv[2]]["trust_level"] == "trusted"
 PYCHILD
-        ' _ "$ROOT/tests/$helper.sh" "$TRUST" "$WORKTREE" "$PROJECT" "$PYTHON"
-      ) || fail "$helper did not isolate registration with $mode CODEX_HOME"
+        ' _ "$ROOT/tests/$helper.sh" "$TRUST" "$WORKTREE" "$PROJECT" "$PYTHON" "$helper"
+      ) || fail "$helper applied the wrong isolation with $mode CODEX_HOME"
       cmp -s "$CASE_DIR/expected-config" "$CASE_DIR/user-home/.codex/config.toml" \
         || fail "$helper changed the ambient default Codex config"
       cmp -s "$CASE_DIR/expected-config" "$CASE_DIR/ambient-codex/config.toml" \
         || fail "$helper changed the ambient custom Codex config"
     done
   done
-  pass "fm-codex-trust: shared test entries isolate default and custom Codex stores"
+  pass "fm-codex-trust: general helpers preserve Codex homes and secondmate fixtures isolate them"
 }
 
 test_spawn_uses_registered_store_despite_pane_environment() {
   local kind mode rec home id target fakebin launchlog expected
   local spawn_args
   for kind in scout secondmate; do
-    for mode in unset empty custom; do
+    for mode in unset empty custom fixture; do
       rec=$(make_case "spawn-$kind-$mode")
       read_case "$rec"
       home="$CASE_DIR/home"
@@ -439,7 +444,13 @@ SH
       launchlog="$CASE_DIR/launch.sh"
       expected="$CASE_DIR/user-home/.codex"
       [ "$mode" != custom ] || expected="$CASE_DIR/custom codex's home"
+      [ "$mode" != fixture ] || expected="$home/user-home/.codex"
       (
+        if [ "$mode" = fixture ]; then
+          CODEX_HOME="$CASE_DIR/pane-codex" FM_FAKE_LAUNCH_LOG="$launchlog" \
+            fm_test_run_spawn "$home" "$target" "$fakebin" "${spawn_args[@]}" --backend tmux >"$CASE_DIR/spawn.out" 2>&1
+          exit $?
+        fi
         case "$mode" in
           unset) unset CODEX_HOME ;;
           empty) export CODEX_HOME='' ;;
@@ -468,7 +479,7 @@ SH
 }
 
 test_updates_equivalent_project_representations
-test_shared_test_entries_isolate_codex_store
+test_test_helpers_scope_codex_store_isolation
 test_spawn_uses_registered_store_despite_pane_environment
 test_registers_exact_worktree
 test_preserves_existing_config_and_updates_entry
