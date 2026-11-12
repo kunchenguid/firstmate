@@ -56,27 +56,43 @@ fm_auggie_path_is_auggie() {  # <path>
   return 1
 }
 
-# Print the first non-flag argument after argv[0], from the live process's
-# NUL-delimited argv when [pid] is readable under /proc (which keeps a script
-# path containing spaces intact), otherwise from the flattened <args> string.
+# Print Node's main script, skipping interpreter options and their operands.
+# Read the live process's NUL-delimited argv when [pid] is readable under /proc
+# (which keeps a script path containing spaces intact), otherwise use <args>.
 # For flattened args, prefer the longest space-joined prefix after interpreter
 # flags that names an existing file, preserving script paths containing spaces.
 fm_auggie_script_arg() {  # <args> [pid]
-  local args=$1 pid=${2:-} token index=0 candidate='' script=''
+  local args=$1 pid=${2:-} token index=1 candidate='' script=''
+  local live_argv=0 options=1
   local -a words=()
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+    live_argv=1
     while IFS= read -r -d '' token; do
-      if [ "$index" -gt 0 ]; then
-        case "$token" in -*) ;; *) printf '%s\n' "$token"; return 0 ;; esac
-      fi
-      index=$((index + 1))
+      words+=("$token")
     done < "/proc/$pid/cmdline"
-    return 1
+  else
+    read -r -a words <<<"$args" || [ "${#words[@]}" -gt 0 ] || return 1
   fi
-  read -r -a words <<<"$args" || [ "${#words[@]}" -gt 0 ] || return 1
-  for token in "${words[@]:1}"; do
+  while [ "$index" -lt "${#words[@]}" ]; do
+    token=${words[index]}
+    index=$((index + 1))
     if [ -z "$candidate" ]; then
-      case "$token" in -*) continue ;; esac
+      if [ "$options" -eq 1 ]; then
+        case "$token" in
+          -e|--eval|-p|--print|--eval=*|--print=*|-e?*|-p?*) return 1 ;;
+          --) options=0; continue ;;
+          -*=*) continue ;;
+          -r|--require|--import|--loader|--experimental-loader|--inspect-port|--env-file|--title|-C|--conditions|--input-type)
+            index=$((index + 1))
+            continue
+            ;;
+          -*) continue ;;
+        esac
+      fi
+      if [ "$live_argv" -eq 1 ]; then
+        printf '%s\n' "$token"
+        return 0
+      fi
       candidate=$token
       script=$token
     else

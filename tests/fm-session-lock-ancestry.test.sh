@@ -319,6 +319,68 @@ SH
   pass "session-lock: spaced live argv retains auggie ancestry, liveness, reclaim protection, and inspection"
 }
 
+# Oracle: Node's CLI assigns --require's operand to a preload, not the main
+# script. Query actual live Node argv through both the native and ps fallback
+# interfaces; selecting the preload (or an eval argument) must fail this test.
+test_auggie_node_options_preserve_script_identity() {
+  local dir option
+  command -v node >/dev/null 2>&1 || fail "auggie option tests require node"
+  dir="$TMP_ROOT/node-options"
+  mkdir -p "$dir/Agent Tools"
+  : > "$dir/preload.cjs"
+  cat > "$dir/Agent Tools/auggie" <<'JS'
+const {spawnSync} = require('node:child_process');
+const result = spawnSync('bash', ['-c', `
+  . "$1"
+  args=$(LC_ALL=C ps -p "$2" -o args=) || exit 1
+  comm=$(LC_ALL=C ps -p "$2" -o comm=) || exit 2
+  for pid in "$2" ''; do
+    if [ "$3" = script ]; then
+      [ "$(fm_auggie_script_arg "$args" "$pid")" = "$4" ] || exit 3
+      fm_auggie_process_matches "$comm" "$args" "$pid" || exit 4
+    else
+      if fm_auggie_script_arg "$args" "$pid"; then exit 5; fi
+      if fm_auggie_process_matches "$comm" "$args" "$pid"; then exit 6; fi
+    fi
+  done
+`, 'probe', process.env.FM_TEST_AUGGIE_LIB, String(process.pid),
+  process.env.FM_TEST_AUGGIE_MODE, process.env.FM_TEST_AUGGIE_SCRIPT], {stdio: 'inherit'});
+process.exit(result.status === null ? 99 : result.status);
+JS
+  for option in --require -r; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
+      node "$option" "$dir/preload.cjs" "$dir/Agent Tools/auggie" \
+      || fail "auggie: live node $option lost script identity"
+  done
+  FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+    FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
+    node --max-old-space-size=4096 "$dir/Agent Tools/auggie" \
+    || fail "auggie: live node --option=value lost script identity"
+  for option in -e --eval -p --print; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=eval \
+      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
+      node "$option" 'require(process.env.FM_TEST_AUGGIE_SCRIPT)' "$dir/Agent Tools/auggie" \
+      || fail "auggie: live node $option acquired script identity"
+  done
+
+  # Public parser contract for operands that cannot all accompany a running
+  # script (notably --input-type): each belongs to its preceding Node option.
+  bash -c '
+    . "$1"
+    for option in -r --require --import --loader --experimental-loader --inspect-port --env-file --title -C --conditions --input-type; do
+      [ "$(fm_auggie_script_arg "node $option operand $2")" = "$2" ] || exit 1
+      [ "$(fm_auggie_script_arg "node $option=operand $2")" = "$2" ] || exit 2
+    done
+    [ "$(fm_auggie_script_arg "node --require operand --title operand -- $2 --eval code")" = "$2" ] || exit 3
+    for option in -e --eval -p --print --eval=code --print=code -ecode -pcode; do
+      if fm_auggie_script_arg "node $option $2"; then exit 4; fi
+    done
+  ' probe "$ROOT/bin/fm-auggie-lib.sh" "$dir/Agent Tools/auggie" \
+    || fail "auggie: Node option operand parsing violated the script contract"
+  pass "session-lock: Node option operands and eval launches cannot replace the main script"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -1782,6 +1844,7 @@ test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_auggie_node_bundle_is_identified_by_its_package_script
 test_auggie_live_argv_preserves_script_spaces
+test_auggie_node_options_preserve_script_identity
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
