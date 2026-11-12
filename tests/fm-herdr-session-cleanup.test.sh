@@ -76,8 +76,10 @@ fm_lock_try_acquire() {
 fm_lock_release() { rm -rf -- "$1"; }
 fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
 fm_backend_herdr_projection_focus_snapshot() {
+  local tab
   [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
-  printf 'w1\t%s' "$(cat "$FIXTURE_DIR/active-tab")"
+  tab=$(cat "$FIXTURE_DIR/active-tab")
+  printf '%s\t%s' "${tab%%:*}" "$tab"
 }
 
 fixture_workspace_json() {
@@ -139,7 +141,18 @@ fm_backend_herdr_cli() {
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
   if [ -e "$FIXTURE_DIR/closed" ]; then
     case "$first $second" in
-      "pane get"|"tab get") printf '%s\n' '{"error":{"code":"'"$first"'_not_found"}}' >&2; return 1 ;;
+      "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; return 1 ;;
+      "tab get")
+        if [ "$target" = "$TAB" ]; then
+          if [ -e "$FIXTURE_DIR/presence-unreadable" ]; then
+            rm -f "$FIXTURE_DIR/presence-unreadable"
+            printf 'unreadable\n' >&2
+            return 1
+          fi
+          printf '%s\n' '{"error":{"code":"tab_not_found"}}' >&2
+          return 1
+        fi
+        ;;
       "workspace list") printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1}]}}'; return 0 ;;
     esac
   fi
@@ -200,6 +213,11 @@ fm_backend_herdr_cli() {
     "tab close")
       : > "$FIXTURE_DIR/closed"
       printf '%s\n' "tab close $TAB" >> "$CLOSE_LOG"
+      printf 'w3:t1\n' > "$FIXTURE_DIR/active-tab"
+      [ ! -e "$FIXTURE_DIR/close-response-lost" ] || return 1
+      ;;
+    "tab focus")
+      printf '%s\n' "$target" > "$FIXTURE_DIR/active-tab"
       ;;
     *) return 1 ;;
   esac
@@ -297,9 +315,33 @@ write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "empty task tab cleanup kept the journal"
 [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "empty task tab cleanup did not close the exact tab: $(cat "$CLOSE_LOG")"
+[ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t1' ] || fail "empty task tab cleanup displaced focus"
 pass "bound v2 empty task tab cleanup closes the exact agent-free tab"
+for close_failure in close-response-lost presence-unreadable; do
+  reset_fixture
+  : > "$FIXTURE_DIR/empty-tab"
+  : > "$FIXTURE_DIR/$close_failure"
+  close_status=0
+  fm_backend_herdr_projection_close_empty_tab_focus_preserving test "$WS" "$TAB" || close_status=$?
+  [ "$close_status" -eq 1 ] || fail "$close_failure lost the unconfirmed close result"
+  [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "$close_failure did not close the exact tab"
+  [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t1' ] || fail "$close_failure displaced focus"
+  [ "$(fm_backend_herdr_tab_presence_state test "$TAB")" = dead ] || fail "$close_failure could not subsequently confirm deletion"
+  pass "$close_failure restores prior focus while retaining the close failure"
+
+  reset_fixture
+  : > "$FIXTURE_DIR/empty-tab"
+  : > "$FIXTURE_DIR/$close_failure"
+  write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$close_failure cleanup kept the confirmed-deleted tab's journal"
+  [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "$close_failure cleanup did not close the exact tab"
+  [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t1' ] || fail "$close_failure cleanup displaced focus"
+  pass "$close_failure cleanup restores focus before retiring the journal"
+done
 reset_fixture
 : > "$FIXTURE_DIR/empty-tab"
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
 printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"
 assert_preserved "active empty task tab"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"

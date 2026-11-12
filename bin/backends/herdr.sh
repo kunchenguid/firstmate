@@ -2197,7 +2197,7 @@ fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
 # a non-target close restores the exact prior focus after the close.
 fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <workspace> <tab>
   local session=$1 workspace=$2 tab=$3 before active_tab info target_tab target_workspace pane_count
-  local foreground_rc=0 skip_restore=0 after
+  local foreground_rc=0 skip_restore=0 close_status=0 after
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
   active_tab=${before#*$'\t'}
   info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
@@ -2216,13 +2216,14 @@ fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <w
     before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
     skip_restore=0
   fi
-  fm_backend_herdr_cli "$session" tab close "$tab" >/dev/null 2>&1 || return 1
-  [ "$(fm_backend_herdr_tab_presence_state "$session" "$tab")" = dead ] || return 1
+  fm_backend_herdr_cli "$session" tab close "$tab" >/dev/null 2>&1 || close_status=1
+  [ "$(fm_backend_herdr_tab_presence_state "$session" "$tab")" = dead ] || close_status=1
   if [ "$skip_restore" -eq 0 ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$before" "empty tab close" || return 2
   fi
   after=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
-  [ "$skip_restore" -eq 1 ] || [ "$after" = "$before" ]
+  [ "$skip_restore" -eq 1 ] || [ "$after" = "$before" ] || return 1
+  return "$close_status"
 }
 
 # fm_backend_herdr_pane_process_state: what the operating system says is
