@@ -3124,10 +3124,13 @@ start_check_verdict_proves() {  # <verdict> [record event]
 # 0 when <id> shows positive evidence it began its brief at or after <epoch>: a
 # status line or completed turn written since the launch boundary, or a verdict
 # start_check_verdict_proves accepts. A remote secondmate's evidence comes from
-# its host through `observe <id> --start-proof`: an exact `busy` observation, or
-# the verdict of its own busy record when that record's generation is the launch
-# this check was armed for. A mate that starts and settles without a status line
-# leaves only that record. Cursor creates no busy generation; its transcript
+# its host through `observe <id> --start-proof`, bound to the launch this check
+# was armed for by its busy record's generation: an exact `busy` observation
+# over anything but that launch's spawn seed, or a verdict that record proves. A
+# relaunch can reuse the endpoint, whose observation may still be the previous
+# worker's, so a `busy` observation alone proves only a launch with no busy
+# generation. A mate that starts and settles without a status line leaves only
+# that record. Cursor creates no busy generation; its transcript
 # verdict is bound to this launch by the task's Cursor conversation binding
 # instead, which excludes every earlier conversation (bin/fm-busy-lib.sh
 # fm_busy_cursor_transcript). An unreachable host proves nothing. Codex has no
@@ -3138,12 +3141,12 @@ start_check_started() {  # <id> <meta> <epoch> [record-gen]
   start_check_local_proof "$id" "$epoch" "$meta" && return 0
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
     start_check_remote "$id" observe --start-proof || return 1
-    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && return 0
     verdict=$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^verdict=//p' | head -1)
     case "$verdict" in 'busy cursor-transcript' | 'idle cursor-transcript') return 0 ;; esac
-    [ "$gen" != - ] \
-      && [ "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^busy_gen=//p' | head -1)" = "$gen" ] \
-      && start_check_verdict_proves "$verdict" "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^event=//p' | head -1)"
+    [ "$gen" = - ] && { [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ]; return; }
+    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^busy_gen=//p' | head -1)" = "$gen" ] || return 1
+    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && [ "$verdict" != 'busy fm-spawn' ] && return 0
+    start_check_verdict_proves "$verdict" "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^event=//p' | head -1)"
     return
   fi
   local record event

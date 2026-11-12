@@ -713,8 +713,8 @@ test_remote_secondmate_reads_route() {
   # Restore the real route helper after each stubbed tick.
   local real
   real=$(declare -f start_check_remote)
-  # A busy observation proves; so does the host's own busy record for this
-  # launch, which is all a mate that starts and settles silently leaves (the
+  # A busy observation over this launch's busy record proves; so does that
+  # record alone, which is all a mate that starts and settles silently leaves (the
   # stock secondmate charter writes no status line at start); so does a reply
   # the mirror read past this launch's offset in the host's reply log.
   arm_remote early
@@ -724,7 +724,7 @@ test_remote_secondmate_reads_route() {
   [ "$REMOTE_CALLS" = 0 ] || fail "a remote route was read before its deadline"
   [ -e "$STATE/early.start-pending" ] || fail "a pre-deadline record was removed without local proof"
   arm_remote r1
-  remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof busy 'busy pi-ext' g900.1.1 agent_start)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r1.start-pending" ] || fail "a busy remote observation did not count as proof"
   arm_remote r8
   remote_tick "$(remote_proof idle 'idle pi-ext' g900.1.1 agent-settled)" alive '' 0 || fail "tick failed"; eval "$real"
@@ -881,6 +881,39 @@ test_remote_cursor_transcript_is_start_proof() {
   pass "a remote cursor launch's own transcript proves its start without a busy generation"
 }
 
+# A relaunch can reuse the remote endpoint, whose backend observation may still
+# carry the previous worker's busy state, so a busy observation proves this
+# launch only with this launch's busy record behind it: a record from another
+# launch, or this launch's untouched spawn seed, leaves the parked replacement's
+# wake in place.
+test_remote_busy_observation_needs_this_launch() {
+  reset_state
+  local real
+  real=$(declare -f start_check_remote)
+  arm_remote b1
+  remote_tick "$(remote_proof busy 'busy pi-ext' g800.1.1 agent_start)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    "check: start b1: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh b1 --key Enter") ;;
+    *) fail "a busy observation with the previous launch's record silenced the replacement's wake: $START_CHECK_WAKE" ;;
+  esac
+  arm_remote b2
+  remote_tick "$(remote_proof busy 'busy fm-spawn' g900.1.1 launch-brief)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    "check: start b2: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog"*) ;;
+    *) fail "a busy observation over this launch's spawn seed silenced the replacement's wake: $START_CHECK_WAKE" ;;
+  esac
+  [ "$(count_wakes)" = 2 ] || fail "expected one wake per unproven remote launch"
+  arm_remote b3
+  remote_tick "$(remote_proof busy 'busy pi-ext' g900.1.1 agent_start)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/b3.start-pending" ] || fail "a busy observation with this launch's record did not count as proof"
+  arm_remote b4 -
+  sed -i.bak -e '/^remote_busy_gen=/d' "$STATE/b4.meta" && rm -f "$STATE/b4.meta.bak"
+  remote_tick "$(remote_proof busy 'busy fm-spawn' '' '')" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/b4.start-pending" ] || fail "a busy observation stopped proving a launch with no busy generation"
+  [ "$(count_wakes)" = 2 ] || fail "a proven remote launch woke: $START_CHECK_WAKE"
+  pass "a remote busy observation proves only the launch its busy record belongs to"
+}
+
 test_spent_route_budget_defers_remote_record() {
   reset_state
   local real saved_secs=$START_CHECK_ROUTE_SECS
@@ -893,7 +926,7 @@ test_spent_route_budget_defers_remote_record() {
   start_check_remote() {  # b1 answers slowly but proves its start
     WATCHER_CAPTURE=
     case "$1:$2" in
-      b1:observe) sleep 4; WATCHER_CAPTURE=$(remote_proof busy) ;;
+      b1:observe) sleep 4; WATCHER_CAPTURE=$(remote_proof busy 'busy pi-ext' g900.1.1 agent_start) ;;
       b2:observe) WATCHER_CAPTURE=$(remote_proof idle) ;;
       *) return 1 ;;
     esac
@@ -1025,6 +1058,7 @@ fm_test_run \
   test_remote_secondmate_reads_route \
   test_truncated_reply_log_relaunch_is_not_proof \
   test_remote_cursor_transcript_is_start_proof \
+  test_remote_busy_observation_needs_this_launch \
   test_spent_route_budget_defers_remote_record \
   test_spent_proof_budget_keeps_remote_cause \
   test_replaced_record_survives_tick \
