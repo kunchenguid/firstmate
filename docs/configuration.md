@@ -1054,6 +1054,24 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Jev stale-escalation triage (config/jev-wake-triage)
+
+The Jev classifier on the watcher's stale-escalation path is off by default; only an affirmative value in the local, gitignored `config/jev-wake-triage` file or in `FM_JEV_WAKE_TRIAGE` turns it on.
+With no `config/jev-wake-triage` file and `FM_JEV_WAKE_TRIAGE` unset or empty, the gate stays off and the watcher escalates exactly as it did before Jev.
+When the file exists, a first line of `on`, `1`, `true`, or `yes` (any case) turns it on; `off`, `0`, `false`, `no`, an empty file, an empty first line, or any other value (a typo such as `of` included) turns it off, so a present but unparseable file never opens the gate.
+A non-empty `FM_JEV_WAKE_TRIAGE` beats the file and follows the same rule: `on`/`1`/`true`/`yes` is on, and `off`/`0`/`false`/`no` or any other value is off.
+The gate runs only at the moment a provably-working stale pane would otherwise escalate, after the wait, worktree-write, dead-record, and any configured validating-run, T3, and guard probes.
+It asks typesafe.ai's System One model (Jev) to classify `pipeline_wait`, `true_wedge`, or `healthy_idle`, plus a `wedge_probability` Noul, and escalates on `true_wedge`.
+`pipeline_wait` and `healthy_idle` suppress only when Choice confidence is at least 0.6, matching `bin/fm-dispatch-resolve.sh`; missing or below-floor confidence fail-opens.
+Consecutive suppressions of one pane are capped at `FM_WEDGE_DEMAND_INSPECT_COUNT` (default 3) while its last status line is unchanged; at the cap the watcher escalates without calling Jev, so the escalation counter reaches the `demand-deep-inspection` page on its normal schedule and model calls stay bounded.
+A new last status line, or any answer other than suppress, restarts the streak.
+Any missing key, timeout, HTTP error, or malformed answer also fail-opens to today's escalate path and stamps `jev_triage.unavailable`.
+The key is `TYPESAFE_API_KEY` from the watcher process environment only, vault-injected at runtime, never from `.env`.
+Telemetry under `state/.jev-triage-telemetry` records `jev_triage.suppressed|escalated|unavailable` with the task class (`ship`, `scout`, `secondmate`, or `unknown`) and no status content.
+The first 20 decisions append `state/.jev-triage-calibration.jsonl` so the captain can audit precision before the gate becomes load-bearing.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+[`architecture.md`](architecture.md) owns the triage contract, `bin/fm-jev-wake-triage.sh`'s header owns the request, output, telemetry, and calibration log, and [`verification/jev-wake-triage.md`](verification/jev-wake-triage.md) records the portable tests.
+
 ## Wedge evidence guards (config/wedge-evidence-guards)
 
 The optional local, gitignored `config/wedge-evidence-guards` file opts this home into consulting operator-owned [Jev guards](jev-guards.md) before the watcher wedge-escalates a quiet live pane.
@@ -3586,7 +3604,7 @@ FM_DISPATCH_PROVIDER=   # typesafe, openrouter, systemone, or openai; absent pre
 FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter, systemone, and openai
 FM_DISPATCH_BASE_URL=   # http(s) base of a System One-compatible host; required for systemone
 FM_DISPATCH_API_KEY=    # optional systemone key; absent sends no Authorization header
-TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment, .env, or the declared credential source ("Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typesafe.ai System One key: typed dispatch resolution from the environment, .env, or the declared credential source, and Jev stale-escalation triage from the environment only ("Typed dispatch resolution" and "Jev stale-escalation triage")
 TYPESAFE_BASE=          # optional TypeSafe base; see "Typed dispatch resolution"
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment, .env, or the declared credential source
 OPENAI_API_KEY=         # OpenAI dispatch key, from the environment or .env
@@ -3633,6 +3651,7 @@ FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_JEV_WAKE_TRIAGE=                # override config/jev-wake-triage; on/1/true/yes enables the default-off Jev stale-escalation gate, any other non-empty value disables it, unset or empty defers to the file (absent file = off)
 FM_WEDGE_GUARD_TIMEOUT_SECS=5      # seconds one guard from config/wedge-evidence-guards may run before it counts as no answer; zero or invalid values use 5
 FM_WEDGE_GUARD_DEFER_MAX=3         # consecutive windows a CRITICAL guard answer may defer one pane's wedge escalation before it fires anyway; invalid values use 3
 FM_WEDGE_MAX_ESCALATIONS=0    # optional ceiling on consecutive wedge escalations for one worker window; 0 (the default) leaves the cap off and every escalation produces a wake, and any value from 1 up to 999999999999999999 publishes one terminal PERMANENTLY-WEDGED wake at that count - carrying the same evidence the escalation it replaces carried: the guard verdict, and the `demand-deep-inspection` marker once the count has reached `FM_WEDGE_DEMAND_INSPECT_COUNT` - and then writes the window-scoped state/.wedge-permanent-<key> to silence further wedge escalations for that window whatever hash its pane renders; the wedge path publishes no second terminal wake while the row that episode queued is still unacknowledged, which scopes the suppression to the episode rather than the window so an earlier episode's unconsumed wake cannot silence a later episode's (the away-posture first sight, which releases the markers without ending the episode, can re-open the row within one episode - an over-notify in the safe direction: the queue check bounds duplicate terminal wakes only while the episode marker stands, and the release removed exactly the marker that would have gated the re-fire, so after it a second wake can stand behind an unacknowledged first), the cap marker and the escalation count the cap was counting drop through the one episode-ending reset whose release routes are owned by the cap discussion below, and a fresh wedge escalates normally again; a cap fire also resets the consecutive-deferral budget of a config/wedge-evidence-guards guard, because the guard is not consulted at all while the cap is silencing that window, so its budget must not carry across as if it had been spent, and preserving it would leave a CRITICAL guard that reached its deferral ceiling before the cap fired already at that ceiling on the first escalation after the cap lifts, unable to defer at all; an invalid or out-of-range value uses 0

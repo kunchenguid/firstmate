@@ -586,6 +586,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/jev-wake-triage.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/kiro.md",
       "audience": "maintainer-verification"
     },
