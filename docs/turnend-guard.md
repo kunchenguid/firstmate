@@ -216,7 +216,8 @@ That is exactly what a long-poll home (`FM_POLL=300`) hit against the Claude Sto
 
 Every beacon reader therefore derives its default from the configured poll instead of a bare constant.
 `fm_beacon_grace` in `bin/fm-wake-lib.sh` is the single reader entry point, and `fm_poll_derived_grace` beside it owns the `max(300, FM_POLL + 60)` formula.
-Without an explicit poll argument, the derivation resolves the home's `config/watch.env` followed by `config/x-mode.env`, using `FM_CONFIG_OVERRIDE` when supplied, in an isolated shell so readers use the arm's cadence without changing their own environment.
+Armed and direct watcher launches load the home's `config/watch.env` followed by `config/x-mode.env`, using `FM_CONFIG_OVERRIDE` when supplied.
+Grace and stall-bound readers resolve the same configuration in an isolated shell, including its explicit grace overrides, without changing their own environment.
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
 Its readers are:
 

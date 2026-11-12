@@ -185,14 +185,19 @@ fm_path_age() {
 # derives the same default fm-watch.sh itself would use.
 # docs/turnend-guard.md "Guard grace and the poll cadence" is the single owner
 # of the rationale; every FM_GUARD_GRACE default should derive from this.
+fm_watch_settings_load() {
+  local config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  # shellcheck source=/dev/null
+  [ ! -f "$config/watch.env" ] || . "$config/watch.env" >/dev/null
+  # shellcheck source=/dev/null
+  [ ! -f "$config/x-mode.env" ] || . "$config/x-mode.env" >/dev/null
+  return 0
+}
+
 fm_poll_derived_grace() (
-  local poll=${1:-} margin=60 derived config
+  local poll=${1:-} margin=60 derived
   if [ -z "$poll" ]; then
-    config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-    # shellcheck source=/dev/null
-    [ ! -f "$config/watch.env" ] || . "$config/watch.env" >/dev/null
-    # shellcheck source=/dev/null
-    [ ! -f "$config/x-mode.env" ] || . "$config/x-mode.env" >/dev/null
+    fm_watch_settings_load
     poll=${FM_POLL:-15}
   fi
   case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
@@ -207,11 +212,13 @@ fm_poll_derived_grace() (
 # FM_GUARD_GRACE, else fm_poll_derived_grace). Under it a live holder with a
 # stale beacon is a slow cycle; at or past it bin/fm-watch.sh evicts that holder
 # and bin/fm-watch-arm.sh stops following it, so both read this one definition.
-fm_watcher_stall_bound() {
+fm_watcher_stall_bound() (
   local poll=${1:-} grace
+  fm_watch_settings_load
+  poll=${poll:-${FM_POLL:-15}}
   grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$poll")}}
   printf '%s\n' "${FM_WATCHER_STALL_BOUND:-$((grace * 3))}"
-}
+)
 
 # fm_beacon_grace
 # The beacon-freshness grace every liveness reader judges against: an explicit
@@ -220,9 +227,10 @@ fm_watcher_stall_bound() {
 # the warning, the replacement arm, and the watcher's own re-arm agree on what
 # "fresh" means instead of each carrying its own flat constant.
 # docs/turnend-guard.md "Guard grace and the poll cadence" owns the rationale.
-fm_beacon_grace() {
-  printf '%s\n' "${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}"
-}
+fm_beacon_grace() (
+  fm_watch_settings_load
+  printf '%s\n' "${FM_GUARD_GRACE:-$(fm_poll_derived_grace "${FM_POLL:-15}")}"
+)
 
 # fm_watch_beacon_tick <beat-path>
 # Throttled, fork-free refresh of the watcher liveness beacon, for the sweeps a
@@ -297,7 +305,7 @@ fm_watcher_lock_matches_pid() {
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local state=$1 watch_path=$2 grace=${3:-$(fm_beacon_grace)} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
@@ -565,7 +573,7 @@ FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
-  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}} home=${4:-$FM_HOME}
+  local state=$1 watch=$2 grace=${3:-$(fm_beacon_grace)} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
   local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false

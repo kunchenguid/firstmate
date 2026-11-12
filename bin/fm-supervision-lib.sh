@@ -51,7 +51,7 @@ fm_sup_stat_mtime() {
 # the arm that replaces a stalled cycle).
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}} meta source check id beat m age
+  local state=$1 grace=${2:-$(fm_beacon_grace)} meta source check id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false

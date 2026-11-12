@@ -343,6 +343,7 @@ fi
 # markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
+fm_watch_settings_load
 POLL=${FM_POLL:-15}                   # seconds between cycles
 # The liveness beacon (BEAT, assigned before the poll loop) is touched at the top
 # of every cycle and refreshed again from inside a cycle's own sweeps by
@@ -3662,6 +3663,7 @@ event_wait_or_sleep() {
   fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
+    fm_watch_beacon_progress
     sleep "$POLL"
     return
   fi
@@ -3678,6 +3680,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
+    fm_watch_beacon_progress
     sleep "$POLL"
     return
   fi
@@ -3686,6 +3689,7 @@ event_wait_or_sleep() {
   # signal for all of it (watcher_waited).
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
+  fm_watch_beacon_progress
   TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
     fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
   rc=$?
@@ -3702,6 +3706,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
+      fm_watch_beacon_progress
       sleep "$POLL"
       ;;
     *)
