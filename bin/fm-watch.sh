@@ -3099,14 +3099,17 @@ captain_call_stale_bound() {  # <window-key> <task>
 # then fires exactly as it would without this bound. The first sight of each
 # finished record still alarms; only later sightings of the SAME record (bound
 # to the whole status-log signature, so any new append starts over) are
-# absorbed, with no time window. A pane seen busy afterwards drops the bound
-# (finished_parked_rearm), so a turn the worker ran since gets its own alarm.
+# absorbed, with no time window. The bound also carries the busy-state record's
+# generation and sequence when the harness writes one, so a turn the worker ran
+# since starts over even when no poll saw it busy; for an idle verdict with no
+# record behind it, a pane seen busy afterwards drops the bound instead
+# (finished_parked_rearm). Either way that later turn gets its own alarm.
 # Sets STALE_WAIT_DECLARATION to that record's scope whenever the lane is
 # finished and parked, so the caller's stale_wait_record arms the bound only
 # once its first-sight wake was appended, and leaves it EMPTY otherwise.
 # FINISHED_PARKED_VERDICT names the evidence for the caller's absorb log line.
 finished_parked_stale_bound() {  # <window-key> <task> <tail40> [dialog-name]
-  local key=$1 task=$2 tail40=$3 dialog=${4-} verb line state src sig busy refused=
+  local key=$1 task=$2 tail40=$3 dialog=${4-} verb line state src sig busy record gen refused=
   STALE_WAIT_DECLARATION=
   FINISHED_PARKED_VERDICT=
   [ -n "$task" ] || return 1
@@ -3141,7 +3144,9 @@ finished_parked_stale_bound() {  # <window-key> <task> <tail40> [dialog-name]
   fi
   sig=$(fm_wake_signal_sig "$STATE/$task.status" 2>/dev/null) || return 1
   [ -n "$sig" ] || return 1
-  STALE_WAIT_DECLARATION="finished-parked:$state:$sig"
+  record=$(fm_busy_record_read "$STATE" "$task") || record=
+  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=
+  STALE_WAIT_DECLARATION="finished-parked:$state:$sig:$gen:${record##* }"
   FINISHED_PARKED_VERDICT="crew state $state from $src, busy-state $busy, no open decision or blocker, no visible background work"
   [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]
 }

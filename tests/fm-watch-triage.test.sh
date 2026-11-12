@@ -2257,7 +2257,9 @@ test_terminal_stale_surfaced() {
 # Stop), and an empty harness leaves the lane with no busy-state record at all.
 # FINISHED_PARKED_KIND overrides the recorded lane kind (default ship). With
 # [steer] set, the worker runs one more turn between the first sight and the
-# redraw - a busy poll, then a settle - without appending a status line.
+# redraw - a busy poll, then a settle - without appending a status line; with
+# [steer] set to `unseen`, that turn starts and settles between two polls, so no
+# poll ever sees it busy.
 finished_parked_redraw_alarms() {  # <case> <status-line> <crew-state> <redraw-capture-file> <harness> [steer]
   local name=$1 status_line=$2 verdict=$3 redraw=$4 harness=$5 steer=${6-} dir state fakebin out capture_file window key pid rc gen source
   dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2289,7 +2291,12 @@ finished_parked_redraw_alarms() {  # <case> <status-line> <crew-state> <redraw-c
   ack_stopped_cycle "$state" || fail "$name: could not acknowledge the first-sight wake"
   touch "$state/.last-check" "$state/.last-heartbeat"
 
-  if [ -n "$steer" ]; then
+  if [ "$steer" = unseen ]; then
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked busy --gen "$gen" --source "$source" --event steered \
+      || fail "$name: could not record the steered turn"
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
+      || fail "$name: could not record the steered turn settling"
+  elif [ -n "$steer" ]; then
     "$ROOT/bin/fm-busy-event.sh" apply "$state" parked busy --gen "$gen" --source "$source" --event steered \
       || fail "$name: could not record the steered turn"
     cp "$redraw" "$capture_file"
@@ -2350,6 +2357,10 @@ test_finished_parked_redraw_absorbed() {
     'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' "$redraw" claude; then
     fail "a finished-and-parked lane with green checks alarmed again on a redraw"
   fi
+  if finished_parked_redraw_alarms finished-parked-failed 'failed: cannot reproduce the bug on main' \
+    'state: failed · source: status-log · cannot reproduce the bug on main' "$redraw" claude; then
+    fail "a lane parked on its own failed: verdict alarmed again on a redraw"
+  fi
   pass "a finished-and-parked lane alarms once per record on any harness, then a redraw is absorbed with a visible log line"
 }
 
@@ -2362,10 +2373,11 @@ test_finished_parked_wedges_still_alarm() {
   finished_parked_redraw_alarms wedge-failed-run 'done: implementation complete, ready to validate' \
     'state: failed · source: run-step · run failed' "$redraw" claude \
     || fail "a worker silent on its own failed run stopped alarming on a redraw"
-  # A run still working after the done line is not a finished lane.
-  finished_parked_redraw_alarms wedge-running-run 'done: implementation complete, ready to validate' \
-    'state: running · source: run-step · validating' "$redraw" claude \
-    || fail "a worker whose run is still working stopped alarming on a redraw"
+  # A worker's own failure report whose run has failed too leaves that run
+  # failure for the worker to answer.
+  finished_parked_redraw_alarms wedge-failed-own-run 'failed: build broke on the branch' \
+    'state: failed · source: run-step · run failed' "$redraw" claude \
+    || fail "a worker silent on a failed run after its own failed: report stopped alarming on a redraw"
   # A run parked at a gate the worker owes an answer to is a stopped worker,
   # not a finished one.
   finished_parked_redraw_alarms wedge-parked-gate 'done: implementation complete, ready to validate' \
@@ -2381,7 +2393,10 @@ test_finished_parked_wedges_still_alarm() {
   finished_parked_redraw_alarms wedge-steered-turn 'done: ready in branch fm/parked' \
     'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude steer \
     || fail "a finished lane that ran a new turn after its record stopped alarming on a redraw"
-  pass "finished-and-parked exemption leaves failed, running, and parked runs, refused reports, and later turns alarming"
+  finished_parked_redraw_alarms wedge-unseen-turn 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude unseen \
+    || fail "a finished lane that ran a turn no poll saw busy stopped alarming on a redraw"
+  pass "finished-and-parked exemption leaves failed and parked runs, refused reports, and later turns alarming"
 }
 
 # Every refused exemption keeps the alarm and logs the signal that refused it.
