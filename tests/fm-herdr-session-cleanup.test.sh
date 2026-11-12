@@ -98,8 +98,10 @@ fixture_workspaces() {
   printf '[{"workspace_id":"w1","label":"firstmate","focused":%s,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1},' \
     "$( [ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t1 ] && printf true || printf false )"
   fixture_workspace_json "$title" "$tabs" "$panes"
+  printf ',{"workspace_id":"w3","label":"notes","focused":%s,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' \
+    "$( [ "$(cat "$FIXTURE_DIR/active-tab")" = w3:t1 ] && printf true || printf false )"
   if [ -e "$FIXTURE_DIR/duplicate-token" ]; then
-    printf ',{"workspace_id":"w3","label":"└ copy · p:%s","focused":false,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' "$TOKEN"
+    printf ',{"workspace_id":"w4","label":"└ copy · p:%s","focused":false,"active_tab_id":"w4:t1","tab_count":1,"pane_count":1}' "$TOKEN"
   fi
   printf ']'
 }
@@ -139,16 +141,17 @@ fm_backend_herdr_cli() {
   local _session=$1 first=${2:-} second=${3:-} target=${4:-} title tabs panes
   shift
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
+  if [ "$first $second" = "tab get" ] && [ "$target" = "$TAB" ] \
+    && [ -e "$FIXTURE_DIR/presence-unreadable" ] && [ -s "$CLOSE_LOG" ]; then
+    rm -f "$FIXTURE_DIR/presence-unreadable"
+    printf 'unreadable\n' >&2
+    return 1
+  fi
   if [ -e "$FIXTURE_DIR/closed" ]; then
     case "$first $second" in
       "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; return 1 ;;
       "tab get")
         if [ "$target" = "$TAB" ]; then
-          if [ -e "$FIXTURE_DIR/presence-unreadable" ]; then
-            rm -f "$FIXTURE_DIR/presence-unreadable"
-            printf 'unreadable\n' >&2
-            return 1
-          fi
           printf '%s\n' '{"error":{"code":"tab_not_found"}}' >&2
           return 1
         fi
@@ -181,6 +184,7 @@ fm_backend_herdr_cli() {
       ;;
     "tab get")
       if [ "$target" = w1:t1 ]; then
+        [ ! -e "$FIXTURE_DIR/switch-during-restore" ] || cat "$FIXTURE_DIR/switch-during-restore" > "$FIXTURE_DIR/active-tab"
         printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1","pane_count":1}}}'
       elif [ -e "$FIXTURE_DIR/empty-tab" ]; then
         printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s","pane_count":0}}}\n' "$TAB" "$WS"
@@ -211,9 +215,14 @@ fm_backend_herdr_cli() {
       printf '%s\n' "pane close $PANE" >> "$CLOSE_LOG"
       ;;
     "tab close")
-      : > "$FIXTURE_DIR/closed"
       printf '%s\n' "tab close $TAB" >> "$CLOSE_LOG"
+      if [ -e "$FIXTURE_DIR/close-fails" ]; then
+        [ ! -e "$FIXTURE_DIR/switch-during-close" ] || cat "$FIXTURE_DIR/switch-during-close" > "$FIXTURE_DIR/active-tab"
+        return 1
+      fi
+      : > "$FIXTURE_DIR/closed"
       printf 'w3:t1\n' > "$FIXTURE_DIR/active-tab"
+      [ ! -e "$FIXTURE_DIR/switch-during-close" ] || cat "$FIXTURE_DIR/switch-during-close" > "$FIXTURE_DIR/active-tab"
       [ ! -e "$FIXTURE_DIR/close-response-lost" ] || return 1
       ;;
     "tab focus")
@@ -339,6 +348,41 @@ for close_failure in close-response-lost presence-unreadable; do
   [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t1' ] || fail "$close_failure cleanup displaced focus"
   pass "$close_failure cleanup restores focus before retiring the journal"
 done
+for close_failure in close-fails close-response-lost presence-unreadable; do
+  reset_fixture
+  : > "$FIXTURE_DIR/empty-tab"
+  : > "$FIXTURE_DIR/$close_failure"
+  printf 'w1:t2\n' > "$FIXTURE_DIR/switch-during-close"
+  close_status=0
+  fm_backend_herdr_projection_close_empty_tab_focus_preserving test "$WS" "$TAB" || close_status=$?
+  [ "$close_status" -eq 1 ] || fail "$close_failure lost the unconfirmed close result after a focus switch"
+  [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "$close_failure did not attempt the exact tab close"
+  [ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t2 ] || fail "$close_failure replaced the tab selected during close"
+  pass "$close_failure preserves a tab selected during close"
+done
+for presence in readable unreadable; do
+  reset_fixture
+  : > "$FIXTURE_DIR/empty-tab"
+  : > "$FIXTURE_DIR/close-fails"
+  [ "$presence" = readable ] || : > "$FIXTURE_DIR/presence-unreadable"
+  printf 'w3:t1\n' > "$FIXTURE_DIR/switch-during-close"
+  write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "failed cleanup did not attempt the exact tab close"
+  [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "failed cleanup retired the surviving tab's journal"
+  [ "$(cat "$FIXTURE_DIR/active-tab")" = w3:t1 ] || fail "failed cleanup replaced a tab selected during close with $presence tab presence"
+  pass "failed cleanup preserves the journal and new focus with $presence tab presence"
+done
+reset_fixture
+: > "$FIXTURE_DIR/empty-tab"
+: > "$FIXTURE_DIR/close-response-lost"
+printf 'w1:t2\n' > "$FIXTURE_DIR/switch-during-restore"
+close_status=0
+fm_backend_herdr_projection_close_empty_tab_focus_preserving test "$WS" "$TAB" || close_status=$?
+[ "$close_status" -ne 0 ] || fail "a focus switch during restoration lost the close failure"
+[ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "restoration race did not attempt the exact close"
+[ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t2 ] || fail "restoration replaced the newer tab selection"
+pass "uncertain close rechecks current focus immediately before restoration"
 reset_fixture
 : > "$FIXTURE_DIR/empty-tab"
 write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"

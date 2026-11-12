@@ -440,7 +440,7 @@ Firstmate then cleans up the candidate in this order:
    Neither helper grants cleanup authority to an ambiguous object.
 8. Retire the matching journal only after the exact pane or empty tab is positively confirmed gone.
 
-Empty-tab cleanup attempts to restore the exact prior focus even if the close response or immediate absence check is unreadable.
+After a failed or uncertain empty-tab close, cleanup restores the exact prior focus only if the tab or its workspace is confirmed gone and current focus still matches the close's expected destination; a newer tab selection is preserved.
 Closing the last empty tab also removes its workspace in Herdr; cleanup never issues `workspace close` or closes a workspace that still has another tab.
 
 The process proof requires all of these:
