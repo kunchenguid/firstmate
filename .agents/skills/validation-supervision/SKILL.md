@@ -23,6 +23,8 @@ Once ownership is settled, validate exactly once against that final head so no o
 
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
+The decision text names the exact `no-mistakes axi respond` action: dismissing one or more findings and keeping the code as-is is `--action approve` for the step, fixing selected findings is `--action fix --findings <ids> --instructions <guidance>`, and `--action skip` skips the whole step, because the tool cannot skip a single finding.
+Never write "skip" for a dismissed finding: skipping the review step leaves no review-approved head, so the push is refused.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 
