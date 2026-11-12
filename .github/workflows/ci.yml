@@ -581,6 +581,9 @@ jobs:
           FM_TEST_STOCK_BASH=1 /bin/bash bin/fm-test-tap-verify.sh \
             tests/fm-watch-triage.test.sh
 
+          FM_TEST_STOCK_BASH=1 /bin/bash bin/fm-test-tap-verify.sh \
+            tests/fm-hermes-harness.test.sh
+
           # The fork-free hot-path helpers must stay byte-identical to the
           # commands they replace under stock Bash 3.2, which lacks the
           # printf %(...)T clock and falls back to date.
