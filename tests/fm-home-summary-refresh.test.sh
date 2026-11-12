@@ -316,6 +316,68 @@ wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
 pass "live watcher cadence bounds publication staleness without signals"
 
+# After a missed deadline the watcher must not start another attempt on its
+# very next poll: a producer that keeps missing would otherwise run back to
+# back. Seed a fresh record of four consecutive misses, which holds refreshes
+# for eight intervals, while the ledger is already due; then age the record
+# past its delay and require the ordinary cadence to resume and clear it. The
+# zero-padded interval must still read as decimal seconds.
+BACKOFF_HOME="$TMP_ROOT/backoff-home"
+mkdir -p "$BACKOFF_HOME/state" "$BACKOFF_HOME/data" "$BACKOFF_HOME/config" \
+  "$BACKOFF_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$BACKOFF_HOME/AGENTS.md"
+printf 'backoff\n' > "$BACKOFF_HOME/.fm-secondmate-home"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$BACKOFF_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  "$WRITER" || fail "could not seed the backoff ledger"
+touch -t 203801010000 "$BACKOFF_HOME/state/home-summary.json"
+printf '4\n' > "$BACKOFF_HOME/state/.home-summary-refresh.backoff"
+PATH="$FAKEBIN:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=08 FM_SIGNAL_GRACE=0 \
+  FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
+  "$WATCH" > "$TMP_ROOT/backoff-watch.out" 2> "$TMP_ROOT/backoff-watch.err" &
+WATCH_PID=$!
+i=0
+while [ ! -e "$BACKOFF_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
+  kill -0 "$WATCH_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$BACKOFF_HOME/state/.last-watcher-beat" ] \
+  || fail "the backoff watcher did not complete its initial cycle"
+sleep 4
+kill -0 "$WATCH_PID" 2>/dev/null \
+  || fail "the backoff watcher exited: $(cat "$TMP_ROOT/backoff-watch.out" "$TMP_ROOT/backoff-watch.err" 2>/dev/null)"
+jq -e --arg now "$NOW_TWO" '.generated == $now' \
+  "$BACKOFF_HOME/state/home-summary.json" >/dev/null \
+  || fail "the watcher refreshed during its deadline-miss backoff"
+touch -t 200001010000 "$BACKOFF_HOME/state/.home-summary-refresh.backoff"
+i=0
+while ! jq -e --arg now "$NOW_THREE" '.generated == $now' \
+  "$BACKOFF_HOME/state/home-summary.json" >/dev/null 2>&1; do
+  kill -0 "$WATCH_PID" 2>/dev/null \
+    || fail "the backoff watcher exited before resuming publication"
+  [ "$i" -lt 100 ] \
+    || fail "the watcher did not resume publication once its backoff expired"
+  sleep 0.1
+  i=$((i + 1))
+done
+
+# The worker renames the ledger into place before it removes the record.
+i=0
+while [ -e "$BACKOFF_HOME/state/.home-summary-refresh.backoff" ]; do
+  [ "$i" -lt 50 ] || fail "the resumed publication kept the deadline-miss record"
+  sleep 0.1
+  i=$((i + 1))
+done
+kill "$WATCH_PID" >/dev/null 2>&1 || true
+wait "$WATCH_PID" >/dev/null 2>&1 || true
+WATCH_PID=
+pass "the watcher backs off its refresh after a missed deadline and resumes once the delay passes"
+
 # Consumer boundary: first serialize behind any watcher-started publication,
 # then replace the ledger with a structurally complete but semantically false
 # state. The default parent snapshot must consume that publication rather than
@@ -478,7 +540,10 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+
+# The reap child only tries the held lock, so the caller stays within the
+# documented bound of FM_HOME_SUMMARY_TIMEOUT plus 7 seconds.
+[ "$elapsed" -le 8 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "repeated lock timeout changed the best-effort caller result"
@@ -489,6 +554,51 @@ wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
 pass "best-effort refresh bounds publication lock acquisition"
 
+# The deadline tests below inject the worker's clock. This timeout(1) stand-in
+# fires a refresh worker's deadline when its stall writes the deadline fifo
+# named for the attempt, so a loaded host cannot move the deadline before or
+# after the stall, and returns once the killed worker's whole process group is
+# gone, so its lock is reclaimable. Other bounded calls run unbounded, so a
+# loaded host cannot cut the reap short either. An optional
+# FM_TEST_AFTER_DEADLINE command runs once the worker is dead.
+DEADLINEBIN="$TMP_ROOT/deadlinebin"
+DEADLINE_DIR="$TMP_ROOT/deadlines"
+mkdir -p "$DEADLINEBIN" "$DEADLINE_DIR"
+cat > "$DEADLINEBIN/timeout" <<'SH'
+#!/usr/bin/env bash
+worker=0
+for arg in "$@"; do
+  [ "$arg" != --_worker ] || worker=1
+done
+if [ "$worker" -eq 0 ]; then
+  shift 3
+  exec "$@"
+fi
+shift 3
+fifo="$FM_TEST_DEADLINE_DIR/$PPID"
+mkfifo "$fifo" || exit 125
+set -m
+( "$@"; rc=$?; printf 'exit\n' > "$fifo"; exit "$rc" ) &
+child=$!
+set +m
+read -r event < "$fifo"
+if [ "$event" = exit ]; then
+  wait "$child"
+  rc=$?
+  rm -f "$fifo"
+  exit "$rc"
+fi
+exec 2>/dev/null
+kill -KILL -- "-$child" || true
+wait "$child" || true
+while kill -0 -- "-$child" 2>/dev/null; do sleep 0.05; done
+rm -f "$fifo"
+[ -z "${FM_TEST_AFTER_DEADLINE:-}" ] || "$FM_TEST_AFTER_DEADLINE"
+exit 124
+SH
+chmod +x "$DEADLINEBIN/timeout"
+cp "$DEADLINEBIN/timeout" "$DEADLINEBIN/gtimeout"
+
 HANGBIN="$TMP_ROOT/hangbin"
 REAL_JQ=$(command -v jq)
 mkdir -p "$HANGBIN"
@@ -496,23 +606,243 @@ cat > "$HANGBIN/jq" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
   case "$arg" in
-    */.home-summary.json.*) sleep 30 ;;
+    */.home-summary.json.*)
+      attempt=${arg##*/.home-summary.json.}
+      printf 'deadline\n' > "$FM_TEST_DEADLINE_DIR/${attempt%%.*}"
+      sleep 30
+      ;;
   esac
 done
 exec "$FM_TEST_REAL_JQ" "$@"
 SH
 chmod +x "$HANGBIN/jq"
-started=$(date +%s)
-PATH="$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+PATH="$DEADLINEBIN:$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
   "$WRITER" --best-effort \
   || fail "validation timeout changed the best-effort caller result"
-elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on validation"
 grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication validation timeout was not logged"
 pass "best-effort refresh bounds validation and publication"
+
+# A worker killed at its deadline never runs its own cleanup, so the parent
+# must remove that attempt's temporary files and record the miss for the
+# watcher's backoff. A validation stall that ignores TERM forces the KILL path.
+STUBBORNBIN="$TMP_ROOT/stubbornbin"
+mkdir -p "$STUBBORNBIN"
+cat > "$STUBBORNBIN/jq" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary.json.*)
+      trap '' TERM
+      if [ -n "${FM_TEST_DEADLINE_DIR:-}" ]; then
+        attempt=${arg##*/.home-summary.json.}
+        printf 'deadline\n' > "$FM_TEST_DEADLINE_DIR/${attempt%%.*}"
+      fi
+      i=0
+      while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+chmod +x "$STUBBORNBIN/jq"
+rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
+for attempt in 1 2; do
+  PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    "$WRITER" --best-effort \
+    || fail "a killed worker changed the best-effort caller result"
+  leftovers=$(find "$HOME_DIR/state" -maxdepth 1 \
+    \( -name '.home-summary.json.*' -o -name '.home-summary-error.*' \
+    -o -name '.home-summary-refresh.*.tmp.*' \
+    -o -name '.home-summary-refresh.generation.attempt.*' \) -print)
+  [ -z "$leftovers" ] || fail "a killed worker left its temporary files behind: $leftovers"
+  [ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = "$attempt" ] \
+    || fail "deadline miss $attempt was not counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
+done
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the counted deadline misses"
+[ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
+  || fail "a successful publication kept the deadline-miss record"
+pass "the parent removes a killed worker's temporary files and counts consecutive deadline misses"
+
+# A worker killed between writing and renaming its generation record leaves
+# that temporary file for its parent to reap.
+GENBIN="$TMP_ROOT/generation-stallbin"
+REAL_MV=$(command -v mv)
+mkdir -p "$GENBIN"
+cat > "$GENBIN/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary-refresh.generation.tmp.*)
+      trap '' TERM
+      printf 'deadline\n' > "$FM_TEST_DEADLINE_DIR/${arg##*.}"
+      i=0
+      while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$GENBIN/mv"
+PATH="$DEADLINEBIN:$GENBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MV="$REAL_MV" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort \
+  || fail "a worker killed during its generation write changed the best-effort caller result"
+leftovers=$(find "$HOME_DIR/state" -maxdepth 1 -name '.home-summary-refresh.*.tmp.*' -print)
+[ -z "$leftovers" ] || fail "a killed worker left its generation temporary file behind: $leftovers"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the generation-write deadline miss"
+pass "the parent removes a killed worker's generation temporary file"
+
+# Two callers that miss together each try the refresh lock once, so a miss
+# whose lock try loses to the other's update goes unrecorded. The pair never
+# adds more than its two misses.
+rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
+for pair in 1 2; do
+  PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
+    "$WRITER" --best-effort &
+  pair_pid=$!
+  PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
+    "$WRITER" --best-effort \
+    || fail "a concurrent deadline miss changed the best-effort caller result"
+  wait "$pair_pid" \
+    || fail "a concurrent deadline miss changed the best-effort caller result"
+  misses=$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)
+  case "${misses:-0}" in
+    *[!0-9]*) fail "concurrent deadline misses corrupted the record: $misses" ;;
+  esac
+  [ "${misses:-0}" -le "$((pair * 2))" ] \
+    || fail "concurrent deadline misses were over-counted: $misses"
+done
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the concurrent deadline misses"
+pass "concurrent deadline misses never wait on each other or over-count"
+
+# A refresh that published after a timed-out attempt started is the newer
+# result, so that attempt's miss must not restore the record it cleared. The
+# newer publication runs after the worker is killed and before its parent reaps.
+NEWER_PUBLISH="$TMP_ROOT/publish-newer"
+cat > "$NEWER_PUBLISH" <<SH
+#!/usr/bin/env bash
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" "$WRITER"
+SH
+chmod +x "$NEWER_PUBLISH"
+printf '1\n' > "$HOME_DIR/state/.home-summary-refresh.backoff"
+PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_AFTER_DEADLINE="$NEWER_PUBLISH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort \
+  || fail "a killed worker changed the best-effort caller result"
+[ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
+  || fail "a timed-out attempt restored the record a newer publication cleared"
+pass "a deadline miss superseded by a newer publication leaves the backoff record clear"
+
+# A publication that finished before an attempt started does not supersede
+# that attempt's miss, even when both land in the same second. The ledger's
+# mtime is pushed ahead so no whole-second clock could order the two.
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish before the same-second deadline miss"
+touch -t 203801010000 "$HOME_DIR/state/home-summary.json"
+PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort \
+  || fail "a killed worker changed the best-effort caller result"
+[ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = 1 ] \
+  || fail "a miss after a same-second publication was not counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the same-second deadline miss"
+pass "a deadline miss after a same-second publication is still counted"
+
+# The generation snapshot is taken once the worker holds the lock, so a
+# publication by an earlier-started refresh that held the lock while this
+# attempt waited does not supersede this attempt's own later miss. The holder
+# publishes a new generation only after the attempt has started its worker.
+SNAPSHOT_GATE="$TMP_ROOT/snapshot-gate"
+SNAPSHOT_MARKER="$TMP_ROOT/snapshot-lock-held"
+rm -f "$HOME_DIR/state/.home-summary-refresh.backoff" "$SNAPSHOT_MARKER"
+mkfifo "$SNAPSHOT_GATE"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$2/state/.home-summary-refresh.lock"
+  : > "$3"
+  read -r _ < "$4"
+  generation=$(head -n 1 "$2/state/.home-summary-refresh.generation" 2>/dev/null || echo 0)
+  printf "%s\n" "$((generation + 1))" > "$2/state/.home-summary-refresh.generation"
+  fm_lock_release "$2/state/.home-summary-refresh.lock"
+' _ "$ROOT" "$HOME_DIR" "$SNAPSHOT_MARKER" "$SNAPSHOT_GATE" &
+LOCK_HOLDER_PID=$!
+i=0
+while [ ! -e "$SNAPSHOT_MARKER" ] && [ "$i" -lt 600 ]; do
+  kill -0 "$LOCK_HOLDER_PID" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -e "$SNAPSHOT_MARKER" ] || fail "could not hold the publication lock for snapshot coverage"
+PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort &
+waiting_pid=$!
+i=0
+while [ -z "$(ls "$DEADLINE_DIR")" ] && [ "$i" -lt 600 ]; do
+  kill -0 "$waiting_pid" 2>/dev/null || break
+  sleep 0.05
+  i=$((i + 1))
+done
+[ -n "$(ls "$DEADLINE_DIR")" ] || fail "the waiting attempt never started its worker"
+printf 'publish\n' > "$SNAPSHOT_GATE"
+wait "$LOCK_HOLDER_PID" || fail "the lock holder could not publish its generation"
+LOCK_HOLDER_PID=
+wait "$waiting_pid" || fail "a killed worker changed the best-effort caller result"
+rm -f "$SNAPSHOT_GATE"
+[ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = 1 ] \
+  || fail "a publication made while the attempt waited for the lock dropped its miss"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the lock-wait deadline miss"
+pass "a publication made while an attempt waits for the lock does not supersede its miss"
+
+# A reap child killed between writing and renaming the backoff record leaves
+# its temporary file and its attempt's generation snapshot. The next
+# publication holds the lock that every writer of those files held, so it
+# removes both.
+BACKOFFMVBIN="$TMP_ROOT/backoff-mvbin"
+mkdir -p "$BACKOFFMVBIN"
+cat > "$BACKOFFMVBIN/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary-refresh.backoff.tmp.*) kill -KILL "$PPID"; exit 1 ;;
+  esac
+done
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$BACKOFFMVBIN/mv"
+rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
+PATH="$DEADLINEBIN:$STUBBORNBIN:$BACKOFFMVBIN:$FAKEBIN:$PATH" \
+  FM_TEST_REAL_JQ="$REAL_JQ" FM_TEST_REAL_MV="$REAL_MV" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort \
+  || fail "a killed reap child changed the best-effort caller result"
+[ -n "$(find "$HOME_DIR/state" -maxdepth 1 -name '.home-summary-refresh.backoff.tmp.*' -print)" ] \
+  || fail "the killed reap child never reached its backoff write"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the killed reap child"
+leftovers=$(find "$HOME_DIR/state" -maxdepth 1 \( -name '.home-summary-refresh.*.tmp.*' \
+  -o -name '.home-summary-refresh.generation.attempt.*' \) -print)
+[ -z "$leftovers" ] || fail "a publication left a killed reap child's files behind: $leftovers"
+pass "a publication removes a killed reap child's backoff temporary file"
 
 MKBIN="$TMP_ROOT/mkdir-hangbin"
 REAL_MKDIR=$(command -v mkdir)
@@ -534,7 +864,11 @@ PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
   "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
   || fail "state initialization timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 6 ] \
+
+# The stalled state directory holds the worker, reap and log children each to
+# its own bound and kill grace, which together are the documented bound of
+# FM_HOME_SUMMARY_TIMEOUT plus 7 seconds.
+[ "$elapsed" -le 8 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 
