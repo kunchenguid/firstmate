@@ -46,18 +46,19 @@
 # semantics (`--until` is the optional hold deferral), so the create waives
 # Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
 # date or registering a `types.custom` captain issue type. The command records
-# a UTC `Captain hold set:` timestamp in the task body: repeating an open
-# captain call (still held, or deferred past its `--until` date) preserves the
-# existing timestamp, while re-holding released work starts a new lifecycle. A
-# task already closed is refused rather than reopened.
+# a UTC `Captain hold set:` timestamp in the task body: repeating an active
+# hold preserves the existing timestamp, while re-holding released work or a
+# deferral past its `--until` date starts a new lifecycle. A task already
+# closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
 # `complete` and `verify` check. `hold --origin` with an origin an open captain
 # call does not record yet only adds that origin beside the ones the
 # call records, so one call found by several reviews serves each of them: the
 # recorded reason, `--until` date, hold-set stamp, and parent decision stay as
 # they are, and the new `--reason` and `--until` are ignored. With an origin the
-# call already records it is a normal re-hold that keeps the other origins. A
-# new lifecycle replaces the origins.
+# call already records it is a normal re-hold that keeps the other origins. An
+# open call (still held, or deferred past its date) keeps its origins; re-held
+# released work replaces them.
 # The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
 # readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
@@ -822,7 +823,7 @@ body_hold_set_timestamp() {  # <decoded-task-body>
 }
 
 write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
-  local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
+  local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp separator=$'\n\n'
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   existing=$(body_hold_set_timestamp "$body")
@@ -836,9 +837,12 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
       $'\n'*) body=${body#$'\n'} ;;
     esac
   fi
+  case "$body" in
+    'Captain hold origin: '*) separator=$'\n' ;;
+  esac
   new_body=$(printf 'Captain hold set: %s' "$hold_set")
   if [ -n "$body" ]; then
-    new_body=$(printf '%s\n\n%s' "$new_body" "$body")
+    new_body=$new_body$separator$body
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-stamp.XXXXXX") \
     || fail "cannot stage the hold-set stamp"
@@ -863,8 +867,8 @@ body_hold_origins() {  # <decoded-task-body>; prints one origin per line
 
 # An open captain call is one still held for the captain or deferred past its
 # date: tasks-axi keeps hold_kind through an expired date gate but clears it on
-# release. Only an open call keeps its timestamp and origins and can take
-# another origin; a released call is re-held as a new lifecycle instead.
+# release. Only an open call keeps its origins and can take another origin; a
+# released call is re-held with the new origin alone.
 is_open_captain_call() {  # <shown-task>
   [ "$(show_field "$1" state)" != "done" ] \
     && [ "$(show_field_value "$1" hold_kind)" = captain ]
@@ -1141,7 +1145,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local preserve_hold_set=0 stored_reason original_body='' hold_status=0 decoded_body
+  local open_call=0 preserve_hold_set=0 stored_reason original_body='' hold_status=0 decoded_body
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1181,7 +1185,8 @@ command_hold() {
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     if is_open_captain_call "$show"; then
-      preserve_hold_set=1
+      open_call=1
+      [ "$(show_field_value "$show" held)" != yes ] || preserve_hold_set=1
     fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
@@ -1218,7 +1223,7 @@ command_hold() {
     origin=$(task_identity "$origin") || exit $?
   fi
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
-  if [ "$preserve_hold_set" = 1 ] && [ -n "$origin" ]; then
+  if [ "$open_call" = 1 ] && [ -n "$origin" ]; then
     decoded_body=$(decode_shown_value "$(show_field "$show" body)") \
       || fail "could not decode the existing body for $id"
     if [ -n "$(body_hold_set_timestamp "$decoded_body")" ] \
@@ -1255,7 +1260,7 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
   if [ -n "$origin" ]; then
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" "$preserve_hold_set" || exit $?
+    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" "$open_call" || exit $?
   fi
   printf '%s\n' "$id"
 }

@@ -4548,7 +4548,8 @@ test_same_origin_rehold_retries_and_updates_a_shared_call() {
 # A deferral whose --until date has passed is still the captain's open call:
 # tasks-axi reports it as not held, but it keeps its captain annotations. A
 # second review that finds it shares it as it would share a held call, and a
-# later re-hold of the same call keeps every review's origin.
+# later re-hold of the same call restarts its age but keeps every review's
+# origin.
 test_expired_deferral_serves_several_origins() {
   local home parent channel o id=sample-expired-call shown stamp parent_before reason_before
   home=$(make_home expired-shared-origin)
@@ -4603,13 +4604,55 @@ test_expired_deferral_serves_several_origins() {
     || fail "could not defer the shared call again"
   shown=$(tasks_in "$home" show "$id" --full)
   assert_contains "$shown" 'held: yes' "deferring the shared call again did not hold it"
-  assert_contains "$shown" "$stamp" "deferring the shared call again restarted its lifecycle"
+  assert_contains "$shown" 'Captain hold set: 2098-12-31T00:00:00Z' \
+    "deferring the lapsed call again kept its old hold age"
   for o in review-a review-b; do
     assert_equals 1 "$(printf '%s\n' "$shown" | grep -o "Captain hold origin: $o" | wc -l | tr -d ' ')" \
       "deferring the shared call again did not keep exactly one $o origin"
     run_captain "$home" verify "$o" >/dev/null || fail "the re-deferred call no longer verifies $o"
   done
   pass "a captain call deferred past its date stays one shared call for several origins"
+}
+
+# A lapsed deferral that firstmate asks again without a date is a new
+# lifecycle: its age restarts, so the fleet snapshot reads it as a live call
+# rather than an aged one, while the call keeps the origin it already records.
+test_lapsed_deferral_rehold_restarts_its_age() {
+  local home id=sample-lapsed-call shown snap
+  home=$(make_home lapsed-rehold)
+  mkdir -p "$home/data/review-a"
+  tasks_in "$home" add review-a "Review review-a" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the review fixture"
+  write_origin_meta "$home" review-a
+  printf 'done: report complete\n' > "$home/state/review-a.status"
+  FM_CAPTAIN_HOLD_NOW=2026-10-01T12:00:00Z run_captain "$home" hold "$id" --title "Decide the lapsed call" \
+    --reason "captain deferred this" --until 2026-11-01 --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the deferred call"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the review could not complete against its deferred call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: no' "the fixture deferral has not lapsed"
+
+  FM_CAPTAIN_HOLD_NOW=2026-11-02T12:00:00Z run_captain "$home" hold "$id" \
+    --reason "Decide now" >/dev/null || fail "could not ask the lapsed call again"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "asking the lapsed call again did not hold it"
+  assert_contains "$shown" 'Captain hold set: 2026-11-02T12:00:00Z' \
+    "asking the lapsed call again kept its old hold age"
+  assert_not_contains "$shown" '2026-10-01T12:00:00Z' "asking the lapsed call again kept its old stamp"
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-11-02T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
+  printf '%s' "$snap" | jq -e --arg id "$id" '
+    ([.backlog.records[] | select(.id == $id)][0]) as $call
+    | $call.hold_set == "2026-11-02T12:00:00Z" and $call.hold_age_days == 0
+      and $call.hold_bucket == "live" and $call.hold_until == null
+      and $call.captain_actionable == true
+  ' >/dev/null || fail "the re-asked lapsed call does not read as a live call: $snap"
+  run_captain "$home" verify review-a >/dev/null \
+    || fail "asking the lapsed call again dropped the origin it records"
+  pass "a lapsed deferral asked again restarts its age and keeps its origin"
 }
 
 test_hold_origins_follow_backend_holds() {
@@ -5302,6 +5345,7 @@ test_complete_refuses_an_entry_held_for_another_origin
 test_one_active_hold_serves_several_origins
 test_same_origin_rehold_retries_and_updates_a_shared_call
 test_expired_deferral_serves_several_origins
+test_lapsed_deferral_rehold_restarts_its_age
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes

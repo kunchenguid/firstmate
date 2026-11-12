@@ -55,14 +55,15 @@ It works in this order:
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
 6. When `--origin` is supplied, it records the origin on the task only after the backend hold succeeds.
-   A new lifecycle replaces any previous association, while an open call keeps its other origins; adding a new origin to an open call skips steps 2 to 5 (see the shared-call case below).
+   Re-held released work replaces any previous association, while an open call keeps its other origins; adding a new origin to an open call skips steps 2 to 5 (see the shared-call case below).
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
 Repeat and edge cases:
 
-- Retries of an open captain call, still held or deferred past its `--until` date, preserve its hold-set timestamp.
-- Re-holding released work starts a new timestamped lifecycle.
+- Retries of an active hold preserve its hold-set timestamp.
+- Re-holding released work, or a deferral past its `--until` date, starts a new timestamped lifecycle.
+  A deferral past its date is still an open call, so it keeps its origins.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
