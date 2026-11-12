@@ -1318,7 +1318,17 @@ A project-less seed requires no existing project clones or `data/projects.md` en
 A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
 
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
+Seeding also protects linked-worktree homes with a Git-native lock that identifies them as durable Firstmate homes, so ordinary `git worktree remove` refuses them while the mate is idle.
+Repeated seeding preserves owned protection; existing unlocked linked homes gain it when reseeded, while standalone clones keep their existing lifecycle.
+Guarded retirement and attempt-owned rollback release only matching Firstmate protection, and refuse foreign locks or unknown ownership.
+A failed return restores protection when the worktree survives and preserves the route for retry.
+This lock does not prevent filesystem trash operations, a `treehouse return` that cleans the checkout in place, or an explicit Git lock override by a tool that ignores the protection.
+The [home-lock library](../bin/fm-home-worktree-lock-lib.sh) owns receipt validation and release mechanics.
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
+A returned slot is an ordinary pool checkout again, so a successful retirement return or attempt-owned seed-rollback return clears the retired home's payload (`data/`, `state/`, `config/`, `projects/`, and both identity markers), while a failed or handled-interruption return puts the whole home back for the preserved retry; a slot that kept the payload would refuse the next seed in it as already marked for a mate that no longer exists.
+A return stages that payload in the parent's state directory and refuses a home it cannot stage there atomically before anything moves, so a parent on another filesystem leaves the home intact rather than half-moved.
+A return killed outright, or signalled while the slot release itself runs, can still strand that staging and leave the home stripped of its payload and identity.
+The [payload library](../bin/fm-home-payload-lib.sh) owns that cleanup.
 
 ### Project modes and backlog handoff
 

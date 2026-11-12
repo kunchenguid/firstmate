@@ -2181,7 +2181,7 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
     "$ROOT/bin/fm-t3code-codex-env.sh" install "$home" "FM_HOME=$home" || fail "install secondmate overlay"
     journal=$(git -C "$home" rev-parse --git-path fm-t3code-codex-env.json)
   fi
-  mkdir -p "$data" "$state" "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin" "$home/.claude"
+  mkdir -p "$data" "$state" "$CASE_DIR/home/state" "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin" "$home/.claude"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '{"env":{"FM_HOME":"%s"}}\n' "$home" > "$home/.claude/settings.local.json"
@@ -2490,7 +2490,7 @@ test_pooled_t3_secondmate_home_returned_only_after_provider_exits() {
   t3_world "$(t3_thread_json "$thread" running false)"
   root="$CASE_DIR/fm-root"; home="$CASE_DIR/pool-slot"; state="$CASE_DIR/state"; data="$CASE_DIR/data"
   fm_git_worktree "$root" "$home" "fm/$id"
-  mkdir -p "$data" "$state" "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin"
+  mkdir -p "$data" "$state" "$CASE_DIR/home/state" "$home/state" "$home/data" "$home/config" "$home/projects" "$home/bin"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   touch "$state/.last-watcher-beat"
