@@ -13,6 +13,9 @@
 # For local-only tasks, the first accepted done head is latched as exactly one
 # local_done_head= full commit id in the live task metadata. Observing done again
 # never changes that identity. Revised work needs a new task/approval record.
+# A done naming the lane's own rebased head stays ready, without changing the
+# record, only when fm_dod_rebased_identity_proof proves its content identical;
+# the one rebind is fm_dod_rebind_local_done_head, run at landing after that proof.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -896,12 +899,110 @@ fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [met
   [ "$(cat "$live")" = "$captured" ] || return 1
   if grep -q '^local_done_head=' "$live"; then
     pinned=$(fm_dod_local_done_head "$live") || return 1
-    [ "$pinned" = "$sha" ]
+    [ "$pinned" = "$sha" ] && return 0
+    # A lane that rebased its recorded head onto a moved default branch stays
+    # ready only when the rebase is provably identical; bin/fm-merge-local.sh
+    # re-proves it and rebinds the record at landing.
+    fm_dod_rebased_lane_head_proven "$live" "$id" "$pinned" "$sha"
     return
   fi
   tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
   { cat "$live" && printf '\nlocal_done_head=%s\n' "$sha"; } > "$tmp" || return 1
   fm_backlog_record_publish "$tmp" "$live" 'local readiness metadata' "$state"
+)
+
+# The rebased-lane identity proof. 0 only when the lane's own branch head
+# <candidate> carries exactly the tree that combining the recorded head
+# <recorded> with <target>, the current head of the default branch <default>,
+# yields: <target> is a strict ancestor of <candidate>, <recorded> and <target>
+# have diverged from exactly one merge base, `git merge-tree --write-tree`
+# merges them cleanly, and its tree equals <candidate>^{tree}. On refusal it
+# prints the reason on stdout. The caller proves <candidate> is the lane's own
+# branch head.
+fm_dod_rebased_identity_proof() (  # <proj> <default> <recorded> <candidate> <target>
+  local proj=$1 default=$2 recorded=$3 candidate=$4 target=$5 bases proof_tree candidate_tree
+  if ! git -C "$proj" cat-file -e "$recorded^{commit}" 2>/dev/null; then
+    echo 'the recorded done head is no longer in the project repository'
+    return 1
+  fi
+  if [ "$candidate" = "$target" ]; then
+    echo "the branch is not $default plus commits of its own"
+    return 1
+  fi
+  if ! git -C "$proj" merge-base --is-ancestor "$target" "$candidate"; then
+    echo "the branch is not a fast-forward of $default; have the crewmate rebase it onto $default again, then retry"
+    return 1
+  fi
+  if git -C "$proj" merge-base --is-ancestor "$recorded" "$target"; then
+    echo "the recorded done head is already part of $default"
+    return 1
+  fi
+  if git -C "$proj" merge-base --is-ancestor "$target" "$recorded"; then
+    echo "the recorded done head still fast-forwards $default, so there is nothing to rebase"
+    return 1
+  fi
+  bases=$(git -C "$proj" merge-base --all "$target" "$recorded") || bases=
+  if [ -z "$bases" ] || [ "$(printf '%s\n' "$bases" | wc -l | tr -d ' ')" != 1 ]; then
+    echo "the recorded done head and $default do not share exactly one merge base"
+    return 1
+  fi
+  # Exit 0 from --write-tree means a clean merge whose only output is the tree.
+  if ! proof_tree=$(git -C "$proj" merge-tree --write-tree "$target" "$recorded" 2>/dev/null); then
+    echo "the recorded done head does not combine cleanly with $default (Git 2.38 or newer required)"
+    return 1
+  fi
+  candidate_tree=$(git -C "$proj" rev-parse --verify --quiet "$candidate^{tree}") || candidate_tree=
+  if [ -z "$candidate_tree" ] || [ "$proof_tree" != "$candidate_tree" ]; then
+    echo "the rebased content differs from the recorded done head combined with $default"
+    return 1
+  fi
+)
+
+# 0 when <sha> is the lane's own branch head and a provably identical rebase
+# of the recorded head <pinned> onto the project's current default branch
+# (origin/HEAD, else main, else master), by fm_dod_rebased_identity_proof.
+# Read-only: the record keeps <pinned> until a landing rebinds it.
+fm_dod_rebased_lane_head_proven() (  # <meta> <id> <pinned> <sha>
+  local meta=$1 id=$2 pinned=$3 sha=$4 proj branch default ref target
+  proj=$(fm_dod_meta_value "$meta" project)
+  [ -n "$proj" ] || return 1
+  branch=$(fm_dod_meta_value "$meta" branch)
+  [ -n "$branch" ] || branch="fm/$id"
+  [ "$(git -C "$proj" rev-parse --verify --quiet "refs/heads/$branch^{commit}")" = "$sha" ] || return 1
+  ref=$(git -C "$proj" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
+  default=${ref#origin/}
+  if [ -z "$default" ]; then
+    for ref in main master; do
+      git -C "$proj" show-ref --verify --quiet "refs/heads/$ref" && { default=$ref; break; }
+    done
+  fi
+  [ -n "$default" ] || return 1
+  target=$(git -C "$proj" rev-parse --verify --quiet "refs/heads/$default^{commit}") || return 1
+  fm_dod_rebased_identity_proof "$proj" "$default" "$pinned" "$sha" "$target" >/dev/null
+)
+
+# Swap the recorded head <old> for the rebased head <new> that
+# fm_dod_rebased_identity_proof proved identical. The caller holds the task's
+# control and meta locks and runs that proof (bin/fm-merge-local.sh).
+# Refuses unless the live record still names exactly <old>.
+fm_dod_rebind_local_done_head() (  # <state> <id> <old> <new>
+  local state=$1 id=$2 old=$3 new=$4 script_dir live tmp=''
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=/dev/null
+  . "$script_dir/fm-backlog-transition-lib.sh"
+  live="$state/$id.meta"
+  case "$new" in ''|*[!0-9a-f]*) return 1 ;; esac
+  case ${#new} in 40|64) ;; *) return 1 ;; esac
+  fm_backlog_record_present "$live" 'local readiness metadata' "$state" || return 1
+  [ "$(fm_dod_local_done_head "$live")" = "$old" ] || return 1
+  trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
+  tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
+  awk -v old="$old" -v new="$new" '
+    $0 == "local_done_head=" old { print "local_done_head=" new; next }
+    { print }
+  ' "$live" > "$tmp" || return 1
+  fm_backlog_record_publish "$tmp" "$live" 'local readiness metadata' "$state" || return 1
+  tmp=
 )
 
 # 0 when the forge's head for a PR is the head the done names. In no-mistakes
