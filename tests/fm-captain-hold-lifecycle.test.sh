@@ -4455,8 +4455,6 @@ test_one_active_hold_serves_several_origins() {
   FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
     --reason "different words from B" --until 2099-06-01 --origin review-b >/dev/null \
     || fail "could not add the second review to the active call"
-  run_captain "$home" hold "$id" --reason "different words from B" --origin review-b >/dev/null \
-    || fail "repeating the added origin was not idempotent"
   shown=$(tasks_in "$home" show "$id" --full)
   assert_contains "$shown" 'held: yes' "adding an origin lifted the active hold"
   assert_equals "$reason_before" "$(printf '%s\n' "$shown" | grep '^  hold_reason: ')" \
@@ -4467,7 +4465,7 @@ test_one_active_hold_serves_several_origins() {
   assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: review-a' | wc -l | tr -d ' ')" \
     "the shared call did not keep exactly one first-review origin"
   assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: review-b' | wc -l | tr -d ' ')" \
-    "the repeated hold duplicated the second-review origin"
+    "adding the second review duplicated its origin"
   run_captain "$home" complete review-b "$id" >/dev/null \
     || fail "the second review could not complete against the shared call"
   run_captain "$home" verify review-b >/dev/null || fail "the second review could not verify"
@@ -4494,6 +4492,57 @@ test_one_active_hold_serves_several_origins() {
   assert_no_grep "add review-c to this active hold" "$home/closed.err" \
     "the closed-call refusal offers to add an origin to a call that is no longer held"
   pass "one active captain hold serves several origins without changing or duplicating the call"
+}
+
+# Re-holding an active call with an origin it already records is the normal
+# re-hold, not an added origin: it retries a parent publication that failed,
+# takes the new reason and deferral date, and keeps every other origin.
+test_same_origin_rehold_retries_and_updates_a_shared_call() {
+  local home parent channel o id=sample-retried-call shown stamp reason_before
+  home=$(make_home same-origin-rehold)
+  parent=$(make_home same-origin-rehold-parent)
+  channel="$parent/state/retry-mate.status"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  printf 'retry-mate\n' > "$home/.fm-secondmate-home"
+  for o in review-a review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  mkdir -p "$channel"
+  run_captain "$home" hold "$id" --title "Publish the retried change" \
+    --reason "first wording" --repo sample --origin review-a > "$home/first.out" 2> "$home/first.err" \
+    || fail "a parent-channel failure made the local hold fail"
+  assert_grep "did not reach the parent channel" "$home/first.err" \
+    "the failed parent publication was not reported"
+  run_captain "$home" hold "$id" --reason "words from B" --origin review-b >/dev/null \
+    || fail "could not add the second review to the active call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  stamp=$(printf '%s\n' "$shown" | grep -o 'Captain hold set: [0-9TZ:-]*')
+  [ -n "$stamp" ] || fail "the call has no hold-set stamp"
+  reason_before=$(printf '%s\n' "$shown" | grep '^  hold_reason: ')
+  rmdir "$channel"
+
+  FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
+    --reason "second wording" --until 2099-03-01 --origin review-a >/dev/null \
+    || fail "the same-origin re-hold failed"
+  assert_equals 'needs-decision [key=captain-hold-sample-retried-call-1] [until=2099-03-01]: captain hold sample-retried-call: second wording' \
+    "$(sed -E 's/ \[at=[0-9]+\]//' "$channel")" "the same-origin re-hold did not retry the parent publication"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "the same-origin re-hold lifted the hold"
+  assert_contains "$shown" 'hold_until: 2099-03-01' "the same-origin re-hold dropped the new deferral date"
+  [ "$(printf '%s\n' "$shown" | grep '^  hold_reason: ')" != "$reason_before" ] \
+    || fail "the same-origin re-hold dropped the new reason"
+  assert_contains "$shown" "$stamp" "the same-origin re-hold restarted the call's lifecycle"
+  for o in review-a review-b; do
+    assert_equals 1 "$(printf '%s\n' "$shown" | grep -o "Captain hold origin: $o" | wc -l | tr -d ' ')" \
+      "the same-origin re-hold did not keep exactly one $o origin"
+    run_captain "$home" complete "$o" "$id" >/dev/null || fail "the re-held call no longer completes $o"
+  done
+  pass "a same-origin re-hold retries publication and updates the call while keeping its other origins"
 }
 
 test_hold_origins_follow_backend_holds() {
@@ -5199,6 +5248,7 @@ test_inventory_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
 test_one_active_hold_serves_several_origins
+test_same_origin_rehold_retries_and_updates_a_shared_call
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes

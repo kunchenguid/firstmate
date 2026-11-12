@@ -68,8 +68,9 @@ Repeat and edge cases:
   Each association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
   The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is date-expired.
 - One call found by several investigations or reviews stays one held task.
-  While the hold is still active, `hold --origin` only adds that origin beside the ones the call records, idempotently, and skips steps 2 to 5.
+  While the hold is still active, `hold --origin` with an origin the call does not record yet only adds that origin beside the ones the call records, and skips steps 2 to 5.
   The recorded reason, `--until` date, hold-set timestamp, and parent decision stay unchanged; the new `--reason` and `--until` are ignored.
+  With an origin the call already records, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
   Only an active call takes a further origin this way: a closed call is refused, and re-holding a released or date-expired call starts a new lifecycle.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
