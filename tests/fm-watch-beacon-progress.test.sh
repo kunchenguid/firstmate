@@ -213,6 +213,7 @@ test_crew_classification_refreshes_progress() {
   local dir home
   dir=$(make_home classification-progress)
   home=$(case_home "$dir")
+  # shellcheck disable=SC2016 # Fixture leaves "$1" for runtime expansion.
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf "state: %s · source: run-step · fixture\n" "$1"' > "$dir/crew-state"
   chmod 0700 "$dir/crew-state"
