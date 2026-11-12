@@ -213,7 +213,7 @@ publish_lock_session_or_die() {
 confirm_own_lock() {  # <recorded-pid>
   local recorded pids waited=0
   if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
-    fm_lock_acquire_wait "$CLAIM_LOCK"
+    fm_lock_acquire_wait "$CLAIM_LOCK" --refuse-unreapable || exit 1
     CLAIM_LOCK_HELD=1
     waited=1
   fi
@@ -266,7 +266,7 @@ if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
       echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the fleet lock" >&2
       exit 1
     fi
-    fm_lock_acquire_wait "$CLAIM_LOCK"
+    fm_lock_acquire_wait "$CLAIM_LOCK" --refuse-unreapable || exit 1
   fi
   CLAIM_LOCK_HELD=1
 fi
