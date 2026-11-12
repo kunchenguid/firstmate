@@ -5,7 +5,10 @@
 # the ones a wrong guess would make dangerous:
 #   1. agy publishes no harness-identity marker of its own (a live 1.2.0 TUI
 #      carries no AGY_* variable; AGENT=1 there is inherited launcher state),
-#      so detection is ancestry alone on the anchored process name `agy`.
+#      so detection is ancestry alone on the anchored process name `agy`, its
+#      binary name `antigravity` (a mise install symlinks `agy` to
+#      .../antigravity-cli/<ver>/antigravity), or a Linux sandbox init named
+#      `exe` whose argv[0] is that antigravity binary.
 #   2. The anchored match must never claim unrelated commands containing the
 #      fragment, and a structural agy ancestor now outranks a retained or
 #      inherited CLAUDECODE - tests/fm-harness-precedence.test.sh owns the
@@ -93,6 +96,42 @@ SH
   pass "fm-harness.sh: ancestry detects a natively-named agy command"
 }
 
+# A mise install ships the binary as .../antigravity-cli/<ver>/antigravity with
+# `agy` a symlink to it, so Linux can name the process `antigravity`; agy's
+# Linux command sandbox re-executes its jail init through /proc/self/exe, so
+# that process is named `exe` while argv[0] is still the antigravity binary.
+test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-antigravity")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
+  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(FAKE_PS_COMM=antigravity \
+    FAKE_PS_ARGS='/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "comm=antigravity must be detected as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=exe \
+    FAKE_PS_ARGS='/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "a sandbox init (comm=exe, argv0=.../antigravity) must be detected as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=exe FAKE_PS_ARGS='/opt/antigravity-cli/current/runner --jail' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "comm=exe under an antigravity-cli install tree must be detected as agy, got '$out'"
+  pass "fm-harness.sh: ancestry detects the antigravity binary and its sandbox init"
+}
+
 test_agy_ancestry_rejects_unrelated_mentions() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/anc-negatives")
@@ -115,14 +154,41 @@ SH
     PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "a later shell argument naming agy must not detect agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=antigravityd FAKE_PS_ARGS='antigravityd --serve' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "an unrelated antigravityd command must not detect agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=exe FAKE_PS_ARGS='/usr/lib/sandbox/exe --child' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "an unrelated exe process must not detect agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=exe FAKE_PS_ARGS='/opt/magyk/antigravity-tools/exe agy antigravity' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "an exe whose argv[0] only contains agy fragments must not detect agy, got '$out'"
   pass "fm-harness.sh: ancestry rejects unrelated agy mentions"
 }
 
 test_agy_claims_no_inherited_launcher_marker() {
-  local fakebin out
+  local neutralbin fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  # Stub ps to a neutral shell so this case does not read the real ancestry,
+  # which is agy itself when the suite runs inside an agy session.
+  neutralbin=$(fm_fakebin "$TMP_ROOT/anc-neutral")
+  cat > "$neutralbin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$neutralbin/ps"
+  out=$(AGENT=1 PATH="$neutralbin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -208,11 +274,38 @@ test_agy_tmux_names_the_native_binary_an_agent() {
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
   got=$(fm_agent_process_classify_name agy)
   [ "$got" = agent ] || fail "tmux liveness must read the agy binary as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravity)
+  [ "$got" = agent ] || fail "tmux liveness must read the antigravity binary as an agent, got '$got'"
   got=$(fm_agent_process_classify_name magyk)
   [ "$got" = other ] || fail "tmux liveness must not read magyk as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravityd)
+  [ "$got" = other ] || fail "tmux liveness must not read antigravityd as an agent, got '$got'"
   got=$(fm_agent_process_classify_name bash)
   [ "$got" = shell ] || fail "tmux liveness must still read bash as a shell, got '$got'"
-  pass "bin/fm-agent-process-lib.sh: agy is an agent, fragments are not"
+  pass "bin/fm-agent-process-lib.sh: agy and antigravity are agents, fragments are not"
+}
+
+# The session lock walks the same ancestry with its own matcher, so a primary
+# running as the antigravity binary or its sandbox init must find its harness.
+test_agy_session_lock_ancestry_recognizes_antigravity() {
+  local bin=/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    fm_harness_process_matches agy agy \
+      || fail "session-lock ancestry must match comm=agy"
+    fm_harness_process_matches antigravity "$bin" \
+      || fail "session-lock ancestry must match comm=antigravity"
+    fm_harness_process_matches exe "$bin --sandbox-init" \
+      || fail "session-lock ancestry must match a sandbox init (comm=exe, argv0=.../antigravity)"
+    ! fm_harness_process_matches exe '/usr/lib/sandbox/exe --child' \
+      || fail "session-lock ancestry must not match an unrelated exe"
+    ! fm_harness_process_matches antigravityd 'antigravityd --serve' \
+      || fail "session-lock ancestry must not match antigravityd"
+    ! fm_harness_process_matches magyk 'magyk --serve' \
+      || fail "session-lock ancestry must not match magyk"
+  ) || exit 1
+  pass "fm-session-lock-lib.sh: ancestry recognizes agy, antigravity, and its sandbox init"
 }
 
 # Canned `pane process-info` bodies for the herdr fixtures. The shared
@@ -915,6 +1008,7 @@ test_agy_spawn_arms_no_busy_wiring() {
 }
 
 test_agy_ancestry_detects_the_native_command_name
+test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
@@ -922,6 +1016,7 @@ test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
 test_agy_tmux_names_the_native_binary_an_agent
+test_agy_session_lock_ancestry_recognizes_antigravity
 test_herdr_done_with_live_registry_stays_live
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
 test_herdr_shell_first_with_live_registry_stays_live

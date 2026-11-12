@@ -31,15 +31,17 @@ unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
 # agy are anchored exactly like pi: their process names are the bare words `omp`
-# (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
-# comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
+# (verified, omp 18.1.11) and `agy` or `antigravity` (agy's own binary name, see
+# bin/fm-harness.sh), and a substring match would claim ompd or comp.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$|^antigravity$'
 
-# The same harnesses as exact executable names. Keep in sync with
-# FM_HARNESS_RE. Used only for the stricter path evidence below, where the
-# loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
+# The same harnesses as exact executable names, plus agy's versioned install
+# directory `antigravity-cli`. Keep in sync with FM_HARNESS_RE. Used only for
+# the stricter path evidence below, where the loose regex would also match
+# ordinary firstmate paths such as bin/fm-claude-stop-autoarm.sh. Matching
+# argv[0] here is also what claims agy's Linux command-sandbox init, whose
+# process name is `exe` while argv[0] is the antigravity binary path.
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy antigravity antigravity-cli)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

@@ -47,9 +47,11 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # unrelated commands such as ompd or comp.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
     # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
-    # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
-    # single binary, comm=agy with argv[0]=agy), and a glob would claim
-    # unrelated commands containing that fragment. devin is anchored the same
+    # live process name is the bare word `agy` or its binary name `antigravity`
+    # (verified, agy 1.2.0: a Go-compiled single binary, comm=agy with
+    # argv[0]=agy; agy 1.5.6 via mise: comm=antigravity when started by that
+    # name, see bin/fm-harness.sh), and a glob would claim unrelated commands
+    # containing that fragment. devin is anchored the same
     # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
     # claims an unrelated command. Command Code is anchored on its own process
     # title (verified, Command Code 1.74.1: comm=command-code). polytoken is
@@ -58,7 +60,7 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # daemon), so a `*polytoken*` glob never claims an unrelated command.
     # cortex (Cortex Code) is anchored too (verified, cortex 1.1.104: a
     # Bun-compiled single binary, comm=cortex).
-    agy|devin|command-code|polytoken|cortex|hermes) printf 'agent' ;;
+    agy|antigravity|devin|command-code|polytoken|cortex|hermes) printf 'agent' ;;
     # kiro (Kiro CLI) is anchored for the same reason as muse, omp, and agy: its
     # live foreground process name is the bare word `kiro-cli` (verified,
     # kiro-cli 2.21.4: a toolbox/aim-sandbox wrapper whose comm and tmux

@@ -29,6 +29,25 @@ Herdr's `pane process-info` for the same pane reports the foreground process as 
 `bin/fm-harness.sh` therefore matches the anchored process name `agy` alone, and the spawn clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` at the launch boundary.
 `tests/fm-agy-harness.test.sh` pins the anchored match, the rejection of unrelated names containing the fragment, and that an inherited `CLAUDECODE` never outranks a real `agy` ancestor once the spawn clears it.
 
+### The antigravity binary name and the sandbox init (2026-11-12, agy 1.5.6 via mise, Linux x64)
+
+A mise install ships the executable as `antigravity-cli/<ver>/antigravity`, with `agy` a symlink to it.
+Linux names a process after the file name it was executed by, so the same binary reports a different process name depending on how it was started:
+
+```
+$ ls -l ~/.local/share/mise/installs/antigravity-cli/1.5.6/
+agy -> antigravity
+antigravity
+$ ps -o comm=,args= -p <pid>    # started as .../antigravity-cli/latest/agy
+agy             /home/<user>/.local/share/mise/installs/antigravity-cli/latest/agy
+$ ps -o comm=,args= -p <pid>    # started as .../antigravity-cli/1.5.6/antigravity
+antigravity     /home/<user>/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity
+```
+
+The binary's Linux command sandbox re-executes its jail init through `/proc/self/exe` (the binary carries the `exec /proc/self/exe: %v` error string beside its `jail.Linux` configuration), and the kernel names such a process `exe` while argv[0] keeps the antigravity binary path.
+`bin/fm-harness.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-agent-process-lib.sh` therefore also accept the anchored name `antigravity`, and accept `exe` only with that argv[0] evidence.
+`tests/fm-agy-harness.test.sh` pins both shapes and the rejection of unrelated `exe` and `antigravityd` processes.
+
 ## Launch: positional prompt-interactive with auto-submit
 
 ```
@@ -132,7 +151,7 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 ```
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
-The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
+The tmux adapter classifies the anchored process names `agy` and `antigravity` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
 agy is included in the session-lock name vocabulary in `bin/fm-session-lock-lib.sh` (`FM_HARNESS_RE` and `FM_HARNESS_NAMES`), recognizing an agy ancestor process as a verified session-lock holder.
 
 ## Composer: unknown by design

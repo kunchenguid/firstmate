@@ -8,7 +8,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 
 | Fact | Value |
 |---|---|
-| Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
+| Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary whose live process name is `agy`, or `antigravity` when started through its real binary name (a mise install symlinks `agy` to `.../antigravity-cli/<ver>/antigravity`). |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
@@ -38,7 +38,8 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 ## Detection
 
-Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
+Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy` or `antigravity`, never `*agy*`.
+Its Linux command-sandbox init is named `exe` and is claimed only when argv[0]'s basename is `agy` or `antigravity` or its path has an `antigravity-cli` component.
 No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
 agy is included in the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, allowing an agy session to hold a home session lock.
 
