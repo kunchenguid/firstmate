@@ -2240,6 +2240,112 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- finished and parked: one alarm per record, not one per redraw ---
+# A finished lane idles at its own prompt with a terminal verdict as its last
+# record, and every redraw of that idle pane is a new hash. Each new hash used
+# to re-enter the terminal path and alarm the same finished record again, so a
+# handful of finished lanes raised the stuck-worker alarm every few minutes.
+# The first sight of the record still alarms; a later new hash of the SAME
+# record is absorbed with a visible log line - and only when every signal of
+# the finished-and-parked shape holds, which the wedge cases below pin.
+# Runs one lane through a first sight (always alarms) and then a redraw, and
+# reports whether the redraw alarmed: 0 alarmed, 1 absorbed.
+finished_parked_redraw_alarms() {  # <case> <status-line> <crew-state> <redraw-capture-file>
+  local name=$1 status_line=$2 verdict=$3 redraw=$4 dir state fakebin out capture_file window key pid rc
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-parked"
+  printf 'finished, sitting at the prompt' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
+  printf '%s\n' "$status_line" > "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  key=$(watch_window_key "$window")
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE="$verdict"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "$name: the first sight of a terminal record did not alarm"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "$name: the first sight did not print a stale wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "$name: could not acknowledge the first-sight wake"
+  touch "$state/.last-check" "$state/.last-heartbeat"
+
+  # The idle pane redraws: a new hash, already stable for one poll.
+  cp "$redraw" "$capture_file"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE="$verdict"
+  pid=$!
+  if wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    [ ! -s "$state/.wake-queue" ] || fail "$name: a redraw with no printed wake still queued one"
+    rc=1
+  else
+    grep -F "stale: $window" "$out" >/dev/null || fail "$name: the redraw exited without a stale wake: $(cat "$out")"
+    rc=0
+  fi
+  FINISHED_PARKED_CASE_STATE=$state
+  return "$rc"
+}
+
+test_finished_parked_redraw_absorbed() {
+  local redraw state
+  redraw="$TMP_ROOT/finished-parked-redraw.txt"
+  printf 'finished, sitting at the prompt (redrawn)' > "$redraw"
+  if finished_parked_redraw_alarms finished-parked-ready 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw"; then
+    fail "a finished-and-parked lane alarmed again on a redraw of the same ready report"
+  fi
+  state=$FINISHED_PARKED_CASE_STATE
+  grep -F "absorbed stale (finished and parked: crew state done from status-log" "$state/.watch-triage.log" >/dev/null \
+    || fail "the absorbed redraw left no finished-and-parked log line: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  if finished_parked_redraw_alarms finished-parked-green 'done: PR https://example.test/pr/9 checks green' \
+    'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' "$redraw"; then
+    fail "a finished-and-parked lane with green checks alarmed again on a redraw"
+  fi
+  pass "a finished-and-parked lane alarms once per record, then a redraw is absorbed with a visible log line"
+}
+
+test_finished_parked_wedges_still_alarm() {
+  local redraw picker
+  redraw="$TMP_ROOT/finished-parked-wedge-redraw.txt"
+  printf 'quiet pane (redrawn)' > "$redraw"
+  # The worker reported done, was then sent to validate, and has gone silent
+  # on its own failed run: a pipeline failure is still the worker's to answer.
+  finished_parked_redraw_alarms wedge-failed-run 'done: implementation complete, ready to validate' \
+    'state: failed · source: run-step · run failed' "$redraw" \
+    || fail "a worker silent on its own failed run stopped alarming on a redraw"
+  # A run parked at a gate the worker owes an answer to is a stopped worker,
+  # not a finished one.
+  finished_parked_redraw_alarms wedge-parked-gate 'done: implementation complete, ready to validate' \
+    'state: parked · source: run-step · parked at review: 2 finding(s)' "$redraw" \
+    || fail "a worker silent at its own parked gate stopped alarming on a redraw"
+  # A ready report the supervisor refused leaves the lane with work to do.
+  finished_parked_redraw_alarms wedge-refused-ready 'done: ready in branch fm/parked' \
+    'state: blocked · source: status-log · local-only done head differs from the recorded head' "$redraw" \
+    || fail "a lane whose ready report was refused stopped alarming on a redraw"
+  # A background job still running behind the prompt is not parked.
+  picker="$TMP_ROOT/finished-parked-picker.txt"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$picker"
+  finished_parked_redraw_alarms wedge-background-job 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$picker" \
+    || fail "a done lane with a background job still running stopped alarming on a redraw"
+  # A decision the worker is waiting on is not a terminal verdict.
+  finished_parked_redraw_alarms wedge-needs-decision 'needs-decision: pick option A or B' \
+    'state: done · source: run-step · checks green: PR ready for review' "$redraw" \
+    || fail "a lane whose last record is an open decision stopped alarming on a redraw"
+  pass "finished-and-parked exemption leaves failed runs, parked gates, refused reports, background jobs, and open decisions alarming"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -5511,6 +5617,8 @@ fm_test_run \
   test_unreadable_status_reports_once_per_file_state \
   test_permission_recovery_surfaces_preserved_status \
   test_terminal_stale_surfaced \
+  test_finished_parked_redraw_absorbed \
+  test_finished_parked_wedges_still_alarm \
   test_stale_terminal_status_overridden_by_active_run \
   test_nonterminal_stale_provably_working_absorbed_then_escalated \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
