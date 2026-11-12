@@ -875,6 +875,8 @@ test_wedge_threshold_defers_to_an_executing_validation_run() {
     || fail "the validating recheck did not name its run: $(cat "$out")"
   grep -F 'rechecked on a long cadence not a wedge; confirm the run is still progressing' "$out" >/dev/null \
     || fail "the validating recheck lost its action: $(cat "$out")"
+  grep -F 'confirm the run is still progressing) task=wedge' "$out" >/dev/null \
+    || fail "the validating recheck does not name the task id: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null \
     && fail "the validating recheck was worded as a possible wedge: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the validating recheck"
