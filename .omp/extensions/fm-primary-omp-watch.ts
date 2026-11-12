@@ -11,9 +11,12 @@
 //     still tracked at before_agent_start / message_start exactly as on Pi.
 //   - omp reports no session_shutdown reason, so EVERY shutdown with a pending
 //     actionable close persists the replacement handoff and the next owning
-//     session_start, in this process or a later one, replays it. Replaying a
-//     wake main has already drained is harmless (the queue is durable and the
-//     drain is idempotent); losing one across /new is not.
+//     session_start, in this process or a later one, replays it unless its
+//     captured signal queue rows have already been acknowledged. Each binding
+//     carries the exact queue rows, including their append sequences; only a
+//     complete readable queue with all bound rows absent retires that close.
+//     Missing, malformed, or unbound evidence retains delivery. Non-signal
+//     closes, including supervision-host outcomes, keep their replay behavior.
 //   - Replacement shutdown retires the established predecessor arm before the
 //     successor arms; unlike Pi, it is not retained until a distinct active
 //     successor generation commits its own arm, so omp keeps the plain
@@ -55,12 +58,12 @@
 // Consumption is tracked only so a replacement can replay a follow-up omp had
 // not consumed. An idle main consumes at before_agent_start; a streaming main
 // consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// event finishes the pending record. A still-unconsumed record rides the
+// replacement handoff, subject to the signal acknowledgement rule above.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
 // injected TypeBox compatibility shim keeps it available for tool parameters.
@@ -98,6 +101,7 @@ type PendingActionableClose = {
   message: string;
   predecessorArmPid: string;
   delivered?: true;
+  signalRows?: string[];
 };
 
 type ReplacementActionableHandoff = {
@@ -320,28 +324,67 @@ function nodeErrorCode(error: unknown): string {
     : "";
 }
 
+// Bind a signal close to its exact durable rows, not its display text or the
+// status file's mtime. A later signal for the same file is a different row.
+// No binding (old handoff, missing/corrupt queue) means delivery is retained.
+function readWakeQueue(): string[] | null {
+  try {
+    const queue = `${state}/.wake-queue`;
+    if (!lstatSync(queue).isFile()) return null;
+    const raw = readFileSync(queue, "utf8");
+    if (raw === "") return [];
+    if (!raw.endsWith("\n")) return null;
+    const rows = raw.slice(0, -1).split("\n");
+    return rows.every((row) => /^[0-9]+\t[0-9]+\t(signal|stale|check|heartbeat)\t[^\t\r\n]*\t[^\t\r\n]*$/.test(row))
+      ? rows : null;
+  } catch {
+    return null;
+  }
+}
+
+function signalRowsForClose(message: string): string[] | undefined {
+  if (!message.startsWith("signal:")) return undefined;
+  const rows = readWakeQueue();
+  if (!rows) return undefined;
+  const keys = new Set(message.slice("signal:".length).trim().split(/\s+/).map((file) => basename(file)));
+  const matching = rows.filter((row) => {
+    const fields = row.split("\t");
+    return fields[2] === "signal" && keys.has(fields[3]);
+  });
+  return matching.length > 0 ? matching : undefined;
+}
+
+function signalAcknowledged(pending: PendingActionableClose): boolean {
+  if (!pending.signalRows) return false;
+  const rows = readWakeQueue();
+  return rows !== null && pending.signalRows.every((row) => !rows.includes(row));
+}
+
 function createPendingActionable(message: string, predecessorArmPid: string): PendingActionableClose {
   return {
     version: 1,
     token: `${process.pid}-${Date.now()}-${++replacementCoordinator.nextTokenId}`,
     message,
     predecessorArmPid,
+    signalRows: signalRowsForClose(message),
   };
 }
 
 function validatePendingActionable(value: unknown): PendingActionableClose {
   if (
     typeof value !== "object" || value === null ||
-    (value as { version?: unknown }).version !== 1 ||
-    typeof (value as { token?: unknown }).token !== "string" ||
-    !/^[0-9]+-[0-9]+-[0-9]+$/.test((value as { token: string }).token) ||
-    typeof (value as { message?: unknown }).message !== "string" ||
-    (!actionableLine((value as { message: string }).message) &&
-      !/^supervision-host:/m.test((value as { message: string }).message)) ||
-    typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
-    !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
-    ((value as { delivered?: unknown }).delivered !== undefined &&
-      (value as { delivered?: unknown }).delivered !== true)
+    !("version" in value) || value.version !== 1 ||
+    !("token" in value) || typeof value.token !== "string" ||
+    !/^[0-9]+-[0-9]+-[0-9]+$/.test(value.token) ||
+    !("message" in value) || typeof value.message !== "string" ||
+    (!actionableLine(value.message) && !/^supervision-host:/m.test(value.message)) ||
+    !("predecessorArmPid" in value) || typeof value.predecessorArmPid !== "string" ||
+    !/^[0-9]*$/.test(value.predecessorArmPid) ||
+    ("signalRows" in value && value.signalRows !== undefined &&
+      (!Array.isArray(value.signalRows) || value.signalRows.length === 0 ||
+        !value.signalRows.every((row) =>
+          typeof row === "string" && /^[0-9]+\t[0-9]+\tsignal\t[^\t\r\n]*\t[^\t\r\n]*$/.test(row)))) ||
+    ("delivered" in value && value.delivered !== undefined && value.delivered !== true)
   ) {
     throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
   }
@@ -661,6 +704,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     // No supervision branch on omp: every actionable wake goes to main.
+    if (message === pending.message && signalAcknowledged(pending)) return true;
     return await sendWake(owner, message, pending);
   }
 
@@ -742,6 +786,10 @@ export default function (pi: ExtensionAPI) {
           (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
         );
         if (!pending) break;
+        if (signalAcknowledged(pending)) {
+          finishPendingActionable(owner, pending);
+          continue;
+        }
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
         if (existingClaim && existingClaim.owner !== owner) {
           const settlement = await existingClaim.settlement;
