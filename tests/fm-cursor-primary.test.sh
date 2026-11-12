@@ -72,7 +72,7 @@ install_scripts() {
   for f in fm-turnend-guard-cursor.sh fm-turnend-guard.sh fm-sessionstart-cursor.sh \
            fm-sessionstart-run.sh fm-sessionstart-nudge.sh fm-arm-pretool-check.sh \
            fm-cd-pretool-check.sh fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
-           fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
+           fm-primary-scope-lib.sh fm-supervision-lib.sh fm-startup-network-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
            fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
@@ -892,6 +892,22 @@ test_default_ceiling_bites_before_the_registered_loop_limit() {
   [ ! -e "$dir/state/arm-ran" ] || fail "the adapter armed past its own default ceiling"
   pass "cursor bounds nest: firstmate's default ceiling stops the loop before Cursor's loop_limit does"
 }
+
+test_startup_receipt_keeps_primary_handling_without_crew() {
+  local dir out status generation=fixture.5378.primary
+  dir=$(make_primary_dir "$TMP_ROOT/startup-handling")
+  mkdir -p "$dir/state/.startup-network-wake-receipts"
+  printf '%s\n' "$generation" > "$dir/state/.startup-network-wake-receipts/$generation"
+  printf '1\t1\tcheck\tstartup-network:%s\tcheck: startup-network: actionable\n' "$generation" > "$dir/state/.wake-queue"
+  write_arm_fixture "$dir" actionable
+  out=$(run_park "$dir"); status=$?
+  [ "$status" -eq 0 ] || fail "startup handling park failed"
+  [ "$(kind_of_followup "$out")" = watcher ] || fail "startup handling lost its Cursor follow-up: $out"
+  [ -s "$dir/state/.wake-queue" ] || fail "handoff consumed startup handling before acknowledgement"
+  pass "primary handoff: receipt preserves startup-only handling until acknowledgement"
+}
+
+test_startup_receipt_keeps_primary_handling_without_crew
 
 test_turnend_guard_stands_down_on_cursor_payload
 test_turnend_guard_still_blocks_for_claude_payload
