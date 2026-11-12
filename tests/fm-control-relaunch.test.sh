@@ -3423,6 +3423,26 @@ test_native_grant_refuses_a_decoded_nul_in_an_identity_field() {
   pass "grant with a decoded NUL in an identity field is refused"
 }
 
+test_native_grant_refuses_a_repeated_key_hidden_in_a_nested_value() {
+  local dir rc=0 grant
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant nested repeated-key test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-nested-repeat"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng13 \
+    "$(printf '{"task":{"x":1},"task":"ng13","pane":"%%7","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" "$(date +%s)")")
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    if fm_native_grant_check "$grant" ng13 claude %7 "$dir/ledger"; then exit 3; fi
+    [ ! -s "$dir/ledger" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a grant repeating a key inside a nested value must be refused (rc=$rc)"
+  pass "grant repeating a key inside a nested value is refused and not spent"
+}
+
 test_native_grant_keeps_the_recorded_account() {
   local dir out rc=0 grant
   grant_case_or_skip grant-acct ng6 || {
@@ -3691,6 +3711,7 @@ test_native_grant_keeps_the_recorded_account
 test_native_grant_refuses_a_home_without_a_readable_backlog
 test_native_grant_recovers_a_held_item_in_a_manual_backlog_home
 test_native_grant_refuses_a_decoded_nul_in_an_identity_field
+test_native_grant_refuses_a_repeated_key_hidden_in_a_nested_value
 test_native_grant_spends_the_bytes_it_checked
 test_native_grant_refuses_nul_padding
 test_native_grant_refuses_a_pane_that_did_not_survive
