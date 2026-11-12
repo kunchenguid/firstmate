@@ -40,8 +40,13 @@ SH
 # which is how a dead pid behaves. FM_TEST_KILL_RC decides kill as before.
 # CLAUDE identity envs are scrubbed the same way the ancestry suite scrubs
 # them, so a suite running inside a real Claude session cannot leak in.
+# The process root is an empty directory so the table stays the only source
+# on every host: on Git Bash the library reads local pids from /proc before
+# ps, and the real /proc would otherwise answer ahead of the table.
 lib_eval_denied() {  # <fakebin> <provider-table-file> <expression>
+  mkdir -p "$TMP_ROOT/no-proc"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" \
     FM_PROVIDER_FILE="$2" PATH="$1:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -529,8 +534,11 @@ SH
   chmod +x "$fakebin/ps"
   marker="$dir/provider-was-called"; : > "$marker"
   table="$dir/t"; : > "$table"
-  # Provider override records any call by writing to the marker file.
-  env FM_MARKER_FILE="$marker" PATH="$fakebin:$PATH" bash -c "
+  # Provider override records any call by writing to the marker file. The
+  # empty process root keeps the fake ps the only source on Git Bash too,
+  # where the library would otherwise read the real /proc first.
+  mkdir -p "$dir/no-proc"
+  env FM_MARKER_FILE="$marker" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     fm_os_proc_triple() { printf 'called\n' > \"\$FM_MARKER_FILE\"; return 1; }
     fm_harness_ancestry_pid >/dev/null || exit 3
