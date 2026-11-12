@@ -54,7 +54,8 @@ It works in this order:
 3. It invokes the underlying tasks-axi hold operation.
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
-6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
+6. When `--origin` is supplied, it records the origin on the task only after the backend hold succeeds.
+   A new lifecycle replaces any previous association, while an active call keeps its other origins; adding a new origin to an active call skips steps 2 to 5 (see the shared-call case below).
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
