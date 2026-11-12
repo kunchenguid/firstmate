@@ -885,6 +885,18 @@ task_identity() {
   printf '%s' "$id"
 }
 
+# Whether the body already records <origin-id>, comparing backend identities so
+# a stored legacy alias counts as the same origin. Exits on a lookup failure.
+body_records_origin() {  # <decoded-task-body> <origin-id>
+  local stored_origin stored_id
+  while IFS= read -r stored_origin; do
+    [ -n "$stored_origin" ] || continue
+    stored_id=$(task_identity "$stored_origin") || exit $?
+    [ "$stored_id" != "$2" ] || return 0
+  done <<< "$(body_hold_origins "$1")"
+  return 1
+}
+
 # With <keep-existing>=1 (the same open call) the origin is added to those
 # this call already recorded; a new lifecycle is a new call, so they are
 # replaced.
@@ -897,6 +909,7 @@ write_hold_origin() {  # <task-id> <shown-body> <origin> <keep-existing>
     || fail "task $id lost its hold-set stamp before its origin was recorded"
   if [ "$keep" = 1 ]; then
     origins=$(body_hold_origins "$body")
+    ! body_records_origin "$body" "$origin" || origin=''
   fi
   origins=$(printf '%s\n%s\n' "$origins" "$origin" | awk 'NF && !seen[$0]++')
   rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
@@ -1215,7 +1228,7 @@ command_hold() {
     decoded_body=$(decode_shown_value "$(show_field "$show" body)") \
       || fail "could not decode the existing body for $id"
     if [ -n "$(body_hold_set_timestamp "$decoded_body")" ] \
-      && ! grep -Fqx -- "$origin" <<< "$(body_hold_origins "$decoded_body")"; then
+      && ! body_records_origin "$decoded_body" "$origin"; then
       write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 1 || exit $?
       printf '%s\n' "$id"
       return 0

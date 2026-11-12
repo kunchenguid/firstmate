@@ -72,7 +72,7 @@ Repeat and edge cases:
 - One call found by several investigations or reviews stays one held task.
   While the call is open, `hold --origin` with an origin the call does not record yet only adds that origin beside the ones the call records, and skips steps 2 to 5.
   The recorded reason, `--until` date, hold-set timestamp, and parent decision stay unchanged; the new `--reason` and `--until` are ignored.
-  With an origin the call already records, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
+  With an origin the call already records, compared by backend identity so a stored alias spelling counts, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
   An open call that has no hold-set timestamp yet also takes the normal re-hold, which records the timestamp.
   Only an open call takes a further origin this way: a closed call is refused, and re-holding a released call starts a new lifecycle.
   The call's origins are every `Captain hold origin:` line in its body, including those below a resolution record that an interrupted `answer` left.

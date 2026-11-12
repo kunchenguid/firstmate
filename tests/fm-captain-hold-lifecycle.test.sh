@@ -5108,6 +5108,44 @@ SH
   pass "completion and verification compare backend identities for entries and current or stored origins"
 }
 
+# An open call that stores a legacy alias of its origin, re-held with the
+# canonical spelling, is a same-origin re-hold: it must update the reason and
+# date through the normal path, not be taken for a new origin and skipped.
+test_same_origin_rehold_compares_backend_identities() {
+  local home shown
+  home=$(make_home alias-rehold)
+  tasks_in "$home" add fm-o "Origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the canonical origin"
+  write_origin_meta "$home" fm-o
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -ge 2 ]; then
+  case "$2" in
+    o|call) set -- "$1" "fm-$2" "${@:3}" ;;
+  esac
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  run_captain "$home" hold fm-call --title "Shared call" --reason "First wording" --origin fm-o >/dev/null \
+    || fail "could not hold the call for the origin"
+  shown=$(tasks_in "$home" show fm-call --full)
+  printf '%s\n' "$shown" | sed -n 's/^  body: //p' | jq -r . \
+    | sed 's/^Captain hold origin: fm-o$/Captain hold origin: o/' > "$home/legacy-origin.txt"
+  tasks_in "$home" update fm-call --body-file "$home/legacy-origin.txt" >/dev/null \
+    || fail "could not store the legacy origin alias"
+  run_captain "$home" hold fm-call --reason "Second wording" --until 2099-01-01 --origin fm-o >/dev/null \
+    || fail "the same-origin re-hold with the canonical spelling failed"
+  shown=$(tasks_in "$home" show fm-call --full)
+  assert_contains "$shown" 'hold_until: 2099-01-01' \
+    "the same-origin re-hold through an alias was taken for a new origin and left the date unchanged"
+  assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: ' | wc -l | tr -d ' ')" \
+    "the same-origin re-hold through an alias recorded the origin twice"
+  run_captain "$home" complete fm-o fm-call >/dev/null \
+    || fail "the origin could not complete against its re-held call"
+  pass "a same-origin re-hold through a legacy alias updates the call instead of adding the origin again"
+}
+
 # tasks-axi refuses parentheses and line breaks in a hold reason and stores the
 # rest on one markdown line. The reason is encoded where it is written and
 # decoded wherever it is shown, so prose with every awkward character survives.
@@ -5402,6 +5440,7 @@ test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
 test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
+test_same_origin_rehold_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
 test_one_active_hold_serves_several_origins
