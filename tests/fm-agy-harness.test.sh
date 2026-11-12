@@ -292,6 +292,12 @@ test_agy_tmux_names_the_native_binary_an_agent() {
   [ "$got" = agent ] || fail "the agy CLI started as antigravity must read as an agent, got '$got'"
   got=$(fm_agent_process_classify_name exe /home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity)
   [ "$got" = agent ] || fail "agy's sandbox init must read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name '' /home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity)
+  [ "$got" = agent ] || fail "an argv[0]-only agy CLI path must read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name '' /usr/share/antigravity/antigravity)
+  [ "$got" = other ] || fail "an argv[0]-only Antigravity IDE path must not read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name '' /usr/bin/antigravity)
+  [ "$got" = other ] || fail "an argv[0]-only /usr/bin/antigravity must not read as an agent, got '$got'"
   got=$(fm_agent_process_classify_name antigravity /usr/share/antigravity/antigravity)
   [ "$got" = other ] || fail "the Antigravity IDE at /usr/share/antigravity must not read as an agent, got '$got'"
   got=$(fm_agent_process_classify_name antigravity /usr/bin/antigravity)

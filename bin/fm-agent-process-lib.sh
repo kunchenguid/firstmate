@@ -71,7 +71,7 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
         printf 'agent'
-      elif fm_agy_process_matches "$path" "$argv0"; then
+      elif fm_agy_process_matches "${path:-$argv0}" "$argv0"; then
         printf 'agent'
       # cursor-agent runs as a bundled node script, so tmux reports the pane
       # command as a bare `node` that no name pattern above can own, and its
