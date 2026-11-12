@@ -54,7 +54,8 @@ It works in this order:
 3. It invokes the underlying tasks-axi hold operation.
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
-6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
+6. When `--origin` is supplied, it records the origin on the task only after the backend hold succeeds.
+   On a still-active captain hold the origin is added beside the ones that call already records; on a new lifecycle it replaces any previous association.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -65,7 +66,9 @@ Repeat and edge cases:
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
-  The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
+  Each association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
+- One call found by several investigations or reviews stays one held task.
+  Re-running `hold --origin` for each further origin while the hold is active adds that origin idempotently, keeps the hold-set timestamp, and publishes no second parent decision.
   The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
@@ -128,7 +131,7 @@ A Done task still requires a recorded resolution, but is not subject to that sta
 An answered entry that markdown Done retention moved into the configured Done archive still counts, while an archived close with no recorded answer does not.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
-An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings.
+An entry whose recorded origins do not include the one being completed is refused, comparing backend identities rather than alias spellings.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.

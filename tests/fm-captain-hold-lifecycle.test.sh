@@ -4411,6 +4411,59 @@ test_complete_refuses_an_entry_held_for_another_origin() {
   pass "complete refuses an entry held for another origin and flags one with none recorded"
 }
 
+# One captain call can be found by two reviews of the same work. Holding the
+# already-held task again with the second origin adds that origin to the same
+# call, so both reviews complete and verify against one decision, while an
+# origin never added is still refused.
+test_one_active_hold_serves_several_origins() {
+  local home o id=sample-shared-call shown stamp
+  home=$(make_home shared-origin)
+  for o in review-a review-b review-c; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold "$id" --title "Publish the shared change" \
+    --reason "captain must decide" --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the call for the first review"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the first review could not complete against its call"
+  stamp=$(tasks_in "$home" show "$id" --full | grep -o 'Captain hold set: [0-9TZ:-]*')
+  [ -n "$stamp" ] || fail "the shared call has no hold-set stamp"
+
+  run_captain "$home" hold "$id" --reason "captain must decide" --origin review-b >/dev/null \
+    || fail "could not add the second review to the active call"
+  run_captain "$home" hold "$id" --reason "captain must decide" --origin review-b >/dev/null \
+    || fail "repeating the added origin was not idempotent"
+  run_captain "$home" complete review-b "$id" >/dev/null \
+    || fail "the second review could not complete against the shared call"
+  run_captain "$home" verify review-b >/dev/null || fail "the second review could not verify"
+  run_captain "$home" verify review-a >/dev/null \
+    || fail "adding the second review invalidated the first review"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: review-a' | wc -l | tr -d ' ')" \
+    "the shared call did not keep exactly one first-review origin"
+  assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: review-b' | wc -l | tr -d ' ')" \
+    "the repeated hold duplicated the second-review origin"
+  assert_contains "$shown" "$stamp" "adding an origin restarted the call's lifecycle"
+
+  if run_captain "$home" complete review-c "$id" > "$home/other.out" 2> "$home/other.err"; then
+    fail "complete accepted the shared call for an origin never added"
+  fi
+  assert_grep "was held for origins review-a, review-b, not review-c" "$home/other.err" \
+    "the refusal does not name every recorded origin"
+
+  printf 'Publish it.\n' > "$home/shared-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/shared-answer.txt" >/dev/null \
+    || fail "could not answer the shared call"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null || fail "the answered shared call no longer verifies $o"
+  done
+  pass "one active captain hold serves several origins without duplicating the call"
+}
+
 test_hold_origins_follow_backend_holds() {
   local home phase timing failure id shown origin out parent channel occurrence until_args=() until_field
   for phase in new active released; do
@@ -4557,14 +4610,21 @@ SH
       shown=$(tasks_in "$home" show "$id" --full)
       assert_contains "$shown" 'held: yes' "the successful retry did not hold the task"
       assert_contains "$shown" 'Captain hold origin: origin-b' "a successful hold lost its association"
-      assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
       assert_equals 1 "$(grep -Fc "needs-decision [key=captain-hold-$id-$occurrence]" "$channel")" \
         "retrying the origin write duplicated the parent decision"
       run_captain "$home" complete origin-b "$id" >/dev/null \
         || fail "a successful hold could not complete B"
       run_captain "$home" verify origin-b >/dev/null || fail "a successful hold could not verify B"
-      if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
-        fail "a successful reassociation still certified A"
+      # The same active call keeps A beside B; a new lifecycle replaces A.
+      if [ "$phase" = active ]; then
+        assert_contains "$shown" 'Captain hold origin: origin-a' "adding B to the active call dropped A"
+        run_captain "$home" complete origin-a "$id" >/dev/null \
+          || fail "adding B to the active call stopped certifying A"
+      else
+        assert_not_contains "$shown" 'Captain hold origin: origin-a' "a new lifecycle retained the old association"
+        if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
+          fail "$phase $timing reassociation still certified A"
+        fi
       fi
     done
   done
@@ -5123,6 +5183,7 @@ test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
+test_one_active_hold_serves_several_origins
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
