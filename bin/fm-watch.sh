@@ -158,8 +158,21 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#   heartbeat              backlog readiness read ready or unknown through
+#                          bin/fm-ready-queue-lib.sh, or the fleet-scan backstop
+#                          found an unsurfaced captain-relevant status; a present
+#                          state/.afk emits every heartbeat. Readiness is checked
+#                          before the posture split, so ready queued work is
+#                          actionable in every posture and resets the idle
+#                          interval instead of waiting out backoff, while an away
+#                          heartbeat over a proven-empty queue stays plain for the
+#                          daemon's own triage and keeps the interval doubling. The
+#                          backlog consumer owns readiness; supervision rechecks
+#                          current stops and worker capacity. Otherwise the
+#                          heartbeat is absorbed: the schedule advances and the
+#                          interval doubles per consecutive absorbed pass, up to
+#                          FM_HEARTBEAT_MAX, and any surfaced non-heartbeat wake or
+#                          actionable heartbeat resets it.
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -3548,6 +3561,9 @@ EOF
   return "$rc"
 }
 
+# shellcheck source=bin/fm-ready-queue-lib.sh
+. "$SCRIPT_DIR/fm-ready-queue-lib.sh"
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any status log carries a captain-relevant event past the position already
 # surfaced to firstmate (.hb-surfaced-<task>). It walks every log rather than only
@@ -4790,12 +4806,15 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
-    # no-change case (advance the schedule and back off exactly as wake() would,
-    # without exiting); the away-mode daemon, when present, owns triage and wants
-    # every heartbeat.
-    if afk_present; then
+    # Triage: ready or unknown queue readiness resets idle backoff in every
+    # posture. Away-mode heartbeats with a proven-empty queue retain idle
+    # accounting; the daemon owns their triage and wants every heartbeat.
+    # Otherwise surface missed captain-relevant statuses or absorb no change.
+    if fm_ready_queue_needs_review; then
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat" actionable
+    elif afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
