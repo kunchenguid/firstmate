@@ -13,6 +13,13 @@
 # POSIX. Line 1 keeps its whole-line pid format because every other reader
 # takes the first line as the pid.
 #
+# Acquisition serializes through state/.lock.acquire. Both claim paths use
+# fm-wake-lib.sh's stale real-directory recovery for that lock and its .steal
+# mutex, and opt into fm_lock_acquire_wait's --refuse-unreapable mode. When
+# recovery reports an unremovable stale directory, acquisition exits 1 naming
+# the path to inspect for contents or permission problems. Live contention has no new
+# deadline. tests/fm-watcher-lock.test.sh covers recovery and refusal.
+#
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
 # confirmed-own acquisition, including the early already-mine exit that waits

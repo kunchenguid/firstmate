@@ -1643,10 +1643,9 @@ fm_lock_parent_gone() {  # <lockdir>
   [ ! -d "$parent" ]
 }
 
-# Wait for a lock. The 0.1s retry serves live contention on short critical
-# sections, where a wider interval would delay every handoff between the
-# watcher and its writers. The wait is unbounded only while the lock can still
-# be taken: it returns 1 within 0.2s of its parent directory's removal
+# Wait for a lock without a contention deadline. The 0.1s retry serves short
+# critical sections, where a wider interval would delay every handoff between
+# the watcher and its writers. It returns 1 within 0.2s of its parent's removal
 # (fm_lock_parent_gone) instead of polling for a lock that can never exist.
 # Callers that handle failure may opt into --refuse-unreapable to refuse a
 # stale real directory that cannot be removed, naming its exact path. The
