@@ -424,17 +424,19 @@ A candidate must meet all of these conditions:
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane.
 
-Firstmate then cleans up the candidate in this order:
+Firstmate then cleans up the candidates in this order:
 
-1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
-2. Inside both locks, take one exact snapshot.
-3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
-4. Positively confirm no registered agent.
-5. Read Herdr's process information for the exact named-session pane and apply the process proof below.
-6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
-7. Call the existing exact-pane focus-preserving close helper.
+1. Attempt each home-local journal's existing task-id spawn lock, and then acquire the shared named-session presentation lock once for the whole pass.
+   A busy task id is preserved.
+2. Inside those locks, parse every valid journal once into an exact-title index and correlate that index with one workspace listing.
+3. For each uniquely correlated candidate, take one exact snapshot.
+4. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
+5. Positively confirm no registered agent.
+6. Read Herdr's process information for the exact named-session pane and apply the process proof below.
+7. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
+8. Call the existing exact-pane focus-preserving close helper.
    It closes only that pane, never a workspace.
-8. Retire the matching journal only after the exact pane is positively confirmed gone.
+9. Retire the matching journal only after the exact pane is positively confirmed gone.
 
 The process proof requires all of these:
 
@@ -493,7 +495,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
-| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
+| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary, plus a bounded 100-workspace and 50-journal scale case. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |

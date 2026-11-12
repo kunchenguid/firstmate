@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Focused safety tests for bin/fm-herdr-session-cleanup.sh.
 # Covers one exact cleanup, every title/journal/topology/agent/process refusal,
-# locked revalidation races, focus refusal, read errors, and repeat idempotence.
+# locked revalidation races, focus refusal, read errors, repeat idempotence,
+# and bounded cleanup with roughly fleet-scale workspace and journal counts.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -71,6 +72,14 @@ fm_backend_herdr_session() { printf test; }
 fm_backend_herdr_presentation_session_lock_path() { printf '%s/presentation.lock' "$TMP_ROOT"; }
 fm_lock_try_acquire() {
   printf '%s\n' "$1" >> "$LOCK_LOG"
+  if [ -e "$FIXTURE_DIR/task-lock-busy" ] \
+    && [ "$1" = "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ]; then
+    return 1
+  fi
+  if [ -e "$FIXTURE_DIR/presentation-lock-busy" ] \
+    && [ "$1" = "$TMP_ROOT/presentation.lock" ]; then
+    return 1
+  fi
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
@@ -170,6 +179,9 @@ fm_backend_herdr_cli() {
       ;;
     "api snapshot")
       : > "$FIXTURE_DIR/snapshotted"
+      if [ -e "$FIXTURE_DIR/journal-race" ]; then
+        write_v1 "$ID" ZbCdEfGhIjKlMnOpQrStUv
+      fi
       printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
       fixture_workspaces
       printf ',"tabs":'; fixture_tabs
@@ -269,6 +281,10 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; : > "$FIXTURE_DIR/task-lock-busy"; assert_preserved "busy task lock"
+reset_fixture; : > "$FIXTURE_DIR/presentation-lock-busy"; assert_preserved "busy presentation lock"
+[ ! -d "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] \
+  || fail "presentation lock refusal retained the task lock"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
@@ -278,9 +294,78 @@ reset_fixture; : > "$FIXTURE_DIR/process-unsafe"; assert_preserved "non-idle she
 reset_fixture; : > "$FIXTURE_DIR/process-unsafe"; assert_preserved "child process or shell job"
 reset_fixture; : > "$FIXTURE_DIR/error-api-snapshot"; assert_preserved "unreadable snapshot"
 reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreadable topology check"
-reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
+reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "workspace revalidation race"
+reset_fixture; : > "$FIXTURE_DIR/journal-race"; assert_preserved "journal revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+# The operator-visible failure was multiplicative: every projected workspace
+# reparsed every home journal before it could discover current metadata. Drive
+# the executable's public surface with the same approximate cardinality under a
+# hard bound, while preserving every metadata-backed journal.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+SCALE_DIR="$TMP_ROOT/scale"
+SCALE_HOME="$SCALE_DIR/home"
+SCALE_FAKEBIN="$SCALE_DIR/fakebin"
+SCALE_WORKSPACES="$SCALE_DIR/workspaces.json"
+SCALE_OUT="$SCALE_DIR/cleanup.out"
+mkdir -p "$SCALE_HOME/state" "$SCALE_HOME/config" "$SCALE_FAKEBIN"
+printf '%s\n' herdr > "$SCALE_HOME/config/backend"
+printf '{"result":{"workspaces":[' > "$SCALE_WORKSPACES"
+i=1
+while [ "$i" -le 100 ]; do
+  [ "$i" -eq 1 ] || printf ',' >> "$SCALE_WORKSPACES"
+  if [ "$i" -le 50 ]; then
+    scale_id=$(printf 'scale-%03d' "$i")
+    scale_token=$(printf 'ScaleToken%012d' "$i")
+    scale_title=$(fm_backend_herdr_projection_workspace_label "$scale_id" "$scale_token")
+    {
+      printf 'version=1\n'
+      printf 'task_id=%s\n' "$scale_id"
+      printf 'projection_id=%s\n' "$scale_token"
+    } > "$SCALE_HOME/state/$scale_id.herdr-presentation"
+    : > "$SCALE_HOME/state/$scale_id.meta"
+  else
+    scale_token=$(printf 'OtherToken%012d' "$i")
+    scale_title="└ unrelated-$i · p:$scale_token"
+  fi
+  printf '{"workspace_id":"scale-w%s","label":"%s"}' "$i" "$scale_title" >> "$SCALE_WORKSPACES"
+  i=$((i + 1))
+done
+printf ']}}\n' >> "$SCALE_WORKSPACES"
+cat > "$SCALE_FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "session list")
+    printf '{"sessions":[{"name":"scale","running":true,"socket_path":"%s"}]}\n' "$FM_HERDR_SCALE_SOCKET"
+    ;;
+  "workspace list")
+    cat "$FM_HERDR_SCALE_WORKSPACES"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$SCALE_FAKEBIN/herdr"
+SCALE_SOCKET="$SCALE_DIR/fake.sock"
+SCALE_HASH=$(printf '%s\0%s' scale "$SCALE_SOCKET" | shasum -a 256 | awk '{print $1}')
+SCALE_LOCK="/tmp/firstmate-herdr-presentation-$(id -u)/order-${SCALE_HASH:0:32}.lock"
+scale_status=0
+scale_started=$SECONDS
+FM_HERDR_SCALE_SOCKET="$SCALE_SOCKET" \
+FM_HERDR_SCALE_WORKSPACES="$SCALE_WORKSPACES" \
+FM_HOME="$SCALE_HOME" FM_STATE_OVERRIDE="$SCALE_HOME/state" \
+FM_CONFIG_OVERRIDE="$SCALE_HOME/config" HERDR_SESSION=scale \
+PATH="$SCALE_FAKEBIN:$PATH" \
+  fm_run_timed 20 "$ROOT/bin/fm-herdr-session-cleanup.sh" > "$SCALE_OUT" 2>&1 \
+  || scale_status=$?
+scale_elapsed=$((SECONDS - scale_started))
+rm -rf -- "$SCALE_LOCK"
+[ "$scale_status" -eq 0 ] \
+  || fail "100-workspace/50-journal cleanup exceeded its 20s bound or failed (status=$scale_status elapsed=${scale_elapsed}s): $(cat "$SCALE_OUT")"
+[ "$(find "$SCALE_HOME/state" -name '*.herdr-presentation' -type f | wc -l | tr -d ' ')" = 50 ] \
+  || fail "scale cleanup retired a metadata-backed journal"
+pass "100 projected workspaces and 50 home journals complete in ${scale_elapsed}s within the 20s bound while metadata-backed work is preserved"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
