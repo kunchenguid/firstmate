@@ -278,15 +278,17 @@ jobs:
   # expose new runner-image regressions without blocking their merge.
   # Job-level continue-on-error only keeps the workflow run green: the job's
   # own check would still be red, and bin/fm-pr-merge.sh refuses any red
-  # check. So every step tolerates its own failure and the last step reports
+  # check. So every run step tolerates its own failure and the last step reports
   # the real result in the job summary and a warning annotation.
   tests-ubuntu-26-canary:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Ubuntu 26.04 canary
     runs-on: ubuntu-26.04
     continue-on-error: true
     if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
-    # Heavy tier: these serial suites span several normal-tier shards.
-    timeout-minutes: 75
+    # Canary exception to the tiers: above ten suites at their 1500-second
+    # bound, so a hung suite fails inside its step and is reported, where a
+    # job timeout would cancel the job and publish a check that is not green.
+    timeout-minutes: 270
     steps:
       - uses: actions/checkout@v6
       - name: Print coreutils versions

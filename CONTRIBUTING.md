@@ -34,7 +34,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 CI on a pull request from an author without write access runs only the quick checks and the `Ubuntu 26.04 canary` at first.
 The quick checks are `Test coverage guard`, `Repo invariants`, and the no-mistakes body check.
-The canary runs ten suites on the Ubuntu 26.04 runner image for up to 75 minutes and never blocks a merge.
+The canary runs ten suites on the Ubuntu 26.04 runner image, each bounded at 1500 seconds, and a failing or hung suite does not block a merge.
 Its check stays green when a suite fails, and its job summary and a warning annotation report the failure.
 Lint and the behavior suites wait for a maintainer, or the maintainer's fleet, to add the `full-ci` label when the pull request is picked up for review.
 Until then the `Full suite` check fails with a message naming the label; that is expected and needs no action from you.

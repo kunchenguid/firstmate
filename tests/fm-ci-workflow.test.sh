@@ -332,7 +332,9 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # one-off number the policy removed.
 FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate full-suite'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
-HEAVY_TIER_JOBS='tests-herdr tests-hc tests-ubuntu-26-canary'
+HEAVY_TIER_JOBS='tests-herdr tests-hc'
+# The one job outside the tiers: its timeout must exceed its suites' summed bounds.
+CANARY_JOB='tests-ubuntu-26-canary'
 
 # Print the one timeout every listed job shares; fail on any disagreement.
 tier_timeout() {  # <tier> <job>...
@@ -551,21 +553,23 @@ end
   pass "every ci.yml job carries a finite timeout"
 }
 
-# Every job sits in exactly one tier, and the workflow carries exactly three
-# distinct job-level timeouts: one per tier, no one-off numbers.
+# Every job sits in exactly one tier or is the canary exception, and the tiers
+# carry exactly three distinct job-level timeouts: one per tier, no one-off
+# numbers.
 test_every_job_belongs_to_exactly_one_timeout_tier() {
   local expected actual distinct
   # shellcheck disable=SC2086
-  expected=$(printf '%s\n' $FAST_TIER_JOBS $NORMAL_TIER_JOBS $HEAVY_TIER_JOBS | LC_ALL=C sort)
+  expected=$(printf '%s\n' $FAST_TIER_JOBS $NORMAL_TIER_JOBS $HEAVY_TIER_JOBS $CANARY_JOB | LC_ALL=C sort)
   [ "$(printf '%s\n' "$expected" | LC_ALL=C sort -u)" = "$expected" ] \
     || fail "a job is listed in more than one timeout tier:"$'\n'"$expected"
   actual=$(workflow_jobs | LC_ALL=C sort) || fail "could not list ci.yml jobs"
   [ "$actual" = "$expected" ] \
     || fail "ci.yml jobs and the timeout tiers disagree; every job must join one tier"$'\n'"workflow: $(printf '%s' "$actual" | tr '\n' ' ')"$'\n'"tiers: $(printf '%s' "$expected" | tr '\n' ' ')"
-  distinct=$(for job in $expected; do job_timeout "$job"; done | LC_ALL=C sort -u | wc -l | tr -d ' ')
+  # shellcheck disable=SC2086
+  distinct=$(for job in $FAST_TIER_JOBS $NORMAL_TIER_JOBS $HEAVY_TIER_JOBS; do job_timeout "$job"; done | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$distinct" = 3 ] \
     || fail "ci.yml must carry exactly three distinct job timeouts (fast, normal, heavy), got $distinct"
-  pass "every ci.yml job belongs to one of the three timeout tiers"
+  pass "every ci.yml job belongs to one of the three timeout tiers or is the canary exception"
 }
 
 # Fast tier: seconds-long checks share one short tripwire in the 5-10 minute band.
@@ -593,9 +597,9 @@ test_normal_tier_shares_one_budget() {
   pass "normal tier jobs share one $normal minute budget"
 }
 
-# Heavy tier: the real backend lanes and multi-suite canary carry a backstop
-# above the normal tier. Backend family-run steps have a tighter tripwire so
-# their always() cleanup and timing upload still run after a hang.
+# Heavy tier: the real backend lanes carry a job-level last-resort backstop
+# above the normal tier, while each family-run step owns a tighter tripwire so
+# the always() cleanup and timing upload still run after a hang.
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
   local normal heavy step
   # shellcheck disable=SC2086
@@ -606,7 +610,7 @@ test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
     || fail "heavy tier backstop ($heavy) must exceed the normal tier ($normal)"
   [ "$heavy" -ge 60 ] && [ "$heavy" -le 75 ] \
     || fail "heavy tier backstop must stay a 60-75 minute last resort, got $heavy"
-  # Each real backend lane's family-run step owns the same 20-minute tripwire shape:
+  # Each heavy lane's family-run step owns the same 20-minute tripwire shape:
   # its own timeout, an always() cleanup step that must come after it, and a
   # bound below the shared job backstop.
   while read -r lane run_step cleanup_step; do
@@ -826,8 +830,30 @@ test_failing_canary_publishes_a_green_check_and_reports_the_failure() {
   pass "a failing Ubuntu 26.04 canary publishes a green check, a per-suite summary and a warning"
 }
 
+# GitHub cancels a job that reaches its timeout, which no step-level
+# continue-on-error absorbs: the check is then not green and the report step
+# never runs. So the job timeout must exceed every suite hanging to the
+# per-suite bound the runner is actually given. The suite count is issue 7797's.
+test_canary_job_timeout_exceeds_its_suites_summed_bounds() {
+  local root bound suites job
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"%s/args"\n' "$root" >"$root/repo/bin/fm-test-run.sh"
+  run_canary_job "$root" >/dev/null || fail "could not run the canary steps"
+  bound=$(grep -A1 -x -- '--per-script-timeout-secs' "$root/args" | tail -n 1)
+  case "$bound" in ''|*[!0-9]*) fail "the canary must bound each suite, got: $bound" ;; esac
+  suites=$(grep -c '^tests/.*\.test\.sh$' "$root/args")
+  # shellcheck disable=SC2086
+  [ "$suites" = "$(printf '%s\n' $CANARY_SUITES | wc -l | tr -d ' ')" ] \
+    || fail "the canary must run the ten issue-listed suites, ran $suites"
+  job=$(job_timeout "$CANARY_JOB") || fail "could not read the canary job timeout"
+  [ "$bound" -gt 0 ] && [ $((job * 60)) -gt $((suites * bound)) ] \
+    || fail "the canary job timeout (${job}m) must exceed $suites suites at ${bound}s each"
+  pass "the canary job timeout (${job}m) exceeds $suites suites at ${bound}s each"
+}
+
 test_ubuntu_canary_failure_is_non_blocking
 test_failing_canary_publishes_a_green_check_and_reports_the_failure
+test_canary_job_timeout_exceeds_its_suites_summed_bounds
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
