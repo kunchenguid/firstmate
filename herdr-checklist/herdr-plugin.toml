@@ -1,0 +1,23 @@
+id = "herdr-checklist"
+name = "Checklist"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "An at-a-glance checklist pane: act-now / in-flight / waiting / recently-done, kept in one markdown file."
+platforms = ["linux", "macos"]
+
+# Scaffold a new checklist file (from the format in checklist-template.md) and
+# print how to open its pane. Owner name comes from $HERDR_CHECKLIST_OWNER.
+[[actions]]
+id = "new"
+title = "New checklist"
+contexts = ["workspace"]
+command = ["bash", "herdr-checklist.sh", "new"]
+
+# The checklist pane: watches the checklist file and re-renders on every change.
+# A split pane so it stays visible beside your work; the open request can
+# override this placement (overlay, popup, split, tab, or zoomed).
+[[panes]]
+id = "checklist"
+title = "Checklist"
+placement = "split"
+command = ["bash", "herdr-checklist.sh", "view"]
