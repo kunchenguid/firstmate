@@ -43,6 +43,8 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   A fresh spawn on a home whose backlog tracks the task also REFUSES a project
+#   directory whose name differs from the item's recorded `repo`, naming both.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
 #   in the brief, and is refused on scouts, secondmates, and relaunches. When the
@@ -4931,7 +4933,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   if fm_backlog_row_probe "$DATA" "$ID"; then
     BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
   elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (bin/fm-tasks-axi.sh add $ID '<title>' --kind $KIND) and re-run" >&2
+    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (bin/fm-tasks-axi.sh add $ID '<title>' --kind $KIND --repo $(printf '%q' "$(basename "$PROJ_ABS")")) and re-run" >&2
     exit 1
   else
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
@@ -4946,6 +4948,15 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
+  fi
+  # The item's recorded repo must be the project this spawn targets, so an
+  # isolated worktree of the wrong repository cannot pass the isolation checks.
+  if [ "$RELAUNCH" -eq 0 ]; then
+    SPAWN_TARGET_REPO=$(basename "$PROJ_ABS")
+    if [ -n "$FM_BACKLOG_ROW_REPO" ] && [ "$FM_BACKLOG_ROW_REPO" != "$SPAWN_TARGET_REPO" ]; then
+      echo "error: project mismatch for $ID: its backlog item records repo $FM_BACKLOG_ROW_REPO but the spawn targets project $SPAWN_TARGET_REPO ($PROJ_ABS); pass the $FM_BACKLOG_ROW_REPO project directory, or correct the item's repo if the item is wrong" >&2
+      exit 1
+    fi
   fi
 else
   BACKLOG_GATE_STATUS=$?
