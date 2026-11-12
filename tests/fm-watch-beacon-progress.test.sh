@@ -173,12 +173,18 @@ test_progress_refresh_is_throttled_and_inert_outside_a_watcher() {
     set -u
     . "$1"
     beat=$2
+    unset SECONDS
+    SECONDS=100
     FM_WATCH_BEACON_PATH=$beat
     fm_watch_beacon_progress || exit 1
     [ -e "$beat" ] || exit 2
-    first=$_FM_BEACON_TICK_AT
+    touch -t 200001010000 "$beat"
+    before=$(fm_path_mtime "$beat")
     fm_watch_beacon_progress || exit 3
-    [ "$_FM_BEACON_TICK_AT" = "$first" ] || exit 4
+    [ "$(fm_path_mtime "$beat")" = "$before" ] || exit 4
+    SECONDS=101
+    fm_watch_beacon_progress || exit 5
+    [ "$(fm_path_age "$beat")" -le 1 ] || exit 6
     exit 0
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$beat" \
     || fail "progress refresh did not touch the beacon or did not throttle the repeat"
@@ -201,6 +207,41 @@ test_progress_refresh_is_throttled_and_inert_outside_a_watcher() {
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$beat" \
     || fail "progress refresh was not inert outside a watcher"
   pass "progress refresh is inert outside a watcher, so no library invents liveness"
+}
+
+test_crew_classification_refreshes_progress() {
+  local dir home
+  dir=$(make_home classification-progress)
+  home=$(case_home "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "state: %s · source: run-step · fixture\n" "$1"' > "$dir/crew-state"
+  chmod 0700 "$dir/crew-state"
+  FM_HOME="$home" bash -c '
+    set -eu
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    FM_CREW_STATE_BIN=$2
+    FM_WATCH_BEACON_PATH=$3
+    unset SECONDS
+    SECONDS=100
+    for state in working paused unknown; do
+      touch -t 200001010000 "$3"
+      result=$(crew_absorb_class "$state")
+      [ "$(fm_path_age "$3")" -le 1 ]
+      case "$state:$result" in
+        working:working|paused:paused|unknown:none) ;;
+        *) exit 1 ;;
+      esac
+    done
+    unset FM_WATCH_BEACON_PATH
+    touch -t 200001010000 "$3"
+    before=$(fm_path_mtime "$3")
+    crew_is_provably_working working
+    crew_is_paused paused
+    [ "$(fm_path_mtime "$3")" = "$before" ]
+  ' _ "$ROOT" "$dir/crew-state" "$home/state/.last-watcher-beat" \
+    || fail "crew classification lost its verdict or watcher-scoped progress refresh"
+  pass "crew classification refreshes watcher progress and preserves standalone verdicts"
 }
 
 test_derived_grace_follows_the_poll_cadence() {
@@ -416,6 +457,7 @@ test_explicit_heartbeat_cadence_still_governs() {
 
 fm_test_run \
   test_progress_refresh_is_throttled_and_inert_outside_a_watcher \
+  test_crew_classification_refreshes_progress \
   test_derived_grace_follows_the_poll_cadence \
   test_standalone_supervision_uses_derived_grace \
   test_progress_throttle_has_a_fixed_interval \
