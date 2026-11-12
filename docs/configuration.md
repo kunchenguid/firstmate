@@ -1728,6 +1728,10 @@ While the list is present, every Claude ship or scout spawn must name one declar
 Firstmate chooses that entry at dispatch intake under the [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) procedure, and [`bin/fm-claude-account-quota.sh`](../bin/fm-claude-account-quota.sh) measures each entry for it by running `quota-axi --provider claude --profile-only` under that entry's own config directory (`~/.claude` for `ordinary`).
 Firstmate never picks an entry by default, by file order, or from the ambient account, and never discovers, adds, or copies a login.
 
+Quota for a Keychain-sourced entry is read from that config directory's stored login.
+Without a stored login, the entry is reported unmeasured and remains eligible with disclosed uncertainty under `quota-array-dispatch`.
+The directory login and Keychain token must belong to the same account for the reading to describe the worker's quota; if the login belongs to a different subscription, the reading belongs to that other account.
+
 The named entry passes the same refusals as a pin before anything launches: its directory must exist, a raw Claude command must not override it, and `claude auth status` must say it is signed in, with the stripped environment and credential unsetting described above.
 If its line names a source file, Firstmate validates and reads only that entry's declaration; the token is checked and loaded through the shared adapter and reaches Claude only in process memory. A missing, malformed, unavailable, or unreadable mapped source refuses without falling back to the account directory's stored login. Entries without a source file continue to use the selected account's stored login. The single-pin `config/claude-account-credential-source.json` cannot be used with the pool list.
 An undeclared, missing, or signed-out entry refuses rather than falling back to another entry or the ambient account.
