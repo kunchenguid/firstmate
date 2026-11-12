@@ -233,7 +233,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 }
 
 test_unborn_head_project_is_refused_at_once() {
-  local rec id out status started elapsed
+  local rec id out status started elapsed shown
   id=settle-unborn-head-z5
   rec=$(make_settle_case settle-unborn "$id" 0)
   read_settle_record "$rec"
@@ -244,13 +244,56 @@ test_unborn_head_project_is_refused_at_once() {
   out=$(run_settle_spawn "$id")
   status=$?
   elapsed=$((SECONDS - started))
+  shown=$(CDPATH='' cd -- "$PROJ_DIR" && pwd)
   expect_code 1 "$status" "spawn into a project with no commit should be refused"
   assert_contains "$out" "unborn HEAD" "the refusal did not name the unborn HEAD cause"
-  assert_contains "$out" "make one commit" "the refusal did not name the remedy"
+  assert_contains "$out" "$shown is not a registered project clone" \
+    "the refusal did not say the path is not a registered project clone"
+  assert_not_contains "$out" "commit --allow-empty" \
+    "an unregistered path must not suggest a commit"
   [ "$elapsed" -lt 30 ] || fail "refusal took ${elapsed}s instead of failing before the treehouse wait"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   [ -z "$(git -C "$PROJ_DIR" rev-list --all 2>/dev/null)" ] || fail "spawn committed into the project"
-  pass "a project with an unborn HEAD is refused at once with its cause named"
+  pass "an unregistered path with an unborn HEAD is refused without a commit hint"
+}
+
+test_registered_unborn_clone_gets_commit_hint() {
+  local rec id out status
+  id=settle-unborn-registered-z6
+  rec=$(make_settle_case settle-unborn-registered "$id" 0)
+  read_settle_record "$rec"
+  PROJ_DIR="$HOME_DIR/projects/widget"
+  git init -q "$PROJ_DIR"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn into a registered clone with no commit should be refused"
+  assert_contains "$out" "unborn HEAD" "the refusal did not name the unborn HEAD cause"
+  assert_contains "$out" "make one commit" "a registered clone did not get the commit hint"
+  assert_contains "$out" "commit --allow-empty" "a registered clone did not get the commit example"
+  assert_not_contains "$out" "not a registered project clone" \
+    "a registered clone was described as unregistered"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ -z "$(git -C "$PROJ_DIR" rev-list --all 2>/dev/null)" ] || fail "spawn committed into the project"
+  pass "a registered clone with an unborn HEAD still gets the commit hint"
+}
+
+test_symlinked_unborn_clone_gets_commit_hint() {
+  local rec id out status
+  id=settle-unborn-symlink-z7
+  rec=$(make_settle_case settle-unborn-symlink "$id" 0)
+  read_settle_record "$rec"
+  PROJ_DIR="$TMP_ROOT/settle-unborn-symlink/linked-target"
+  git init -q "$PROJ_DIR"
+  ln -s "$PROJ_DIR" "$HOME_DIR/projects/widget"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn into a symlinked clone with no commit should be refused"
+  assert_contains "$out" "make one commit" "a symlinked clone did not get the commit hint"
+  assert_not_contains "$out" "not a registered project clone" \
+    "a symlinked clone was described as unregistered"
+  pass "a symlinked clone with an unborn HEAD still gets the commit hint"
 }
 
 test_single_stale_first_read_is_not_accepted
@@ -258,5 +301,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
+test_registered_unborn_clone_gets_commit_hint
+test_symlinked_unborn_clone_gets_commit_hint
 
 echo "# all fm-spawn-worktree-settle tests passed"
