@@ -33,9 +33,10 @@
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one
 #     GENERATION owner arms per event epoch: the epoch ledger's monotonic
 #     sequence is the claim generation, every firing defers (exit 0) to a live
-#     open claim, and a stuck, dead, identity-mismatched, or finished claim is
-#     superseded by taking the next generation instead of being unlocked or
-#     revoked. No mutex is ever held across arming or output - the owner lock
+#     open claim, and a stuck, dead, identity-mismatched, or finished claim -
+#     or one an earlier Claude session took, as the Stop payload's session_id
+#     tells - is superseded by taking the next generation instead of being
+#     unlocked or revoked. No mutex is ever held across arming or output - the owner lock
 #     survives only as the micro-mutex serializing individual ledger writes -
 #     and a superseded owner goes completely silent: ownership is re-verified
 #     before every arm invocation, episode-state mutation, ledger write, and
@@ -296,15 +297,27 @@ SESSION_ID=$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null || true)
 # pre-generation build (or the guard's own terminal-check), which the legacy
 # shim defers to while genuinely deciding and reclaims once when proven
 # abandoned.
-fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
-fm_autoarm_claim_next "$STATE" "$GRACE"
+# The payload's session_id names the Claude session this firing belongs to,
+# which is the session Claude delivers its exit-2 rewake to, so a claim an
+# earlier session took stops deferring this one (fm_autoarm_claim_open). No
+# payload, no jq, or an id the ledger cannot carry means no session, which
+# keeps the claim's previous behavior.
+HOOK_SESSION=
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  HOOK_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty | strings' 2>/dev/null || true)
+fi
+case "$HOOK_SESSION" in
+  *[!A-Za-z0-9._-]*) HOOK_SESSION= ;;
+esac
+fm_autoarm_claim_open "$STATE" "$GRACE" "$HOOK_SESSION" && exit 0
+fm_autoarm_claim_next "$STATE" "$GRACE" "$HOOK_SESSION"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
   [ "$CLAIM_RC" -eq 2 ] && exit 0
   ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   [ -n "$ROLE" ] || exit 0
   fm_autoarm_release_abandoned "$STATE" "$GRACE" || exit 0
-  fm_autoarm_claim_next "$STATE" "$GRACE" || exit 0
+  fm_autoarm_claim_next "$STATE" "$GRACE" "$HOOK_SESSION" || exit 0
 fi
 MY_GEN=$FM_AUTOARM_MY_GEN
 [ -n "$MY_GEN" ] || exit 0

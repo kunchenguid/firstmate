@@ -140,6 +140,20 @@ SH
   pass "session-lock: a harness that is pid 1 of its own namespace is examined, not skipped"
 }
 
+test_bun_run_omp_is_identified_on_both_platforms() {
+  local comm fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/bun-omp")
+  # macOS reports the executable path in comm, procps on Linux the exec name.
+  for comm in bun /Users/u/.bun/bin/bun /opt/homebrew/bin/bun; do
+    lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/omp'" \
+      || fail "$comm running the omp launcher must be identified"
+    if lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/ompd'"; then
+      fail "$comm running ompd was identified as a harness"
+    fi
+  done
+  pass "session-lock: a bun-run omp script is identified under both platforms' comm reporting"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -983,6 +997,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-omp-process-lib.sh" "$dir/bin/fm-omp-process-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-auggie-lib.sh" "$dir/bin/fm-auggie-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
@@ -1763,6 +1778,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
+test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_auggie_node_bundle_is_identified_by_its_package_script
 test_auggie_live_argv_preserves_script_spaces

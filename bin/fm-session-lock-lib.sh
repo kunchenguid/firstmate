@@ -27,6 +27,8 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 [ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-omp-process-lib.sh"
 # shellcheck source=bin/fm-auggie-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-auggie-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
@@ -110,7 +112,9 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
-#   5. Auggie's own structural identity, owned by bin/fm-auggie-lib.sh.
+#   5. omp's structural identity, owned by bin/fm-omp-process-lib.sh, which
+#      also covers the bun-package install whose process name is `bun`.
+#   6. Auggie's own structural identity, owned by bin/fm-auggie-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args> [pid]
   local comm=$1 args=$2 pid=${3:-} base argv0 name
@@ -139,6 +143,7 @@ fm_harness_process_matches() {  # <comm> <args> [pid]
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  fm_omp_process_matches "$comm" "$args" && return 0
   # Auggie: same reason as Cursor, from its script argument's package path.
   fm_auggie_process_matches "$comm" "$args" "$pid" && return 0
   return 1
