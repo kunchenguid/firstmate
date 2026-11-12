@@ -257,7 +257,9 @@ if [ "$MODE" != local-only ] && [ -n "$PROMOTE_PROJECT" ]; then
   0 | 2) ;;
   *)
     echo "error: promotion refused for $ID: $FM_ROLE_PUB_DENIAL" >&2
-    echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+    # Neither grant can authorize an undeterminable target, so name them only when one could.
+    [ -z "$FM_ROLE_PUB_TARGET" ] ||
+      echo "error: to let this home publish to $FM_ROLE_PUB_TARGET, write 'maintainer $FM_ROLE_PUB_TARGET' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent $FM_ROLE_PUB_TARGET for this one task with the captain's explicit approval" >&2
     exit 1
     ;;
   esac
