@@ -203,6 +203,13 @@ if [ "$ACTION" = ack ]; then
   exit 0
 fi
 
+breaker_release_locks() {
+  [ -z "${BREAKER_META_LOCK:-}" ] || fm_lock_release "$BREAKER_META_LOCK"
+  [ -z "${BREAKER_TASK_LOCK:-}" ] || fm_lock_release "$BREAKER_TASK_LOCK"
+  BREAKER_META_LOCK=
+  BREAKER_TASK_LOCK=
+}
+
 now=$(date +%s)
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
@@ -233,20 +240,36 @@ for meta in "$STATE"/*.meta; do
   row=${verdict#*$'\t'}
   record="$STATE/$id.quota-breaker"
   breaker_lock="$STATE/.quota-breaker-$id.lock"
-  fm_lock_try_acquire "$breaker_lock" || continue
+  BREAKER_TASK_LOCK=$breaker_lock
+  BREAKER_META_LOCK=
+  fm_lock_try_acquire "$BREAKER_TASK_LOCK" || {
+    BREAKER_TASK_LOCK=
+    continue
+  }
+  # The pane capture happened before this point. Hold the task's authoritative
+  # metadata lock while rechecking its incarnation and publishing the breaker
+  # record, so a concurrent relaunch cannot make an old refusal look current.
+  BREAKER_META_LOCK=$(fm_meta_lock_path "$meta" 2>/dev/null) || {
+    breaker_release_locks
+    continue
+  }
+  fm_lock_try_acquire "$BREAKER_META_LOCK" || {
+    breaker_release_locks
+    continue
+  }
   if [ ! -f "$meta" ]; then
-    fm_lock_release "$breaker_lock"
+    breaker_release_locks
     continue
   fi
   case "$(grep -v '^[[:space:]]*$' "$STATE/$id.status" 2>/dev/null | tail -n 1)" in
     'done '*|'done['*|'failed '*|'failed['*)
-      fm_lock_release "$breaker_lock"
+      breaker_release_locks
       continue
       ;;
   esac
   gen=$(fm_meta_get "$meta" spawn_gen)
   [ "$gen" = "$pre_gen" ] || {
-    fm_lock_release "$breaker_lock"
+    breaker_release_locks
     continue
   }
   pending_record="$STATE/$id.quota-breaker.pending"
@@ -265,7 +288,7 @@ for meta in "$STATE"/*.meta; do
     last=$(sed -n 's/^epoch=//p' "$record")
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
     if [ "$pending_exists" = 0 ] && [ $((now - last)) -lt "$REALERT" ]; then
-      fm_lock_release "$breaker_lock"
+      breaker_release_locks
       continue
     fi
   fi
@@ -273,25 +296,25 @@ for meta in "$STATE"/*.meta; do
     if [ "$pending_exists" = 0 ]; then
       pending_epoch=$now
       pending_tmp=$(mktemp "$STATE/.$id.quota-breaker.pending.XXXXXX") || {
-        fm_lock_release "$breaker_lock"
+        breaker_release_locks
         continue
       }
       if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\n' "$class" "$gen" "$pending_epoch" > "$pending_tmp" \
         || ! mv -f -- "$pending_tmp" "$pending_record"; then
         rm -f -- "$pending_tmp"
-        fm_lock_release "$breaker_lock"
+        breaker_release_locks
         continue
       fi
     fi
   else
     breaker_tmp=$(mktemp "$STATE/.$id.quota-breaker.XXXXXX") || {
-      fm_lock_release "$breaker_lock"
+      breaker_release_locks
       continue
     }
     if ! printf 'class=%s\nspawn_gen=%s\nepoch=%s\npending=0\n' "$class" "$gen" "$now" > "$breaker_tmp" \
       || ! mv -f -- "$breaker_tmp" "$record"; then
       rm -f -- "$breaker_tmp"
-      fm_lock_release "$breaker_lock"
+      breaker_release_locks
       continue
     fi
   fi
@@ -302,6 +325,6 @@ for meta in "$STATE"/*.meta; do
     printf 'quota-breaker %s %s harness=%s model=%s brief=%s: %s\n' "$id" "$class" \
       "$(fm_meta_get "$meta" harness)" "$(fm_meta_get "$meta" model)" "$DATA/$id/brief.md" "$row"
   fi
-  fm_lock_release "$breaker_lock"
+  breaker_release_locks
 done
 exit 0
