@@ -827,7 +827,8 @@ The optional local, gitignored `config/hold-pr-settle` presence flag enables set
 Create the empty flag in the owning home and use `bin/fm-captain-hold.sh pr-policy` to declare each hold's settlement policy.
 The command's `--help` owns its arguments and durable record format.
 The existing contribution observer applies matching GitHub merge or closure evidence, including observations retained after the worker stops.
-It also reports an unmerged closure through the contribution notification channel, whether or not that event settles a hold.
+It also reports an unmerged closure through the contribution notification channel, once for each owning task that is still an open captain hold after settlement.
+A task without a captain hold gets no closure notification, so enabling the flag does not replay historical closed PRs.
 No captain answer is invented, and unrelated holds remain open.
 With the flag absent, no settlement or new closure notification occurs.
 The flag takes effect on the next contribution poll and is not inherited by secondmate homes.

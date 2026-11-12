@@ -210,12 +210,17 @@
 # With config/hold-pr-settle present, pr-policy declares which forge events
 # answer this particular hold. It adds the structured PR link and atomically
 # records data/<task>/hold-pr-policy.json: schema fm-hold-pr.v1, task, url, on,
-# action, fingerprint (SHA-256 of the shown reason, title, hold-set timestamp
-# and resolution count), occurrence.
+# action, fingerprint (SHA-256 of the shown reason, title without its structured
+# PR links, hold-set timestamp and resolution count), occurrence.
 # `close` asserts the task contains only the decision; `release` preserves
 # unfinished work. `terminal` accepts either merge or unmerged closure.
 # No policy is inferred from links or prose. Re-holding invalidates the policy,
-# and editing the reason or title makes it stale. Only github.com PRs supported
+# and editing the reason or title makes it stale; linking another PR does not.
+# A policy that can no longer settle is removed: silently once the task is done
+# or no longer a captain hold, and with a non-zero exit naming the cause when
+# the question changed or the PR ended in the other terminal state.
+# A `release` policy waits while the home is away, like `answer --release`, and
+# a later settle-pr applies it. Only github.com PRs supported
 # by the contribution observer qualify. settle-pr reads that observer's durable,
 # validated terminal evidence, never caller-supplied state or a captain answer.
 # It records forge-closed/forge-released reconciliation evidence before changing
@@ -1819,8 +1824,17 @@ command_reconcile_requests() {
 }
 
 pr_hold_fingerprint() { # <show-output>
+  local links word title=''
+  local -a words=()
+  # The markdown backend shows structured links inside the title, and linking a
+  # follow-up PR does not change the question.
+  links=",$(show_field_value "$1" links),"
+  read -r -a words <<< "$(show_field_value "$1" title)"
+  for word in ${words[@]+"${words[@]}"}; do
+    case "$links" in *",pr:$word,"*) ;; *) title="$title $word" ;; esac
+  done
   sha256_text "$(show_field "$1" hold_reason)
-$(show_field "$1" title)
+$title
 $(body_hold_set_timestamp "$(show_field_value "$1" body)")
 $(resolution_record_count "$(show_field "$1" body)")"
 }
@@ -1878,9 +1892,16 @@ command_settle_pr() {
     and .retired == null and .checked_at != null and (.observation.state | IN("merged","closed")))] | first // empty' "$record")
   [ -n "$evidence" ] || return 0
   event=$(printf '%s' "$evidence" | jq -r .observation.state)
-  case "$(jq -r .on "$policy")" in "$event"|terminal) ;; *) return 0 ;; esac
+  case "$(jq -r .on "$policy")" in
+    "$event"|terminal) ;;
+    *)
+      rm -f -- "$policy"
+      fail "dropped the PR policy for $id: the PR is $event and can no longer reach the declared event; the hold stays open"
+      ;;
+  esac
   observed=$(printf '%s' "$evidence" | jq -r .checked_at)
   action=$(jq -r .action "$policy")
+  [ "$action" != release ] || release_attended || return 0
   occurrence=$(jq -r .occurrence "$policy")
   fingerprint=$(jq -r .fingerprint "$policy")
   if [ "$action" = close ]; then mode=forge-closed; else mode=forge-released; fi
@@ -1896,8 +1917,14 @@ Settlement policy: $(jq -r .on "$policy") -> $action"
     && [ "$(resolution_record_count "$body")" = "$occurrence" ]; then
     : # Resume an interrupted settlement after its evidence was recorded.
   else
-    [ "$(show_field "$show" state)" != "done" ] && [ "$(show_field_value "$show" hold_kind)" = captain ] || return 0
-    [ "$(pr_hold_fingerprint "$show")" = "$fingerprint" ] || return 0
+    if [ "$(show_field "$show" state)" = "done" ] || [ "$(show_field_value "$show" hold_kind)" != captain ]; then
+      rm -f -- "$policy"
+      return 0
+    fi
+    if [ "$(pr_hold_fingerprint "$show")" != "$fingerprint" ]; then
+      rm -f -- "$policy"
+      fail "dropped the PR policy for $id: its question changed after the policy was declared; the hold stays open"
+    fi
     write_resolution_record "$id" "$mode" "$body"
   fi
   if [ "$action" = close ]; then close_answered "$id" 0
