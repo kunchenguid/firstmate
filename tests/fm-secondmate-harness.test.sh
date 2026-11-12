@@ -802,7 +802,7 @@ test_spawn_unverified_secondmate_harness_refused() {
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw env env-flags nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution other quoted-other; do
+    for how in config explicit raw env env-flags nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other; do
       w="$TMP_ROOT/spawn-auggie-$kind-$how"
       sm="$w/sm"
       mkdir -p "$w/home/config" "$w/home/state"
@@ -832,6 +832,20 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         operand) set -- "$@" "env -C '/opt/Agent Tools' auggie --model test-model" ;;
         exec-name) set -- "$@" "exec -a 'worker name' env 'auggie' --model test-model" ;;
         substitution) set -- "$@" "FOO=\$(touch '$w/evaluated') env 'auggie' --model test-model" ;;
+        redirect) set -- "$@" 'env 2>worker.log auggie --model test-model' ;;
+        leading-redirect) set -- "$@" '2>worker.log env auggie --model test-model' ;;
+        split) set -- "$@" "env -S 'auggie --model test-model'" ;;
+        split-attached) set -- "$@" "env -S'auggie --model test-model'" ;;
+        split-long) set -- "$@" "env --split-string='auggie --model test-model'" ;;
+        search-path) set -- "$@" 'env -P /usr/bin auggie --model test-model' ;;
+        compound) set -- "$@" 'cd /tmp && env auggie --model test-model' ;;
+        pipeline) set -- "$@" 'true | env auggie --model test-model' ;;
+        group) set -- "$@" '(env auggie --model test-model)' ;;
+        nested-substitution) set -- "$@" 'true "$(env auggie --model test-model)"' ;;
+        redirect-other) set -- "$@" 'env 2>auggie true auggie --model test-model' ;;
+        compound-other) set -- "$@" 'cd /tmp && env true auggie --model test-model' ;;
+        search-path-other) set -- "$@" 'env -P /opt/auggie true auggie --model test-model' ;;
+        split-other) set -- "$@" "env -S 'true auggie --model test-model'" ;;
         quoted-other) set -- "$@" "env -u 'auggie' BAR='two words' 'true' auggie --model test-model" ;;
         other) set -- "$@" 'env -u auggie AUGGIE=auggie true auggie --model test-model' ;;
       esac
@@ -848,7 +862,7 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
 
       [ ! -e "$w/evaluated" ] || fail "auggie $kind $how: parsing executed the raw command"
-      if [ "$how" = other ] || [ "$how" = quoted-other ]; then
+      if [[ "$how" = other || "$how" = *-other ]]; then
         if grep -q "primary harness only" "$err"; then
           fail "auggie $kind $how: a wrapped non-auggie program was refused as auggie"
         fi
