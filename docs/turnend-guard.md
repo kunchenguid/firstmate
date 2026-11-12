@@ -193,7 +193,7 @@ The guard still requires a fresh beacon, with these results:
 - A daemon that stops restarting its watcher still blocks once the beacon passes grace.
 - A home with no daemon and no watcher blocks exactly as it did before.
 
-That beacon check uses the poll-derived grace described below rather than the flat `FM_GUARD_GRACE` default.
+That beacon check uses the shared beacon grace described below, which grows with a long poll cadence rather than staying a fixed default.
 It uses that grace because the daemon starts a fresh one-shot watcher only after it finishes handling the previous wake.
 That handling can legitimately outrun a fixed 300-second window under load (a slow registered check, a busy supervisor pane) with the daemon perfectly healthy throughout.
 
@@ -221,12 +221,13 @@ Grace and stall-bound readers resolve the same configuration in an isolated shel
 The default never drops below the historical 300-second floor for the common short-poll case, but grows with the poll cadence once that cadence would otherwise outrun it.
 Its readers are:
 
-- `bin/fm-guard.sh`.
-- `bin/fm-watch-arm.sh`.
-- The strict-watcher checks in `bin/fm-turnend-guard.sh` and its Cursor and Antigravity wrappers.
+- `bin/fm-guard.sh` and `bin/fm-watch-arm.sh`.
+- The strict-watcher checks in `bin/fm-turnend-guard.sh` and its Cursor and Antigravity wrappers, and the Claude Stop auto-arm hook that forks the arm.
 - `bin/fm-watch.sh`'s own pre-acquisition staleness check (the "lock held by live pid but heartbeat is stale" refusal), which keeps its `FM_WATCHER_STALE_GRACE` override ahead of the shared grace.
-- The shared predicates `fm_watcher_healthy`, `fm_watcher_supervision_verdict`, and `fm_supervision_status` when called without an explicit grace.
-- The inbox supervision verdict in `bin/fm-inbox.sh`.
+- The supervision host (`bin/fm-supervision-host.sh`), its acknowledged hand-back (`bin/fm-supervision-handoff.sh`), and the away-return catch-up report (`bin/fm-afk-return.sh`).
+- The shared predicates `fm_watcher_healthy`, `fm_watcher_supervision_verdict`, and `fm_supervision_status`, plus the auto-arm claim helpers in `bin/fm-wake-lib.sh`, when called without an explicit grace; the inbox supervision verdict in `bin/fm-inbox.sh` reads the same value.
+
+Every liveness reader in `bin/` resolves the grace through these functions, so a search for `fm_beacon_grace` and `fm_watcher_stall_bound` there is the authoritative list rather than this page.
 
 `FM_GUARD_GRACE` still wins everywhere it is set, so an operator override reaches the warning, the arm, and the watcher alike.
 
@@ -252,13 +253,13 @@ The daemon's watcher-restart cadence is not a fixed poll loop, so a flat grace m
 ### Cycle progress keeps the beacon fresh
 
 A poll cadence is not the only source of beacon age.
-One cycle runs the pending-reply sweep, the per-window stale loop, the per-status heartbeat scan, and the per-check sweep before it reaches its terminal wait, and each of those shells out per unit.
+One cycle runs several such sweeps - the pending-reply sweep, the per-window stale loop, the per-status scans, and the per-check sweep - before it reaches its terminal wait, and each of them shells out per unit.
 On a home with a deep pending-reply backlog, a single cycle ran past 590 seconds with the watcher genuinely working the whole time; on another it ran 1997 seconds and delivered an actionable check at the end.
 A beacon touched only at the top of a cycle aged with the cycle, so a working watcher read as a dead supervisor, and its successor refused the live holder as stale until `FM_WATCHER_STALL_BOUND`.
 
 Those sweeps therefore refresh the beacon between units.
 `fm_watch_beacon_progress` in `bin/fm-wake-lib.sh` is the entry point, and it acts only when a live watcher exported `FM_WATCH_BEACON_PATH`, so the same library code under a one-shot command or a test invents no liveness evidence.
-`bin/fm-pending-reply-lib.sh`'s per-record loop and the watcher's per-window, per-status, and per-check loops call it.
+Every loop and shared boundary in a cycle that shells out per unit calls it: `bin/fm-pending-reply-lib.sh`'s per-record loop, `bin/fm-classify-lib.sh`'s shared per-crew classification, the watcher's per-signal, per-window, per-status, per-check, per-secondmate, and per-captain-call boundaries, its shared pane-capture helper, the per-task Rex and Herdr display syncs, and every branch of the terminal wait before it blocks.
 
 What this guarantees and what it does not:
 
@@ -657,9 +658,12 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 
 `tests/fm-watch-beacon-progress.test.sh` covers the beacon's liveness contract over real processes:
 
-- A progress refresh that keeps the beacon fresh from inside a cycle's sweeps and throttles tight loops.
+- A progress refresh that keeps the beacon fresh from inside a cycle's sweeps, throttles tight loops on a fixed interval, and reaches the shared per-crew classification boundary.
 - That refresh staying inert outside a watcher, so no library invents liveness evidence.
 - The shared derived grace, its 300-second floor, and an explicit `FM_GUARD_GRACE` winning over it.
+- A home's `config/watch.env` cadence and explicit grace governing readers that never sourced it, Relay precedence over that cadence, and the readers' own environments staying untouched.
+- Standalone supervision predicates deriving the grace with no sourcing caller.
+- Every terminal wait branch refreshing the beacon before it blocks, and a directly launched watcher loading the home's settings.
 - A live watcher working through a check sweep longer than the grace keeping its beacon fresh, raising no watcher-down banner, and accepting a successor arm instead of being refused or replaced.
 - A genuinely stalled live holder still raising the banner with the explicit grace named in it, staying attached inside an explicit `FM_WATCHER_STALL_BOUND`, and still being evicted and replaced past a tighter one.
 - An explicit `FM_HEARTBEAT` cadence still governing the heartbeat next to the progress refresh.

@@ -1130,7 +1130,7 @@ Only explicit keys with valid source `[at=<epoch>]` timestamps can be aged.
 Repeats start at that interval, double after each repeat, and cap at `FM_OPEN_DECISION_BACKOFF_MAX_SECS`, which defaults to `14400` seconds.
 Both settings must be canonical positive integers of at most nine digits, with the cap at least the threshold.
 Invalid settings stop the watcher with an error when the flag is present.
-Pass them in the watcher's environment, or export them in `config/watch.env` for watchers started through `bin/fm-watch-arm.sh`.
+Pass them in the watcher's environment, or export them in `config/watch.env`, which every watcher launch loads (see [Relay (.env)](#relay-env)).
 The flag is home-local and is not inherited by secondmate homes.
 `bin/fm-watch.sh`'s `open_decision_reminder_tick` owns the per-key schedule, which persists across watcher restarts.
 
@@ -3586,7 +3586,7 @@ FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion f
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs, and live ones whose start time (or, for the watch lock, process identity) no longer matches the holder's recorded value, have no age grace
-FM_GUARD_GRACE unset     # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; defaults to the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence")
+FM_GUARD_GRACE=         # beacon freshness threshold for every liveness reader: guard verdicts, arm health checks, turn-end guards, the supervision host and its hand-back, the inbox, and the away-return report; unset means the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence")
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=300   # minimum seconds between StopFailure-driven exit-2 continuations; nonnegative integers accepted, invalid or empty values use 300; pacing mechanics: bin/fm-claude-stop-autoarm.sh header
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
