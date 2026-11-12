@@ -437,6 +437,27 @@ test_remove_worktree_selector_not_found_refuses_when_path_present() {
   pass "fm_backend_orca_remove_worktree: selector_not_found with the path present still refuses"
 }
 
+test_remove_worktree_selector_not_found_refuses_when_parent_unsearchable() {
+  local out status parent="$TMP_ROOT/locked-parent"
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "fm_backend_orca_remove_worktree: unsearchable-parent case skipped when running as root"
+    return 0
+  fi
+  orca_case remove-selector-locked
+  mkdir -p "$parent/wt"
+  chmod 000 "$parent"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$parent/wt" 2>&1 )
+  status=$?
+  chmod 755 "$parent"
+  [ "$status" -ne 0 ] || fail "selector_not_found with an unsearchable parent must still refuse"
+  assert_contains "$out" "orca worktree rm failed" "refusal printed no diagnostic"
+  [ -d "$parent/wt" ] || fail "the files behind the unsearchable parent must be untouched"
+  pass "fm_backend_orca_remove_worktree: selector_not_found with an unsearchable parent still refuses"
+}
+
 test_remove_worktree_other_error_refuses_even_when_path_gone() {
   local out status gone="$TMP_ROOT/gone-wt-path-2"
   orca_case remove-other-error
@@ -1416,6 +1437,7 @@ test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_remove_worktree_selector_not_found_treats_gone_path_as_removed
 test_remove_worktree_selector_not_found_refuses_when_path_present
+test_remove_worktree_selector_not_found_refuses_when_parent_unsearchable
 test_remove_worktree_other_error_refuses_even_when_path_gone
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives

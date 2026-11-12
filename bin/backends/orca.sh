@@ -241,7 +241,11 @@ let d; try { d = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch (e) 
 process.stdout.write(String((d && d.ok === false && d.error && d.error.code) || ""));
 ' 2>/dev/null || true)
   wt_path=${worktree_id#*::}
-  if [ "$err_code" = selector_not_found ] && [ "$wt_path" != "$worktree_id" ] && [ -n "$wt_path" ] && [ ! -e "$wt_path" ]; then
+  # "! -e" is also true when a parent directory cannot be searched, so require a
+  # readable, searchable parent before believing the path is really absent.
+  if [ "$err_code" = selector_not_found ] && [ "$wt_path" != "$worktree_id" ] && [ -n "$wt_path" ] \
+    && [ -d "${wt_path%/*}/" ] && [ -r "${wt_path%/*}/" ] && [ -x "${wt_path%/*}/" ] \
+    && [ ! -e "$wt_path" ] && [ ! -L "$wt_path" ]; then
     echo "note: Orca no longer knows worktree $worktree_id and $wt_path is gone; treating it as already removed" >&2
     return 0
   fi
