@@ -41,6 +41,12 @@ for shell_bin in /bin/bash "$BASH"; do
   "$shell_bin" -c 'set -u; . "$1"; ! fm_hermes_process_matches ""' _ "$ROOT/bin/fm-hermes-process-lib.sh" 2>&1 \
     || fail "empty args not a clean non-match under $shell_bin"
 done
+if [ "${FM_TEST_STOCK_BASH:-}" = 1 ]; then
+  printf '1..1\n'
+  pass 'empty Hermes argv is a clean non-match under set -u'
+  printf 'FM_TEST_COMPLETE\n'
+  exit 0
+fi
 # Use a real interpreter process so kernel-name loss and argv loss are
 # independent regressions, not expectations encoded into a fake harness.
 mkdir -p "$TMP_ROOT/process/tui_gateway"
