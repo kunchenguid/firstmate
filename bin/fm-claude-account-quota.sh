@@ -100,8 +100,9 @@ trap 'rm -rf "$WORK"' EXIT
 # Every entry becomes {account, root, snapshot} or {account, root, error}.
 : > "$WORK/accounts.jsonl"
 while IFS= read -r entry; do
-  root=$entry
-  [ "$entry" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
+  account=${entry%%$'\t'*}
+  root=$account
+  [ "$account" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
   error=
   if fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
       quota-axi --provider claude --profile-only --json > "$WORK/snapshot.json" 2>/dev/null </dev/null; then
@@ -110,10 +111,10 @@ while IFS= read -r entry; do
     error="quota-axi could not read this account"
   fi
   if [ -n "$error" ]; then
-    jq -cn --arg account "$entry" --arg root "$root" --arg error "$error" '{account: $account, root: $root, error: $error}'
+    jq -cn --arg account "$account" --arg root "$root" --arg error "$error" '{account: $account, root: $root, error: $error}'
   else
-    jq -c --arg account "$entry" --arg root "$root" '{account: $account, root: $root, snapshot: .}' "$WORK/snapshot.json"
-  fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $entry"
+    jq -c --arg account "$account" --arg root "$root" '{account: $account, root: $root, snapshot: .}' "$WORK/snapshot.json"
+  fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $account"
 done <<< "$LISTED"
 
 jq -rs --arg model "$MODEL" '

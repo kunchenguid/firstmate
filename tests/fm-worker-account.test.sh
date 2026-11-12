@@ -44,6 +44,8 @@ fi
   printf 'ANTHROPIC_API_KEY=%s\n' "\${ANTHROPIC_API_KEY-unset}"
   case "\${CLAUDE_CODE_OAUTH_TOKEN:-}" in
     fm-synthetic-oauth-token) printf 'CLAUDE_CODE_OAUTH_TOKEN=expected\n' ;;
+    fm-synthetic-first-token) printf 'CLAUDE_CODE_OAUTH_TOKEN=first-item\n' ;;
+    fm-synthetic-second-token) printf 'CLAUDE_CODE_OAUTH_TOKEN=second-item\n' ;;
     '') printf 'CLAUDE_CODE_OAUTH_TOKEN=unset\n' ;;
     *) printf 'CLAUDE_CODE_OAUTH_TOKEN=unexpected\n' ;;
   esac
@@ -85,12 +87,11 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> '$dir/security-argv'
 case "\$*" in
-  'find-generic-password -s fm-claude-token -a worker -w' | \\
-  'find-generic-password -s first-token -a worker -w' | \\
-  'find-generic-password -s second-token -a worker -w') ;;
+  'find-generic-password -s fm-claude-token -a worker -w') printf '%s\n' 'fm-synthetic-oauth-token' ;;
+  'find-generic-password -s first-token -a worker -w') printf '%s\n' 'fm-synthetic-first-token' ;;
+  'find-generic-password -s second-token -a worker -w') printf '%s\n' 'fm-synthetic-second-token' ;;
   *) exit 44 ;;
 esac
-printf '%s\n' 'fm-synthetic-oauth-token'
 SH
   chmod +x "$fakebin/claude" "$fakebin/pi" "$fakebin/security"
   cp "$fakebin/pi" "$fakebin/pi-signed"
@@ -675,7 +676,7 @@ test_account_list_secondmate_needs_its_own_pin() {
 }
 
 test_claude_account_pool_keychain_sources() {
-  local out rc id
+  local out rc id measured chosen
   new_case pool-keychain-dispatch claude
   fake_macos_host
   signed_in_claude_root "$CASE/first"
@@ -686,24 +687,44 @@ test_claude_account_pool_keychain_sources() {
     > "$HOME_DIR/config/claude-account-credential-source-first.json"
   printf '%s\n' '{"claude":{"source":"macos-keychain","service":"second-token","account":"worker"}}' \
     > "$HOME_DIR/config/claude-account-credential-source-second.json"
+  cat > "$FAKEBIN/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":70,"selection":{"spendPriority":0.2}}]}}]}'
+SH
+  chmod +x "$FAKEBIN/quota-axi"
+  measured=$(FM_HOME="$HOME_DIR" PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-claude-account-quota.sh"); rc=$?
+  expect_code 0 "$rc" "dispatch must be able to measure the Keychain pool: $measured"
+  chosen=${measured#*row: }
+  chosen=${chosen%%  root=*}
+  assert_equals "$CASE/first" "$chosen" "the quota row must expose a bare account usable for dispatch"
   id=acct-pool-keychain-dispatch
-  out=$(spawn_ship "$id" --account "$CASE/first"); rc=$?
+  out=$(spawn_ship "$id" --account "$chosen"); rc=$?
   expect_code 0 "$rc" "the dispatch-selected pool entry should use its Keychain source: $out"
   assert_contains "$out" "account=$CASE/first" "the dispatch-selected entry should remain the recorded account"
   assert_equals 'find-generic-password -s first-token -a worker -w' \
     "$(cat "$CASE/security-argv")" "the dispatch-selected entry should read only its mapped Keychain item"
   run_pane
-  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=expected' "$CASE/claude-worker" \
-    "the dispatch-selected pool entry should receive the synthetic token"
+  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=first-item' "$CASE/claude-worker" \
+    "the dispatch-selected pool entry should receive its own synthetic token"
+  assert_equals $'find-generic-password -s first-token -a worker -w\nfind-generic-password -s first-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "both check and launch must read only the first entry's item"
   assert_not_contains "$(cat "$CASE/launch.log" "$CASE/security-argv" "$CASE/claude-worker")" \
-    'fm-synthetic-oauth-token' "the dispatch-selected token must not appear in output or logs"
+    'fm-synthetic-' "the dispatch-selected token must not appear in output or logs"
 
+  : > "$CASE/security-argv"
   id=acct-pool-keychain-explicit
   out=$(spawn_ship "$id" --account "$CASE/second"); rc=$?
   expect_code 0 "$rc" "an explicitly named pool entry should use its own Keychain source: $out"
   assert_contains "$out" "account=$CASE/second" "the explicit entry should be recorded"
-  assert_contains "$(cat "$CASE/security-argv")" 'find-generic-password -s second-token -a worker -w' \
-    "--account should select the matching entry's Keychain item"
+  assert_equals 'find-generic-password -s second-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "--account must check only the matching entry's Keychain item"
+  run_pane
+  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=second-item' "$CASE/claude-worker" \
+    "the explicit pool entry must receive its own synthetic token"
+  assert_equals $'find-generic-password -s second-token -a worker -w\nfind-generic-password -s second-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "both check and launch must read only the second entry's item"
+  assert_not_contains "$(cat "$CASE/launch.log" "$CASE/security-argv" "$CASE/claude-worker")" \
+    'fm-synthetic-' "the explicit token must not appear in output or logs"
   pass "dispatch-selected and explicit Claude pool entries use only their own Keychain sources"
 }
 

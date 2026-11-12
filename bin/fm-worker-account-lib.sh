@@ -298,19 +298,12 @@ fm_worker_account_pi_provider() {
 # when this account uses the selected root's stored login.
 fm_worker_account_credential_source_file() {
   local config=$1 filename=${2:-$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE} path source problem
-  case "$filename" in
-  "$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE") fm_worker_account_has_credential_source "$config" || return 0 ;;
-  claude-account-credential-source-[A-Za-z0-9]*.json)
-    [[ "$filename" =~ ^claude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]] || {
-      echo "error: invalid Claude credential-source filename: $filename" >&2
-      return 1
-    }
-    ;;
-  *)
+  if [ "$filename" = "$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]; then
+    fm_worker_account_has_credential_source "$config" || return 0
+  elif [[ ! "$filename" =~ ^claude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]]; then
     echo "error: invalid Claude credential-source filename: $filename" >&2
     return 1
-    ;;
-  esac
+  fi
   path="$config/$filename"
   if [ ! -f "$path" ] || [ ! -r "$path" ]; then
     echo "error: $path must be a readable regular file" >&2
