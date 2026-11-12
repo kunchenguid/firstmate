@@ -1012,6 +1012,16 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+fm_busy_agy_tail_idle() {
+  local tail last previous
+  tail=$(grep -v '^[[:space:]]*$' | tail -12)
+  ! printf '%s\n' "$tail" | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel' || return 1
+  last=$(printf '%s\n' "$tail" | tail -n 1)
+  previous=$(printf '%s\n' "$tail" | tail -n 2 | head -n 1)
+  printf '%s\n' "$last" | grep -qE '^[[:space:]]*\?[[:space:]]+for[[:space:]]+shortcuts([[:space:]]|$)' || return 1
+  printf '%s\n' "$previous" | grep -qE '^[[:space:]]*─{10,}[[:space:]]*$'
+}
+
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
 #
 # Each function consumes a captured pane tail on stdin (the caller's whole
@@ -1284,10 +1294,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
           return 0
         fi
       fi
-      # Best-effort like rovo: a long turn can scroll the busy marker out of
-      # the captured tail, so its absence means "can't tell," never idle.
       if printf '%s' "$tail40" | fm_busy_agy_tail_busy; then
         printf 'busy agy-regex'
+      elif printf '%s' "$tail40" | fm_busy_agy_tail_idle; then
+        printf 'idle agy-regex'
       else
         printf 'unknown agy-regex'
       fi

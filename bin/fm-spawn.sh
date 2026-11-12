@@ -3577,6 +3577,21 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
     unset CLAUDE_CONFIG_DIR
   fi
 fi
+# Quota pre-flight (bin/fm-quota-preflight.sh owns it): advisory only. In a home
+# with dispatch profiles, a ship or scout launch whose candidate quota-axi
+# already reports exhausted_now prints one quota-preflight: notice, so the
+# dispatcher can move it to the next same-group candidate before it stalls.
+if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  preflight_args=("$HARNESS" "${MODEL:-default}" --effort "${EFFORT:-default}")
+  # fm-quota-preflight derives the schema-6 account lane from harness/model;
+  # WORKER_ACCOUNT_PROVIDER is the provider passed to the runner, not always
+  # the quota row key (codex-native maps to codex-home).
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    preflight_args+=(--account "$WORKER_ACCOUNT_DECLARED")
+    [ -z "$WORKER_ACCOUNT_ROOT" ] || preflight_args+=(--account-root "$WORKER_ACCOUNT_ROOT")
+  fi
+  FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-quota-preflight.sh" "${preflight_args[@]}" >&2 || true
+fi
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"

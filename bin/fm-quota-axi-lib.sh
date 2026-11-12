@@ -29,6 +29,11 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null; schema 5 ignores $lane.
+#   quota_scope_applies($model; $quota_scope)
+#                                  whether the input availability row bounds a
+#                                  candidate for $model: a provider-wide scope,
+#                                  the model's own model:/product: scope, or
+#                                  the profile's declared quota_scope.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
@@ -43,6 +48,11 @@ FM_QUOTA_ROW_JQ='
        ([$rows[] | select(.accountKey == "default")] | first) // null)
     else ($rows | first) // null
     end;
+  def quota_scope_applies($model; $quota_scope):
+    (($model // "") | split("/") | last) as $bare |
+    .scope == "all_models" or .scope == "all_products" or
+    (($model // "") != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare))) or
+    (($quota_scope // "") != "" and .scope == $quota_scope);
 '
 
 # fm_quota_axi_version_compatible <version-output>

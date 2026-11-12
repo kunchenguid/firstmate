@@ -70,6 +70,10 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   keys     every named key send, one per line.
 #   pane     optional capture-pane override, for an adapter whose busy verdict
 #            is read from the rendered tail.
+#   pane-after-escape  optional screen shown once an Escape has been sent,
+#            after `after-escape-late` more captures of the ordinary pane:
+#            an agent that is still ending its turn when the key lands.
+#   cursor   optional cursor row override for the composer read.
 #   key-times  every named key with its wall-clock send time.
 #   devin    optional Devin screen model, which capture-pane renders as the
 #            rows devin 3000.11.1 draws: `running`, `armed`, `cancelled`,
@@ -173,6 +177,8 @@ case "${1:-}" in
           # A modelled Devin screen parks the cursor on its composer row.
           if [ -f "$D/devin" ]; then
             devin_screen "$(cat "$D/devin")" | awk '/^❭ /{ print NR - 1; exit }'
+          elif [ -f "$D/cursor" ]; then
+            cat "$D/cursor"
           else
             printf '1\n'
           fi
@@ -192,6 +198,18 @@ case "${1:-}" in
         printf '%s' "$((late - 1))" > "$D/after-enter-late"
       else
         cat "$D/after-enter"
+        exit 0
+      fi
+    fi
+    if [ -f "$D/pane-after-escape" ] && [ -f "$D/keys" ] && grep -qx Escape "$D/keys"; then
+      # after-escape-late holds how many captures after the interrupt still
+      # show the ordinary pane, for an agent still ending its turn.
+      late=0
+      [ ! -f "$D/after-escape-late" ] || late=$(cat "$D/after-escape-late")
+      if [ "$late" -gt 0 ]; then
+        printf '%s' "$((late - 1))" > "$D/after-escape-late"
+      else
+        cat "$D/pane-after-escape"
         exit 0
       fi
     fi
@@ -265,6 +283,7 @@ run_control() {
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_COMPOSER_WAIT="${FM_CONTROL_COMPOSER_WAIT:-0.5}" \
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
@@ -1323,6 +1342,183 @@ EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
 
+# --- composer settle after an interrupt -------------------------------------
+#
+# Pi's composer is the separated shape: empty is provable only while its busy
+# footer is gone. Right after the interrupt Escape it is still drawn, so the
+# composer reads unknown for a moment before settling.
+
+pi_screen() {  # <busy|idle> [composer-text]
+  local rule top
+  rule=$(printf '─%.0s' $(seq 1 60))
+  top='done earlier'
+  [ "$1" != busy ] || top='⠋ Working...'
+  printf '%s\n%s\n%s\n%s\n~/wt\n0.0%%/1.0M (auto)      (zai) glm-5.3-flash • high\n' \
+    "$top" "$rule" "${2:- }" "$rule"
+}
+
+# agy draws a bare `>` between two rules (verified live, agy 1.5.6); busy adds
+# its pinned `esc to cancel` status row.
+agy_screen() {  # <busy|idle>
+  local rule status='? for shortcuts'
+  rule=$(printf '─%.0s' $(seq 1 60))
+  [ "$1" != busy ] || status='esc to cancel'
+  printf '  ⎿  Interrupted · What should Antigravity CLI do instead?\n%s\n>\n%s\n%s      Gemini 4 Carbon · high\n' \
+    "$rule" "$rule" "$status"
+}
+
+busy_pi_case() {  # <name> -> case dir with an armed, busy Pi task t1
+  local dir gen
+  dir=$(new_case "$1")
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  pi_screen busy > "$dir/fake/pane"
+  printf '2' > "$dir/fake/cursor"
+  printf '%s\n' "$dir"
+}
+
+test_busy_pi_exit_waits_for_the_composer_to_settle() {
+  local dir out rc
+  dir=$(busy_pi_case pi-settle)
+  pi_screen idle > "$dir/fake/pane-after-escape"
+  printf '6' > "$dir/fake/after-escape-late"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a busy Pi whose composer settles after the interrupt should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "a busy Pi should get one interrupt Escape and no clear key, got: $(keys_sent "$dir")"
+  [ "$(literals "$dir")" = /quit ] || fail "the exit command should follow the settled composer, got: $(literals "$dir")"
+
+  # The divergence this pins: the same agent judged at the instant the key
+  # lands is still unproven, which is the refusal every busy Pi used to hit.
+  dir=$(busy_pi_case pi-no-settle)
+  pi_screen idle > "$dir/fake/pane-after-escape"
+  printf '6' > "$dir/fake/after-escape-late"
+  out=$(FM_CONTROL_COMPOSER_WAIT=0 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "with no settle window the busy Pi composer must still read unproven"$'\n'"$out"
+  assert_contains "$out" "composer state is 'unknown'" "an unsettled Pi composer should be named unknown"
+  [ -z "$(literals "$dir")" ] || fail "an unproven composer must receive no exit command, got: $(literals "$dir")"
+  pass "fm-control exit: a busy Pi is exited once its composer settles after the interrupt"
+}
+
+test_busy_pi_exit_still_refuses_pending_text() {
+  local dir out rc
+  dir=$(busy_pi_case pi-pending)
+  pi_screen idle 'queued steer text' > "$dir/fake/pane-after-escape"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a composer holding text after the interrupt must refuse"$'\n'"$out"
+  assert_contains "$out" "visibly holds pending text" "the refusal should name the pending text"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed over pending text, got: $(literals "$dir")"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "pending text must not be cleared, got keys: $(keys_sent "$dir")"
+  pass "fm-control exit: text left in a settled composer still refuses and is never cleared"
+}
+
+test_pi_composer_that_never_settles_still_refuses() {
+  local dir out rc
+  dir=$(busy_pi_case pi-stuck)
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a composer that never settles must refuse"$'\n'"$out"
+  assert_contains "$out" "not proven empty" "the refusal should say the composer was never proven empty"
+  [ -z "$(literals "$dir")" ] || fail "an unproven composer must receive no exit command, got: $(literals "$dir")"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "a harness with no verified clear key must not be sent one, got: $(keys_sent "$dir")"
+  pass "fm-control exit: a composer that never settles still refuses on an adapter with no clear key"
+}
+
+test_agy_idle_composer_is_cleared_with_its_verified_key() {
+  local dir out rc
+  dir=$(new_case agy-idle)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  agy_screen idle > "$dir/fake/pane"
+  printf '2' > "$dir/fake/cursor"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an idle agy should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = C-u ] \
+    || fail "an idle agy should get only its clear key before the exit command, got: $(keys_sent "$dir")"
+  [ "$(literals "$dir")" = /quit ] || fail "agy should be exited with /quit, got: $(literals "$dir")"
+
+  dir=$(new_case agy-busy)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  agy_screen busy > "$dir/fake/pane"
+  agy_screen idle > "$dir/fake/pane-after-escape"
+  printf '2' > "$dir/fake/after-escape-late"
+  printf '2' > "$dir/fake/cursor"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a busy agy should succeed once its turn ends"$'\n'"$out"
+  [ "$(keys_sent "$dir" | paste -sd' ' -)" = "Escape C-u" ] \
+    || fail "a busy agy should be interrupted, then cleared, got: $(keys_sent "$dir")"
+  [ "$(literals "$dir")" = /quit ] || fail "agy should be exited with /quit, got: $(literals "$dir")"
+
+  # Its turn never ends: the clear key waits on the busy verdict, so nothing
+  # is cleared or typed into a running turn.
+  dir=$(new_case agy-stuck)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  agy_screen busy > "$dir/fake/pane"
+  printf '2' > "$dir/fake/cursor"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an agy turn that never ends must refuse"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "a still-busy agy must not be sent its clear key, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "a still-busy agy must receive no exit command, got: $(literals "$dir")"
+
+  dir=$(new_case agy-ambiguous)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  printf 'reply landed\n────────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────────\nGemini 4 Carbon · high\n' > "$dir/fake/pane"
+  printf '2' > "$dir/fake/cursor"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an agy pane without a status marker must refuse"
+  assert_contains "$out" "not proven empty" "an ambiguous agy pane should remain unproven"
+  [ -z "$(keys_sent "$dir")" ] || fail "an ambiguous agy pane must receive neither Escape nor Ctrl+U, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "an ambiguous agy pane must receive no exit command, got: $(literals "$dir")"
+  pass "fm-control exit: agy clears only after an explicit idle status marker"
+}
+
+test_composer_clear_key_table() {
+  local h
+  [ "$(fm_control_composer_clear_key agy)" = C-u ] || fail "agy's verified composer clear key is Ctrl+U"
+  for h in $(fm_control_harnesses); do
+    [ "$h" = agy ] && continue
+    fm_control_composer_clear_key "$h" >/dev/null || fail "$h has control mechanics but no clear-key entry"
+    [ -z "$(fm_control_composer_clear_key "$h")" ] || fail "$h's idle composer is provable and must declare no clear key"
+  done
+  fm_control_composer_clear_key someagent && fail "an unverified harness must not get a clear key"
+  pass "fm-control-lib: only agy declares a composer clear key"
+}
+
+test_fresh_session_plan_table() {
+  [ "$(fm_control_fresh_session_plan pi pi /s/a.jsonl)" = archive ] \
+    || fail "a Pi replacement that would resume a session file must move it aside"
+  [ "$(fm_control_fresh_session_plan pi-signed pi /s/a.jsonl)" = archive ] \
+    || fail "pi-signed resumes the same Pi reference and must move it aside too"
+  [ "$(fm_control_fresh_session_plan claude pi /s/a.jsonl)" = fresh ] \
+    || fail "a replacement that resumes nothing starts fresh anyway"
+  [ "$(fm_control_fresh_session_plan pi claude /s/a.jsonl)" = fresh ] \
+    || fail "a reference another adapter registered is never resumed, so the launch is fresh"
+  [ "$(fm_control_fresh_session_plan pi pi '')" = fresh ] \
+    || fail "no recorded reference means a fresh launch"
+  fm_control_fresh_session_plan pi pi 01abc >/dev/null \
+    && fail "a bare id the replacement would resume cannot be moved aside and must refuse"
+  pass "fm-control-lib: --fresh-session moves a resumed session file aside and refuses a reference it cannot"
+}
+
+test_fresh_session_is_relaunch_only() {
+  local dir out rc
+  dir=$(new_case fresh-exit)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit --fresh-session); rc=$?
+  expect_code 1 "$rc" "--fresh-session on exit must be refused"$'\n'"$out"
+  assert_contains "$out" "apply to 'relaunch' only" "the refusal should name the verb it belongs to"
+  [ -z "$(literals "$dir")" ] || fail "a refused flag must send nothing"
+  pass "fm-control: --fresh-session belongs to relaunch only"
+}
+
 test_exit_types_each_harness_verified_command
 test_opencode_exit_matches_recorded_major
 test_opencode2_exit_retries_ctrl_c_once
@@ -1372,3 +1568,10 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_busy_pi_exit_waits_for_the_composer_to_settle
+test_busy_pi_exit_still_refuses_pending_text
+test_pi_composer_that_never_settles_still_refuses
+test_agy_idle_composer_is_cleared_with_its_verified_key
+test_composer_clear_key_table
+test_fresh_session_plan_table
+test_fresh_session_is_relaunch_only

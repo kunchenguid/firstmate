@@ -11,8 +11,8 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
-| Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), [quota circuit breaker](#quota-circuit-breaker-configquota-breaker), and [Calm preference](#calm-preference-configcalm) |
+| Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) and [session rotation](#second-mate-session-rotation-configsecondmate-rotation) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -829,6 +829,58 @@ It skips persistent secondmate and scout records, a `pr=` that names another PR,
 A refused registration, such as a draft, prints one `check: pr-register:` wake for each task and PR, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
+
+## Second-mate session rotation (config/secondmate-rotation)
+
+Create the home-local `config/secondmate-rotation` file to restart an idle second mate onto a fresh conversation once its session grows past a context size.
+A second mate does not end its own conversation during ordinary operation, and every step it takes pays for the whole context, so a mate that has grown to hundreds of thousands of tokens answers its notifications several times slower than a fresh one.
+
+The feature is off when the file is absent.
+The file is local to each home and is not inherited.
+The watcher's check sweep reads it every time, so creating or removing it needs no restart.
+
+The file may be empty or hold these lines, each optional:
+
+- `threshold-tokens=<n>` is the context size at or above which a mate is due (default 250000).
+- `window-seconds=<n>` is the minimum time between two rotations of the same mate, whatever the first one's outcome (default 21600).
+
+Blank lines and lines that start with `#` are ignored, and an unusable value keeps its default.
+
+A mate is rotated when all of these hold:
+
+- It is a local second mate of this home; a remotely placed mate is skipped.
+- Its context size is measured at or above `threshold-tokens`.
+  The size is the last request's usage in the mate's own transcript; only Pi and Claude mates are measured, and `bin/fm-secondmate-rotate.sh tokens <id>` prints what the sweep sees.
+- Its busy state reads idle.
+- Its last rotation, recorded in `state/<id>.rotation`, is at least `window-seconds` old.
+
+A due mate gets `bin/fm-secondmate-restart.sh --rotate <id>` in the background, with its report in `state/<id>.rotation.log`, and the sweep queues one `check: secondmate-rotation` notification naming the mate and its size.
+That is the ordinary persist-then-restart: the mate first writes down its open work, and only its own answer allows the restart.
+The restart then starts a fresh conversation (`bin/fm-control.sh relaunch --fresh-session`); on Herdr a Pi mate's old session file is moved aside to `<path>.rotated-<UTC stamp>`, never deleted, so its pane keeps the same session identity.
+A mate that does not confirm, or cannot be restarted, is reported unreached in the report and keeps running on its old conversation.
+`bin/fm-secondmate-rotate.sh` owns the guards, with coverage in [`tests/fm-secondmate-rotate.test.sh`](../tests/fm-secondmate-rotate.test.sh).
+
+## Quota circuit breaker (config/quota-breaker)
+
+Create the home-local `config/quota-breaker` file to be notified when a live worker is stalled on a hard provider quota or rate-limit refusal, instead of finding it hours later.
+
+The feature is off when the file is absent.
+The file is local to each home and is not inherited.
+The watcher's check sweep reads it every time, so creating or removing it needs no restart.
+
+The file may be empty or hold these lines, each optional:
+
+- `rate-limit-repeats=<n>` is how many request rate-limit refusals in one worker's recent output count as a wedge rather than a retry (default 5).
+- `realert-seconds=<n>` is the minimum time before the same refusal on the same worker is reported again (default 3600).
+
+Blank lines and lines that start with `#` are ignored, and an unusable value keeps its default.
+
+Each sweep checks that the task is still live and nonterminal, then reads the recent output of every local ship and scout and matches the providers' own refusal text: Z.AI's 5-hour (`1308`) and weekly or monthly (`1310`) caps, Antigravity's `Quota reached` and Gemini's `RESOURCE_EXHAUSTED`, Codex and Claude usage limits, and a run of Z.AI request rate limits (`1302`).
+A tripped worker queues one `check: quota-breaker: <task> <class> harness=<h> model=<m> brief=<path>: <refusal>` notification. The waking firstmate re-resolves that brief against `config/crew-dispatch.json` as at intake, excludes the tripped candidate, and the `quota-array-dispatch` skill owns the relaunch on the next candidate of the same dispatch group.
+The breaker only notifies; it never stops or relaunches a worker itself.
+`bin/fm-quota-breaker.sh` owns the exact signatures, with coverage in [`tests/fm-quota-breaker.test.sh`](../tests/fm-quota-breaker.test.sh).
+
+In a home with dispatch profiles, every ship and scout launch also runs the advisory `bin/fm-quota-preflight.sh`, which prints one `quota-preflight:` notice when quota-axi already reports the launch's candidate `exhausted_now` or when provider/quota-scope profiles are ambiguous; it never refuses a launch, and `FM_QUOTA_PREFLIGHT=off` silences it.
 
 ## Degraded PR watch (config/pr-degraded-watch)
 

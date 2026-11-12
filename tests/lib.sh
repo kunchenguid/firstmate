@@ -98,6 +98,12 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # can find the CLI; a case that verifies detection sets these itself.
 unset REX_SESSION REX_BLOCK
 
+# Keep the spawn's advisory quota pre-flight (bin/fm-quota-preflight.sh) from
+# reading the host's live quota-axi: a fixture home with dispatch profiles
+# would otherwise print a notice that depends on this machine's accounts. The
+# pre-flight's own suite turns it back on with a captured snapshot.
+export FM_QUOTA_PREFLIGHT=off
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the

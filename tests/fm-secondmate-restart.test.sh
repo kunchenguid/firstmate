@@ -486,7 +486,15 @@ case "${rargs[1]:-}" in
     case "${FM_FAKE_SSH_MODE:-ok}" in
       slow-relaunch)
         : > "$FM_FAKE_DIR/remote-relaunch-start"
-        /bin/sleep 2
+        if [ -n "${FM_FAKE_RELEASE_GATE:-}" ]; then
+          i=0
+          while [ ! -e "$FM_FAKE_RELEASE_GATE" ] && [ "$i" -lt 500 ]; do
+            /bin/sleep 0.02
+            i=$((i + 1))
+          done
+        else
+          /bin/sleep 2
+        fi
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
@@ -774,10 +782,12 @@ test_relaunches_do_not_block_persist_polling() {
 
 # --- T13: a worker that cannot publish its result cannot hang the pass -------
 test_unpublished_worker_result_is_accounted_for() {
-  local dir out rc_file driver i result_dir
+  local dir out rc_file driver i result_dir release_gate
   dir=$(new_case worker-result)
   setup_remote_case "$dir" sm1 slow-relaunch
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
+  release_gate="$dir/fake/release-relaunch"
+  export FM_FAKE_RELEASE_GATE="$release_gate"
   out="$dir/restart.out"
   rc_file="$dir/restart.rc"
 
@@ -785,14 +795,21 @@ test_unpublished_worker_result_is_accounted_for() {
   driver=$!
   result_dir=
   i=0
-  while [ "$i" -lt 200 ]; do
+  while kill -0 "$driver" 2>/dev/null && [ "$i" -lt 1500 ]; do
     result_dir=$(find "$dir/home/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
-    [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ] && break
-    /bin/sleep 0.01
+    if [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ]; then
+      break
+    fi
+    /bin/sleep 0.02
     i=$((i + 1))
   done
-  [ -n "$result_dir" ] || { kill "$driver" 2>/dev/null || true; fail "restart result directory never appeared"; }
+  if [ ! -e "$dir/fake/remote-relaunch-start" ] || [ -z "$result_dir" ]; then
+    kill "$driver" 2>/dev/null || true
+    wait "$driver" 2>/dev/null || true
+    fail "restart result directory and relaunch marker did not appear"
+  fi
   rm -rf -- "$result_dir"
+  : > "$FM_FAKE_RELEASE_GATE"
   i=0
   while kill -0 "$driver" 2>/dev/null && [ "$i" -lt 400 ]; do
     /bin/sleep 0.01
@@ -804,7 +821,7 @@ test_unpublished_worker_result_is_accounted_for() {
     fail "a terminated restart worker left the parent hung"
   fi
   wait "$driver" 2>/dev/null || true
-  unset FM_FAKE_ANSWER_STATUS
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELEASE_GATE
 
   [ "$(cat "$rc_file")" = 3 ] || fail "an unpublished worker result did not fail as accounted"
   assert_contains "$(cat "$out")" "restart worker exited before publishing an outcome" \
@@ -987,6 +1004,32 @@ w = { tokens: [],
   pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
 
+# --- T18: --rotate restarts onto a fresh session, and never nudges ----------
+test_rotate_restarts_onto_a_fresh_session() {
+  local dir out rc
+  dir=$(new_case rotate)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" --rotate sm1); rc=$?
+  expect_code 0 "$rc" "a confirmed persist should rotate the mate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (claude)" "the rotated mate should be restarted"
+  assert_grep 'phase=complete' "$dir/home/state/sm1.control-relaunch" \
+    "the rotation should run the ordinary relaunch transaction"
+
+  # A mate that never confirms keeps its conversation and is reported, but a
+  # rotation has nothing to reload, so no re-read message is sent.
+  dir=$(new_case rotate-unconfirmed)
+  add_local_mate "$dir" sm1
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" --rotate sm1); rc=$?
+  expect_code 3 "$rc" "an unconfirmed rotation is not a success"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1: session not rotated:" "an unconfirmed rotation should be reported unreached"
+  assert_not_contains "$out" "nudged:" "a rotation must never fall back to the re-read message"
+  [ "$(find "$dir/home/state/sm1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "only the persist request should reach the mate, never a re-read message"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "an unconfirmed rotation stopped the agent"
+  pass "T18 --rotate relaunches onto a fresh session after the persist gate and never nudges"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -1012,4 +1055,5 @@ test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_t3_mate_stays_on_the_nudge_path
 
+test_rotate_restarts_onto_a_fresh_session
 echo "# all fm-secondmate-restart tests passed"

@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--account <entry>]
+#                                         [--fresh-session]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -98,6 +99,15 @@
 #              keeps its conversation, so a new turn or a provider change on
 #              it continues the same agent rather than a fresh one
 #              (fm_control_backend_relaunch_supported).
+#              --fresh-session guarantees the replacement starts a NEW
+#              conversation. Only a Herdr Pi relaunch would otherwise resume
+#              the old one (the pane's bound session reference, kept so its
+#              status authority survives); with this flag the old session file
+#              is moved aside to <path>.rotated-<UTC stamp> after the old agent
+#              stops, and the replacement creates an empty session at the same
+#              path (bin/fm-control-lib.sh fm_control_fresh_session_plan). A
+#              reference that cannot be moved aside refuses before anything
+#              stops. Second-mate session rotation uses it.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -144,6 +154,11 @@
 #     proof `exit` describes, and refuses unless that proof settles it).
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#     After an interrupt the composer is polled for up to
+#     FM_CONTROL_COMPOSER_WAIT before an unproven read refuses, because the
+#     agent is still ending its turn when the key lands. An adapter whose idle
+#     composer is unreadable by design (agy) is cleared with its verified
+#     clear key instead (bin/fm-control-lib.sh fm_control_composer_clear_key).
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -153,6 +168,8 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_COMPOSER_WAIT     wait for a composer to settle to a proven
+#                                verdict before exit types its command (8)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -213,6 +230,8 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+COMPOSER_WAIT=${FM_CONTROL_COMPOSER_WAIT:-8}
+COMPOSER_STATE=unknown
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -275,6 +294,7 @@ EFFORT_SET=0
 ACCOUNT_SET=0
 NOTE=
 NOTE_SET=0
+FRESH_SESSION=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -308,6 +328,7 @@ for control_arg in "$@"; do
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
+    --fresh-session) FRESH_SESSION=1 ;;
     --note-file=*)
       [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
       NOTE=$(cat "${control_arg#--note-file=}")
@@ -322,8 +343,8 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, --account, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ "$FRESH_SESSION" = 0 ] \
+    || die "--harness, --model, --effort, --account, --fresh-session, and --note apply to 'relaunch' only"
 fi
 [ "$ACCOUNT_SET" = 0 ] || [ -n "$NEW_ACCOUNT" ] || die "--account requires a non-empty value"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
@@ -529,6 +550,10 @@ send_interrupt_keys() {
       break
     fi
   done
+  # The loop leaves right after the final press, so give the agent its press
+  # gap to act on it before anything reads the screen or types a clear key;
+  # the hazard dismissal settles for itself.
+  [ -n "$hazard" ] || sleep "$gap"
   [ -z "$hazard" ] || dismiss_interrupt_hazard "$key" "$hazard"
   [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
@@ -709,10 +734,69 @@ retire_busy_incarnation() {
   fi
 }
 
+# read_composer: one composer read into COMPOSER_STATE, refusing on a blocking
+# dialog it saw. The classify that fills the sink runs in a subshell, so the
+# file is read rather than a function that subshell sourced.
+read_composer() {
+  local dialog
+  : > "$FM_COMPOSER_DIALOG_SINK" \
+    || die "task $ID's dialog check could not be recorded"
+  COMPOSER_STATE=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+    || COMPOSER_STATE=unknown
+  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+    refuse_blocking_prompt "$dialog"
+  fi
+}
+
+# settle_composer <interrupted>: decide whether the exit command may be typed.
+# Sets COMPOSER_STATE to `empty` (proven), `cleared` (the adapter's verified
+# clear key emptied a composer the classifier cannot read), or the last
+# unproven verdict. A just-interrupted agent is still tearing its turn down -
+# Pi holds its busy footer and identity for a moment after Escape - so the
+# verdict is polled for up to COMPOSER_WAIT rather than judged on the read
+# taken the instant the key landed. An agent that was not interrupted is not in
+# a transition, so its one read stands. An adapter
+# whose idle composer reads `unknown` by design (fm_control_composer_clear_key)
+# gets its clear key once the agent no longer reads busy, and the composer is
+# read again so a draft the classifier can see still refuses.
+settle_composer() {  # <interrupted 0|1>
+  local interrupted=$1 clear elapsed=0 settled=0
+  clear=$(fm_control_composer_clear_key "$HARNESS" 2>/dev/null || true)
+  [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" || clear=
+  while :; do
+    read_composer
+    case "$COMPOSER_STATE" in
+      empty) return 0 ;;
+      pending) [ "$interrupted" = 1 ] || return 0 ;;
+      unknown)
+        if [ -n "$clear" ]; then
+          case "$(busy_verdict)" in
+            busy*) ;;
+            idle*) settled=1; break ;;
+          esac
+        fi
+        ;;
+    esac
+    [ "$interrupted" = 1 ] || break
+    awk -v e="$elapsed" -v t="$COMPOSER_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  [ "$settled" = 1 ] || return 0
+  fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
+    || die "task $ID's $HARNESS composer cannot be read and the $clear that clears it was not delivered; refusing to type the exit command"
+  sleep "$(fm_control_interrupt_press_gap "$HARNESS")"
+  read_composer
+  case "$COMPOSER_STATE" in
+    empty|unknown) COMPOSER_STATE=cleared ;;
+  esac
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
+  local state cmd hazard verdict cancel absence interrupt_result=not-needed dialog interrupted=0
   require_state_verified_backend exit
   fm_control_backend_exit_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, whose T3 Orchestrator V2 tools have no session stop, so 'exit' cannot stop its agent; 'interrupt' ends the running turn and teardown archives the thread"
@@ -771,7 +855,10 @@ do_exit() {
           printf 'stopped'
           return 0
           ;;
-        alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
+        alive)
+          interrupt_result="delivered verified=agent-alive cancel=$cancel"
+          interrupted=1
+          ;;
         missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
         *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
       esac
@@ -782,23 +869,14 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
-  : > "$FM_COMPOSER_DIALOG_SINK" \
-    || die "task $ID's dialog check could not be recorded"
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
-    || composer_state=unknown
-  # The classify that filled the sink ran in a subshell, so read the file
-  # rather than a function that subshell sourced.
-  if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
-    dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
-    refuse_blocking_prompt "$dialog"
-  fi
-  case "$composer_state" in
-    empty) ;;
+  settle_composer "$interrupted"
+  case "$COMPOSER_STATE" in
+    empty|cleared) ;;
     pending)
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
       ;;
     *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      die "task $ID's composer state is '$COMPOSER_STATE', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
       ;;
   esac
   # The submit verdict is NOT the postcondition here: a successful exit command
@@ -1115,6 +1193,66 @@ resolve_relaunch_profile() {
   fi
 }
 
+# resolve_fresh_session: for --fresh-session, decide before anything stops how
+# the replacement will get a new conversation. Sets FRESH_SESSION_PATH to the
+# bound session file to move aside after the old agent exits, or leaves it
+# empty when the replacement starts fresh anyway.
+FRESH_SESSION_PATH=
+resolve_fresh_session() {
+  local identity='' bound_agent='' ref='' plan herdr_state
+  FRESH_SESSION_PATH=
+  [ "$FRESH_SESSION" = 1 ] || return 0
+  # Only Herdr records a per-pane session a replacement resumes
+  # (bin/fm-spawn.sh relaunch_resume_args); everywhere else a relaunch is
+  # already a fresh conversation.
+  [ "$BACKEND" = herdr ] || return 0
+  # A Pi replacement can resume only when Herdr's registration belongs to Pi.
+  # If that registration is live but unreadable, treating it as absent is not
+  # a freshness proof: fm-spawn may read it successfully a moment later and
+  # resume the old conversation.
+  case "$TARGET_HARNESS" in
+    pi|pi-signed) ;;
+    *) return 0 ;;
+  esac
+  fm_backend_source herdr >/dev/null 2>&1 \
+    || die "task $ID's herdr adapter could not be loaded to read its bound session; refusing --fresh-session rather than resuming the old conversation"
+  fm_backend_herdr_parse_target "$T" \
+    || die "task $ID's herdr endpoint could not be parsed for --fresh-session; refusing before stopping anything"
+  herdr_state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || herdr_state=unknown
+  case "$herdr_state" in
+    no-agent|dead) return 0 ;;
+    live|stale-agent) ;;
+    *) die "task $ID's herdr agent registration could not be verified for --fresh-session; refusing before stopping anything" ;;
+  esac
+  identity=$(fm_backend_herdr_pane_agent_session_ref "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null) \
+    || die "task $ID's herdr agent registration could not be read for --fresh-session; refusing before stopping anything"
+  bound_agent=${identity%%$'\t'*}
+  ref=${identity#*$'\t'}
+  plan=$(fm_control_fresh_session_plan "$TARGET_HARNESS" "$bound_agent" "$ref") \
+    || die "task $ID's pane is bound to session '$ref', which the $TARGET_HARNESS replacement would resume and which is not a file that can be moved aside; refusing --fresh-session before stopping anything"
+  if [ "$plan" = archive ]; then
+    [ -f "$ref" ] && [ ! -L "$ref" ] && [ -r "$ref" ] \
+      || die "task $ID's bound session '$ref' is not a readable regular file; refusing --fresh-session before stopping anything"
+    FRESH_SESSION_PATH=$ref
+  fi
+}
+
+# archive_fresh_session: move the old agent's bound session file aside, never
+# delete it. Runs after the old agent stopped and before the replacement
+# launches. Prints the archive path, or nothing when there was no file.
+archive_fresh_session() {
+  local dest
+  [ -n "$FRESH_SESSION_PATH" ] || return 0
+  [ -f "$FRESH_SESSION_PATH" ] && [ ! -L "$FRESH_SESSION_PATH" ] \
+    || die "task $ID's old session '$FRESH_SESSION_PATH' is no longer a regular file, so the replacement would resume it; its agent is stopped and nothing was relaunched"
+  dest="$FRESH_SESSION_PATH.rotated-$(date -u +%Y%m%dT%H%M%SZ)"
+  [ ! -e "$dest" ] || dest="$dest.$RANDOM"
+  mv -- "$FRESH_SESSION_PATH" "$dest" \
+    || die "task $ID's old session $FRESH_SESSION_PATH could not be moved aside, so the replacement would resume it; its agent is stopped and nothing was relaunched"
+  printf '%s' "$dest"
+}
+
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
 # CHECKPOINT_LINES with the journal lines describing what it proved, and
@@ -1217,7 +1355,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line session_archive='' session_word=''
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1248,6 +1386,7 @@ do_relaunch() {
   else
     note_line="note=none"
   fi
+  resolve_fresh_session
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
@@ -1259,6 +1398,8 @@ do_relaunch() {
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  session_archive=$(archive_fresh_session)
+  [ -z "$session_archive" ] || CHECKPOINT_LINES+=("session_archived=$session_archive")
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
@@ -1301,7 +1442,11 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  if [ "$FRESH_SESSION" = 1 ]; then
+    session_word=" session=fresh"
+    [ -z "$session_archive" ] || session_word="$session_word archived=$session_archive"
+  fi
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT$session_word"
 }
 
 # --- verbs ------------------------------------------------------------------

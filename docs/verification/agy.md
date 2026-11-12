@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), and composer clearing was re-measured on `agy 1.5.6` (2026-11-11) |
+| Verified | 2026-09-10; composer clearing re-verified 2026-11-11 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -109,7 +109,7 @@ The completed turn showed the reply, then the idle composer:
 `fm_busy_agy_tail_busy` and the delivery guard in `bin/fm-composer-lib.sh` match the `esc to cancel` token alone: the TUI pins that status row to the bottom of the pane for the whole turn, and the idle row replaces it with `? for shortcuts`.
 The `Generating...` spinner word is deliberately not a signal: it is a free-floating output line, so ordinary worker output such as `Generating report...` would otherwise classify an idle worker as busy or acknowledge a submit that did not land.
 No busy phase without the status row was observed live; every captured mid-turn frame carried it.
-`fm_busy_classify` reports `unknown agy-regex` when the token is absent, because a long turn can scroll the marker out of the captured tail.
+`fm_busy_classify` reports `idle agy-regex` only when the last non-blank row starts with `? for shortcuts`, the preceding non-blank row is a horizontal rule, and no `esc to cancel` appears in the last 12 non-blank rows; otherwise it reports `unknown agy-regex` when the busy marker is absent, because a long turn can scroll the marker out of the captured tail.
 The signature is hardcoded with no environment override, so a stray variable can never change worker-state classification.
 Herdr's own registry agreed throughout: `agent get` reported `agent_status=working` mid-turn and `idle` after, so on Herdr the native verdict carries busy with no new code.
 
@@ -122,7 +122,7 @@ A single `Escape` sent mid-turn through `herdr pane send-keys` cancelled it and 
 ```
 
 Sending `/quit` plus Enter exited the process; the pane closed under the `exec` launch, and Herdr reported the pane gone.
-`bin/fm-control-lib.sh` records `Escape` once, no clear key, no ack source, and `/quit` for agy.
+`bin/fm-control-lib.sh` records `Escape` once, no interrupt acknowledgement source, and `/quit` for agy; the control plane waits for the idle marker and sends agy's verified Ctrl+U clear key before `/quit`, because the shared composer read remains `unknown`.
 
 ## Backend liveness: Herdr recognizes agy, tmux names it
 
@@ -143,6 +143,19 @@ Steering still confirms delivery: the Herdr submit core leads with the native `i
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
 `tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
 This is the cursor precedent, not a gap to patch in shared code.
+
+The control plane's exit therefore clears the composer with Ctrl+U instead of proving it empty (`fm_control_composer_clear_key` in `bin/fm-control-lib.sh`).
+Measured live on `agy 1.5.6` (2026-11-11) in a 120x40 PTY rendered by `pyte`, launched as `agy --dangerously-skip-permissions` with no prompt submitted:
+
+```
+idle:            >  Accept-edits mode: file edits auto-approved (shift+tab to cycle)   (hint in SGR 90)
+typed hello:     > hello world                                                          (default colour)
+after Ctrl+U:    >
+typed, Ctrl+C:   > again text      status row: press ctrl+c again to exit
+```
+
+Ctrl+U returned a typed draft to the bare `>` row, while Ctrl+C left the draft in place and armed exit, so Ctrl+U is the clear key and Ctrl+C is never used for it.
+`tests/fm-control.test.sh` pins the clear-then-exit order, and that a still-busy agy receives no clear key.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 

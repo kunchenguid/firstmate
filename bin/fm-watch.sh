@@ -4202,6 +4202,39 @@ while :; do
         fm_wake_append check pr-register "$pr_register_reason" || exit 1
       fi
     fi
+    # Opt-in fleet sweeps, each gated by its own config file and owned by its
+    # script: second-mate session rotation (bin/fm-secondmate-rotate.sh) and the
+    # quota circuit breaker (bin/fm-quota-breaker.sh). Every output line is one
+    # notification.
+    if [ -e "$CONFIG/secondmate-rotation" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        run_check_capture "$SCRIPT_DIR/fm-secondmate-rotate.sh" scan || exit 1
+      while IFS= read -r sweep_line; do
+        [ -n "$sweep_line" ] || continue
+        fm_wake_append check secondmate-rotation "check: secondmate-rotation: $sweep_line" || exit 1
+      done <<EOF
+$FM_CHECK_RESULT
+EOF
+    fi
+    if [ -e "$CONFIG/quota-breaker" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        run_check_capture "$SCRIPT_DIR/fm-quota-breaker.sh" scan --durable || exit 1
+      while IFS= read -r sweep_line; do
+        [ -n "$sweep_line" ] || continue
+        breaker_id=$(printf '%s\n' "$sweep_line" | awk '{print $2}')
+        breaker_class=$(printf '%s\n' "$sweep_line" | awk '{print $3}')
+        breaker_epoch=$(printf '%s\n' "$sweep_line" | sed -n 's/.*\[quota-breaker-epoch=\([0-9][0-9]*\) generation=[^]]*\].*/\1/p')
+        breaker_gen=$(printf '%s\n' "$sweep_line" | sed -n 's/.*\[quota-breaker-epoch=[0-9][0-9]* generation=\([^]]*\)\].*/\1/p')
+        breaker_payload=$(printf '%s\n' "${sweep_line#quota-breaker }" | sed 's/ \[quota-breaker-epoch=[0-9][0-9]* generation=[^]]*\]$//')
+        fm_wake_append check quota-breaker "check: quota-breaker: $breaker_payload" || exit 1
+        [ -n "$breaker_id" ] && [ -n "$breaker_class" ] && [ -n "$breaker_epoch" ] && [ -n "$breaker_gen" ] || exit 1
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+          "$SCRIPT_DIR/fm-quota-breaker.sh" ack "$breaker_id" "$breaker_class" "$breaker_epoch" "$breaker_gen" \
+          >/dev/null 2>&1 || exit 1
+      done <<EOF
+$FM_CHECK_RESULT
+EOF
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0

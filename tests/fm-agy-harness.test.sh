@@ -189,16 +189,23 @@ test_agy_busy_signatures_are_harness_scoped() {
   pass "fm-composer-lib: agy delivery signatures never cross harnesses"
 }
 
-test_agy_classify_reports_unknown_when_the_marker_scrolls_out() {
+test_agy_classify_distinguishes_status_markers() {
   local statedir busy idle
   statedir="$TMP_ROOT/classify"; mkdir -p "$statedir"
   busy=$(fm_busy_classify tmux fake:win agy agy-case-1 "$statedir" 'turn running
 esc to cancel                                                           Gemini 3.8 Flash · low')
   [ "$busy" = "busy agy-regex" ] || fail "a busy tail must classify busy agy-regex, got '$busy'"
   idle=$(fm_busy_classify tmux fake:win agy agy-case-2 "$statedir" 'reply landed
+────────────────────────────────────────
 ? for shortcuts                                                         Gemini 3.8 Flash · low')
-  [ "$idle" = "unknown agy-regex" ] || fail "a scrolled-out marker must classify unknown, got '$idle'"
-  pass "fm-busy-lib: agy classifies busy on its marker and unknown without it"
+  [ "$idle" = "idle agy-regex" ] || fail "the pinned idle footer must classify idle, got '$idle'"
+  idle=$(fm_busy_classify tmux fake:win agy agy-case-3 "$statedir" 'reply landed
+? for shortcuts                                                         Gemini 3.8 Flash · low')
+  [ "$idle" = "unknown agy-regex" ] || fail "an unanchored idle marker must stay unknown, got '$idle'"
+  idle=$(fm_busy_classify tmux fake:win agy agy-case-4 "$statedir" 'reply landed
+some ambiguous output')
+  [ "$idle" = "unknown agy-regex" ] || fail "a pane without either status marker must classify unknown, got '$idle'"
+  pass "fm-busy-lib: agy classifies busy, idle, and ambiguous tails distinctly"
 }
 
 test_agy_tmux_names_the_native_binary_an_agent() {
@@ -920,7 +927,7 @@ test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
-test_agy_classify_reports_unknown_when_the_marker_scrolls_out
+test_agy_classify_distinguishes_status_markers
 test_agy_tmux_names_the_native_binary_an_agent
 test_herdr_done_with_live_registry_stays_live
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
