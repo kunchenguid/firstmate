@@ -802,7 +802,7 @@ test_spawn_unverified_secondmate_harness_refused() {
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw env env-flags nested other; do
+    for how in config explicit raw env env-flags nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution other quoted-other; do
       w="$TMP_ROOT/spawn-auggie-$kind-$how"
       sm="$w/sm"
       mkdir -p "$w/home/config" "$w/home/state"
@@ -824,6 +824,15 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         env) set -- "$@" 'env auggie --model test-model' ;;
         env-flags) set -- "$@" 'env -i -u CLAUDECODE --chdir /tmp PATH=/usr/bin /opt/tools/bin/auggie --model test-model' ;;
         nested) set -- "$@" 'FOO=1 nohup command -p exec -a worker env BAR=2 auggie --model test-model' ;;
+        quoted) set -- "$@" "env 'auggie' --model test-model" ;;
+        quoted-path) set -- "$@" "env '/opt/Agent Tools/bin/auggie' --model test-model" ;;
+        double-quoted) set -- "$@" 'env "/opt/Agent Tools/bin/auggie" --model test-model' ;;
+        escaped) set -- "$@" 'env /opt/Agent\ Tools/bin/auggie --model test-model' ;;
+        assignment) set -- "$@" "FOO='two words' env BAR='two words' auggie --model test-model" ;;
+        operand) set -- "$@" "env -C '/opt/Agent Tools' auggie --model test-model" ;;
+        exec-name) set -- "$@" "exec -a 'worker name' env 'auggie' --model test-model" ;;
+        substitution) set -- "$@" "FOO=\$(touch '$w/evaluated') env 'auggie' --model test-model" ;;
+        quoted-other) set -- "$@" "env -u 'auggie' BAR='two words' 'true' auggie --model test-model" ;;
         other) set -- "$@" 'env -u auggie AUGGIE=auggie true auggie --model test-model' ;;
       esac
       case "$kind" in
@@ -838,7 +847,8 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         FM_SPAWN_NO_GUARD=1 \
         "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
 
-      if [ "$how" = other ]; then
+      [ ! -e "$w/evaluated" ] || fail "auggie $kind $how: parsing executed the raw command"
+      if [ "$how" = other ] || [ "$how" = quoted-other ]; then
         if grep -q "primary harness only" "$err"; then
           fail "auggie $kind $how: a wrapped non-auggie program was refused as auggie"
         fi

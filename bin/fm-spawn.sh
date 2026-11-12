@@ -3228,11 +3228,9 @@ refuse_primary_only_harness() {  # <harness> <source>
 # Print the basename of the program a raw launch command runs, looking past
 # leading assignments and the trivial env, command, exec, and nohup wrappers
 # with their options, so a wrapped primary-only harness meets the same refusal.
-raw_launch_program() {  # <raw-launch>
-  local -a words
+raw_launch_program() {
   local word wrapper='' skip=0
-  IFS=$' \t\n' read -r -d '' -a words <<<"$1" || true
-  for word in "${words[@]}"; do
+  for word in "$@"; do
     [ "$skip" -eq 0 ] || { skip=0; continue; }
     case "$wrapper:$word" in
       env:-u | env:-C | env:--unset | env:--chdir | exec:-a) skip=1; continue ;;
@@ -3252,9 +3250,24 @@ case "$ARG3" in
   LAUNCH=$ARG3
   HARNESS=""
   harness_src='the raw launch command'
-  for word in $LAUNCH; do
+  raw_words=$(node --input-type=module - "$SCRIPT_DIR/fm-arm-command-policy.mjs" "$LAUNCH" <<'JS'
+import { pathToFileURL } from "node:url";
+const { Lexer } = await import(pathToFileURL(process.argv[2]).href);
+const { tokens, error } = new Lexer(process.argv[3]).tokenize();
+if (error) {
+  console.error(`error: invalid raw launch command: ${error}`);
+  process.exit(1);
+}
+console.log(JSON.stringify(tokens.filter(token => token.type === "word").map(token => token.value)));
+JS
+  ) || exit 1
+  RAW_LAUNCH_WORDS=()
+  while IFS= read -r -d '' word; do
+    RAW_LAUNCH_WORDS+=("$word")
+  done < <(jq -j '.[] | ., "\u0000"' <<<"$raw_words")
+  for word in "${RAW_LAUNCH_WORDS[@]}"; do
     case "$word" in [A-Za-z_]*=*) continue ;; *)
-      HARNESS=$(basename "$word")
+      HARNESS=$(basename -- "$word")
       break
       ;;
     esac
@@ -3288,7 +3301,7 @@ case "$ARG3" in
 esac
 
 refuse_primary_only_harness "$HARNESS" "$harness_src"
-[ "$RAW_LAUNCH" -eq 0 ] || refuse_primary_only_harness "$(raw_launch_program "$LAUNCH")" "$harness_src"
+[ "$RAW_LAUNCH" -eq 0 ] || refuse_primary_only_harness "$(raw_launch_program "${RAW_LAUNCH_WORDS[@]}")" "$harness_src"
 if [ "$RAW_LAUNCH" -eq 0 ]; then
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
     if [ -z "$ARG3" ]; then
