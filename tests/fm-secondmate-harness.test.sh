@@ -794,12 +794,15 @@ test_spawn_unverified_secondmate_harness_refused() {
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
 }
 
-# auggie is verified as a primary only: an auggie secondmate, whether resolved
-# from config or passed explicitly, is refused with that reason before any meta.
+# auggie is verified as a primary only: an auggie worker, whether resolved from
+# config, passed explicitly, or run by a raw launch command - bare or behind the
+# env, command, exec, and nohup wrappers - is refused with that reason before
+# any meta. A wrapped raw launch of another program that merely mentions auggie
+# is not refused for that reason.
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw; do
+    for how in config explicit raw env env-flags nested other; do
       w="$TMP_ROOT/spawn-auggie-$kind-$how"
       sm="$w/sm"
       mkdir -p "$w/home/config" "$w/home/state"
@@ -818,6 +821,10 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
           ;;
         explicit) set -- "$@" auggie ;;
         raw) set -- "$@" 'auggie --model test-model' ;;
+        env) set -- "$@" 'env auggie --model test-model' ;;
+        env-flags) set -- "$@" 'env -i -u CLAUDECODE --chdir /tmp PATH=/usr/bin /opt/tools/bin/auggie --model test-model' ;;
+        nested) set -- "$@" 'FOO=1 nohup command -p exec -a worker env BAR=2 auggie --model test-model' ;;
+        other) set -- "$@" 'env -u auggie AUGGIE=auggie true auggie --model test-model' ;;
       esac
       case "$kind" in
         secondmate) set -- "$@" --secondmate ;;
@@ -831,13 +838,19 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         FM_SPAWN_NO_GUARD=1 \
         "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
 
+      if [ "$how" = other ]; then
+        if grep -q "primary harness only" "$err"; then
+          fail "auggie $kind $how: a wrapped non-auggie program was refused as auggie"
+        fi
+        continue
+      fi
       [ "$rc" -ne 0 ] || fail "auggie $kind $how: spawn should have failed"
       assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
         "auggie $kind $how: error names the primary-only boundary"
       [ -e "$w/home/state/sm.meta" ] && fail "auggie $kind $how: a meta was written despite the abort"
     done
   done
-  pass "B6b spawn: configured, explicit, and raw auggie workers are refused for every task kind"
+  pass "B6b spawn: configured, explicit, raw, and wrapped raw auggie workers are refused for every task kind"
 }
 
 test_spawn_cursor_secondmate_launches_with_its_primary_contract() {

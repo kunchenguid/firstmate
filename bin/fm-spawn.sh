@@ -3212,9 +3212,10 @@ launch_template() {
 }
 
 # auggie is verified as a PRIMARY harness only: it has no launch template and no
-# verified worker lifecycle, so an explicit or resolved auggie worker is refused
-# with that reason rather than the generic unknown-harness one. An auggie
-# primary with an absent or "default" config/crew-harness resolves here too.
+# verified worker lifecycle, so an explicit, resolved, or raw auggie worker is
+# refused with that reason rather than the generic unknown-harness one. An
+# auggie primary with an absent or "default" config/crew-harness resolves here
+# too.
 refuse_primary_only_harness() {  # <harness> <source>
   case "$1" in
     auggie)
@@ -3222,6 +3223,27 @@ refuse_primary_only_harness() {  # <harness> <source>
       exit 1
       ;;
   esac
+}
+
+# Print the basename of the program a raw launch command runs, looking past
+# leading assignments and the trivial env, command, exec, and nohup wrappers
+# with their options, so a wrapped primary-only harness meets the same refusal.
+raw_launch_program() {  # <raw-launch>
+  local -a words
+  local word wrapper='' skip=0
+  IFS=$' \t\n' read -r -d '' -a words <<<"$1" || true
+  for word in "${words[@]}"; do
+    [ "$skip" -eq 0 ] || { skip=0; continue; }
+    case "$wrapper:$word" in
+      env:-u | env:-C | env:--unset | env:--chdir | exec:-a) skip=1; continue ;;
+      env:-* | env:[A-Za-z_]*=* | exec:-* | command:-* | nohup:-*) continue ;;
+      :[A-Za-z_]*=*) continue ;;
+    esac
+    case "$(basename -- "$word")" in
+      env | command | exec | nohup) wrapper=$(basename -- "$word") ;;
+      *) basename -- "$word"; return ;;
+    esac
+  done
 }
 
 case "$ARG3" in
@@ -3266,6 +3288,7 @@ case "$ARG3" in
 esac
 
 refuse_primary_only_harness "$HARNESS" "$harness_src"
+[ "$RAW_LAUNCH" -eq 0 ] || refuse_primary_only_harness "$(raw_launch_program "$LAUNCH")" "$harness_src"
 if [ "$RAW_LAUNCH" -eq 0 ]; then
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
     if [ -z "$ARG3" ]; then
