@@ -6375,6 +6375,43 @@ test_competing_live_runs_report_unknown_with_both_ids() {
   pass 'competing live runs report unknown with both run ids'
 }
 
+# Sibling of the competing-live-runs case for the other terminal word this
+# contract made selectable: a stale handed_off overview row is terminal, so a
+# newer live same-branch run has to take the same competing-live-runs,
+# ordering-unverified and newer-live-run-replacement safeguards completed,
+# cancelled and failed take. Without it the superseded handed_off row answers
+# for the branch and the confident reading is a wrong one that cannot error.
+test_handed_off_competing_live_runs_report_unknown_with_both_ids() {
+  reset_fakes
+  local d old_head new_head out
+  d=$(new_case stale-handed-off-overview-row)
+  make_repo_on_branch "$d/wt" fm/reused-branch
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  new_head=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating the current run\n' > "$d/state/reused.status"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01OLD\",fm/reused-branch,handed_off,$old_head,\"https://github.com/o/r/pull/1\"
+  \"01NEW\",fm/reused-branch,running,$new_head,\"\""
+  FM_FAKE_RUN_HEAD=$new_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01NEW/')
+branch_sync:
+  state: pipeline_owned"
+  FM_FAKE_AXI_STATUS_RUN_01OLD="$(FM_FAKE_RUN_HEAD=$old_head run_handed_off fm/reused-branch | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN_01NEW="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  running fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  handed_off fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" 'state: working' 'the live newer run stays authoritative over a stale handed_off row'
+  assert_contains "$out" '01NEW' 'the live run identity is the one reported'
+  assert_not_contains "$out" 'state: done' 'a stale handed_off row never answers for the branch'
+  assert_not_contains "$out" 'PR merged' 'the superseded handed_off reading is not reported as the result'
+  unset FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
+  pass 'a stale handed_off overview row yields to the newer live run'
+}
+
 # Overview order A (historical-first / reversed): AXI can surface a historical
 # row before the active current run when an old run was updated by its stale PR
 # being closed. The current branch status identifies the active run, so
@@ -7027,6 +7064,7 @@ test_coarse_live_row_keeps_the_original_supersede_note
 test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
+test_handed_off_competing_live_runs_report_unknown_with_both_ids
 test_current_active_run_beats_stale_overview_row
 test_current_active_run_beats_stale_failed_overview_row
 test_current_active_run_beats_same_head_stale_failed_overview_row
