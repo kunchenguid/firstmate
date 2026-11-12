@@ -53,7 +53,7 @@
 #       else the calling script ($$) when fm_exec_timed runs in a subshell,
 #       else the shell's parent. The escalation starts once that owner is gone
 #       or the watchdog's parent changes, so an owner that dies while the
-#       watchdog is still starting is detected too. The timeout/gtimeout
+#       watchdog is still starting is detected too. The GNU timeout/gtimeout
 #       fallback does not track the owner: it bounds the command only by its
 #       deadline and grace, so owner death alone does not stop the command.
 #       Exit status is the command's own, except 124 (the bound was hit) or
@@ -69,8 +69,9 @@
 #       command they run), so it ends only through the command's own TERM
 #       handling; that is what the grace is for, and a command KILLed after
 #       the grace can leave such a descendant running. With
-#       no perl, timeout, or gtimeout on the host it refuses with 127 rather
-#       than run unbounded: there is no bash fallback, because a monitor-mode
+#       no perl or GNU coreutils timeout/gtimeout on the host it refuses with
+#       127: non-GNU timeout can misreport a forwarded signal as expiration.
+#       There is no bash fallback, because a monitor-mode
 #       watchdog cannot replace the caller.
 #
 #   fm_timed_out <status>
@@ -334,7 +335,8 @@ fm_timed_out() {  # <status>
 # which keeps the bound off perl's platform-dependent syscall-restart signal
 # semantics and off the drift of counting sleep intervals.
 fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
-  local seconds=${1:-} grace=${2:-} value owner timeout_path
+  local seconds=${1:-} grace=${2:-} value owner timeout_path name
+  local refusal='none of perl, timeout, or gtimeout is available'
   for value in "$seconds" "$grace"; do
     case "$value" in
       '' | 0* | *[!0-9]*)
@@ -403,9 +405,15 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
         select undef, undef, undef, 0.05;
       }
     ' -- "$seconds" "$grace" "$owner" "$PPID" "$@"
-  elif timeout_path=$(fm_external_timeout_path); then
-    exec "$timeout_path" -k "$grace" "$seconds" "$@"
   fi
-  printf 'fm_exec_timed: cannot bound %s within %ss: none of perl, timeout, or gtimeout is available\n' "${1##*/}" "$seconds" >&2
+  for name in timeout gtimeout; do
+    timeout_path=$(type -P "$name" 2>/dev/null) || continue
+    [ -x "$timeout_path" ] || continue
+    case "$("$timeout_path" --version 2>/dev/null)" in
+      *'GNU coreutils'*) exec "$timeout_path" -k "$grace" "$seconds" "$@" ;;
+    esac
+    refusal="perl is unavailable and $timeout_path is not GNU coreutils"
+  done
+  printf 'fm_exec_timed: cannot bound %s within %ss: %s\n' "${1##*/}" "$seconds" "$refusal" >&2
   exit 127
 }
