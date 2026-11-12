@@ -199,6 +199,31 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# A GitHub owner is a personal or organization login: at most 39 characters of
+# letters, digits, and single inner hyphens. An Enterprise Managed User login
+# appends exactly one "_" and a 3 to 8 character alphanumeric enterprise short
+# code to such a name, within the same 39-character limit.
+fm_pr_github_owner_valid() {
+  local owner=${1-} base suffix
+  local LC_ALL=C
+  [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || return 1
+  base=$owner
+  case "$owner" in
+    *_*_*) return 1 ;;
+    *_*)
+      base=${owner%_*}
+      suffix=${owner#*_}
+      [ "${#suffix}" -ge 3 ] && [ "${#suffix}" -le 8 ] || return 1
+      case "$suffix" in
+        *[!A-Za-z0-9]*) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$base" in
+    ''|*[!A-Za-z0-9-]*|-*|*-|*--*) return 1 ;;
+  esac
+}
+
 # Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
 # exactly owner/repository, so each segment is validated the same way GitHub's
 # owner and repo are, minus GitHub's specific hyphen-run and length rules.
@@ -249,8 +274,8 @@ fm_pr_github_host_export() {  # <host>
 }
 
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
-# provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
+# provider-tagged identity. Validation is strict and per provider: a GitHub
+# owner must pass fm_pr_github_owner_valid, and GitLab, Gerrit, and Forgejo
 # each get their own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
@@ -268,11 +293,11 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9_-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
     host=${BASH_REMATCH[1]}
     fm_github_host_allowed "$host" || return 1
-    [[ "${BASH_REMATCH[2]}" != *--* ]] || return 1
+    fm_pr_github_owner_valid "${BASH_REMATCH[2]}" || return 1
     [ "${BASH_REMATCH[3]}" != . ] && [ "${BASH_REMATCH[3]}" != .. ] || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
