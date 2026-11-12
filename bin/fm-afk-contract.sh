@@ -87,8 +87,9 @@
 #     Write the record now, with no separate confirmation step, then print the
 #     entry announcement and the read-back. Exit 0 on success and 2 on a usage
 #     error. --words-file keeps the file's bytes verbatim, trailing newlines
-#     included. With no words while a record stands, this is a refresh that
-#     leaves the standing record untouched; new words replace the mandate,
+#     included. With no words while a record of the requested posture stands,
+#     this refresh leaves it untouched (AWAY OR QUIET above owns transitions);
+#     new words replace the mandate,
 #     carry the original session entry forward, and archive the superseded
 #     record. A replacement is staged before the prior record is archived and
 #     replaced. `propose` and `confirm` were retired with the wait-for-go gate.
@@ -457,7 +458,7 @@ fm_afk_contract_render_readback() {  # <path>
 fm_afk_contract_render_announcement() {  # <path>
   local path=$1 expected words mandate_text
   if [ "$(fm_afk_contract_record_mode "$path")" = quiet ]; then
-    printf 'Quiet mode recorded at %s: %s Only an explicit /quiet off ends it.\n' \
+    printf 'Quiet mode recorded at %s: %s Use /quiet off to end it; on a supervision-host home, /afk replaces it with away.\n' \
       "$(fm_afk_contract_read_field "$path" confirmed)" "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
     return 0
   fi
