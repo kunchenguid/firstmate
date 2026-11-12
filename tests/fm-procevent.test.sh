@@ -463,10 +463,11 @@ wait "$shared_launcher" || fail "shared caller-group fixture did not exit cleanl
 pass "public start never claims an inherited caller process group"
 
 # --- an unhandled result remains eligible for re-announcement on restart ----
-# A result is durable but nothing has ever acknowledged handling it. Every
-# reconcile call - not just the first restart after a crash - must keep
-# re-announcing it, because the only thing that stops re-announcement is an
-# explicit handled acknowledgement, never a prior publication.
+# A result is durable but nothing has ever acknowledged handling it. After the
+# queued announcement is consumed, every reconcile call - not just the first
+# restart after a crash - must keep re-announcing it, because the only thing
+# that stops re-announcement is an explicit handled acknowledgement, never a
+# prior publication. A still-queued identical row is not appended again.
 H2="$TMP_ROOT/h2"; new_home "$H2"
 future_status=0
 future_out=$(pe "$H2" handled src-cut 7 2>&1) || future_status=$?
@@ -481,9 +482,17 @@ out=$(pe "$H2" reconcile)
 assert_contains "$out" "published=1" "a durably captured but unhandled result is announced after restart"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "durable adapter identity survives without a registration"
 assert_absent "$H2/state/procevent-inbox/src-cut.7.handled" "recovery alone never marks the recovered result handled"
+queued_rows=$(wake_payloads "$H2" | wc -l | tr -d ' ')
+queued_seq=$(cat "$H2/state/.wake-queue.seq")
+queued_marker=$(cat "$H2/state/.watcher-down")
+out=$(pe "$H2" reconcile)
+assert_contains "$out" "published=0" "an announcement still queued for the handler is not appended again"
+[ "$(wake_payloads "$H2" | wc -l | tr -d ' ')" = "$queued_rows" ] || fail "reconcile duplicated a still-queued announcement"
+[ "$(cat "$H2/state/.wake-queue.seq")" = "$queued_seq" ] || fail "a skipped re-announcement consumed a queue sequence"
+[ "$(cat "$H2/state/.watcher-down")" = "$queued_marker" ] || fail "a skipped re-announcement reopened the recovery episode"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-1"
 out=$(pe "$H2" reconcile)
-assert_contains "$out" "published=1" "an unhandled result is re-announced on every reconcile, not only the first"
+assert_contains "$out" "published=1" "an unhandled result is re-announced after the queued announcement is consumed, not only the first"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "the repeat wake preserves its deduplication identity"
 [ "$(count_results "$H2" src-cut)" = 1 ] || fail "repeat re-announcement created a second durable copy"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-2"
@@ -634,6 +643,20 @@ assert_grep 'publish-src 1' "$HPUBLISH/state/applied" "the handler could not app
 assert_present "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "the later handler application was not acknowledged"
 pass "automatic application waits for durable publication and failed publication remains recoverable"
 
+# An announcement that is already queued (reconcile published it first) is not
+# appended again, yet it is still published: a non-self-announcing adapter's
+# capture must be autohandled rather than left for the handler.
+HDUP="$TMP_ROOT/hdup"; new_home "$HDUP"
+fm_test_track_procevent_home "$HDUP"
+pe_adapter "$HDUP" register applying dup-src -- /bin/echo "apply after queued" >/dev/null
+printf '%s\t1\tcheck\tprocevent:dup-src:1\tcheck: procevent applying dup-src 1\n' "$(date +%s)" > "$HDUP/state/.wake-queue"
+printf '1\n' > "$HDUP/state/.wake-queue.seq"
+out=$(pe_adapter "$HDUP" start dup-src 2>&1)
+assert_contains "$out" "autohandled: dup-src" "an already-queued announcement left the capture unapplied"
+assert_grep 'dup-src 1' "$HDUP/state/applied" "the capture was not applied when its announcement was already queued"
+[ "$(wake_payloads "$HDUP" | wc -l | tr -d ' ')" = 1 ] || fail "an already-queued announcement was appended again"
+pass "an already-queued announcement still lets a non-self-announcing capture autohandle without a duplicate row"
+
 # A self-announcing adapter inverts that order on its own declaration: the
 # runner applies first and publishes nothing for a capture the adapter fully
 # applied and acknowledged, because the adapter's own durable downstream
@@ -682,6 +705,8 @@ assert_contains "$(wake_payloads "$HTERM")" "procevent endnow ends-src 1" "the t
 [ "$(count_results "$HTERM" ends-src)" = 1 ] || fail "terminal retirement lost or duplicated the captured result"
 TERMINAL_RESULT=$(first_result "$HTERM" ends-src || true)
 assert_grep 'terminal payload' "$TERMINAL_RESULT" "automatic retirement retains the captured output verbatim"
+# Re-announcement follows consumption of the earlier row, so drain it first.
+mv "$HTERM/state/.wake-queue" "$HTERM/state/.wake-queue.drained"
 out=$(pe_adapter "$HTERM" reconcile)
 assert_contains "$out" "started=0" "a retired terminal source is never restarted"
 assert_contains "$out" "published=1" "an unhandled terminal result is still re-announced until acknowledged"
