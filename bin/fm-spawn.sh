@@ -6242,9 +6242,26 @@ claude*)
     exit 1
   fi
   ;;
-codex*)
+codex)
   if [ "$BACKEND" != t3code ]; then
     SPAWN_CODEX_HOME=${CODEX_HOME:-${HOME:+$HOME/.codex}}
+    if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+      SPAWN_CODEX_HOME=$(
+        spawn_codex_store=
+        spawn_codex_user_home=${HOME:-}
+        case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+          *$'\nHOME\n'*) spawn_codex_user_home= ;;
+        esac
+        eval "set -- $ORCA_LAUNCH_ENV_ARGS" || exit 1
+        for spawn_env_arg; do
+          case "$spawn_env_arg" in
+            CODEX_HOME=*) spawn_codex_store=${spawn_env_arg#CODEX_HOME=} ;;
+            HOME=*) spawn_codex_user_home=${spawn_env_arg#HOME=} ;;
+          esac
+        done
+        printf '%s' "${spawn_codex_store:-${spawn_codex_user_home:+$spawn_codex_user_home/.codex}}"
+      ) || exit 1
+    fi
     case "$SPAWN_CODEX_HOME" in
       /*) ;;
       *) echo "error: CODEX_HOME or HOME must resolve to an absolute Codex home" >&2; exit 1 ;;
