@@ -683,6 +683,7 @@ fm_lock_discard_staged_owners() {
   for owner in "$lockdir.owner.$scope."*; do
     [ -d "$owner" ] && [ ! -L "$owner" ] || continue
     fm_lock_points_to_owner "$lockdir" "$owner" && continue
+    [ -L "$lockdir" ] && [ "$lockdir" -ef "$owner" ] && continue
     pid=$(cat "$owner/pid" 2>/dev/null || true)
     [ -z "$pid" ] || [ "$pid" = "$mypid" ] || continue
     fm_lock_discard_owner "$owner"

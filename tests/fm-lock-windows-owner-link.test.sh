@@ -3,7 +3,8 @@
 # directory COPY, so a lock's claim could never be read back as a link and the
 # claim wait spun on its own pid forever. The owner link must be a real link
 # (-L and readlink agree), refuse a second claim on the same path, and release
-# together with its owner directory - also when the home is reached through
+# together with its owner directory, and the staged-owner sweep must keep the
+# published owner - also when the home is reached through
 # the drive spelling of a mount-aliased directory and its name carries cmd
 # metacharacters. Skipped on hosts where the boundary does not apply.
 set -u
@@ -37,6 +38,15 @@ check_home() {  # <label> <home>
     [ "$(readlink "$lock")" = "$owner" ] || echo first-claim-disturbed
     fm_lock_release "$lock"
     [ ! -e "$lock" ] && [ ! -L "$lock" ] || echo not-released
+    FM_LOCK_OWNER_SCOPE=sweep
+    fm_lock_try_create "$lock" || { echo scoped-create-failed; exit 1; }
+    owner=$FM_LOCK_OWNER_DIR
+    staged=$(mktemp -d "$lock.owner.sweep.XXXXXX") || exit 1
+    fm_lock_discard_staged_owners "$lock" sweep "$(cat "$owner/pid")"
+    [ -f "$owner/pid" ] || echo published-owner-swept
+    [ ! -e "$staged" ] || echo staged-owner-kept
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || echo scoped-not-released
     [ ! -e "$owner" ] || echo owner-left-behind
     leftovers=$(ls -A "$STATE")
     [ -z "$leftovers" ] || echo "state-not-empty: $leftovers"
