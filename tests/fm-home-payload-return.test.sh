@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eu
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 . "$ROOT/bin/fm-home-worktree-lock-lib.sh"
 . "$ROOT/bin/fm-home-payload-lib.sh"
