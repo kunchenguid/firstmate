@@ -21,22 +21,37 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
-fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
-  local timeout_options=()
-  [ "${FM_CHECK_OWNED_GROUP:-0}" != 1 ] || timeout_options=(--foreground -k 1)
+fm_nm_bounded() (  # <dir> <timeout_secs> <command> <args...>
+  local dir=$1 timeout_secs=$2 have_timeout=none runner pending=0 rc
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
-  case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "${timeout_options[@]}" "$timeout_secs" "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "${timeout_options[@]}" "$timeout_secs" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; local $SIG{ALRM} = sub { kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "${FM_CHECK_OWNED_GROUP:-0}" "$@" ) ;;
-    *)        return 1 ;;
-  esac
-}
+  [ "$have_timeout" != none ] || return 1
+  trap 'pending=129' HUP
+  trap 'pending=130' INT
+  trap 'pending=143' TERM
+  set -m
+  (
+    set +m
+    cd "$dir" || exit 1
+    case "$have_timeout" in
+      timeout|gtimeout) exec "$have_timeout" -k 1 "$timeout_secs" "$@" ;;
+      perl) exec perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM} = sub { kill "KILL", $pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' "$timeout_secs" "$@" ;;
+    esac
+  ) <&0 &
+  runner=$!
+  set +m
+  trap 'kill -KILL -- "-$runner" 2>/dev/null || true; wait "$runner" 2>/dev/null || true' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [ "$pending" -eq 0 ] || exit "$pending"
+  wait "$runner"
+  rc=$?
+  exit "$rc"
+)
 
 # Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
 # per isolated workspace, each against its own NM_HOME. The home cannot be
