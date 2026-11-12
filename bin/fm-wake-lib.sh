@@ -581,6 +581,13 @@ fm_lock_abs_path() {
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*)
+      # readlink re-derives a junction's target through the mount table, so the
+      # owner path is minted in that same spelling.
+      lock_abs=$(cygpath -u "$(cygpath -w "$lock_abs")") || return 1
+      ;;
+  esac
   # An opted-in caller can recover its own staging directories even when a
   # signal interrupts this command substitution before it returns the path.
   mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
@@ -760,8 +767,11 @@ fm_lock_create_owner_link() {  # <owner-directory> <lock-path>
       # are unavailable, so readlink then fails and a lock can never verify its
       # own claim (it waits on itself forever). A directory junction needs no
       # privilege, reads back as a link through -L and readlink, and mklink /J
-      # refuses an existing destination exactly as mkdir does.
-      MSYS2_ARG_CONV_EXCL='*' cmd.exe /c mklink /J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+      # refuses an existing destination exactly as mkdir does. The quoted paths
+      # travel in the environment and are expanded after cmd parses the line,
+      # so cmd metacharacters in a path stay literal.
+      FM_LOCK_LINK_PATH="\"$(cygpath -w "$2")\"" FM_LOCK_LINK_TARGET="\"$(cygpath -w "$1")\"" \
+        MSYS2_ARG_CONV_EXCL='*' cmd.exe /v:on /c mklink /J '!FM_LOCK_LINK_PATH!' '!FM_LOCK_LINK_TARGET!' >/dev/null 2>&1
       return
       ;;
   esac
@@ -808,6 +818,9 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    if [ -L "$lockdir" ] && [ "$lockdir" -ef "$ownerdir" ]; then
+      rm -f "$lockdir" 2>/dev/null || true
+    fi
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
