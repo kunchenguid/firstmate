@@ -538,8 +538,8 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Startup-stop resilience: slow post-claim confirmation, typed startup-lock and identity-publication failures, safe-point deadline and signal forwarding, and cleanup of published locks and in-flight staging while preserving foreign owners.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 - Protection for a live owner with a matching start token and reclamation after PID reuse with a mismatched start token.
-- Bounded acquire on a reused-PID lock with a live stealer returns 1 and leaves the holder empty.
-- Normalized macOS `ps` start tokens, and recorded start tokens that match `fm_pid_start_time` by string equality.
+- Bounded acquire on a reused-PID lock with a live `.steal` holder kept beyond the deadline returns 1 and leaves `FM_LOCK_HELD_PID` empty.
+- Normalized macOS `ps` start tokens, and recorded start tokens that match `fm_pid_start_time` by string equality, with the real `ps` checks skipped where `ps -o lstart=` is unavailable.
 - Reporting the displaced PID when a reused-PID stale lock is reclaimed.
 
 ### Claude auto-arm and turn-end guard
