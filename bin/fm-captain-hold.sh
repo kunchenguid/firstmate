@@ -211,7 +211,7 @@
 # answer this particular hold. It adds the structured PR link and atomically
 # records data/<task>/hold-pr-policy.json: schema fm-hold-pr.v1, task, url, on,
 # action, fingerprint (SHA-256 of the shown reason, title without its structured
-# PR links, hold-set timestamp and resolution count), occurrence.
+# links, hold-set timestamp and resolution count), occurrence.
 # `close` asserts the task contains only the decision; `release` preserves
 # unfinished work. `terminal` accepts either merge or unmerged closure.
 # No policy is inferred from links or prose. Re-holding invalidates the policy,
@@ -1824,14 +1824,15 @@ command_reconcile_requests() {
 }
 
 pr_hold_fingerprint() { # <show-output>
-  local links word title=''
+  local links=, word title=''
   local -a words=()
   # The markdown backend shows structured links inside the title, and linking a
-  # follow-up PR does not change the question.
-  links=",$(show_field_value "$1" links),"
+  # follow-up PR or a retained report does not change the question.
+  IFS=, read -r -a words <<< "$(show_field_value "$1" links)"
+  for word in ${words[@]+"${words[@]}"}; do links="$links${word#*:},"; done
   read -r -a words <<< "$(show_field_value "$1" title)"
   for word in ${words[@]+"${words[@]}"}; do
-    case "$links" in *",pr:$word,"*) ;; *) title="$title $word" ;; esac
+    case "$links" in *",$word,"*) ;; *) title="$title $word" ;; esac
   done
   sha256_text "$(show_field "$1" hold_reason)
 $title

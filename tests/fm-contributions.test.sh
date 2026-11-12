@@ -2114,6 +2114,7 @@ test_forge_hold_settlement_retry() {
   with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show delivery --full | sed -n 's/^  body: //p' | jq -r . > "$home/body.txt"
   printf '\nDeliverable of the finished work: https://github.com/o/r/pull/8\n' >> "$home/body.txt"
   with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --body-file "$home/body.txt" >/dev/null || fail 'deliverable update failed'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --report data/delivery/report.md >/dev/null || fail 'report link failed'
   real=$(command -v tasks-axi)
   cat > "$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
