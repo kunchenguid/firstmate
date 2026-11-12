@@ -18,7 +18,9 @@
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
-#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   the home's data/<task-id>/report.md (no branch, no push, no PR). The worktree
+#   is scratch and deleted at cleanup; durable task artifacts belong beside the
+#   home report.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
 #   confirms the legacy board-compatibility floor; otherwise it asks for a text report.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -711,12 +713,13 @@ $HERDR_SECTION
 # Setup
 $SETUP_BASE
 This is a SCOUT task: the deliverable is a written report, not a PR.
-The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The worktree is your laboratory - install, run, edit, and make scratch commits freely; the whole copy, including anything left under its own \`data/\`, is deleted at cleanup.
+Keep the report and every durable task artifact under the absolute home directory \`$DATA/$ID/\`, never under a worktree-relative \`data/$ID/\`.
+Durable artifacts include captain answers, raw captures, parse evidence, frozen review items, and seals; the report must reference the preserved evidence.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
+2. Keep project edits inside this worktree; outside it, write only task material under \`$DATA/$ID/\` and the status and steering-inbox records below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`

@@ -88,7 +88,20 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
-# A scratch copy (kind=scout) and a --force run discard untracked content.
+# Before any destructive step, a scout copy's data/<task-id> path must be absent.
+# Its presence (including an ignored path, file, or dangling symlink) refuses
+# cleanup even with --force: --force never covers it. Reconcile and verify those
+# artifacts in the home's data/<task-id>/, then remove only the preserved source
+# and rerun, or discard them on the captain's explicit word with
+# --discard-scout-data. A report alone does not prove these task artifacts were
+# saved, and no automatic merge is attempted: the home may already hold a
+# different report or canonical answers. A forced secondmate retirement applies
+# the same check to each child scout copy before any child is stopped or
+# returned; a reassigned slot is never inspected. A worker can still write while
+# it stops, so each copy is checked again after its writers are stopped and
+# before it is returned or removed.
+# Once that check passes, a scratch copy (kind=scout) and a --force run discard
+# remaining untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
 # Before that return, teardown runs `git clean -ffdq` in the copy, and a forced
@@ -209,11 +222,17 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--discard-scout-data] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
-#   captain has explicitly said to discard the work.
+#   captain has explicitly said to discard the work. It never bypasses the scout
+#   task-data check above.
+#   --discard-scout-data skips only that scout task-data check, for a scout copy
+#   (or, with --force, each child scout copy of a retired local or remote
+#   secondmate) whose data/<task-id> content the captain has explicitly said to
+#   discard. It authorizes nothing else: the report and completion-gate checks
+#   still apply unless --force is also given.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -542,11 +561,13 @@ fi
 ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
+DISCARD_SCOUT_DATA=0
 LEGACY_RECORD_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
+    --discard-scout-data) DISCARD_SCOUT_DATA=1 ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -570,7 +591,7 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Role partition: forced teardown discards work, and the supervision branch
 # never discards anything - only an ordinary landed-work teardown is branch
 # territory (contract: bin/fm-lease-lib.sh).
-if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
+if { [ "$FORCE" = --force ] || [ "$DISCARD_SCOUT_DATA" = 1 ]; } && [ "$(fm_lease_actor)" = branch ]; then
   echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
@@ -1163,7 +1184,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp discard_flag
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -1193,7 +1214,9 @@ remote_secondmate_teardown() {
   }
   "$FM_ROOT/bin/fm-guard.sh" || true
   if [ "$FORCE" = --force ]; then
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force < /dev/null 2>&1); then rc=0; else rc=$?; fi
+    discard_flag=
+    [ "$DISCARD_SCOUT_DATA" != 1 ] || discard_flag=--discard-scout-data
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force ${discard_flag:+"$discard_flag"} < /dev/null 2>&1); then rc=0; else rc=$?; fi
   else
     if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" < /dev/null 2>&1); then rc=0; else rc=$?; fi
   fi
@@ -2131,6 +2154,31 @@ report_worktree_dirt() {
       }
     }
   ' >&2
+}
+
+# Task artifacts are not scratch. The check is independent of Git's ignored-file
+# rules and of --force: the operator reconciles them into the home's durable
+# data/<task-id>/ (never overwriting a different canonical copy) or discards them
+# with --discard-scout-data after the captain's explicit word.
+teardown_require_scout_data_preserved() {  # <id> <worktree> <durable-destination>
+  local id=$1 wt=$2 destination=$3 source
+  [ "$DISCARD_SCOUT_DATA" != 1 ] || return 0
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  fm_task_id_path_safe "$id" || return 1
+  source="$wt/data/$id"
+  if [ -e "$source" ] || [ -L "$source" ] \
+      || { [ -d "$wt/data" ] && { [ ! -r "$wt/data" ] || [ ! -x "$wt/data" ]; }; }; then
+    echo "REFUSED: scout task data may remain at $source; cleanup would delete it with the copy." >&2
+    echo "Reconcile and verify these artifacts in $destination/, then remove only the preserved source and rerun teardown. --force does not bypass this check; to discard them on the captain's explicit word, rerun with --discard-scout-data." >&2
+    return 1
+  fi
+}
+
+teardown_require_child_scout_data_preserved() {  # <id> <worktree> <backend> <target> <durable-destination>
+  if [ -n "$2" ] && [ -d "$2" ]; then
+    ID=$1 BACKEND=$3 T=$4 reap_task_worktree_processes "child scout copy" "$2" || return 1
+  fi
+  teardown_require_scout_data_preserved "$1" "$2" "$5"
 }
 
 # Scratch and --force copies are scrubbed before Treehouse return. See the
@@ -3334,7 +3382,7 @@ preflight_descendant_treehouse_slots() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_owner_rc child_owner_err
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3352,7 +3400,7 @@ validate_firstmate_home_children_removal() {
       [ -n "$child_home" ] || child_home=$child_wt
       [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
-      validate_firstmate_home_children_removal "$child_home" || return 1
+      validate_firstmate_home_children_removal "$child_home" "$archive_parent/children/$child_id" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
@@ -3363,6 +3411,20 @@ validate_firstmate_home_children_removal() {
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+    fi
+    if [ "$child_kind" = scout ]; then
+      child_owner_rc=0
+      child_owner_err=
+      child_proj=$(meta_value "$child_meta" project)
+      if [ "$DISCARD_SCOUT_DATA" != 1 ] && [ -n "$child_wt" ] && [ -d "$child_wt" ] \
+          && fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
+        child_owner_err=$(require_owned_worktree_slot_record "$child_id" "$child_wt" 2>&1) || child_owner_rc=$?
+      fi
+      case "$child_owner_rc" in
+        0) teardown_require_scout_data_preserved "$child_id" "$child_wt" "$DATA/$archive_parent/children/$child_id" || return 1 ;;
+        "$TEARDOWN_SLOT_REASSIGNED_RC") ;; # Never inspect a new owner's data.
+        *) printf '%s\n' "$child_owner_err" >&2; return 1 ;;
+      esac
     fi
   done
 }
@@ -3608,6 +3670,10 @@ cleanup_firstmate_home_children() {
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
+      # The child endpoint is stopped: re-prove before its copy goes.
+      [ "$child_kind" != scout ] \
+        || teardown_require_child_scout_data_preserved "$child_id" "$child_wt" "$child_backend" "$child_t" \
+          "$DATA/$archive_parent/children/$child_id" || return 1
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3629,6 +3695,9 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        [ "$child_kind" != scout ] \
+          || teardown_require_child_scout_data_preserved "$child_id" "$child_wt" "$child_backend" "$child_t" \
+          "$DATA/$archive_parent/children/$child_id" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3747,6 +3816,10 @@ fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
+fi
+
+if [ "$KIND" = scout ] && teardown_owns_worktree; then
+  teardown_require_scout_data_preserved "$ID" "$WT" "$DATA/$ID" || exit 1
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
@@ -3967,6 +4040,9 @@ fi
 # returning it on either backend path.
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
+fi
+if [ "$KIND" = scout ] && teardown_owns_worktree; then
+  teardown_require_scout_data_preserved "$ID" "$WT" "$DATA/$ID" || exit 1
 fi
 
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
