@@ -580,28 +580,47 @@ test_child_process_updates_progress_marker_not_beacon() {
 }
 
 test_frozen_watcher_during_display_sweep_trips_guard() {
-  local dir home out pid
+  local dir home out pid i before after age
   dir=$(make_home frozen-display-sweep)
   home=$(case_home "$dir")
   out="$dir/watch.out"
 
-  # Configure Rex tint and an active task so the display sweep runs on each poll.
-  printf '%s\n' 'style=color' > "$home/config/rex-tint"
-  fm_write_meta "$home/state/task-1.meta" "kind=ship"
-  start_slow_cycle_watcher "$home" "$out" 4
+  printf '%s\n' subtle > "$home/config/rex-tint"
+  printf '%s\n' on > "$home/config/rex-status-marks"
+  mkdir -p "$dir/fakebin" "$dir/task-worktree"
+  cat > "$dir/fakebin/no-mistakes" <<'EOF'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 1
+printf '%s\n' "$PWD" >> "$FM_HOME/display-reads"
+sleep 1
+EOF
+  chmod +x "$dir/fakebin/no-mistakes"
+  for i in {1..20}; do
+    fm_write_meta "$home/state/task-$i.meta" kind=ship backend=rex \
+      "window=session:fixture/block:$i" mode=no-mistakes \
+      "worktree=$dir/task-worktree" branch=fixture
+  done
+  PATH="$dir/fakebin:$PATH" start_slow_cycle_watcher "$home" "$out" 4
   pid=$SEED_PID
-
-  # Freeze the watcher process with SIGSTOP while a task is in flight.
+  i=0
+  while [ "$i" -lt 150 ]; do
+    [ -f "$home/display-reads" ] && [ "$(wc -l < "$home/display-reads")" -ge 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$i" -lt 150 ] || fail "display sweep never processed two tasks: $(cat "$out")"
+  before=$(wc -l < "$home/display-reads")
   kill -STOP "$pid" 2>/dev/null || fail "could not SIGSTOP watcher pid $pid"
-
-  # Wait past the 4-second grace window.
   sleep 5
-
-  # The guard must fire: the frozen watcher process is not making progress.
+  after=$(wc -l < "$home/display-reads")
+  age=$(age_of_beacon "$home/state/.last-watcher-beat")
   out=$(run_guard "$dir" 4)
   kill -CONT "$pid" 2>/dev/null || true
   stop_pid "$pid"
-
+  [ "$after" -ge "$((before + 3))" ] \
+    || fail "display child did not continue processing tasks while watcher was frozen"
+  [ "$age" -gt 4 ] \
+    || fail "display child refreshed the frozen watcher's beacon"
   case "$out" in
     *"WATCHER DOWN"*) ;;
     *) fail "a frozen watcher during display sweep did not trip the guard: $out" ;;
