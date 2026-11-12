@@ -11,7 +11,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
-LIB="$ROOT/bin/fm-wake-lib.sh"
+LIB="${FM_TEST_LOCK_LIB:-$ROOT/bin/fm-wake-lib.sh}"
 
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
@@ -1239,7 +1239,7 @@ for suffix in ('', '.steal'):
     (wedged / 'unrecognized-record').write_text('preserve me\n')
     os.utime(wedged, (1, 1))
     result = subprocess.run(
-        ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable', '_', lib, str(lock)],
+        ['bash', '-c', '. "$1"; fm_lock_acquire_wait_bounded "$2" 5', '_', lib, str(lock)],
         env=dict(os.environ, FM_STATE_OVERRIDE=str(state)),
         capture_output=True, text=True, timeout=10)
     assert result.returncode != 0, result
@@ -1291,7 +1291,7 @@ for mode in ('library', 'new-session', 'own-session'):
             for name in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'):
                 env.pop(name, None)
             if mode == 'library':
-                command = ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable',
+                command = ['bash', '-c', '. "$1"; fm_lock_acquire_wait_bounded "$2" 5',
                            '_', lib, str(lock)]
             else:
                 command = [str(harness), '-c', 'if [ "$2" = own-session ]; then '
@@ -2797,6 +2797,441 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_typed_lock_refusal() {
+  local state="$TMP_ROOT/typed-refusal"
+  mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2/missing/lock" && exit 1
+    [ "$FM_LOCK_OUTCOME" = refused ] && [ "$FM_LOCK_CAUSE" = parent-unresolvable ] && [ -z "$FM_LOCK_HELD_PID" ]
+  ' _ "$LIB" "$state" || fail "unresolvable parent must report typed refusal"
+  pass "unresolvable parent reports typed refusal"
+}
+
+test_typed_lock_occupied() {
+  local state="$TMP_ROOT/typed-occupied"
+  mkdir -p "$state"
+  printf x > "$state/lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    for n in 1 2 3; do
+      fm_lock_try_acquire "$2/lock" && exit 1
+      [ "$FM_LOCK_OUTCOME" = refused ] && [ "$FM_LOCK_CAUSE" = lock-path-occupied ] || exit 1
+    done
+  ' _ "$LIB" "$state" || fail "occupied lock must repeatedly report typed refusal"
+  pass "occupied lock repeatedly reports typed refusal"
+}
+
+test_typed_lock_freshness() {
+  local state="$TMP_ROOT/typed-freshness"
+  mkdir -p "$state/fresh" "$state/stale"
+  touch -t 202001010000 "$state/stale"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_freshness "$2/fresh"; [ "$FM_LOCK_FRESHNESS" = fresh ] || exit 1
+    fm_lock_freshness "$2/stale"; [ "$FM_LOCK_FRESHNESS" = stale ] || exit 1
+    fm_lock_freshness "$2/absent"; [ "$FM_LOCK_FRESHNESS" = absent ] || exit 1
+    fm_lock_freshness "$2/missing/lock"; [ "$FM_LOCK_FRESHNESS" = unreadable ] || exit 1
+    long=$(printf "%0300d" 0)
+    fm_lock_freshness "$2/$long"; [ "$FM_LOCK_FRESHNESS" = absent ] || exit 1
+    fm_lock_try_acquire "$2/$long" && exit 1
+    [ "$FM_LOCK_OUTCOME" = refused ] && [ "$FM_LOCK_CAUSE" = create-denied ] || exit 1
+  ' _ "$LIB" "$state" || fail "freshness classes must be distinct"
+  pass "freshness classes are distinct"
+}
+
+test_typed_lock_fresh_holder() {
+  local state="$TMP_ROOT/typed-holder"
+  mkdir -p "$state/lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2/lock" && exit 1
+    [ "$FM_LOCK_OUTCOME" = held ] && [ "$FM_LOCK_CAUSE" = mid-acquire ]
+  ' _ "$LIB" "$state" || fail "fresh unpublished pid must remain held"
+  pass "fresh unpublished pid remains held"
+}
+
+test_typed_wait_reports_refusal() {
+  local state="$TMP_ROOT/typed-wait" child i=0 lines
+  mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" FM_LOCK_WAIT_REFUSAL_REPORT_SECS=1 FM_LOCK_WAIT_REFUSAL_REPEAT_SECS=2 \
+    bash -c '. "$1"; fm_lock_acquire_wait "$2/missing/lock"; printf returned > "$2/returned"' _ "$LIB" "$state" 2> "$state/err" &
+  child=$!
+  while [ "$i" -lt 70 ]; do
+    lines=$(wc -l < "$state/err")
+    [ "$lines" -ge 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  [ ! -e "$state/returned" ] || fail "unbounded wait returned without the lock"
+  [ "$lines" -ge 2 ] && [ "$lines" -le 3 ] || fail "refusal diagnostic must repeat at its bounded interval ($lines)"
+  grep -F "$state/missing/lock" "$state/err" >/dev/null || fail "diagnostic omitted lock path"
+  grep -F parent-unresolvable "$state/err" >/dev/null || fail "diagnostic omitted refusal cause"
+  pass "unbounded wait reports refusal periodically and keeps waiting"
+}
+
+test_typed_watcher_occupied_and_held() {
+  local state="$TMP_ROOT/typed-watch" rc=0
+  mkdir -p "$state"
+  printf x > "$state/.watch.lock"
+  FM_HOME="$state" FM_STATE_OVERRIDE="$state" bash "$WATCH" > "$state/out" 2> "$state/err" || rc=$?
+  [ "$rc" -eq 1 ] || fail "occupied watch lock must exit 1 (got $rc)"
+  ! grep -F 'already running' "$state/out" >/dev/null || fail "occupied watch lock claimed a watcher exists"
+  grep -F "$state/.watch.lock" "$state/err" >/dev/null || fail "watcher refusal omitted lock path"
+  grep -F lock-path-occupied "$state/err" >/dev/null || fail "watcher refusal omitted cause"
+  rm "$state/.watch.lock"
+  mkdir "$state/.watch.lock"
+  rc=0
+  FM_HOME="$state" FM_STATE_OVERRIDE="$state" bash "$WATCH" > "$state/out" 2> "$state/err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "fresh unpublished holder must keep the existing watcher response"
+  grep -Fx 'watcher: already running' "$state/out" >/dev/null || fail "fresh unpublished holder not reported as held"
+  pass "watcher distinguishes occupied path from fresh unpublished holder"
+}
+
+test_typed_lock_publication_lost() {
+  local state="$TMP_ROOT/typed-publication" real_ln
+  mkdir -p "$state/fake"
+  real_ln=$(command -v ln)
+  cat > "$state/fake/ln" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_REAL_LN" "$@" || exit $?
+if [ "$#" -eq 3 ] && [ "$3" = "$FM_TEST_LOCK" ]; then
+  printf 'removed\n' >> "$FM_TEST_REMOVALS"
+  rm -f "$FM_TEST_LOCK"
+fi
+SH
+  chmod +x "$state/fake/ln"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2/normal" || exit 1
+    [ "$FM_LOCK_OUTCOME" = acquired ] || exit 1
+    [ -L "$2/normal" ] && [ "$(cat "$2/normal/pid")" = "${BASHPID:-$$}" ] || exit 1
+    fm_lock_release "$2/normal"
+  ' _ "$LIB" "$state" || fail "uncontended publication must remain present and acquired"
+  PATH="$state/fake:$PATH" FM_TEST_REAL_LN="$real_ln" FM_TEST_LOCK="$state/lock" \
+    FM_TEST_REMOVALS="$state/removals" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$FM_TEST_LOCK" && exit 1
+      [ "$FM_LOCK_OUTCOME" = refused ] && [ "$FM_LOCK_CAUSE" = publication-lost ] || exit 1
+      [ ! -e "$FM_TEST_LOCK" ] && [ ! -L "$FM_TEST_LOCK" ] || exit 1
+      [ "$(wc -l < "$FM_TEST_REMOVALS")" -eq 3 ] || exit 1
+    ' _ "$LIB" || fail "lost publications must end in bounded typed refusal"
+  pass "publication loss is bounded and uncontended publication persists"
+}
+
+test_typed_unreadable_is_not_reclaimed() {
+  local state="$TMP_ROOT/typed-unreadable" real_stat real_mktemp
+  mkdir -p "$state/owner" "$state/fake"
+  printf 'preserve\n' > "$state/owner/evidence"
+  ln -s "$state/owner" "$state/lock"
+  touch -h -t 202001010000 "$state/lock"
+  real_stat=$(command -v stat)
+  real_mktemp=$(command -v mktemp)
+  cat > "$state/fake/stat" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do [ "$arg" != "$FM_TEST_LOCK" ] || exit 1; done
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  cat > "$state/fake/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"$FM_TEST_LOCK.owner."*)
+    if [ -e "$FM_TEST_ATTEMPT" ]; then exit 1; fi
+    : > "$FM_TEST_ATTEMPT"
+    ;;
+esac
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$state/fake/stat" "$state/fake/mktemp"
+  PATH="$state/fake:$PATH" FM_TEST_LOCK="$state/lock" FM_TEST_ATTEMPT="$state/attempt" \
+    FM_TEST_REAL_STAT="$real_stat" FM_TEST_REAL_MKTEMP="$real_mktemp" FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1"
+      # Exercise the stat shim on both GNU and BSD hosts.
+      _FM_UNAME=Linux
+      fm_lock_try_acquire "$FM_TEST_LOCK" && exit 1
+      [ -L "$FM_TEST_LOCK" ] && [ "$(cat "$FM_TEST_LOCK/evidence")" = preserve ] || { echo "unreadable lock was removed" >&2; exit 1; }
+      [ "${FM_LOCK_OUTCOME:-}" = refused ] && [ "${FM_LOCK_CAUSE:-}" = create-denied ] || exit 1
+    ' _ "$LIB" || fail "unreadable lock must survive and creation failure must be refused"
+  [ -e "$state/attempt" ] || fail "the initial creation did not execute"
+  pass "unreadable lock is never reclaimed"
+}
+
+test_typed_wait_contention_is_silent() {
+  local state="$TMP_ROOT/typed-wait-held" child waiter i=0 rc=0
+  mkdir -p "$state/lock"
+  sleep 30 &
+  child=$!
+  printf '%s\n' "$child" > "$state/lock/pid"
+  FM_STATE_OVERRIDE="$state" FM_LOCK_WAIT_REFUSAL_REPORT_SECS=1 FM_LOCK_WAIT_REFUSAL_REPEAT_SECS=1 \
+    bash -c '. "$1"; fm_lock_acquire_wait "$2/lock"; printf done > "$2/done"; fm_lock_release "$2/lock"' _ "$LIB" "$state" 2> "$state/err" &
+  waiter=$!
+  sleep 2
+  [ ! -e "$state/done" ] || { kill "$child" "$waiter" 2>/dev/null || true; fail "wait returned while a holder was live"; }
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  while [ "$i" -lt 100 ] && [ ! -e "$state/done" ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -e "$state/done" ]; then kill "$waiter" 2>/dev/null || true; rc=1; fi
+  wait "$waiter" 2>/dev/null || rc=1
+  [ "$rc" -eq 0 ] || fail "wait did not acquire after the holder exited"
+  [ ! -s "$state/err" ] || fail "ordinary contention emitted refusal diagnostics"
+  pass "wait silently acquires after live contention"
+}
+
+test_typed_lock_release_during_acquire() {
+  local state="$TMP_ROOT/typed-release" real_rmdir
+  mkdir -p "$state/lock" "$state/fake"
+  printf '99999999\n' > "$state/lock/pid"
+  real_rmdir=$(command -v rmdir)
+  cat > "$state/fake/rmdir" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_REAL_RMDIR" "$@" || exit $?
+case "$1" in
+  "$FM_TEST_LOCK".owner.*)
+    if [ ! -e "$FM_TEST_RELEASED" ]; then
+      rm -f "$FM_TEST_LOCK/pid"
+      "$FM_TEST_REAL_RMDIR" "$FM_TEST_LOCK" || exit 1
+      : > "$FM_TEST_RELEASED"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$state/fake/rmdir"
+  PATH="$state/fake:$PATH" FM_TEST_REAL_RMDIR="$real_rmdir" FM_TEST_LOCK="$state/lock" \
+    FM_TEST_RELEASED="$state/released" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$FM_TEST_LOCK" || exit 1
+      [ "${FM_LOCK_OUTCOME:-}" = acquired ] || exit 1
+      [ -e "$FM_TEST_RELEASED" ] || exit 1
+      [ "$(cat "$FM_TEST_LOCK/pid")" = "${BASHPID:-$$}" ] || exit 1
+      fm_lock_release "$FM_TEST_LOCK"
+    ' _ "$LIB" || fail "release during acquisition must acquire, and the release must fire"
+  pass "release during acquisition is followed by an actual acquisition"
+}
+
+test_typed_lock_release_during_freshness() {
+  local state="$TMP_ROOT/typed-freshness-release" real_stat real_rmdir
+  mkdir -p "$state/lock" "$state/fake"
+  real_stat=$(command -v stat)
+  real_rmdir=$(command -v rmdir)
+  cat > "$state/fake/stat" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_TEST_LOCK" ] && [ ! -e "$FM_TEST_RELEASED" ]; then
+    "$FM_TEST_REAL_RMDIR" "$FM_TEST_LOCK" || exit 1
+    : > "$FM_TEST_RELEASED"
+    exit 1
+  fi
+done
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  chmod +x "$state/fake/stat"
+  PATH="$state/fake:$PATH" FM_TEST_REAL_STAT="$real_stat" FM_TEST_REAL_RMDIR="$real_rmdir" \
+    FM_TEST_LOCK="$state/lock" FM_TEST_RELEASED="$state/released" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      _FM_UNAME=Linux
+      [ -d "$FM_TEST_LOCK" ] || exit 1
+      fm_lock_try_acquire "$FM_TEST_LOCK" || exit 1
+      [ -e "$FM_TEST_RELEASED" ] || exit 1
+      [ "${FM_LOCK_OUTCOME:-}" = acquired ] || exit 1
+      [ "$(cat "$FM_TEST_LOCK/pid")" = "${BASHPID:-$$}" ] || exit 1
+      fm_lock_release "$FM_TEST_LOCK"
+    ' _ "$LIB" || fail "release during freshness read must acquire after the release fires"
+  pass "release during freshness read ends in acquisition"
+}
+
+test_typed_bounded_refusal_is_immediate() {
+  local state="$TMP_ROOT/typed-bounded-refusal" child i=0
+  mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_max "$2/missing/lock" 20; then exit 1; fi
+    [ "${FM_LOCK_OUTCOME:-}" = refused ] && [ "${FM_LOCK_CAUSE:-}" = parent-unresolvable ] || exit 1
+    : > "$2/done"
+  ' _ "$LIB" "$state" &
+  child=$!
+  while [ "$i" -lt 40 ] && [ ! -e "$state/done" ] && kill -0 "$child" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$state/done" ]; then
+    kill "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "bounded wait did not surface refusal promptly"
+  fi
+  wait "$child" || fail "bounded wait failed to preserve refusal cause"
+  pass "bounded wait surfaces refusal without spending its deadline"
+}
+
+test_typed_transient_publication_read() {
+  local state="$TMP_ROOT/typed-transient-read" real_readlink
+  mkdir -p "$state/fake"
+  real_readlink=$(command -v readlink)
+  cat > "$state/fake/readlink" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_TEST_LOCK" ] && [ ! -e "$FM_TEST_BLINDED" ]; then
+  : > "$FM_TEST_BLINDED"
+  exit 1
+fi
+exec "$FM_TEST_REAL_READLINK" "$@"
+SH
+  chmod +x "$state/fake/readlink"
+  PATH="$state/fake:$PATH" FM_TEST_REAL_READLINK="$real_readlink" FM_TEST_LOCK="$state/lock" \
+    FM_TEST_BLINDED="$state/blinded" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$FM_TEST_LOCK" || exit 1
+      [ -e "$FM_TEST_BLINDED" ] && [ "$FM_LOCK_OUTCOME" = acquired ] || exit 1
+      [ "$(cat "$FM_TEST_LOCK/pid")" = "${BASHPID:-$$}" ] || exit 1
+      fm_lock_release "$FM_TEST_LOCK"
+    ' _ "$LIB" || fail "a transient confirmation read failure must not discard our published lock"
+  pass "a transient confirmation read failure preserves the uncontended lock"
+}
+
+test_typed_watcher_release_during_acquire() {
+  local state="$TMP_ROOT/typed-watcher-release" real_rmdir child i=0 rc=0 observed=0
+  mkdir -p "$state/.watch.lock" "$state/fake"
+  printf '99999999\n' > "$state/.watch.lock/pid"
+  real_rmdir=$(command -v rmdir)
+  cat > "$state/fake/rmdir" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_REAL_RMDIR" "$@" || exit $?
+case "$1" in
+  "$FM_TEST_LOCK".owner.*)
+    if [ ! -e "$FM_TEST_RELEASED" ]; then
+      rm -f "$FM_TEST_LOCK/pid"
+      "$FM_TEST_REAL_RMDIR" "$FM_TEST_LOCK" || exit 1
+      : > "$FM_TEST_RELEASED"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$state/fake/rmdir"
+  PATH="$state/fake:$PATH" FM_TEST_REAL_RMDIR="$real_rmdir" FM_TEST_LOCK="$state/.watch.lock" \
+    FM_TEST_RELEASED="$state/released" FM_HOME="$state" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 bash "$WATCH" > "$state/out" 2> "$state/err" &
+  child=$!
+  while [ "$i" -lt 100 ]; do
+    if [ -e "$state/released" ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ]; then
+      observed=1
+      break
+    fi
+    kill -0 "$child" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$observed" -eq 1 ]; then kill "$child" 2>/dev/null || true; fi
+  wait_for_exit "$child" 100 || rc=$?
+  [ "$rc" -ne 124 ] || fail "watcher did not exit after bounded cleanup"
+  [ -e "$state/released" ] || fail "watcher release race did not fire"
+  ! grep -F 'already running' "$state/out" >/dev/null || fail "watcher falsely claimed a holder after release"
+  if [ "$observed" -eq 0 ]; then
+    if [ "$rc" -eq 0 ] || ! grep -F 'watcher:' "$state/err" >/dev/null; then
+      fail "watcher neither acquired nor refused with a diagnostic"
+    fi
+  fi
+  pass "watcher does not claim a holder when release races acquisition"
+}
+
+test_typed_unreadable_pid_is_held() {
+  local state="$TMP_ROOT/typed-unreadable-pid" real_cat holder rc=0
+  mkdir -p "$state/owner" "$state/fake"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$state/owner/pid"
+  ln -s "$state/owner" "$state/lock"
+  touch -h -t 202001010000 "$state/lock"
+  real_cat=$(command -v cat)
+  cat > "$state/fake/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "$FM_TEST_LOCK/pid" ]; then
+  : > "$FM_TEST_PID_BLINDED"
+  exit 1
+fi
+exec "$FM_TEST_REAL_CAT" "$@"
+SH
+  chmod +x "$state/fake/cat"
+  PATH="$state/fake:$PATH" FM_TEST_LOCK="$state/lock" FM_TEST_REAL_CAT="$real_cat" FM_TEST_PID_BLINDED="$state/blinded" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$FM_TEST_LOCK" && exit 1
+      [ "${FM_LOCK_OUTCOME:-}" = held ] && [ "${FM_LOCK_CAUSE:-}" = holder-pid-unreadable ] || exit 1
+      [ -z "$FM_LOCK_HELD_PID" ] && [ -L "$FM_TEST_LOCK" ] || exit 1
+      [ "$(command cat "$FM_TEST_LOCK/pid" 2>/dev/null || true)" = "" ] || exit 1
+    ' _ "$LIB" || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ -e "$state/blinded" ] || fail "pid-read failure was not injected"
+  [ "$rc" -eq 0 ] || fail "an unreadable live pid must remain held even when the lock is old"
+  [ "$(cat "$state/owner/pid" 2>/dev/null)" = "$holder" ] || fail "unreadable live holder evidence was removed"
+  pass "an unreadable live pid remains held even when the lock is old"
+}
+
+test_typed_unsearchable_owner_is_not_reclaimed() {
+  local state="$TMP_ROOT/typed-unsearchable-owner" holder rc=0
+  mkdir -p "$state/owner"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$state/owner/pid"
+  ln -s "$state/owner" "$state/lock"
+  touch -h -t 202001010000 "$state/lock"
+  chmod 000 "$state/owner"
+  if [ -e "$state/lock/pid" ]; then
+    chmod 700 "$state/owner"
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    pass "unsearchable-owner case skipped: account can search mode-000 directories"
+    return 0
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2/lock" && exit 1
+    [ "${FM_LOCK_OUTCOME:-}" = held ] && [ "${FM_LOCK_CAUSE:-}" = holder-pid-unreadable ] || exit 1
+    [ -L "$2/lock" ] && [ -z "$FM_LOCK_HELD_PID" ] || exit 1
+  ' _ "$LIB" "$state" || rc=$?
+  chmod 700 "$state/owner"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "unsearchable owner was not conservatively held"
+  [ "$(cat "$state/owner/pid" 2>/dev/null)" = "$holder" ] || fail "unsearchable holder evidence was removed"
+  pass "unsearchable owner remains held without reclaim"
+}
+
+test_lock_real_directory_unreadable_nested_owner() {
+  local state="$TMP_ROOT/nested-unreadable" holder rc=0 real_cat owner
+  mkdir -p "$state/lock/lock.owner.fixture" "$state/fake"
+  owner="$state/lock/lock.owner.fixture"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$owner/pid"
+  printf '99999999\n' > "$state/lock/pid"
+  touch -t 202001010000 "$state/lock" "$owner"
+  real_cat=$(command -v cat)
+  cat > "$state/fake/cat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  "$FM_TEST_NESTED/pid"|./lock.owner.fixture/pid)
+    : > "$FM_TEST_BLINDED"
+    exit 1
+    ;;
+esac
+exec "$FM_TEST_REAL_CAT" "$@"
+SH
+  chmod +x "$state/fake/cat"
+  PATH="$state/fake:$PATH" FM_TEST_NESTED="$owner" FM_TEST_BLINDED="$state/blinded" \
+    FM_TEST_REAL_CAT="$real_cat" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2/lock" && exit 1
+      [ -e "$2/blinded" ] && [ -d "$FM_TEST_NESTED" ] || exit 1
+    ' _ "$LIB" "$state" || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "unreadable live nested owner must not be reclaimed"
+  [ "$(cat "$owner/pid" 2>/dev/null)" = "$holder" ] || fail "nested holder evidence was removed"
+  pass "an unreadable live nested owner prevents real-directory reclaim"
+}
+
 # Optional function names allow focused regression verification without running
 # unrelated watcher scenarios.
 if [ "$#" -gt 0 ]; then
@@ -2806,6 +3241,23 @@ if [ "$#" -gt 0 ]; then
   exit 0
 fi
 
+test_lock_real_directory_unreadable_nested_owner
+test_typed_unsearchable_owner_is_not_reclaimed
+test_typed_unreadable_pid_is_held
+test_typed_watcher_release_during_acquire
+test_typed_transient_publication_read
+test_typed_bounded_refusal_is_immediate
+test_typed_lock_release_during_freshness
+test_typed_lock_release_during_acquire
+test_typed_wait_contention_is_silent
+test_typed_unreadable_is_not_reclaimed
+test_typed_lock_publication_lost
+test_typed_watcher_occupied_and_held
+test_typed_wait_reports_refusal
+test_typed_lock_refusal
+test_typed_lock_occupied
+test_typed_lock_freshness
+test_typed_lock_fresh_holder
 test_lock_tombstone_tracks_reaper_start_time || exit 1
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start

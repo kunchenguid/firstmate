@@ -3746,6 +3746,14 @@ EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
+  if [ "$FM_LOCK_OUTCOME" = refused ]; then
+    if [ "$FM_LOCK_CAUSE" = recovery-record-failed ]; then
+      echo "watcher: FAILED - could not publish downtime marker $WATCHER_DOWNTIME_MARKER ($FM_LOCK_CAUSE)" >&2
+      exit 1
+    fi
+    echo "watcher: FAILED - cannot acquire lock $WATCH_LOCK: $FM_LOCK_CAUSE" >&2
+    exit 1
+  fi
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
     # failure. No blocking pid means the write failed, not contention.
@@ -3915,6 +3923,17 @@ fi
 # A bounded startup recovery-lock failure reports the typed line the arm relays; a
 # transient or dead holder keeps the legacy stderr diagnostic.
 startup_lock_failed() {
+  local state_devino_now
+  if [ ! -d "$STATE" ]; then
+    echo "watcher: exiting - state directory no longer exists: $STATE" >&2
+    exit 1
+  fi
+  if [ ! -e "$WATCH_LOCK/pid" ] && [ -n "$WATCH_STATE_DEVINO" ] \
+    && state_devino_now=$(stat_devino "$STATE") && [ -n "$state_devino_now" ] \
+    && [ "$state_devino_now" != "$WATCH_STATE_DEVINO" ]; then
+    echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
+    exit 1
+  fi
   if [ -n "${FM_RECOVERY_HELD_PID:-}" ] && fm_pid_alive "$FM_RECOVERY_HELD_PID"; then
     echo "watcher: FAILED - startup lock ${FM_RECOVERY_HELD_LOCK:-unknown} held by live pid $FM_RECOVERY_HELD_PID"
   else

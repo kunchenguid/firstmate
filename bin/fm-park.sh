@@ -204,7 +204,13 @@ trap 'exit 1' HUP INT TERM
 PARK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-park.XXXXXX") || die "cannot create a temporary directory"
 
 lock_try() {  # <lock-path>
-  fm_lock_try_acquire "$1" || return 1
+  if ! fm_lock_try_acquire "$1"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $1: $FM_LOCK_CAUSE" >&2
+      return 2
+    fi
+    return 1
+  fi
   LOCKS_HELD="$LOCKS_HELD $1"
 }
 
@@ -609,7 +615,12 @@ slot_lease() {  # <id>
 cmd_park() {
   local id=${1-} why result head local_head pr lease parked_at out rc=0 line inbox_lock
   task_id_ok "$id" || die "usage: fm-park.sh park <task-id>" 2
-  lock_try "$(lane_lock "$id")" || die "another park action holds $id"
+  if lock_try "$(lane_lock "$id")"; then
+    :
+  else
+    [ "$?" -ne 2 ] || exit 1
+    die "another park action holds $id"
+  fi
   why=$(park_preflight "$id") || die "refusing to park $id: $why"
   result=$(gate_eval "$id" "") || die "refusing to park $id: its PR could not be read from the forge"
   if ! gate_print "$result" > "$PARK_TMP/gate" ; then
@@ -661,7 +672,12 @@ cmd_resume() {
   trigger=$2
   rec=$(record_path "$id")
   [ -f "$rec" ] || die "$id is not parked"
-  lock_try "$(lane_lock "$id")" || die "another park action holds $id"
+  if lock_try "$(lane_lock "$id")"; then
+    :
+  else
+    [ "$?" -ne 2 ] || exit 1
+    die "another park action holds $id"
+  fi
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   note="$PARK_TMP/note"

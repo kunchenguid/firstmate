@@ -15,10 +15,10 @@
 #
 # Acquisition serializes through state/.lock.acquire. Both claim paths use
 # fm-wake-lib.sh's stale real-directory recovery for that lock and its .steal
-# mutex, and opt into fm_lock_acquire_wait's --refuse-unreapable mode. When
-# recovery reports an unremovable stale directory, acquisition exits 1 naming
-# the path to inspect for contents or permission problems. Live contention has no new
-# deadline. tests/fm-watcher-lock.test.sh covers recovery and refusal.
+# mutex, using the bounded lock helper. When recovery reports an unremovable
+# stale directory, acquisition exits 1 naming the path to inspect. Contention
+# is bounded so session startup can report failure without entering unlocked.
+# tests/fm-watcher-lock.test.sh covers recovery and refusal.
 #
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
@@ -220,7 +220,10 @@ publish_lock_session_or_die() {
 confirm_own_lock() {  # <recorded-pid>
   local recorded pids waited=0
   if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
-    fm_lock_acquire_wait "$CLAIM_LOCK" --refuse-unreapable || exit 1
+    if ! fm_lock_acquire_wait_bounded "$CLAIM_LOCK" 10; then
+      echo "error: cannot acquire session lock $CLAIM_LOCK: ${FM_LOCK_CAUSE:-timed-out}; operate read-only until resolved" >&2
+      exit 1
+    fi
     CLAIM_LOCK_HELD=1
     waited=1
   fi
@@ -268,12 +271,19 @@ fi
 
 if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
   if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire session lock $CLAIM_LOCK: $FM_LOCK_CAUSE; operate read-only until resolved" >&2
+      exit 1
+    fi
     sweep_pid=$(sed -n 's/^pid=//p' "$STATE/.startup-network.status" 2>/dev/null | tail -1)
     if [ -n "${FM_LOCK_HELD_PID:-}" ] && [ "$FM_LOCK_HELD_PID" = "$sweep_pid" ]; then
       echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the fleet lock" >&2
       exit 1
     fi
-    fm_lock_acquire_wait "$CLAIM_LOCK" --refuse-unreapable || exit 1
+    if ! fm_lock_acquire_wait_bounded "$CLAIM_LOCK" 10; then
+      echo "error: cannot acquire session lock $CLAIM_LOCK: ${FM_LOCK_CAUSE:-timed-out}; operate read-only until resolved" >&2
+      exit 1
+    fi
   fi
   CLAIM_LOCK_HELD=1
 fi
