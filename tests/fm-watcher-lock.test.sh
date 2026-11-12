@@ -1062,49 +1062,53 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
   # identity still recomputes for its live pid. A mismatch is reclaimed
   # without signalling the pid; a matching identity, or no recorded identity
   # at all, still reads as live.
-  local dir state lockdir live identity out case_name recorded
+  local dir home state lockdir live identity out case_name recorded
   dir=$(make_case lock-identity-mismatch)
-  state="$dir/state"
-  lockdir="$state/.watch.lock"
+  mkdir -p "$dir/home/state"
+  ln -s "$dir/home" "$dir/logical-home"
   # Naming the holder under the fixture root lets the suite's cleanup reap it
   # if an assertion below fails before the kill at the end. A python holder
   # carries that name as its own argument instead of through `exec -a`, which a
   # multicall sleep rejects by dispatching on argv[0] and exiting at once.
   python3 -c 'import sys, time; time.sleep(300)' "$dir/holder" >/dev/null 2>&1 &
   live=$!
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
-    || fail "could not identify the fixture holder"
-  for case_name in mismatched matching unrecorded; do
-    rm -rf "$lockdir"
-    mkdir "$lockdir"
-    printf '%s\n' "$live" > "$lockdir/pid"
-    case "$case_name" in
-      mismatched) printf '%s\n' "identity no current rendering produces" > "$lockdir/pid-identity" ;;
-      matching) printf '%s\n' "$identity" > "$lockdir/pid-identity" ;;
-    esac
-    out=$(FM_STATE_OVERRIDE="$state" bash -c '
-      . "$1"
-      if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
-      printf "rc=%s held=%s recovered=%s pid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$2/pid" 2>/dev/null)"
-    ' _ "$LIB" "$lockdir")
-    is_live_non_zombie "$live" || fail "$case_name identity: the live pid was signalled"
-    recorded=$(cat "$lockdir/pid" 2>/dev/null || true)
-    case "$case_name" in
-      mismatched)
-        case "$out" in
-          *"rc=0 held= recovered=$live "*) ;;
-          *) fail "lock whose recorded identity no longer recomputes was not reclaimed: $out" ;;
-        esac
-        [ "$recorded" != "$live" ] || fail "reclaimed lock still records the mismatched pid"
-        ;;
-      *)
-        case "$out" in
-          *"rc=1 held=$live "*) ;;
-          *) fail "$case_name identity: live holder was not refused: $out" ;;
-        esac
-        [ "$recorded" = "$live" ] || fail "$case_name identity: live holder's lock pid was clobbered ('$recorded')"
-        ;;
-    esac
+  for home in "$dir/home" "$dir/logical-home"; do
+    state="$home/state"
+    lockdir="$state/.watch.lock"
+    identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+      || fail "could not identify the fixture holder"
+    for case_name in mismatched matching unrecorded; do
+      rm -rf "$lockdir"
+      mkdir "$lockdir"
+      printf '%s\n' "$live" > "$lockdir/pid"
+      case "$case_name" in
+        mismatched) printf '%s\n' "identity no current rendering produces" > "$lockdir/pid-identity" ;;
+        matching) printf '%s\n' "$identity" > "$lockdir/pid-identity" ;;
+      esac
+      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+        . "$1"
+        if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+        printf "rc=%s held=%s recovered=%s pid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$2/pid" 2>/dev/null)"
+      ' _ "$LIB" "$lockdir")
+      is_live_non_zombie "$live" || fail "$home $case_name identity: the live pid was signalled"
+      recorded=$(cat "$lockdir/pid" 2>/dev/null || true)
+      case "$case_name" in
+        mismatched)
+          case "$out" in
+            *"rc=0 held= recovered=$live "*) ;;
+            *) fail "$home: lock whose recorded identity no longer recomputes was not reclaimed: $out" ;;
+          esac
+          [ "$recorded" != "$live" ] || fail "$home: reclaimed lock still records the mismatched pid"
+          ;;
+        *)
+          case "$out" in
+            *"rc=1 held=$live "*) ;;
+            *) fail "$home $case_name identity: live holder was not refused: $out" ;;
+          esac
+          [ "$recorded" = "$live" ] || fail "$home $case_name identity: live holder's lock pid was clobbered ('$recorded')"
+          ;;
+      esac
+    done
   done
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true

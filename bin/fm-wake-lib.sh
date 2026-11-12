@@ -627,7 +627,7 @@ fm_lock_holder_alive() {
   local lockdir=$1 pid=$2
   fm_pid_alive "$pid" || return 1
   _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_time || return 1
-  [ "$lockdir" = "$STATE/.watch.lock" ] || return 0
+  [ "$lockdir" -ef "$STATE/.watch.lock" ] || return 0
   _fm_lock_record_matches "$lockdir" "$pid" pid-identity fm_pid_identity
 }
 
