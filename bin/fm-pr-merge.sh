@@ -21,6 +21,9 @@
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
+# With the opt-in config/pr-squash-summary presence flag, a GitHub squash merge
+# whose caller passed no subject or body takes the PR title and the body's
+# "## What Changed" section as its commit text; github_add_squash_summary owns it.
 # On Forgejo the merge style defaults to the repository's own
 # default_merge_style, read live, and a merge is refused when it cannot be read.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
@@ -465,6 +468,93 @@ caller_requested_auto_merge() {
     esac
   done
   return "$requested"
+}
+
+# Whether the caller's own extra arguments set the commit subject or body,
+# including gh's -t, -b, and -F short options inside a short-option cluster.
+caller_has_commit_text() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --subject|--subject=*|--body|--body=*|--body-file|--body-file=*) return 0 ;;
+      --*) ;;
+      -*[tbF]*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The "## What Changed" section of the PR body on stdin, without its heading
+# or surrounding blank lines. It ends at the next level-two heading or the
+# no-mistakes attestation comment; nothing is printed when it is absent.
+# Lines inside a fenced code block (``` or ~~~, closed by a run of the same
+# character at least as long) are never read as a heading or that comment;
+# a ``` line whose info string holds a backtick is inline code, not a fence.
+what_changed_section() {
+  tr -d '\r' | awk '
+    # The fence run a line opens or closes with: up to three spaces of
+    # indent, then three or more backticks or tildes; empty when none. A
+    # backtick run followed by another backtick is inline code, not a fence.
+    function fence_run(line,   s, c, n) {
+      s = line
+      sub(/^ ? ? ?/, "", s)
+      c = substr(s, 1, 1)
+      if (c != "`" && c != "~") return ""
+      n = 0
+      while (substr(s, n + 1, 1) == c) n++
+      if (n < 3) return ""
+      if (c == "`" && index(substr(s, n + 1), "`")) return ""
+      return substr(s, 1, n)
+    }
+    {
+      run = fence_run($0)
+      if (fence != "") {
+        rest = $0
+        sub(/^ ? ? ?/, "", rest)
+        rest = substr(rest, length(run) + 1)
+        if (run != "" && substr(run, 1, 1) == substr(fence, 1, 1) \
+          && length(run) >= length(fence) && rest ~ /^[[:space:]]*$/) fence = ""
+        if (inside) lines[++n] = $0
+        next
+      }
+      if (run != "") {
+        fence = run
+        if (inside) lines[++n] = $0
+        next
+      }
+    }
+    /^## / { if (inside) exit; if ($0 ~ /^## What Changed[[:space:]]*$/) { inside = 1; next } }
+    inside && /^<!-- no-mistakes-/ { exit }
+    inside { lines[++n] = $0 }
+    END {
+      first = 1; last = n
+      while (first <= last && lines[first] ~ /^[[:space:]]*$/) first++
+      while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+      for (i = first; i <= last; i++) print lines[i]
+    }'
+}
+
+# Opt-in config/pr-squash-summary: a GitHub squash merge whose caller passed no
+# commit text of its own gets the PR title plus " (#N)" as its subject and the
+# body's What Changed section as its body. Without that section, or when the PR
+# text cannot be read, the repository's own squash text stands.
+github_add_squash_summary() {
+  local json title body
+  case "$(caller_merge_method "$@")" in
+    ''|[sS][qQ][uU][aA][sS][hH]) ;;
+    *) return 0 ;;
+  esac
+  [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-squash-summary" ] || return 0
+  caller_has_commit_text "$@" && return 0
+  if ! json=$(gh pr view "$URL" --json title,body 2>/dev/null) \
+    || ! title=$(printf '%s' "$json" | jq -er '.title | strings | select(length > 0)' 2>/dev/null) \
+    || ! body=$(printf '%s' "$json" | jq -r '.body // "" | strings' 2>/dev/null); then
+    printf 'note: could not read the title and body of %s; the squash commit keeps the repository default text\n' "$URL" >&2
+    return 0
+  fi
+  body=$(printf '%s\n' "$body" | what_changed_section)
+  [ -n "$body" ] || return 0
+  merge_args+=(--subject "$title (#$PR_NUMBER)" --body "$body")
 }
 
 reject_repo_overrides() {
@@ -1889,6 +1979,7 @@ case "$PROVIDER" in
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
     fi
+    github_add_squash_summary "$@"
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     # mergeable reads UNKNOWN for a short while after a push or base-branch
     # change while GitHub recomputes it; retry a bounded number of times,

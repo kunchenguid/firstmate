@@ -688,6 +688,32 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Claude worker tool exclusions
+
+`config/crew-exclude-tools` reaches a Claude ship or scout launch as `--disallowedTools '<names>'` placed directly before `--append-system-prompt`, because the option is variadic and would otherwise swallow the launch prompt.
+[Worker tool exclusions](../configuration.md#worker-tool-exclusions-configcrew-exclude-tools) owns the contract; this record owns the measurement.
+Verified on 2026-11-06 with Claude Code 2.1.319 on Linux, interactive launches in a tmux pane with tool search on, against a capture-only local server (`ANTHROPIC_BASE_URL`) that records each `/v1/messages` body and answers 529, so no model is called.
+The arms differ only in the `--disallowedTools` value; the figures are the bytes of the JSON `tools` array and of the whole request for the main-agent request. The two repeats of the `Workflow,Artifact,mcp__claude-artifacts` arm matched on tool schema bytes and differed by 12 request bytes.
+
+| Launch | Tools sent | Tool schema bytes | Request bytes |
+| --- | --- | --- | --- |
+| no list, artifacts MCP server connected | 20 | 52064 | 188189 |
+| `Workflow,Artifact,mcp__claude-artifacts` | 12 | 28416 | 161748 |
+| `mcp__claude-artifacts` only (built-in `Artifact` takes its place) | 14 | 70987 | 206684 |
+| `Workflow,Artifact,mcp__claude-artifacts` | 12 | 28416 | 161736 |
+
+Findings that shape the contract:
+
+- A disallowed name is removed from the request's `tools` array, and a disallowed deferred MCP tool's name also leaves the deferred-tool list in the messages, so the saving is not only the schema.
+- `--tools` is not a substitute: naming an allow-list made Claude Code send every connected MCP tool eagerly (65 tools, 139760 schema bytes in the same environment), the opposite of a saving.
+- A server-level entry `mcp__<server>` hides every tool of that server, and with the artifacts server hidden Claude Code supplies a 37098-byte built-in `Artifact` tool, so both names are needed to drop every artifact schema.
+
+The token-free live guard refreshes the per-version evidence and fails naming the Claude Code version if a release stops honoring the flag:
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-tool-exclude-live.test.sh
+```
+
 ## Secondmate busy contract
 
 Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.
