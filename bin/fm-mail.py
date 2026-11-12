@@ -5,14 +5,15 @@
 #   read                   List unseen INBOX mail as a compact digest.
 #   send <to> <subj> <body | ->   Send one SMTP message; "-" reads stdin.
 #   poll_list              Emit unseen mail as tab-separated rows for the bash
-#                          poll, bounded to uids this home has not surfaced,
+#                          poll, bounded to uids this home has not processed,
 #                          plus a retry-set of previously unfetchable uids;
 #                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
 #
 # All configuration arrives through the environment, never through arguments,
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
-# is never marked seen before firstmate answers it.
+# is never marked seen before firstmate answers it. Sender filtering is
+# defined in docs/configuration.md "Mail plane".
 import imaplib
 import os
 import re
@@ -23,7 +24,7 @@ import email
 import smtplib
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import formatdate
+from email.utils import formatdate, getaddresses
 
 USER = os.environ['FM_MAIL_USER']
 PW = os.environ['FM_MAIL_PASS']
@@ -51,6 +52,72 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 
 MAX_PREVIEW = 200
 READ_LIMIT = 20
+
+ALLOW_VAR = 'FM_MAIL_SOURCE_ALLOW'
+# One allow-list entry: "@domain" or "local@domain", with no whitespace,
+# angle brackets, quotes, commas, or wildcards that could widen the match.
+ALLOW_DOMAIN_RE = re.compile(r'^@[^@\s<>"*,]+$')
+ALLOW_ADDRESS_RE = re.compile(r'^[^@\s<>"*,]+@[^@\s<>"*,]+$')
+
+
+def load_sender_allow():
+    """Return None when FM_MAIL_SOURCE_ALLOW is unset or blank, else a
+    (domains, addresses) pair of lowercase sets. Raise ValueError naming every
+    malformed entry, or when the list holds no entry at all, so a typo can
+    never silently widen or empty the filter."""
+    raw = os.environ.get(ALLOW_VAR, '')
+    if not raw.strip():
+        return None
+    domains = set()
+    addresses = set()
+    bad = []
+    for part in raw.split(','):
+        entry = part.strip()
+        if not entry:
+            continue
+        if ALLOW_DOMAIN_RE.match(entry):
+            domains.add(entry[1:].lower())
+        elif ALLOW_ADDRESS_RE.match(entry):
+            addresses.add(entry.lower())
+        else:
+            bad.append(entry)
+    if bad:
+        raise ValueError('%s has malformed entries: %s (each entry must be @domain or user@domain)'
+                         % (ALLOW_VAR, ', '.join(repr(b) for b in bad)))
+    if not domains and not addresses:
+        raise ValueError('%s is set but holds no entries' % ALLOW_VAR)
+    return domains, addresses
+
+
+def sender_allowed(msg, allow):
+    """True when the message's single parsed From address matches the allow
+    list: an exact address entry, or an exact "@domain" entry for the part
+    after the last "@". Display text never matches, and a message with no,
+    several, or unparseable From addresses is never allowed."""
+    try:
+        froms = msg.get_all('From') or []
+        if len(froms) != 1:
+            return False
+        found = [a for _, a in getaddresses([str(froms[0])]) if a]
+        if len(found) != 1:
+            return False
+        address = found[0].strip().lower()
+        local, sep, domain = address.rpartition('@')
+        if not sep or not local or not domain:
+            return False
+        domains, addresses = allow
+        return address in addresses or domain in domains
+    except Exception:
+        return False
+
+
+def allow_or_report():
+    """Return (ok, allow); on a malformed list report it on stderr."""
+    try:
+        return True, load_sender_allow()
+    except ValueError as e:
+        print('fm-mail: %s' % e, file=sys.stderr)
+        return False, None
 
 
 def dec(s):
@@ -102,6 +169,10 @@ def body_preview(msg):
 
 
 def cmd_read():
+    ok, allow = allow_or_report()
+    if not ok:
+        return 1
+    withheld = 0
     try:
         m = connect_mailbox()
         m.select('INBOX')
@@ -123,6 +194,9 @@ def cmd_read():
                 print('Body:', '(body unavailable)')
                 continue
             mi = email.message_from_bytes(msg[0][1])
+            if allow is not None and not sender_allowed(mi, allow):
+                withheld += 1
+                continue
             print('---')
             print('From:', dec(mi.get('From')))
             print('Date:', dec(mi.get('Date')))
@@ -133,6 +207,8 @@ def cmd_read():
                 print('Body:', (first[:MAX_PREVIEW] if first else ''))
             else:
                 print('Body:', '(body unavailable)')
+        if withheld:
+            print('(%d unseen message(s) from senders outside %s withheld)' % (withheld, ALLOW_VAR))
         try:
             m.logout()
         except Exception:
@@ -270,7 +346,13 @@ def cmd_poll_list():
     # (already in the cursor) are fetched again so a transient IMAP failure
     # cannot permanently replace real metadata with degraded placeholders. A
     # bounded window of candidates is scanned to fill the per-poll cap, new
-    # uids first so a large retry backlog can never starve new mail.
+    # uids first so a large retry backlog can never starve new mail. With a
+    # sender allow list, a non-matching sender is emitted as a redacted
+    # `filtered` row and an unverifiable (unfetchable) new uid as a redacted
+    # `held` row; neither counts against the new-mail budget.
+    ok, allow = allow_or_report()
+    if not ok:
+        return 1
     cap = int(os.environ.get('FM_MAIL_POLL_MAX_WAKES') or '20')
     if cap < 1:
         cap = 20
@@ -290,7 +372,7 @@ def cmd_poll_list():
             uid = x.decode() if isinstance(x, bytes) else str(x)
             unseen.append(uid)
         if uidv and uidv == stored_gen:
-            # Same mailbox generation: skip uids this home already surfaced so
+            # Same mailbox generation: skip uids this home already processed so
             # the fetch budget goes to genuinely new mail. Retry-set uids are
             # only meaningful for this generation.
             new_uids = [u for u in unseen if u not in seen]
@@ -307,11 +389,11 @@ def cmd_poll_list():
         # persist block below owns when that position advances.
         window = max(cap * 4, cap + 10)
         new_candidates = new_uids[:window]
-        # Only a retry uid that is already surfaced (in the cursor) is a pure
+        # Only a retry uid that is already processed (in the cursor) is a pure
         # retry re-fetch. A retry-set uid that is not yet in the cursor is a
-        # degraded wake that failed to record - it stays a new candidate so
-        # the next poll surfaces it again as degraded instead of silently
-        # dropping it. The window itself (regardless of seen membership) is
+        # fetch failure that failed to record - it stays a new candidate so
+        # the next poll handles it again instead of silently dropping it.
+        # The window itself (regardless of seen membership) is
         # kept so a scan window of only unseen uids can still advance the
         # durable cursor past itself, never stalling the march over the whole
         # retry set.
@@ -362,8 +444,9 @@ def cmd_poll_list():
                 continue
             # A raised or empty FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
-            # surfaced degraded, a retry uid is left for a later scan step, and
-            # the scan advances.
+            # held when filtering requires sender verification, otherwise
+            # surfaced degraded; a retry uid is left for a later scan step,
+            # and the scan advances.
             try:
                 typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
                 if typ != 'OK' or not msg or not msg[0]:
@@ -376,9 +459,21 @@ def cmd_poll_list():
             except Exception:
                 if is_retry:
                     continue
+                if allow is not None:
+                    out.append((clean(u), '', '', '', 'held'))
+                    continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
                 new_emitted += 1
+                continue
+            if allow is not None and not sender_allowed(mi, allow):
+                out.append((uid, '', '', '', 'filtered'))
+                if is_retry:
+                    # The bash layer drops a filtered retry uid from the retry
+                    # set, so it advances the retry scan like an emitted row.
+                    retry_emitted += 1
+                    if first_retry_emitted_index == -1:
+                        first_retry_emitted_index = retry_idx
                 continue
             status = 'retry' if is_retry else 'ok'
             out.append((uid, idate, fr, subj, status))
