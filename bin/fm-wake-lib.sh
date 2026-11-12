@@ -2080,7 +2080,9 @@ fm_failure_episode_reset() {
 #     also records "session_pid=S recovery_generation=G", binding that
 #     handling turn to its live session-lock owner and watcher recovery episode.
 #     A same-session re-anchor of state/.lock moves S with lock line 1
-#     (fm_autoarm_rekey_session).
+#     (fm_autoarm_rekey_session). A claim taken by a Stop firing whose payload
+#     named its Claude session also records "claude_session=C", which every
+#     later owned write of that generation keeps.
 #     Line 2 is the claiming process's pid-identity, the same identity every other
 #     supervision lock in this repo records (fm_pid_identity above). The
 #     identity is MANDATORY: a claimant that cannot record it does not claim
@@ -2120,11 +2122,19 @@ fm_failure_episode_reset() {
 #     whichever id the sidecar carries after lock recovery. An entry written by
 #     a build before these fields existed records neither and falls back to the
 #     descent signal alone.
+#     For a firing that names its Claude session, a claim recorded under a
+#     different claude_session is not open either: Claude delivers a hook's
+#     exit-2 rewake to the session that launched it, so a claim from a session
+#     Claude has since continued under a new id (a backgrounded session's
+#     --fork-session resume, still under the lock-holding front end) can only
+#     wake a conversation nobody runs. A claim or a caller without a session
+#     is judged as before.
 #   - Every firing DEFERS (exits 0) to an open claim; anything else - a
 #     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
-#     identityless entry, or no claim at all - lets the next firing take
-#     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
-#     reclaim: a steady-state predecessor is never signalled or revoked.
+#     identityless entry, an earlier session's claim, or no claim at all - lets
+#     the next firing take generation N+1 (fm_autoarm_claim_next). Taking a
+#     newer generation IS the reclaim: a steady-state predecessor is never
+#     signalled or revoked.
 #   - NO mutex is ever held across a blocking step. The owner lock
 #     state/.claude-autoarm.lock survives only as a micro-mutex serializing
 #     individual ledger reads-then-writes (a few non-blocking file
@@ -2189,7 +2199,8 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
 # FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION, FM_AUTOARM_RECOVERY,
-# FM_AUTOARM_OWNER_SESSION_ID, FM_AUTOARM_OWNER_LOCK_IDENTITY (line 3 of the
+# FM_AUTOARM_OWNER_SESSION_ID, FM_AUTOARM_CLAUDE_SESSION (empty for an entry
+# that recorded none), FM_AUTOARM_OWNER_LOCK_IDENTITY (line 3 of the
 # entry: the session-lock identity of the holder as the claim was taken), and
 # FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
 # line 2 - identity is never substituted from a lock, so a transient
@@ -2203,6 +2214,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_SESSION=
   FM_AUTOARM_RECOVERY=
   FM_AUTOARM_OWNER_SESSION_ID=
+  FM_AUTOARM_CLAUDE_SESSION=
   FM_AUTOARM_OWNER_LOCK_IDENTITY=
   FM_AUTOARM_IDENTITY=
   FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
@@ -2211,6 +2223,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_SESSION=$(_fm_autoarm_epoch_field "$epoch" session_pid 2>/dev/null || true)
   FM_AUTOARM_RECOVERY=$(_fm_autoarm_epoch_field "$epoch" recovery_generation 2>/dev/null || true)
   FM_AUTOARM_OWNER_SESSION_ID=$(_fm_autoarm_epoch_field "$epoch" owner_session_id 2>/dev/null || true)
+  FM_AUTOARM_CLAUDE_SESSION=$(_fm_autoarm_epoch_field "$epoch" claude_session 2>/dev/null || true)
   case "$FM_AUTOARM_GEN" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -2239,15 +2252,21 @@ fm_pid_descends_from() {  # <pid> <ancestor>
 # window without producing a first beat is the same hang. An identityless
 # entry is never open: real generation claims always record identity, a legacy
 # build's entry gets its deference from its held role-carrying lock through
-# the legacy shim, and anything else must not defer.
-fm_autoarm_claim_open() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current lock_pid lock_identity recorded
+# the legacy shim, and anything else must not defer. A caller that names its
+# Claude session (the Stop payload's session_id) also finds a claim recorded
+# under another session not open.
+fm_autoarm_claim_open() {  # <state-dir> [grace] [claude-session]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session=${3:-} epoch current lock_pid lock_identity recorded
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
   esac
   fm_autoarm_ledger_read "$state" || return 1
   [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
+  if [ -n "$session" ] && [ -n "$FM_AUTOARM_CLAUDE_SESSION" ] \
+    && [ "$session" != "$FM_AUTOARM_CLAUDE_SESSION" ]; then
+    return 1
+  fi
   fm_pid_alive "$FM_AUTOARM_OWNER" || return 1
   [ -n "$FM_AUTOARM_IDENTITY" ] || return 1
   current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
@@ -2323,15 +2342,19 @@ fm_autoarm_session_matches() {  # <state-dir> <identity> [recorded-session-id]
 }
 
 # Atomically publish this process as the owner of generation N+1, under one
-# short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
-# when a competing claimant won the race (the ledger holds an open claim), and
-# 1 when the micro-mutex is contended, the mandatory identity cannot be
-# computed, or the write failed.
-fm_autoarm_claim_next() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
+# short micro-mutex hold, recording the claimant's Claude session when it names
+# one (an id outside [A-Za-z0-9._-] is recorded as none). Returns 0 with
+# FM_AUTOARM_MY_GEN set on success, 2 when a competing claimant won the race
+# (the ledger holds a claim open to this session), and 1 when the micro-mutex
+# is contended, the mandatory identity cannot be computed, or the write failed.
+fm_autoarm_claim_next() {  # <state-dir> [grace] [claude-session]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} claude_session=${3:-} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
+  case "$claude_session" in
+    *[!A-Za-z0-9._-]*) claude_session= ;;
+  esac
   # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
   # command substitution would resolve it in that subshell, recording the
   # identity of a process that exits immediately.
@@ -2347,7 +2370,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   lock_identity=$(fm_session_pid_identity "$lock_pid" 2>/dev/null || true)
   [ -n "$lock_identity" ] || session_id=
   fm_lock_try_acquire "$lock" || return 1
-  if fm_autoarm_claim_open "$state" "$grace"; then
+  if fm_autoarm_claim_open "$state" "$grace" "$claude_session"; then
     fm_lock_release "$lock"
     return 2
   fi
@@ -2373,6 +2396,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
       printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s' \
         "$gen" "$pid" "$(date +%s)"
       [ -z "$session_id" ] || printf ' owner_session_id=%s' "$session_id"
+      [ -z "$claude_session" ] || printf ' claude_session=%s' "$claude_session"
       printf '\n%s\n' "$identity"
       [ -z "$session_id" ] || printf '%s\n' "$lock_identity"
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
@@ -2435,6 +2459,7 @@ _fm_autoarm_write_owned_locked() {  # <state-dir> <gen> <outcome> [marker-file] 
         "$gen" "$pid" "$outcome" "$(date +%s)"
       [ -z "$session" ] || printf ' session_pid=%s' "$session"
       [ -z "$recovery" ] || printf ' recovery_generation=%s' "$recovery"
+      [ -z "$FM_AUTOARM_CLAUDE_SESSION" ] || printf ' claude_session=%s' "$FM_AUTOARM_CLAUDE_SESSION"
       printf '\n'
       [ -z "$identity" ] || printf '%s\n' "$identity"
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
