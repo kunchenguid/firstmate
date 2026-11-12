@@ -392,6 +392,36 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+# A lane relaunched after its PR was recorded keeps that PR as its record's
+# tail, so the armed merge poll still validates against it.
+test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
+  local dir out rc url=https://github.com/example/repo/pull/7 check
+  dir=$(new_case keeps-pr rl44)
+  add_ship_task "$dir" rl44 claude
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *headRefOid*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+  *isDraft*) printf '%s\n' '{"isDraft":false}' ;;
+  *state*) printf '%s\n' MERGED ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-pr-check.sh" rl44 "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "the executable merge-poll registration should succeed"$'\n'"$out"
+  check="$dir/home/state/rl44.check.sh"
+  [ -f "$check" ] || fail "fm-pr-check did not arm the merge poll: $out"
+
+  out=$(run_control "$dir" rl44 relaunch --note "address review"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a lane with a recorded PR should succeed"$'\\n'"$out"
+  [ -n "$(meta_field "$dir" rl44 control_relaunch_tx)" ] || fail "the relaunch transaction id was not recorded"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash "$check")
+  [ "$out" = merged ] || fail "the armed merge poll stopped accepting the relaunched record: '$out'"
+  pass "fm-control relaunch: a recorded PR stays valid to the armed merge poll"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -466,6 +496,63 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
   assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
   [ ! -e "$fetch_head" ] || fail "relaunch fetched instead of preserving the recorded copy"
   pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
+}
+
+# A standalone clone is a legitimate task copy: fresh spawn's isolation check
+# (spawn_worktree_isolated) accepts it because its git dir is not the recorded
+# project's common git dir, even though its own --git-dir and --git-common-dir
+# are equal. The relaunch isolation check must draw the same boundary, or every
+# clone-layout task starts once and can never be restarted. The fixture drives
+# a codex task because Claude's own launch-time trust pre-registration refuses
+# any path that is not a linked worktree of the project (bin/fm-claude-trust.sh).
+test_relaunch_accepts_a_standalone_clone_worktree() {
+  local dir out rc
+  dir=$(new_case clone-wt rl45)
+  add_ship_task "$dir" rl45 codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  git -C "$dir/proj" worktree remove --force "$dir/wt"
+  git clone -q "$dir/proj" "$dir/wt"
+  [ "$(git -C "$dir/wt" rev-parse --path-format=absolute --git-dir --git-common-dir | sort -u | wc -l | tr -d ' ')" = 1 ] \
+    || fail "fixture broken: the clone's git-dir and git-common-dir must be equal"
+  [ "$(git -C "$dir/wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$dir/proj" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture broken: the clone must not share the recorded project's common git dir"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continue in the clone"); rc=$?
+  expect_code 0 "$rc" "a standalone clone worktree should relaunch"$'\n'"$out"
+  assert_contains "$out" "relaunched rl45 harness=codex" "the outcome should name the transition"
+  [ "$(meta_field "$dir" rl45 worktree)" = "$dir/wt" ] \
+    || fail "the recorded copy must be reused, not reallocated"
+  [ "$(meta_field "$dir" rl45 window)" = "fmses:fm-rl45" ] \
+    || fail "the endpoint must be reused, not recreated"
+  [ "$(journal_field "$dir" rl45 phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  assert_grep "/quit" "$dir/fake/literal" "the previous agent should have been exited"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  pass "fm-control relaunch: a recorded worktree that is a standalone clone relaunches"
+}
+
+# The remaining refused case still stops the old agent first: the isolation
+# check lives only in the launch owner, so on the `relaunch` verb a refusal
+# ends as a failed launch with no replacement running.
+test_relaunch_refusal_of_the_project_primary_checkout_still_leaves_no_replacement() {
+  local dir out rc
+  dir=$(new_case projwt-stop rl46)
+  add_ship_task "$dir" rl46 claude
+  sed -i.bak "s#^worktree=.*#worktree=$dir/proj#" "$dir/home/state/rl46.meta"
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+
+  out=$(run_control "$dir" rl46 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a worktree that is the project primary checkout should refuse"
+  assert_contains "$out" "primary home or checkout" "the refusal should name the primary checkout"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "the launch-owner refusal fires after the old agent has stopped"
+  assert_no_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "a refused relaunch must leave no replacement launched"
+  [ "$(journal_field "$dir" rl46 phase)" = "failed:launching" ] \
+    || fail "the journal should record the failed launch, got '$(journal_field "$dir" rl46 phase)'"
+  pass "fm-control relaunch: the project primary checkout is refused after stop, leaving no replacement"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1178,6 +1265,28 @@ test_pi_exclude_tools_follow_the_relaunch() {
   assert_not_contains "$(cat "$dir/fake/literal")" "--exclude-tools" \
     "a relaunch without the file must launch with no exclusions"
   pass "fm-control relaunch: a Pi replacement keeps the home's tool exclusions"
+}
+
+test_claude_exclude_tools_follow_the_relaunch() {
+  local dir out rc id=rl-claude-excl
+  dir=$(new_case claude-exclude "$id")
+  add_ship_task "$dir" "$id" claude
+  printf claude > "$dir/fake/command"
+  printf claude > "$dir/fake/becomes"
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '# hide unused schemas' 'Workflow' 'mcp__srv' > "$dir/home/config/crew-exclude-tools"
+  out=$(run_control "$dir" "$id" relaunch --note "keep exclusions"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch with exclusions should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "--disallowedTools 'Workflow,mcp__srv' --append-system-prompt " \
+    "the relaunched Claude worker must keep the home's tool exclusions"
+  rm "$dir/home/config/crew-exclude-tools"
+  : > "$dir/fake/literal"
+  printf claude > "$dir/fake/command"
+  out=$(run_control "$dir" "$id" relaunch --note "exclusions removed"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch after the file is removed should succeed"$'\n'"$out"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--disallowedTools" \
+    "a relaunch without the file must launch with no exclusions"
+  pass "fm-control relaunch: a Claude replacement keeps the home's tool exclusions"
 }
 
 test_exclude_tools_refusals_happen_before_the_agent_stops() {
@@ -3145,9 +3254,12 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
+test_relaunch_accepts_a_standalone_clone_worktree
+test_relaunch_refusal_of_the_project_primary_checkout_still_leaves_no_replacement
 test_relaunch_preserves_durable_task_metadata
 test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -3171,6 +3283,7 @@ test_account_list_relaunch_moves_only_on_explicit_account
 test_account_list_relaunch_refusals_happen_before_stop
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
+test_claude_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

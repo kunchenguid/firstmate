@@ -106,6 +106,18 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+# Writes the task record bin/fm-dispatch-resolve.sh leaves in data/<id>/ (its
+# documented shape: task, status, and profile with null for an unset axis).
+record_dispatch() {  # <home> <id> <status> [<harness> <model> <effort>]
+  local home=$1 id=$2 status=$3
+  mkdir -p "$home/data/$id"
+  jq -cn --arg id "$id" --arg status "$status" --arg h "${4:-}" --arg m "${5:-}" --arg e "${6:-}" '
+    def opt: if . == "" then null else . end;
+    {task: $id, status: $status,
+     profile: (if $status == "clear" then {harness: $h, model: ($m | opt), effort: ($e | opt)} else null end)}' \
+    > "$home/data/$id/dispatch-resolution.json"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -467,6 +479,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   enable_dispatch_profile "$HOME_DIR"
   jq '.preferred_provider = "claude"' "$HOME_DIR/config/crew-dispatch.json" > "$HOME_DIR/config/preferred.json"
   mv "$HOME_DIR/config/preferred.json" "$HOME_DIR/config/crew-dispatch.json"
+  record_dispatch "$HOME_DIR" "$id" ambiguous
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
@@ -477,7 +490,140 @@ test_active_dispatch_profile_allows_explicit_harness() {
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model, effort, and Codex bypass flag"
-  pass "active crew-dispatch profile allows an explicit resolved harness"
+  pass "a non-clear dispatch record accepts the explicit flags of the manual intake"
+}
+
+test_recorded_dispatch_selection_refuses_conflicting_flags() {
+  local rec id out status
+  id=profile-selected-conflict-z13
+  rec=$(make_spawn_case profile-selected-conflict claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear claude opus high
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 1 "$status" "flags that differ from the recorded selection should be refused"
+  assert_contains "$out" 'launch flags do not match the clear dispatch selection --harness claude --model opus --effort high' "spawn did not name the recorded selection"
+  assert_absent "$HOME_DIR/state/$id.meta" "selection mismatch should refuse before task publication"
+  assert_equals '' "$(cat "$LAUNCH_LOG")" "selection mismatch must not create a worker"
+  pass "a recorded dispatch selection refuses conflicting explicit launch flags"
+}
+
+test_recorded_dispatch_selection_allows_matching_flags() {
+  local rec id out status
+  id=profile-selected-match-z13
+  rec=$(make_spawn_case profile-selected-match claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear codex gpt-5 high
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "flags equal to the recorded selection should launch: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_no_grep 'dispatch_override=' "$HOME_DIR/state/$id.meta" "a matching launch should record no override"
+  pass "a recorded dispatch selection allows the matching launch flags"
+}
+
+test_recorded_dispatch_selection_allows_recorded_override() {
+  local rec id out status
+  id=profile-selected-override-z13
+  rec=$(make_spawn_case profile-selected-override claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear claude opus high
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --dispatch-override 'authorized account test')
+  status=$?
+  expect_code 0 "$status" "a recorded task override should permit a different launch: $out"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not report the overridden Codex launch"
+  assert_grep 'dispatch_override=authorized account test' "$HOME_DIR/state/$id.meta" "task record omitted the override reason"
+  pass "a task override with its reason permits a different launch and is recorded"
+}
+
+test_recorded_dispatch_selection_leaves_unset_effort_unbound() {
+  local rec id out status
+  id=profile-selected-fallback-z13
+  rec=$(make_spawn_case profile-selected-fallback claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear codex gpt-5 ''
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort low)
+  status=$?
+  expect_code 0 "$status" "a fallback effort beside a selection with no effort should launch: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 low
+  assert_no_grep 'dispatch_override=' "$HOME_DIR/state/$id.meta" "the documented effort fallback should need no override"
+  pass "an effort the clear selection leaves unset is not bound"
+}
+
+# A raw command keeps its own options, so matching --harness/--model/--effort
+# beside it proves nothing about what the worker runs.
+test_recorded_dispatch_selection_refuses_raw_launch_without_override() {
+  local rec id out status
+  id=profile-selected-raw-z13
+  rec=$(make_spawn_case profile-selected-raw claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear claude haiku low
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --model opus --effort high" --model haiku --effort low)
+  status=$?
+  expect_code 1 "$status" "a raw command under a clear selection should be refused without an override"
+  assert_contains "$out" 'launch flags do not match the clear dispatch selection --harness claude --model haiku --effort low' "spawn did not name the recorded selection"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused raw launch should not publish the task"
+  assert_equals '' "$(cat "$LAUNCH_LOG")" "a refused raw launch must not create a worker"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --model opus --effort high" --dispatch-override 'captain asked for opus')
+  status=$?
+  expect_code 0 "$status" "a raw command with a recorded task override should launch: $out"
+  assert_grep 'dispatch_override=captain asked for opus' "$HOME_DIR/state/$id.meta" "task record omitted the override reason"
+  pass "a clear dispatch selection refuses a raw launch command unless a task override is recorded"
+}
+
+test_active_dispatch_without_task_record_is_refused() {
+  local rec id out status
+  id=profile-unrecorded-z13
+  rec=$(make_spawn_case profile-unrecorded claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 1 "$status" "an active dispatch spawn with no task record should be refused"
+  assert_contains "$out" "has no recorded dispatch resolution; run bin/fm-dispatch-resolve.sh" "refusal did not name the resolver command"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unrecorded dispatch should refuse before task publication"
+  assert_equals '' "$(cat "$LAUNCH_LOG")" "an unrecorded dispatch must not create a worker"
+  pass "active dispatch refuses a spawn whose task has no recorded resolution"
+}
+
+test_batch_checks_each_task_against_its_own_record() {
+  local rec id1 id2 out status
+  id1=profile-batch-own-a-z13
+  id2=profile-batch-own-b-z13
+  rec=$(make_spawn_case profile-batch-own claude "$id1" "$id2")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id1" clear codex gpt-5 high
+  record_dispatch "$HOME_DIR" "$id2" clear claude opus high
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 1 "$status" "a batch with one conflicting task record should report failure"
+  assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
+  assert_absent "$HOME_DIR/state/$id2.meta" "the task whose record selects claude must not launch codex"
+  assert_contains "$out" "batch: FAILED to spawn $id2" "batch did not name the refused task"
+  pass "batch dispatch checks each task against its own recorded selection"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -486,6 +632,7 @@ test_active_dispatch_profile_allows_positional_harness() {
   rec=$(make_spawn_case profile-positional claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" clear codex gpt-5 high
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" codex --model gpt-5 --effort high)
@@ -588,6 +735,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id" off
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "custom-agent --flag")
@@ -599,7 +747,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   # The unverified-adapter escape hatch is still an agent this fleet launched,
   # so it carries the compact-adviser floor and the AI-trailer strip; nothing
   # else may rewrite the captain's own command.
-  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(fm_test_launch_git_prefix "$launch")custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(fm_test_launch_git_prefix "$launch")export FM_HOME='$HOME_DIR'; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -1354,6 +1502,8 @@ test_batch_preserves_native_ultra() {
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id1" clear pi codex-native/gpt-6-astra ultra
+  record_dispatch "$HOME_DIR" "$id2" clear pi codex-native/gpt-6-astra ultra
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
   expect_code 0 "$?" "native Ultra batch failed: $out"
@@ -1736,6 +1886,57 @@ JS
   pass "Pi worker registries report unmatched and unverified exclusions without reporting exact matches"
 }
 
+# Claude Code removes a --disallowedTools entry's schema from every request
+# (docs/configuration.md "Worker tool exclusions"). The option is variadic, so
+# the launch must keep a later flag between it and the launch prompt.
+test_claude_exclude_tools_reach_ship_and_scout_launches() {
+  local rec id out status launch kindflag doorbell
+  for kindflag in --ship --scout; do
+    id="excl-claude-${kindflag#--}-z9k"
+    rec=$(make_spawn_case "excl-claude-${kindflag#--}" claude "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" '# hide the unused tool schemas' '' \
+      '  Workflow  ' 'mcp__other-srv' 'mcp__other-srv__tool.v2'
+    if [ "$kindflag" = --scout ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    else
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    fi
+    status=$?
+    expect_code 0 "$status" "claude $kindflag spawn with exclusions should succeed"$'\n'"$out"
+    launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+    assert_contains "$launch" "--disallowedTools 'Workflow,mcp__other-srv,mcp__other-srv__tool.v2' --append-system-prompt " \
+      "claude $kindflag launch must carry the quoted list directly before the next flag"
+    assert_not_contains "$launch" "--exclude-tools" "claude must not receive the Pi flag"
+    doorbell=$(claude_launch_brief_arg "$launch")
+    [ -n "$doorbell" ] || fail "claude $kindflag launch lost its launch prompt after the exclusion flag"
+  done
+  pass "Claude ship and scout launches carry the configured tool exclusions ahead of the prompt"
+}
+
+test_claude_exclude_tools_leave_the_rest_of_the_launch_unchanged() {
+  local rec id out status launch with_list without_list
+  id=excl-claude-same-z9l
+  rec=$(make_spawn_case excl-claude-same claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "claude spawn without the file should succeed"$'\n'"$out"
+  without_list=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  assert_not_contains "$without_list" "--disallowedTools" "an absent file must add no Claude exclusions"
+
+  id=excl-claude-same-z9m
+  rec=$(make_spawn_case excl-claude-same2 claude "$id")
+  read_case_record "$rec"
+  write_exclude_file "$HOME_DIR" 'Workflow'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "claude spawn with the file should succeed"$'\n'"$out"
+  with_list=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  assert_contains "$with_list" "--disallowedTools 'Workflow' --append-system-prompt " "the exclusion flag is missing"
+  assert_contains "$with_list" "--dangerously-skip-permissions" "the permission flag must survive the exclusion flag"
+  assert_contains "$with_list" "--settings " "the settings flag must survive the exclusion flag"
+  pass "a Claude exclusion list adds only its own flag to the launch"
+}
+
 test_pi_exclude_tools_absent_and_empty_lists() {
   local rec id out status launch
   id=excl-absent-z9b
@@ -1763,13 +1964,14 @@ test_pi_exclude_tools_absent_and_empty_lists() {
     status=$?
     expect_code 0 "$status" "$harness spawn with an empty exclusion list should succeed"$'\n'"$out"
     assert_not_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools" "$harness must receive no exclusion flag"
+    assert_not_contains "$(cat "$LAUNCH_LOG")" "--disallowedTools" "$harness must receive no disallowed-tools flag"
   done
   pass "an absent or empty exclusion list leaves every runtime unaffected"
 }
 
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list() {
   local harness rec id out status
-  for harness in claude codex grok; do
+  for harness in codex grok; do
     id="excl-refuse-${harness}-z9i"
     rec=$(make_spawn_case "excl-refuse-${harness}" "$harness" "$id")
     read_case_record "$rec"
@@ -1886,6 +2088,22 @@ test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates() {
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
   assert_contains "$launch" "fm-primary-turnend-guard.ts" "secondmate launch was not the Pi secondmate shape"
   assert_not_contains "$launch" "--exclude-tools" "a secondmate's own agent must not receive the worker exclusions"
+
+  # The same holds for a Claude secondmate's own agent.
+  id_a=excl-sm-claude-z9n
+  rec_a=$(make_spawn_case excl-sm-claude claude "$id_a")
+  read_case_record "$rec_a"
+  write_exclude_file "$HOME_DIR" 'Workflow'
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id_a"
+  sm=$(cd "$sm" && pwd -P)
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_a" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Claude secondmate spawn should succeed"$'\n'"$out"
+  launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+  assert_contains "$launch" "claude " "secondmate launch was not the Claude shape"
+  assert_not_contains "$launch" "--disallowedTools" "a Claude secondmate's own agent must not receive the worker exclusions"
   pass "exclusions stay in the home that configured them and skip secondmate agents"
 }
 
@@ -1896,6 +2114,8 @@ test_batch_forwards_shared_profile_flags() {
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  record_dispatch "$HOME_DIR" "$id1" clear codex gpt-5 high
+  record_dispatch "$HOME_DIR" "$id2" escalate
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
@@ -2536,7 +2756,7 @@ claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(fm_test_launch_git_prefix "$1")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(fm_test_launch_git_prefix "$1")export FM_HOME='$2'; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
 test_claude_permission_mode_absent_defaults_to_bypass() {
@@ -2812,6 +3032,13 @@ test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
+test_recorded_dispatch_selection_refuses_conflicting_flags
+test_recorded_dispatch_selection_allows_matching_flags
+test_recorded_dispatch_selection_allows_recorded_override
+test_recorded_dispatch_selection_leaves_unset_effort_unbound
+test_recorded_dispatch_selection_refuses_raw_launch_without_override
+test_active_dispatch_without_task_record_is_refused
+test_batch_checks_each_task_against_its_own_record
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_launch_trailing_separator_or_comment_keeps_disarm
@@ -2858,6 +3085,8 @@ test_pi_seeded_secondmate_preapproves_project_trust
 test_pi_worker_launch_omits_seeded_home_approve
 test_pi_approve_probe_omits_unsupported_flag
 test_pi_exclude_tools_reach_ship_and_scout_launches
+test_claude_exclude_tools_reach_ship_and_scout_launches
+test_claude_exclude_tools_leave_the_rest_of_the_launch_unchanged
 test_pi_exclude_tools_worker_registry_reports
 test_pi_exclude_tools_absent_and_empty_lists
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list

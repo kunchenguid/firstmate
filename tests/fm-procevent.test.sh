@@ -1103,6 +1103,57 @@ wait_for "$HORPHAN/state/worker-4.inbox/001.msg" \
   || fail "the recovered capture did not reach its owning worker's steering inbox"
 pass "a capture interrupted before its result commit does not wedge its source"
 
+# --- end-user-aligned regression: confirming a launch leaves the lock free ----
+# A runner needs the source lock to claim. A confirmation loop polling that lock
+# before any claim exists starves the launch it is waiting for, which on a loaded
+# host pushed healthy listeners past the confirm window: arm then retired its own
+# registration and reconcile announced a launch failure. The stand-in holds the
+# runner at its first process-group check, just before it first takes the lock,
+# so anything seen holding the lock during that hold is the confirmation itself.
+STALL_BIN=$(fm_fakebin "$TMP_ROOT/ps-stall-stub")
+STALL_STARTED="$TMP_ROOT/ps-stall-started"
+STALL_RELEASE="$TMP_ROOT/ps-stall-release"
+STALL_REAL_PS=$(command -v ps)
+export STALL_STARTED STALL_RELEASE STALL_REAL_PS
+cat > "$STALL_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'-o pgid='*)
+    printf 'held\n' > "$STALL_STARTED"
+    while [ ! -e "$STALL_RELEASE" ]; do
+      [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+      sleep 0.02
+    done
+    ;;
+esac
+exec "$STALL_REAL_PS" "$@"
+SH
+chmod +x "$STALL_BIN/ps"
+assert_confirmation_leaves_lock_free() {  # <home> <source-id> <description> <fm-procevent command...>
+  local home=$1 id=$2 description=$3 lock pid sample_until touched=0
+  shift 3
+  rm -f "$STALL_STARTED" "$STALL_RELEASE"
+  lock=$(printf '%s/%s.lock' "$FM_PROCEVENT_CLAIM_ROOT" "$id")
+  FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=60 PATH="$STALL_BIN:$PATH" pe "$home" "$@" >/dev/null 2>&1 &
+  pid=$!
+  wait_for "$STALL_STARTED" || fail "the stalled runner never reached its process-group check: $description"
+  sample_until=$((SECONDS + 2))
+  while [ "$SECONDS" -lt "$sample_until" ]; do
+    if [ -e "$lock" ] || [ -L "$lock" ]; then touched=1; fi
+  done
+  touch "$STALL_RELEASE"
+  wait "$pid" || fail "a launch held only by a slow runner was not confirmed: $description"
+  [ "$touched" -eq 0 ] || fail "confirmation took the source lock before any claim existed: $description"
+  pe "$home" retire "$id" >/dev/null
+}
+HLOCKFREE="$TMP_ROOT/hlockfree"; new_home "$HLOCKFREE"
+LOCKFREE_TRIGGER="$TMP_ROOT/lockfree-hold"
+pe_register "$HLOCKFREE" lavish lockfree-src -- "$BLOCKER" "$LOCKFREE_TRIGGER" "lockfree payload" >/dev/null
+assert_confirmation_leaves_lock_free "$HLOCKFREE" lockfree-src "ensure-listening" ensure-listening lockfree-src
+pe_register "$HLOCKFREE" lavish lockfree-src -- "$BLOCKER" "$LOCKFREE_TRIGGER" "lockfree payload" >/dev/null
+assert_confirmation_leaves_lock_free "$HLOCKFREE" lockfree-src "reconcile" reconcile
+pass "confirming a launch leaves the source lock free until a claim exists"
+
 # --- end-user-aligned regression: an orphaned capture keeps its owner ---------
 # An unacknowledged capture belongs to whoever it was routed to. Retiring the
 # board it came from orphans that capture without handing it to anyone, so a
@@ -5159,7 +5210,7 @@ done
 [ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
 # Stand the first generation's claim back up on a live process so the re-arm
 # meets it still held, then release it partway through the confirm window.
-setsid sleep 60 &
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 60 &
 drain_holder=$!
 # Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
 # can read empty, and a pre-exec identity would never match the live holder.
