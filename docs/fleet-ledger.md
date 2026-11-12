@@ -20,7 +20,7 @@ Every record carries these members:
 | ------- | --------------------------------------------------------- |
 | `v`     | Record format version, currently `1`                      |
 | `ts`    | Unix time in seconds when the record was written          |
-| `event` | One of the five event names below                         |
+| `event` | One of the six event names below                          |
 | `task`  | The firstmate task id the record is about                 |
 
 Readers must ignore members and events they do not recognize, so later versions can add them without breaking existing readers.
@@ -29,13 +29,16 @@ Readers must ignore members and events they do not recognize, so later versions 
 
 | Event              | Extra members                                  | Written when |
 | ------------------ | ---------------------------------------------- | ------------ |
-| `task.dispatched`  | `kind`, `project`, `harness`, `model`          | A new worker or second mate is launched. A relaunch of an existing task is not recorded. |
+| `task.dispatched`  | `kind`, `project`, `harness`, `model`          | A new worker or second mate is launched. A relaunch of an existing task writes `task.relaunched` instead. |
+| `task.relaunched`  | `harness`, `model`                             | An existing task's agent is replaced in its endpoint by a relaunch. |
 | `task.status`      | `state`, `key`, `text`                         | A complete, nonblank line in the task's status log is captured. |
 | `task.pr_ready`    | `pr`                                           | Firstmate records the task's PR as ready for review. |
 | `task.merged`      | `via` (`"pr"` or `"local"`), plus `pr` when `via` is `"pr"` | The task's PR merge is recorded, or its local-only branch landed. |
 | `task.cleaned_up`  | none                                           | The task's worker and local copy were removed. |
 
 `task.dispatched` members: `kind` is `ship`, `scout`, or `secondmate`; `project` is the project directory name, or `null` for a remote second mate; `harness` names the agent tool; `model` is the requested model, or `null` for the tool's default.
+
+`task.relaunched` members: `harness` and `model` describe the replacement agent the same way.
 
 `task.pr_ready` members: `pr` is the PR's full URL.
 It is written each time firstmate records a PR for the task, so registering a replacement PR, or the same PR again, writes another record; recording the PR again as part of merging it writes none.
@@ -74,12 +77,34 @@ Example:
   To truncate it, stop reading, then empty it with `: > state/fleet-ledger.jsonl`; later records append to the empty file.
 - The ledger copies status text verbatim from the home's `state/` directory and adds no scrubbing, so give its readers exactly the trust you give `state/`.
 
+## Outcome scorecard
+
+`bin/fm-scorecard.sh` reads ledgers and prints, per profile (harness and model) and task kind, how tasks have gone.
+It is advisory and read-only: it writes nothing and never changes routing or dispatch configuration.
+By default it reads this home's ledger plus the ledger of every local second mate home in `data/secondmates.md`; each `--home <dir>` replaces that set.
+A home with no ledger or an empty ledger is listed as such, and a remote second mate is listed as not read.
+`--since <YYYY-MM-DD|epoch>` keeps tasks dispatched at or after that local date or time, and `--json` prints the same report for machines.
+
+Columns, over tasks with a `task.dispatched` record (second mate dispatches are left out):
+
+- **tasks**: tasks in the group; `*` marks a group of fewer than five, too few to be a trend.
+- **ready-med**, **ready-p90**: median and nearest-rank 90th percentile time from dispatch to the first `task.pr_ready`, or to the first `done` status when no PR was recorded, as on a local-only or scout task.
+- **val-rounds**: always `n/a`, because the ledger carries no validation data.
+- **blocked**, **relaunched**: tasks that reported `blocked` at least once, or had at least one `task.relaunched`.
+- **landed**, **abandoned**, **open**: a ship landed when merged and a scout when cleaned up after a `done` status; any other cleaned-up task was abandoned; the rest are open.
+
+Known limits:
+
+- "Stuck" means a reported `blocked` status; a task that stopped responding is not recorded in the ledger.
+- Relaunches are recorded only by a spawn that writes `task.relaunched`.
+- The ledger has no dispatch profile name, validation round count, or share of captain-requested changes, so the scorecard has none either.
+- A task reused under the same id after a fresh dispatch counts as a new task.
+
 ## Not included
 
 These are possible follow-ups, deliberately left out of this version:
 
 - session start, away-mode, and quiet-mode events;
-- relaunch events;
 - whether a worker is currently working or idle, and when a turn ends; see the [runtime backend event sources](architecture.md#runtime-session-backends) for native activity observations;
 - sequence numbers and gap detection;
 - rotation and continuity across rotated files;
