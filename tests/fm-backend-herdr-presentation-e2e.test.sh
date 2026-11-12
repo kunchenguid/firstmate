@@ -246,7 +246,6 @@ for arg in "$@"; do
   esac
 done
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "$sub" = get ]; then
-  if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "$sub" = get ]; then
   exit 0
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under

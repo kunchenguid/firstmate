@@ -6118,7 +6118,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     }
     spawn_send_text_line "$WT_TARGET" "treehouse --root $(shell_quote "$SPAWN_POOL_ROOT") get"
-  fi
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
