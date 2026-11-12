@@ -100,6 +100,122 @@ test_guard_reports_foreign_link_and_archive() {
   pass "bootstrap reports a code-root backlog linked elsewhere and a forked archive"
 }
 
+# A home that is itself a Firstmate checkout runs its own scripts, the way a
+# leased secondmate worktree does.
+make_checkout_home() {  # <dir>
+  mkdir -p "$1/data" "$1/state" "$1/config"
+  ln -s "$ROOT/bin" "$1/bin"
+  cp "$ROOT/AGENTS.md" "$1/AGENTS.md"
+  cp "$ROOT/.tasks.toml" "$1/.tasks.toml"
+}
+
+# The reported cross-home false positive: another checkout's bootstrap run
+# with FM_HOME naming a secondmate home that is itself a Firstmate checkout.
+# The invoking checkout's data/ is its own home's live backlog, not a fork of
+# the secondmate's, so nothing may be reported against it - least of all a
+# remedy that moves it aside.
+test_guard_silent_for_cross_home_checkout() {
+  local dir out
+  dir="$TMP_ROOT/cross-home"
+  make_checkout_home "$dir/main"
+  make_checkout_home "$dir/mate"
+  printf '## In flight\n\n## Queued\n\n- [ ] main-1: the main home'"'"'s own row\n\n## Done\n' \
+    > "$dir/main/data/backlog.md"
+  printf '## Done\n' > "$dir/main/data/done-archive.md"
+  empty_backlog "$dir/mate/data/backlog.md"
+  printf '## Done\n' > "$dir/mate/data/done-archive.md"
+  out=$(PATH="$BASE_PATH" FM_HOME="$dir/mate" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_BOOTSTRAP_NETWORK=skip "$dir/main/bin/fm-bootstrap.sh" 2>&1 | grep '^BACKLOG_RECONCILE' || true)
+  assert_not_contains "$out" "$dir/main/data" \
+    "a cross-home bootstrap reported the invoking checkout's own data files"
+  assert_equals "" "$out" "a cross-home bootstrap of a checkout home must stay silent"
+  pass "another checkout's bootstrap stays silent for a home that is its own checkout"
+}
+
+# A separate operational home may carry its own .tasks.toml to select a
+# backlog adapter without being a checkout. Its sessions still run the code
+# root's scripts, so a bare tasks-axi write from the code root still forks the
+# queue there, and the check must keep seeing it.
+test_guard_reports_fork_beside_home_with_own_tasks_config() {
+  local dir out
+  dir=$(make_split guard-home-tasks-config)
+  cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
+  rm "$dir/code/data/backlog.md"
+  printf '## In flight\n\n## Queued\n\n- [ ] stray: written from the code root\n\n## Done\n' \
+    > "$dir/code/data/backlog.md"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "BACKLOG_RECONCILE: code-root $dir/code/data/backlog.md is not this home's $dir/home/data/backlog.md" \
+    "a code-root fork beside a home with its own .tasks.toml was not reported"
+  assert_not_contains "${out##* - }" "move it aside" "a stray fork beside a non-checkout home incorrectly gained a move-aside remedy"
+  assert_contains "${out##* - }" "this check cannot tell whether that file is another home's live record" "the non-destructive remedy was not used"
+  pass "a home's own .tasks.toml does not hide a code-root fork"
+}
+
+# None of these home-identity hints proves whether the code-root books are
+# live. The same conservative diagnostic must survive all of them.
+test_guard_remedy_never_moves_external_code_root() {
+  local dir out remedy layout
+  dir=$(make_split guard-remedy-external)
+  rm "$dir/code/data/backlog.md"
+  empty_backlog "$dir/code/data/backlog.md"
+  mkdir -p "$dir/code/state"
+  for layout in unmarked marker registry parent cycle stale-state; do
+    case "$layout" in
+      marker) printf 'sibling\n' > "$dir/code/.fm-secondmate-home" ;;
+      registry) printf '| sibling | %s | sibling scope |\n' "$dir/code" > "$dir/home/data/secondmates.md" ;;
+      parent) printf '%s\n' "$dir/code" > "$dir/home/.fm-secondmate-parent" ;;
+      cycle) printf '%s\n' "$dir/home" > "$dir/code/.fm-secondmate-parent" ;;
+      stale-state) printf '999999999\n' > "$dir/code/state/.lock" ;;
+    esac
+    out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+    assert_contains "$out" "is not this home's $dir/home/data/backlog.md" "$layout: a code-root backlog was not reported"
+    remedy=${out##* - }
+    assert_contains "$remedy" "this check cannot tell whether that file is another home's live record" "$layout: the non-destructive remedy was not used"
+    assert_contains "$remedy" "leave ambiguous rows untouched and report them to the captain" "$layout: the row-recovery instruction was missing"
+    assert_not_contains "$remedy" "move it aside" "$layout: the remedy moved an external code root's backlog"
+  done
+  pass "external code roots never get move-aside based on markers, registries, parent chains, cycles, or stale state"
+}
+
+# FM_DATA_OVERRIDE selects the current invocation's books, not every session's
+# books. Exercise the real checkout bootstrap with and without the override;
+# neither the warning nor its remedy may endanger the normal-data records.
+test_guard_relocated_data_preserves_potentially_live_records() {
+  local dir out normal name line before
+  dir="$TMP_ROOT/guard-relocated-live"
+  mkdir -p "$dir/relocated"
+  make_checkout_home "$dir/home"
+  printf 'task: normal-data work\n' > "$dir/home/state/shared.status"
+  for name in backlog.md done-archive.md; do
+    printf '## Queued\n\n- [ ] shared: normal-data work\n- [ ] queued: normal-data work without records\n' > "$dir/home/data/$name"
+    printf '## Queued\n\n- [ ] relocated: separate relocated-data work\n' > "$dir/relocated/$name"
+  done
+  before=$(cksum "$dir/home/data/"*.md "$dir/relocated/"*.md)
+  normal=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_BOOTSTRAP_NETWORK=skip bash "$dir/home/bin/fm-bootstrap.sh" 2>&1) || fail "normal-data bootstrap failed"
+  assert_not_contains "$normal" "BACKLOG_RECONCILE: code-root" "normal-data bootstrap reported its own books"
+  out=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_DATA_OVERRIDE="$dir/relocated" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip bash "$dir/home/bin/fm-bootstrap.sh" 2>&1) || fail "relocated-data bootstrap failed"
+  assert_equals "$before" "$(cksum "$dir/home/data/"*.md "$dir/relocated/"*.md)" \
+    "relocated-data bootstrap mutated a backlog or archive"
+  for name in backlog.md done-archive.md; do
+    line=$(printf '%s\n' "$out" | grep -F "BACKLOG_RECONCILE: code-root $dir/home/data/$name is not this home's $dir/relocated/$name")
+    assert_contains "$line" "a tasks-axi write may have landed there" "relocated-data fork was not reported cautiously"
+    assert_not_contains "$line" "move it aside" "relocated-data warning prescribes moving potentially live normal-data records"
+    assert_contains "$line" "never move, rewrite, or delete it on this line alone" "relocated-data warning lacks the standalone safety boundary"
+    assert_contains "$line" "this home's normal-data sessions" "the warning overlooks sessions using the normal data directory"
+    assert_contains "$line" "a matching task id alone is not ownership evidence" "shared records were treated as ownership proof"
+    assert_contains "$line" "leave ambiguous rows untouched and report them to the captain" "relocated-data row ambiguity was not escalated"
+    assert_contains "$line" "queued rows may have no records yet" "unclaimed queued rows were silently lost"
+  done
+  normal=$(PATH="$BASE_PATH" FM_HOME="$dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_BOOTSTRAP_NETWORK=skip bash "$dir/home/bin/fm-bootstrap.sh" 2>&1) || fail "normal-data bootstrap failed after override"
+  assert_not_contains "$normal" "BACKLOG_RECONCILE: code-root" "the override changed later normal-data addressing"
+  assert_equals "$before" "$(cksum "$dir/home/data/"*.md "$dir/relocated/"*.md)" \
+    "normal-data recheck mutated a backlog or archive"
+  pass "relocated-data warning protects normal-data records and surfaces row ambiguity without mutating either copy"
+}
+
 test_guard_silent_for_single_home() {
   local dir out
   dir="$TMP_ROOT/single-guard"
@@ -112,6 +228,46 @@ test_guard_silent_for_single_home() {
   out=$(bootstrap_backlog_lines "$dir" "$dir")
   assert_equals "" "$out" "FM_HOME naming the code root was reported as a fork"
   pass "bootstrap stays silent when the code root is the home"
+}
+
+# The warning is an operator-facing recovery instruction, not an automatic
+# row merger. Check that emitted contract with colliding IDs and unclaimed
+# queued rows, and prove that inspection leaves both homes' books untouched.
+test_guard_row_recovery_requires_unambiguous_ownership() {
+  local dir out line name before
+  dir=$(make_split guard-row-ownership)
+  rm "$dir/code/data/backlog.md"
+  mkdir -p "$dir/code/state" "$dir/code/data/shared-data" "$dir/home/data/shared-data"
+  printf 'task: target work\n' > "$dir/home/state/shared-state.status"
+  printf 'task: unrelated code-root work\n' > "$dir/code/state/shared-state.status"
+  printf 'task: target-only work\n' > "$dir/home/state/target-only.status"
+  for name in backlog.md done-archive.md; do
+    printf '## Queued\n\n- [ ] shared-state: unrelated code-root work\n- [ ] shared-data: another colliding task\n- [ ] unclaimed: queued without records in either home\n- [ ] target-only: target-only work\n' \
+      > "$dir/code/data/$name"
+    printf '## Queued\n\n- [ ] shared-state: target work\n- [ ] shared-data: target data-backed task\n' \
+      > "$dir/home/data/$name"
+  done
+  before=$(cksum "$dir/code/data/"*.md "$dir/home/data/"*.md)
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  for name in backlog.md done-archive.md; do
+    line=$(printf '%s\n' "$out" | grep -F "code-root $dir/code/data/$name is not")
+    assert_contains "$line" "a matching task id alone is not ownership evidence" \
+      "the emitted recovery instruction treats an overlapping id as ownership"
+    assert_contains "$line" "only rows corroborated as the same task by this home's records" \
+      "the emitted recovery instruction lacks positive task evidence"
+    assert_contains "$line" "whose id has no record in $dir/code" \
+      "the emitted recovery instruction ignores competing code-root records"
+    assert_contains "$line" "leave ambiguous rows untouched and report them to the captain" \
+      "ambiguous recovery rows were not escalated"
+    assert_contains "$line" "including every row both homes' records claim or neither home's records claim" \
+      "colliding or unclaimed rows were silently excluded from recovery"
+    assert_contains "$line" "queued rows may have no records yet" \
+      "a missing queued row without records was treated as irrelevant"
+    assert_not_contains "$line" "move it aside" "recovery moved another home's file"
+  done
+  assert_equals "$before" "$(cksum "$dir/code/data/"*.md "$dir/home/data/"*.md)" \
+    "the ownership warning changed a home's backlog or archive"
+  pass "recovery guidance requires task evidence and escalates overlapping ids and unclaimed queued rows without writes"
 }
 
 # The end-to-end fork: a bare tasks-axi write from the code root. Whatever the
@@ -242,6 +398,11 @@ test_wrapper_single_home() {
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
+test_guard_silent_for_cross_home_checkout
+test_guard_reports_fork_beside_home_with_own_tasks_config
+test_guard_remedy_never_moves_external_code_root
+test_guard_relocated_data_preserves_potentially_live_records
+test_guard_row_recovery_requires_unambiguous_ownership
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
   test_wrapper_writes_through_to_home
