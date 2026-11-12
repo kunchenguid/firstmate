@@ -18,6 +18,12 @@
 # already uses when it first records a remote route - and republishes this
 # home's own metadata to match. A failed or refused relaunch leaves this
 # parent's record untouched.
+#
+# A relaunch is also where a desk whose host or home was replaced comes back,
+# so after republishing it runs bin/fm-procevent-remote-reply.sh rebase --if-moved:
+# a reply log that no longer continues this parent's cursor is re-read from the
+# start through the replay identity, and an intact one stays armed where it is.
+# That check failing is reported as a warning; the relaunch itself has succeeded.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,3 +100,10 @@ done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
 fm_lock_release "$META_LOCK"
+
+if REBASE_OUT=$("$SCRIPT_DIR/fm-procevent-remote-reply.sh" rebase "$ID" --if-moved 2>&1); then
+  printf '%s\n' "$REBASE_OUT"
+else
+  printf 'warning: %s relaunched, but its reply channel was not checked against the remote log: %s\n' \
+    "$ID" "$REBASE_OUT" >&2
+fi

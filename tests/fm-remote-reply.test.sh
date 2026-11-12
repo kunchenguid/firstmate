@@ -1444,4 +1444,126 @@ assert_absent "$PARENT/state/remote-replies/ios.cursor" \
   || fail "a retirement that stopped after removal changed the count"
 pass "a retirement that stops after removing the cursor leaves the old count"
 
+# --- rebase after the remote log is replaced ---------------------------------
+# A desk rebuilt on a new host comes back with a different
+# state/parent-replies.status. The reader reports that as a continuity break,
+# which drops the registration. `rebase` re-arms from offset zero and the replay
+# identity record lets only genuinely new lines through.
+REMOTE_MEGA="$TMP_ROOT/remote-mega"
+mkdir -p "$REMOTE_MEGA/state" "$REMOTE_MEGA/data"
+printf -- '- mega - heavy offload (host: remote-mac; root: %s; home: %s; scope: offload; projects: alpha; added 2026-11-10)\n' \
+  "$ROOT" "$REMOTE_MEGA" >> "$PARENT/data/secondmates.md"
+MEGA_SID=$(remote_env "$ADAPTER" source-id mega)
+MEGA_STATUS="$PARENT/state/mega.status"
+
+mega_owner() {
+  remote_env "$ROOT/bin/fm-procevent.sh" list 2>/dev/null \
+    | awk -v id="$MEGA_SID" 'NR > 1 && $1 == id { print $3; exit }'
+}
+
+# Keep one runner listening until <predicate> holds.
+await_mega() { # <predicate-command...>
+  local i starter='' owner
+  for i in $(seq 1 800); do
+    "$@" && return 0
+    if [ "$((i % 20))" -eq 1 ] && { [ -z "$starter" ] || ! kill -0 "$starter" 2>/dev/null; }; then
+      starter=''
+      owner=$(mega_owner)
+      if [ -n "$owner" ] && [ "$owner" != live ]; then
+        remote_env "$ROOT/bin/fm-procevent.sh" start "$MEGA_SID" >/dev/null 2>&1 &
+        starter=$!
+      fi
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+stop_mega_listener() {
+  local pid _
+  pid=$(sed -n '2p' "$CLAIMS/$MEGA_SID.claim" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 80); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+mega_status_has() { grep -Fq -- "$1" "$MEGA_STATUS" 2>/dev/null; }
+mega_continuity_open() {
+  status_open_decisions "$MEGA_STATUS" | cut -f1 | grep -Fqx "remote-reply-continuity-mega"
+}
+
+out=$(remote_env "$ADAPTER" rebase mega --if-moved)
+assert_contains "$out" "unchanged: $MEGA_SID has no reply channel to rebase" \
+  "a route with no reply channel was not left alone"
+assert_absent "$PARENT/state/procevent/$MEGA_SID.source" \
+  "rebase --if-moved armed a route that had no reply channel"
+pass "rebase --if-moved leaves a route with no reply channel alone"
+
+printf 'working: first host is up\nneeds-decision [key=q1]: pick a cache size\n' \
+  > "$REMOTE_MEGA/state/parent-replies.status"
+remote_env "$ADAPTER" arm mega >/dev/null
+await_mega mega_status_has 'needs-decision [key=q1]: pick a cache size' \
+  || fail "the first host's lines were not mirrored"
+if remote_env "$ADAPTER" registered mega; then :; else
+  fail "an armed reply source did not report registered"
+fi
+out=$(remote_env "$ADAPTER" rebase mega --if-moved)
+assert_contains "$out" "unchanged: $MEGA_SID offset=" "an intact log was rebased"
+remote_env "$ADAPTER" registered mega || fail "an intact log was left unregistered after rebase --if-moved"
+pass "rebase --if-moved keeps an intact log at its cursor and armed"
+
+# The desk moves: the new host's log starts over with one line the parent has
+# already mirrored and two it has not.
+stop_mega_listener || fail "the mega listener did not stop before the move"
+printf 'note: rebuilt on a new host\nworking: first host is up\nworking: caught up after the move\n' \
+  > "$REMOTE_MEGA/state/parent-replies.status"
+await_mega mega_continuity_open || fail "the replaced log was not reported as a continuity break"
+for _ in $(seq 1 100); do
+  remote_env "$ADAPTER" registered mega || break
+  sleep 0.05
+done
+if remote_env "$ADAPTER" registered mega; then
+  fail "a continuity break left the reply source registered"
+fi
+pass "a replaced remote log breaks continuity and drops the registration"
+
+# A record-only resolve closes the decision but does not bring the channel back.
+printf '%s\n' 'resolved [key=remote-reply-continuity-mega]: looked fine' >> "$MEGA_STATUS"
+if remote_env "$ADAPTER" registered mega; then
+  fail "a resolved line re-registered the reply source"
+fi
+printf '%s\n' 'blocked [key=remote-reply-continuity-mega]: reopened for the rebase test' >> "$MEGA_STATUS"
+
+# A captured result nobody handled makes rebase refuse without touching anything.
+mkdir -p "$PARENT/state/procevent-inbox"
+printf 'schema=fm-remote-delta.v1\n' > "$PARENT/state/procevent-inbox/$MEGA_SID.999.result"
+printf 'adapter=remote-reply\n' > "$PARENT/state/procevent-inbox/$MEGA_SID.999.adapter"
+cursor_before=$(cat "$PARENT/state/remote-replies/mega.cursor")
+if remote_env "$ADAPTER" rebase mega > "$TMP_ROOT/rebase-pending.out" 2>&1; then
+  fail "rebase accepted an unhandled captured result"
+fi
+assert_grep 'unhandled captured result' "$TMP_ROOT/rebase-pending.out" \
+  "rebase did not explain its pending-result refusal"
+[ "$(cat "$PARENT/state/remote-replies/mega.cursor")" = "$cursor_before" ] \
+  || fail "a refused rebase changed the cursor"
+rm -f "$PARENT/state/procevent-inbox/$MEGA_SID.999.result" "$PARENT/state/procevent-inbox/$MEGA_SID.999.adapter"
+pass "rebase refuses while a captured result is unhandled"
+
+before_first=$(grep -cF 'working: first host is up' "$MEGA_STATUS")
+out=$(remote_env "$ADAPTER" rebase mega --if-moved)
+assert_contains "$out" "rebased: $MEGA_SID new_lines=2 reason=prefix-changed" \
+  "rebase did not report the lines the replay identity lets through"
+remote_env "$ADAPTER" registered mega || fail "rebase left the reply source unregistered"
+mega_continuity_open && fail "rebase left the continuity decision open"
+await_mega mega_status_has 'working: caught up after the move' \
+  || fail "the new host's lines were not mirrored after rebase"
+mega_status_has 'note: rebuilt on a new host' || fail "the new host's first line was not mirrored"
+[ "$(grep -cF 'working: first host is up' "$MEGA_STATUS")" -eq "$before_first" ] \
+  || fail "rebase mirrored a line the parent already had"
+pass "rebase re-arms from offset zero and mirrors only genuinely new lines"
+
 echo "ALL TESTS PASSED"

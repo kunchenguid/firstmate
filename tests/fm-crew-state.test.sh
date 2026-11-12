@@ -3482,6 +3482,9 @@ setup_remote_case() {  # <name> -> echoes case dir with remote meta + registry
   cat > "$d/data/secondmates.md" <<EOF
 - rsm - remote test domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
 EOF
+  # A healthy remote mate has a registered reply source collecting its replies.
+  mkdir -p "$d/state/procevent"
+  printf 'adapter=remote-reply\nargc=1\nargv:\nsource\n' > "$d/state/procevent/remote-reply-rsm.source"
   cat > "$d/fakebin/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 cat > /dev/null
@@ -3539,6 +3542,27 @@ test_remote_unreachable_is_unknown_remote_not_dead() {
   assert_not_contains "$out" "worktree gone" "an unreachable remote must never read as torn down"
   assert_not_contains "$out" "backend target gone" "an unreachable remote must never read as a dead target"
   pass "fm-crew-state remote: an unreachable host reads unknown-remote, never gone or dead"
+}
+
+test_remote_alive_without_reply_source_is_blocked() {
+  reset_fakes
+  local d out rc
+  d=$(setup_remote_case remote-alive-unregistered)
+  make_fakebin "$d" >/dev/null
+  rm -f "$d/state/procevent/remote-reply-rsm.source"
+  # The continuity decision was closed by a resolved line alone.
+  printf '%s\n' \
+    'blocked [key=remote-reply-continuity-rsm]: remote reply continuity broke for rsm (prefix-changed)' \
+    'resolved [key=remote-reply-continuity-rsm]: looked fine' \
+    'working: refactoring the quota adapter' > "$d/state/rsm.status"
+  out=$(FM_FAKE_REMOTE_STATE_OUT=alive FM_FAKE_SSH_RC=0 run_remote_crew_state "$d" rsm); rc=$?
+  expect_code 0 "$rc" "remote alive without a reply source exits 0"
+  assert_contains "$out" "state: blocked" "a live remote mate with no reply source must read blocked"
+  assert_contains "$out" "remote reply channel for rsm is not registered" \
+    "the blocker must name the unregistered reply channel"
+  assert_contains "$out" "fm-procevent-remote-reply.sh rebase rsm" "the blocker must name the recovery"
+  assert_not_contains "$out" "state: working" "a resolved line must not hide a dead reply channel"
+  pass "fm-crew-state remote: a live endpoint with no registered reply source reads blocked"
 }
 
 test_remote_dead_reports_remote_verdict() {
@@ -6855,6 +6879,7 @@ test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
+test_remote_alive_without_reply_source_is_blocked
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta

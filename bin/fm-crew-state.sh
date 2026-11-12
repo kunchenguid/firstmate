@@ -43,7 +43,10 @@
 #      (fm-on.sh + fm-remote-secondmate-control.sh state). alive falls through
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
-#      gone/dead.
+#      gone/dead. An alive endpoint whose reply source has no process-event
+#      registration (bin/fm-procevent-remote-reply.sh registered) reports
+#      blocked before the log is read: nothing collects its replies, and a
+#      resolved line in the log cannot bring that channel back.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
@@ -374,6 +377,10 @@ if [ -n "$REMOTE_HOST" ]; then
   REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
   case "$REMOTE_STATE" in
     alive)
+      if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-procevent-remote-reply.sh" registered "$ID" >/dev/null 2>&1; then
+        emit blocked remote-endpoint "remote reply channel for $ID is not registered, so its replies are not being collected; recover with bin/fm-procevent-remote-reply.sh rebase $ID${SEP}remote endpoint alive on $REMOTE_HOST"
+      fi
       if [ -n "$LOG_VERB" ]; then
         LOG_STATE=$(map_log_state "$LOG_LINE")
         if [ "$LOG_STATE" != unknown ]; then
