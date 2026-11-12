@@ -7696,7 +7696,8 @@ esac
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds ambient credentials that could override it. A declared token source
-# wraps the command to load its OAuth token after the ambient credentials are shed.
+# wraps the command to load its OAuth token; the env prefix preserves that
+# token while shedding the other ambient credentials.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)

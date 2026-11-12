@@ -39,7 +39,7 @@
 # it separately for the pre-launch check and worker command, without falling
 # back to the pinned root's stored login.
 #
-# The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
+# The stored-login check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential
 # variable left in the caller cannot answer for a root that has no login:
 #   Claude: `claude auth status`, which exits 0 only when signed in.
@@ -51,9 +51,9 @@
 #           a root can authenticate; a row whose provider column is exactly
 #           <p> passes. --no-refresh keeps the check from rewriting a root's
 #           tokens while other workers use them.
-# A pinned Claude launch also unsets the environment credentials Claude ranks
-# above the root's stored login, so an ambient API key or token cannot outrank
-# the pin. Pi ranks a root's stored credentials above environment variables,
+# A pinned Claude launch sheds ambient credentials; a declared source supplies
+# CLAUDE_CODE_OAUTH_TOKEN through the helper instead of the root's stored login.
+# Pi ranks a root's stored credentials above environment variables,
 # and the check refuses a provider the root has not stored, so a pinned Pi
 # launch unsets nothing.
 #
@@ -61,7 +61,7 @@
 # config/claude-accounts: one entry per line, each `ordinary` or an absolute
 # path exactly as config/claude-account would hold it, optionally followed by
 # a tab and a config-local `claude-account-credential-source-<name>.json` file.
-# The list has no blank lines, duplicate accounts, or control characters, and
+# The list has no blank lines, duplicate accounts, or other control characters, and
 # an optional final newline. The list is opt-in in the same way: absent, nothing
 # here changes. Present, it replaces the home-wide pin, which must then be
 # absent, and every Claude ship or scout launch names one declared entry with
@@ -322,8 +322,9 @@ fm_worker_account_credential_source_file() {
 }
 
 # fm_worker_account_check <harness> <declared> <root> <executable> [<provider>] [<setting>] [<credential-source-file>]
-# Returns 0 only when the runner's own check says the selected root or token
-# source is signed in for this launch; otherwise prints one error and returns 1.
+# Returns 0 when the runner confirms a stored login or selects the declared
+# OAuth token as its auth method; this does not validate the token remotely.
+# Otherwise prints one error and returns 1.
 fm_worker_account_check() {
   local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} setting=${6:-} source_file=${7:-} out verdict name rc method
   [ -n "$setting" ] || setting="config/$(fm_worker_account_file "$harness")"
