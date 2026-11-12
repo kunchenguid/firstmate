@@ -19,7 +19,9 @@
 # still wakes on a merge from the plain state field. A GitLab poll also emits
 # "ontrain" while the merge request has a merge-train car, and a degraded
 # train=dropped line once the car is gone from a still-open merge request; the
-# watcher wakes on a drop only after it saw the car on the train.
+# watcher wakes on a drop only after it saw the car on the train. On a GitLab
+# project with merge trains enabled, a merged line also needs the landed merge,
+# squash, or fast-forward commit recorded; until then the poll stays armed.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -181,10 +183,41 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
+    enc=${path//\//%2F}
+    gitlab_report_merged() {  # [merge request JSON already read]
+        # On a project with merge trains, merged alone is not proof of the
+        # landing: the merge, squash, or (fast-forward project) head commit
+        # must also be recorded, or the poll stays armed. bin/fm-pr-merge.sh
+        # waits on this same check, so the two cannot disagree. Every path
+        # below that reports a GitLab merge goes through here. Without jq the
+        # project settings cannot be read, so the plain merged wake stands;
+        # any other unreadable read reports nothing.
+        command -v jq >/dev/null 2>&1 || { printf '%s\n' merged; return 0; }
+        project=$(GITLAB_HOST=$host glab api "projects/$enc" 2>/dev/null) || exit $unknown
+        settings=$(printf '%s' "$project" | jq -r '
+            if type == "object" then "\(.merge_trains_enabled // false) \(.merge_method // "")"
+            else error("unreadable") end' 2>/dev/null) || exit $unknown
+        if [ "${settings%% *}" = false ]; then
+          printf '%s\n' merged
+          return 0
+        fi
+        mr_json=${1:-}
+        if [ -z "$mr_json" ]; then
+          mr_json=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit $unknown
+        fi
+        landed=$(printf '%s' "$mr_json" | jq -r --arg method "${settings#* }" '
+            def commit: if type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$") then . else null end;
+            if type == "object" and .state == "merged" then
+              ((.merge_commit_sha | commit) // (.squash_commit_sha | commit)
+                // (if $method == "ff" then (.sha | commit) else null end) // "-")
+            else "-" end' 2>/dev/null) || exit $unknown
+        [ -n "$landed" ] && [ "$landed" != - ] && printf '%s\n' merged
+        return 0
+    }
     if [ "$degraded_enabled" != 1 ]; then
       raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
       state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
-      [ "$state" = merged ] && printf '%s\n' merged
+      [ "$state" = merged ] && gitlab_report_merged
       exit 0
     fi
     # glab resolves the instance from the project URL passed to -R, so the host
@@ -208,7 +241,6 @@ case "$provider" in
     # a pending or green head pipeline and an unreadable initial MR record.
     # Without jq the poll falls back to the plain state field,
     # which keeps the merged wake for a watch armed before jq was required.
-    enc=${path//\//%2F}
     gitlab_detail_read() {  # <api path>
         # Each detail read gets its own hard limit of five seconds, so a hung
         # read is cut rather than holding the poll until the watcher's check
@@ -290,7 +322,7 @@ case "$provider" in
     if ! command -v jq >/dev/null 2>&1; then
       raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
       state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
-      [ "$state" = merged ] && printf '%s\n' merged
+      [ "$state" = merged ] && gitlab_report_merged
       exit 0
     fi
     raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit $unknown
@@ -365,7 +397,7 @@ case "$provider" in
             else error("invalid merge request record")
             end' 2>/dev/null) || current_state=unknown
           case $current_state in
-            merged) printf '%s\n' merged; exit 0 ;;
+            merged) gitlab_report_merged "$current"; exit 0 ;;
             opened|locked) ;;
             closed) exit 0 ;;
             *) current_state=unknown ;;
@@ -382,7 +414,7 @@ case "$provider" in
     esac
     case $result in
       merged)
-        printf '%s\n' merged
+        gitlab_report_merged "$raw"
         ;;
       'degraded pipeline='*)
         case $result in
