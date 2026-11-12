@@ -753,6 +753,21 @@ fm_lock_wait_pending_mutation() {
   fi
 }
 
+fm_lock_create_owner_link() {  # <owner-directory> <lock-path>
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*)
+      # Git Bash's ln -s silently makes a directory COPY when native symlinks
+      # are unavailable, so readlink then fails and a lock can never verify its
+      # own claim (it waits on itself forever). A directory junction needs no
+      # privilege, reads back as a link through -L and readlink, and mklink /J
+      # refuses an existing destination exactly as mkdir does.
+      MSYS2_ARG_CONV_EXCL='*' cmd.exe /c mklink /J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+      return
+      ;;
+  esac
+  ln -s "$1" "$2"
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
@@ -781,7 +796,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  ln -s "$ownerdir" "$lockdir" 2>/dev/null &
+  fm_lock_create_owner_link "$ownerdir" "$lockdir" 2>/dev/null &
   FM_LOCK_PENDING_PID=$!
   if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then

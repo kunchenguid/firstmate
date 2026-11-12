@@ -581,8 +581,14 @@ fm_proc_info() {  # <pid>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ extending=0 printed=0
+  local pid=$$ extending=0 printed=0 seen=" "
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    # A parent chain that revisits a pid can never reach anything new. On a
+    # Cygwin-family host the severed parent link reports pid 1 as its own
+    # parent, and without this guard the walk re-examined pid 1 on every
+    # remaining hop, several process launches each.
+    case "$seen" in *" $pid "*) break ;; esac
+    seen="$seen$pid "
     fm_proc_info "$pid" || break
     if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
       printf '%s\n' "$pid"

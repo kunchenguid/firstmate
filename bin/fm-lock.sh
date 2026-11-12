@@ -94,6 +94,21 @@ rm -f "$probe" 2>/dev/null || {
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# Verify the native owner-link primitive before entering a retry loop, so a
+# Windows host that cannot publish one gets a clear refusal instead of a claim
+# wait that spins on its own pid.
+case "$me" in
+  win:*)
+    link_probe=$(mktemp -d "$STATE/.lock-links.XXXXXX") || exit 1
+    if ! fm_lock_try_create "$link_probe/claim"; then
+      rmdir "$link_probe" 2>/dev/null || true
+      echo "error: cannot publish a native Windows lock owner link; no fleet lock was acquired" >&2
+      exit 1
+    fi
+    fm_lock_release "$link_probe/claim"
+    rmdir "$link_probe" || exit 1
+    ;;
+esac
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
 LEASE_LOCK="$STATE/.fm-lease-command.lock"
