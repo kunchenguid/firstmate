@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # tests/fm-inbox.test.sh - captain inbox capture, receipts, replies, readiness.
 #
-# Covers the durable order contract: request-id idempotency, the crash window
-# between save and announce, saved-but-unannounced repair, the unknown
-# announced state of notes that predate the marker, bounded receipts JSON with
-# omission disclosure, the reply cursor's strict order, and the readiness
-# projection's model-aware verdict and unknown path. Human note/list/drain
-# behaviour stays unchanged when the new flags are omitted.
+# Covers the durable order contract: request-id idempotency, repeatable
+# attachment metadata, the crash window between save and announce,
+# saved-but-unannounced repair, the unknown announced state of notes that
+# predate the marker, bounded receipts JSON with omission disclosure, the reply
+# cursor's strict order, and the readiness projection's model-aware verdict and
+# unknown path. Human note/list/drain behaviour stays unchanged when the new
+# flags are omitted.
 set -euo pipefail
 
 # shellcheck source=tests/lib.sh
@@ -72,6 +73,73 @@ list_out=$(run_inbox "$home" list) || fail "list should succeed"
 assert_contains "$list_out" "hello from the terminal" "list should show the body"
 pass "plain note, list, and wake stay on the historical human path"
 
+# --- opt-in attachments are record metadata, never opened ------------------
+
+home=$(make_home attachments)
+first_attachment="/does/not/exist/first attachment.txt"
+second_attachment="/also/missing/second.txt"
+attached=$(run_inbox "$home" note --request-id attachment-1 --attach "$first_attachment" \
+  --attach "$second_attachment" --json "record these paths") \
+  || fail "an attachment note should not require the paths to exist"
+attached_id=$(printf '%s' "$attached" | json_get id)
+attached_paths=$(printf '%s' "$attached" | python3 -c 'import json,sys; print("|".join(json.load(sys.stdin)["attachments"]))')
+assert_equals "$first_attachment|$second_attachment" "$attached_paths" \
+  "the note receipt echoes every attachment in order"
+assert_grep "attach=$first_attachment" "$home/state/inbox/$attached_id.note" \
+  "the first attachment is recorded in the note"
+assert_grep "attach=$second_attachment" "$home/state/inbox/$attached_id.note" \
+  "the second attachment is recorded in the note"
+
+attached_receipts=$(run_inbox "$home" receipts --all-pending) \
+  || fail "receipts should expose an attached note"
+receipt_paths=$(printf '%s' "$attached_receipts" | python3 -c 'import json,sys
+row=json.load(sys.stdin)["pending"][0]
+print("|".join(row["attachments"]))')
+assert_equals "$first_attachment|$second_attachment" "$receipt_paths" \
+  "receipts echo the recorded attachment paths"
+
+attached_replay=$(run_inbox "$home" note --request-id attachment-1 \
+  --attach /ignored/on/replay --json "new text is not recorded") \
+  || fail "an attachment replay should succeed"
+replay_paths=$(printf '%s' "$attached_replay" | python3 -c 'import json,sys; print("|".join(json.load(sys.stdin)["attachments"]))')
+assert_equals "$first_attachment|$second_attachment" "$replay_paths" \
+  "a replay returns the attachments already recorded for the request"
+
+separator_attachment=$'/tmp/a\x1cb'
+separator_note=$(run_inbox "$home" note --attach "$separator_attachment" --json "separator path") \
+  || fail "an attachment with a non-newline separator should succeed"
+separator_paths=$(printf '%s' "$separator_note" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["attachments"]))')
+assert_equals '["/tmp/a\u001cb"]' "$separator_paths" \
+  "the receipt keeps a path with a non-newline separator as one attachment"
+separator_receipts=$(run_inbox "$home" receipts --all-pending) || fail "receipts should succeed"
+separator_receipt_paths=$(printf '%s' "$separator_receipts" | SEP_ID="$(printf '%s' "$separator_note" | json_get id)" python3 -c 'import json,os,sys
+rows=[r for r in json.load(sys.stdin)["pending"] if r["id"]==os.environ["SEP_ID"]]
+print(json.dumps(rows[0]["attachments"]))')
+assert_equals '["/tmp/a\u001cb"]' "$separator_receipt_paths" \
+  "receipts keep a path with a non-newline separator as one attachment"
+
+human_attached=$(run_inbox "$home" note --attach /human/receipt.txt "human attachment") \
+  || fail "a human attachment note should succeed"
+assert_contains "$human_attached" "attachment /human/receipt.txt" \
+  "the human receipt echoes an attachment"
+attached_list=$(run_inbox "$home" list) || fail "list should succeed with attachments"
+assert_contains "$attached_list" "  attachment $first_attachment" \
+  "list echoes the recorded attachment for the firstmate handling the note"
+attached_drain=$(run_inbox "$home" drain) || fail "drain should succeed with attachments"
+assert_contains "$attached_drain" "  attachment /human/receipt.txt" \
+  "drain echoes the recorded attachment"
+
+set +e
+relative_attachment=$(run_inbox "$home" note --attach relative.txt "refuse this" 2>&1)
+relative_code=$?
+set -e
+expect_code 1 "$relative_code" "relative attachments are refused"
+assert_contains "$relative_attachment" "must be absolute" \
+  "the attachment refusal explains the absolute-path requirement"
+assert_equals "3" "$(count_notes "$home")" \
+  "a refused attachment does not create a note"
+pass "attachments are opt-in metadata and do not require file access"
+
 # A saved note whose wake fails still exits 1 for callers that omit the new flags.
 isolated="$TMP_ROOT/isolated"
 mkdir -p "$isolated/bin"
@@ -105,6 +173,8 @@ assert_equals "True" "$(printf '%s' "$first" | json_get announced)" \
   "first submission is announced"
 assert_equals "req-1" "$(printf '%s' "$first" | json_get request_id)" \
   "receipt carries the request id"
+assert_equals "False" "$(printf '%s' "$first" | python3 -c 'import json,sys; print("attachments" in json.load(sys.stdin))')" \
+  "a receipt without attachments keeps the historical schema"
 
 second=$(printf '%s' "$body" | run_inbox "$home" note --request-id req-1 --json -) \
   || fail "replay of the same request id should succeed"
