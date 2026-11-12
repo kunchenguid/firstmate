@@ -281,6 +281,17 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture
+write_v1 active ActiveToken0123456789a
+: > "$FM_STATE_OVERRIDE/active.meta"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "cleanup beside an active task kept the stale journal"
+[ -f "$FM_STATE_OVERRIDE/active.herdr-presentation" ] || fail "cleanup retired an active task journal"
+! grep -qxF "$FM_STATE_OVERRIDE/.spawn-active.lock" "$LOCK_LOG" \
+  || fail "cleanup attempted a metadata-backed task's spawn lock"
+[ ! -d "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] && [ ! -d "$TMP_ROOT/presentation.lock" ] \
+  || fail "cleanup retained a lock after its candidate finished"
+pass "metadata-backed tasks are never locked and candidate locks are released"
 reset_fixture; : > "$FIXTURE_DIR/task-lock-busy"; assert_preserved "busy task lock"
 reset_fixture; : > "$FIXTURE_DIR/presentation-lock-busy"; assert_preserved "busy presentation lock"
 [ ! -d "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] \
@@ -348,8 +359,6 @@ esac
 SH
 chmod +x "$SCALE_FAKEBIN/herdr"
 SCALE_SOCKET="$SCALE_DIR/fake.sock"
-SCALE_HASH=$(printf '%s\0%s' scale "$SCALE_SOCKET" | shasum -a 256 | awk '{print $1}')
-SCALE_LOCK="/tmp/firstmate-herdr-presentation-$(id -u)/order-${SCALE_HASH:0:32}.lock"
 scale_status=0
 scale_started=$SECONDS
 FM_HERDR_SCALE_SOCKET="$SCALE_SOCKET" \
@@ -360,7 +369,16 @@ PATH="$SCALE_FAKEBIN:$PATH" \
   fm_run_timed 20 "$ROOT/bin/fm-herdr-session-cleanup.sh" > "$SCALE_OUT" 2>&1 \
   || scale_status=$?
 scale_elapsed=$((SECONDS - scale_started))
-rm -rf -- "$SCALE_LOCK"
+SCALE_LOCK=$(
+  FM_HERDR_SCALE_SOCKET="$SCALE_SOCKET" \
+  FM_HOME="$SCALE_HOME" FM_STATE_OVERRIDE="$SCALE_HOME/state" \
+  FM_CONFIG_OVERRIDE="$SCALE_HOME/config" HERDR_SESSION=scale \
+  PATH="$SCALE_FAKEBIN:$PATH" FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1 \
+    bash -c '. "$1" && fm_backend_herdr_presentation_session_lock_path scale' _ \
+    "$ROOT/bin/fm-herdr-session-cleanup.sh" 2>/dev/null
+) || fail "production presentation lock path helper failed for the scale session"
+[ ! -e "$SCALE_LOCK" ] \
+  || { rm -rf -- "$SCALE_LOCK"; fail "scale cleanup left the shared presentation lock held"; }
 [ "$scale_status" -eq 0 ] \
   || fail "100-workspace/50-journal cleanup exceeded its 20s bound or failed (status=$scale_status elapsed=${scale_elapsed}s): $(cat "$SCALE_OUT")"
 [ "$(find "$SCALE_HOME/state" -name '*.herdr-presentation' -type f | wc -l | tr -d ' ')" = 50 ] \

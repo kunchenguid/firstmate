@@ -426,10 +426,11 @@ A candidate must meet all of these conditions:
 
 Firstmate then cleans up the candidates in this order:
 
-1. Attempt each home-local journal's existing task-id spawn lock, and then acquire the shared named-session presentation lock once for the whole pass.
-   A busy task id is preserved.
-2. Inside those locks, parse every valid journal once into an exact-title index and correlate that index with one workspace listing.
-3. For each uniquely correlated candidate, take one exact snapshot.
+1. Parse every valid home-local journal once into an exact-title index and correlate that index with one workspace listing.
+   A correlated task with ordinary metadata is preserved without taking any lock.
+2. For each remaining candidate, acquire the existing task-id spawn lock, and then the shared named-session presentation lock, held only for that candidate.
+   A busy lock preserves the candidate.
+3. Inside both locks, take one exact snapshot.
 4. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
 5. Positively confirm no registered agent.
 6. Read Herdr's process information for the exact named-session pane and apply the process proof below.
