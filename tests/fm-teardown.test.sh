@@ -5839,6 +5839,40 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
 
+# An orphan status log archived by record hygiene must survive status-archive
+# retention: the prune counts 30 days from archive time, not the log's last write.
+test_record_hygiene_archive_survives_status_archive_prune() {
+  local case_dir rc=0
+  case_dir=$(make_case record-hygiene-archive-retention)
+  write_meta "$case_dir" local-only ship
+  touch "$case_dir/config/status-archive"
+  printf 'done: complete\n' > "$case_dir/state/task-x1.status"
+  printf 'failed [at=1]: orphan from a lost task\n' > "$case_dir/state/orphan-x2.status"
+  touch -t 200001010000 "$case_dir/state/orphan-x2.status"
+  FM_TEST_LIB_SOURCED=1 bash -c '
+    SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$SCRIPT_DIR/fm-classify-lib.sh"
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh"
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    # shellcheck source=bin/fm-record-hygiene-lib.sh
+    . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+    record_hygiene_report
+  ' _ "$ROOT" "$case_dir" > "$case_dir/hygiene.out" 2>&1 || fail "record hygiene archive pass failed: $(cat "$case_dir/hygiene.out")"
+  assert_present "$case_dir/data/orphan-x2/status.log" "record hygiene did not archive the orphan status log"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "status-archive teardown after record hygiene: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/data/task-x1/status.log" "status-archive teardown did not archive its own task"
+  assert_present "$case_dir/data/orphan-x2/status.log" "teardown pruned a status log record hygiene just archived"
+  pass "a status log archived by record hygiene survives the next status-archive teardown"
+}
+
 # Archive coverage uses the real teardown entry point over isolated homes.
 test_status_archive_opt_in() {
   local case_dir rc mode
@@ -6437,6 +6471,7 @@ test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
 test_status_archive_opt_in
+test_record_hygiene_archive_survives_status_archive_prune
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure

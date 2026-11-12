@@ -950,6 +950,15 @@ Each opted-in archival prunes owned logs older than 30 completed days by mtime; 
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
 
+## Record hygiene report (config/record-hygiene)
+
+The optional local, gitignored `config/record-hygiene` presence flag opts this home into reporting its own inconsistent task records.
+Create it with `touch "$FM_HOME/config/record-hygiene"`; remove it to stop the report.
+With the flag present, session-start bootstrap prints a `RECORD_HYGIENE:` line for each inconsistency, and the watcher heartbeat runs the scan in the background and raises one `check: record hygiene:` notification when its findings change.
+It is off by default: without the flag, session start and the heartbeat print no report, move no files, and perform no record-hygiene reads.
+The flag takes effect at the next session start or heartbeat, and is a home-local preference that is not inherited by secondmate homes.
+[`architecture.md`](architecture.md#task-status-archives) owns scan scope and status-log archiving; [`bin/fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh) owns the mechanics.
+
 ## Record export (config/record-export-root)
 
 The optional local, gitignored `config/record-export-root` file contains exactly one absolute directory path and opts this home into a private copy of a fixed record allowlist.
