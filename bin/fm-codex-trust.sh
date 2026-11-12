@@ -118,12 +118,13 @@ if [ -e "$STORE" ]; then
 fi
 
 if ! "$PYTHON" - "$STORE" "$TARGET_REAL" <<'PY'
+import datetime
 import fcntl
 import hashlib
+import json
 import os
 import pathlib
 import re
-import shutil
 import stat
 import sys
 import tempfile
@@ -142,106 +143,55 @@ try:
 except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
     raise SystemExit(f"Codex config '{store}' is invalid TOML: {exc}")
 
-projects = parsed.get("projects", {})
-entry = projects.get(target, {}) if isinstance(projects, dict) else {}
-if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+projects = parsed.setdefault("projects", {})
+if not isinstance(projects, dict):
+    raise SystemExit("Codex config projects must be a table")
+entry = projects.setdefault(target, {})
+if not isinstance(entry, dict):
+    raise SystemExit(f"Codex project '{target}' must be a table")
+if entry.get("trust_level") == "trusted":
     print(f"trusted: {target} (already registered)")
     raise SystemExit(0)
+entry["trust_level"] = "trusted"
 
-text = original.decode() if original else ""
-escaped = target.replace("\\", "\\\\").replace('"', '\\"')
-header = f'[projects."{escaped}"]'
-header_re = re.compile(r'^[ \t]*(?P<header>\[[ \t]*projects[ \t]*\.[ \t]*(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')[ \t]*\])[ \t]*(?:#.*)?(?:\r?\n)?$')
-table_re = re.compile(r'^[ \t]*\[\[?[^\n]+\]\]?[ \t]*(?:#.*)?(?:\r?\n)?$')
 
-# TOML strings can contain anything that resembles a table or assignment,
-# including newlines.  Find structural lines only while outside strings.
-def next_string_state(line, state):
-    index = 0
-    while index < len(line):
-        if state:
-            if state == '"""' and line[index] == '\\':
-                index += 2
-            elif line.startswith(state, index):
-                index += 3
-                state = None
-            else:
-                index += 1
-            continue
-        if line.startswith('"""', index) or line.startswith("'''", index):
-            state = line[index:index + 3]
-            index += 3
-        elif line[index] == '"':
-            index += 1
-            while index < len(line):
-                if line[index] == '\\':
-                    index += 2
-                elif line[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
-        elif line[index] == "'":
-            index += 1
-            while index < len(line) and line[index] != "'":
-                index += 1
-            if index < len(line):
-                index += 1
-        elif line[index] == '#':
-            break
-        else:
-            index += 1
-    return state
+def toml_value(value):
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False).replace(chr(127), r"\u007f")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(
+            f"{toml_value(key)} = {toml_value(item)}" for key, item in value.items()
+        ) + " }"
+    raise SystemExit(f"unsupported TOML value: {type(value).__name__}")
 
-lines = re.findall(r'[^\n]*\n|[^\n]+\Z', text)
-starts = []
-offset = 0
-state = None
-for line in lines:
-    starts.append((offset, state))
-    state = next_string_state(line, state)
-    offset += len(line)
 
-match_index = None
-header_indexes = []
-for index, (line, (_, state_before)) in enumerate(zip(lines, starts)):
-    if state_before is not None or not table_re.match(line):
+retained = []
+statement = ""
+table_root = None
+for line in re.findall(r"[^\n]*\n|[^\n]+\Z", original.decode()):
+    statement += line
+    try:
+        fields = tomllib.loads(statement)
+    except tomllib.TOMLDecodeError:
         continue
-    header_indexes.append(index)
-    match = header_re.match(line)
-    if match:
-        candidate_config = tomllib.loads(match.group("header") + "\n__fm_marker = 1\n")
-        candidate_projects = candidate_config.get("projects", {})
-        if isinstance(candidate_projects, dict) and target in candidate_projects:
-            match_index = index
-if match_index is None:
-    if text and not text.endswith("\n"):
-        text += "\n"
-    text += f"\n{header}\ntrust_level = \"trusted\"\n"
-else:
-    section_end = len(lines)
-    for index in header_indexes:
-        if index > match_index:
-            section_end = index
-            break
-    trust_index = None
-    for index in range(match_index + 1, section_end):
-        line, (_, state_before) = lines[index], starts[index]
-        if state_before is None and re.match(r'^[ \t]*(?:trust_level|"trust_level"|\'trust_level\')[ \t]*=', line):
-            trust_index = index
-            break
-    if trust_index is not None:
-        end_index = trust_index + 1
-        while end_index < section_end and starts[end_index][1] is not None:
-            end_index += 1
-        replacement = re.match(r'^([ \t]*)', lines[trust_index]).group(1) + 'trust_level = "trusted"\n'
-        start = starts[trust_index][0]
-        stop = starts[end_index][0] if end_index < len(starts) else len(text)
-        text = text[:start] + replacement + text[stop:]
-    else:
-        insertion = starts[match_index][0] + len(lines[match_index])
-        separator = "" if lines[match_index].endswith("\n") else "\n"
-        text = text[:insertion] + separator + 'trust_level = "trusted"\n' + text[insertion:]
+    if statement.lstrip().startswith("["):
+        table_root = next(iter(fields))
+    if not fields or (table_root != "projects" and not (
+        table_root is None and "projects" in fields
+    )):
+        retained.append(statement)
+    statement = ""
+if statement:
+    raise SystemExit("could not locate complete statements in Codex config")
+text = f"projects = {toml_value(projects)}\n" + "".join(retained)
 
 try:
     tomllib.loads(text)
