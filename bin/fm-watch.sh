@@ -3108,15 +3108,14 @@ captain_call_stale_bound() {  # <window-key> <task>
 # finished and parked, so the caller's stale_wait_record arms the bound only
 # once its first-sight wake was appended, and leaves it EMPTY otherwise.
 # FINISHED_PARKED_VERDICT names the evidence for the caller's absorb log line.
-finished_parked_stale_bound() {  # <window-key> <task> <tail40> [dialog-name]
-  local key=$1 task=$2 tail40=$3 dialog=${4-} verb line state src sig busy record gen refused=
+finished_parked_stale_bound() {  # <window-key> <task> <tail40> <crew-state-line> [dialog-name]
+  local key=$1 task=$2 tail40=$3 line=$4 dialog=${5-} verb state src sig busy record gen refused=
   STALE_WAIT_DECLARATION=
   FINISHED_PARKED_VERDICT=
   [ -n "$task" ] || return 1
   status_line_verb "$(last_status_line "$STATE/$task.status")" verb
   case "$verb" in done|failed) ;; *) refused="terminal record: last record is ${verb:-unrecognised}" ;; esac
   if [ -z "$refused" ]; then
-    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=
     state=; src=
     case "$line" in
       state:*) state=${line#state: }; state=${state%% *}; src=${line#*source: }; src=${src%% *} ;;
@@ -4738,7 +4737,9 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            crew_line=
+            [ -z "$task" ] || crew_line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || crew_line=
+            if [ "$(crew_absorb_class "$task" "$crew_line")" = working ]; then
               printf '%s' "$h" > "$sf"
               # Pre-cap shape kept the count here (keep-count contract).
               wedge_episode_end "$key" 0 1
@@ -4758,7 +4759,7 @@ EOF
               wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
-            elif [ -z "$STALE_WAIT_DECLARATION" ] && finished_parked_stale_bound "$key" "$task" "$tail40" "$dialog"; then
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && finished_parked_stale_bound "$key" "$task" "$tail40" "$crew_line" "$dialog"; then
               # Finished and parked: this record's first sight already alarmed,
               # so a redraw of the idle pane has nothing new to report. The log
               # line is how a supervisor sees the lane parked, not missing.

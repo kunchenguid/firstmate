@@ -2254,7 +2254,9 @@ test_terminal_stale_surfaced() {
 # reports whether the redraw alarmed: 0 alarmed, 1 absorbed. <harness> is
 # recorded in the lane's meta; pi and claude lanes also get the settled idle
 # record their own adapter writes at turn end (pi-ext agent_settled, claude-hook
-# Stop), and an empty harness leaves the lane with no busy-state record at all.
+# Stop), while grok and an empty harness leave the lane with no busy-state
+# record at all (grok's verdict is read from its rendered tail, whose busy
+# footer is `Ctrl+c:cancel`).
 # FINISHED_PARKED_KIND overrides the recorded lane kind (default ship). With
 # [steer] set, the worker runs one more turn between the first sight and the
 # redraw - a busy poll, then a settle - without appending a status line; with
@@ -2297,16 +2299,24 @@ finished_parked_redraw_alarms() {  # <case> <status-line> <crew-state> <redraw-c
     "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
       || fail "$name: could not record the steered turn settling"
   elif [ -n "$steer" ]; then
-    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked busy --gen "$gen" --source "$source" --event steered \
-      || fail "$name: could not record the steered turn"
-    cp "$redraw" "$capture_file"
+    if [ -n "$source" ]; then
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" parked busy --gen "$gen" --source "$source" --event steered \
+        || fail "$name: could not record the steered turn"
+      cp "$redraw" "$capture_file"
+    else
+      printf 'working on the steer\nCtrl+c:cancel\n' > "$capture_file"
+    fi
     : > "$out"
     watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_CREW_STATE="$verdict"
     pid=$!
     wait_poll_cycle "$state" "$pid" || fail "$name: the busy poll of the steered turn exited: $(cat "$out")"
-    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
-      || { reap "$pid"; fail "$name: could not record the steered turn settling"; }
+    if [ -n "$source" ]; then
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
+        || { reap "$pid"; fail "$name: could not record the steered turn settling"; }
+    else
+      cp "$redraw" "$capture_file"
+    fi
     FINISHED_PARKED_CASE_STATE=$state
     if wait_for_exit "$pid" 100; then
       grep -F "stale: $window" "$out" >/dev/null || fail "$name: the settled turn exited without a stale wake: $(cat "$out")"
@@ -2393,6 +2403,11 @@ test_finished_parked_wedges_still_alarm() {
   finished_parked_redraw_alarms wedge-steered-turn 'done: ready in branch fm/parked' \
     'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude steer \
     || fail "a finished lane that ran a new turn after its record stopped alarming on a redraw"
+  # Grok's idle verdict has no record behind it, so only the busy poll itself
+  # can tell that a turn ran after the record.
+  finished_parked_redraw_alarms wedge-steered-turn-unrecorded 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" grok steer \
+    || fail "a finished grok lane that ran a new turn after its record stopped alarming on a redraw"
   finished_parked_redraw_alarms wedge-unseen-turn 'done: ready in branch fm/parked' \
     'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude unseen \
     || fail "a finished lane that ran a turn no poll saw busy stopped alarming on a redraw"
