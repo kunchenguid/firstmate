@@ -48,10 +48,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -413,6 +413,7 @@ test_remove_worktree_selector_not_found_treats_gone_path_as_removed() {
   orca_case remove-selector-gone
   rm -rf "$gone"
   printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$gone" 2>&1 )
   status=$?
@@ -426,6 +427,7 @@ test_remove_worktree_selector_not_found_refuses_when_path_present() {
   orca_case remove-selector-present
   mkdir -p "$present"
   printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$present" 2>&1 )
   status=$?
@@ -440,6 +442,7 @@ test_remove_worktree_other_error_refuses_even_when_path_gone() {
   orca_case remove-other-error
   rm -rf "$gone"
   printf '{"ok":false,"error":{"code":"internal_error","message":"boom"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$gone" 2>&1 )
   status=$?

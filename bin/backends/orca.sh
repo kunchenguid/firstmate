@@ -229,13 +229,9 @@ fm_backend_orca_remove_worktree() {  # <worktree-id>
   local worktree_id=${1:-}
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  local out err_code wt_path
-  out=$(orca worktree rm --worktree "id:$worktree_id" --force --json) || {
-    [ -z "$out" ] || printf '%s\n' "$out" | fm_backend_orca_json_ok >&2 || true
-    echo "error: orca worktree rm failed for $worktree_id" >&2
-    return 1
-  }
-  if printf '%s' "$out" | fm_backend_orca_json_ok 2>/dev/null; then
+  local out err_code wt_path rc=0
+  out=$(orca worktree rm --worktree "id:$worktree_id" --force --json) || rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | fm_backend_orca_json_ok 2>/dev/null; then
     return 0
   fi
   # Orca no longer knows the worktree: already removed only if its recorded
