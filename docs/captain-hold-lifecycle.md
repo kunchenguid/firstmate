@@ -338,7 +338,7 @@ The observer invokes settlement for both fresh and retained terminal observation
 It records evidence before applying the declared task transition, under the task's control lock.
 A retry uses that evidence to finish an interrupted transition without writing a second resolution.
 The existing parent channel receives the resolution before the declaration is retired.
-A `release` declaration follows the attended-only rule of [Answering a call](#answering-a-call-answer): while the home is away the hold stays unchanged, and a later poll applies the declaration after the captain returns.
+A `release` declaration follows the attended-only rule of [Answering a call](#answering-a-call-answer): while the home is away or the away-posture record is locked the hold stays unchanged, and a later poll applies the declaration after the captain returns.
 Linking a follow-up PR to the held task keeps its declaration valid.
 A declaration that can no longer settle is removed, and the observer prints one diagnostic line when the question changed or the PR ended in the other terminal state.
 A successful settlement prints nothing, so it causes no wake.
