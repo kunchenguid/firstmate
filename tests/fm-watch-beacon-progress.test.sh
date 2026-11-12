@@ -529,26 +529,34 @@ test_explicit_grace_overrides_the_derived_default() {
 }
 
 test_explicit_heartbeat_cadence_still_governs() {
-  local dir home out i
+  local dir home out i slow_home slow_pid
   dir=$(make_home heartbeat-override)
   home=$(case_home "$dir")
+  slow_home=$(case_home "$(make_home heartbeat-long-interval)")
   out="$dir/watch.out"
-  # An idle fleet's heartbeat is absorbed, but it still records its schedule, so
-  # an explicit FM_HEARTBEAT remains in force next to the progress refresh.
+  fm_test_track_watcher_state "$slow_home/state"
+  FM_HOME="$slow_home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_HEARTBEAT_MAX=999999 "$WATCH" > "$dir/slow.out" 2>&1 &
+  slow_pid=$!
   fm_test_track_watcher_state "$home/state"
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
     FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 "$WATCH" > "$out" 2>&1 &
   SEED_PID=$!
   i=0
   while [ "$i" -lt 150 ]; do
-    [ -e "$home/state/.last-heartbeat" ] && break
+    [ -s "$home/state/.heartbeat-streak" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   stop_pid "$SEED_PID"
-  [ -e "$home/state/.last-heartbeat" ] \
+  stop_pid "$slow_pid"
+  [ -s "$home/state/.heartbeat-streak" ] \
     || fail "an explicit one-second FM_HEARTBEAT never ran: $(cat "$out")"
-  pass "an explicit FM_HEARTBEAT cadence still governs the heartbeat"
+  [ -e "$slow_home/state/.last-heartbeat" ] \
+    || fail "long-interval watcher never initialized: $(cat "$dir/slow.out")"
+  [ ! -e "$slow_home/state/.heartbeat-streak" ] \
+    || fail "a long FM_HEARTBEAT ran during the short cadence observation"
+  pass "explicit short and long FM_HEARTBEAT cadences govern scheduled heartbeats"
 }
 
 test_child_process_updates_progress_marker_not_beacon() {

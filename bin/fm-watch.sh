@@ -3517,6 +3517,27 @@ watcher_wait_child_progress() {
   fm_watch_beacon_tick "$BEAT"
 }
 
+watcher_display_sync() {
+  local pgid
+  FM_CHECK_SIGNAL_PENDING=
+  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  set -m
+  { FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$@" sync >/dev/null 2>&1 & } 2>/dev/null
+  FM_ACTIVE_CHECK_PID=$!
+  FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
+  set +m
+  watcher_stop_signals
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
+    fm_active_check_stop || exit 1
+    return 1
+  fi
+  watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
+  FM_ACTIVE_CHECK_PID=
+  fm_active_check_stop || exit 1
+}
+
 # The event wait's scratch directory, given to it as TMPDIR. A stop kills the
 # wait before its own cleanup removes its reader FIFO, so the watcher owns the
 # directory and removes it after each wait and in watcher_cleanup.
@@ -4178,10 +4199,7 @@ while :; do
   # display-only tags and agents view, never a wake. Off costs one file test.
   if [ -e "$CONFIG/herdr-project-groups" ]; then
     fm_watch_beacon_progress
-    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync >/dev/null 2>&1 &
-    FM_ACTIVE_CHECK_PID=$!
-    watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
-    FM_ACTIVE_CHECK_PID=
+    watcher_display_sync "$SCRIPT_DIR/fm-herdr-groups.sh"
   fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
   # "Attention marks"): display and desktop notification only, never a wake.
@@ -4190,10 +4208,7 @@ while :; do
     || compgen -G "$STATE/.rex-mark-*" >/dev/null || compgen -G "$STATE/.rex-progress-*" >/dev/null \
     || compgen -G "$STATE/.rex-tint-*" >/dev/null; then
     fm_watch_beacon_progress
-    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 &
-    FM_ACTIVE_CHECK_PID=$!
-    watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
-    FM_ACTIVE_CHECK_PID=
+    watcher_display_sync "$SCRIPT_DIR/fm-rex-marks.sh"
   fi
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
