@@ -228,8 +228,88 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
     "the refusal did not name the path the pane kept reporting"
   assert_contains "$out" "repository's primary checkout" \
     "the refusal did not say why that path was rejected"
+  assert_contains "$out" "within 60s" \
+    "the refusal did not name the default 60 second bound"
+  [ "$(cat "$COUNTFILE")" -eq 60 ] || fail "default wait polled $(cat "$COUNTFILE") times instead of 60"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
+}
+
+# A large repository whose new slot takes longer than the default wait spawns
+# once config/worktree-wait raises the bound past the slot's preparation time.
+test_configured_wait_admits_a_slow_slot() {
+  local rec id out status
+  id=settle-wait-slow-z6
+  rec=$(make_primary_case settle-wait-slow "$id" 70)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  printf '90\n' > "$HOME_DIR/config/worktree-wait"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should outwait a slow slot under a raised bound"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the slot that settled after the default bound"
+  pass "config/worktree-wait lets a slot slower than 60 seconds spawn"
+}
+
+# The configured value is the one bound: it limits the polls and is the number
+# the refusal reports.
+test_configured_wait_bounds_poll_and_refusal() {
+  local rec id out status
+  id=settle-wait-short-z7
+  rec=$(make_primary_case settle-wait-short "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  printf '5\n' > "$HOME_DIR/config/worktree-wait"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 5s" "the refusal did not report the configured bound"
+  [ "$(cat "$COUNTFILE")" -eq 5 ] || fail "configured wait polled $(cat "$COUNTFILE") times instead of 5"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "config/worktree-wait bounds both the poll and the refusal"
+}
+
+# The minimum bound still gets the confirming read that acceptance needs, so a
+# pane already in its worktree spawns under config/worktree-wait=1.
+test_minimum_configured_wait_accepts_a_settled_pane() {
+  local rec id out status
+  id=settle-wait-one-z9
+  rec=$(make_primary_case settle-wait-one "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  printf '1\n' > "$HOME_DIR/config/worktree-wait"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should accept an already-settled pane under a 1 second bound"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the already-settled worktree under the minimum bound"
+  pass "config/worktree-wait=1 accepts a pane already in its worktree"
+}
+
+# A value that is not a positive integer refuses before the pane is ever read
+# or any record exists, naming the setting.
+test_invalid_configured_wait_is_refused_before_launch() {
+  local rec id out status value n=0
+  for value in 0 000 -3 abc '' '1 2' ' 30' 1234567890; do
+    n=$((n + 1))
+    id=settle-wait-bad-z8-$n
+    rec=$(make_primary_case "settle-wait-bad-$n" "$id" 0)
+    read_settle_record "$rec"
+    printf '%s\n' "$value" > "$HOME_DIR/config/worktree-wait"
+
+    out=$(run_settle_spawn "$id")
+    status=$?
+    expect_code 1 "$status" "invalid config/worktree-wait '$value' should refuse the spawn"$'\n'"$out"
+    assert_contains "$out" "config/worktree-wait must be a positive integer" \
+      "the refusal for '$value' did not name the setting"
+    [ ! -s "$COUNTFILE" ] || fail "invalid config/worktree-wait '$value' still read the pane"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata for '$value'"
+  done
+  pass "a config/worktree-wait that is not a positive integer refuses before launch"
 }
 
 test_unborn_head_project_is_refused_at_once() {
@@ -257,6 +337,10 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_configured_wait_admits_a_slow_slot
+test_configured_wait_bounds_poll_and_refusal
+test_minimum_configured_wait_accepts_a_settled_pane
+test_invalid_configured_wait_is_refused_before_launch
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
