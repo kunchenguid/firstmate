@@ -21,6 +21,12 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
+# Each query leads a process group of its own, which is what lets the wrapper
+# propagate cancellation: it traps HUP/INT/TERM, kills that group on the way
+# out, and reaps it, so a stopped display sweep never leaves a query descendant
+# running while its watcher releases the singleton. The group stays query-local,
+# so the query's own timeout still kills only its descendants and returns 124;
+# one expired read never aborts the sweep's remaining tasks.
 fm_nm_bounded() (  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none runner pending=0 rc
   shift 2

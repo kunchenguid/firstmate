@@ -3517,6 +3517,13 @@ watcher_wait_child_progress() {
   fm_watch_beacon_tick "$BEAT"
 }
 
+# watcher_display_sync <helper>
+# Run one opt-in display sweep (Herdr project groups, Rex marks) as a managed
+# child: the helper leads a process group recorded in
+# FM_ACTIVE_CHECK_PID/FM_ACTIVE_CHECK_PGID, so a stop runs watcher_cleanup's
+# fm_active_check_stop on that whole group before the singleton lock is released.
+# Its progress-marker updates are what watcher_wait_child_progress propagates to
+# the liveness beacon, so the sweep stays observable without touching it.
 watcher_display_sync() {
   local pgid
   FM_CHECK_SIGNAL_PENDING=
