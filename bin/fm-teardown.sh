@@ -45,9 +45,12 @@
 # hard-resets/removes the worktree and kills its processes. A clean normal ship
 # task may be cleaned up when its work has landed, or when all its commits are
 # reachable from remote-tracking refs and its recorded PR is positively open
-# (including an upstream-contribution PR from a fork). A missing, closed-unmerged,
+# with a live head containing the worktree's HEAD (including an
+# upstream-contribution PR from a fork). A missing, closed-unmerged,
 # unreadable, or unrecognized PR record cannot supply that open-PR proof; the
 # landing proofs below still apply.
+# An external review's backup copy never permits cleanup before its reviewed
+# content reaches the default branch.
 # A branch pushed only to the local no-mistakes mirror does not count as pushed
 # to a forge. When local refs do not show the work, refresh_remote_refs updates
 # them from each remote. Work has landed when its PR is merged and
@@ -1849,11 +1852,10 @@ work_is_landed() {
   content_in_default
 }
 
-# Is the recorded PR positively open? The provider reader must report an open
-# state to allow cleanup of pushed work that is not landed; every other state,
-# including an unreadable or unrecognized record, fails closed.
-pr_is_open() {
-  local target provider
+# The recorded PR must be open and its live head must contain this copy's HEAD.
+# Remote reachability plus an unrelated open review cannot retain this work.
+pr_is_open_and_contains_head() {
+  local target provider head current
   [ -n "$PR_URL" ] || return 1
   target=$PR_URL
   fm_pr_url_parse "$target" || return 1
@@ -1861,15 +1863,20 @@ pr_is_open() {
   case "$provider" in
     github)
       fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 1
+      head=$(cd "$WT" && gh pr view "$target" --json headRefOid -q .headRefOid 2>/dev/null) || return 1
       ;;
     gitlab)
       fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
       ;;
     gerrit)
       fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      fm_pr_gerrit_read_revision "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_REVISION
       ;;
     forgejo)
       fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
       ;;
     *)
       return 1
@@ -1877,12 +1884,15 @@ pr_is_open() {
   esac
   case "$provider:$FM_PR_RECORD_STATE:$FM_PR_RECORD_MERGED" in
     github:OPEN:false|github:open:false|gitlab:opened:false|gitlab:open:false|forgejo:open:false|gerrit:NEW:false|gerrit:DRAFT:false)
-      return 0
       ;;
     *)
       return 1
       ;;
   esac
+  fm_pr_head_valid "$head" || return 1
+  ensure_commit_object "$target" "$head" || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null
 }
 
 # The completion links this teardown already holds locally. A retained scout
@@ -2306,7 +2316,7 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || ! pr_is_open; }; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || ! pr_is_open_and_contains_head; }; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2

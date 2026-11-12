@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
-# The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# The retention proofs in bin/fm-teardown.sh's header govern cleanup, because
+# treehouse return hard-resets the worktree. These cases verify both successful
+# cleanup and preservation of work when a proof is missing.
 #
 # Covers three fixes:
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
@@ -340,7 +338,8 @@ SH
 }
 
 add_gh_pr_open() {
-  local case_dir=$1
+  local case_dir=$1 head
+  head=${2-$(git -C "$case_dir/wt" rev-parse HEAD)}
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -349,8 +348,13 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
+  cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-} \${2:-}" = "pr view" ]; then
+  case " \$* " in
+    *" --json headRefOid "*) printf '%s\n' '$head'; exit 0 ;;
+  esac
+fi
 echo "error: graphql unavailable" >&2
 exit 1
 SH
@@ -1285,6 +1289,67 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
 
   expect_code 0 "$rc" "nm-pushed-open-pr: teardown should proceed"
   pass "pushed work with a recorded open PR is not refused"
+}
+
+test_open_pr_requires_current_head_containment() {
+  local provider relation case_dir head pr_head url expected rc
+  for provider in github gitlab forgejo gerrit; do
+    for relation in unrelated stale current descendant missing; do
+      case_dir=$(make_case "open-pr-$provider-$relation")
+      write_meta "$case_dir" direct-PR ship
+      wt_commit_file "$case_dir" feature.txt hello "task work"
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      seed_backlog_in_flight "$case_dir"
+      git -C "$case_dir/wt" push -q origin fm/task-x1
+      expected=1
+      case "$relation" in
+        unrelated) pr_head=$(commit_tree_from_wt_head "$case_dir" origin/main "unrelated review") ;;
+        stale) pr_head=$(git -C "$case_dir/wt" rev-parse HEAD^) ;;
+        current) pr_head=$head; expected=0 ;;
+        descendant) pr_head=$(commit_tree_from_wt_head "$case_dir" "$head" "review follow-up"); expected=0 ;;
+        missing) pr_head= ;;
+      esac
+      case "$provider" in
+        github)
+          url=https://github.com/example/repo/pull/7
+          add_gh_pr_open "$case_dir" "$pr_head"
+          ;;
+        gitlab)
+          url=https://gitlab.example.org/team/repo/-/merge_requests/7
+          add_glab_mr_for_head "$case_dir" opened "$pr_head"
+          ;;
+        forgejo)
+          url=https://git.example.org/team/repo/pulls/7
+          add_tea_pull_for_head "$case_dir" false "$pr_head" open
+          ;;
+        gerrit)
+          url=https://gerrit.example.org/c/project/+/7
+          cat > "$case_dir/fakebin/gerrit-axi" <<SH
+#!/usr/bin/env bash
+[ "\${1:-} \${2:-}" = "show 7" ] || exit 1
+printf '%s\n' '{"ok":true,"changes":[{"change":7,"status":"NEW","revision":"$pr_head"}]}'
+SH
+          chmod +x "$case_dir/fakebin/gerrit-axi"
+          ;;
+      esac
+      # A previously recorded matching head cannot replace the forge's live head.
+      printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
+      rc=0
+      FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code "$expected" "$rc" "open-pr-$provider-$relation: containment verdict"
+      if [ "$expected" = 1 ]; then
+        assert_refusal_retained_task_state "$case_dir" "open-pr-$provider-$relation" "$head"
+        [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+          || fail "open-pr-$provider-$relation: refusal closed the backlog item"
+      else
+        [ ! -e "$case_dir/state/task-x1.meta" ] \
+          || fail "open-pr-$provider-$relation: cleanup retained the task record"
+        [ "$(backlog_row_state "$case_dir")" = 'done' ] \
+          || fail "open-pr-$provider-$relation: cleanup did not close the backlog item"
+      fi
+    done
+  done
+  pass "open reviews allow cleanup only when their live head contains the task HEAD on every supported forge"
 }
 
 # A forge=external ship never pushes its task branch and records review=, not
@@ -6880,6 +6945,7 @@ test_hung_fetch_is_bounded_and_refuses
 test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_pushed_unmerged_refuses
 test_no_mistakes_pushed_with_open_pr_allowed
+test_open_pr_requires_current_head_containment
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
 test_external_forge_backup_copy_refuses_unmerged_review
 test_external_forge_without_backup_copy_refuses
