@@ -25,7 +25,8 @@
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
-#      a plain agent_end is idle, turn_end is a notification only.
+#      a plain agent_end is idle and is the only turn-ended notification;
+#      an inner turn_end refreshes the progress marker and never notifies.
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
@@ -442,24 +443,27 @@ test_busy_extension_lifecycle() {
     esac
   done
 
-  rm -f "$state/$id.turn-ended"
+  rm -f "$state/$id.turn-ended" "$state/$id.progress"
   out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
-  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge"
+  [ ! -e "$state/$id.turn-ended" ] || fail "an inner turn_end must not wake the primary mid-run"
+  [ -f "$state/$id.progress" ] || fail "an inner turn_end must refresh the native progress marker"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] || fail "turn_end must not change busy state"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext'"
 
   out=$(drive_omp_ext "$ext" end-continuing) || fail "continuing agent_end drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "agent_end with willContinue must stay busy (a session_stop continuation is coming)"
+  [ ! -e "$state/$id.turn-ended" ] || fail "agent_end with willContinue must not notify: the run is not over"
 
   out=$(drive_omp_ext "$ext" end-final) || fail "final agent_end drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "idle omp-ext" ] || fail "a plain agent_end must classify 'idle omp-ext'"
+  [ -f "$state/$id.turn-ended" ] || fail "the final agent_end must touch the turn-ended notification"
 
   # A record from another harness's writer is never trusted for omp.
   fm_busy_source_trusted omp pi-ext && fail "omp must not trust the Pi extension's records"
   fm_busy_source_trusted omp omp-ext || fail "omp must trust its own extension's records"
-  pass "omp extension: agent_start busy, willContinue stays busy, plain agent_end idle, turn_end a notification"
+  pass "omp extension: agent_start busy, willContinue stays busy, plain agent_end idle and notifies, inner turn_end only refreshes progress"
 }
 
 # --- 4. Control, composer, supervision model -----------------------------------
