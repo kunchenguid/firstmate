@@ -221,7 +221,8 @@ A source invocation failure becomes a bounded host-produced `firstmate.process-e
 Host timeout evidence includes a `deadline` object identifying the bound, actual operation, configured `timeout_ms`, measured `elapsed_ms` and `overrun_ms`, and granted `grace_ms`.
 The launch barrier reports its release-deadline diagnostics on its bounded stderr.
 For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, result identity, adapter, and immutable extension identity all match.
-Result identity compares exact bytes except that timeout timing samples `elapsed_ms` and `overrun_ms` are excluded, retaining the first complete diagnostic capture for that bound.
+For timeout envelopes with deadline evidence, result identity compares parsed fields with `elapsed_ms` and `overrun_ms` excluded, retaining the first complete diagnostic capture for that bound.
+Other host-error envelopes require exact result bytes.
 A matching retry allocates no new result sequence and records no handled acknowledgement.
 Ordinary reconciliation continues to publish the retained evidence and retry polling, so old failure evidence does not block recovery.
 A changed error or extension identity remains distinct, and a failure after its matching evidence was handled receives a fresh capture.
