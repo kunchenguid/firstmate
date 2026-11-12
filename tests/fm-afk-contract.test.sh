@@ -127,7 +127,7 @@ test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return() {
   assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'announcement says hold-for-return only, aloud'
   assert_contains "$out" 'Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return.' 'announcement says the words will be carried out'
   assert_contains "$out" 'Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say.' 'announcement states the never-set'
-  assert_contains "$out" 'Expected return: not given. Spend cap: 4 concurrent workers.' 'announcement carries the defaults'
+  assert_contains "$out" 'Expected return: not given. Spend cap: 5 concurrent workers.' 'announcement carries the empty-home spend cap'
   assert_contains "$out" 'Away posture (recorded):' 'the read-back follows the entry'
   assert_contains "$out" '    merge it when green' 'the read-back carries the words'
   assert_not_contains "$out" 'Say go' 'entry must never ask for a go'
@@ -576,6 +576,7 @@ test_quiet_record_reads_as_a_present_captain_holding_nothing() {
   assert_not_contains "$out" 'hold-for-return' 'a quiet entry must not read as hold-for-return'
   assert_not_contains "$out" 'Away posture' 'a quiet entry must not call itself the away posture'
   assert_not_contains "$out" 'Spend cap' 'a quiet entry must not announce an away spend cap'
+  assert_not_contains "$out" 'new workers that can start' 'a quiet entry must not state away worker room'
   [ "$(contract "$home" mode)" = quiet ] || fail "mode of a quiet record is not quiet: $(contract "$home" mode)"
   out=$(contract "$home" readback) || fail "quiet readback failed"
   assert_contains "$out" 'Quiet mode (recorded):' 'quiet readback title'
@@ -607,6 +608,7 @@ test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
   quiet_entered=$(contract "$home" field entered_epoch)
   out=$(contract "$home" enter 2>&1) || fail "away refresh over quiet failed: $out"
   assert_contains "$out" 'quiet mode became the away posture' 'the conversion names itself'
+  assert_contains "$out" 'new workers that can start: 5' 'conversion to away states entry room'
   assert_contains "$out" 'hold-for-return only' 'the converted record holds for the return'
   [ "$(contract "$home" mode)" = away ] || fail "an /afk refresh over quiet mode left the record quiet"
   ls "$home/state/afk-contracts/$quiet_entered-superseded-"*.afk-contract >/dev/null 2>&1 \
@@ -622,52 +624,100 @@ test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
   pass "an away entry over quiet mode records away, and a quiet entry never masks a standing away record"
 }
 
-# The spend cap entry records without --spend is the parallelism already
-# standing in this home, counted exactly the way the later refusal counts it, so
-# away mode never narrows work that is already under way. The earlier default
-# stays a floor, and a secondmate is a persistent home rather than spend.
-test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
+# Without --spend, entry records the live ordinary count plus headroom, never
+# below the floor, counted the same way the later refusal counts it. An
+# explicit --spend is recorded unchanged. The read-back states how many new
+# workers can start, and warns when that room is zero or less. A secondmate is
+# a persistent home rather than spend.
+test_entry_without_spend_records_live_count_plus_headroom() {
   local home out i
-  home=$(make_home spend-live-above)
-  for i in 1 2 3 4 5 6; do
-    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
-  done
-  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
-  [ "$(contract "$home" live-workers)" = 6 ] \
-    || fail "live-workers counted the secondmate or miscounted: $(contract "$home" live-workers)"
-  out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 6 ] \
-    || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
-  assert_contains "$out" 'Spend cap: 6 concurrent workers.' 'the announcement carries the live count'
-  assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
 
-  home=$(make_home spend-live-below)
-  fm_write_meta "$home/state/task-1.meta" "window=fm-task-1" "kind=ship"
-  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
-  out=$(contract "$home" enter --words 'quiet lane' 2>&1) || fail "entry failed: $out"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
-    || fail "a home below the floor did not keep the default cap: $(contract "$home" field spend_max_concurrent_workers)"
-
-  home=$(make_home spend-live-empty)
-  out=$(contract "$home" enter --words 'nothing running' 2>&1) || fail "entry failed: $out"
+  home=$(make_home spend-live-zero)
+  out=$(contract "$home" enter --words 'nothing running' 2>&1) || fail "empty entry failed: $out"
   [ "$(contract "$home" live-workers)" = 0 ] || fail "an empty home did not count zero workers"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
-    || fail "an empty home recorded a cap other than the default floor"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 5 ] \
+    || fail "an empty home recorded $(contract "$home" field spend_max_concurrent_workers), not live plus headroom"
+  assert_contains "$out" 'Spend cap: 5 concurrent workers.' 'the announcement carries live plus headroom for an empty home'
+  assert_contains "$out" '  new workers that can start: 5' 'empty read-back states the room'
+  assert_not_contains "$out" 'no new worker can start while away' 'empty entry must not warn'
 
-  home=$(make_home spend-live-explicit)
+  home=$(make_home spend-live-three)
+  for i in 1 2 3; do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  [ "$(contract "$home" live-workers)" = 3 ] \
+    || fail "live-workers counted the secondmate or miscounted: $(contract "$home" live-workers)"
+  out=$(contract "$home" enter --words 'three running' 2>&1) || fail "three-worker entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 8 ] \
+    || fail "three live records did not record live plus headroom: $(contract "$home" field spend_max_concurrent_workers)"
+  assert_contains "$out" 'Spend cap: 8 concurrent workers.' 'the announcement carries live plus headroom'
+  assert_contains "$out" '  spend cap: 8 concurrent workers' 'the read-back carries the cap'
+  assert_contains "$out" '  new workers that can start: 5' 'three-worker read-back states the headroom'
+  assert_not_contains "$out" 'no new worker can start while away' 'three-worker entry must not warn'
+
+  home=$(make_home spend-live-fifteen)
+  for ((i = 1; i <= 15; i++)); do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  out=$(contract "$home" enter --words 'fifteen running' 2>&1) || fail "fifteen-worker entry failed: $out"
+  [ "$(contract "$home" live-workers)" = 15 ] || fail "fifteen records were not counted"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 20 ] \
+    || fail "fifteen live records did not record live plus headroom: $(contract "$home" field spend_max_concurrent_workers)"
+  assert_contains "$out" '  new workers that can start: 5' 'fifteen-worker read-back states the headroom'
+  assert_not_contains "$out" 'no new worker can start while away' 'fifteen-worker entry must not warn'
+
+  home=$(make_home spend-zero-room)
+  for ((i = 1; i <= 15; i++)); do
+    fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
+  done
+  out=$(contract "$home" enter --words 'no room' --spend 15 2>&1) \
+    || fail "zero-room entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 15 ] \
+    || fail "explicit spend did not record the live count: $(contract "$home" field spend_max_concurrent_workers)"
+  assert_contains "$out" '  new workers that can start: 0' 'zero-room read-back states no room'
+  assert_contains "$out" 'warning: no new worker can start while away; send /afk again with new words and --spend to raise the limit.' \
+    'zero-room read-back warns and names how to raise the limit'
+
+  out=$(contract "$home" readback 2>&1) || fail "zero-room readback failed: $out"
+  assert_not_contains "$out" 'new workers that can start' 'shared readback omits entry room'
+  assert_not_contains "$out" 'no new worker can start while away' 'shared readback omits entry warning'
+  out=$(contract "$home" enter 2>&1) || fail "zero-room refresh failed: $out"
+  assert_not_contains "$out" 'new workers that can start' 'refresh omits entry room'
+  assert_not_contains "$out" 'no new worker can start while away' 'refresh omits entry warning'
+  out=$(contract "$home" enter --words 'replacement mandate' --spend 15 2>&1) || fail "replacement failed: $out"
+  assert_contains "$out" 'new workers that can start: 0' 'replacement entry states room'
+  assert_contains "$out" 'no new worker can start while away' 'replacement entry warns'
+
+  home=$(make_home spend-explicit)
   for i in 1 2 3 4 5 6; do
     fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
   done
-  contract "$home" enter --words 'hold it down' --spend 2 >/dev/null 2>&1 || fail "explicit entry failed"
+  out=$(contract "$home" enter --words 'hold it down' --spend 2 2>&1) || fail "explicit entry failed: $out"
   [ "$(contract "$home" field spend_max_concurrent_workers)" = 2 ] \
-    || fail "an explicit --spend lost to the live count"
-  pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
+    || fail "an explicit --spend lost to the live count plus headroom"
+  assert_contains "$out" '  spend cap: 2 concurrent workers' 'an explicit cap is what the read-back shows'
+  assert_contains "$out" '  new workers that can start: 0 (4 over the cap)' 'explicit cap below the live count states the shortfall'
+  assert_contains "$out" 'warning: no new worker can start while away; send /afk again with new words and --spend to raise the limit.' \
+    'an explicit cap with no room warns'
+  out=$(contract "$home" enter --spend 10 2>&1) || fail "spend-only refresh failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 2 ] || fail "refresh changed the cap"
+  out=$(contract "$home" enter --words 'continue with more room' --spend 10 2>&1) || fail "cap replacement failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 10 ] || fail "replacement did not raise the cap"
+  assert_contains "$out" 'new workers that can start: 4' 'following the warning creates room'
+  assert_not_contains "$out" 'no new worker can start while away' 'raised cap must not warn'
+  for i in '' invalid -1; do
+    out=$(bash -c '. "$1"; fm_afk_contract_render_spend_room "$2" "$3"' _ "$CONTRACT" "$home/state/.afk-contract" "$i") \
+      || fail "nonnumeric spend failed"
+    [ -z "$out" ] || fail "nonnumeric spend printed room: $out"
+  done
+  pass "entry without --spend records the live count plus headroom, never below the floor, and an explicit --spend still wins"
 }
 
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
-test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
+test_entry_without_spend_records_live_count_plus_headroom
 test_retired_two_step_entry_is_refused_by_name
 test_enter_removes_a_legacy_proposal_without_promoting_it
 test_same_turn_entry_pre_authorizes_nothing_on_the_never_set
