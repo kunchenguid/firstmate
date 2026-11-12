@@ -32,7 +32,7 @@ Herdr's `pane process-info` for the same pane reports the foreground process as 
 ### The antigravity binary name and the sandbox init (2026-11-12, agy 1.5.6 via mise, Linux x64)
 
 A mise install ships the executable as `antigravity-cli/<ver>/antigravity`, with `agy` a symlink to it.
-Linux names a process after the file name it was executed by, so the same binary reports a different process name depending on how it was started:
+Linux names a process after the file name it was executed by, so the same binary reports a different process name depending on how it was started: `agy` through the symlink, `antigravity` through the real file name.
 
 ```
 $ ls -l ~/.local/share/mise/installs/antigravity-cli/1.5.6/
@@ -45,8 +45,10 @@ antigravity     /home/<user>/.local/share/mise/installs/antigravity-cli/1.5.6/an
 ```
 
 The binary's Linux command sandbox re-executes its jail init through `/proc/self/exe` (the binary carries the `exec /proc/self/exe: %v` error string beside its `jail.Linux` configuration), and the kernel names such a process `exe` while argv[0] keeps the antigravity binary path.
-`bin/fm-harness.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-agent-process-lib.sh` therefore also accept the anchored name `antigravity`, and accept `exe` only with that argv[0] evidence.
-`tests/fm-agy-harness.test.sh` pins both shapes and the rejection of unrelated `exe` and `antigravityd` processes.
+`antigravity` is also the process name of the Antigravity IDE (an Electron app installed as `/usr/bin/antigravity` or `/usr/share/antigravity/antigravity`), and `exe` is generic, so neither name alone identifies agy.
+One rule, owned by `bin/fm-agy-process-lib.sh` and used by `bin/fm-harness.sh`, `bin/fm-session-lock-lib.sh`, and `bin/fm-agent-process-lib.sh`: process name `agy` is agy; process name `antigravity` or `exe` is agy only when argv[0] has the basename `agy` or sits under a path component named exactly `antigravity-cli`.
+A bare `antigravity` with no argv[0], or with an IDE-shaped argv[0], is never agy.
+`tests/fm-agy-harness.test.sh` pins both agy shapes and the rejection of the IDE paths, unrelated `exe`, and `antigravityd` processes.
 
 ## Launch: positional prompt-interactive with auto-submit
 
@@ -151,7 +153,7 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 ```
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
-The tmux adapter classifies the anchored process names `agy` and `antigravity` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
+The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names; `antigravity` and `exe` read as `agent` only with the argv[0] evidence above.
 agy is included in the session-lock name vocabulary in `bin/fm-session-lock-lib.sh` (`FM_HARNESS_RE` and `FM_HARNESS_NAMES`), recognizing an agy ancestor process as a verified session-lock holder.
 
 ## Composer: unknown by design

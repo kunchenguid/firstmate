@@ -83,6 +83,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-agy-process-lib.sh
+. "${SCRIPT_DIR:-/}/fm-agy-process-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -190,7 +192,7 @@ ancestry_names_omp() {
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
-  local pid=$1 comm args argv0 exe_argv0
+  local pid=$1 comm args argv0
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
@@ -248,28 +250,21 @@ harness_process_verdict() {  # <pid>
     pi) echo "comm pi"; return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and Herdr's
-    # process-info reports name agy with argv[0] agy) or `antigravity`: a mise
-    # install ships the binary as .../antigravity-cli/<ver>/antigravity with
-    # `agy` a symlink to it, and Linux names the process after the file it
-    # was started by (verified, agy 1.5.6 via mise: started as `antigravity`,
-    # comm=antigravity). Inside agy's Linux command sandbox the jail init is
-    # re-executed through /proc/self/exe, so its comm is `exe` while argv[0]
-    # still carries the antigravity binary path; `exe` alone is far too
-    # generic, so only that argv[0] evidence claims it. Anchored, never
-    # *agy*, so unrelated commands cannot be misread as this harness. agy
+    # process-info reports name agy with argv[0] agy), or `antigravity` / `exe`
+    # when started through its real file name or as its Linux sandbox init.
+    # bin/fm-agy-process-lib.sh owns that rule: the two generic names count only
+    # with agy CLI evidence in argv[0], so the Antigravity IDE (also named
+    # `antigravity`) is never this harness. Anchored, never *agy*, so unrelated
+    # commands cannot be misread as this harness. agy
     # publishes no harness-identity marker of its own (a live 1.2.0 TUI
     # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
-    agy|antigravity) echo "comm agy"; return ;;
-    exe)
-      exe_argv0=${args%% *}
-      case "$(basename -- "$exe_argv0")" in
-        agy|antigravity) echo "comm agy"; return ;;
-      esac
-      case "/$exe_argv0/" in
-        */antigravity-cli/*) echo "comm agy"; return ;;
-      esac
+    agy|antigravity|exe)
+      if fm_agy_process_matches "$comm" "${args%% *}"; then
+        echo "comm agy"
+        return
+      fi
       ;;
     # polytoken (Polytoken CLI) is a daemon-plus-TUI whose per-session daemon
     # process name is exactly `polytoken` (verified live on 0.8.19: a TUI
