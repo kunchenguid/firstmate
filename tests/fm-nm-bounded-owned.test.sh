@@ -3,15 +3,24 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-nm-bounded-owned)
+TIMEOUT_EXECUTABLE=$(type -P timeout || type -P gtimeout || true)
+QUERY_MECHANISMS=(default perl)
+if [ -n "$TIMEOUT_EXECUTABLE" ]; then
+  QUERY_MECHANISMS=(default gtimeout perl)
+else
+  printf '# GNU timeout backend emulation skipped: timeout and gtimeout unavailable\n'
+fi
 
 test_owned_queries_remain_cancellable() {
   local mechanism operation dir owner i child mismatch status
-  for mechanism in default gtimeout perl; do
+  for mechanism in "${QUERY_MECHANISMS[@]}"; do
     for operation in status resolver; do
       dir="$TMP_ROOT/$mechanism-$operation"
       mkdir -p "$dir/config" "$dir/fakebin"
-      printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v timeout)" > "$dir/fakebin/gtimeout"
-      chmod +x "$dir/fakebin/gtimeout"
+      if [ "$mechanism" = gtimeout ]; then
+        printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$TIMEOUT_EXECUTABLE" > "$dir/fakebin/gtimeout"
+        chmod +x "$dir/fakebin/gtimeout"
+      fi
       cat > "$dir/fakebin/no-mistakes" <<'SCRIPT'
 #!/usr/bin/env bash
 sleep 30 &
@@ -87,11 +96,13 @@ test_bounded_queries_preserve_success() {
 
 test_query_timeouts_are_isolated() {
   local mechanism dir result rc started elapsed child status
-  for mechanism in default gtimeout perl; do
+  for mechanism in "${QUERY_MECHANISMS[@]}"; do
     dir="$TMP_ROOT/timeout-$mechanism"
     mkdir -p "$dir/fakebin"
-    printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v timeout)" > "$dir/fakebin/gtimeout"
+    if [ "$mechanism" = gtimeout ]; then
+      printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$TIMEOUT_EXECUTABLE" > "$dir/fakebin/gtimeout"
       chmod +x "$dir/fakebin/gtimeout"
+    fi
     cat > "$dir/query" <<'SCRIPT'
 #!/usr/bin/env bash
 sleep 30 &
