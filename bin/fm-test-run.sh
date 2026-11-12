@@ -370,6 +370,7 @@ family_for_basename() {
     fm-harness-liveness-drift-live-e2e.test.sh|fm-backend-hc-liveness-live-e2e.test.sh|\
     fm-kimi-trust-prompt-live-e2e.test.sh|\
     fm-devin-signals-live-e2e.test.sh|fm-commandcode-signals-live-e2e.test.sh|fm-cortex-signals-live-e2e.test.sh|fm-hermes-signals-live-e2e.test.sh|fm-hermes-profile-safety-live-e2e.test.sh|fm-hermes-gateway-coexistence-live-e2e.test.sh|fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|fm-kiro-signals-live-e2e.test.sh|fm-polytoken-signals-live-e2e.test.sh|\
+    fm-kimi-brief-delivery-live-e2e.test.sh|\
     fm-launch-prompt-signals-live-e2e.test.sh|fm-backend-t3code-live-e2e.test.sh|\
     fm-backend-t3code-pr-tools-live-e2e.test.sh|\
     fm-pi-seeded-home-trust-live-e2e.test.sh|\
@@ -832,6 +833,7 @@ tests/fm-inactive-reconcile.test.sh 60823
 tests/fm-inbox.test.sh 6062
 tests/fm-install-herdr.test.sh 1000
 tests/fm-jev-mem-guard.test.sh 336
+tests/fm-kimi-brief-delivery-live-e2e.test.sh 60
 tests/fm-kimi-harness.test.sh 58917
 tests/fm-kimi-trust-prompt-live-e2e.test.sh 60
 tests/fm-lane-capacity-integration.test.sh 48000
@@ -1817,6 +1819,13 @@ families_for_changed_path() {
       # (fm-kimi-trust-prompt-live-e2e) asks the installed binary.
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-grok-trust-lib.sh)
+      # Grok's directory-trust predicates are vendor-rendered signal. The
+      # portable Grok suite replays the recorded 1.0.70 dialog through
+      # fm-spawn. There is no live guard: the wording was read from the
+      # installed binary, and answering it would launch a real session.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
