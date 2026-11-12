@@ -5571,11 +5571,6 @@ spawn_lease_herdr_slot() {
   validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
 }
 
-# Enter the exact copy recorded for this task immediately before trust setup and
-# launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
-# treehouse subshell's foreground cwd is not enough to keep a later pane restart
-# out of the primary checkout. The same explicit cd gives every backend one
-# launch boundary and makes a dropped or ignored cwd change a refusal.
 spawn_require_absolute_worktree() {
   case "$WT" in
     /*) ;;
@@ -5586,6 +5581,11 @@ spawn_require_absolute_worktree() {
   esac
 }
 
+# Enter the exact copy recorded for this task immediately before trust setup and
+# launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
+# treehouse subshell's foreground cwd is not enough to keep a later pane restart
+# out of the primary checkout. The same explicit cd gives every backend one
+# launch boundary and makes a dropped or ignored cwd change a refusal.
 spawn_enter_recorded_worktree() {
   [ "$KIND" = secondmate ] && return 0
   # T3 starts the agent in the leased worktree its thread launch bound;
