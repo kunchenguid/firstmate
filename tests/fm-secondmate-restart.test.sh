@@ -486,7 +486,15 @@ case "${rargs[1]:-}" in
     case "${FM_FAKE_SSH_MODE:-ok}" in
       slow-relaunch)
         : > "$FM_FAKE_DIR/remote-relaunch-start"
-        /bin/sleep 2
+        if [ -n "${FM_FAKE_RELEASE_GATE:-}" ]; then
+          i=0
+          while [ ! -e "$FM_FAKE_RELEASE_GATE" ] && [ "$i" -lt 500 ]; do
+            /bin/sleep 0.02
+            i=$((i + 1))
+          done
+        else
+          /bin/sleep 2
+        fi
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
@@ -774,10 +782,12 @@ test_relaunches_do_not_block_persist_polling() {
 
 # --- T13: a worker that cannot publish its result cannot hang the pass -------
 test_unpublished_worker_result_is_accounted_for() {
-  local dir out rc_file driver i result_dir
+  local dir out rc_file driver i result_dir release_gate
   dir=$(new_case worker-result)
   setup_remote_case "$dir" sm1 slow-relaunch
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
+  release_gate="$dir/fake/release-relaunch"
+  export FM_FAKE_RELEASE_GATE="$release_gate"
   out="$dir/restart.out"
   rc_file="$dir/restart.rc"
 
@@ -785,14 +795,21 @@ test_unpublished_worker_result_is_accounted_for() {
   driver=$!
   result_dir=
   i=0
-  while [ "$i" -lt 200 ]; do
+  while kill -0 "$driver" 2>/dev/null && [ "$i" -lt 1500 ]; do
     result_dir=$(find "$dir/home/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
-    [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ] && break
-    /bin/sleep 0.01
+    if [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ]; then
+      break
+    fi
+    /bin/sleep 0.02
     i=$((i + 1))
   done
-  [ -n "$result_dir" ] || { kill "$driver" 2>/dev/null || true; fail "restart result directory never appeared"; }
+  if [ ! -e "$dir/fake/remote-relaunch-start" ] || [ -z "$result_dir" ]; then
+    kill "$driver" 2>/dev/null || true
+    wait "$driver" 2>/dev/null || true
+    fail "restart result directory and relaunch marker did not appear"
+  fi
   rm -rf -- "$result_dir"
+  : > "$FM_FAKE_RELEASE_GATE"
   i=0
   while kill -0 "$driver" 2>/dev/null && [ "$i" -lt 400 ]; do
     /bin/sleep 0.01
@@ -804,7 +821,7 @@ test_unpublished_worker_result_is_accounted_for() {
     fail "a terminated restart worker left the parent hung"
   fi
   wait "$driver" 2>/dev/null || true
-  unset FM_FAKE_ANSWER_STATUS
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELEASE_GATE
 
   [ "$(cat "$rc_file")" = 3 ] || fail "an unpublished worker result did not fail as accounted"
   assert_contains "$(cat "$out")" "restart worker exited before publishing an outcome" \
