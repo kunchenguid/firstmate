@@ -62,6 +62,7 @@ WS=w2
 TAB=w2:t1
 PANE=w2:p1
 TITLE="└ task · p:$TOKEN"
+ACTIVE_TOKEN=ActiveToken0123456789a
 FIXTURE_DIR="$TMP_ROOT/fixture"
 LOCK_LOG="$TMP_ROOT/locks.log"
 CLOSE_LOG="$TMP_ROOT/closes.log"
@@ -106,6 +107,9 @@ fixture_workspaces() {
   fixture_workspace_json "$title" "$tabs" "$panes"
   if [ -e "$FIXTURE_DIR/duplicate-token" ]; then
     printf ',{"workspace_id":"w3","label":"└ copy · p:%s","focused":false,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' "$TOKEN"
+  fi
+  if [ -e "$FIXTURE_DIR/active-workspace" ]; then
+    printf ',{"workspace_id":"w4","label":"└ active · p:%s","focused":false,"active_tab_id":"w4:t1","tab_count":1,"pane_count":1}' "$ACTIVE_TOKEN"
   fi
   printf ']'
 }
@@ -282,7 +286,10 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
 reset_fixture
-write_v1 active ActiveToken0123456789a
+# Give the active journal a correlated workspace so it reaches the
+# metadata guard instead of being dropped by title matching.
+: > "$FIXTURE_DIR/active-workspace"
+write_v1 active "$ACTIVE_TOKEN"
 : > "$FM_STATE_OVERRIDE/active.meta"
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "cleanup beside an active task kept the stale journal"
