@@ -570,11 +570,12 @@ test_lock_reclaims_reused_pid_but_not_a_live_owner() {
 }
 
 test_lock_bounded_acquire_reused_pid_under_live_stealer() {
-  local dir state lockdir holder_file decoy recorded stealer i out rc held
+  local dir state lockdir holder_file release decoy recorded stealer i out rc held
   dir=$(make_case lock-bounded-reused-pid-stealer)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   holder_file="$dir/stealer.ready"
+  release="$dir/stealer.release"
   mkdir -p "$state" "$lockdir"
 
   sleep 30 &
@@ -589,9 +590,13 @@ test_lock_bounded_acquire_reused_pid_under_live_stealer() {
     . "$1"
     fm_lock_try_acquire "$2.steal" || exit 7
     printf "%s\n" "${BASHPID:-$$}" > "$3"
-    sleep 3
+    while [ ! -e "$4" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+      && [ "$SECONDS" -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+      sleep 0.05
+    done
+    [ -e "$4" ] || exit 8
     fm_lock_release "$2.steal"
-  ' _ "$LIB" "$lockdir" "$holder_file" &
+  ' _ "$LIB" "$lockdir" "$holder_file" "$release" &
   stealer=$!
 
   i=0
@@ -601,7 +606,7 @@ test_lock_bounded_acquire_reused_pid_under_live_stealer() {
   done
   [ -s "$holder_file" ] || {
     kill "$stealer" "$decoy" 2>/dev/null || true
-    wait "$stealer" 2>/dev/null || true
+    wait_for_exit "$stealer" 50 || true
     wait "$decoy" 2>/dev/null || true
     fail "live steal mutex holder did not start"
   }
@@ -613,9 +618,12 @@ test_lock_bounded_acquire_reused_pid_under_live_stealer() {
     printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
   ' _ "$LIB" "$lockdir")
 
-  wait "$stealer" 2>/dev/null || true
+  : > "$release"
+  rc=0
+  wait_for_exit "$stealer" 50 || rc=$?
   kill "$decoy" 2>/dev/null || true
   wait "$decoy" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "live steal mutex holder failed (rc=$rc)"
 
   rc=${out#rc=}; rc=${rc%% *}
   held=${out#*held=}; held=${held%% *}
