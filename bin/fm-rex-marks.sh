@@ -301,6 +301,8 @@ fresh() {
 # failed write.
 sync_task() {
   local task kind target tab rc=0
+  load_status_libs || return 1
+  fm_watch_beacon_progress
   IFS=$'\t' read -r task kind target tab <<EOF
 $3
 EOF
