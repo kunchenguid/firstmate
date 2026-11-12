@@ -3490,6 +3490,7 @@ watcher_waited() {  # <command...>
 
 # watcher_capture: fm_backend_capture through watcher_waited.
 watcher_capture() {  # <backend> <target> <lines> [expected-label]
+  fm_watch_beacon_progress
   watcher_waited fm_backend_capture "$@"
 }
 
