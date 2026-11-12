@@ -7703,6 +7703,11 @@ esac
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
+    if [ -n "$WORKER_ACCOUNT_SOURCE_FILE" ]; then
+      # Evaluate the whole expression only after token loading and credential
+      # shedding, so a raw command's retry cannot bypass either boundary.
+      LAUNCH="bash -c $(shell_quote "$LAUNCH")"
+    fi
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
       LAUNCH="$(fm_worker_account_claude_shed "$WORKER_ACCOUNT_SOURCE_FILE") CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     else

@@ -813,7 +813,7 @@ test_claude_pin_uses_a_keychain_oauth_token() {
   pass "a Claude pin uses its declared Keychain OAuth token without logging or passing the token as an argument"
 }
 
-# keychain_token_ship <id>: a ship spawn whose Claude pin maps to the fake
+# keychain_token_ship <id> [spawn args...]: a ship spawn whose Claude pin maps to the fake
 # Keychain item, after the pre-launch check has read the token once.
 keychain_token_ship() {
   local out rc
@@ -822,7 +822,7 @@ keychain_token_ship() {
   printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
   printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
     > "$HOME_DIR/config/claude-account-credential-source.json"
-  out=$(spawn_ship "$1"); rc=$?
+  out=$(spawn_ship "$@"); rc=$?
   expect_code 0 "$rc" "a Claude pin with a readable Keychain OAuth token should launch: $out"
 }
 
@@ -855,6 +855,21 @@ test_claude_pin_does_not_fall_back_when_its_keychain_token_vanishes_after_the_ch
   pass "a token that vanishes after the pre-launch check stops the launch without falling back"
 }
 
+test_raw_claude_retry_does_not_bypass_a_failed_keychain_read() {
+  new_case keychain-token-raw-retry claude
+  keychain_token_ship acct-claude-token-raw-retry --harness 'claude --print first || claude --print retry'
+  printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$CASE/security-argv'" 'exit 44' \
+    > "$FAKEBIN/security"
+  # Contract: a failed launch-time token read refuses the entire raw expression,
+  # even when the pane has credentials that would let its retry start Claude.
+  pane 2> "$CASE/pane-stderr"
+  assert_contains "$(cat "$CASE/pane-stderr")" 'is unavailable' "the pane reports the failed token read"
+  assert_absent "$CASE/claude-worker" "neither side of the raw retry may start Claude after token refusal"
+  assert_equals $'find-generic-password -s fm-claude-token -a worker -w\nfind-generic-password -s fm-claude-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "the pre-launch read succeeded and the launch-time read was attempted"
+  pass "a raw Claude retry cannot bypass a failed launch-time Keychain read"
+}
+
 test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable() {
   local out rc id=acct-claude-token-missing
   new_case keychain-token-missing claude
@@ -879,6 +894,7 @@ test_claude_pin_uses_a_keychain_oauth_token
 test_claude_pin_does_not_fall_back_when_its_keychain_token_is_unavailable
 test_claude_pin_keeps_the_token_out_of_an_inherited_xtrace
 test_claude_pin_does_not_fall_back_when_its_keychain_token_vanishes_after_the_check
+test_raw_claude_retry_does_not_bypass_a_failed_keychain_read
 test_remote_secondmate_account_override_refuses_locally
 test_remote_secondmate_refuses_account
 test_absent_pin_keeps_the_launch_unchanged
