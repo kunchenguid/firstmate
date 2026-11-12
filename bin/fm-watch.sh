@@ -3082,26 +3082,32 @@ captain_call_stale_bound() {  # <window-key> <task>
 # shape whose repeated alarm is the success condition rather than a wedge: an
 # idle parked pane still churns its hash on every redraw, and each new hash used
 # to re-alarm the same finished record forever. Every signal below must hold:
-#   - the pane is not busy (the caller's gate) and shows no blocking dialog, so
-#     no live turn and no Claude background-task exit picker;
 #   - the worker's own latest status record is a `done:` or `failed:` verdict;
 #   - the authoritative bin/fm-crew-state.sh verdict agrees: `done` from any
 #     source (a ready report, or a run whose checks are green), or `failed` from
 #     the status log only, since a pipeline failure the worker has not answered
 #     is still the worker's to act on. Any running, fixing, or parked run, any
-#     declared wait, and any refused ready report reads as something else here.
+#     declared wait, and any refused ready report reads as something else here;
+#   - the lane's harness gives POSITIVE evidence that no background work is
+#     running. Only Pi and pi-signed do: Pi has no harness-held background job
+#     (its bash tool runs in the foreground), and its pi-ext idle record is
+#     written only once ctx.isIdle() confirms nothing will continue. Every other
+#     harness can idle its turn with a background shell or task still running,
+#     so the exemption is refused there and the refusal is logged.
 # The first sight of each such record still alarms; only later sightings of the
-# SAME record (bound to the whole status-log signature, so any new append starts
-# over) are absorbed, with no time window. Sets STALE_WAIT_DECLARATION to that
-# record's scope whenever the lane is finished and parked, so the caller's
-# stale_wait_record arms the bound only once its first-sight wake was appended,
-# and leaves it EMPTY otherwise. FINISHED_PARKED_VERDICT names the verdict for
-# the caller's absorb log line.
-finished_parked_stale_bound() {  # <window-key> <task> [dialog-name]
-  local key=$1 task=$2 dialog=${3-} verb line state src sig
+# SAME record are absorbed, with no time window. The record is bound to the whole
+# status-log signature and to the idle busy-state record's generation and
+# sequence, so any new append and any turn the worker ran since (a steer, a
+# typed prompt) starts over. Sets STALE_WAIT_DECLARATION to that record's scope
+# whenever the lane is finished and parked, so the caller's stale_wait_record
+# arms the bound only once its first-sight wake was appended, and leaves it EMPTY
+# otherwise. FINISHED_PARKED_VERDICT names the evidence for the caller's absorb
+# log line.
+finished_parked_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 verb line state src sig meta harness busy gen
   STALE_WAIT_DECLARATION=
   FINISHED_PARKED_VERDICT=
-  [ -n "$task" ] && [ -z "$dialog" ] || return 1
+  [ -n "$task" ] || return 1
   status_line_verb "$(last_status_line "$STATE/$task.status")" verb
   case "$verb" in done|failed) ;; *) return 1 ;; esac
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
@@ -3110,10 +3116,29 @@ finished_parked_stale_bound() {  # <window-key> <task> [dialog-name]
   src=${line#*source: }; src=${src%% *}
   [ "$state" = "$verb" ] || return 1
   [ "$state" = "done" ] || [ "$src" = status-log ] || return 1
+  meta="$STATE/$task.meta"
+  harness=$(fm_meta_get "$meta" harness 2>/dev/null) || harness=
+  case "$harness" in
+    pi|pi-signed) ;;
+    *)
+      triage_log "finished-and-parked exemption refused (no background-work signal for harness ${harness:-unrecorded}): $task"
+      return 1
+      ;;
+  esac
+  busy=$(fm_busy_record_read "$STATE" "$task") || busy=
+  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=
+  case "$busy" in
+    "idle pi-ext "*) ;;
+    *)
+      triage_log "finished-and-parked exemption refused (no settled pi-ext idle record for harness $harness: ${busy:-none}): $task"
+      return 1
+      ;;
+  esac
+  [ -n "$gen" ] || return 1
   sig=$(fm_wake_signal_sig "$STATE/$task.status" 2>/dev/null) || return 1
   [ -n "$sig" ] || return 1
-  STALE_WAIT_DECLARATION="finished-parked:$state:$sig"
-  FINISHED_PARKED_VERDICT="$state from $src"
+  STALE_WAIT_DECLARATION="finished-parked:$state:$sig:$gen:${busy##* }"
+  FINISHED_PARKED_VERDICT="crew state $state from $src, $harness settled idle with no background job"
   [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]
 }
 
@@ -4716,7 +4741,7 @@ EOF
               wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
-            elif [ -z "$STALE_WAIT_DECLARATION" ] && finished_parked_stale_bound "$key" "$task" "$dialog"; then
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && finished_parked_stale_bound "$key" "$task"; then
               # Finished and parked: this record's first sight already alarmed,
               # so a redraw of the idle pane has nothing new to report. The log
               # line is how a supervisor sees the lane parked, not missing.
@@ -4724,7 +4749,7 @@ EOF
               # Pre-cap shape kept the count here (keep-count contract).
               wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
-              triage_log "absorbed stale (finished and parked: crew state $FINISHED_PARKED_VERDICT, no live turn or background job, first sight of this record already surfaced): $w"
+              triage_log "absorbed stale (finished and parked: $FINISHED_PARKED_VERDICT, first sight of this record already surfaced): $w"
             else
               stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
               fm_wake_append stale "$w" "$stale_reason" || exit 1
