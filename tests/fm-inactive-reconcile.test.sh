@@ -189,11 +189,11 @@ test_recent_native_progress_defers_inactive_outcome() {
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$MAIN/state" child) || fail "could not arm native progress"
   "$ROOT/bin/fm-busy-event.sh" progress "$MAIN/state" child --gen "$gen" || fail "could not record native progress"
 
-  FM_FAKE_CREW_STATE=done run_reconcile "$MAIN" --startup
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   assert_withheld "recent native progress"
 
   age "$MAIN/state/child.progress"
-  FM_FAKE_CREW_STATE=done run_reconcile "$MAIN" --startup
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "stale native progress suppressed the inactive outcome"
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "stale native progress suppressed the supervisor wake"
   pass "recent native progress defers inactive outcomes until activity becomes stale"
