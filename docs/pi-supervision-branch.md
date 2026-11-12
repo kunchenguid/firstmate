@@ -119,6 +119,7 @@ A second mate's status log is one shared channel carrying many independently key
 The row is excluded when one of those lines is a decision, blocked, or captain-held line, resolves a decision open just before it, or declares, in the status parser's key positions, the key of a decision still open in that log.
 A resolution that closes nothing, key-less beside only keyed decisions or keyed for a key never open, stays routine.
 A key-less line otherwise falls back to its verb; an unrelated open decision alone leaves a routine span eligible, while a mixed span goes wholly to main.
+A span line that the home-owned status-append ledger in `bin/fm-classify-lib.sh` proves this home wrote itself, such as a `--resolve-key` answer, updates the open-decision set but never decides ownership, so main's own answer does not route the second mate's next routine line to main; any doubt about the ledger judges the span as if it had no owned lines.
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
 Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
 
@@ -655,6 +656,8 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
 - In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.
+- In `test_branch_dispatch_ignores_home_owned_lines_in_secondmate_span`: a home-owned resolution leaving a routine span eligible on the Pi and attended-host paths, a foreign decision in the same span still forcing main, and the same resolution written by a foreign hand still forcing main.
+- In `test_branch_dispatch_rescans_secondmate_span_after_ledger_lands`: a span verdict cached while the home-owned ledger had not yet landed being recomputed once it lands over an unchanged status log.
 - In `test_branch_dispatch_resolves_terminal_keyed_orca_stale_row`: a unique Orca `terminal=` handle resolving to its task and project in routine and heartbeat scans, and conflicting terminal, window, or task aliases refusing the whole scan in either record order.
 
 `tests/fm-branch-supervision.test.sh` covers:
