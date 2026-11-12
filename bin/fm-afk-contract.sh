@@ -52,10 +52,8 @@
 #   expected_return: <UTC ISO 8601> | -
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
-#   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
-#                                  records this home already holds at entry,
-#                                  and never fewer than the default
-#                                  (SPEND CAP below)
+#   spend_max_concurrent_workers: <n>   SPEND CAP below owns the entry default
+#                                  and the counting rule
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
 #   confirmed_epoch: <seconds>        is the go, so no later human step stamps it
 #   mode: quiet                    only on a quiet entry (FM_AFK_MODE=quiet); absent
@@ -135,11 +133,16 @@
 # fm_afk_contract_live_ordinary_workers and exposed as `live-workers`, which is
 # the one implementation both the entry default and that refusal read, so the
 # two can never count differently.
-# Without --spend, entry records the count standing at that moment, so away mode
-# never narrows work already under way; it never records less than
-# FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters with the ordinary
-# room to work, and never 0. An explicit --spend is the captain's number and is
-# recorded unchanged.
+# Without --spend, entry records the count standing at that moment plus
+# FM_AFK_CONTRACT_SPEND_HEADROOM (5), so away mode keeps
+# room for new workers and never narrows work already under way. It never
+# records less than FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters
+# with at least the ordinary room to work, and never 0. An explicit --spend is
+# the captain's number and is recorded unchanged. When an away record is
+# written, the entry read-back states how many new workers can start (the cap
+# minus the live count, displayed as at least zero), reports how far over the
+# cap the home is when applicable, and warns when no new worker can start.
+# The room count and warning are omitted on refresh and from shared `readback`.
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
 # posture, spend-cap, and lock helpers (fm_afk_contract_path,
@@ -161,6 +164,7 @@ FM_AFK_CONTRACT_VERSION=2
 FM_AFK_CONTRACT_READABLE_VERSIONS="1 2"
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
+FM_AFK_CONTRACT_SPEND_HEADROOM=5
 FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
 # Generous against the longest legitimate holder, a merge waiting on the forge,
 # so the bound only ever trips on something genuinely wedged.
@@ -199,11 +203,12 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
   printf '%s\n' "$live"
 }
 
-# The cap to record when the captain gave no --spend: the count standing at
-# entry, never below the default and so never 0.
+# The cap to record when the captain gave no --spend: the live count plus
+# headroom, never below the default and so never 0.
 fm_afk_contract_entry_spend_default() {  # [state-dir]
   local live
   live=$(fm_afk_contract_live_ordinary_workers "${1:-$FM_AFK_CONTRACT_STATE}")
+  live=$((live + FM_AFK_CONTRACT_SPEND_HEADROOM))
   [ "$live" -gt "$FM_AFK_CONTRACT_SPEND_DEFAULT" ] || live=$FM_AFK_CONTRACT_SPEND_DEFAULT
   printf '%s\n' "$live"
 }
@@ -420,6 +425,26 @@ fm_afk_contract_validate() {  # <path>
 
 # --- rendering --------------------------------------------------------------
 
+# Room under the recorded cap: the cap minus the ordinary workers this home
+# holds now. Zero or less warns that no new worker can start while away.
+fm_afk_contract_render_spend_room() {  # <record-path> <spend>
+  local path=$1 spend=$2 live room state
+  case "$spend" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  state=$(dirname "$path")
+  live=$(fm_afk_contract_live_ordinary_workers "$state")
+  room=$((10#$spend - live))
+  if [ "$room" -lt 0 ]; then
+    printf '  new workers that can start: 0 (%s over the cap)\n' "$((-room))"
+  else
+    printf '  new workers that can start: %s\n' "$room"
+  fi
+  if [ "$room" -le 0 ]; then
+    printf '  warning: no new worker can start while away; send /afk again with new words and --spend to raise the limit.\n'
+  fi
+}
+
 # The read-back is the record's content and nothing else: the words verbatim
 # beside the entry time, expected return, spend cap, and reach line. Firstmate's
 # plain-sentence restatement is spoken in chat after entry, and the execution
@@ -610,6 +635,9 @@ fm_afk_contract_cmd_enter() {
   fi
   rm -f "$legacy"
   fm_afk_contract_render_announcement "$record" || return 1
+  if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
+    fm_afk_contract_render_spend_room "$record" "$SPEND" || return 1
+  fi
   fm_afk_contract_render_readback "$record"
 }
 
