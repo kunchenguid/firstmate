@@ -455,6 +455,8 @@ trap 'fm_test_cleanup; exit 131' QUIT
 
 TREEHOUSE_ROOT=$(fm_test_tmproot fm-treehouse-pool)
 export TREEHOUSE_ROOT
+CODEX_HOME=$(fm_test_tmproot fm-codex-home) || fail "could not isolate Codex home"
+export CODEX_HOME
 
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a

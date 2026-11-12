@@ -2,8 +2,8 @@
 # Behavior tests for Codex's exact workspace trust registration.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRUST="$ROOT/bin/fm-codex-trust.sh"
@@ -318,6 +318,158 @@ test_rejects_primary_checkout() {
   pass "fm-codex-trust: rejects a primary checkout"
 }
 
+
+test_updates_equivalent_project_representations() {
+  local rec
+  rec=$(make_case representations)
+  read_case "$rec"
+  "$PYTHON" - "$TRUST" "$WORKTREE" "$PROJECT" "$CODEX_HOME_DIR" <<'PYTEST' || fail "equivalent TOML project representations did not preserve configuration"
+import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tomllib
+
+trust, target, project, home = sys.argv[1:]
+key = json.dumps(target)
+prefix = '# Keep this comment.\u2028[projects."/comment"]\nmodel = "example"\n'
+suffix = ('[profiles.review]\nnote = """A string containing TOML-like text:\n'
+          '[projects."/unrelated"]\ntrust_level = "untrusted"\n"""\n'
+          'projects = { unrelated = true }\n[[tools]]\nname = "preserved"\n')
+variants = [
+    'projects = {}\n',
+    '"projects" = { "/other" = { trust_level = "untrusted" } }\n',
+    f'projects = {{ {key} = {{ trust_level = "untrusted", note = "preserve" }} }}\n',
+    f'["projects".{key}]\ntrust_level = "untrusted"\nnote = "preserve"\n',
+    f"['projects'.{key}]\ntrust_level = 'untrusted'\n",
+    f'projects.{key}.trust_level = "untrusted"\n',
+    f'[projects]\n{key} = {{ note = "preserve" }}\n',
+    f'[projects]\n{key}.trust_level = "untrusted"\n',
+    f'[projects.{key}.metadata]\nwhen = 1979-05-27T07:32:00Z\n'
+    'values = [true, 2, 3.5, 1979-05-27, 07:32:00, { nested = "value" }]\n',
+]
+store = Path(home) / 'config.toml'
+for variant in variants:
+    original = prefix + variant + suffix
+    store.write_text(original)
+    expected = copy.deepcopy(tomllib.loads(original))
+    expected['projects'].setdefault(target, {})['trust_level'] = 'trusted'
+    result = subprocess.run([trust, target, project], env=dict(os.environ, CODEX_HOME=home),
+                            capture_output=True, text=True)
+    assert result.returncode == 0, (variant, result.stderr)
+    updated = store.read_text()
+    assert tomllib.loads(updated) == expected, variant
+    assert prefix in updated and suffix in updated, 'unrelated configuration text changed'
+    subprocess.run([trust, target, project], env=dict(os.environ, CODEX_HOME=home),
+                   stdout=subprocess.DEVNULL, check=True)
+    assert store.read_text() == updated, 'repeated registration changed the config'
+PYTEST
+  pass "fm-codex-trust: updates parsed project tables across TOML representations"
+}
+
+test_shared_test_entries_isolate_codex_store() {
+  local rec helper mode
+  rec=$(make_case test-isolation)
+  read_case "$rec"
+  mkdir -p "$CASE_DIR/user-home/.codex" "$CASE_DIR/ambient-codex"
+  printf 'model = "untouched"\n' > "$CASE_DIR/expected-config"
+  cp "$CASE_DIR/expected-config" "$CASE_DIR/user-home/.codex/config.toml"
+  cp "$CASE_DIR/expected-config" "$CASE_DIR/ambient-codex/config.toml"
+  for helper in lib fixtures secondmate-helpers; do
+    for mode in unset custom; do
+      (
+        export HOME="$CASE_DIR/user-home"
+        if [ "$mode" = custom ]; then
+          export CODEX_HOME="$CASE_DIR/ambient-codex"
+        else
+          unset CODEX_HOME
+        fi
+        bash -eu -c '
+          . "$1"
+          "$2" "$3" "$4" >/dev/null
+          "$5" - "$CODEX_HOME/config.toml" "$3" <<"PYCHILD"
+import sys, tomllib
+with open(sys.argv[1], "rb") as handle:
+    assert tomllib.load(handle)["projects"][sys.argv[2]]["trust_level"] == "trusted"
+PYCHILD
+        ' _ "$ROOT/tests/$helper.sh" "$TRUST" "$WORKTREE" "$PROJECT" "$PYTHON"
+      ) || fail "$helper did not isolate registration with $mode CODEX_HOME"
+      cmp -s "$CASE_DIR/expected-config" "$CASE_DIR/user-home/.codex/config.toml" \
+        || fail "$helper changed the ambient default Codex config"
+      cmp -s "$CASE_DIR/expected-config" "$CASE_DIR/ambient-codex/config.toml" \
+        || fail "$helper changed the ambient custom Codex config"
+    done
+  done
+  pass "fm-codex-trust: shared test entries isolate default and custom Codex stores"
+}
+
+test_spawn_uses_registered_store_despite_pane_environment() {
+  local kind mode rec home id target fakebin launchlog expected
+  local spawn_args
+  for kind in scout secondmate; do
+    for mode in unset empty custom; do
+      rec=$(make_case "spawn-$kind-$mode")
+      read_case "$rec"
+      home="$CASE_DIR/home"
+      id="trust-$kind-$mode"
+      fm_test_spawn_home "$home" codex
+      fm_test_spawn_brief "$home" "$id"
+      mkdir -p "$CASE_DIR/user-home" "$CASE_DIR/pane-home" "$CASE_DIR/pane-codex"
+      fakebin=$(fm_test_make_spawn_fakebin "$CASE_DIR/fake")
+      fm_test_fake_sleep_noop "$fakebin"
+      cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$CODEX_HOME" > "$FM_CODEX_OBSERVED_HOME"
+SH
+      chmod +x "$fakebin/codex"
+      if [ "$kind" = secondmate ]; then
+        target="$CASE_DIR/secondmate"
+        mkdir -p "$target/bin" "$target/data"
+        printf '# Firstmate\n' > "$target/AGENTS.md"
+        printf '%s\n' "$id" > "$target/.fm-secondmate-home"
+        printf 'charter\n' > "$target/data/charter.md"
+        fm_git_init_commit "$target"
+        spawn_args=("$id" "$target" --secondmate --harness codex)
+      else
+        target=$WORKTREE
+        spawn_args=("$id" "$PROJECT" --scout --harness codex)
+      fi
+      launchlog="$CASE_DIR/launch.sh"
+      expected="$CASE_DIR/user-home/.codex"
+      [ "$mode" != custom ] || expected="$CASE_DIR/custom codex's home"
+      (
+        case "$mode" in
+          unset) unset CODEX_HOME ;;
+          empty) export CODEX_HOME='' ;;
+          custom) export CODEX_HOME="$expected" ;;
+        esac
+        HOME="$CASE_DIR/user-home" FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
+          FM_FAKE_PANE_PATH="$target" FM_FAKE_LAUNCH_LOG="$launchlog" \
+          PATH="$fakebin:$PATH" TMUX=fake,1,0 \
+          "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" --backend tmux >"$CASE_DIR/spawn.out" 2>&1
+      ) || { cat "$CASE_DIR/spawn.out" >&2; fail "$kind spawn with $mode CODEX_HOME failed"; }
+      [ "$(trust_value "$expected" "$target")" = trusted ] \
+        || fail "$kind did not register trust in the resolved $mode Codex home"
+      (
+        cd "$target" || exit 1
+        HOME="$CASE_DIR/pane-home" CODEX_HOME="$CASE_DIR/pane-codex" \
+          FM_CODEX_OBSERVED_HOME="$CASE_DIR/observed-home" PATH="$fakebin:$PATH" \
+          bash "$launchlog"
+      ) || fail "captured $kind launch with $mode CODEX_HOME failed"
+      [ "$(cat "$CASE_DIR/observed-home")" = "$expected" ] \
+        || fail "$kind inherited the pane's Codex store instead of the registered $mode store"
+      [ ! -e "$CASE_DIR/pane-codex/config.toml" ] \
+        || fail "$kind registered trust in the pane's stale Codex store"
+    done
+  done
+  pass "fm-codex-trust: scout and secondmate launches use the registered store over pane inheritance"
+}
+
+test_updates_equivalent_project_representations
+test_shared_test_entries_isolate_codex_store
+test_spawn_uses_registered_store_despite_pane_environment
 test_registers_exact_worktree
 test_preserves_existing_config_and_updates_entry
 test_inserts_before_following_table

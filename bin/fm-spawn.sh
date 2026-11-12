@@ -6231,6 +6231,7 @@ spawn_assert_agent_worktree
 # answers the dialog itself and, on a path that was not pre-registered, refuses
 # to count a busy turn as ready until it has done so.
 AGY_TRUST_PREREGISTERED=0
+SPAWN_CODEX_HOME=
 case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
@@ -6245,12 +6246,17 @@ claude*)
   ;;
 codex*)
   if [ "$BACKEND" != t3code ]; then
+    SPAWN_CODEX_HOME=${CODEX_HOME:-${HOME:+$HOME/.codex}}
+    case "$SPAWN_CODEX_HOME" in
+      /*) ;;
+      *) echo "error: CODEX_HOME or HOME must resolve to an absolute Codex home" >&2; exit 1 ;;
+    esac
     if [ "$KIND" = secondmate ]; then
       spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
     else
       spawn_trust_args=("$WT" "$PROJ_ABS")
     fi
-    if ! "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+    if ! CODEX_HOME="$SPAWN_CODEX_HOME" "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
       echo "error: could not pre-register Codex workspace trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
       exit 1
     fi
@@ -7727,11 +7733,8 @@ if [ -n "$WORKER_ACCOUNT" ]; then
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
-if [ "$HARNESS" = codex ] && [ "$BACKEND" != t3code ] && [ -n "${CODEX_HOME:-}" ]; then
-  case "$CODEX_HOME" in
-    /*) LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_HOME") $LAUNCH" ;;
-    *) echo "error: CODEX_HOME must be absolute for a Codex worker launch" >&2; exit 1 ;;
-  esac
+if [ -n "$SPAWN_CODEX_HOME" ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$SPAWN_CODEX_HOME") $LAUNCH"
 fi
 # Like CLAUDE_CONFIG_DIR above, FM_HOME cannot be left to pane inheritance:
 # every worker gets its home explicitly, or its bin/*.sh scripts fall back to
