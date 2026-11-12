@@ -392,6 +392,36 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+# A lane relaunched after its PR was recorded keeps that PR as its record's
+# tail, so the armed merge poll still validates against it.
+test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
+  local dir out rc url=https://github.com/example/repo/pull/7 check
+  dir=$(new_case keeps-pr rl44)
+  add_ship_task "$dir" rl44 claude
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *headRefOid*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+  *isDraft*) printf '%s\n' '{"isDraft":false}' ;;
+  *state*) printf '%s\n' MERGED ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-pr-check.sh" rl44 "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "the executable merge-poll registration should succeed"$'\n'"$out"
+  check="$dir/home/state/rl44.check.sh"
+  [ -f "$check" ] || fail "fm-pr-check did not arm the merge poll: $out"
+
+  out=$(run_control "$dir" rl44 relaunch --note "address review"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a lane with a recorded PR should succeed"$'\\n'"$out"
+  [ -n "$(meta_field "$dir" rl44 control_relaunch_tx)" ] || fail "the relaunch transaction id was not recorded"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash "$check")
+  [ "$out" = merged ] || fail "the armed merge poll stopped accepting the relaunched record: '$out'"
+  pass "fm-control relaunch: a recorded PR stays valid to the armed merge poll"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3224,6 +3254,7 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

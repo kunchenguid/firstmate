@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -820,6 +821,14 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Park on review
+
+The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
+`config/auto-land` opts into merge-time cleanup of unparked ship lanes.
+Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
+Both flags are home-local and not inherited by secondmate homes.
+The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
+
 ## PR registration scan (config/pr-register-scan)
 
 The optional local, gitignored `config/pr-register-scan` presence flag opts this home into recording, without the supervisor, each PR a task reports.
@@ -958,6 +967,15 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Record hygiene report (config/record-hygiene)
+
+The optional local, gitignored `config/record-hygiene` presence flag opts this home into reporting its own inconsistent task records.
+Create it with `touch "$FM_HOME/config/record-hygiene"`; remove it to stop the report.
+With the flag present, session-start bootstrap prints a `RECORD_HYGIENE:` line for each inconsistency, and the watcher heartbeat runs the scan in the background and raises one `check: record hygiene:` notification when its findings change.
+It is off by default: without the flag, session start and the heartbeat print no report, move no files, and perform no record-hygiene reads.
+The flag takes effect at the next session start or heartbeat, and is a home-local preference that is not inherited by secondmate homes.
+[`architecture.md`](architecture.md#task-status-archives) owns scan scope and status-log archiving; [`bin/fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh) owns the mechanics.
 
 ## Record export (config/record-export-root)
 

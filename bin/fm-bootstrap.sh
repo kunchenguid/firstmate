@@ -16,6 +16,8 @@
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
+#                 "RECORD_HYGIENE: <record inconsistency found in this home>"
+#                 (only with config/record-hygiene present),
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -183,6 +185,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -1643,6 +1647,9 @@ treehouse_pool_report() {
   rm -f "$records"
 }
 
+# shellcheck source=bin/fm-record-hygiene-lib.sh
+. "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+
 detect_local_config() {
   # Opt-in only: without the flag bootstrap reads no Treehouse state.
   [ ! -e "$CONFIG/treehouse-pool-report" ] || treehouse_pool_report
@@ -1767,6 +1774,7 @@ if network_phase; then
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
+local_phase && [ -e "$CONFIG/record-hygiene" ] && record_hygiene_report
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
