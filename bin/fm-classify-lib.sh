@@ -2669,11 +2669,16 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
-# FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
+# FM_CREW_STATE_BIN lets tests stub the verdict. A caller that already read
+# that line passes it as [crew-state-line] so the read is not repeated.
+crew_absorb_class() {  # <id> [crew-state-line]
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  if [ "$#" -ge 2 ]; then
+    line=$2
+  else
+    line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  fi
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi

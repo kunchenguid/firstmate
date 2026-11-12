@@ -2240,6 +2240,226 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- finished and parked: one alarm per record, not one per redraw ---
+# A finished lane idles at its own prompt with a terminal verdict as its last
+# record, and every redraw of that idle pane is a new hash. Each new hash used
+# to re-enter the terminal path and alarm the same finished record again, so a
+# handful of finished lanes raised the stuck-worker alarm every few minutes.
+# The first sight of the record still alarms; a later new hash of the SAME
+# record is absorbed with a visible log line - and only when every signal of
+# the finished-and-parked shape holds (a confirmed terminal record, an exact
+# idle busy-state verdict, no open decision or blocker, no visible background
+# work), which the wedge and refusal cases below pin.
+# Runs one lane through a first sight (always alarms) and then a redraw, and
+# reports whether the redraw alarmed: 0 alarmed, 1 absorbed. <harness> is
+# recorded in the lane's meta; pi and claude lanes also get the settled idle
+# record their own adapter writes at turn end (pi-ext agent_settled, claude-hook
+# Stop), while grok and an empty harness leave the lane with no busy-state
+# record at all (grok's verdict is read from its rendered tail, whose busy
+# footer is `Ctrl+c:cancel`).
+# FINISHED_PARKED_KIND overrides the recorded lane kind (default ship). With
+# [steer] set, the worker runs one more turn between the first sight and the
+# redraw - a busy poll, then a settle - without appending a status line; with
+# [steer] set to `unseen`, that turn starts and settles between two polls, so no
+# poll ever sees it busy.
+finished_parked_redraw_alarms() {  # <case> <status-line> <crew-state> <redraw-capture-file> <harness> [steer]
+  local name=$1 status_line=$2 verdict=$3 redraw=$4 harness=$5 steer=${6-} dir state fakebin out capture_file window key pid rc gen source
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-parked"
+  printf 'finished, sitting at the prompt' > "$capture_file"
+  printf 'window=%s\nkind=%s\n' "$window" "${FINISHED_PARKED_KIND:-ship}" > "$state/parked.meta"
+  [ -z "$harness" ] || printf 'harness=%s\n' "$harness" >> "$state/parked.meta"
+  case "$harness" in
+    pi) source=pi-ext ;;
+    claude) source=claude-hook ;;
+    *) source= ;;
+  esac
+  if [ -n "$source" ]; then
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" parked)
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
+      || fail "$name: could not record the settled idle state"
+  fi
+  printf '%s\n' "$status_line" > "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  key=$(watch_window_key "$window")
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE="$verdict"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "$name: the first sight of a terminal record did not alarm"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "$name: the first sight did not print a stale wake: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "$name: could not acknowledge the first-sight wake"
+  touch "$state/.last-check" "$state/.last-heartbeat"
+
+  if [ "$steer" = unseen ]; then
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked busy --gen "$gen" --source "$source" --event steered \
+      || fail "$name: could not record the steered turn"
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
+      || fail "$name: could not record the steered turn settling"
+  elif [ -n "$steer" ]; then
+    if [ -n "$source" ]; then
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" parked busy --gen "$gen" --source "$source" --event steered \
+        || fail "$name: could not record the steered turn"
+      cp "$redraw" "$capture_file"
+    else
+      printf 'working on the steer\nCtrl+c:cancel\n' > "$capture_file"
+    fi
+    : > "$out"
+    watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_CREW_STATE="$verdict"
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || fail "$name: the busy poll of the steered turn exited: $(cat "$out")"
+    if [ -n "$source" ]; then
+      "$ROOT/bin/fm-busy-event.sh" apply "$state" parked idle --gen "$gen" --source "$source" --event settled \
+        || { reap "$pid"; fail "$name: could not record the steered turn settling"; }
+    else
+      cp "$redraw" "$capture_file"
+    fi
+    FINISHED_PARKED_CASE_STATE=$state
+    if wait_for_exit "$pid" 100; then
+      grep -F "stale: $window" "$out" >/dev/null || fail "$name: the settled turn exited without a stale wake: $(cat "$out")"
+      return 0
+    fi
+    reap "$pid"
+    return 1
+  fi
+
+  # The idle pane redraws: a new hash, already stable for one poll.
+  cp "$redraw" "$capture_file"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE="$verdict"
+  pid=$!
+  if wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    [ ! -s "$state/.wake-queue" ] || fail "$name: a redraw with no printed wake still queued one"
+    rc=1
+  else
+    grep -F "stale: $window" "$out" >/dev/null || fail "$name: the redraw exited without a stale wake: $(cat "$out")"
+    rc=0
+  fi
+  FINISHED_PARKED_CASE_STATE=$state
+  return "$rc"
+}
+
+test_finished_parked_redraw_absorbed() {
+  local redraw state harness
+  redraw="$TMP_ROOT/finished-parked-redraw.txt"
+  printf 'finished, sitting at the prompt (redrawn)' > "$redraw"
+  for harness in claude pi; do
+    if finished_parked_redraw_alarms "finished-parked-ready-$harness" 'done: ready in branch fm/parked' \
+      'state: done · source: status-log · ready in branch fm/parked' "$redraw" "$harness"; then
+      fail "a finished-and-parked $harness lane alarmed again on a redraw of the same ready report"
+    fi
+    state=$FINISHED_PARKED_CASE_STATE
+    [ "$(grep -c -F "absorbed stale (finished and parked: crew state done from status-log, busy-state idle " \
+      "$state/.watch-triage.log")" = 1 ] \
+      || fail "the absorbed $harness redraw left no single finished-and-parked log line: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+    grep -F "no open decision or blocker, no visible background work, first sight of this record already surfaced): test:fm-parked" \
+      "$state/.watch-triage.log" >/dev/null \
+      || fail "the absorbed $harness redraw did not name its evidence: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  done
+  if finished_parked_redraw_alarms finished-parked-green 'done: PR https://example.test/pr/9 checks green' \
+    'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' "$redraw" claude; then
+    fail "a finished-and-parked lane with green checks alarmed again on a redraw"
+  fi
+  if finished_parked_redraw_alarms finished-parked-failed 'failed: cannot reproduce the bug on main' \
+    'state: failed · source: status-log · cannot reproduce the bug on main' "$redraw" claude; then
+    fail "a lane parked on its own failed: verdict alarmed again on a redraw"
+  fi
+  pass "a finished-and-parked lane alarms once per record on any harness, then a redraw is absorbed with a visible log line"
+}
+
+test_finished_parked_wedges_still_alarm() {
+  local redraw
+  redraw="$TMP_ROOT/finished-parked-wedge-redraw.txt"
+  printf 'quiet pane (redrawn)' > "$redraw"
+  # The worker reported done, was then sent to validate, and has gone silent
+  # on its own failed run: a pipeline failure is still the worker's to answer.
+  finished_parked_redraw_alarms wedge-failed-run 'done: implementation complete, ready to validate' \
+    'state: failed · source: run-step · run failed' "$redraw" claude \
+    || fail "a worker silent on its own failed run stopped alarming on a redraw"
+  # A worker's own failure report whose run has failed too leaves that run
+  # failure for the worker to answer.
+  finished_parked_redraw_alarms wedge-failed-own-run 'failed: build broke on the branch' \
+    'state: failed · source: run-step · run failed' "$redraw" claude \
+    || fail "a worker silent on a failed run after its own failed: report stopped alarming on a redraw"
+  # A run parked at a gate the worker owes an answer to is a stopped worker,
+  # not a finished one.
+  finished_parked_redraw_alarms wedge-parked-gate 'done: implementation complete, ready to validate' \
+    'state: parked · source: run-step · parked at review: 2 finding(s)' "$redraw" claude \
+    || fail "a worker silent at its own parked gate stopped alarming on a redraw"
+  # A ready report the supervisor refused leaves the lane with work to do.
+  finished_parked_redraw_alarms wedge-refused-ready 'done: ready in branch fm/parked' \
+    'state: blocked · source: status-log · local-only done head differs from the recorded head' "$redraw" claude \
+    || fail "a lane whose ready report was refused stopped alarming on a redraw"
+  # A worker steered after its ready report ran a new turn and then stopped at
+  # its prompt without a new status line: it may be wedged mid-task, so its
+  # first idle redraw after that turn alarms again.
+  finished_parked_redraw_alarms wedge-steered-turn 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude steer \
+    || fail "a finished lane that ran a new turn after its record stopped alarming on a redraw"
+  # Grok's idle verdict has no record behind it, so only the busy poll itself
+  # can tell that a turn ran after the record.
+  finished_parked_redraw_alarms wedge-steered-turn-unrecorded 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" grok steer \
+    || fail "a finished grok lane that ran a new turn after its record stopped alarming on a redraw"
+  finished_parked_redraw_alarms wedge-unseen-turn 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude unseen \
+    || fail "a finished lane that ran a turn no poll saw busy stopped alarming on a redraw"
+  pass "finished-and-parked exemption leaves failed and parked runs, refused reports, and later turns alarming"
+}
+
+# Every refused exemption keeps the alarm and logs the signal that refused it.
+finished_parked_refusal_logged() {  # <case-state> <reason>
+  grep -F "finished-and-parked exemption refused ($2): parked" "$1/.watch-triage.log" >/dev/null \
+    || fail "a refused exemption did not log '$2': $(cat "$1/.watch-triage.log" 2>/dev/null)"
+}
+
+test_finished_parked_refusals_name_their_signal() {
+  local redraw picker
+  redraw="$TMP_ROOT/finished-parked-refusal-redraw.txt"
+  printf 'finished, sitting at the prompt (redrawn)' > "$redraw"
+  # A decision the worker is waiting on is not a terminal verdict.
+  finished_parked_redraw_alarms refuse-needs-decision 'needs-decision: pick option A or B' \
+    'state: done · source: run-step · checks green: PR ready for review' "$redraw" claude \
+    || fail "a lane whose last record is an open decision stopped alarming on a redraw"
+  finished_parked_refusal_logged "$FINISHED_PARKED_CASE_STATE" 'terminal record: last record is needs-decision'
+  # A lane kind whose done line does not close its decisions still holds the
+  # blocker it reported before that line.
+  FINISHED_PARKED_KIND=custom finished_parked_redraw_alarms refuse-open-blocker \
+    "$(printf 'blocked: waiting on credentials\ndone: ready in branch fm/parked')" \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" claude \
+    || fail "a done lane with a blocker still open stopped alarming on a redraw"
+  finished_parked_refusal_logged "$FINISHED_PARKED_CASE_STATE" 'no open decision or blocker: the status log still holds one open'
+  # Claude's Stop hook settles the turn while a background shell keeps
+  # running; the pane's background-work dialog is what says so.
+  picker="$TMP_ROOT/finished-parked-picker.txt"
+  printf '%s\n' \
+    'Background work is running' \
+    '❯ 1. Exit and stop tasks' \
+    'The following will stop when you exit:' \
+    'shell · sleep 300' \
+    '  2. Move to background and exit' \
+    '  3. Stay' \
+    'Enter to confirm · Esc to cancel' > "$picker"
+  finished_parked_redraw_alarms refuse-background-run 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$picker" claude \
+    || fail "a done lane with a visible background run still going stopped alarming on a redraw"
+  finished_parked_refusal_logged "$FINISHED_PARKED_CASE_STATE" \
+    'no visible background work: the pane shows Claude background-task exit picker'
+  # No busy-state record at all is no idle verdict, so it cannot be parked.
+  finished_parked_redraw_alarms refuse-unknown-verdict 'done: ready in branch fm/parked' \
+    'state: done · source: status-log · ready in branch fm/parked' "$redraw" '' \
+    || fail "a done lane with no recognised idle verdict stopped alarming on a redraw"
+  finished_parked_refusal_logged "$FINISHED_PARKED_CASE_STATE" 'idle pane: busy-state verdict is unknown missing'
+  pass "finished-and-parked exemption is refused, with the refusing signal logged, for open decisions, blockers, background work, and unrecognised verdicts"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -5511,6 +5731,9 @@ fm_test_run \
   test_unreadable_status_reports_once_per_file_state \
   test_permission_recovery_surfaces_preserved_status \
   test_terminal_stale_surfaced \
+  test_finished_parked_redraw_absorbed \
+  test_finished_parked_wedges_still_alarm \
+  test_finished_parked_refusals_name_their_signal \
   test_stale_terminal_status_overridden_by_active_run \
   test_nonterminal_stale_provably_working_absorbed_then_escalated \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
