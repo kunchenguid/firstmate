@@ -478,6 +478,34 @@ SH
   pass "fm-codex-trust: scout and secondmate launches use the registered store over pane inheritance"
 }
 
+
+test_raw_commands_only_register_exact_codex() {
+  local command rec home fakebin id
+  for command in codex codex-tools; do
+    id="trust-raw-$command"
+    rec=$(make_case "$id")
+    read_case "$rec"
+    home="$CASE_DIR/home"
+    fm_test_spawn_home "$home"
+    fm_test_spawn_brief "$home" "$id"
+    fakebin=$(fm_test_make_spawn_fakebin "$CASE_DIR/fake" "$command")
+    fm_test_fake_sleep_noop "$fakebin"
+    FM_HOME="$home" HOME="$CASE_DIR/user-home" CODEX_HOME="$CODEX_HOME_DIR" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WORKTREE" TMUX=fake,1,0 PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" --scout --backend tmux \
+      --harness "$command --fixture-raw-command" >"$CASE_DIR/spawn.out" 2>&1 \
+      || { cat "$CASE_DIR/spawn.out" >&2; fail "raw $command spawn failed"; }
+    if [ "$command" = codex ]; then
+      [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+        || fail "raw Codex did not register workspace trust"
+    else
+      assert_absent "$CODEX_HOME_DIR/config.toml" "unrelated executable registered Codex trust"
+    fi
+  done
+  pass "fm-codex-trust: raw Codex registers trust without matching unrelated executables"
+}
+
+test_raw_commands_only_register_exact_codex
 test_updates_equivalent_project_representations
 test_test_helpers_scope_codex_store_isolation
 test_spawn_uses_registered_store_despite_pane_environment
