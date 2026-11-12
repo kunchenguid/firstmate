@@ -1004,7 +1004,7 @@ w = { tokens: [],
   pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
 
-# --- T17: --rotate restarts onto a fresh session, and never nudges ----------
+# --- T18: --rotate restarts onto a fresh session, and never nudges ----------
 test_rotate_restarts_onto_a_fresh_session() {
   local dir out rc
   dir=$(new_case rotate)
@@ -1027,7 +1027,7 @@ test_rotate_restarts_onto_a_fresh_session() {
   [ "$(find "$dir/home/state/sm1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
     || fail "only the persist request should reach the mate, never a re-read message"
   assert_no_regex '^/exit$' "$dir/fake/literal" "an unconfirmed rotation stopped the agent"
-  pass "T17 --rotate relaunches onto a fresh session after the persist gate and never nudges"
+  pass "T18 --rotate relaunches onto a fresh session after the persist gate and never nudges"
 }
 
 test_persist_gates_and_asks_only_for_open_records
@@ -1055,5 +1055,5 @@ test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_t3_mate_stays_on_the_nudge_path
 
-echo "# all fm-secondmate-restart tests passed"
 test_rotate_restarts_onto_a_fresh_session
+echo "# all fm-secondmate-restart tests passed"
