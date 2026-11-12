@@ -841,7 +841,7 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         compound) set -- "$@" 'cd /tmp && env auggie --model test-model' ;;
         pipeline) set -- "$@" 'true | env auggie --model test-model' ;;
         group) set -- "$@" '(env auggie --model test-model)' ;;
-        nested-substitution) set -- "$@" 'true "$(env auggie --model test-model)"' ;;
+        nested-substitution) set -- "$@" "true \"\$(env auggie --model test-model)\"" ;;
         redirect-other) set -- "$@" 'env 2>auggie true auggie --model test-model' ;;
         compound-other) set -- "$@" 'cd /tmp && env true auggie --model test-model' ;;
         search-path-other) set -- "$@" 'env -P /opt/auggie true auggie --model test-model' ;;
