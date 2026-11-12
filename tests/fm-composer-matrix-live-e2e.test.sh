@@ -19,7 +19,10 @@
 #     non-tmux backend performs and the one a vendor's own footer rows can
 #     break: a harness that renders a statusLine or mode hint below its
 #     composer must never make an idle composer read `pending`, because that
-#     verdict is what skips a steer's doorbell fleet-wide.
+#     verdict is what skips a steer's doorbell fleet-wide;
+#   - the Pi model selector live (when pi is installed): /model opened on a
+#     throwaway provider is named from real rendered rows, and the typed-send
+#     path refuses it without typing the text or pressing Enter.
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -44,6 +47,10 @@ SESSION="cmxlive"
 ZELLIJ_SESSION="fm-cmx-live-zj-$$"
 CHECKED=0
 FAILED=0
+# The throwaway Pi agent directory, tracked as soon as it is created so a
+# failed run removes it too: `fail` exits through cleanup, which runs before
+# this section's own removals.
+PI_DIR=
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -55,6 +62,8 @@ cleanup() {
   if command -v zellij >/dev/null 2>&1; then
     zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
   fi
+  [ -z "${PI_DIR:-}" ] || fm_test_remove_tree "$PI_DIR"
+  PI_DIR=
 }
 trap cleanup EXIT
 
@@ -271,6 +280,126 @@ if command -v zellij >/dev/null 2>&1; then
   zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
 else
   note "harness absent, not verified here: zellij (false-positive regression not exercised)"
+fi
+
+# --- 4. The Pi model selector, live -----------------------------------------
+# Whether a rendered screen is the /model selector is a vendor-surface fact, so
+# the guard that refuses to submit it must be proven against the installed pi
+# and not only against a recorded frame. It is: the frame is what a vendor
+# release can change, and reading it wrong is silent - the guard simply never
+# fires (the live regression this section was written from).
+# The launch uses a throwaway agent directory whose models.json declares a
+# provider on an unreachable port (provider id `localfake`), so /model lists
+# rows on a host with no authorised login, no provider is called, and nothing
+# is submitted: this section spends no model tokens and touches no operator
+# credentials or settings.
+check_pi_model_selector() {  # <name> <version>
+  local name=$1 version=$2 dir win target screen dialog probe err out rc
+  local i=0 polled=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45}
+  probe='live-guard probe: this text must not reach the selector'
+  win='pi-model'
+  target="$SESSION:$win"
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmx-pi.XXXXXX")
+  PI_DIR=$dir
+  mkdir -p "$dir/agent"
+  cat > "$dir/agent/models.json" <<'JSON'
+{
+  "providers": {
+    "localfake": {
+      "name": "Local Fake",
+      "baseUrl": "http://127.0.0.1:9/v1",
+      "api": "openai-completions",
+      "apiKey": "localfake",
+      "models": [
+        { "id": "alpha-model-one", "contextWindow": 128000 },
+        { "id": "beta-model-two", "contextWindow": 128000 },
+        { "id": "gamma-model-three", "contextWindow": 128000 }
+      ]
+    }
+  }
+}
+JSON
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$dir" -- \
+    env PI_CODING_AGENT_DIR="$dir/agent" "$name" \
+    || fail "$name ($version): could not launch with the throwaway provider"
+  # Wait for a proven-idle composer before typing: a slash command sent into a
+  # half-drawn TUI would prove nothing about the selector.
+  while [ "$i" -lt "$budget" ]; do
+    [ "$(fm_tmux_composer_state "$target")" = empty ] && break
+    i=$((i + 1))
+    sleep 1
+  done
+  [ "$i" -lt "$budget" ] \
+    || fail "$name ($version): the throwaway session never reached an idle composer, so the selector was not driven"
+  tmux -L "$SOCKET" send-keys -t "$target" -l '/model' 2>/dev/null \
+    || fail "$name ($version): could not type /model"
+  sleep 1
+  tmux -L "$SOCKET" send-keys -t "$target" Enter 2>/dev/null \
+    || fail "$name ($version): could not submit /model"
+  i=0
+  while [ "$i" -lt "$budget" ]; do
+    screen=$(fm_tmux_composer_capture "$target" 2>/dev/null) || screen=''
+    if dialog=$(fm_composer_blocking_dialog "$screen"); then
+      polled=1
+      break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  if [ "$polled" -eq 0 ]; then
+    printf '# %s (%s) pane tail at failure:\n' "$name" "$version" >&2
+    printf '%s\n' "$screen" | grep '[^[:space:]]' | tail -18 | sed 's/^/#   /' >&2
+    tmux -L "$SOCKET" kill-window -t "$target" 2>/dev/null || true
+    fm_test_remove_tree "$dir"
+    PI_DIR=
+    FAILED=1
+    printf 'not ok - %s (%s): the /model selector was not named by its rendered rows; a steer to this harness would submit into it\n' \
+      "$name" "$version" >&2
+    return 0
+  fi
+  # Move the highlight off the current model, so the `→` cursor and the `✓`
+  # current marker sit on different rows the way they do in real use.
+  tmux -L "$SOCKET" send-keys -t "$target" Down 2>/dev/null || true
+  sleep 1
+  # The safety property itself: the real entry point every steer uses must
+  # refuse before it types, and must not press Enter either.
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-cmx-pi-err.XXXXXX")
+  rc=0
+  fm_backend_send_text_submit tmux "$target" "$probe" 0 0 0 >/dev/null 2>"$err" || rc=$?
+  out=$(fm_tmux_composer_capture "$target" 2>/dev/null || true)
+  if [ "$rc" -eq 0 ]; then
+    FAILED=1
+    printf 'not ok - %s (%s): a typed submit onto the open model selector was accepted\n' \
+      "$name" "$version" >&2
+  elif ! grep -F 'blocked on a prompt: Pi model selector' "$err" >/dev/null; then
+    FAILED=1
+    printf 'not ok - %s (%s): the refusal did not name the model selector (got: %s)\n' \
+      "$name" "$version" "$(tr '\n' ' ' < "$err")" >&2
+  elif printf '%s' "$out" | grep -F "$probe" >/dev/null; then
+    FAILED=1
+    printf 'not ok - %s (%s): the probe text reached the open model selector\n' \
+      "$name" "$version" >&2
+  elif ! fm_composer_blocking_dialog "$out" >/dev/null; then
+    FAILED=1
+    printf 'not ok - %s (%s): the selector was answered or closed by the refused submit\n' \
+      "$name" "$version" >&2
+  else
+    CHECKED=$((CHECKED + 1))
+    pass "$name ($version): the /model selector is named from its rendered rows, and a typed submit to it types nothing and sends no Enter"
+  fi
+  fm_test_remove_tree "$err"
+  tmux -L "$SOCKET" send-keys -t "$target" Escape 2>/dev/null || true
+  tmux -L "$SOCKET" kill-window -t "$target" 2>/dev/null || true
+  fm_test_remove_tree "$dir"
+  PI_DIR=
+}
+
+if command -v pi >/dev/null 2>&1; then
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  check_pi_model_selector pi "$(harness_version pi)"
+else
+  note "harness absent, not verified here: pi (model-selector dialog guard not exercised)"
 fi
 
 # --- refuse a vacuous pass ---------------------------------------------------
