@@ -4,11 +4,13 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-nm-bounded-owned)
 
 test_owned_queries_remain_cancellable() {
-  local mechanism operation dir owner i child pgid mismatch status
-  for mechanism in default perl; do
+  local mechanism operation dir owner i child mismatch status
+  for mechanism in default gtimeout perl; do
     for operation in status resolver; do
       dir="$TMP_ROOT/$mechanism-$operation"
       mkdir -p "$dir/config" "$dir/fakebin"
+      printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v timeout)" > "$dir/fakebin/gtimeout"
+      chmod +x "$dir/fakebin/gtimeout"
       cat > "$dir/fakebin/no-mistakes" <<'SCRIPT'
 #!/usr/bin/env bash
 sleep 30 &
@@ -21,16 +23,17 @@ SCRIPT
       fi
       set -m
       FM_HOME="$dir" PATH="$dir/fakebin:$PATH" bash -c '
-        if [ "$2" = perl ]; then
+        if [ "$2" != default ]; then
+          mechanism=$2
           command() {
             case "$*" in
-              "-v timeout"|"-v gtimeout") return 1 ;;
+              "-v timeout") return 1 ;;
+              "-v gtimeout") [ "$mechanism" != perl ] && builtin command "$@" ;;
               *) builtin command "$@" ;;
             esac
           }
         fi
         . "$1/bin/fm-nm-run-lib.sh"
-        FM_CHECK_OWNED_GROUP=1
         unset NM_HOME
         fm_nm_run_bounded "$FM_HOME" 30 axi status
       ' _ "$ROOT" "$mechanism" > "$dir/out" 2>&1 &
@@ -42,12 +45,7 @@ SCRIPT
         i=$((i + 1))
       done
       mismatch=
-      if [ -s "$dir/query-pids" ]; then
-        while read -r child; do
-          pgid=$(ps -o pgid= -p "$child" | tr -d '[:space:]')
-          [ "$pgid" = "$owner" ] || mismatch="$mechanism $operation escaped ownership: $child group $pgid, owner $owner"
-        done < "$dir/query-pids"
-      else
+      if [ ! -s "$dir/query-pids" ]; then
         mismatch="$mechanism $operation never started: $(cat "$dir/out")"
       fi
       kill -TERM -- "-$owner" 2>/dev/null || true
@@ -71,13 +69,13 @@ SCRIPT
       [ -z "$mismatch" ] || fail "$mismatch"
     done
   done
-  pass "owned status and resolver queries stay in their cancellable display group"
+  pass "status and resolver query descendants stop on display cancellation"
 }
 
 test_bounded_queries_preserve_success() {
   local result
   . "$ROOT/bin/fm-nm-run-lib.sh"
-  result=$(FM_CHECK_OWNED_GROUP=1 fm_nm_bounded "$TMP_ROOT" 2 bash -c 'printf result; exit 7')
+  result=$(fm_nm_bounded "$TMP_ROOT" 2 bash -c 'printf result; exit 7')
   [ "$?" -eq 7 ] || fail "owned bounded query lost its exit status"
   [ "$result" = result ] || fail "owned bounded query lost stdout"
   result=$(fm_nm_bounded "$TMP_ROOT" 2 bash -c 'printf standalone; exit 9')
@@ -86,4 +84,52 @@ test_bounded_queries_preserve_success() {
   pass "owned and standalone bounded queries preserve stdout and status"
 }
 
-fm_test_run test_owned_queries_remain_cancellable test_bounded_queries_preserve_success
+test_query_timeouts_are_isolated() {
+  local mechanism dir result rc started elapsed child status
+  for mechanism in default gtimeout perl; do
+    dir="$TMP_ROOT/timeout-$mechanism"
+    mkdir -p "$dir/fakebin"
+    printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v timeout)" > "$dir/fakebin/gtimeout"
+      chmod +x "$dir/fakebin/gtimeout"
+    cat > "$dir/query" <<'SCRIPT'
+#!/usr/bin/env bash
+sleep 30 &
+printf '%s\n' "$$" "$!" > "$FM_HOME/query-pids"
+wait
+SCRIPT
+    chmod +x "$dir/query"
+    started=$SECONDS
+    result=$(FM_HOME="$dir" PATH="$dir/fakebin:$PATH" bash -c '
+      if [ "$2" != default ]; then
+        mechanism=$2
+        command() {
+          case "$*" in
+            "-v timeout") return 1 ;;
+            "-v gtimeout") [ "$mechanism" != perl ] && builtin command "$@" ;;
+            *) builtin command "$@" ;;
+          esac
+        }
+      fi
+      . "$1/bin/fm-nm-run-lib.sh"
+      fm_nm_bounded "$FM_HOME" 1 "$FM_HOME/query"
+      rc=$?
+      printf "timeout=%s\n" "$rc"
+      fm_nm_bounded "$FM_HOME" 2 printf next-query
+    ' _ "$ROOT" "$mechanism")
+    rc=$?
+    elapsed=$((SECONDS - started))
+    [ "$rc" -eq 0 ] && [ "$result" = $'timeout=124\nnext-query' ] \
+      || fail "$mechanism timeout aborted its caller or lost the failure: $result ($rc)"
+    [ "$elapsed" -lt 5 ] || fail "$mechanism query retained stdout after its bound: ${elapsed}s"
+    while read -r child; do
+      status=$(ps -o stat= -p "$child" 2>/dev/null || true)
+      case "$status" in
+        ''|*Z*) ;;
+        *) kill -KILL "$child" 2>/dev/null || true; fail "$mechanism timeout left descendant $child running" ;;
+      esac
+    done < "$dir/query-pids"
+  done
+  pass "expired queries close descendant output and allow the next query"
+}
+
+fm_test_run test_owned_queries_remain_cancellable test_bounded_queries_preserve_success test_query_timeouts_are_isolated
