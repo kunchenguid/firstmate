@@ -3081,65 +3081,77 @@ captain_call_stale_bound() {  # <window-key> <task>
 # Bound a terminal stale alarm for a lane that is finished and parked, the one
 # shape whose repeated alarm is the success condition rather than a wedge: an
 # idle parked pane still churns its hash on every redraw, and each new hash used
-# to re-alarm the same finished record forever. Every signal below must hold:
-#   - the worker's own latest status record is a `done:` or `failed:` verdict;
-#   - the authoritative bin/fm-crew-state.sh verdict agrees: `done` from any
-#     source (a ready report, or a run whose checks are green), or `failed` from
-#     the status log only, since a pipeline failure the worker has not answered
-#     is still the worker's to act on. Any running, fixing, or parked run, any
-#     declared wait, and any refused ready report reads as something else here;
-#   - the lane's harness gives POSITIVE evidence that no background work is
-#     running. Only Pi and pi-signed do: Pi has no harness-held background job
-#     (its bash tool runs in the foreground), and its pi-ext idle record is
-#     written only once ctx.isIdle() confirms nothing will continue. Every other
-#     harness can idle its turn with a background shell or task still running,
-#     so the exemption is refused there and the refusal is logged.
-# The first sight of each such record still alarms; only later sightings of the
-# SAME record are absorbed, with no time window. The record is bound to the whole
-# status-log signature and to the idle busy-state record's generation and
-# sequence, so any new append and any turn the worker ran since (a steer, a
-# typed prompt) starts over. Sets STALE_WAIT_DECLARATION to that record's scope
-# whenever the lane is finished and parked, so the caller's stale_wait_record
-# arms the bound only once its first-sight wake was appended, and leaves it EMPTY
-# otherwise. FINISHED_PARKED_VERDICT names the evidence for the caller's absorb
-# log line.
-finished_parked_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2 verb line state src sig meta harness busy gen
+# to re-alarm the same finished record forever. Every signal below must hold,
+# read from evidence every harness already has:
+#   - terminal record: the worker's own latest status record is a `done:` or
+#     `failed:` verdict, and the authoritative bin/fm-crew-state.sh verdict
+#     agrees: `done` from any source (a ready report, or a run whose checks are
+#     green), or `failed` from the status log only, since a pipeline failure the
+#     worker has not answered is still the worker's to act on. Any running,
+#     fixing, or parked run, any declared wait, and any refused ready report
+#     reads as something else here;
+#   - idle pane: the semantic busy-state contract (bin/fm-busy-lib.sh) gives an
+#     exact idle verdict; busy, unknown, dead, or anything unrecognised refuses;
+#   - no open decision or blocker: the status log's decision fold holds nothing;
+#   - no visible background work: the pane shows no blocking dialog, such as
+#     Claude's background-task exit picker.
+# Each refusal is logged with the signal that refused it, and the stale alarm
+# then fires exactly as it would without this bound. The first sight of each
+# finished record still alarms; only later sightings of the SAME record (bound
+# to the whole status-log signature, so any new append starts over) are
+# absorbed, with no time window. A pane seen busy afterwards drops the bound
+# (finished_parked_rearm), so a turn the worker ran since gets its own alarm.
+# Sets STALE_WAIT_DECLARATION to that record's scope whenever the lane is
+# finished and parked, so the caller's stale_wait_record arms the bound only
+# once its first-sight wake was appended, and leaves it EMPTY otherwise.
+# FINISHED_PARKED_VERDICT names the evidence for the caller's absorb log line.
+finished_parked_stale_bound() {  # <window-key> <task> <tail40> [dialog-name]
+  local key=$1 task=$2 tail40=$3 dialog=${4-} verb line state src sig busy refused=
   STALE_WAIT_DECLARATION=
   FINISHED_PARKED_VERDICT=
   [ -n "$task" ] || return 1
   status_line_verb "$(last_status_line "$STATE/$task.status")" verb
-  case "$verb" in done|failed) ;; *) return 1 ;; esac
-  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) return 1 ;; esac
-  state=${line#state: }; state=${state%% *}
-  src=${line#*source: }; src=${src%% *}
-  [ "$state" = "$verb" ] || return 1
-  [ "$state" = "done" ] || [ "$src" = status-log ] || return 1
-  meta="$STATE/$task.meta"
-  harness=$(fm_meta_get "$meta" harness 2>/dev/null) || harness=
-  case "$harness" in
-    pi|pi-signed) ;;
-    *)
-      triage_log "finished-and-parked exemption refused (no background-work signal for harness ${harness:-unrecorded}): $task"
-      return 1
-      ;;
-  esac
-  busy=$(fm_busy_record_read "$STATE" "$task") || busy=
-  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=
-  case "$busy" in
-    "idle pi-ext "*) ;;
-    *)
-      triage_log "finished-and-parked exemption refused (no settled pi-ext idle record for harness $harness: ${busy:-none}): $task"
-      return 1
-      ;;
-  esac
-  [ -n "$gen" ] || return 1
+  case "$verb" in done|failed) ;; *) refused="terminal record: last record is ${verb:-unrecognised}" ;; esac
+  if [ -z "$refused" ]; then
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=
+    state=; src=
+    case "$line" in
+      state:*) state=${line#state: }; state=${state%% *}; src=${line#*source: }; src=${src%% *} ;;
+    esac
+    if [ "$state" != "$verb" ] || { [ "$state" != "done" ] && [ "$src" != status-log ]; }; then
+      refused="terminal record: crew state is ${state:-unreadable} from ${src:-unknown}"
+    fi
+  fi
+  if [ -z "$refused" ]; then
+    busy=$(fm_busy_classify_meta "$STATE/$task.meta" "$task" "$STATE" "$tail40")
+    case "$busy" in
+      idle\ *) ;;
+      *) refused="idle pane: busy-state verdict is ${busy:-empty}" ;;
+    esac
+  fi
+  if [ -z "$refused" ] && [ -n "$(status_open_decisions "$STATE/$task.status")" ]; then
+    refused="no open decision or blocker: the status log still holds one open"
+  fi
+  if [ -z "$refused" ] && [ -n "$dialog" ]; then
+    refused="no visible background work: the pane shows $dialog"
+  fi
+  if [ -n "$refused" ]; then
+    triage_log "finished-and-parked exemption refused ($refused): $task"
+    return 1
+  fi
   sig=$(fm_wake_signal_sig "$STATE/$task.status" 2>/dev/null) || return 1
   [ -n "$sig" ] || return 1
-  STALE_WAIT_DECLARATION="finished-parked:$state:$sig:$gen:${busy##* }"
-  FINISHED_PARKED_VERDICT="crew state $state from $src, $harness settled idle with no background job"
+  STALE_WAIT_DECLARATION="finished-parked:$state:$sig"
+  FINISHED_PARKED_VERDICT="crew state $state from $src, busy-state $busy, no open decision or blocker, no visible background work"
   [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]
+}
+
+# Drop a finished-and-parked bound once its pane is seen busy: the worker ran a
+# turn after the record it was bound to, so that turn's idle end alarms again.
+finished_parked_rearm() {  # <window-key>
+  case "$(cat "$STATE/.paused-resurfaced-$1" 2>/dev/null || true)" in
+    finished-parked:*) rm -f "$STATE/.paused-resurfaced-$1" ;;
+  esac
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -4741,7 +4753,7 @@ EOF
               wedge_episode_end "$key" 0 1
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
-            elif [ -z "$STALE_WAIT_DECLARATION" ] && finished_parked_stale_bound "$key" "$task"; then
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && finished_parked_stale_bound "$key" "$task" "$tail40" "$dialog"; then
               # Finished and parked: this record's first sight already alarmed,
               # so a redraw of the idle pane has nothing new to report. The log
               # line is how a supervisor sees the lane parked, not missing.
@@ -4848,6 +4860,7 @@ EOF
         # the cap that episode fired goes with the rest of its bookkeeping.
         paused_bound=1
         [ "$busy_now" -ne 0 ] || paused_wait_superseded "$w" "$task" || true
+        [ "$busy_now" -ne 0 ] || finished_parked_rearm "$key"
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
         else
@@ -4868,6 +4881,7 @@ EOF
       echo 0 > "$cf"
       paused_bound=1
       [ "$busy_now" -ne 0 ] || paused_wait_superseded "$w" "$task" || true
+      [ "$busy_now" -ne 0 ] || finished_parked_rearm "$key"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" "$dialog" && paused_bound=0
       else
