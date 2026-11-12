@@ -14,13 +14,14 @@ fm_home_worktree_lock_context() {
   FM_HOME_LOCK_DIR=
   FM_HOME_LOCK_RECEIPT=
   FM_HOME_LOCK_REASON=
+  FM_HOME_LOCK_PARENT=
   FM_HOME_LOCK_HOME=$(cd "$home" && pwd -P) || return 1
-  FM_HOME_LOCK_PARENT=$(cd "$parent" && pwd -P) || return 1
   [ ! -L "$home/.git" ] || {
     echo "REFUSED: symlinked Git metadata for durable home $home" >&2
     return 1
   }
   [ -f "$home/.git" ] || return 0
+  FM_HOME_LOCK_PARENT=$(cd "$parent" && pwd -P) || return 1
   FM_HOME_LOCK_DIR=$(git -C "$home" rev-parse --absolute-git-dir) || return 1
   common=$(cd "$home" && cd "$(git rev-parse --git-common-dir)" && pwd -P) || return 1
   top=$(git -C "$home" rev-parse --show-toplevel) || return 1
