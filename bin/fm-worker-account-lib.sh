@@ -59,17 +59,18 @@
 #
 # A home that spends several Claude subscriptions declares them instead in
 # config/claude-accounts: one entry per line, each `ordinary` or an absolute
-# path exactly as config/claude-account would hold it, with no blank lines,
-# duplicates, or control characters, and an optional final newline. The list is
-# opt-in in the same way: absent, nothing here changes. Present, it replaces the
-# home-wide pin, which must then be absent, and every Claude ship or scout
-# launch names one declared entry with --account; Firstmate chooses it at
-# intake (bin/fm-claude-account-quota.sh measures each entry) and never
-# defaults to the first entry, another entry, or the ambient account. The named
-# entry passes the same root, raw-command, and sign-in refusals as a pin and is
-# recorded as account=, which a ship or scout relaunch reuses unless an
-# explicit --account moves it. A local secondmate's agent never draws from the
-# list: it needs its own per-secondmate pin.
+# path exactly as config/claude-account would hold it, optionally followed by
+# a tab and a config-local `claude-account-credential-source-<name>.json` file.
+# The list has no blank lines, duplicate accounts, or control characters, and
+# an optional final newline. The list is opt-in in the same way: absent, nothing
+# here changes. Present, it replaces the home-wide pin, which must then be
+# absent, and every Claude ship or scout launch names one declared entry with
+# --account; Firstmate chooses it at intake and never picks from file order. A
+# selected entry's source file uses the shared credential-source schema, and
+# the launch reads only that entry's source. The named entry passes the same
+# root, raw-command, and sign-in refusals as a pin and is recorded as account=,
+# which a ship or scout relaunch reuses unless an explicit --account moves it.
+# A local secondmate's agent never draws from the list: it needs its own pin.
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
@@ -215,10 +216,9 @@ fm_worker_account_resolve() {
 }
 
 # fm_worker_account_list <harness> <config-dir>
-# Prints the entries config/claude-accounts declares, one per line, for a
-# Claude launch. Prints nothing and returns 0 for another runner or when the
-# list is absent. On a malformed or unreadable list prints one error naming the
-# file and returns 1.
+# Prints account entries from config/claude-accounts, preserving an optional
+# tab-separated credential-source filename. Prints nothing for another runner
+# or an absent list. On a malformed or unreadable list, prints one error.
 fm_worker_account_list() {
   local harness=$1 cfg="$2/claude-accounts" out rc
   [ "$harness" = claude ] || return 0
@@ -232,10 +232,11 @@ fm_worker_account_list() {
     (-f $f && -r _) or exit 5;
     open(my $fh, "<", $f) or exit 5;
     my $body = do { local $/; <$fh> } // "";
-    $body =~ /\A(?:(?:ordinary|\/[^\x00-\x1f\x7f]*)\n)*(?:ordinary|\/[^\x00-\x1f\x7f]*)\n?\z/ or exit 6;
+    $body =~ /\A(?:(?:ordinary|\/[^\x00-\x1f\x7f]*)(?:\tclaude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json)?\n)*(?:ordinary|\/[^\x00-\x1f\x7f]*)(?:\tclaude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json)?\n?\z/ or exit 6;
     my %seen;
     for my $entry (split /\n/, $body) {
-      exit 7 if $seen{$entry}++;
+      my ($account) = split /\t/, $entry, 2;
+      exit 7 if $seen{$account}++;
       print $entry, "\n";
     }
   ' -- "$cfg")
@@ -253,7 +254,7 @@ fm_worker_account_list() {
     return 1
     ;;
   *)
-    echo "error: config/claude-accounts must hold one account per line, each 'ordinary' or an absolute path, with no blank lines or control characters: $cfg" >&2
+    echo "error: config/claude-accounts must hold one 'ordinary' or absolute-path account per line, optionally followed by a tab and claude-account-credential-source-<name>.json; no blank lines or control characters: $cfg" >&2
     return 1
     ;;
   esac
@@ -292,13 +293,25 @@ fm_worker_account_pi_provider() {
   esac
 }
 
-# fm_worker_account_credential_source_file <config-dir>
+# fm_worker_account_credential_source_file <config-dir> [<filename>]
 # Prints the checked Claude credential-source declaration path, or nothing
 # when this account uses the selected root's stored login.
 fm_worker_account_credential_source_file() {
-  local config=$1 path source problem
-  path="$config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE"
-  fm_worker_account_has_credential_source "$config" || return 0
+  local config=$1 filename=${2:-$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE} path source problem
+  case "$filename" in
+  "$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE") fm_worker_account_has_credential_source "$config" || return 0 ;;
+  claude-account-credential-source-[A-Za-z0-9]*.json)
+    [[ "$filename" =~ ^claude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]] || {
+      echo "error: invalid Claude credential-source filename: $filename" >&2
+      return 1
+    }
+    ;;
+  *)
+    echo "error: invalid Claude credential-source filename: $filename" >&2
+    return 1
+    ;;
+  esac
+  path="$config/$filename"
   if [ ! -f "$path" ] || [ ! -r "$path" ]; then
     echo "error: $path must be a readable regular file" >&2
     return 1
@@ -411,7 +424,7 @@ fm_worker_account_request_valid() {
 # before a relaunch stops the live agent.
 fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-} account=${7:-}
-  local selection declared root providers word provider='' selected_config setting listed count source_file=''
+  local selection declared root providers word provider='' selected_config setting listed count source_file='' source_name=''
   fm_worker_account_request_valid "$account" || return 1
   if [ -n "$account" ] && [ "$harness" != claude ]; then
     echo "error: --account names one of config/claude-accounts and applies to Claude workers only, not $harness" >&2
@@ -445,7 +458,11 @@ fm_worker_account_select() {
     fi
     declared=
     while IFS= read -r word; do
-      [ "$word" != "$account" ] || { declared=$account; break; }
+      [ "${word%%$'\t'*}" != "$account" ] || {
+        declared=$account
+        [[ "$word" == *$'\t'* ]] && source_name=${word#*$'\t'}
+        break
+      }
     done <<< "$listed"
     [ -n "$declared" ] || {
       echo "error: account '$account' is not declared in config/claude-accounts; name a declared entry with --account" >&2
@@ -473,11 +490,17 @@ fm_worker_account_select() {
     root=${root%%$'\t'*}
   fi
   if [ "$harness" = claude ]; then
-    if [ -n "$listed" ] && [ -z "$mate" ] && fm_worker_account_has_credential_source "$selected_config"; then
-      echo "error: $selected_config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE applies to one config/claude-account pin, not config/claude-accounts" >&2
-      return 1
+    if [ -n "$listed" ] && [ -z "$mate" ]; then
+      if fm_worker_account_has_credential_source "$selected_config"; then
+        echo "error: $selected_config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE applies to one config/claude-account pin, not config/claude-accounts" >&2
+        return 1
+      fi
+      if [ -n "$source_name" ]; then
+        source_file=$(fm_worker_account_credential_source_file "$selected_config" "$source_name") || return 1
+      fi
+    else
+      source_file=$(fm_worker_account_credential_source_file "$selected_config") || return 1
     fi
-    source_file=$(fm_worker_account_credential_source_file "$selected_config") || return 1
     for word in $raw; do
       case "$word" in
       [A-Za-z_]*=*)

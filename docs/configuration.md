@@ -1643,7 +1643,7 @@ Keep `config/claude-account` as the account pin and add `config/claude-account-c
 The declaration names only the Keychain item, never its token.
 Store the long-lived OAuth token created by `claude setup-token` with `security add-generic-password -s <service> -a <account> -w`, using the declared service and account; it prompts for the token, keeps it out of arguments, and lets `security` read it back without an access dialog.
 For a local secondmate, place the same file beside its pin in `config/secondmate-accounts/<id>/`.
-This mapping applies only to a single `config/claude-account` pin, not `config/claude-accounts`.
+This file maps the single `config/claude-account` pin. For a pool, each `config/claude-accounts` entry may name its own config-local credential-source declaration; see [several Claude accounts](#several-claude-accounts-configclaude-accounts).
 
 Before launch or relaunch, Firstmate loads the token through the shared credential-source adapter and requires `claude auth status` to report `authMethod` as `oauth_token`.
 The check proves only that the token loads and is the auth method Claude will use; an expired or revoked token is not detected before launch.
@@ -1667,14 +1667,14 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ### Several Claude accounts (config/claude-accounts)
 
 A home with more than one Claude subscription can let each ship and scout launch on whichever declared account has quota to spare, instead of pinning every Claude worker to one account.
-Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it:
+Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it. An entry may optionally add a tab and the name of its credential-source declaration file in this home's `config/` directory:
 
 ```text
 ordinary
-/home/me/.claude-second
+/home/me/.claude-second<TAB>claude-account-credential-source-second.json
 ```
 
-A final newline is optional; a blank line, a relative path, a repeated entry, or a control character refuses.
+`<TAB>` denotes one literal tab. The source filename must match `claude-account-credential-source-<name>.json`, where `<name>` starts with an ASCII letter or digit and continues with ASCII letters, digits, `.`, `_`, or `-`. Its contents use the same [credential-source declaration schema](#claude-token-source-configclaude-account-credential-sourcejson) as a single pin. A final newline is optional; a blank line, relative account path, repeated account, malformed source filename, or control character refuses.
 The list is opt-in: without it, every launch, including the single pin above, behaves exactly as before, and `--account` refuses.
 A home keeps either the list or `config/claude-account`, never both; with both present, every Claude launch refuses.
 
@@ -1683,6 +1683,7 @@ Firstmate chooses that entry at dispatch intake under the [`quota-array-dispatch
 Firstmate never picks an entry by default, by file order, or from the ambient account, and never discovers, adds, or copies a login.
 
 The named entry passes the same refusals as a pin before anything launches: its directory must exist, a raw Claude command must not override it, and `claude auth status` must say it is signed in, with the stripped environment and credential unsetting described above.
+If its line names a source file, Firstmate validates and reads only that entry's declaration; the token is checked and loaded through the shared adapter and reaches Claude only in process memory. A missing, malformed, unavailable, or unreadable mapped source refuses without falling back to the account directory's stored login. Entries without a source file continue to use the selected account's stored login. The single-pin `config/claude-account-credential-source.json` cannot be used with the pool list.
 An undeclared, missing, or signed-out entry refuses rather than falling back to another entry or the ambient account.
 The spawn line and the task record carry the entry as `account=`.
 

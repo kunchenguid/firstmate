@@ -84,7 +84,12 @@ SH
   cat > "$fakebin/security" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> '$dir/security-argv'
-[ "\$*" = 'find-generic-password -s fm-claude-token -a worker -w' ] || exit 44
+case "\$*" in
+  'find-generic-password -s fm-claude-token -a worker -w' | \\
+  'find-generic-password -s first-token -a worker -w' | \\
+  'find-generic-password -s second-token -a worker -w') ;;
+  *) exit 44 ;;
+esac
 printf '%s\n' 'fm-synthetic-oauth-token'
 SH
   chmod +x "$fakebin/claude" "$fakebin/pi" "$fakebin/security"
@@ -669,6 +674,55 @@ test_account_list_secondmate_needs_its_own_pin() {
   pass "a list never chooses a secondmate's account: it needs its own pin and refuses --account"
 }
 
+test_claude_account_pool_keychain_sources() {
+  local out rc id
+  new_case pool-keychain-dispatch claude
+  fake_macos_host
+  signed_in_claude_root "$CASE/first"
+  signed_in_claude_root "$CASE/second"
+  declare_accounts "$CASE/first"$'\t'claude-account-credential-source-first.json \
+    "$CASE/second"$'\t'claude-account-credential-source-second.json
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"first-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source-first.json"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"second-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source-second.json"
+  id=acct-pool-keychain-dispatch
+  out=$(spawn_ship "$id" --account "$CASE/first"); rc=$?
+  expect_code 0 "$rc" "the dispatch-selected pool entry should use its Keychain source: $out"
+  assert_contains "$out" "account=$CASE/first" "the dispatch-selected entry should remain the recorded account"
+  assert_equals 'find-generic-password -s first-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "the dispatch-selected entry should read only its mapped Keychain item"
+  run_pane
+  assert_grep 'CLAUDE_CODE_OAUTH_TOKEN=expected' "$CASE/claude-worker" \
+    "the dispatch-selected pool entry should receive the synthetic token"
+  assert_not_contains "$(cat "$CASE/launch.log" "$CASE/security-argv" "$CASE/claude-worker")" \
+    'fm-synthetic-oauth-token' "the dispatch-selected token must not appear in output or logs"
+
+  id=acct-pool-keychain-explicit
+  out=$(spawn_ship "$id" --account "$CASE/second"); rc=$?
+  expect_code 0 "$rc" "an explicitly named pool entry should use its own Keychain source: $out"
+  assert_contains "$out" "account=$CASE/second" "the explicit entry should be recorded"
+  assert_contains "$(cat "$CASE/security-argv")" 'find-generic-password -s second-token -a worker -w' \
+    "--account should select the matching entry's Keychain item"
+  pass "dispatch-selected and explicit Claude pool entries use only their own Keychain sources"
+}
+
+test_pool_entry_keychain_read_failure_never_falls_back() {
+  local out rc id=acct-pool-keychain-missing
+  new_case pool-keychain-missing claude
+  fake_macos_host
+  signed_in_claude_root "$CASE/first"
+  declare_accounts "$CASE/first"$'\t'claude-account-credential-source-first.json
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"missing-token","account":"worker"}}' \
+    > "$HOME_DIR/config/claude-account-credential-source-first.json"
+  out=$(spawn_ship "$id" --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "an unavailable pool-entry Keychain item must refuse despite a stored login"
+  assert_refused_before_launch "$id" "$out" "token could not be loaded"
+  assert_equals 'find-generic-password -s missing-token -a worker -w' \
+    "$(cat "$CASE/security-argv")" "only the selected entry's missing Keychain item should be queried"
+  pass "an unavailable pool-entry Keychain token refuses without falling back to the account's stored login"
+}
+
 test_claude_credential_source_requires_a_single_pin() {
   local out rc id=acct-claude-token-source-invalid
   new_case keychain-source-no-pin claude
@@ -822,6 +876,8 @@ test_local_secondmate_reads_the_launching_home_pin
 test_no_account_list_keeps_today_and_refuses_account
 test_account_list_launches_the_named_entry
 test_account_list_refusals
+test_claude_account_pool_keychain_sources
+test_pool_entry_keychain_read_failure_never_falls_back
 test_account_list_secondmate_needs_its_own_pin
 
 echo "# all fm-worker-account tests passed"

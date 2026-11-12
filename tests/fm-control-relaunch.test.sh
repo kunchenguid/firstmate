@@ -1008,6 +1008,10 @@ make_claude_auth_stub() {  # <case-dir>
   cat > "$1/fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = auth ] && [ "${2:-}" = status ] || exit 0
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token"}'
+  exit 0
+fi
 [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" ]
 SH
   chmod +x "$1/fakebin/claude"
@@ -1083,6 +1087,38 @@ test_account_list_relaunch_reuses_the_recorded_account() {
   expect_code 0 "$rc" "a direct fm-spawn --relaunch under a list should reuse the recorded account"$'\n'"$out"
   assert_contains "$out" "account=$dir/first" "the direct relaunch should report the recorded account"
   pass "fm-control relaunch: a declared account list keeps the account the task records"
+}
+
+test_account_list_relaunch_uses_recorded_entry_keychain_source() {
+  local dir out rc id=rl-list-keychain source_name=claude-account-credential-source-first.json
+  dir=$(new_case list-keychain "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  cat > "$dir/fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+[ "$*" != -s ] || { printf '%s\n' Darwin; exit 0; }
+exec /usr/bin/uname "$@"
+SH
+  cat > "$dir/fakebin/security" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$dir/security-argv'
+[ "\$*" = 'find-generic-password -s fm-claude-token -a worker -w' ] || exit 44
+printf '%s\n' 'fm-synthetic-oauth-token'
+SH
+  chmod +x "$dir/fakebin/uname" "$dir/fakebin/security"
+  printf '%s\n' '{"claude":{"source":"macos-keychain","service":"fm-claude-token","account":"worker"}}' \
+    > "$dir/home/config/$source_name"
+  printf '%s\t%s\n%s\n%s\n' "$dir/first" "$source_name" "$dir/second" "$dir/signed-out" \
+    > "$dir/home/config/claude-accounts"
+  out=$(run_control "$dir" "$id" relaunch --note "same account with Keychain token"); rc=$?
+  expect_code 0 "$rc" "a relaunch should recheck the recorded pool entry's Keychain source: $out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/first" ] || fail "relaunch should keep the recorded account"
+  assert_equals $'find-generic-password -s fm-claude-token -a worker -w\nfind-generic-password -s fm-claude-token -a worker -w' \
+    "$(cat "$dir/security-argv")" "relaunch should recheck the recorded entry's Keychain item before stopping and launching"
+  assert_contains "$(cat "$dir/fake/literal")" "$dir/home/config/$source_name" \
+    "the replacement launch should carry only the source declaration path"
+  assert_not_contains "$(cat "$dir/fake/literal")" 'fm-synthetic-oauth-token' \
+    "the synthetic token must not appear in relaunch output or arguments"
+  pass "fm-control relaunch: the recorded Claude pool entry reuses its Keychain source"
 }
 
 test_account_list_relaunch_moves_only_on_explicit_account() {
@@ -3226,6 +3262,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_account_list_relaunch_reuses_the_recorded_account
+test_account_list_relaunch_uses_recorded_entry_keychain_source
 test_account_list_relaunch_moves_only_on_explicit_account
 test_account_list_relaunch_refusals_happen_before_stop
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
