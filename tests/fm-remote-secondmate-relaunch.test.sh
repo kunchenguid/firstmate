@@ -71,10 +71,27 @@ IFS=$'\t' read -r cmd action id harness model effort <<EOF
 $command_fields
 EOF
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
+if [ "$action" = state ]; then
+  printf 'probe diagnostic\nalive\n'
+  exit 0
+fi
 [ "$action" = relaunch ] || exit 94
 case "$FM_FAKE_RELAUNCH_MODE" in
   refuse)
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
+    exit 1
+    ;;
+  refuse-preflight)
+    printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
+    printf 'relaunch_refused_before_control=%s\n' "$id"
+    exit 1
+    ;;
+  uncertain)
+    printf 'error: remote connection lost\n' >&2
+    exit 255
+    ;;
+  foreign-refusal)
+    printf 'relaunch_refused_before_control=another-task\n'
     exit 1
     ;;
   confirm-other)
@@ -189,4 +206,154 @@ fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
+for unpinned_model in - default; do
+  reset_meta
+  printf 'max=1\nmodel-pattern=.*\n' > "$HOME_DIR/config/sol-cap"
+  sed 's|^model=.*|model=default|' "$HOME_DIR/state/ios.meta" > "$TMP/unpinned.meta"
+  mv "$TMP/unpinned.meta" "$HOME_DIR/state/ios.meta"
+  printf 'occupied\tgpt-6.1-sol\t1\t%s\n' "$$" > "$HOME_DIR/state/sol-sessions.tsv"
+  OUT=$(run_relaunch ios codex gpt-6.1-sol default); RC=$?
+  expect_code 1 "$RC" "an explicitly pinned switch must respect the full ceiling"
+  OUT=$(run_relaunch ios codex "$unpinned_model" default); RC=$?
+  expect_code 0 "$RC" "an unpinned switch must bypass the full ceiling: $OUT"
+  assert_grep 'model=default' "$HOME_DIR/state/ios.meta" \
+    "the unpinned switch must publish the confirmed model"
+  assert_equals 1 "$(wc -l < "$HOME_DIR/state/sol-sessions.tsv" | tr -d ' ')" \
+    "an unpinned switch must not create occupancy"
+done
+pass "both unpinned model spellings bypass a full model-pattern ceiling"
+
 echo "ALL TESTS PASSED"
+
+reset_meta
+printf 'max=4\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
+for i in 1 2 3 4; do printf 'live-%s\tgpt-6.1-sol\t1\t%s\n' "$i" "$$"; done > "$HOME_DIR/state/sol-sessions.tsv"
+printf 'ios\tgpt-6.1-sol\t1\t99999999\n' >> "$HOME_DIR/state/sol-sessions.tsv"
+OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+expect_code 1 "$RC" "a runtime switch bypassed the full parent ceiling"
+awk -F'\t' '$1 != "live-4"' "$HOME_DIR/state/sol-sessions.tsv" > "$TMP/registry"
+mv "$TMP/registry" "$HOME_DIR/state/sol-sessions.tsv"
+OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+expect_code 0 "$RC" "an admitted Sol runtime switch failed: $OUT"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "remote switch did not preserve occupancy"
+OUT=$(FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim fifth ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state"); RC=$?
+expect_code 1 "$RC" "stale-row replacement left the switched worker uncounted"
+OUT=$(run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+expect_code 0 "$RC" "an existing live reservation could not be reused: $OUT"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "reused occupancy was not preserved before delivery"
+OUT=$(FM_FAKE_RELAUNCH_MODE=refuse run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 1 "$RC" "refused remote replacement unexpectedly succeeded"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "failed runtime switch released occupancy"
+# The same refusal over the UNCAPPED worker that held no row: this switch
+# created the reservation, so a confirmed pre-control refusal must release it
+# rather than block every later capped dispatch. A failure whose phase the
+# host does not prove, and a proof naming another task, keep it.
+for refusal_mode in refuse-preflight refuse uncertain foreign-refusal; do
+  reset_meta
+  printf 'max=1\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
+  : > "$HOME_DIR/state/sol-sessions.tsv"
+  cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-capped-refusal.meta"
+  OUT=$(FM_FAKE_RELAUNCH_MODE="$refusal_mode" run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+  [ "$RC" -ne 0 ] || fail "a failed uncapped-to-capped switch unexpectedly succeeded: $OUT"
+  cmp -s "$TMP/ios-before-capped-refusal.meta" "$HOME_DIR/state/ios.meta" \
+    || fail "a failed uncapped-to-capped switch changed the original worker's route"
+  if [ "$refusal_mode" = refuse-preflight ]; then
+    assert_equals '' "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" \
+      "a confirmed pre-control refusal leaked the reservation the switch created"
+    expected_admission=0
+  else
+    assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" \
+      "a delivery that may have started a replacement released its reservation ($refusal_mode)"
+    expected_admission=1
+  fi
+  OUT=$(FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim next ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state"); RC=$?
+  expect_code "$expected_admission" "$RC" "wrong capacity after $refusal_mode: $OUT"
+done
+pass "only a confirmed pre-control refusal releases the reservation a switch created"
+REAL_MV=$(command -v mv)
+export REAL_MV
+cat > "$FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [[ "$last" = */ios.meta ]]; then
+  [ "${FM_TEST_PUBLISH_FAIL:-0}" = 0 ] || exit 1
+  if [ -n "${FM_TEST_PUBLISH_PAUSE:-}" ]; then
+    touch "$FM_TEST_PUBLISH_PAUSE.ready"
+    while [ ! -e "$FM_TEST_PUBLISH_PAUSE.release" ]; do sleep 0.02; done
+  fi
+fi
+exec "$REAL_MV" "$@"
+SH
+chmod +x "$FAKEBIN/mv"
+OUT=$(PATH="$FAKEBIN:$PATH" FM_TEST_PUBLISH_FAIL=1 run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 1 "$RC" "failed metadata publication unexpectedly succeeded"
+assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "publication failure released occupancy"
+PATH="$FAKEBIN:$PATH" FM_TEST_PUBLISH_PAUSE="$TMP/publication" run_relaunch ios claude claude-opus-5-5 medium > "$TMP/switch.out" &
+switch_pid=$!
+for ((i=0; i<200; i++)); do
+  [ ! -e "$TMP/publication.ready" ] || break
+  sleep 0.02
+done
+[ -e "$TMP/publication.ready" ] || fail "model publication did not reach the barrier"
+(
+  FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim concurrent ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state" > "$TMP/admission.out"
+  printf '%s\n' "$?" > "$TMP/admission.done"
+) &
+admission_pid=$!
+sleep 0.1
+[ ! -e "$TMP/admission.done" ] || fail "admission crossed the model-publication boundary"
+touch "$TMP/publication.release"
+wait "$switch_pid"; RC=$?
+OUT=$(cat "$TMP/switch.out")
+expect_code 0 "$RC" "reverse runtime switch failed: $OUT"
+wait "$admission_pid"
+assert_equals 0 "$(cat "$TMP/admission.done")" "post-publication admission restored stale Sol occupancy"
+assert_equals '' "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "confirmed non-Sol replacement retained occupancy"
+pass "remote runtime switches enforce parent admission and retain uncertain occupancy"
+
+cat > "$FAKEBIN/rex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --autostart=false ]; then
+  echo 'error: could not connect to the rex server' >&2
+  exit 4
+fi
+if [ "${1:-}" = whoami ]; then
+  if [ "$FM_TEST_REX_MODE" = foreign ]; then
+    printf '{"endpoint":"unix:///other.sock"}\n'
+  else
+    printf '{"endpoint":"unix:///recorded.sock"}\n'
+  fi
+  exit 0
+fi
+if [ "$FM_TEST_REX_MODE" = gone ]; then
+  echo 'error: block not found' >&2
+  exit 3
+fi
+echo 'error: could not connect to the rex server' >&2
+exit 4
+SH
+chmod +x "$FAKEBIN/rex"
+for entry in relaunch standalone; do
+  for rex_mode in unknown foreign gone; do
+    reset_meta
+    printf 'max=1\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
+    fm_write_meta "$HOME_DIR/state/stopped-rex.meta" "backend=rex" \
+      "window=aaaaaaaa:bbbbbbbb" "rex_server=unix:///recorded.sock" "model=gpt-6.1-sol"
+    printf 'stopped-rex\tgpt-6.1-sol\t1\t-2\n' > "$HOME_DIR/state/sol-sessions.tsv"
+    if [ "$entry" = relaunch ]; then
+      OUT=$(REX_BIN_DIR="$FAKEBIN" FM_TEST_REX_MODE="$rex_mode" run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+    else
+      OUT=$(FM_HOME="$HOME_DIR" REX_BIN_DIR="$FAKEBIN" FM_TEST_REX_MODE="$rex_mode" \
+        bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim fresh ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state"); RC=$?
+    fi
+    if [ "$rex_mode" = gone ]; then
+      expect_code 0 "$RC" "$entry did not recover stopped Rex capacity: $OUT"
+      assert_equals -1 "$(awk -F '\t' '$1 == "stopped-rex" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "$entry forgot the Rex stop proof"
+    else
+      expect_code 1 "$RC" "$entry admitted against unproven Rex absence: $OUT"
+      assert_equals -2 "$(awk -F '\t' '$1 == "stopped-rex" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "$entry released unproven Rex occupancy"
+    fi
+  done
+  rm -f "$HOME_DIR/state/stopped-rex.meta"
+done
+pass "remote relaunch and standalone admission recover only proven Rex absence"

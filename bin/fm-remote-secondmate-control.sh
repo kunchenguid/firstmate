@@ -48,6 +48,10 @@
 # invoked it directly (rather than through bin/fm-remote-secondmate-relaunch.sh,
 # which reads this block to keep the parent's own record in sync) still gets
 # the confirmed identity.
+# A relaunch refused before this host invokes fm-control prints
+# relaunch_refused_before_control=<id>. The parent releases the reservation the
+# switch created only on that proof, because a failure at or after the control
+# call may have left a replacement running.
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the
@@ -71,6 +75,15 @@ export FM_BACKEND_REX_NO_AUTOSTART=1
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
+
+# The pre-control refusal proof a relaunch prints on its way out: the caller
+# reads it to tell a refusal that started nothing from a delivery that may have
+# left a replacement running. Empty means the window is closed.
+RELAUNCH_PREFLIGHT_ID=
+relaunch_refusal_proof() {
+  [ -z "$RELAUNCH_PREFLIGHT_ID" ] ||
+    printf 'relaunch_refused_before_control=%s\n' "$RELAUNCH_PREFLIGHT_ID"
+}
 
 # Sourcing fm-wake-lib.sh through the libraries below creates "$FM_HOME/state",
 # so recognize an already-retired home before loading them rather than
@@ -338,6 +351,11 @@ cmd_relaunch() {
   local -a control_args relaunch_env
 
   validate_id "$id"
+  # Arm the refusal proof for this verb's pre-control window, and only for it.
+  # Every exit from here to the disarm below proves fm-control never ran, so no
+  # worker on this host was started, stopped, or replaced.
+  RELAUNCH_PREFLIGHT_ID=$id
+  trap relaunch_refusal_proof EXIT
   validate_home "$id"
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
@@ -356,6 +374,10 @@ cmd_relaunch() {
   # in its backend's dedicated session placement, and the parent already owns
   # both convergence legs, so the host-local spawn must not re-sync or
   # re-inherit against this host's own Firstmate copy.
+  # The refusal proof ends here: from the control call on, a failure may have
+  # left a replacement running, so the parent must keep its reservation.
+  RELAUNCH_PREFLIGHT_ID=
+  trap - EXIT
   relaunch_env=(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT"
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA"
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1

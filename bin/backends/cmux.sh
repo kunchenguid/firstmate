@@ -599,9 +599,6 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
   done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
 }
 
-# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
-# every other backend's `kill` `|| true` contract). A cmux task owns one
-# workspace, so teardown reclaims that workspace and all of its surfaces.
 #
 # The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
 # workspace in a window"): cmux keeps every window at >=1 workspace, so
@@ -615,6 +612,33 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # target is the last one in its window a throwaway sibling is created first,
 # leaving that window a fresh default workspace (never an fm-<home>- title, so
 # recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
+# fm_backend_cmux_workspace_absent: prove that the named workspace is gone.
+# Every window's inventory is read, and every workspace in it must be a
+# different workspace with a different title. A read that cannot run, or an
+# inventory that still names the workspace, is not proof of absence.
+fm_backend_cmux_workspace_absent() {
+  local wsid=$1 label=${2:-} inventory title='' windows window_ids wid
+  [ -z "$label" ] || title=$(fm_backend_cmux_scoped_title "$label")
+  windows=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 1
+  window_ids=$(printf '%s' "$windows" | jq -er '
+    if type == "array" and all(.[]; (.id | type == "string") and (.id | length > 0) and (.id | contains("\n") | not))
+    then map(.id) | join("\n") else error("invalid window inventory") end
+  ' 2>/dev/null) || return 1
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    inventory=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || return 1
+    printf '%s' "$inventory" | jq -e --arg id "$wsid" --arg title "$title" '
+      type == "object" and (.workspaces | type == "array")
+      and all(.workspaces[]; (.id | type == "string") and (.title | type == "string"))
+      and all(.workspaces[]; .id != $id and ($title == "" or .title != $title))
+    ' >/dev/null 2>&1 || return 1
+  done <<< "$window_ids"
+  return 0
+}
+
+# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
+# every other backend's `kill` `|| true` contract). A cmux task owns one
+# workspace, so teardown reclaims that workspace and all of its surfaces.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
   local expected_label=${3:-} wsid wininfo win count
   if [ -n "$expected_label" ]; then
@@ -630,6 +654,37 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
     fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
   fi
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+}
+
+# fm_backend_cmux_kill_confirmed: close the task's workspace and report
+# whether the workspace is gone. Only the capped-session release decision
+# uses this, so ordinary teardown keeps fm_backend_cmux_kill's best-effort
+# contract unchanged for every other task. The close and the absence proof
+# are the reviewed cmux sequence: a workspace whose window cannot be resolved
+# is not closed, and every window's inventory must prove the workspace gone.
+fm_backend_cmux_kill_confirmed() {  # <target> [unused] [expected-label]
+  local expected_label=${3:-} wsid wininfo win count
+  fm_backend_cmux_parse_target "$1" || return 1
+  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  if [ -n "$expected_label" ]; then
+    if ! fm_backend_cmux_target_ready "$1" "$expected_label"; then
+      fm_backend_cmux_workspace_absent "$wsid" "$expected_label"
+      return $?
+    fi
+    wsid=$FM_BACKEND_CMUX_WORKSPACE
+  fi
+  wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
+  if [ -z "$wininfo" ]; then
+    fm_backend_cmux_workspace_absent "$wsid" "$expected_label"
+    return $?
+  fi
+  win=${wininfo%% *}
+  count=${wininfo##* }
+  if [ -n "$win" ] && [ "$count" = 1 ]; then
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || return 1
+  fi
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+  fm_backend_cmux_workspace_absent "$wsid" "$expected_label"
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace
