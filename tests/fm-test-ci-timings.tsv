@@ -335,6 +335,7 @@ tests/fm-wake-queue.test.sh	217334
 tests/fm-warm-compact-herdr-live-e2e.test.sh	253
 tests/fm-warm-compact.test.sh	562
 tests/fm-watch-arm.test.sh	313703
+tests/fm-watch-beacon-progress.test.sh	45000
 tests/fm-watch-checkpoint.test.sh	25895
 tests/fm-watch-inbox-meta.test.sh	516
 tests/fm-watch-open-decisions.test.sh	16297
