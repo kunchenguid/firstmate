@@ -51,8 +51,10 @@
 # a new lifecycle. A task already closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
 # `complete` and `verify` check. Repeating `hold --origin` on a still-active
-# captain hold adds that origin beside the ones the call records, so one call
-# found by several reviews serves each of them; a new lifecycle replaces them.
+# captain hold only adds that origin beside the ones the call records, so one
+# call found by several reviews serves each of them: the recorded reason,
+# `--until` date, hold-set stamp, and parent decision stay as they are, and the
+# new `--reason` and `--until` are ignored. A new lifecycle replaces the origins.
 # The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
 # readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
@@ -856,6 +858,14 @@ body_hold_origins() {  # <decoded-task-body>; prints one origin per line
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | awk 'NF && !seen[$0]++'
 }
 
+# Only a call still held for the captain right now can take another origin; an
+# expired deferral or a lifted hold is re-held as a new lifecycle instead.
+is_active_captain_hold() {  # <shown-task>
+  [ "$(show_field "$1" state)" != "done" ] \
+    && [ "$(show_field_value "$1" hold_kind)" = captain ] \
+    && [ "$(show_field_value "$1" held)" = yes ]
+}
+
 task_identity() {
   local id=$1
   if task_show "$id"; then
@@ -1054,7 +1064,7 @@ archived_entry() {  # <origin-or-empty> <entry>; prints the archived id
 # origin was recorded, so completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
   local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id resolve_err archived archived_status
-  local stored_origin matched held_for
+  local stored_origin matched held_for active_hint
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
@@ -1087,6 +1097,10 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   id=${resolved%% *}
   how=${resolved##* }
   verify_hold_durable "$id"
+  active_hint=''
+  if is_active_captain_hold "$TASK_SHOW_OUTPUT"; then
+    active_hint=", add $origin to this active hold with hold --origin"
+  fi
   id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
   validate_slug backend-task-id "$id"
   stored=$(body_hold_origins "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
@@ -1107,7 +1121,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
         case "$stored" in
           *$'\n'*) held_for="origins $(printf '%s\n' "$stored" | paste -sd, - | sed 's/,/, /g')" ;;
         esac
-        fail "captain-held task $id was held for $held_for, not $origin; hold a task for $origin, add $origin to this active hold with hold --origin, or list the right one"
+        fail "captain-held task $id was held for $held_for, not $origin; hold a task for $origin$active_hint, or list the right one"
       fi
     fi
     origin_state=recorded
@@ -1117,7 +1131,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local preserve_hold_set=0 stored_reason original_body='' hold_status=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1156,9 +1170,7 @@ command_hold() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
-    existing_hold_kind=$(show_field_value "$show" hold_kind)
-    existing_held=$(show_field_value "$show" held)
-    if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
+    if is_active_captain_hold "$show"; then
       preserve_hold_set=1
     fi
     if [ -n "$title" ]; then
@@ -1196,6 +1208,11 @@ command_hold() {
     origin=$(task_identity "$origin") || exit $?
   fi
   task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
+  if [ "$preserve_hold_set" = 1 ] && [ -n "$origin" ]; then
+    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 1 || exit $?
+    printf '%s\n' "$id"
+    return 0
+  fi
   original_body=$(show_field "$show" body)
   write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
@@ -1223,7 +1240,7 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
   if [ -n "$origin" ]; then
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" "$preserve_hold_set" || exit $?
+    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" 0 || exit $?
   fi
   printf '%s\n' "$id"
 }
