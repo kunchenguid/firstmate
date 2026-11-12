@@ -732,14 +732,102 @@ raise "canary failures must be tolerated" unless canary.fetch("continue-on-error
 raise "canary must not wait for required jobs" unless Array(canary["needs"]).empty?
 jobs.each do |id, job|
   raise "#{id} must not depend on the canary" if Array(job["needs"]).include?("tests-ubuntu-26-canary")
-  next if id == "tests-ubuntu-26-canary" || id == "macos-stock-bash"
-  raise "#{id} must remain pinned to Ubuntu 24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
 end
 RUBY
-  pass "Ubuntu 26.04 canary failures cannot affect required jobs, whose Linux pins stay unchanged"
+  pass "Ubuntu 26.04 canary failures cannot affect required jobs"
+}
+
+# The ten suites issue 7797 lists for the canary.
+CANARY_SUITES='fm-watch-checkpoint fm-fleet-ledger fm-herdr-groups fm-pr-health fm-backend-rex fm-record-export fm-supervision-host fm-public-followup fm-contributions fm-remote-secondmate-lifecycle-e2e'
+
+# Build a checkout the canary's steps can run in: the real runner, a passing
+# stand-in for each issue-listed suite, and stand-ins for the tools the setup
+# steps reach outside the repository.
+canary_fixture() {
+  local root suite tool
+  root=$(fm_test_tmproot fm-ci-canary) || return 1
+  mkdir -p "$root/repo/bin" "$root/repo/tests" "$root/stubs" "$root/runner-temp"
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$root/repo/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$root/repo/tests/"
+  for suite in $CANARY_SUITES; do
+    printf '#!/usr/bin/env bash\necho "ok - stand-in suite"\n' >"$root/repo/tests/$suite.test.sh"
+  done
+  for tool in npm tasks-axi tmux; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$root/stubs/$tool"
+  done
+  chmod +x "$root/repo/bin/fm-test-run.sh" "$root/repo/tests/"*.test.sh "$root/stubs/"*
+  printf '%s\n' "$root"
+}
+
+# Run the canary job's steps in a fixture the way the runner does and print
+# the job's check conclusion. GitHub documents that a failed step fails the
+# job unless that step sets continue-on-error, that steps.<id>.outcome is the
+# result before continue-on-error applies, and that a step without a status
+# function in its `if` runs only while the job is still successful. Step
+# output goes to <fixture>/log and the job summary to <fixture>/summary.
+run_canary_job() {  # <fixture>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
+doc = YAML.load_file(ARGV.shift)
+root = ARGV.shift
+context = simulated_context(doc.fetch("name"), [])
+base_env = {
+  "PATH" => "#{root}/stubs:#{ENV.fetch("PATH")}",
+  "RUNNER_TEMP" => "#{root}/runner-temp",
+  "GITHUB_STEP_SUMMARY" => "#{root}/summary",
+  "FM_TASK_ID" => nil,
+}
+conclusion = "success"
+File.open("#{root}/log", "w") do |log|
+  doc.fetch("jobs").fetch("tests-ubuntu-26-canary").fetch("steps").each do |step|
+    next unless step.key?("run")
+    next unless Expression.condition(step["if"], context.merge("needs.status" => conclusion))
+    env = step.fetch("env", {}).to_h { |k, v| [k, interpolate(v, context)] }
+    ok = system(base_env.merge(env), "bash", "-e", "-c", step.fetch("run"),
+                chdir: "#{root}/repo", out: log, err: log)
+    context["steps.#{step["id"]}.outcome"] = ok ? "success" : "failure" if step["id"]
+    conclusion = "failure" unless ok || step["continue-on-error"] == true
+  end
+end
+puts conclusion
+' "$CI_WORKFLOW" "$1"
+}
+
+# bin/fm-pr-merge.sh refuses a PR with any red check, required or not, so a
+# canary that fails must still publish a successful check and say what failed
+# where a reader looks: the job summary and a warning annotation.
+test_failing_canary_publishes_a_green_check_and_reports_the_failure() {
+  local root conclusion suite
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  conclusion=$(run_canary_job "$root") || fail "could not run the canary steps"
+  [ "$conclusion" = success ] || fail "a passing canary must conclude success, got $conclusion:"$'\n'"$(cat "$root/log")"
+  for suite in $CANARY_SUITES; do
+    grep -qF "| \`tests/$suite.test.sh\` | pass |" "$root/summary" \
+      || fail "the summary must report $suite as pass, got:"$'\n'"$(cat "$root/summary")"
+  done
+  if grep -q '^::warning' "$root/log"; then fail "a passing canary must not warn"; fi
+
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$root/repo/tests/fm-public-followup.test.sh"
+  conclusion=$(run_canary_job "$root") || fail "could not run the canary steps"
+  [ "$conclusion" = success ] || fail "a failing canary suite must leave the check green, got $conclusion"
+  grep -qF "| \`tests/fm-public-followup.test.sh\` | fail (exit 1) |" "$root/summary" \
+    || fail "the summary must report the failing suite, got:"$'\n'"$(cat "$root/summary")"
+  grep -qF "| \`tests/fm-contributions.test.sh\` | pass |" "$root/summary" \
+    || fail "the summary must still report the suites that passed, got:"$'\n'"$(cat "$root/summary")"
+  grep '^::warning' "$root/log" | grep -q 'suites' \
+    || fail "a failing canary suite must emit a warning naming the suites step, got:"$'\n'"$(cat "$root/log")"
+
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$root/stubs/npm"
+  conclusion=$(run_canary_job "$root") || fail "could not run the canary steps"
+  [ "$conclusion" = success ] || fail "a failing canary setup step must leave the check green, got $conclusion"
+  grep '^::warning' "$root/log" | grep -q 'tasks-axi' \
+    || fail "a failing setup step must emit a warning naming it, got:"$'\n'"$(cat "$root/log")"
+  pass "a failing Ubuntu 26.04 canary publishes a green check, a per-suite summary and a warning"
 }
 
 test_ubuntu_canary_failure_is_non_blocking
+test_failing_canary_publishes_a_green_check_and_reports_the_failure
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other

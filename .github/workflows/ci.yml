@@ -276,6 +276,10 @@ jobs:
 
   # Keep this independent of full-ci and required verdicts so outside PRs
   # expose new runner-image regressions without blocking their merge.
+  # Job-level continue-on-error only keeps the workflow run green: the job's
+  # own check would still be red, and bin/fm-pr-merge.sh refuses any red
+  # check. So every step tolerates its own failure and the last step reports
+  # the real result in the job summary and a warning annotation.
   tests-ubuntu-26-canary:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Ubuntu 26.04 canary
     runs-on: ubuntu-26.04
@@ -286,10 +290,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Print coreutils versions
+        id: versions
+        continue-on-error: true
         run: |
           timeout --version
           sleep --version
       - name: Require portable test prerequisites
+        id: prerequisites
+        continue-on-error: true
         run: |
           set -eu
           command -v jq
@@ -297,13 +305,18 @@ jobs:
           command -v tmux
           tmux -V
       - name: Install tasks-axi
+        id: tasks_axi
+        continue-on-error: true
         run: |
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run Ubuntu 26.04 regression canary
+        id: suites
+        continue-on-error: true
         run: |
-          nice -n 10 bin/fm-test-run.sh --jobs 1 --per-script-timeout-secs 1500 \
+          bin/fm-test-run.sh --jobs 1 --per-script-timeout-secs 1500 \
+            --json "$RUNNER_TEMP/fm-test/ubuntu-26-canary.json" \
             tests/fm-watch-checkpoint.test.sh \
             tests/fm-fleet-ledger.test.sh \
             tests/fm-herdr-groups.test.sh \
@@ -314,6 +327,30 @@ jobs:
             tests/fm-public-followup.test.sh \
             tests/fm-contributions.test.sh \
             tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+      - name: Report canary result
+        env:
+          STEP_OUTCOMES: versions=${{ steps.versions.outcome }} prerequisites=${{ steps.prerequisites.outcome }} tasks-axi=${{ steps.tasks_axi.outcome }} suites=${{ steps.suites.outcome }}
+        run: |
+          failed=
+          for outcome in $STEP_OUTCOMES; do
+            case $outcome in
+              *=success) ;;
+              *) failed="$failed ${outcome%%=*}" ;;
+            esac
+          done
+          {
+            echo '### Ubuntu 26.04 canary'
+            echo
+            echo "Step outcomes: $STEP_OUTCOMES"
+            echo
+            echo '| Suite | Result |'
+            echo '|---|---|'
+            # jq or the results file may be what this image is missing.
+            jq -r '.scripts[] | "| `\(.path)` | \(if .exit != 0 then "fail (exit \(.exit))" elif .gate_skip then "skipped: \(.gate_skip_reason)" else "pass" end) |"' \
+              "$RUNNER_TEMP/fm-test/ubuntu-26-canary.json" \
+              || echo '| no per-suite results | unknown |'
+          } >>"$GITHUB_STEP_SUMMARY"
+          [ -z "$failed" ] || echo "::warning title=Ubuntu 26.04 canary failed::Failed steps:$failed. The job summary lists each suite. This check stays green so the canary never blocks a merge."
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
   # hard-fail on "skip: herdr not found". Starts on Linux x86_64; if a genuine
