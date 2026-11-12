@@ -5576,12 +5576,27 @@ spawn_lease_herdr_slot() {
 # treehouse subshell's foreground cwd is not enough to keep a later pane restart
 # out of the primary checkout. The same explicit cd gives every backend one
 # launch boundary and makes a dropped or ignored cwd change a refusal.
+spawn_require_absolute_worktree() {
+  case "$WT" in
+    /*) ;;
+    *)
+      echo "error: task $ID's recorded worktree '$WT' is not an absolute path; refusing to send it to the endpoint as a cd target" >&2
+      exit 1
+      ;;
+  esac
+}
+
 spawn_enter_recorded_worktree() {
   [ "$KIND" = secondmate ] && return 0
   # T3 starts the agent in the leased worktree its thread launch bound;
   # there is no shell endpoint to receive a cd command.
   [ "$BACKEND" = t3code ] && return 0
-  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
+  # The bare cd (no `--`) is deliberate: an interactive cd wrapper such as
+  # Omarchy's zoxide `alias cd=zd` takes its plain-directory path only when $1
+  # is a directory, so `cd -- <path>` would leave the shell where it was. An
+  # absolute path can never parse as an option, so require one.
+  spawn_require_absolute_worktree
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")" || {
     echo "error: task $ID's endpoint could not be moved into its recorded worktree '$WT'; refusing to launch outside the copy holding its work" >&2
     exit 1
   }
@@ -6085,8 +6100,10 @@ elif [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
+    # Bare cd for the reason spawn_enter_recorded_worktree gives.
+    spawn_require_absolute_worktree
     relaunch_cd_path=${WT//\'/\'\\\'\'}
-    spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
+    spawn_send_text_line "$WT_TARGET" "cd '$relaunch_cd_path'" || {
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     }
