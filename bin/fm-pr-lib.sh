@@ -1293,7 +1293,7 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
-  # Consumed by bin/fm-teardown.sh pr_is_merged; empty when the forge omitted it.
+  # Consumed and validated by bin/fm-teardown.sh; empty when the forge omitted it.
   # shellcheck disable=SC2034
   FM_PR_RECORD_HEAD=$head
 }

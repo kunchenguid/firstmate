@@ -50,8 +50,7 @@
 # to a forge. When local refs do not show the work, refresh_remote_refs updates
 # them from each remote. Unpushed work has landed only when its PR is merged and
 # the forge reports a PR head that contains the current local work, or its
-# content is already present in the
-# up-to-date default branch. This recognizes the common squash-merge-then-delete-
+# content is already present in the up-to-date default branch. This recognizes the common squash-merge-then-delete-
 # branch flow, where the branch's own commits live nowhere on a remote yet the
 # change is fully in main. Local-only delivery retains its existing boundary where
 # publishing the branch to a remote is sufficient. A task whose meta records
