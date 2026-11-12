@@ -229,7 +229,29 @@ fm_backend_orca_remove_worktree() {  # <worktree-id>
   local worktree_id=${1:-}
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot remove worktree" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "id:$worktree_id" --force --json
+  local out err_code wt_path
+  out=$(orca worktree rm --worktree "id:$worktree_id" --force --json) || {
+    [ -z "$out" ] || printf '%s\n' "$out" | fm_backend_orca_json_ok >&2 || true
+    echo "error: orca worktree rm failed for $worktree_id" >&2
+    return 1
+  }
+  if printf '%s' "$out" | fm_backend_orca_json_ok 2>/dev/null; then
+    return 0
+  fi
+  # Orca no longer knows the worktree: already removed only if its recorded
+  # path (the id's "<repo-id>::<path>" suffix) is really gone from disk.
+  err_code=$(printf '%s' "$out" | node -e '
+let d; try { d = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch (e) { process.exit(0); }
+process.stdout.write(String((d && d.ok === false && d.error && d.error.code) || ""));
+' 2>/dev/null || true)
+  wt_path=${worktree_id#*::}
+  if [ "$err_code" = selector_not_found ] && [ "$wt_path" != "$worktree_id" ] && [ -n "$wt_path" ] && [ ! -e "$wt_path" ]; then
+    echo "note: Orca no longer knows worktree $worktree_id and $wt_path is gone; treating it as already removed" >&2
+    return 0
+  fi
+  printf '%s' "$out" | fm_backend_orca_json_ok >&2 || true
+  echo "error: orca worktree rm failed for $worktree_id${err_code:+ ($err_code)}" >&2
+  return 1
 }
 
 fm_backend_orca_worktree_path() {
