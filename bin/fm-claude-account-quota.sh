@@ -18,8 +18,12 @@
 # unmeasured with the vendor's own reason rather than as an unreadable root.
 #
 # A login kept in the macOS Keychain has no credential file, so its
-# --profile-only row is marked notSetUp. Only when some entry's row is, the
-# script makes one more read for every declared directory at once:
+# --profile-only row is marked notSetUp and the entry is reported unmeasured.
+# The optional, local, gitignored config/claude-accounts-keychain presence flag
+# opts a home into measuring such entries; without it nothing below runs and the
+# output is exactly the --profile-only readings. With it, and only when some
+# entry's row is notSetUp, the script makes one more read for every declared
+# directory at once:
 #   env -u CLAUDE_CONFIG_DIR -u CLAUDE_SECURESTORAGE_CONFIG_DIR \
 #     -u CLAUDE_CODE_OAUTH_TOKEN -u QUOTA_AXI_CLAUDE_SWAP -u QUOTA_AXI_SNAPSHOT \
 #     QUOTA_AXI_CLAUDE_PROFILES=<declared directories joined by ':'> \
@@ -31,15 +35,20 @@
 # is the unsuffixed `Claude Code-credentials` item (or, where quota-axi reports
 # no keychainService, the lane at ~/.claude); for a directory, the lane whose
 # path equals the entry and whose keychainService is not that default item.
+# When no declared directory can be listed, such as a list holding only
+# `ordinary`, the read drops QUOTA_AXI_CLAUDE_PROFILES and --full instead: with
+# every profile selector and token unset, the one profile quota-axi reads is the
+# default one, which is how `ordinary` launches, so `ordinary` takes that read's
+# single claude row.
 # An entry that no lane, or more than one lane, claims keeps its notSetUp row
 # plus an uncertainty line saying why, and is never answered from another lane
 # or the ambient account. A directory containing ':' cannot be listed and stays
-# unmeasured. Entries --profile-only already measured keep that reading.
-# The read never passes --allow-keychain-prompt, so it opens a Keychain item only
-# under the grant quota-axi recorded when the operator once approved that item
-# with `quota-axi --allow-keychain-prompt`; an item without that grant reports
-# quota-axi's own keychain-access reason instead of prompting. A lane served
-# stale from quota-axi's cache adds an uncertainty line saying so.
+# unmeasured with that reason. Entries --profile-only already measured keep that
+# reading. The read never passes --allow-keychain-prompt, so it opens a Keychain
+# item only under the grant quota-axi recorded when the operator once approved
+# that item with `quota-axi --allow-keychain-prompt`; an item without that grant
+# reports quota-axi's own keychain-access reason instead of prompting. A lane
+# served stale from quota-axi's cache adds an uncertainty line saying so.
 #
 # Each entry binds to its own snapshot's claude row and to the scopes that bound
 # --model: all_models/all_products plus model:<id> and product:<id> for the
@@ -142,11 +151,12 @@ done <<< "$LISTED"
 
 # An entry whose credential file is absent (quota-axi marks its row notSetUp)
 # may still be signed in through the macOS Keychain, which --profile-only never
-# opens. Such entries are bound from one Keychain-aware read of every declared
-# directory; the header owns the read and the binding rule.
+# opens. Under config/claude-accounts-keychain such entries are bound from one
+# Keychain-aware read; the header owns the read and the binding rule.
 JQ_NOT_SET_UP='def not_set_up:
   .snapshot and ([.snapshot.providers[]? | select(.provider == "claude")] | first | .notSetUp == true);'
-if [ -n "$(jq -r "$JQ_NOT_SET_UP"' select(not_set_up) | .account' "$WORK/accounts.jsonl")" ]; then
+if [ -e "$CONFIG/claude-accounts-keychain" ] &&
+  [ -n "$(jq -r "$JQ_NOT_SET_UP"' select(not_set_up) | .account' "$WORK/accounts.jsonl")" ]; then
   profiles=
   while IFS= read -r entry; do
     case "$entry" in
@@ -154,35 +164,40 @@ if [ -n "$(jq -r "$JQ_NOT_SET_UP"' select(not_set_up) | .account' "$WORK/account
       /*) profiles="${profiles:+$profiles:}$entry" ;;
     esac
   done <<< "$LISTED"
-  shared_error=
-  if [ -z "$profiles" ]; then
-    shared_error="no declared config directory to read beside the default profile"
+  if [ -n "$profiles" ]; then
+    mode=profiles
+    read_args=(QUOTA_AXI_CLAUDE_PROFILES="$profiles" quota-axi --provider claude --full --json --no-credential-refresh)
   else
-    fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT -u QUOTA_AXI_CLAUDE_SWAP \
-      -u CLAUDE_CONFIG_DIR -u CLAUDE_SECURESTORAGE_CONFIG_DIR -u CLAUDE_CODE_OAUTH_TOKEN \
-      QUOTA_AXI_CLAUDE_PROFILES="$profiles" \
-      quota-axi --provider claude --full --json --no-credential-refresh > "$WORK/shared.json" 2>/dev/null </dev/null
-    fm_quota_json_valid < "$WORK/shared.json" || shared_error="the Keychain-aware quota-axi read returned no valid snapshot"
+    mode=default
+    read_args=(quota-axi --provider claude --json --no-credential-refresh)
   fi
-  [ -z "$shared_error" ] || printf '{"providers": []}\n' > "$WORK/shared.json"
-  if ! jq -c --slurpfile shared "$WORK/shared.json" --arg error "$shared_error" --arg home "${HOME:-}" "$JQ_NOT_SET_UP"'
-    [$shared[0].providers[]? | select(.provider == "claude" and (.accountLocator | type) == "object"
-      and .accountLocator.kind == "config-dir")] as $lanes |
+  shared_error=
+  fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT -u QUOTA_AXI_CLAUDE_SWAP \
+    -u QUOTA_AXI_CLAUDE_PROFILES -u CLAUDE_CONFIG_DIR -u CLAUDE_SECURESTORAGE_CONFIG_DIR -u CLAUDE_CODE_OAUTH_TOKEN \
+    "${read_args[@]}" > "$WORK/shared.json" 2>/dev/null </dev/null
+  if ! fm_quota_json_valid < "$WORK/shared.json"; then
+    shared_error="the Keychain-aware quota-axi read returned no valid snapshot"
+    printf '{"providers": []}\n' > "$WORK/shared.json"
+  fi
+  if ! jq -c --slurpfile shared "$WORK/shared.json" --arg error "$shared_error" --arg mode "$mode" \
+    --arg home "${HOME:-}" "$JQ_NOT_SET_UP"'
+    [$shared[0].providers[]? | select(.provider == "claude")] as $rows |
+    [$rows[] | select((.accountLocator | type) == "object" and .accountLocator.kind == "config-dir")] as $lanes |
     ([$lanes[].accountLocator.keychainService | strings] | length > 0) as $keychains |
-    def claims($e):
-      if $e == "ordinary" then
-        if $keychains then .accountLocator.keychainService == "Claude Code-credentials"
-        else .accountLocator.path == ($home + "/.claude") end
-      else .accountLocator.path == $e and .accountLocator.keychainService != "Claude Code-credentials" end;
+    def claimed($e):
+      if $mode == "default" then (if $e == "ordinary" then $rows else [] end)
+      elif $e == "ordinary" then
+        [$lanes[] | select(if $keychains then .accountLocator.keychainService == "Claude Code-credentials"
+          else .accountLocator.path == ($home + "/.claude") end)]
+      else [$lanes[] | select(.accountLocator.path == $e and .accountLocator.keychainService != "Claude Code-credentials")] end;
     if not_set_up then
-      .account as $e | [$lanes[] | select(claims($e))] as $claimed |
-      if ($claimed | length) == 1 then .snapshot = {providers: $claimed}
-      else .unbound = (
-        if $error != "" then $error
-        elif ($e | contains(":")) then "a path containing : cannot be named in QUOTA_AXI_CLAUDE_PROFILES"
-        elif ($claimed | length) > 1 then "\($claimed | length) Keychain-aware lanes claim this account, so none is used"
-        else "no Keychain-aware lane is located at this account" end)
-      end
+      .account as $e | claimed($e) as $claimed |
+      if ($e | startswith("/")) and ($e | contains(":")) then
+        .unbound = "a path containing : cannot be named in QUOTA_AXI_CLAUDE_PROFILES"
+      elif $error != "" then .unbound = $error
+      elif ($claimed | length) == 1 then .snapshot = {providers: $claimed}
+      elif ($claimed | length) > 1 then .unbound = "\($claimed | length) Keychain-aware lanes claim this account, so none is used"
+      else .unbound = "no Keychain-aware lane is located at this account" end
     else . end
   ' "$WORK/accounts.jsonl" > "$WORK/bound.jsonl" || ! mv "$WORK/bound.jsonl" "$WORK/accounts.jsonl"; then
     die "cannot bind the Keychain-aware quota reading"

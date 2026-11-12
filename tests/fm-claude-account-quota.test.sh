@@ -5,10 +5,10 @@
 #
 # A fake quota-axi answers from <root>/quota.json, the way the real
 # --profile-only read answers from that root's own credential file, and logs
-# the root and arguments of every read. A read that sets
-# QUOTA_AXI_CLAUDE_PROFILES stands in for the Keychain-aware multi-profile read:
-# it answers from the case's synthetic shared.json, never a real Keychain or
-# token, and logs its environment and arguments to shared-reads.
+# the root and arguments of every read. Any other read stands in for the
+# Keychain-aware read that config/claude-accounts-keychain enables: it answers
+# from the case's synthetic shared.json, never a real Keychain or token, and
+# logs its environment and arguments to shared-reads.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -25,10 +25,11 @@ new_case() {
   mkdir -p "$HOME_DIR/config" "$FAKEBIN" "$CASE/user-home"
   cat > "$FAKEBIN/quota-axi" <<SH
 #!/usr/bin/env bash
-if [ -n "\${QUOTA_AXI_CLAUDE_PROFILES+set}" ]; then
+case " \$* " in *" --profile-only "*) profile_only=1 ;; *) profile_only= ;; esac
+if [ -z "\$profile_only" ]; then
   printf 'config=%s snapshot=%s token=%s securestorage=%s swap=%s profiles=%s args=%s\n' \
     "\${CLAUDE_CONFIG_DIR-unset}" "\${QUOTA_AXI_SNAPSHOT-unset}" "\${CLAUDE_CODE_OAUTH_TOKEN-unset}" \
-    "\${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}" "\${QUOTA_AXI_CLAUDE_SWAP-unset}" "\$QUOTA_AXI_CLAUDE_PROFILES" "\$*" >> '$CASE/shared-reads'
+    "\${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}" "\${QUOTA_AXI_CLAUDE_SWAP-unset}" "\${QUOTA_AXI_CLAUDE_PROFILES-unset}" "\$*" >> '$CASE/shared-reads'
   [ -f '$CASE/shared.json' ] || exit 1
   cat '$CASE/shared.json'
   exit 0
@@ -118,7 +119,12 @@ lane() {
         + (if $service == "-" then {} else {keychainService: $service} end))} end)'
 }
 
-# shared_read <lane-json>...: the multi-profile read's snapshot for this case.
+# keychain_opt_in: set this case's config/claude-accounts-keychain flag.
+keychain_opt_in() {
+  : > "$HOME_DIR/config/claude-accounts-keychain"
+}
+
+# shared_read <lane-json>...: the Keychain-aware read's snapshot for this case.
 shared_read() {
   printf '%s\n' "$@" | jq -s '{schemaVersion: 6, providers: .}' > "$CASE/shared.json"
 }
@@ -254,6 +260,7 @@ test_keychain_logins_are_bound_by_locator() {
     "$(lane profile:bbb "$CASE/second" "Claude Code-credentials-0b1c2d3e" 40 0.6)" \
     "$(lane profile:ccc "$CASE/elsewhere" "Claude Code-credentials-9f8e7d6c" 5 0.99)"
   printf 'ordinary\n%s\n' "$CASE/second" > "$HOME_DIR/config/claude-accounts"
+  keychain_opt_in
   out=$(run_tool_with_env CLAUDE_CONFIG_DIR="$CASE/ambient" CLAUDE_CODE_OAUTH_TOKEN=ambient-token \
     CLAUDE_SECURESTORAGE_CONFIG_DIR="$CASE/ambient" QUOTA_AXI_CLAUDE_SWAP=1); rc=$?
   expect_code 0 "$rc" "binding Keychain logins should succeed: $out"
@@ -280,6 +287,7 @@ test_file_readings_win_over_the_shared_read() {
     "$(lane profile:aaa "$CASE/filed" "Claude Code-credentials-11111111" 10 0.9)" \
     "$(lane profile:bbb "$CASE/keyed" "Claude Code-credentials-22222222" 40 0.6)"
   printf '%s\n%s\n' "$CASE/filed" "$CASE/keyed" > "$HOME_DIR/config/claude-accounts"
+  keychain_opt_in
   out=$(run_tool)
   assert_contains "$out" "row: $CASE/filed  root=$CASE/filed  scope=all_models  status=known  remaining=80%  spendPriority=0.3" \
     "an entry its credential file measured should keep that reading"
@@ -303,6 +311,7 @@ test_unbindable_entries_stay_unmeasured() {
     "$(lane profile:ccc "$CASE/twice" "Claude Code-credentials-44444444" 20 0.5)" \
     "$(lane profile:ddd - - 60 0.7)"
   printf 'ordinary\n%s\n%s\n%s\n' "$CASE/missing" "$CASE/twice" "$CASE/user-home/.claude-named" > "$HOME_DIR/config/claude-accounts"
+  keychain_opt_in
   out=$(run_tool)
   assert_contains "$out" "row: ordinary  root=$CASE/user-home/.claude  scope=all_models  status=known  remaining=90%" \
     "ordinary binds by the default Keychain item, wherever quota-axi locates it"
@@ -327,24 +336,61 @@ test_shared_read_failures_are_disclosed() {
   keychain_login "$CASE/keyed"
   keychain_login "$CASE/odd:dir"
   printf '%s\n%s\n' "$CASE/keyed" "$CASE/odd:dir" > "$HOME_DIR/config/claude-accounts"
+  keychain_opt_in
   out=$(run_tool)
   assert_contains "$out" "row: $CASE/keyed  root=$CASE/keyed  uncertainty: the Keychain-aware quota-axi read returned no valid snapshot" \
     "a failed shared read should be disclosed on each entry it was for"
+  assert_contains "$out" "row: $CASE/odd:dir  root=$CASE/odd:dir  uncertainty: a path containing : cannot be named in QUOTA_AXI_CLAUDE_PROFILES" \
+    "a directory containing : was never listed, so it keeps that reason even when the shared read fails"
+  assert_not_contains "$out" "row: $CASE/odd:dir  root=$CASE/odd:dir  uncertainty: the Keychain-aware" "an unlisted directory must not blame the shared read"
   assert_grep "profiles=$CASE/keyed args=" "$CASE/shared-reads" "a directory containing : cannot be listed in QUOTA_AXI_CLAUDE_PROFILES"
   shared_read "$(lane profile:aaa "$CASE/keyed" "Claude Code-credentials-55555555" 50 0.5)"
   out=$(run_tool)
   assert_contains "$out" "row: $CASE/odd:dir  root=$CASE/odd:dir  uncertainty: a path containing : cannot be named in QUOTA_AXI_CLAUDE_PROFILES" \
     "a directory containing : should say why it stays unmeasured"
   assert_contains "$out" "row: $CASE/keyed  root=$CASE/keyed  scope=all_models  status=known  remaining=50%" "the listable directory is still measured"
+  pass "a failed shared read is disclosed, and an unlistable directory keeps its own reason"
+}
 
+test_an_ordinary_only_list_reads_the_default_profile() {
+  local out
   new_case only-ordinary
   keychain_login "$CASE/user-home/.claude"
   printf 'ordinary\n' > "$HOME_DIR/config/claude-accounts"
+  keychain_opt_in
+  shared_read "$(lane default - - 65 0.4)"
+  out=$(run_tool_with_env QUOTA_AXI_CLAUDE_PROFILES="$CASE/ambient" CLAUDE_CONFIG_DIR="$CASE/ambient" CLAUDE_CODE_OAUTH_TOKEN=ambient-token)
+  assert_contains "$out" "row: ordinary  root=$CASE/user-home/.claude  scope=all_models  status=known  remaining=65%  spendPriority=0.4" \
+    "ordinary alone should take the single row of the default-profile read"
+  assert_not_contains "$out" "uncertainty" "ordinary alone should be measured"
+  assert_grep "config=unset snapshot=unset token=unset securestorage=unset swap=unset profiles=unset args=--provider claude --json --no-credential-refresh" \
+    "$CASE/shared-reads" "with no directory to list, the read should select only the default profile, with no ambient selector or token"
+  shared_read "$(lane default - - 65 0.4)" "$(lane other - - 10 0.9)"
   out=$(run_tool)
-  assert_contains "$out" "row: ordinary  root=$CASE/user-home/.claude  uncertainty: no declared config directory to read beside the default profile" \
-    "ordinary alone has no directory to list, so it stays unmeasured"
-  assert_absent "$CASE/shared-reads" "nothing should be read when no directory can be listed"
-  pass "a failed or impossible shared read leaves its entries unmeasured with the reason"
+  assert_contains "$out" "row: ordinary  root=$CASE/user-home/.claude  uncertainty: 2 Keychain-aware lanes claim this account, so none is used" \
+    "a default-profile read with more than one row should stay unmeasured"
+  assert_not_contains "$out" "remaining=10%" "an unexpected second row must not answer for ordinary"
+  pass "a list with only ordinary is measured from a read of the default profile alone"
+}
+
+test_without_the_opt_in_keychain_logins_stay_unmeasured() {
+  local out
+  new_case opt-out
+  keychain_login "$CASE/user-home/.claude"
+  keychain_login "$CASE/second"
+  shared_read \
+    "$(lane profile:aaa "$CASE/user-home/.claude" "Claude Code-credentials" 70 0.2)" \
+    "$(lane profile:bbb "$CASE/second" "Claude Code-credentials-0b1c2d3e" 40 0.6)"
+  printf 'ordinary\n%s\n' "$CASE/second" > "$HOME_DIR/config/claude-accounts"
+  out=$(run_tool)
+  assert_equals "claude-account-quota:
+  row: ordinary  root=$CASE/user-home/.claude  uncertainty: quota unknown (unavailable: Claude profile credentials missing)
+  row: ordinary  root=$CASE/user-home/.claude  uncertainty: no applicable quota scope
+  row: $CASE/second  root=$CASE/second  uncertainty: quota unknown (unavailable: Claude profile credentials missing)
+  row: $CASE/second  root=$CASE/second  uncertainty: no applicable quota scope" "$out" \
+    "without config/claude-accounts-keychain the output should be the profile-only readings alone"
+  assert_absent "$CASE/shared-reads" "without config/claude-accounts-keychain no Keychain-aware read may run"
+  pass "without the opt-in flag, Keychain logins stay unmeasured and no Keychain-aware read runs"
 }
 
 test_shared_lane_facts_are_disclosed() {
@@ -361,6 +407,7 @@ test_shared_lane_facts_are_disclosed() {
       state: {status: "unavailable", stale: false, error: "Claude Keychain access required"},
       quotaSemantics: {status: "unknown", effectiveAvailability: []}}')"
   printf 'ordinary\n%s\n%s\n' "$CASE/stale" "$CASE/ungranted" > "$HOME_DIR/config/claude-accounts"
+  keychain_opt_in
   out=$(run_tool)
   assert_contains "$out" "row: ordinary  root=$CASE/user-home/.claude  scope=all_models  status=known  remaining=70%" \
     "without keychainService, ordinary binds to the lane at ~/.claude"
@@ -385,6 +432,8 @@ test_keychain_logins_are_bound_by_locator
 test_file_readings_win_over_the_shared_read
 test_unbindable_entries_stay_unmeasured
 test_shared_read_failures_are_disclosed
+test_an_ordinary_only_list_reads_the_default_profile
+test_without_the_opt_in_keychain_logins_stay_unmeasured
 test_shared_lane_facts_are_disclosed
 
 echo "# all fm-claude-account-quota tests passed"
