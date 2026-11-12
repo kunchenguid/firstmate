@@ -94,7 +94,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
+  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.80.0 (fake) 2026-06-27T00:02:18Z}"
   exit 0
 fi
 exit 0
@@ -409,15 +409,15 @@ test_no_mistakes_min_version() {
       missing)
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
       outdated)
-        expect="OUTDATED: no-mistakes (installed: $installed; requires 1.46.0; upgrade: no-mistakes update)"
+        expect="OUTDATED: no-mistakes (installed: $installed; requires 1.80.0; upgrade: no-mistakes update)"
         [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^empty^
-newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^empty^
+minimum no-mistakes version is accepted^no-mistakes version v1.80.0 (fake)^empty^
+newer no-mistakes minor is accepted^no-mistakes version v1.81.0 (fake)^empty^
 newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty^
 absent no-mistakes reports a missing tool^absent^missing^
-older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^outdated^1.45.4
+older no-mistakes patch reports an upgrade^no-mistakes version v1.79.4 (fake)^outdated^1.79.4
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^outdated^unparseable
 ROWS
   pass "bootstrap separates an absent no-mistakes from one below its version floor"
