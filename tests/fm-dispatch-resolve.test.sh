@@ -1840,6 +1840,54 @@ reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a schema 6 row without accountKey is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "keyless schema 6 row is named as an invalid snapshot"
+
+# A merged account row lists every credential key it covers in accountKeys;
+# here the only codex row covers the Pi openai-codex lane by alias alone.
+SCHEMA6_COVERED="$TMP_ROOT/schema6-covered.json"
+jq '
+  (.providers[] | select(.accountKey == "openai-codex-work")) as $account |
+  .providers |= map(select(.provider != "codex")) |
+  .providers += [($account | .accountKey = "codex-home" | .accountKeys = ["codex-home", "openai-codex"] |
+    .quotaSemantics.effectiveAvailability |= map(
+      .effectivePercentRemaining = 80 | .runway.status = "through_reset" | .selection.spendPriority = 0.8))]
+' "$SCHEMA6" > "$SCHEMA6_COVERED"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_COVERED" run code out err "$BRIEF"
+expect_code 0 "$code" "covered-key schema 6 snapshot exits 0"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "a Pi lane binds to the row whose accountKeys covers its key"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "native Codex still binds to its own accountKey"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=codex  -> eligible, unranked: provider codex has no quota row for account openai-codex-work: disclosed uncertainty' "an uncovered key with no default row stays unmeasured"
+
+# Two rows matching one key conflict: the candidate stays unmeasured and never
+# falls back to the default row, while other keys keep their own rows.
+SCHEMA6_CONFLICT="$TMP_ROOT/schema6-conflict.json"
+jq '
+  (.providers[] | select(.accountKey == "codex-home")) as $covered |
+  .providers += [($covered | del(.accountKeys) | .accountKey = "openai-codex" |
+      .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")),
+    ($covered | del(.accountKeys) | .accountKey = "default" |
+      .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 50 | .selection.spendPriority = 0.5))]
+' "$SCHEMA6_COVERED" > "$SCHEMA6_CONFLICT"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_CONFLICT" run code out err "$BRIEF"
+expect_code 0 "$code" "conflicting schema 6 snapshot exits 0"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has 2 quota rows covering account openai-codex; left unmeasured: disclosed uncertainty' "a key matched by two rows stays unmeasured and names the conflict"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "an unconflicted key keeps its row"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=codex  scope=all_models  remaining=50%  spendPriority=0.5  runway=through_reset  -> eligible' "an unmatched key still falls back to the default row"
+
+for malformed in '"openai-codex"' '["openai-codex", 1]' '[""]' '["openai codex"]' 'null'; do
+  jq --argjson keys "$malformed" '.providers[1].accountKeys = $keys' "$SCHEMA6" > "$TMP_ROOT/schema6-malformed-keys.json"
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-malformed-keys.json" run code out err "$BRIEF"
+  assert_contains "$out" '  status: error' "schema 6 accountKeys $malformed is an error outcome"
+  assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "schema 6 accountKeys $malformed is named as an invalid snapshot"
+done
+
+jq '.providers[1].accountKeys = "openai-codex"' "$SCHEMA5_PAIR" > "$TMP_ROOT/schema5-account-keys.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema5-account-keys.json" run code out err "$BRIEF"
+assert_contains "$out" '  reason: genuine spendPriority tie' "schema 5 ignores accountKeys and still joins by provider alone"
+pass "schema 6: accountKeys coverage binds a unique row, conflicts stay unmeasured, malformed coverage is rejected"
 cp "$BASE_RULES" "$RULES"
 pass "schema 6: each candidate binds to its account row; schema 5 is unchanged"
 
