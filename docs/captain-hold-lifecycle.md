@@ -557,6 +557,9 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
 - `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new and released holds, including secondmate publication and retry deduplication.
 - `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
+- One open call, held or deferred past its date, serves several origins.
+  `hold --origin` adds a new origin without changing the reason, `--until` date, stamp, or parent decision, and a same-origin re-hold still retries publication and updates the call.
+  An origin never added is refused, and the refusal suggests `hold --origin` only while the call is open.
 - An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
 
 ### Answers, stamps, and deferral
@@ -565,7 +568,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
-- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
+- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release or when a lapsed deferral is held again.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 
