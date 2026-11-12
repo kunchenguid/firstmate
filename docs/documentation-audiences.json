@@ -414,6 +414,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/forgejo-cli-alternatives.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/forgejo-tea-integration.md",
       "audience": "maintainer-verification"
     },

@@ -1298,6 +1298,61 @@ FIELDS
   FM_PR_RECORD_HEAD=$head
 }
 
+# --- Forgejo CLI resolution -------------------------------------------------
+#
+# A Forgejo pull request is reached through one of several Forgejo CLIs, and
+# this block is the single owner that picks one and its host login for a pull
+# request. bin/fm-pr-poll.sh keeps its own copy of the whole selection because
+# the watcher body sources nothing; every other reader (bin/fm-pr-merge.sh,
+# bin/fm-crew-state.sh, bin/fm-teardown.sh, bin/fm-pr-check.sh) goes through
+# these functions.
+#
+# A CLI can serve firstmate's contract only when it can make a raw
+# authenticated REST request against the instance. Every read here is the same
+# REST record with the same field names, and the merge must carry Forgejo's
+# head_commit_id so a merge stays bound to the head this run verified. Two of
+# the recognized CLIs can:
+#   tea   `tea api --login <name> --repo <owner>/<repo> [-X <method>] [-f k=v] <endpoint>`
+#   fgj   `fgj api <endpoint> --hostname <host> [-X <method>] [-f k=v]`
+# `fj` (forgejo-cli) cannot. It exposes no authenticated request passthrough at
+# all, its pull request views print only localized human prose with no commit
+# id anywhere, and its own merge request is built with head_commit_id fixed to
+# null, so it can neither bind a merge to a verified head nor report one. A
+# resolved `fj` is therefore refused by every operation that needs the record,
+# loudly and by name, rather than reading a rendered line as state or merging
+# unbound; docs/forgejo-forgejo-cli-integration.md holds the empirical record.
+#
+# A CLI is selected by explicit configuration first (a project's registered
+# `forge=forgejo:<cli>` registry binding, or FM_FORGEJO_CLI) and by what is
+# installed second: FM_PR_FORGEJO_CLI_ORDER is tried in order and the first CLI
+# that is installed AND holds exactly one login for <host> wins, so a home that
+# has tea keeps its exact previous behaviour and a home that has only fj gets a
+# legible refusal instead of "tea not found". Zero logins for <host> in a CLI's
+# own store, or several, refuses rather than guesses, mirroring the tea login
+# match this block replaces.
+
+# The recognized Forgejo CLIs, in the order an unnamed project tries them.
+FM_PR_FORGEJO_CLI_ORDER='tea fgj fj'
+
+# The CLI and host login fm_pr_forgejo_resolve selected: consumed by the
+# fm_pr_forgejo_* helpers below and by every caller's own diagnostics.
+FM_PR_FORGEJO_CLI=
+FM_PR_FORGEJO_LOGIN=
+
+# 0 when <cli> exposes an authenticated raw REST request, which is what every
+# reader and the head-bound merge need. `fj` does not, and never will by
+# accident: the capability is declared here rather than inferred from a flag.
+fm_pr_forgejo_cli_api_capable() {  # <cli>
+  case "${1:-}" in
+    tea|fgj) return 0 ;;
+  esac
+  return 1
+}
+
+fm_pr_forgejo_cli_installed() {  # <cli>
+  command -v "${1:-}" >/dev/null 2>&1
+}
+
 # tea addresses a repo by slug only and takes the host from a named login, so
 # the one login registered for <host> is printed by name, and zero or several
 # matches fail rather than pick one. The list is parsed as JSON with jq rather
@@ -1305,8 +1360,7 @@ FIELDS
 # each field on its own line: a login printed as one compact object would hand
 # a line-oriented split the name where it expects the url, and arming would
 # then refuse every host. A login matches when its url's host - scheme,
-# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
-# its own copy of this filter because the watcher body sources nothing.
+# userinfo, port, and path stripped - is exactly <host>.
 # shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
 FM_PR_FORGEJO_LOGIN_JQ='
   if type == "array" then
@@ -1329,13 +1383,192 @@ fm_pr_forgejo_login() {  # <host>
   tea login list --output json 2>/dev/null | jq -er --arg h "$1" "$FM_PR_FORGEJO_LOGIN_JQ" 2>/dev/null
 }
 
-# The state, merged flag, and head commit of one Forgejo pull request, read
-# from the REST record through "tea api" so the credential never leaves tea.
-# "tea api" exits 0 on an HTTP error and prints the error body instead, so
+# fgj keeps its own auth store: one entry per instance hostname, selected on the
+# command line with --hostname. `fgj auth status` prints one
+# "  <bullet> <host> (user: <name>)" line per configured instance, so the
+# configured hostnames are read from that report and never from the config file,
+# which also holds each instance's token. Zero or several lines naming <host>
+# fails rather than picking one.
+fm_pr_forgejo_fgj_login() {  # <host>
+  command -v fgj >/dev/null 2>&1 || return 1
+  local status
+  status=$(fgj auth status 2>/dev/null) || return 1
+  printf '%s\n' "$status" | awk -v h="$1" '
+    /\(user: [^)]*\)[[:space:]]*$/ {
+      line = $0
+      sub(/[[:space:]]*\(user: [^)]*\)[[:space:]]*$/, "", line)
+      n = split(line, field, /[[:space:]]+/)
+      if (n >= 1 && field[n] == h) matched++
+    }
+    END { if (matched != 1) exit 1; print h }
+  '
+}
+
+# fj keeps one login per instance and prints the bare hostnames one per line
+# with `fj auth list` (its "no logins" message goes to stderr, leaving stdout
+# empty). Zero or several lines naming <host> fails rather than picking one.
+# fj still cannot serve firstmate's contract - see the resolver note above - but
+# its store is read here so a target host can be recognized as fj's and refused
+# by name instead of looking unconfigured.
+fm_pr_forgejo_fj_login() {  # <host>
+  command -v fj >/dev/null 2>&1 || return 1
+  local status
+  status=$(fj auth list 2>/dev/null) || return 1
+  printf '%s\n' "$status" | awk -v h="$1" '$0 == h { matched++ } END { if (matched != 1) exit 1; print h }'
+}
+
+# The host login a given CLI would use for <host>, read from that CLI's own
+# store. Prints the token the CLI itself wants (`--login` for tea, `--hostname`
+# for fgj, `--host` for fj) and fails when that CLI has no, or an ambiguous,
+# login for <host>.
+fm_pr_forgejo_cli_login() {  # <cli> <host>
+  case "${1:-}" in
+    tea) fm_pr_forgejo_login "${2:-}" ;;
+    fgj) fm_pr_forgejo_fgj_login "${2:-}" ;;
+    fj) fm_pr_forgejo_fj_login "${2:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve the Forgejo CLI and its own host login for <host> in one place.
+# <preference> is `auto` (or empty) or one of tea|fgj|fj. An explicit preference
+# is honored and REFUSED when that CLI is not installed or holds no single login
+# for <host>, rather than silently falling back to another CLI; `auto` walks
+# FM_PR_FORGEJO_CLI_ORDER and takes the first installed CLI holding exactly one
+# login for <host>. Sets FM_PR_FORGEJO_CLI and FM_PR_FORGEJO_LOGIN and returns 0
+# on success; clears both and returns 1 otherwise.
+# The caller decides whether the resolved CLI can serve the operation it needs
+# (fm_pr_forgejo_cli_api_capable); this function only answers "which CLI, which
+# login", so a caller can report `fj` by name instead of reporting nothing.
+fm_pr_forgejo_resolve() {  # <host> [<preference>]
+  local host=${1:-} preference=${2:-auto} cli login
+  FM_PR_FORGEJO_CLI=
+  FM_PR_FORGEJO_LOGIN=
+  case "$host" in
+    ''|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  case "$preference" in
+    ''|auto) ;;
+    tea|fgj|fj)
+      fm_pr_forgejo_cli_installed "$preference" || return 1
+      login=$(fm_pr_forgejo_cli_login "$preference" "$host") || return 1
+      [ -n "$login" ] || return 1
+      FM_PR_FORGEJO_CLI=$preference
+      FM_PR_FORGEJO_LOGIN=$login
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+  for cli in $FM_PR_FORGEJO_CLI_ORDER; do
+    fm_pr_forgejo_cli_installed "$cli" || continue
+    login=$(fm_pr_forgejo_cli_login "$cli" "$host") || continue
+    [ -n "$login" ] || continue
+    FM_PR_FORGEJO_CLI=$cli
+    FM_PR_FORGEJO_LOGIN=$login
+    return 0
+  done
+  return 1
+}
+
+# One authenticated REST request through the CLI fm_pr_forgejo_resolve chose.
+# <method> is GET or POST; <owner>/<repo> are the pull request's own repository;
+# <suffix> is the endpoint path after the repository ("pulls/9",
+# "commits/<sha>/status?limit=50&page=1", or empty for the repository itself);
+# and any remaining arguments are passed through verbatim, which is how a POST
+# names its body fields ("-f Do=merge" "-f head_commit_id=<sha>"). tea and fgj
+# spell those fields the same way, so callers stay CLI-agnostic.
+# The response body is printed verbatim on stdout and NO redirection is applied
+# here: tea writes an HTTP error body to stdout while fgj writes it to stderr
+# and exits non-zero, so each caller chooses between discarding that error and
+# quoting it, and the existing read-back-rather-than-trust-the-exit-status
+# judgement keeps working for both.
+# Returns 1 and runs nothing when no CLI was resolved, the resolved one cannot
+# make a raw request (fj), or the arguments do not fit the method, so a caller
+# can never mistake a rendered line for the record.
+fm_pr_forgejo_api() {  # <method> <owner> <repo> <suffix> [<cli-args>...]
+  local method=${1:-GET} owner=${2:-} repo=${3:-} suffix=${4:-}
+  shift 4
+  [ -n "$owner" ] && [ -n "$repo" ] || return 1
+  [ -n "$FM_PR_FORGEJO_CLI" ] || return 1
+  fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI" || return 1
+  fm_pr_forgejo_cli_installed "$FM_PR_FORGEJO_CLI" || return 1
+  if [ "$method" = GET ]; then
+    # A GET read carries any query string in <suffix>, never as a field.
+    [ "$#" -eq 0 ] || return 1
+  else
+    [ "$#" -gt 0 ] || return 1
+  fi
+  case "$FM_PR_FORGEJO_CLI" in
+    tea)
+      local tea_endpoint="/repos/{owner}/{repo}"
+      [ -z "$suffix" ] || tea_endpoint="$tea_endpoint/$suffix"
+      if [ "$method" = GET ]; then
+        tea api --login "$FM_PR_FORGEJO_LOGIN" --repo "$owner/$repo" "$tea_endpoint"
+      else
+        tea api --login "$FM_PR_FORGEJO_LOGIN" --repo "$owner/$repo" \
+          -X "$method" "$tea_endpoint" "$@"
+      fi
+      ;;
+    fgj)
+      local fgj_endpoint="repos/$owner/$repo"
+      [ -z "$suffix" ] || fgj_endpoint="$fgj_endpoint/$suffix"
+      if [ "$method" = GET ]; then
+        fgj api "$fgj_endpoint" --hostname "$FM_PR_FORGEJO_LOGIN"
+      else
+        fgj api "$fgj_endpoint" --hostname "$FM_PR_FORGEJO_LOGIN" -X "$method" "$@"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# The Forgejo CLI a task's project registered, read from the task's own
+# metadata: `auto` unless the project's registry forge binding names one
+# (`forge=forgejo:<cli>`). An absent or unreadable registry, an unknown project,
+# or any unexpected value resolves to `auto`, which is the same default
+# bin/fm-project-mode.sh reports, so a registry gap never silently pins a CLI.
+# Every warning fm-project-mode.sh writes about an absent project goes to
+# /dev/null: this is a lookup, and the caller reports its own refusal.
+# bin/fm-pr-poll.sh, which sources nothing, deliberately does not use this and
+# always resolves `auto`.
+FM_PR_FORGEJO_CLI_PREFERENCE=
+FM_PR_FORGEJO_CLI_PREFERENCE_AUTHORITATIVE=0
+fm_pr_forgejo_cli_preference() {  # <task-meta-file>
+  FM_PR_FORGEJO_CLI_PREFERENCE=auto
+  FM_PR_FORGEJO_CLI_PREFERENCE_AUTHORITATIVE=0
+  local meta=${1:-} project preference
+  [ -n "$meta" ] && [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  project=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$project" ] || return 0
+  project=$(basename "$project")
+  [ -n "$project" ] || return 0
+  [ -x "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" ] || return 0
+  preference=$(FM_HOME="${FM_HOME:-$_FM_PR_LIB_ROOT}" \
+    "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" --forge-cli "$project" 2>/dev/null) || return 0
+  case "$preference" in
+    tea|fgj|fj) FM_PR_FORGEJO_CLI_PREFERENCE=$preference ;;
+    auto) ;;
+    *) return 0 ;;
+  esac
+  FM_PR_FORGEJO_CLI_PREFERENCE_AUTHORITATIVE=1
+}
+
+# The state, merged flag, and head commit of one Forgejo pull request, read from
+# the REST record through the resolved CLI so the credential never leaves that
+# CLI. "tea api" exits 0 on an HTTP error and prints the error body instead, so
 # only a record whose state, merged, and head.sha fields all have the expected
 # types is accepted; anything else returns 1 for an honest unknown.
+# The CLI is resolved `auto` here, never from the project's registered
+# preference, and deliberately so: every API-capable CLI reads this same REST
+# record with the same field names, this read is what the merge watch
+# (bin/fm-pr-poll.sh), the terminal read (bin/fm-crew-state.sh), and teardown's
+# merged proof (bin/fm-teardown.sh) depend on to reconcile a task at all, and a
+# project whose registered CLI cannot make the request (`fj`) must still be
+# readable so its tasks can be reconciled and cleaned up. The merge path is
+# where the CLI's identity matters, because the head binding is that CLI's own
+# capability, and only it honors the registered preference.
 fm_pr_forgejo_read_record() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 login json fields line
+  local host=$1 path=$2 number=$3 owner repo json fields line
   local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
@@ -1344,10 +1577,15 @@ fm_pr_forgejo_read_record() {  # <host> <path> <number>
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  login=$(fm_pr_forgejo_login "$host") || return 1
-  [ -n "$login" ] || return 1
-  if ! json=$(tea api --login "$login" --repo "$path" \
-      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || [ -z "$json" ]; then
+  case "$path" in
+    */*/*|/*|*/) return 1 ;;
+  esac
+  owner=${path%%/*}
+  repo=${path#*/}
+  [ "$owner" != "$path" ] || return 1
+  fm_pr_forgejo_resolve "$host" auto || return 1
+  if ! json=$(fm_pr_forgejo_api GET "$owner" "$repo" "pulls/$number" 2>/dev/null) \
+    || [ -z "$json" ]; then
     return 1
   fi
   if ! fields=$(printf '%s' "$json" | jq -r '

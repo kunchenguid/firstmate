@@ -269,24 +269,36 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
-# Refuse to arm a Forgejo watch with no tea or jq on PATH, for the same reason
-# as the GitLab and Gerrit cases above. tea also addresses a repo by slug only, resolving the
-# host from a named "tea login" rather than from the URL the way gh and glab
-# do, so a poll can only ever succeed when exactly one registered login
-# matches this host; refuse now rather than watch something that can never
-# resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
-# that script is a static, standalone watcher body with no sourced
-# dependency, so it re-derives the same match at every poll instead of
-# trusting a name recorded here.
+# Refuse to arm a Forgejo watch with no jq on PATH, with no Forgejo CLI
+# holding a login for this host, or with one that cannot read the record, for
+# the same reason as the GitLab and Gerrit cases above: the poll is silent on
+# every error, so arming is the one point where a watch that could never
+# resolve can be reported instead of watching nothing. A Forgejo CLI addresses
+# a repository by owner/repository slug only, resolving the host from its own
+# login rather than from the URL the way gh and glab do, so the CLI and that
+# login are resolved through the same single owner the merge path and the
+# reads use (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve), honoring the project's
+# registered CLI first and what is installed second. `fj` resolves but cannot
+# serve this contract, so it is refused here by name rather than armed into a
+# poll that stays silent forever. bin/fm-pr-poll.sh re-derives the same
+# selection at every poll because it is a static body with no sourced
+# dependency, so it uses the same PATH order without the registry preference;
+# both read the same REST record, so the watch cannot disagree with the merge
+# path about the pull request's own state.
 if [ "$PROVIDER" = forgejo ]; then
-  if ! command -v tea >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
-    exit 1
-  fi
-  fm_pr_forgejo_login "$HOST" >/dev/null || {
-    echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: watching a Forgejo pull request requires jq on PATH" >&2
     exit 1
   }
+  fm_pr_forgejo_cli_preference "$META"
+  fm_pr_forgejo_resolve "$HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
+    echo "error: watching a Forgejo pull request at $HOST requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth status'), or fj (see 'fj auth list')" >&2
+    exit 1
+  }
+  if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then
+    echo "error: watching a Forgejo pull request through 'fj' is refused: forgejo-cli 0.7.0 exposes no authenticated request passthrough and prints only localized prose, so it cannot report whether this pull request merged, and firstmate will not watch an event it cannot read (docs/forgejo-cli-alternatives.md); install tea or fgj, log one in for $HOST, and re-run" >&2
+    exit 1
+  fi
 fi
 
 # The draft state is read before anything is recorded or armed. Only a positive

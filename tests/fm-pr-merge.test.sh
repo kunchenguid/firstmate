@@ -694,6 +694,158 @@ make_forgejo_case() {
   printf '%s\n' "$case_dir"
 }
 
+# write_fgj_auth <file> [<host> ...]
+# The report `fgj auth status` prints for its configured instances: a header
+# line, then one bulleted "  <bullet> <host> (user: <name>)" line per host.
+# The bullet is written as an octal escape so this file stays plain ASCII.
+write_fgj_auth() {
+  local file=$1 host
+  shift
+  printf 'Authenticated instances:\n' > "$file"
+  for host in "$@"; do
+    printf '  \342\200\242 %s (user: fixture)\n' "$host" >> "$file"
+  done
+}
+
+# The per-instance login store a fake `fj` reads its `auth list` from. Written
+# beside the case's fakebin so the mock can find it without an extra exported
+# variable; forgejo-cli itself keeps a JSON store, whose exact shape firstmate
+# never parses because `fj auth list` prints the hostnames one per line.
+write_fj_auth() {
+  local file=$1 host
+  shift
+  : > "$file"
+  for host in "$@"; do printf '%s\n' "$host" >> "$file"; done
+}
+
+# fgj mock recording every invocation. `auth status` answers from
+# <case>/fgj-auth.txt; `api <endpoint>` reads the same pull request and
+# combined-status payloads the tea mock uses, keyed by the endpoint path fgj
+# builds (repos/<owner>/<repo>/...). It differs from the tea mock in the one way
+# the merge path must tolerate: an HTTP-level failure exits non-zero with the
+# error body on stderr rather than exiting 0 with it on stdout.
+add_fgj_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/fgj" <<'SH'
+#!/usr/bin/env bash
+set -u
+log_dir=$(dirname "$FM_TEST_FGJ_LOG")
+printf '%s\n' "$*" >> "$FM_TEST_FGJ_LOG"
+
+if [ "${1:-} ${2:-}" = "auth status" ]; then
+  cat "$log_dir/fgj-auth.txt"
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+shift
+endpoint= method= do_value= head_commit_id=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X|--method) method=${2:-}; shift 2 ;;
+    --hostname|--config) shift 2 ;;
+    -f|--raw-field)
+      case "${2:-}" in
+        Do=*) do_value=${2#Do=} ;;
+        head_commit_id=*) head_commit_id=${2#head_commit_id=} ;;
+      esac
+      shift 2
+      ;;
+    *) endpoint=$1; shift ;;
+  esac
+done
+[ -n "$method" ] || method=GET
+case "$endpoint" in
+  */status|*/status\?*)
+    [ ! -e "$log_dir/fgj-status-fails" ] || { printf 'HTTP 500\n' >&2; exit 1; }
+    page=1
+    case "$endpoint" in
+      *page=*) page=${endpoint##*page=}; page=${page%%&*} ;;
+    esac
+    if [ "$page" = 1 ]; then
+      cat "$log_dir/fgj-status.json"
+    elif [ -e "$log_dir/fgj-status-page$page.json" ]; then
+      cat "$log_dir/fgj-status-page$page.json"
+    else
+      printf '{"state":"","total_count":0,"statuses":[]}\n'
+    fi
+    ;;
+  repos/*/*/pulls/*/merge)
+    if [ -e "$log_dir/fgj-merge-fails" ]; then
+      printf '{"message":"there is nothing to merge"}\n' >&2
+      exit 1
+    fi
+    if [ -e "$log_dir/fgj-expected-head" ] \
+      && [ "$head_commit_id" != "$(cat "$log_dir/fgj-expected-head")" ]; then
+      printf '{"message":"head out of date"}\n' >&2
+      exit 1
+    fi
+    : > "$log_dir/fgj-merge-called"
+    printf '%s\n' "$do_value" > "$log_dir/fgj-merge-do"
+    : > "$log_dir/fgj-merged"
+    printf '{}\n'
+    ;;
+  repos/*/*/pulls/*)
+    [ ! -e "$log_dir/fgj-view-fails" ] || { printf 'HTTP 500\n' >&2; exit 1; }
+    if [ -e "$log_dir/fgj-merged" ]; then
+      cat "$log_dir/pr-post.json"
+    else
+      cat "$log_dir/pr.json"
+    fi
+    ;;
+  repos/*/*)
+    [ ! -e "$log_dir/fgj-repo-fails" ] || { printf 'HTTP 500\n' >&2; exit 1; }
+    if [ -e "$log_dir/fgj-repo.json" ]; then
+      cat "$log_dir/fgj-repo.json"
+    else
+      printf '{"default_merge_style":"merge"}\n'
+    fi
+    ;;
+  *) printf '{"message":"unexpected endpoint"}\n' >&2; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/fgj"
+}
+
+# forgejo-cli's own login list, which firstmate only ever reads to name the host
+# it cannot serve. Any other invocation is a failure: nothing in firstmate may
+# execc `fj` for a read or a merge.
+add_fj_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/fj" <<'SH'
+#!/usr/bin/env bash
+set -u
+self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ "${1:-} ${2:-}" = "auth list" ]; then
+  cat "$self_dir/../fj-auth.txt"
+  exit 0
+fi
+printf 'fj: unexpected invocation: %s\n' "$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/fj"
+}
+
+# make_fgj_case <name> [<pr-field>=<value> ...]: the same as make_forgejo_case
+# but with fgj's own store instead of tea's, so `auto` has exactly one
+# API-capable candidate in the case directory.
+make_fgj_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  add_fgj_mock "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/fgj.log"
+  write_fgj_auth "$case_dir/fgj-auth.txt" "$FJ_HOST"
+  write_forgejo_pr_json "$case_dir/pr.json" "$@"
+  write_forgejo_pr_json "$case_dir/pr-post.json" state=closed mergeable=false merged=true head="$FJ_HEAD"
+  write_forgejo_status_json "$case_dir/fgj-status.json"
+  printf '%s\n' "$FJ_HEAD" > "$case_dir/fgj-expected-head"
+  printf '%s\n' "$case_dir"
+}
+
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
 # mocks and a merge request payload. Echoes the case dir.
 make_gitlab_case() {
@@ -781,8 +933,9 @@ run_pr_merge() {
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   FM_TEST_TEA_LOG="$case_dir/tea.log" \
+  FM_TEST_FGJ_LOG="$case_dir/fgj.log" \
   HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="${FM_TEST_PATH_OVERRIDE:-$case_dir/fakebin:$PATH}" \
     "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
@@ -2404,7 +2557,7 @@ test_forgejo_refuses_when_login_is_ambiguous() {
     set -e
 
     expect_code 1 "$rc" "forgejo-login-$name: fm-pr-merge should refuse"
-    assert_grep "requires exactly one 'tea login' registered for that host" "$case_dir/stderr" \
+    assert_grep "requires a Forgejo CLI holding a login for that host" "$case_dir/stderr" \
       "forgejo-login-$name: refusal did not name the login requirement"
     assert_no_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
       "forgejo-login-$name: a PR reference was recorded despite the ambiguous login"
@@ -2546,10 +2699,14 @@ test_forgejo_invalid_head_refuses() {
   pass "fm-pr-merge refuses a Forgejo head commit it cannot validate"
 }
 
+# A slightly misleading name: a missing `jq` is named as the missing tool, but a
+# missing `tea` is only one of the three Forgejo CLIs firstmate can drive, so
+# the refusal names the whole requirement (a CLI with a login for this host)
+# instead of pretending tea specifically was needed.
 test_forgejo_missing_tool_refuses_before_recording() {
-  local case_dir rc tool other
+  local case_dir rc tool other expected
   for tool in tea jq; do
-    if [ "$tool" = tea ]; then other=jq; else other=tea; fi
+    if [ "$tool" = tea ]; then other=jq; expected="requires a Forgejo CLI holding a login for that host"; else other=tea; expected="error: merging a Forgejo pull request requires jq on PATH"; fi
     case_dir=$(make_forgejo_case "forgejo-no-$tool")
     mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
     PATH="$case_dir/no$tool" command -v "$other" >/dev/null 2>&1 \
@@ -2566,7 +2723,7 @@ test_forgejo_missing_tool_refuses_before_recording() {
     set -e
 
     expect_code 1 "$rc" "forgejo-no-$tool: fm-pr-merge should refuse"
-    assert_grep "error: merging a Forgejo pull request requires $tool on PATH" \
+    assert_grep "$expected" \
       "$case_dir/stderr" "forgejo-no-$tool: refusal did not name the missing tool"
     assert_no_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
       "forgejo-no-$tool: a PR reference was recorded despite the missing tool"
@@ -2688,6 +2845,185 @@ test_forgejo_merge_method_and_extra_args() {
     || fail "forgejo-unsupported-arg: a merge was attempted despite the unsupported argument"
 
   pass "fm-pr-merge maps --squash/--rebase to Forgejo's Do field, defaults to the repository's default merge style, and refuses any other extra argument"
+}
+
+# fgj keeps its own per-hostname auth store and reaches the API through
+# `fgj api`, so it can serve every read the tea path serves and send the same
+# head_commit_id that binds a merge to the verified head. It resolves on its own
+# when no tea is installed and logged in for the host, which is the shape this
+# case pins: the inherited search path is rebuilt without tea, so `auto` has
+# exactly one API-capable candidate.
+test_forgejo_fgj_serves_the_reads_and_binds_the_merge() {
+  local case_dir rc merge_line
+  case_dir=$(make_fgj_case forgejo-fgj-merges)
+  mirror_path_without "$case_dir/nocli" tea "$case_dir/fakebin"
+
+  FM_TEST_PATH_OVERRIDE="$case_dir/nocli" run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-fgj-merges: a well-formed pull request URL should merge through fgj, not error: $(cat "$case_dir/stderr")"
+
+  assert_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-fgj-merges: pr= was not recorded before merging"
+  assert_grep "api repos/$FJ_OWNER/$FJ_REPO/pulls/9 --hostname $FJ_HOST" "$case_dir/fgj.log" \
+    "forgejo-fgj-merges: the pre-merge state was not read through fgj's own hostname"
+  assert_grep "api repos/$FJ_OWNER/$FJ_REPO/commits/$FJ_HEAD/status?limit=50&page=1 --hostname $FJ_HOST" \
+    "$case_dir/fgj.log" "forgejo-fgj-merges: the combined status was not read through fgj"
+  merge_line=$(grep -F 'pulls/9/merge' "$case_dir/fgj.log" || true)
+  case "$merge_line" in
+    *"api repos/$FJ_OWNER/$FJ_REPO/pulls/9/merge --hostname $FJ_HOST -X POST -f Do=merge -f head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "forgejo-fgj-merges: the merge was not bound to the verified head: '$merge_line'" ;;
+  esac
+  [ "$(cat "$case_dir/fgj-merge-do" 2>/dev/null)" = merge ] \
+    || fail "forgejo-fgj-merges: the merge style was not sent as Do"
+  assert_grep "successful combined status at head $FJ_HEAD" "$case_dir/stderr" \
+    "forgejo-fgj-merges: the verified head was not reported"
+  [ ! -e "$case_dir/tea.log" ] || fail "forgejo-fgj-merges: a tea invocation leaked into an fgj merge"
+
+  # "fgj api" exits non-zero on an HTTP error and writes the body to stderr,
+  # unlike "tea api". That exit status must still not be the evidence: a merge
+  # the forge refused has to be caught by the confirm read, exactly as on tea.
+  case_dir=$(make_fgj_case forgejo-fgj-rejected-merge)
+  mirror_path_without "$case_dir/nocli" tea "$case_dir/fakebin"
+  : > "$case_dir/fgj-merge-fails"
+  set +e
+  FM_TEST_PATH_OVERRIDE="$case_dir/nocli" run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-fgj-rejected-merge: a refused merge must fail"
+  assert_grep "Forgejo did not confirm $FJ_URL as merged" "$case_dir/stderr" \
+    "forgejo-fgj-rejected-merge: refusal did not report the unconfirmed merge"
+  assert_grep '"message":"there is nothing to merge"' "$case_dir/stderr" \
+    "forgejo-fgj-rejected-merge: the forge's own rejection body was not quoted"
+  [ ! -e "$case_dir/fgj-merged" ] || fail "forgejo-fgj-rejected-merge: the mock recorded a landed merge"
+
+  pass "fm-pr-merge reads a Forgejo pull request through fgj and binds the merge to the verified head"
+}
+
+# The project's registered forge binding names the CLI, and that choice beats
+# what PATH order would otherwise pick: tea is installed and logged in for this
+# host in the same case, so only the registry can make fgj the one used.
+test_forgejo_registered_cli_beats_path_order() {
+  local case_dir
+  case_dir=$(make_forgejo_case forgejo-registered-cli)
+  add_fgj_mock "$case_dir"
+  : > "$case_dir/fgj.log"
+  write_fgj_auth "$case_dir/fgj-auth.txt" "$FJ_HOST"
+  write_forgejo_status_json "$case_dir/fgj-status.json"
+  printf '%s\n' "$FJ_HEAD" > "$case_dir/fgj-expected-head"
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fgj] - fixture (added 2026-01-01)\n' \
+    > "$case_dir/home/data/projects.md"
+
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-registered-cli: the registered fgj binding should merge: $(cat "$case_dir/stderr")"
+
+  grep -qF "api repos/$FJ_OWNER/$FJ_REPO/pulls/9/merge --hostname $FJ_HOST" "$case_dir/fgj.log" \
+    || fail "forgejo-registered-cli: the registered CLI did not merge the pull request"
+  [ ! -s "$case_dir/tea.log" ] \
+    || fail "forgejo-registered-cli: tea was used although the project registered fgj"
+  pass "fm-pr-merge uses the project's registered Forgejo CLI ahead of PATH order"
+}
+
+# forgejo-cli cannot serve firstmate's contract, and the refusal has to say so
+# with the capability it lacks rather than merging or watching unbound. The
+# case's search path is rebuilt so fj is the only Forgejo CLI present and it
+# holds a login for the host; the merge is refused, nothing is recorded, and no
+# poll is left behind.
+test_forgejo_fj_is_refused_with_the_capability_it_lacks() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-fj-only)
+  rm -f "$case_dir/fakebin/tea"
+  add_fj_mock "$case_dir"
+  write_fj_auth "$case_dir/fj-auth.txt" "$FJ_HOST"
+  mirror_path_without "$case_dir/nocli" tea "$case_dir/fakebin"
+  rm -f "$case_dir/nocli/fgj"
+
+  set +e
+  FM_TEST_PATH_OVERRIDE="$case_dir/nocli" run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-fj-only: merging through fj must be refused"
+  assert_grep "merging a Forgejo pull request through 'fj' is refused" "$case_dir/stderr" \
+    "forgejo-fj-only: the refusal did not name fj"
+  assert_grep 'head_commit_id fixed to null' "$case_dir/stderr" \
+    "forgejo-fj-only: the refusal did not name the head binding fj cannot send"
+  assert_grep "docs/forgejo-cli-alternatives.md" "$case_dir/stderr" \
+    "forgejo-fj-only: the refusal did not point at the empirical record"
+  assert_no_grep "pr=$FJ_URL" "$case_dir/state/task-x1.meta" \
+    "forgejo-fj-only: a PR reference was recorded despite the refusal"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "forgejo-fj-only: a merge poll was armed despite the refusal"
+  pass "fm-pr-merge refuses fj by name and keeps the head-binding requirement"
+}
+
+# The resolver itself: which CLI and which login a host resolves to, in the
+# order an unnamed project gets, under an explicit preference, and when it must
+# refuse rather than guess. Exercised through bin/fm-pr-lib.sh's public
+# functions, the same way the merge watch and the merge path consume them.
+test_forgejo_cli_resolution_order_and_preference() {
+  local case_dir case_dir_path out resolve_probe
+  case_dir=$(make_case forgejo-resolver)
+  mkdir -p "$case_dir/fakebin"
+  : > "$case_dir/tea.log"
+  : > "$case_dir/fgj.log"
+  add_tea_mock "$case_dir"
+  add_fgj_mock "$case_dir"
+  add_fj_mock "$case_dir"
+  write_tea_logins_json "$case_dir/tea-logins.json" "tea-login" "https://$FJ_HOST"
+  write_fgj_auth "$case_dir/fgj-auth.txt" "$FJ_HOST"
+  write_fj_auth "$case_dir/fj-auth.txt" "$FJ_HOST"
+  # A complete search path with the case's own fakebin ahead of every real
+  # Forgejo CLI a developer's machine may have installed, so the resolver
+  # sees exactly the three mocks plus jq and the ordinary tools.
+  mirror_path_without "$case_dir/resolverpath" __fm_absent__ "$case_dir/fakebin"
+  case_dir_path=$case_dir/resolverpath
+  # Deliberately single-quoted: this body is handed to `bash -c` below, so its
+  # $1/$2/$3 and $FM_TEST_PATH_OVERRIDE must expand in that shell, not here.
+  # shellcheck disable=SC2016
+  resolve_probe='PATH="$FM_TEST_PATH_OVERRIDE"; export PATH
+    . "$1"
+    if ! fm_pr_forgejo_resolve "$2" "$3" >/dev/null; then printf "REFUSED"; exit 0; fi
+    printf "%s %s" "$FM_PR_FORGEJO_CLI" "$FM_PR_FORGEJO_LOGIN"'
+
+  for spec in "auto:tea tea-login" "fgj:fgj $FJ_HOST" "fj:fj $FJ_HOST"; do
+    preferred=${spec%%:*}
+    want=${spec#*:}
+    out=$(FM_TEST_TEA_LOG="$case_dir/tea.log" FM_TEST_FGJ_LOG="$case_dir/fgj.log" \
+      FM_HOME="$case_dir/home" FM_TEST_PATH_OVERRIDE="$case_dir_path" \
+      bash -c "$resolve_probe" _ "$ROOT/bin/fm-pr-lib.sh" "$FJ_HOST" "$preferred") \
+      || fail "forgejo-resolver: resolving $preferred failed"
+    [ "$out" = "$want" ] \
+      || fail "forgejo-resolver: $preferred resolved to '$out', wanted '$want'"
+  done
+
+  out=$(FM_TEST_TEA_LOG="$case_dir/tea.log" FM_TEST_FGJ_LOG="$case_dir/fgj.log" \
+    FM_HOME="$case_dir/home" FM_TEST_PATH_OVERRIDE="$case_dir_path" \
+    bash -c "$resolve_probe" _ "$ROOT/bin/fm-pr-lib.sh" elsewhere.example auto) \
+    || fail "forgejo-resolver: the no-login-host probe failed"
+  [ "$out" = REFUSED ] \
+    || fail "forgejo-resolver: a host with no login in any store must refuse: '$out'"
+
+  out=$(FM_TEST_TEA_LOG="$case_dir/tea.log" FM_TEST_FGJ_LOG="$case_dir/fgj.log" \
+    FM_HOME="$case_dir/home" FM_TEST_PATH_OVERRIDE="$case_dir_path" \
+    bash -c "$resolve_probe" _ "$ROOT/bin/fm-pr-lib.sh" "$FJ_HOST" bogus) \
+    || fail "forgejo-resolver: the unknown-preference probe failed"
+  [ "$out" = REFUSED ] \
+    || fail "forgejo-resolver: an unknown preference must refuse rather than fall back: '$out'"
+
+  # A CLI that cannot make an authenticated request must never be offered as
+  # API-capable, which is what keeps a merge from happening unbound.
+  for spec in "tea:API" "fgj:API" "fj:NOAPI"; do
+    cli=${spec%%:*}
+    want=${spec#*:}
+    out=$(bash -c '. "$1"; fm_pr_forgejo_cli_api_capable "$2" && echo API || echo NOAPI' \
+      _ "$ROOT/bin/fm-pr-lib.sh" "$cli")
+    [ "$out" = "$want" ] \
+      || fail "forgejo-resolver: $cli reported '$out' for API capability, wanted '$want'"
+  done
+  pass "fm-pr-lib resolves the Forgejo CLI and its own host login, refuses rather than guesses, and marks fj non-API"
 }
 
 test_gitlab_head_override_args_refuse_before_recording() {
@@ -3619,6 +3955,10 @@ test_forgejo_missing_tool_refuses_before_recording
 test_forgejo_rejected_merge_is_never_trusted_by_exit_status
 test_forgejo_transient_confirm_read_failure_still_persists_authority
 test_forgejo_merge_method_and_extra_args
+test_forgejo_fgj_serves_the_reads_and_binds_the_merge
+test_forgejo_registered_cli_beats_path_order
+test_forgejo_fj_is_refused_with_the_capability_it_lacks
+test_forgejo_cli_resolution_order_and_preference
 
 # The merge gate asks whether the task is still held for the captain. A home
 # that carries no backlog records no captain calls at all, so nothing can be

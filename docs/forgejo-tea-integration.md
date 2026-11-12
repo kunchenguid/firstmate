@@ -4,6 +4,7 @@ Empirical record for the merge watch and the merge path on Forgejo, alongside th
 Every finding here was verified against a real, disposable Forgejo instance rather than assumed from `tea --help`, because several of them contradict what the help text alone would suggest.
 All evidence below was collected on 2026-09-13.
 A project opts in with the `forge=forgejo` registry binding, which `bin/fm-project-mode.sh` owns; the watch and merge paths recorded here key off the pull request URL itself, and the binding decides only that a generated ship brief names `tea` rather than `gh-axi`.
+`tea` is the documented default and one of several Forgejo CLIs firstmate can drive: [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) records what `forgejo-cli` (`fj`) and `fgj` offer, and which of them can serve the REST calls and the `head_commit_id` binding this record owns.
 
 ## Versions
 
