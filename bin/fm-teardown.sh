@@ -41,36 +41,40 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
-# REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. For a normal ship task,
-# work whose branch is pushed but has no PR recorded or found, or whose recorded PR
-# is confirmed closed without merging, is refused, while a pushed branch with an
-# open PR (including an upstream-contribution PR from a fork) may be cleaned up.
+# REFUSES a ship worktree without a retention proof, because cleanup
+# hard-resets/removes the worktree and kills its processes. A clean normal ship
+# task may be cleaned up when its work has landed, or when all its commits are
+# reachable from remote-tracking refs and its recorded PR is positively open
+# (including an upstream-contribution PR from a fork). A missing, closed-unmerged,
+# unreadable, or unrecognized PR record cannot supply that open-PR proof; the
+# landing proofs below still apply.
 # A branch pushed only to the local no-mistakes mirror does not count as pushed
 # to a forge. When local refs do not show the work, refresh_remote_refs updates
-# them from each remote. Unpushed work has landed only when its PR is merged and
-# the forge reports a PR head that contains the current local work, or its
+# them from each remote. Work has landed when its PR is merged and
+# the forge reports a PR head (Gerrit's current revision) containing the local work, or its
 # content is already present in the up-to-date default branch. This recognizes
 # the common squash-merge-then-delete-branch flow, where the branch's own commits
 # live nowhere on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch. Local-only delivery retains its
-# existing boundary where publishing the branch to a remote is sufficient.
+# its base branch instead of the default branch. Recorded GitLab, Forgejo, and
+# Gerrit URLs use their provider readers; these reads need neither
+# config/park-on-review nor config/auto-land.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
 # whose head contains the current local work (ancestor or whitespace-exact patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
+# or a clean content-in-default tree match. Neither remote reachability alone
+# nor an open PR alone proves landing.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A merged-PR lookup error falls back to the content check; if that is also
+# inconclusive, only the separate pushed-work/open-PR proof can permit cleanup.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -78,9 +82,9 @@
 # Dirty refusals distinguish untracked-only leftovers from tracked edits and list
 # at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
 # untracked work and the clean return control.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# Local-only delivery accepts clean work reachable from a non-mirror remote or
+# merged into the local default branch (firstmate performs that merge after
+# configured approval), including when there is no remote at all.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -1835,8 +1839,7 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# Has the worktree's committed work actually LANDED? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
@@ -4267,8 +4270,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # recursive removal rather than the file rm above.
 rm -rf "$STATE/$ID.kiro-home"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
-# retired endpoint; teardown only runs after landing is confirmed, so any
-# leftover unhandled steer here is moot rather than unlanded work.
+# retired endpoint and is removed only after the cleanup safety checks pass.
 # state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
 # read-only by its installer, and state/<id>.push-guard is a forge=external
 # task's read-only push guard record (bin/fm-git-push-guard.sh).
