@@ -240,7 +240,7 @@ run_control() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' CODEX_HOME='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -262,7 +262,7 @@ run_spawn() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' CODEX_HOME='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }

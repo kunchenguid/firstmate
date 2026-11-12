@@ -474,7 +474,7 @@ EOF
 
   # HERDR_ENV=1 is what a run from inside a Herdr pane inherits.
   PATH="$fakebin:$BASE_PATH" TMUX='' HERDR_ENV=1 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" CODEX_HOME="$w/codex-home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data_override" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 \

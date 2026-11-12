@@ -186,7 +186,7 @@ new_worktree() {  # <case-dir> <name>
 run_spawn() {  # <case-dir> <home> <pane-path> <args...>
   local case_dir=$1 home=$2 pane=$3
   shift 3
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" CODEX_HOME="$case_dir/codex-home" \
     FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_BACKEND=tmux \
     FM_FAKE_PANE_PATH="$pane" FM_FAKE_CALL_LOG="$case_dir/calls.log" \

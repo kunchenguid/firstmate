@@ -28,6 +28,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-orca-worktree)
+export CODEX_HOME="$TMP_ROOT/codex-home"
 
 # make_orca_fakebin <dir>: a fake `orca` CLI that performs a REAL `git
 # worktree add` for `worktree create` (so spawn_worktree_isolated's checks are
