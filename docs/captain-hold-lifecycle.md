@@ -72,6 +72,7 @@ Repeat and edge cases:
   While the hold is still active, `hold --origin` with an origin the call does not record yet only adds that origin beside the ones the call records, and skips steps 2 to 5.
   The recorded reason, `--until` date, hold-set timestamp, and parent decision stay unchanged; the new `--reason` and `--until` are ignored.
   With an origin the call already records, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
+  An active hold that has no hold-set timestamp yet also takes the normal re-hold, which records the timestamp.
   Only an active call takes a further origin this way: a closed call is refused, and re-holding a released or date-expired call starts a new lifecycle.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
