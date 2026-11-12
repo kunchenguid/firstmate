@@ -479,17 +479,27 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # rechecked before that time, and it is rechecked once as soon as that time
 # passes even when the flat cadence has not elapsed, then held to the cadence.
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
-# connect/subscribe failure) before the push fast-path is disabled for the rest
-# of this watcher process and the loop reverts to pure polling (report section
-# 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
-# capability, so a transient backend hiccup self-heals on the next cycle chain.
+# connect/subscribe failure) before the push fast-path is switched off and the
+# loop reverts to pure polling (report section 5c trigger 3:
+# proven-unreliable-at-runtime). The switch-off is never permanent and never
+# silent: it is logged to the triage log with the backend's cause, it is lifted
+# when the set of watched panes changes or after EVENT_CAP_RETRY_SECS, and the
+# re-arm is logged too. A re-arm after the timer gets one probationary cycle: a
+# single further failure switches the path off again.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
+EVENT_CAP_RETRY_SECS=${FM_EVENT_CAP_RETRY_SECS:-300}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
 # "<backend>:<session>"; re-probed only when that key changes.
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+# Epoch of the failure switch-off, or 0 when the path is not switched off by
+# failures (a failed capability probe leaves this 0: that verdict is re-probed
+# only on a key change).
+_event_cap_off_at=0
+# Sorted list of the panes the last event wait covered.
+_event_cap_panes=""
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -3617,7 +3627,7 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc panes diag diag_file
   local windows=() t3_windows=()
   while IFS= read -r w; do
     b=$(window_backend "$w")
@@ -3664,6 +3674,29 @@ event_wait_or_sleep() {
       _event_cap_ok=0
     fi
     _event_cap_fails=0
+    _event_cap_off_at=0
+    _event_cap_panes=""
+  fi
+  # A changed pane set is new evidence about what failed (a stale record gone, a
+  # task added), so it lifts a failure count or switch-off; a timer lifts a
+  # switch-off too, so a transient backend problem cannot leave this watcher
+  # polling for the rest of its life.
+  panes=$(printf '%s\n' "${windows[@]}" | LC_ALL=C sort | tr '\n' ' ')
+  if [ "$panes" != "$_event_cap_panes" ]; then
+    _event_cap_panes=$panes
+    if [ "$_event_cap_off_at" -gt 0 ]; then
+      triage_log "event path re-armed: watched pane set changed ($first_backend:$first_session)"
+      _event_cap_ok=1
+      _event_cap_off_at=0
+      _event_cap_fails=0
+    elif [ "$_event_cap_fails" -gt 0 ]; then
+      _event_cap_fails=0
+    fi
+  elif [ "$_event_cap_off_at" -gt 0 ] && [ $(( $(date +%s) - _event_cap_off_at )) -ge "$EVENT_CAP_RETRY_SECS" ]; then
+    triage_log "event path re-armed: retrying after ${EVENT_CAP_RETRY_SECS}s ($first_backend:$first_session)"
+    _event_cap_ok=1
+    _event_cap_off_at=0
+    _event_cap_fails=$((EVENT_CAP_FAIL_MAX - 1))
   fi
   if [ "$_event_cap_ok" != 1 ]; then
     sleep "$POLL"
@@ -3674,10 +3707,14 @@ event_wait_or_sleep() {
   # signal for all of it (watcher_waited).
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
-  TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
+  diag_file=
+  [ -z "$WATCHER_WAIT_TMP" ] || diag_file=$WATCHER_WAIT_TMP/diag
+  TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_DIAG_FILE=$diag_file FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
     fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
   rc=$?
   rec=$WATCHER_CAPTURE
+  diag=
+  [ ! -f "$diag_file" ] || diag=$(tr '\n' ';' < "$diag_file" | sed 's/;$//; s/;/; /g')
   fm_wait_tmp_cleanup
   case "$rc" in
     0)
@@ -3686,10 +3723,14 @@ event_wait_or_sleep() {
       ;;
     2)
       # Event path unusable this cycle (connect/subscribe failure). Sleep the
-      # budget and count toward the runtime-disable threshold; past it, drop to
-      # pure polling for the rest of this watcher process.
+      # budget and count toward the switch-off threshold; past it, poll until
+      # the pane set changes or EVENT_CAP_RETRY_SECS passes, and say so.
       _event_cap_fails=$((_event_cap_fails + 1))
-      [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
+      if [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ]; then
+        _event_cap_ok=0
+        _event_cap_off_at=$(date +%s)
+        triage_log "event path off after ${_event_cap_fails} consecutive failures ($first_backend:$first_session): ${diag:-cause not reported}; polling until the pane set changes or ${EVENT_CAP_RETRY_SECS}s pass"
+      fi
       sleep "$POLL"
       ;;
     *)

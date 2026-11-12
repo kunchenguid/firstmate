@@ -47,6 +47,14 @@ class RejectedSubscriptionSocket(ClosingStreamSocket):
         self.chunks = [b'{"result":{"type":"not_started"}}\n']
 
 
+class PaneNotFoundSocket(ClosingStreamSocket):
+    def __init__(self):
+        self.chunks = [
+            b'{"id":"fm-eventwait","error":{"code":"pane_not_found",'
+            b'"message":"pane w1:p2 not found"}}\n'
+        ]
+
+
 class EventWaitReadLineTest(unittest.TestCase):
     def test_deadline_is_clean_timeout(self):
         left, right = socket.socketpair()
@@ -100,6 +108,17 @@ class EventWaitReadLineTest(unittest.TestCase):
 
         self.assertEqual(result, 3)
         self.assertEqual(stdout.getvalue(), "")
+
+    def test_main_names_the_error_herdr_rejected_the_subscription_with(self):
+        stdout = io.StringIO()
+        with mock.patch.object(READER.socket, "socket", return_value=PaneNotFoundSocket()):
+            with mock.patch.object(READER.sys, "stdout", stdout):
+                result = READER.main(["herdr-eventwait.py", "socket", "1", "w1:p2"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(
+            stdout.getvalue(), "@error\tpane_not_found\tpane w1:p2 not found\n"
+        )
 
 
 if __name__ == "__main__":

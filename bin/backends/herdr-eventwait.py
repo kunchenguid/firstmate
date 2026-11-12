@@ -25,12 +25,17 @@ projection - NOT the final normalized record; the bash normalizer adds the
 from_status and builds the canonical shape):
   @subscribed
   <pane_id>\t<workspace_id>\t<agent_status>\t<agent>
+or, when herdr answers the subscribe request with an error (for example
+pane_not_found for one gone pane, which rejects the WHOLE subscription), one
+line naming that error and nothing else:
+  @error\t<code>\t<message>
 
 Exit status:
   0  streamed until the timeout elapsed with no error - a clean bounded wait;
      the caller treats this as "no fast escalation, poll cadence preserved".
   2  bad arguments, could not connect, or could not send the subscribe request.
-  3  the subscribe request did not return a subscription_started ack.
+  3  the subscribe request did not return a subscription_started ack (an
+     error response is also printed as the @error line above).
   4  the server closed the stream early or a receive operation failed.
 A non-zero exit tells the bash caller to fall back to plain polling for this
 cycle (the permanent fail-closed backstop), never to go silent.
@@ -119,6 +124,13 @@ def main(argv):
         return 3
     result = ack.get("result") or {}
     if result.get("type") != "subscription_started":
+        error = ack.get("error")
+        if isinstance(error, dict):
+            sys.stdout.write(
+                "@error\t%s\t%s\n"
+                % (_clean(error.get("code") or ""), _clean(error.get("message") or ""))
+            )
+            sys.stdout.flush()
         return 3
 
     sys.stdout.write("@subscribed\n")
