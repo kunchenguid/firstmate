@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), and composer clearing was re-measured on `agy 1.5.6` (2026-11-11) |
+| Verified | 2026-09-10; composer clearing re-verified 2026-11-11 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -122,7 +122,7 @@ A single `Escape` sent mid-turn through `herdr pane send-keys` cancelled it and 
 ```
 
 Sending `/quit` plus Enter exited the process; the pane closed under the `exec` launch, and Herdr reported the pane gone.
-`bin/fm-control-lib.sh` records `Escape` once, no clear key, no ack source, and `/quit` for agy.
+`bin/fm-control-lib.sh` records `Escape` once, no interrupt acknowledgement source, and `/quit` for agy; the control plane waits for the idle marker and sends agy's verified Ctrl+U clear key before `/quit`, because the shared composer read remains `unknown`.
 
 ## Backend liveness: Herdr recognizes agy, tmux names it
 

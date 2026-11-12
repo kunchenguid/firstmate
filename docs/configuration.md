@@ -833,7 +833,7 @@ The flag takes effect at the next check sweep, and is a home-local preference th
 ## Second-mate session rotation (config/secondmate-rotation)
 
 Create the home-local `config/secondmate-rotation` file to restart an idle second mate onto a fresh conversation once its session grows past a context size.
-A second mate never ends its own conversation, and every step it takes pays for the whole context, so a mate that has grown to hundreds of thousands of tokens answers its notifications several times slower than a fresh one.
+A second mate does not end its own conversation during ordinary operation, and every step it takes pays for the whole context, so a mate that has grown to hundreds of thousands of tokens answers its notifications several times slower than a fresh one.
 
 The feature is off when the file is absent.
 The file is local to each home and is not inherited.
