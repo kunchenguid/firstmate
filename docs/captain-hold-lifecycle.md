@@ -55,25 +55,25 @@ It works in this order:
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
 6. When `--origin` is supplied, it records the origin on the task only after the backend hold succeeds.
-   A new lifecycle replaces any previous association, while an active call keeps its other origins; adding a new origin to an active call skips steps 2 to 5 (see the shared-call case below).
+   A new lifecycle replaces any previous association, while an open call keeps its other origins; adding a new origin to an open call skips steps 2 to 5 (see the shared-call case below).
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
 Repeat and edge cases:
 
-- Retries of an active hold preserve its hold-set timestamp.
+- Retries of an open captain call, still held or deferred past its `--until` date, preserve its hold-set timestamp.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
   Each association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
-  The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is date-expired.
+  The ordering above prevents an interrupted or refused backend hold from publishing the new association.
 - One call found by several investigations or reviews stays one held task.
-  While the hold is still active, `hold --origin` with an origin the call does not record yet only adds that origin beside the ones the call records, and skips steps 2 to 5.
+  While the call is open, `hold --origin` with an origin the call does not record yet only adds that origin beside the ones the call records, and skips steps 2 to 5.
   The recorded reason, `--until` date, hold-set timestamp, and parent decision stay unchanged; the new `--reason` and `--until` are ignored.
   With an origin the call already records, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
-  An active hold that has no hold-set timestamp yet also takes the normal re-hold, which records the timestamp.
-  Only an active call takes a further origin this way: a closed call is refused, and re-holding a released or date-expired call starts a new lifecycle.
+  An open call that has no hold-set timestamp yet also takes the normal re-hold, which records the timestamp.
+  Only an open call takes a further origin this way: a closed call is refused, and re-holding a released call starts a new lifecycle.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
   If the subsequent origin write fails, the command returns nonzero, but the successful captain hold and its stamp remain with the previous association (or with no recorded origin for a new task).
@@ -554,8 +554,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
-- `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new, active, and released holds, including secondmate publication and retry deduplication.
-- `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, active and expired holds, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
+- `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new and released holds, including secondmate publication and retry deduplication.
+- `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
 - An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
 
 ### Answers, stamps, and deferral
