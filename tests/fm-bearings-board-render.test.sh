@@ -266,6 +266,276 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_each_summary_tile_scrolls_to_the_section_it_counts() {
+  local home out
+  home=$(make_home tile-targets)
+  out=$(render_board "$home" '[
+    {"id":"uw-1","repo":"sample","name":"Running work","state":"working","kind":"ship","doing":"building"}
+  ]' '[
+    {"id":"queued-one","repo":"sample","title":"Queued","reason":"","dispatchable":true}
+  ]')
+  # The oracle is the heading the captain reads on each section, not the ids
+  # the template happens to use.
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and ([.stats[] | {label, scrolls_to}] == [
+        {label:"need you", scrolls_to:["Captain'"'"'s Call"]},
+        {label:"underway", scrolls_to:["Underway"]},
+        {label:"landed recently", scrolls_to:["Recently Landed"]},
+        {label:"charted next", scrolls_to:["Charted Next"]}])
+      and all(.stats[]; .tag == "button" and .type == "button" and .prompts == 0)
+  ' >/dev/null || fail "a summary tile did not scroll to the section it counts, or reached the agent: $out"
+  pass "each summary tile is a button that scrolls to the section headed by what it counts and queues nothing"
+}
+
+test_every_captains_call_card_takes_the_tallest_cards_height() {
+  local home out
+  home=$(make_home call-height)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"merge.short","type":"merge","repo":"sample","title":"Merge: short","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]},
+    {"key":"long-decision","type":"decision","repo":"sample","title":"A decision with a great deal of context to read before answering",
+     "about":"This decision card carries a long about line that wraps across several lines of the card at any reasonable width, so its content is much taller than the short merge card that comes before it.",
+     "decide":"Which of the several options below should the fleet adopt, given everything described above and the tradeoffs each option names in its hint?",
+     "options":[
+       {"value":"first","label":"First option","hint":"A hint long enough to wrap onto a second line inside the option row"},
+       {"value":"second","label":"Second option","hint":"Another hint long enough to wrap onto a second line inside the option row"},
+       {"value":"third","label":"Third option"}],
+     "allow_freeform":true},
+    {"key":"merge.medium","type":"merge","repo":"sample","title":"Merge: medium","risk":"high",
+     "detail":"A detail line of moderate length that wraps once or twice.",
+     "options":[{"value":"merge","label":"Merge now"},{"value":"hold","label":"Not yet"}]}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    def even($pages): ($pages | length) == 3
+      and ([$pages[] | .natural] | unique | length) == 3
+      and ([$pages[] | .height] | unique) == [([$pages[] | .natural] | max)];
+    even(.call.wide) and even(.call.narrow)
+      and (.call.wide[0].height != .call.narrow[0].height)
+      and ([.call.wide[] | .title] == ["Merge: short",
+        "A decision with a great deal of context to read before answering", "Merge: medium"])
+  ' >/dev/null || fail "Captain's Call cards of different lengths did not all take the tallest card's height: $out"
+  pass "every Captain's Call card takes the tallest card's height, and again after a resize"
+}
+
+test_every_captains_call_card_opens_a_full_screen_details_view() {
+  local home out
+  home=$(make_home call-details)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"explained","type":"decision","repo":"sample","title":"An explained call",
+     "about":"One-line about.","decide":"One-line question?",
+     "context":["First paragraph of context.",
+       "See https://example.com/pr/1. A javascript:alert(1) string stays text."],
+     "options":[
+       {"value":"go","label":"Go ahead","hint":"short hint",
+        "details":["What going ahead does.","What it costs."]},
+       {"value":"wait","label":"Wait"}],
+     "recommend_value":"go","allow_freeform":true},
+    {"key":"merge.plain","type":"merge","repo":"sample","title":"Merge: plain","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    (.call.details | length) == 2
+      and all(.call.details[];
+        .button == {tag:"button", type:"button", label:"Details", controls:"dialog"}
+          and .was_closed and .open and .closed_after and .prompts == 0
+          and .focus == {label:"Details", card:.title, visible:true})
+      and ([.call.details[] | .title] == ["An explained call", "Merge: plain"])
+  ' >/dev/null || fail "a card lacked a Details button, or it did not open and close a full-screen view without queuing anything and hand focus back to its button: $out"
+  # Oracle: CSS Flexbox - a flex row lays every item on one line unless
+  # flex-wrap is wrap, and a card that hides overflow then clips the last item.
+  printf '%s' "$out" | jq -e '
+    all(.call.details[]; .button_row == {buttons:["Queue answer","Details"], display:"flex", flex_wrap:"wrap"})
+  ' >/dev/null || fail "the answer row holding Details does not wrap, so a narrow card clips Details: $out"
+  printf '%s' "$out" | jq -e '
+    .call.details[0] as $d
+    | $d.ctx_rows == [["about","One-line about."],["decide","One-line question?"]]
+      and $d.context == ["First paragraph of context.",
+        "See https://example.com/pr/1. A javascript:alert(1) string stays text."]
+      and $d.none == []
+      and $d.links == ["https://example.com/pr/1"]
+      and ($d.options | map(.label)) == ["Go ahead", "Wait", "Reconcile"]
+      and $d.options[0] == {label:"Go ahead", rec:true, hint:"short hint",
+        details:["What going ahead does.","What it costs."]}
+      and $d.options[1] == {label:"Wait", rec:false, hint:null, details:[]}
+  ' >/dev/null || fail "the Details view did not show the full context and every option with its details: $out"
+  printf '%s' "$out" | jq -e '
+    .call.details[1] as $d
+    | $d.context == [] and $d.none == ["No further context was recorded for this call."]
+      and ($d.options | map(.label)) == ["Merge now"]
+  ' >/dev/null || fail "a card without context did not say so in its Details view: $out"
+  pass "every Captain's Call card opens a full-screen Details view with its context and every option's details, queuing nothing"
+}
+
+# One call carries one label: the badge naming a call's type in its Details view
+# is one its card already shows. The card's own label is the one upstream boards
+# shipped before the Details view: "decision" on every call that is not a merge.
+test_a_details_view_shows_the_type_badge_its_card_shows() {
+  local home out
+  home=$(make_home call-details-badge)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"credential.token","type":"credential","repo":"sample","title":"Provide the deploy token",
+     "decide":"Which token should the deploy use?","options":[],"allow_freeform":true},
+    {"key":"pick","type":"decision","repo":"sample","title":"Pick a route",
+     "options":[{"value":"a","label":"Route A"}]},
+    {"key":"merge.it","type":"merge","repo":"sample","title":"Merge: it","risk":"high",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.call.details | length) == 3
+      and .call.details[0].card_badges == [{tone:"solid", text:"decision"}]
+      and all(.call.details[]; (.meta_badges | length) == 1 and (.meta_badges - .card_badges) == [])
+  ' >/dev/null || fail "a Details view labelled its call with a badge the card does not show: $out"
+  pass "a Details view shows the type badge its card shows, a credential card included"
+}
+
+# Oracles: the WAI-ARIA Authoring Practices modal dialog pattern - Tab and
+# Shift+Tab cycle through the dialog's tab stops, wrapping from the last to the
+# first and back, and Escape closes the dialog and returns focus to the control
+# that opened it; WCAG 2.1.1 Keyboard, as axe-core's scrollable-region-focusable
+# rule checks it - every region that scrolls is reachable from the keyboard.
+# The view's markup orders its stops as the title region, Close, then the body
+# region with its links in reading order. Per CSS overflow, the page behind the
+# open view does not scroll.
+test_details_keeps_keyboard_focus_inside_and_closes_on_escape() {
+  local home out
+  home=$(make_home call-details-keys)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"linked","type":"decision","repo":"sample","title":"A linked call",
+     "context":["Read https://example.com/a and then https://example.com/b first."],
+     "options":[{"value":"go","label":"Go ahead"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    {region:"title", overflow_y:"auto"} as $title
+    | {region:"body", overflow_y:"auto"} as $body
+    | .call.keys as $k
+    | .error == "" and $k.card == "A linked call"
+      and $k.opened == {open:true, focus:{label:"Close", card:null, visible:true}, page_overflow:"hidden"}
+      and $k.forward == [
+        {prevented:false, at:$body},
+        {prevented:false, at:{label:"https://example.com/a"}},
+        {prevented:false, at:{label:"https://example.com/b"}},
+        {prevented:true, at:$title},
+        {prevented:false, at:{label:"Close"}}]
+      and $k.backward == [
+        {prevented:false, at:$title},
+        {prevented:true, at:{label:"https://example.com/b"}},
+        {prevented:false, at:{label:"https://example.com/a"}},
+        {prevented:false, at:$body},
+        {prevented:false, at:{label:"Close"}}]
+      and $k.escape == {prevented:true, open:false,
+        focus:{label:"Details", card:"A linked call", visible:true}, page_overflow:null}
+  ' >/dev/null || fail "the Details view let Tab leave it or skip a scrolling region, or Escape did not close it and return focus to the card: $out"
+  pass "the Details view keeps Tab and Shift+Tab inside it, reaches each scrolling region, and closes on Escape, returning focus to the card"
+}
+
+# Same oracles as above, for a view with no link: Close is then not the only
+# tab stop, so Tab from it reaches the body region that scrolls the context and
+# options instead of being held on Close.
+test_a_details_view_without_links_still_tabs_to_its_scrolling_regions() {
+  local home out
+  home=$(make_home call-details-keys-nolink)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"plain","type":"credential","repo":"sample","title":"A plain call",
+     "decide":"Which token should the deploy use?",
+     "context":["No link appears anywhere in this view."],
+     "options":[],"allow_freeform":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    {region:"title", overflow_y:"auto"} as $title
+    | {region:"body", overflow_y:"auto"} as $body
+    | .call.keys as $k
+    | .error == "" and $k.card == "A plain call"
+      and $k.opened.focus.label == "Close"
+      and $k.forward == [
+        {prevented:false, at:$body},
+        {prevented:true, at:$title},
+        {prevented:false, at:{label:"Close"}}]
+      and $k.backward == [
+        {prevented:false, at:$title},
+        {prevented:true, at:$body},
+        {prevented:false, at:{label:"Close"}}]
+  ' >/dev/null || fail "Tab in a Details view with no link did not reach its scrolling regions: $out"
+  pass "a Details view with no link still tabs from Close to its scrolling body and title regions"
+}
+
+# Oracle: the GFM autolink rule - a trailing ")" belongs to the URL only when
+# the URL holds a matching "(", trailing punctuation and the emphasis markers
+# "*", "_" and "~" stay text, and a code-span backtick is never part of a URL.
+test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation() {
+  local home out para markup
+  home=$(make_home call-details-links)
+  para='Background is at https://en.wikipedia.org/wiki/Foo_(bar) (see https://example.com/x).'
+  # shellcheck disable=SC2016 # Backticks are literal Markdown in the paragraph.
+  markup='See `https://github.com/o/r/pull/1`. Also **https://example.com/y**.'
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(jq -n --arg p "$para" --arg m "$markup" '[
+    {key:"linked",type:"decision",repo:"sample",title:"A linked call",
+     context:[$p,$m],options:[{value:"go",label:"Go ahead"}]}]')")
+  printf '%s' "$out" | jq -e --arg p "$para" --arg m "$markup" '
+    .error == ""
+      and .call.details[0].links == ["https://en.wikipedia.org/wiki/Foo_(bar)", "https://example.com/x",
+        "https://github.com/o/r/pull/1", "https://example.com/y"]
+      and .call.details[0].context == [$p, $m]
+  ' >/dev/null || fail "a Details paragraph cut a URL at its own parenthesis or linked trailing punctuation or Markdown markers: $out"
+  pass "a Details link keeps a balanced closing parenthesis and leaves trailing punctuation and Markdown markers as text"
+}
+
+# Oracle: the WAI-ARIA dialog pattern - closing a dialog returns focus to the
+# control that opened it, or to a logical control when that one is gone. Here
+# the queued answer has dealt the next card, so the opener is hidden.
+test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details() {
+  local home out
+  home=$(make_home call-details-advance)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"merge.first","type":"merge","repo":"sample","title":"Merge: first","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]},
+    {"key":"merge.second","type":"merge","repo":"sample","title":"Merge: second","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and .call.advance == {answered:"Merge: first", shown:"Merge: second",
+        focus:{label:"Details", card:"Merge: second", visible:true}}
+  ' >/dev/null || fail "closing Details after the deal advanced left focus off the shown card's Details button: $out"
+  pass "closing Details after a queued answer dealt the next card focuses that card's Details button"
+}
+
+# A card with no options is answered in the captain's own words, so it has no
+# option to pick; answering it still deals the next card. A decision card always
+# gains the injected reconcile option, so the freeform-only card here is a
+# credential card, which gains none.
+test_a_freeform_only_first_card_still_deals_the_next_card() {
+  local home out
+  home=$(make_home call-freeform-first)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"credential.first","type":"credential","repo":"sample","title":"Name the release",
+     "decide":"What should the release be called?","options":[],"allow_freeform":true},
+    {"key":"merge.second","type":"merge","repo":"sample","title":"Merge: second","risk":"low",
+     "options":[{"value":"merge","label":"Merge now"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and .call.advance == {answered:"Name the release", shown:"Merge: second",
+        focus:{label:"Details", card:"Merge: second", visible:true}}
+  ' >/dev/null || fail "answering a freeform-only first card in its own words did not deal the next card: $out"
+  pass "a freeform-only first card answered in its own words deals the next card"
+}
+
+test_an_empty_captains_call_still_shows_its_empty_state() {
+  local home out
+  home=$(make_home call-empty)
+  out=$(render_board "$home" '[]' '[]')
+  printf '%s' "$out" | jq -e '
+    .call.wide == [] and .call.narrow == []
+      and .call.empty == ["Nothing needs your action right now."]
+  ' >/dev/null || fail "an empty Captain's Call lost its empty-state line: $out"
+  pass "an empty Captain's Call still shows its empty-state line"
+}
+
 test_full_snapshot_question_reaches_the_rendered_decision() {
   local home a b reason snapshot calls out
   home=$(make_home full-decision-question)
@@ -296,6 +566,15 @@ EOF
 }
 
 test_full_snapshot_question_reaches_the_rendered_decision
+test_every_captains_call_card_takes_the_tallest_cards_height
+test_every_captains_call_card_opens_a_full_screen_details_view
+test_a_details_view_shows_the_type_badge_its_card_shows
+test_details_keeps_keyboard_focus_inside_and_closes_on_escape
+test_a_details_view_without_links_still_tabs_to_its_scrolling_regions
+test_a_details_link_keeps_balanced_parentheses_and_drops_trailing_punctuation
+test_closing_details_after_the_deal_advances_focuses_the_shown_cards_details
+test_a_freeform_only_first_card_still_deals_the_next_card
+test_an_empty_captains_call_still_shows_its_empty_state
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
@@ -305,3 +584,4 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_each_summary_tile_scrolls_to_the_section_it_counts
