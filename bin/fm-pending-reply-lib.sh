@@ -173,7 +173,7 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
 fm_pending_reply_new_id() {
-  local raw hex
+  local raw="" hex=""
   if command -v openssl >/dev/null 2>&1; then
     raw=$(openssl rand -hex 8 2>/dev/null || true)
   fi
@@ -958,6 +958,48 @@ fm_pending_reply_recovery_message() {  # <record-path>
   printf '%s' "$msg"
 }
 
+# Reuse only refusals, scoped by fm_pending_reply_tick's dynamically local
+# cache. cmp checks exact bytes as well as file identity: second-resolution
+# stat fields alone miss same-size rewrites. Keep large snapshots out of shell
+# variables so every per-record command substitution need not inherit them.
+# The classifier remains the decision owner; no cached value permits a send.
+_fm_pending_reply_decision_denied() {  # <status-file>
+  local file=$1 signature snapshot kind decisions i
+  if [ -z "${_fm_pending_reply_decision_cache_dir:-}" ]; then
+    [ -n "$(status_own_open_decisions "$file")" ]
+    return $?
+  fi
+  signature=$(fm_pending_reply_file_signature "$file")
+  kind=$(_fm_status_kind "$file")
+  for ((i = 0; i < ${#_fm_pending_reply_denied_files[@]}; i++)); do
+    [ "${_fm_pending_reply_denied_files[$i]}" = "$file" ] || continue
+    if [ "${_fm_pending_reply_denied_signatures[$i]}" = "$signature" ] \
+      && [ "${_fm_pending_reply_denied_kinds[$i]}" = "$kind" ] \
+      && cmp -s "$file" "$_fm_pending_reply_decision_cache_dir/$i"; then
+      return 0
+    fi
+    break
+  done
+  snapshot="$_fm_pending_reply_decision_cache_dir/$i"
+  _fm_pending_reply_denied_signatures[i]=
+  # Copy before folding, then confirm neither identity nor bytes changed while
+  # the classifier read the original. A failed snapshot simply disables reuse.
+  if ! cp "$file" "$snapshot" 2>/dev/null; then
+    [ -n "$(status_own_open_decisions "$file")" ]
+    return $?
+  fi
+  decisions=$(status_own_open_decisions "$file")
+  [ -n "$decisions" ] || return 1
+  if [ "$signature" = "$(fm_pending_reply_file_signature "$file")" ] \
+    && [ "$kind" = "$(_fm_status_kind "$file")" ] \
+    && cmp -s "$file" "$snapshot"; then
+    _fm_pending_reply_denied_files[i]=$file
+    _fm_pending_reply_denied_signatures[i]=$signature
+    _fm_pending_reply_denied_kinds[i]=$kind
+  fi
+  return 0
+}
+
 # Deliver the recovery message once. Caller must hold phase awaiting_report with
 # turn completed and grace elapsed. Uses FM_PENDING_REPLY_SEND_HOOK when set
 # (tests), otherwise invokes fm-send with FM_PENDING_REPLY_EXISTING_CORR so a
@@ -994,7 +1036,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   # config/wait-no-turns: a mate waiting on its own open decision or blocker
   # is never poked. The recovery stays unattempted until the answer lands.
   if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
-    [ -z "$(status_own_open_decisions "$state/$task_id.status")" ] || return 1
+    _fm_pending_reply_decision_denied "$state/$task_id.status" && return 1
   fi
   status_file=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
@@ -1016,6 +1058,8 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   fm_lock_acquire_wait "$lock" || return 1
   if _fm_pending_reply_try_resolve_locked "$state" "$corr" "$status_file" \
     || [ "$(fm_pending_reply_get "$rec" phase)" != awaiting_report ] \
+    || { [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ] \
+      && [ -n "$(status_own_open_decisions "$state/$task_id.status")" ]; } \
     || ! fm_pending_reply_set "$rec" recovery_sender_pid "$sender_pid" \
     || ! fm_pending_reply_set "$rec" recovery_sender_identity "$sender_identity" \
     || ! fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" \
@@ -1555,6 +1599,93 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
   '
 }
 
+_fm_pending_reply_path_owner() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %u "$1" 2>/dev/null
+  else
+    stat -c %u "$1" 2>/dev/null
+  fi
+}
+
+_fm_pending_reply_path_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+# Return or create a private directory (mode 0700, owned by current user)
+# for pending-reply decision snapshots under ${TMPDIR:-/tmp}.
+_fm_pending_reply_decision_cache_root() {
+  local base=${TMPDIR:-/tmp} root uid owner mode
+  [ -d "$base" ] || return 1
+  uid=$(id -u 2>/dev/null || echo "${EUID:-}")
+  [ -n "$uid" ] || return 1
+  root="$base/fm-pending-reply-$uid"
+  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+    (umask 077 && mkdir -p "$root") 2>/dev/null || return 1
+  fi
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  owner=$(_fm_pending_reply_path_owner "$root") || return 1
+  [ "$owner" = "$uid" ] || return 1
+  mode=$(_fm_pending_reply_path_mode "$root") || return 1
+  case "$mode" in
+    700|0700) ;;
+    *)
+      chmod 0700 "$root" 2>/dev/null || return 1
+      mode=$(_fm_pending_reply_path_mode "$root") || return 1
+      [ "$mode" = 700 ] || [ "$mode" = 0700 ] || return 1
+      ;;
+  esac
+  printf '%s\n' "$root"
+}
+
+# Safely remove a pending-reply decision snapshot directory. Re-checks
+# ownership and symlink status at delete time, refusing any path that is a
+# symlink, not a directory, or not owned by the current user.
+_fm_pending_reply_decision_cache_rm_one() {  # <dir-path>
+  local d=$1 uid owner f
+  [ -n "$d" ] || return 0
+  [ -e "$d" ] || [ -L "$d" ] || return 0
+  [ ! -L "$d" ] || return 1
+  [ -d "$d" ] || return 1
+
+  uid=$(id -u 2>/dev/null || echo "${EUID:-}")
+  owner=$(_fm_pending_reply_path_owner "$d")
+  [ -n "$uid" ] && [ -n "$owner" ] && [ "$owner" = "$uid" ] || return 1
+
+  for f in "$d"/*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    [ ! -L "$d" ] || return 1
+    rm -f -- "$f"
+  done
+
+  [ ! -L "$d" ] || return 1
+  owner=$(_fm_pending_reply_path_owner "$d")
+  [ "$owner" = "$uid" ] || return 1
+  rmdir "$d" 2>/dev/null || true
+}
+
+# Remove this process's pending-reply decision snapshot directories.
+# Cleans snapshot directories under the watcher user's private root (0700)
+# and sweeps any legacy PID-prefixed paths in ${TMPDIR:-/tmp}. Re-checks
+# ownership and symlink status at delete time and refuses otherwise.
+fm_pending_reply_decision_cache_cleanup() {
+  local d root
+  if root=$(_fm_pending_reply_decision_cache_root 2>/dev/null) && [ -d "$root" ]; then
+    for d in "$root"/fm-pending-reply-decisions."$$".*; do
+      [ -e "$d" ] || [ -L "$d" ] || continue
+      _fm_pending_reply_decision_cache_rm_one "$d" || true
+    done
+    rmdir "$root" 2>/dev/null || true
+  fi
+  for d in "${TMPDIR:-/tmp}"/fm-pending-reply-decisions."$$".*; do
+    [ -e "$d" ] || [ -L "$d" ] || continue
+    _fm_pending_reply_decision_cache_rm_one "$d" || true
+  done
+}
+
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks. Records are
@@ -1564,6 +1695,9 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
+  local _fm_pending_reply_decision_cache_dir=
+  local -a _fm_pending_reply_denied_files=() _fm_pending_reply_denied_signatures=()
+  local -a _fm_pending_reply_denied_kinds=()
   local -a observation_tasks=() observation_values=() records=() selected=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
@@ -1582,6 +1716,13 @@ fm_pending_reply_tick() {  # <state-dir>
   while IFS= read -r rec; do
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
+  if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
+    local _fm_cache_root
+    if _fm_cache_root=$(_fm_pending_reply_decision_cache_root 2>/dev/null); then
+      _fm_pending_reply_decision_cache_dir=$(mktemp -d "$_fm_cache_root/fm-pending-reply-decisions.$$.XXXXXX" 2>/dev/null) \
+        || _fm_pending_reply_decision_cache_dir=
+    fi
+  fi
   for rec in ${selected[@]+"${selected[@]}"}; do
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
@@ -1682,6 +1823,10 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  if [ -n "$_fm_pending_reply_decision_cache_dir" ]; then
+    _fm_pending_reply_decision_cache_rm_one "$_fm_pending_reply_decision_cache_dir" || true
+    rmdir "${_fm_pending_reply_decision_cache_dir%/*}" 2>/dev/null || true
+  fi
   return 0
 }
 

@@ -39,10 +39,16 @@ Each adapter:
 
 - Starts the next arm before delivering the wake prompt.
 - Checks current session-lock ownership at launch.
-- Preserves one child or scheduled retry at a time.
+- Preserves one child slot or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
-Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+Pi reports an existing cycle as `starting` while readiness is unconfirmed inside `FM_PI_ARM_READY_TIMEOUT_MS`, `healthy` only when `bin/fm-wake-lib.sh` verifies its home, watcher path, and process identity against a fresh progress beacon while this session owns the lock, `retrying` while it retires and replaces an identity-proved watcher or owns a scheduled continuity retry, and `unhealthy` when this session cannot take ownership of this home's watcher because its home, watcher path, or process identity is not proved, which withholds replacement; a session without the lock instead reports the read-only refusal while another session holds it, or the not-armed message when no live session holds it.
+Both the health check and the identity check resolve the expected watcher path inside bash before comparing it, because the lock records `watcher-path` in the shell's own `pwd` spelling: a native Windows root such as `C:\firstmate` must be compared as the Git Bash `/c/firstmate/bin/fm-watch.sh` or cygwin `/cygdrive/c/firstmate/bin/fm-watch.sh` the watcher wrote, and rewriting drive letters in the extension could only guess one shell's convention.
+The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is past the shared guard grace, which by default derives from the home's poll cadence rather than a fixed 300-second floor (see [`turnend-guard.md`](turnend-guard.md#guard-grace-and-the-poll-cadence)), without waiting for another tool call.
+A health replacement never waits out a slow exit: when that arm's retirement exceeds `FM_WATCH_ARM_RETIRE_TIMEOUT_MS`, the extension logs the timeout, releases the single-flight slot, and starts the replacement anyway, and the timed-out arm's later close adds no second replacement.
+An arm awaiting readiness or a scheduled retry reports `starting` or `retrying`, never a health claim; a stale or missing beacon is likewise never `healthy`.
+An unproved retirement relationship leaves the existing processes and foreign lock metadata untouched.
+Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of reporting that arm's state.
 The actionable restoration path applies the same live-child check after readiness, so output retained by a dead child's descendant cannot satisfy successor verification.
 Pi also settles an arm child on its process exit event, not only on stdio close, so a child that dies while a descendant still holds its pipes takes the same bounded retry.
 If a complete actionable line arrives while those pipes drain after exit, it replaces the provisional failure retry and takes the ordinary actionable restoration path.
@@ -155,13 +161,14 @@ Delivery to the branch stays serialized: one wake is delivered at a time, each w
 The handling handoff is confirmed inside the successor start, while that successor is still the live arm, and the delivery reads the confirmed outcome.
 A successor that a later close already replaced is therefore never confirmed as a failed handoff, and a healthy newer successor is never reported to main as a restoration failure.
 A verified successor that fails while a successor start or a wake delivery is in flight keeps its bounded retry for the end of that operation, and the operation that held the guard settles it.
+A wake delivery in flight also defers any failed arm that was not deliberately retired, so a health replacement that fails before readiness keeps the same bounded retry instead of being dropped; an unready child that fails during a successor start belongs to the restoration that started it.
 
 If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
 Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
 On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
 An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
-The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, and confirmation targets and results to state/.watch-extension.log, a bounded record that never changes supervision behavior.
+The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, confirmation targets and results, health-monitor states, and slow-retire timeouts to state/.watch-extension.log, a bounded record that never changes supervision behavior.
 docs/configuration.md owns the knob's default and accepted values.
 A failed confirmation is never swallowed.
 
@@ -426,7 +433,7 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 ### Grace, beacon, and stop signals
 
-The default 300-second grace is unchanged.
+Beacon freshness keeps its 300-second floor and rises with the home's poll cadence; [`turnend-guard.md`](turnend-guard.md#guard-grace-and-the-poll-cadence) owns that derivation and its readers.
 Only the watcher process touches `state/.last-watcher-beat`.
 No helper process can make a wedged watcher appear healthy.
 An arm whose own script path sits under a disposable no-mistakes validation checkout (`.no-mistakes/worktrees/`) refuses with the typed failure line before touching any state, because a watcher started there outlives the validation step and keeps writing the real home's state from a checkout about to be deleted.
@@ -463,7 +470,8 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 
 ### Pi and OpenCode watch extension
 
-`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops.
+`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and the explicit `starting`, `healthy`, `retrying`, and `unhealthy` state each owned call reports.
+It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that the grace judging staleness follows the home's poll cadence instead of a fixed 300-second floor, that a root spelled differently from the lock's own recorded spelling still proves identity and repairs instead of holding `unhealthy`, that unproved identities preserve both the child and foreign lock metadata, that an arm outliving its retire bound still yields exactly one replacement with no false failure alarm, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
@@ -474,6 +482,7 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 - Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
 - Lets a verified Pi successor exit after delivery while a descendant holds its pipes to prove the exit alone schedules the bounded retry.
+- Fails an unready health replacement while a branch delivery is held to prove its bounded retry still starts, once, when that delivery settles.
 - Delays a Pi arm's actionable line behind a descendant-held pipe until after its exit to prove that line still becomes the wake instead of a retry.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
