@@ -830,9 +830,9 @@ status_line_note() {  # <status-line> [<out-var>] -> text after the first colon,
     *:*)
       __fm_note_text=${__fm_note_unstamped#*:}
       __fm_note_text=${__fm_note_text#"${__fm_note_text%%[![:space:]]*}"}
-      # A note-head token that states this line's key (no before-colon token,
-      # valid slug) is key metadata, not note text: strip it so both stated-key
-      # positions yield the same note.
+      # A note-head token that states this line's key (no before-colon or
+      # unbracketed token, valid slug) is key metadata, not note text: strip it
+      # so both stated-key positions yield the same note.
       if ! _fm_key_before_colon "$__fm_note_unstamped" \
         && ! _fm_key_unbracketed "$__fm_note_unstamped" >/dev/null \
         && _fm_key_at_note_head "$__fm_note_unstamped" __fm_note_key \
