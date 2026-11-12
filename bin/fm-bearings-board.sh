@@ -117,14 +117,35 @@ validate_payload() {  # <data.json>
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
     def name_marker: has("name") and (.name | nonempty_string);
+    # A filed date is checked WITHOUT ever converting it to an epoch value.
+    # jq 1.6 applies the local daylight-saving offset inside
+    # fromdateiso8601 and mktime, so the round-trip comparison they feed reads
+    # "2026-08-14T09:30:00Z" back as "2026-08-14T10:30:00Z" wherever summer time
+    # is in force and rejects every valid stamp on that machine. strptime fills
+    # the broken-down fields verbatim and strftime formats straight back out of
+    # them, which is identical under TZ=UTC, Europe/Berlin, America/New_York and
+    # Asia/Kolkata. strptime range-checks each field on its own, so it catches
+    # month 13, day 32, hour 99 and minute 61 but accepts 2026-02-29,
+    # 2026-04-31 and second 60 or 61 (strftime then echoes those seconds
+    # back unchanged); the month length and second are therefore checked here
+    # rather than inherited from the normalizing conversion this no longer
+    # performs.
+    def days_in_month($year; $month):
+      if $month == 2
+      then (if ($year % 4 == 0 and $year % 100 != 0) or $year % 400 == 0 then 29 else 28 end)
+      elif $month == 4 or $month == 6 or $month == 9 or $month == 11 then 30
+      else 31
+      end;
     def valid_filed:
       . as $filed
       | type == "string"
       and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$")
-      and (if test("T")
-        then try ((fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ")) == $filed) catch false
-        else try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $filed) catch false
-        end);
+      and ((if test("T") then "%Y-%m-%dT%H:%M:%SZ" else "%Y-%m-%d" end) as $format
+        | try (strptime($format) as $parts
+          | ($parts | strftime($format)) == $filed
+            and $parts[2] <= days_in_month($parts[0]; $parts[1] + 1)
+            and $parts[5] <= 59)
+          catch false);
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
