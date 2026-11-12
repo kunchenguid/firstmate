@@ -1220,16 +1220,28 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
+fm_backend_composer_ownership_capture() {
+  case "$1" in
+    orca)
+      fm_backend_source orca || return 1
+      fm_backend_orca_composer_capture "$2" "$3"
+      ;;
+    *) fm_backend_capture "$@" ;;
+  esac
+}
+
 # FM_BACKEND_VISIBLE_CAPTURE: backends with a verified viewport-only read, each
 # implementing fm_backend_<name>_visible_capture. This one list answers both the
 # capability question and the dispatch, so they cannot disagree. cmux is absent
 # pending live verification: its `read-screen` without `--scrollback` plausibly
 # reads only the viewport, but that has not been observed on a real cmux, and
-# the adapter's own capture opts into history with `--scrollback`. orca's
-# `terminal read --limit` is a history read with no viewport mode. rex has no
-# viewport-only read either; its viewport is DERIVED as the last size.rows rows
-# of the styled capture, which always ends with the full screen grid
-# (bin/backends/rex.sh's header owns the derivation and its verified basis).
+# the adapter's own capture opts into history with `--scrollback`. orca is
+# absent too: its `terminal read --limit` is a history read, and the composer
+# path's `terminal read --screen` renders the screen without a verified
+# viewport bound. rex has no viewport-only read either; its viewport is DERIVED
+# as the last size.rows rows of the styled capture, which always ends with the
+# full screen grid (bin/backends/rex.sh's header owns the derivation and its
+# verified basis).
 # tern reads the viewport with `tern capture --surfaces` and no `--scrollback`
 # (trimmed to the block's rows); its own capture opts into history with the flag.
 # hc reads the screen alone with `hc read --lines 0`.
@@ -1396,6 +1408,25 @@ fm_backend_busy_state() {  # <backend> <target>
     tern) fm_backend_tern_busy_state "$@" ;;
     hc) fm_backend_hc_busy_state "$@" ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_composer_draft: the backend's structured input draft for <target>,
+# printed verbatim so an EMPTY draft is an answer rather than a failure. Exit 0
+# is that answer, exit 1 means "this backend has no structured draft" (the only
+# case where fm-task-inbox-lib.sh's own-line check may fall back to plain
+# capture), and exit 3 means a structured draft exists but could not be read -
+# an ownership decision that must defer instead of trusting stream text.
+# Only Orca publishes the field (result.terminal.draft); see docs/orca-backend.md.
+fm_backend_composer_draft() {
+  local backend=$1
+  shift
+  case "$backend" in
+    orca)
+      fm_backend_source "$backend" || return 1
+      fm_backend_orca_composer_draft "$@"
+      ;;
+    *) return 1 ;;
   esac
 }
 

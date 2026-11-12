@@ -61,7 +61,7 @@ The stable firstmate alias is `fm-<id>`.
 The recorded `terminal=` and `orca_worktree_id=` fields are what backend helpers use under the hood.
 
 If an ordinary steer fails to enqueue, or a typed-plane `fm-send` fails to submit, do not immediately repeat the instruction.
-Read the reported failure and peek first, then decide whether the record exists or the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
+Read the reported failure, then peek the recorded endpoint - in Orca's UI instead when the failure names a replacement pane, because `fm-peek` reads the recorded handle and cannot follow retargeting - and decide whether the record exists or the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
 For harness-specific interrupts or exits, load `harness-adapters`.
 
 ## Recovery
@@ -71,6 +71,7 @@ For a messy Orca-backed task:
 1. Read `state/<id>.meta` and the relevant status tail first.
 2. Confirm the task is actually Orca-backed before using Orca-specific assumptions.
 3. Use the recorded `terminal=`, `orca_worktree_id=`, and `worktree=` as the task identity.
+   For stale-terminal delivery, follow the [send-time resolution contract](../../../docs/orca-backend.md#task-shape-and-metadata).
 4. Prefer firstmate helpers for peek, send, state, and teardown.
 5. Avoid raw deletion of Orca worktrees or manual branch cleanup.
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.

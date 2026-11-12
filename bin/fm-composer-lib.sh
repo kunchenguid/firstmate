@@ -627,8 +627,9 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
 # screen with a raised one. kiro's bare `›` composer needs no entry here: see
-# FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
+# FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below.
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness; matching is
+# case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
 
 # KIRO ONLY (fm_composer_kiro_scope): idle placeholders that carry a submit hint
@@ -2452,25 +2453,67 @@ EOF
 # retyping would duplicate it. Proven pending (and pending-unproven) retries
 # consume the budget; any other verdict returns immediately, so `unknown`
 # stays a loud refusal rather than a blind retry into an unreadable pane.
+# A caller that opts into <resolved-target-var> also receives endpoint outcomes:
+# Enter resolving a different endpoint than <target> returns `endpoint-changed`
+# (`inbox-deferred` on the inbox plane) with no retype and no further Enter.
+# A failed Enter after accepted text is ALWAYS unconfirmed, whatever the composer
+# reads: Orca can replace the pane between the accepted text and the failed
+# Enter, so an empty composer on the replacement (or on a handle now bound to a
+# fresh pane) is indistinguishable from a delivered message. The typed plane
+# returns `pending` (fm-send's unconfirmed outcome) and the inbox plane
+# `inbox-deferred`; `send-failed` is never right there, because the text was
+# already accepted and a caller told "not sent" would retype or re-ring. The
+# failed path deliberately does not read the composer. Every caller that omits
+# the variable keeps the vocabulary above.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
-fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
+fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [resolved-target-var]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
+  local resolved_target_var=${7:-} key_rc
   while :; do
-    "$send_key_fn" "$target" Enter "$expected_label" || true
+    key_rc=0
+    "$send_key_fn" "$target" Enter "$expected_label" || key_rc=$?
+    if [ -n "$resolved_target_var" ] && [ -n "${!resolved_target_var}" ] && [ "${!resolved_target_var}" != "$target" ]; then
+      if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+        printf 'inbox-deferred'
+      else
+        printf 'endpoint-changed'
+      fi
+      return 0
+    fi
+    # Only a caller that passes resolved-target-var (Orca) stops on a failed
+    # Enter; every other backend keeps verifying the composer as before.
+    # An Enter that fails after the text was accepted is never a proven
+    # non-delivery: the text may still be in that composer, or an earlier
+    # Enter may have submitted it. It is also never a proven delivery: a pane
+    # replaced between the accepted text and the failed Enter can read an
+    # empty composer that is indistinguishable from a delivered message. So
+    # the failed path never consults the composer read; the send stays
+    # unconfirmed (typed `pending`) or deferred (inbox), with no retype and no
+    # further Enter, and `send-failed` stays reserved for a literal typing
+    # failure that happened before this loop.
+    if [ "$key_rc" -ne 0 ] && [ -n "$resolved_target_var" ]; then
+      if [ -n "${FM_TASK_INBOX_RING_LINE:-}" ]; then
+        printf 'inbox-deferred'
+      else
+        printf 'pending'
+      fi
+      return 0
+    fi
     sleep "$sleep_s"
     state=$("$state_fn" "$target" "$expected_label")
     # The first Enter can open a picker. A later Enter would confirm it.
     if fm_composer_blocking_dialog_noted >/dev/null; then
-      printf 'unknown'
-      return 0
+      state=unknown
     fi
     case "$state" in
-      pending|pending-unproven) ;;
-      *) printf '%s' "$state"; return 0 ;;
+      pending|pending-unproven)
+        i=$((i + 1))
+        [ "$i" -ge "$retries" ] || continue
+        ;;
     esac
-    i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
+    printf '%s' "$state"
+    return 0
   done
 }
 
