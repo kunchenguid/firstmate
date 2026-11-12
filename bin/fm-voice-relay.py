@@ -535,13 +535,19 @@ class Session:
             AsyncBedrockRuntimeClient,
             InvokeModelWithBidirectionalStreamOperationInput)
         from aws_sdk_bedrock_runtime.config import AsyncBedrockRuntimeConfig
+        from smithy_http.aio.crt import AWSCRTHTTPClient
 
         creds = await self.credentials.get()
         began = time.monotonic()
+        # The SDK's own config default (AIOHTTPClient) cannot drive
+        # InvokeModelWithBidirectionalStream: it raises UnsupportedTransportError
+        # the moment a duplex session opens. AWSCRTHTTPClient is the transport the
+        # SDK ships specifically for duplex streaming, so it has to be requested
+        # here rather than left to that default.
         config = await AsyncBedrockRuntimeConfig.resolve(
             endpoint_uri="https://bedrock-runtime.{}.amazonaws.com".format(
                 self.options.region),
-            region=self.options.region, **creds)
+            region=self.options.region, transport=AWSCRTHTTPClient(), **creds)
         client = AsyncBedrockRuntimeClient(config=config)
         self.stream = await client.invoke_model_with_bidirectional_stream(
             InvokeModelWithBidirectionalStreamOperationInput(
