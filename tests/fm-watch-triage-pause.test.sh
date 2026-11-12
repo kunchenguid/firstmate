@@ -36,7 +36,7 @@ test_nonterminal_stale_not_working_surfaced() {
   # primed so the signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
   sig=$(seen_sig "$state/stopped.status"); printf '%s' "$sig" > "$state/.seen-stopped_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -78,7 +78,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   # not pre-empt the stale path.
   printf 'paused: holding for the upstream tool release\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle, holding for upstream")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -136,7 +136,7 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
   for wait_kind in background-shell pipeline-run foreground-command; do
     dir=$(make_case "own-work-$wait_kind"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/own-work.status"
-    window="test:fm-own-work"; key=$(printf '%s' "$window" | tr ':/.' '___')
+    window="test:fm-own-work"; key=$(watch_window_key "$window")
     printf 'idle worker awaiting its own %s\n' "$wait_kind" > "$capture_file"
     printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/own-work.meta"
     printf 'paused: waiting for my %s to finish; resume on completion\n' "$wait_kind" > "$statusf"
@@ -226,7 +226,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle bare shell after agent exit")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -272,7 +272,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle bare shell after captain-held transfer")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -294,7 +294,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
   printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle external-decision gate")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -357,7 +357,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
     if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
     else touch -m -d "@$back" "$statusf"; fi
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-    key=$(printf '%s' "$window" | tr ':/.' '___')
+    key=$(watch_window_key "$window")
     printf '%s' "$(hash_text 'idle after agent exit')" > "$state/.hash-$key"
     printf '1\n' > "$state/.count-$key"
 
@@ -452,7 +452,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
     printf '%s\n' "$status_line" > "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
-    key=$(printf '%s' "$window" | tr ':/.' '___')
+    key=$(watch_window_key "$window")
     throttle="$state/.paused-resurfaced-$key"
 
     # First sight of a parked-but-live worker must still surface: the state is
@@ -534,7 +534,7 @@ test_live_paused_until_controls_recheck_time() {
   future=$(iso_utc_at "$(( $(date +%s) + 7200 ))")
   printf 'paused: rate limit until %s\n' "$future" > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'parked, elapsed 1s' > "$capture_file"
   printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -594,7 +594,7 @@ test_live_paused_until_controls_recheck_time() {
 
 # The window key every hold fixture uses, derived the way fm-watch.sh derives it.
 hold_key() {
-  printf '%s' test:fm-held-merge | tr ':/.' '___'
+  watch_window_key test:fm-held-merge
 }
 
 make_hold_home() {  # <name> <status-line> <hold|nohold>
@@ -839,7 +839,7 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-held_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -873,7 +873,7 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-hold_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle awaiting the captain")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -900,7 +900,7 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-working.meta"
   printf 'working: the parent supervises this secondmate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-working_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle while the parent supervises")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -922,9 +922,7 @@ test_secondmate_unpause_clears_pause_tracking() {
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-resumed.meta"
   printf 'working: upstream landed\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-secondmate-resumed_status"
-  key=${window//:/_}
-  key=${key//\//_}
-  key=${key//./_}
+  key=$(watch_window_key "$window")
   : > "$state/.paused-$key"
   : > "$state/.paused-rechecked-$key"
   : > "$state/.paused-resurfaced-$key"
@@ -949,7 +947,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/transition.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/transition.status"
   sig=$(seen_sig "$state/transition.status"); printf '%s' "$sig" > "$state/.seen-transition_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
@@ -1006,7 +1004,7 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-recheck.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/pause-recheck.status"
   sig=$(seen_sig "$state/pause-recheck.status"); printf '%s' "$sig" > "$state/.seen-pause-recheck_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
@@ -1036,7 +1034,7 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-working.meta"
   printf 'paused: awaiting the upstream release\n' > "$state/paused-working.status"
   sig=$(seen_sig "$state/paused-working.status"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
@@ -1108,7 +1106,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-secondmate-hold_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle awaiting the captain")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1165,7 +1163,7 @@ test_captain_held_rechecked_under_a_quiet_record() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-secondmate-hold_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   printf '%s' "$(hash_text "idle awaiting the captain")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   write_quiet_record "$state"
@@ -1189,7 +1187,7 @@ test_captain_held_rechecked_under_a_quiet_record() {
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-afk.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held-afk_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   printf 'quiet\n' > "$state/.afk"
   write_quiet_record "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1212,7 +1210,7 @@ test_live_captain_held_first_sight_silenced_by_away_record() {
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-live.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-live_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   write_away_record "$state"
   # A LIVE agent at the gate: without the record pause_state_class answers none
   # and the first sight surfaces (test_exited_declared_pause_is_bounded_but_live_gate_surfaces).
@@ -1259,7 +1257,7 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-afk.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-afk_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   date '+%s' > "$state/.afk"
   write_away_record "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1293,17 +1291,22 @@ paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
-  key=$(printf '%s' "$window" | tr '.:/' '___')
+  key=$(watch_window_key "$window")
   printf '%s' "$(hash_text 'idle, waiting for the reset')" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   printf '%s\n' "$dir"
+}
+
+# The pause ceiling is opt-in; a case that exercises it arms the home's presence flag.
+arm_pause_ceiling() {  # <home-dir>
+  mkdir -p "$1/config" && : > "$1/config/pause-ceiling"
 }
 
 until_watch() {  # <dir> <cadence> -> pid in UNTIL_PID
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
-    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE="$dir/config" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS="$2" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
   UNTIL_PID=$!
@@ -1359,6 +1362,404 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_pause_ceiling_dated_overdue_pause_opens_one_decision() {
+  local dir state class
+  dir=$(paused_until_fixture until-overdue "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"
+  arm_pause_ceiling "$dir"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = paused ] || fail "overdue dated pause classified as working: $class"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a declared wait whose until time passed was not rechecked ahead of the cadence"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the due recheck did not print a stale wake: $(cat "$dir/watch.out")"
+  grep -F 'wait overdue - decide or release' "$dir/watch.out" >/dev/null \
+    || fail "the overdue recheck did not request a decision: $(cat "$dir/watch.out")"
+  grep -F 'possible wedge' "$dir/watch.out" >/dev/null && fail "a due declared wait was mislabeled a possible wedge"
+  grep -F 'paused-overdue-until' < <(status_open_decisions "$state/until.status") >/dev/null \
+    || fail "the overdue pause did not open a keyed decision"
+  local heartbeat
+  heartbeat=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; STATE="$2"; heartbeat_scan_finds_actionable; printf "%s" "$FM_HEARTBEAT_SURFACE_ENDPOINTS"' _ "$WATCH" "$state") \
+    || fail "heartbeat did not classify the overdue pause as actionable"
+  case "$heartbeat" in *until.status*) ;; *) fail "heartbeat omitted overdue pause status: $heartbeat" ;; esac
+  # The due recheck fires once per declaration: a second watcher on the same
+  # unchanged declaration absorbs it again.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
+  : > "$dir/watch.out"
+  until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "the due recheck repeated on every poll instead of once per declaration: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  printf 'working: resumed\n' >> "$state/until.status"
+  # A fresh watcher observes the resumed status and closes the keyed decision.
+  : > "$dir/watch.out"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "resumed worker did not clear the overdue decision"; }
+  [ -z "$(status_open_decisions "$state/until.status")" ] \
+    || fail "resuming the worker did not close the overdue pause decision"
+  pass "with config/pause-ceiling, a dated pause past its ceiling opens one keyed decision that a worker event closes"
+}
+
+test_pause_ceiling_absent_keeps_old_pauses_on_the_recheck() {
+  local dir state statusf before
+  dir=$(paused_until_fixture pause-ceiling-absent "" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
+  before=$(cat "$statusf")
+  # A marker left by an earlier opt-in must not change anything once the flag is gone.
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=1 bash -c '
+    . "$1"
+    wake() { :; }
+    printf "%s:%s\n" "$(stat_devino "$2")" "$(_fm_status_file_size "$2")" > "$STATE/.paused-overdue-until"
+    status_pause_is_overdue "paused: waiting for an external dependency" 90000 "$(date +%s)" && exit 3
+    pause_overdue_reconcile until "$2" && exit 4
+    handle_paused_stale test:fm-until until hash
+  ' _ "$WATCH" "$statusf" || fail "without config/pause-ceiling an old pause was treated as overdue"
+  [ "$(cat "$statusf")" = "$before" ] || fail "without config/pause-ceiling the watcher wrote to the status log: $(cat "$statusf")"
+  [ -e "$state/.paused-overdue-until" ] || fail "without config/pause-ceiling the watcher touched a leftover overdue marker"
+  grep -F 'stale: test:fm-until' "$state/.wake-queue" >/dev/null || fail "without config/pause-ceiling the old pause was not rechecked"
+  grep -F 'wait overdue' "$state/.wake-queue" >/dev/null && fail "without config/pause-ceiling the recheck asked for an overdue decision"
+  pass "without config/pause-ceiling an old pause keeps the plain recheck and opens no decision"
+}
+
+test_overdue_resume_race_uses_pause_snapshot() {
+  local dir state statusf timing
+  for timing in before after; do
+    dir=$(paused_until_fixture "overdue-resume-race-$timing" "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+    arm_pause_ceiling "$dir"
+    FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=1 bash -c '
+      . "$1"
+      original_append=$(declare -f fm_wake_status_append_self_announced)
+      eval "${original_append/fm_wake_status_append_self_announced ()/original_append_impl ()}"
+      fm_wake_status_append_self_announced() {
+        case "$3" in blocked*)
+          [ "$timing" != before ] || printf "working: resumed\n" >> "$2"
+          original_append_impl "$@"
+          [ "$timing" != after ] || printf "working: resumed\n" >> "$2"
+          return 1 ;;
+        esac
+        original_append_impl "$@"
+      }
+      timing=$3
+      handle_paused_stale test:fm-until until hash
+      [ ! -s "$STATE/.wake-queue" ] || exit 1
+      [ ! -e "$STATE/.paused-overdue-until" ] || exit 1
+      [ -z "$(status_open_decisions "$2")" ] || exit 1
+      grep -Fq "resolved [key=paused-overdue-until]" "$2"
+    ' _ "$WATCH" "$statusf" "$timing" || fail "initial overdue publication missed a resume ($timing)"
+  done
+  pass "overdue publication reconciles resumes before or after the blocker append without a stale alert"
+}
+
+test_busy_overdue_pause_does_not_enter_wedge_ladder() {
+  local dir state statusf
+  dir=$(paused_until_fixture busy-overdue "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+  arm_pause_ceiling "$dir"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=1 bash -c '
+    . "$1"
+    wake() { :; }
+    key=$(window_key test:fm-until)
+    since="$STATE/.stale-since-$key"; escalations="$STATE/.escalated-$key"
+    busy_turn_bound_check test:fm-until until first "$since" "$escalations" || exit 1
+    status_open_decisions "$2" | grep -Fq paused-overdue-until || exit 1
+    before=$(wc -l < "$STATE/.wake-queue")
+    busy_turn_bound_check test:fm-until until second "$since" "$escalations" || exit 1
+    busy_turn_bound_check test:fm-until until third "$since" "$escalations" || exit 1
+    [ "$(wc -l < "$STATE/.wake-queue")" = "$before" ] || exit 1
+    [ ! -e "$since" ] && [ ! -e "$escalations" ] || exit 1
+    printf "working: resumed\n" >> "$2"
+    STALE_ESCALATE_SECS=999999
+    busy_turn_bound_check test:fm-until until resumed "$since" "$escalations"
+    [ "$?" -eq 1 ] && [ -e "$since" ] || exit 1
+    [ -z "$(status_open_decisions "$2")" ]
+  ' _ "$WATCH" "$statusf" || fail "busy overdue pause repeated a wake or lost normal wedge tracking after resume"
+  pass "busy overdue decisions suppress wedge alerts until a worker event, then restore ordinary tracking"
+}
+
+test_overdue_marker_survives_reconcile_and_closes_on_working() {
+  local dir state statusf
+  dir=$(paused_until_fixture overdue-marker-eof "" 90000); state="$dir/state"; statusf="$state/overdue-marker-eof.status"
+  arm_pause_ceiling "$dir"
+  printf 'holding: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_CLASSIFY_PAUSED_VERB=holding bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-overdue "$STATE/.paused-resurfaced-overdue-marker-eof" 90000 overdue "" 0 "$2" \
+      "blocked [key=paused-overdue-overdue-marker-eof]: paused 90000s, wait overdue - decide or release" \
+      "$STATE/.paused-overdue-overdue-marker-eof" "$(stat_devino "$2"):$(_fm_status_file_size "$2")"
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    printf "blocked [key=other]: unrelated decision\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "holding [at=200]: waiting for an external dependency\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "Still waiting for the dependency\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "working: resumed\n" >> "$2"
+    FM_CLASSIFY_RESOLVE_VERB=answered pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    grep -Fq "answered [key=paused-overdue-overdue-marker-eof]" "$2" || exit 1
+    ! FM_CLASSIFY_RESOLVE_VERB=answered status_open_decisions "$2" | grep -Fq paused-overdue-overdue-marker-eof || exit 1
+    printf "holding: waiting for an external dependency\n" >> "$2"
+    offset=$(_fm_status_file_size "$2")
+    identity=$(stat_devino "$2")
+    printf "%s:%s\n" "$identity" "$offset" > "$STATE/.paused-overdue-overdue-marker-eof"
+    printf "blocked [key=paused-overdue-overdue-marker-eof]: overdue\n" >> "$2"
+    printf "merged\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "holding: waiting for an external dependency\n" >> "$2"
+    offset=$(_fm_status_file_size "$2")
+    identity=$(stat_devino "$2")
+    printf "%s:%s\n" "$identity" "$offset" > "$STATE/.paused-overdue-overdue-marker-eof"
+    printf "blocked [key=paused-overdue-overdue-marker-eof]: overdue\n" >> "$2"
+    printf "holding [at=300]: waiting for an external dependency\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    printf "needs-decision: captain input required\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    grep -Fq "resolved [key=paused-overdue-overdue-marker-eof]" "$2"
+  ' _ "$WATCH" "$statusf" || fail "a freshly written overdue marker did not survive reconcile and close on working"
+  pass "a fresh overdue marker survives reconciliation and closes when the worker resumes"
+}
+
+test_overdue_terminal_status_ignores_pane_display_churn() {
+  local dir state statusf pid
+  dir=$(paused_until_fixture overdue-display-churn "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+  arm_pause_ceiling "$dir"
+  printf 'window=test:fm-until\nkind=ship\n' > "$state/until.meta"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue pause did not open its decision"; }
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "overdue decision was not opened"
+  ack_stopped_cycle "$state" || fail "could not acknowledge overdue decision"
+
+  printf 'idle, waiting for the reset; display changed\n' > "$dir/pane.txt"
+  until_watch "$dir" 240
+  pid=$UNTIL_PID
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "terminal overdue pause repeated a stale wake after pane display changed: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "pane display churn printed another stale wake"
+  [ ! -s "$state/.wake-queue" ] || fail "pane display churn queued another stale wake"
+  reap "$pid"
+  pass "an open overdue decision suppresses terminal stale wakes caused only by pane display churn"
+}
+
+test_reused_task_id_does_not_inherit_overdue_pause() {
+  local dir state statusf
+  dir=$(paused_until_fixture reused-overdue-task "" 90000); state="$dir/state"; statusf="$state/until.status"
+  arm_pause_ceiling "$dir"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-reused" 90000 overdue "" 0 "$2" "blocked [key=paused-overdue-until]: paused 90000s, wait overdue - decide or release" "$STATE/.paused-overdue-until" "$(stat_devino "$2"):$(_fm_status_file_size "$2")"
+    mv "$2" "$2.retired"
+    printf "working: fresh task\n" > "$2"
+    result=$(pause_state_class test:fm-until until)
+    [ "$result" != paused ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-until" ]
+  ' _ "$WATCH" "$statusf" || fail "a reused task id inherited its prior overdue pause marker"
+  pass "a reused task id with fresh working status does not inherit overdue pause state"
+}
+
+test_malformed_dated_pause_is_not_undated_overdue() {
+  local dir state result class statusf
+  dir=$(paused_until_fixture malformed-until "" 90000); state="$dir/state"; statusf="$state/until.status"
+  arm_pause_ceiling "$dir"
+  printf 'paused: waiting until not-a-time\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
+  result=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 bash -c '. "$1"; status_pause_is_overdue "paused: waiting until not-a-time" 90000 "$(date +%s)"; printf "%s" "$?"' _ "$WATCH")
+  [ "$result" = 1 ] || fail "malformed dated pause entered the undated overdue path"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: run-step' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = working ] || fail "watcher classification treated a malformed dated pause as overdue: $class"
+  pass "malformed dated pauses remain on bounded recheck"
+}
+
+test_undated_pause_age_uses_the_pause_line() {
+  local now=1800000000 age
+  age=$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_age "$2" 7200 "$3"' _ "$ROOT" "paused [at=$((now - 90000))]: waiting" "$now")
+  [ "$age" = 90000 ] || fail "a later file touch moved the pause age ($age)"
+  age=$(bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_age "$2" 7200 "$3"' _ "$ROOT" "paused: waiting" "$now")
+  [ "$age" = 7200 ] || fail "an unstamped pause did not keep the file age ($age)"
+  arm_pause_ceiling "$TMP_ROOT/undated-age-home"
+  result=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/undated-age-home/config" FM_PAUSE_UNDATED_MAX_SECS=0 bash -c '. "$1/bin/fm-classify-lib.sh"; status_pause_is_overdue "paused: waiting" 9 1800000000; printf "%s" "$?"' _ "$ROOT")
+  [ "$result" = 1 ] || fail "zero bound made a fresh pause overdue"
+  pass "the undated bound uses the pause timestamp and rejects zero"
+}
+
+test_undated_pause_overdue_bound() {
+  local dir state statusf class
+  dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
+  arm_pause_ceiling "$dir"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 30 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  export FM_PAUSE_UNDATED_MAX_SECS=60 FM_PAUSE_RESURFACE_SECS=240
+  until_watch "$dir" 240
+  wait_poll_cycle "$state" "$UNTIL_PID" || { reap "$UNTIL_PID"; fail "fresh undated pause exited before its ceiling"; }
+  wait_poll_cycle "$state" "$UNTIL_PID" || { reap "$UNTIL_PID"; fail "undated pause exited before its ceiling"; }
+  [ -z "$(status_open_decisions "$statusf")" ] || fail "undated pause opened a decision before its bound"
+
+  set_mtime "$(( $(date +%s) - 61 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = paused ] || fail "overdue undated pause classified as working: $class"
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue undated pause did not surface"; }
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "overdue undated pause did not open a decision"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; status_open_decisions() { printf called > "$3"; return 1; }; pause_state_class test:fm-until until' _ "$WATCH" "$state" "$dir/open-fold-called")
+  [ "$class" = paused ] || fail "unchanged overdue pause did not stay classified as paused: $class"
+  [ ! -e "$dir/open-fold-called" ] || fail "unchanged overdue poll folded the full status log"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the overdue undated wake"
+
+  printf 'resolved [key=unrelated]: another decision closed\n' >> "$statusf"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; pause_overdue_reconcile until "$2"; printf "%s" "$?"' _ "$WATCH" "$statusf")
+  [ "$class" = 0 ] || fail "an unrelated resolved key cleared the overdue pause decision"
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "the overdue decision closed on an unrelated resolution"
+
+  printf 'working: resumed\n' >> "$statusf"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "undated resume did not close decision"; }
+  [ -z "$(status_open_decisions "$statusf")" ] || fail "undated resume left decision open"
+  unset FM_PAUSE_UNDATED_MAX_SECS FM_PAUSE_RESURFACE_SECS
+  pass "undated pauses stay quiet through the bound and close their overdue decision on resume"
+}
+
+# Opt-in config/paused-recheck-silent: an unchanged paused declaration that was
+# already surfaced once is rechecked without a wake; first sight, a changed
+# declaration, a due declared time, and an open decision still wake.
+silent_recheck_fixture() {  # <name> <until-epoch> <status-age-secs> -> dir
+  local dir state window key
+  dir=$(make_case "$1"); state="$dir/state"; window="test:fm-until"
+  printf 'idle, waiting for the reset\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/until.meta"
+  printf 'paused: rate limit resets, until %s, then resuming\n' "$(iso_utc_at "$2")" > "$state/until.status"
+  set_mtime "$(( $(date +%s) - $3 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  key=$(watch_window_key "$window")
+  printf '%s' "$(hash_text 'idle, waiting for the reset')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$dir"
+}
+
+silent_recheck_case() {  # <name> <flag:on|off> <status-body> -> dir; leaves the first-sight wake acked
+  local name=$1 flag=$2 body=$3 dir state key
+  dir=$(silent_recheck_fixture "$name" "$(( $(date +%s) + 86400 ))" 500); state="$dir/state"
+  printf '%s\n' "$body" > "$state/until.status"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  mkdir -p "$dir/config"
+  [ "$flag" = on ] && : > "$dir/config/paused-recheck-silent"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "first sight of a declared pause did not wake ($name): $(cat "$dir/watch.out")"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight wake ($name)"
+  key=$(watch_window_key test:fm-until)
+  set_mtime "$(( $(date +%s) - 600 ))" "$state/.paused-resurfaced-$key"
+  : > "$dir/watch.out"
+  printf '%s\n' "$dir"
+}
+
+test_silent_recheck_flag_on_absorbs_unchanged_pause() {
+  local dir state key before
+  dir=$(silent_recheck_case silent-on on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  key=$(watch_window_key test:fm-until)
+  before=$(cat "$state/.paused-resurfaced-$key")
+  until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unchanged paused recheck woke the supervisor with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  [ "$(cat "$state/.paused-resurfaced-$key")" = "$before" ] || fail "the recheck changed the declaration scope"
+  [ "$state/.paused-resurfaced-$key" -nt "$state/until.status" ] || fail "the recheck was not recorded in the throttle marker"
+  grep -F 'rechecked without a wake' "$state/.watch-triage.log" >/dev/null || fail "the silent recheck was not logged"
+  pass "with paused-recheck-silent on, an unchanged paused declaration is rechecked without a wake"
+}
+
+test_silent_recheck_flag_off_still_wakes() {
+  local dir state
+  dir=$(silent_recheck_case silent-off off 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "an unchanged paused recheck did not wake with the flag off"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the recheck wake was not printed with the flag off: $(cat "$dir/watch.out")"
+  pass "with paused-recheck-silent absent, the unchanged paused recheck still wakes"
+}
+
+test_silent_recheck_flag_on_wakes_for_an_open_decision() {
+  local dir state body
+  body=$(printf 'needs-decision [at=%s] [key=open-q]: which option\npaused: rate limit resets, until 2999-01-01T00:00Z, then resuming' "$(date +%s)")
+  dir=$(silent_recheck_case silent-open-decision on "$body"); state="$dir/state"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "an open decision did not wake an unchanged pause with the flag on"; }
+  pass "with paused-recheck-silent on, an open decision still wakes"
+}
+
+test_silent_recheck_flag_on_wakes_for_a_changed_declaration() {
+  local dir state
+  dir=$(silent_recheck_case silent-changed on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'paused: a different wait, until 2999-01-01T00:00Z\n' > "$state/until.status"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a changed declaration did not wake with the flag on"; }
+  pass "with paused-recheck-silent on, a changed declaration still wakes"
+}
+
+test_silent_recheck_flag_on_absorbs_unchanged_pause_for_a_live_ship_agent() {
+  local dir state
+  dir=$(silent_recheck_case silent-live-ship on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  FM_FAKE_TMUX_CURRENT_COMMAND=grok until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unchanged paused recheck woke the supervisor for a live ship agent with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  pass "with paused-recheck-silent on, an unchanged paused recheck for a live ship agent is silent"
+}
+
+test_silent_recheck_flag_on_absorbs_a_ticking_pane_for_a_live_ship_agent() {
+  local dir state
+  dir=$(silent_recheck_case silent-ticking on 'paused: waiting on the vendor reply'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  printf 'idle, waiting for the reset 12:01\n' > "$dir/pane.txt"
+  printf '%s' "$(hash_text 'idle, waiting for the reset 12:01')" > "$state/.hash-$(watch_window_key test:fm-until)"
+  FM_FAKE_TMUX_CURRENT_COMMAND=grok until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "a changed pane on an unchanged paused declaration woke the supervisor with the flag on: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  pass "with paused-recheck-silent on, a ticking pane on an unchanged paused declaration is silent"
+}
+
+test_silent_recheck_flag_on_wakes_when_the_agent_exited() {
+  local dir state
+  dir=$(silent_recheck_case silent-dead on 'paused: rate limit resets, until 2999-01-01T00:00Z, then resuming'); state="$dir/state"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  FM_FAKE_TMUX_CURRENT_COMMAND=zsh until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a paused recheck for an exited agent did not wake with the flag on"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the exited-agent recheck wake was not printed: $(cat "$dir/watch.out")"
+  pass "with paused-recheck-silent on, a paused recheck for an exited agent still wakes"
+}
+
+test_silent_recheck_flag_on_wakes_when_declared_time_is_due() {
+  local dir state
+  dir=$(silent_recheck_fixture silent-due "$(( $(date +%s) - 30 ))" 500); state="$dir/state"
+  mkdir -p "$dir/config"; : > "$dir/config/paused-recheck-silent"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a due declared time did not wake with the flag on"; }
+  grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null || fail "the due wake was not the declared-time recheck"
+  pass "with paused-recheck-silent on, a due declared time still wakes"
+}
+
 # --- a live worker paused on its own background job --------------------------
 # A worker declared `paused:` on its own background job and the job then ended
 # without a new status line, so only the passage of time can tell the watcher
@@ -1373,7 +1774,7 @@ bg_job_paused_case() {  # <name> <status-line> -> dir
   printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
   printf '%s\n' "$2" > "$state/parked.status"
   printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'nightly build running' > "$dir/pane.txt"
   printf '%s' "$(hash_text 'nightly build running')" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1420,7 +1821,7 @@ test_paused_bg_job_until_timeout_rechecks_after_the_job_ends() {
   [ "$(bg_job_stale_wakes "$state")" -eq 1 ] || fail "the passed timeout queued the wrong number of rechecks"
   awk -F '\t' '$3 == "stale" && $5 == "stale: test:fm-parked" { found = 1 } END { exit !found }' \
     "$state/.wake-queue" || fail "the recheck carried an unexpected reason: $(cat "$state/.wake-queue")"
-  case "$(cat "$state/.paused-resurfaced-test_fm-parked" 2>/dev/null)" in
+  case "$(cat "$state/.paused-resurfaced-$(watch_window_key test:fm-parked)" 2>/dev/null)" in
     *:due) ;;
     *) fail "the recheck was not recorded as the passed declared time" ;;
   esac
@@ -1463,6 +1864,175 @@ test_required_captain_hold_tests_fail_without_tasks_axi() {
   pass "all four required captain-hold tests fail when tasks-axi is unavailable"
 }
 
+# The superseded-wait check is opt-in through config/paused-wait-supersession;
+# cases arm it unless asked for the flag-absent default.
+make_superseded_pause_case() {  # <name> <status-line> [armed|unarmed]
+  local name=$1 status_line=$2 arm=${3:-armed} dir state window key sig
+  dir=$(make_case "$name"); state="$dir/state"; window="test:fm-superseded"
+  mkdir -p "$dir/config"
+  [ "$arm" = unarmed ] || : > "$dir/config/paused-wait-supersession"
+  printf 'idle at declared wait\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused.meta"
+  printf '%s\n' "$status_line" > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle at declared wait')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s\n' "$dir"
+}
+
+superseded_pause_round() {  # <dir> <crew-state-line> <exit|absorb> [busy]
+  local dir=$1 crew_state=$2 mode=$3 busy=${4:-no} state="$1/state" out="$1/watch.out" pid
+  local command=zsh busy_max=999999
+  case "$busy" in
+    yes|recent) command=grok; [ "$busy" = yes ] && busy_max=1; printf 'working\nCtrl+c:cancel\n' > "$dir/pane.txt" ;;
+  esac
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-superseded \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+    FM_FAKE_CREW_STATE="$crew_state" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE_LOG="$dir/crew-state.log" \
+    FM_BUSY_TURN_MAX_SECS="$busy_max" FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$out" 2>&1 &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+  else
+    wait_poll_cycle "$state" "$pid" 100 || { reap "$pid"; return 1; }
+    reap "$pid"
+  fi
+}
+
+test_declared_wait_surfaces_superseding_state() {
+  local dir state window
+  dir=$(make_superseded_pause_case gate-unreported 'paused: waiting for validation run R')
+  state="$dir/state"; window=test:fm-superseded
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit \
+    || fail "idle paused run parked at an unreported human gate did not surface"
+  grep -F "stale: $window (paused wait superseded: run R is parked at a human-owed gate with no open decision)" \
+    "$dir/watch.out" >/dev/null || fail "gate wake did not identify the run and missing decision"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the idle gate wake"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
+    || fail "the same declaration and run re-alarmed inside the cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "the same declaration and run produced a duplicate wake"
+
+  dir=$(make_superseded_pause_case gate-reported 'paused: waiting for validation run R')
+  state="$dir/state"
+  printf 'needs-decision [key=nm-R-review]: decide the ask-user finding\npaused: waiting for validation run R\n' > "$state/paused.status"
+  sig=$(seen_sig "$state/paused.status"); printf '%s' "$sig" > "$state/.seen-paused_status"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
+    || fail "an already-open decision did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "gate with an open needs-decision generated a stale wake"
+
+  dir=$(make_superseded_pause_case gate-working 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: working · source: run-step · validating (running) · run: R' absorb \
+    || fail "a working validation run did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "working run generated a stale wake"
+
+  dir=$(make_superseded_pause_case gate-terminal 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R' exit \
+    || fail "terminal validation run did not supersede the declared wait"
+  grep -F 'paused wait superseded: current run R is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "terminal wake did not identify the superseded wait"
+
+  dir=$(make_superseded_pause_case gate-terminal-pr 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R1 · pr=https://example.test/1' exit \
+    || fail "terminal run with PR did not supersede the declared wait"
+  grep -F 'current run R1 is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "PR suffix obscured the first terminal run id"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first terminal wake"
+  superseded_pause_round "$dir" 'state: done · source: run-step · run: R2 · pr=https://example.test/2' exit \
+    || fail "second terminal run with PR did not supersede the declared wait"
+  grep -F 'current run R2 is terminal (done)' "$dir/watch.out" >/dev/null \
+    || fail "different terminal run shared the first run's throttle"
+
+  dir=$(make_superseded_pause_case gate-busy-recent 'paused: waiting for validation run R')
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit recent \
+    || fail "recent busy paused run parked at an unreported human gate did not surface"
+  grep -F 'run R is parked at a human-owed gate' "$dir/watch.out" >/dev/null \
+    || fail "recent busy gate wake did not identify the run"
+
+  dir=$(make_superseded_pause_case gate-busy-old 'paused: waiting for validation run R')
+  state="$dir/state"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' exit yes \
+    || fail "old busy paused run parked at an unreported human gate did not surface"
+  grep -F 'run R is parked at a human-owed gate' "$dir/watch.out" >/dev/null \
+    || fail "old busy gate wake did not identify the run"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the busy gate wake"
+  superseded_pause_round "$dir" \
+    'state: parked · source: run-step · ask-user: authority decision · run: R' absorb yes \
+    || fail "the repeated busy poll failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the busy gate repeated inside the cadence"
+
+  pass "declared waits surface unreported gates and terminal runs once, while working runs and answered gates keep the pause cadence on idle and busy paths"
+}
+
+# Absent config/paused-wait-supersession the same superseding states keep main's
+# declared-wait handling: no superseded wake, nothing queued, and no crew-state
+# read beyond the one the idle declared-wait recheck already spends (none on the
+# busy paths), counted through the stub's read log.
+test_superseded_wait_check_is_opt_in() {
+  local c n crew_state busy reads got dir state
+  for c in "idle-gate|state: parked · source: run-step · ask-user: authority decision · run: R|no|1" \
+           "idle-terminal|state: done · source: run-step · run: R|no|1" \
+           "busy-recent|state: parked · source: run-step · ask-user: authority decision · run: R|recent|0" \
+           "busy-old|state: parked · source: run-step · ask-user: authority decision · run: R|yes|0"; do
+    IFS='|' read -r n crew_state busy reads <<< "$c"
+    dir=$(make_superseded_pause_case "unarmed-$n" 'paused: waiting for validation run R' unarmed)
+    state="$dir/state"
+    [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
+    superseded_pause_round "$dir" "$crew_state" absorb "$busy" \
+      || fail "$n: flag-absent watcher round failed"
+    ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
+      || fail "$n: flag-absent watcher surfaced a superseded wait"
+    [ ! -s "$state/.wake-queue" ] || fail "$n: flag-absent watcher queued a wake"
+    got=0
+    [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
+    [ "$got" = "$reads" ] || fail "$n: flag-absent watcher read crew state $got times, want $reads"
+  done
+  pass "without config/paused-wait-supersession superseding states keep the declared-wait cadence and spend no extra crew-state read"
+}
+
+# The flag scopes the check to the foreground watcher: while the away-mode flag
+# exists, a busy paused worker whose run is parked at an unreported human gate
+# gets no superseded wake and no crew-state read, exactly as with the flag absent.
+test_superseded_wait_check_skips_away_mode() {
+  local c busy mode arm got dir out
+  for c in recent:absorb yes:exit; do
+    busy=${c%%:*} mode=${c#*:} out=''
+    for arm in unarmed armed; do
+      dir=$(make_superseded_pause_case "away-busy-$busy-$arm" 'paused: waiting for validation run R' "$arm")
+      date '+%s' > "$dir/state/.afk"
+      [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$dir/state/paused.meta"
+      superseded_pause_round "$dir" \
+        'state: parked · source: run-step · ask-user: authority decision · run: R' "$mode" "$busy" \
+        || fail "busy-$busy $arm: away-mode watcher round failed: $(cat "$dir/watch.out")"
+      ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
+        || fail "busy-$busy $arm: away-mode watcher surfaced a superseded wait"
+      got=0
+      [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
+      [ "$got" = 0 ] || fail "busy-$busy $arm: away-mode watcher read crew state $got times, want 0"
+      if [ "$arm" = unarmed ]; then
+        out=$(cat "$dir/watch.out")
+      else
+        [ "$(cat "$dir/watch.out")" = "$out" ] \
+          || fail "busy-$busy: armed away-mode output differs from flag-absent: $(cat "$dir/watch.out") vs $out"
+      fi
+    done
+  done
+  pass "with the away-mode flag present an armed busy paused worker at a human gate behaves exactly as with the flag absent: no superseded wake and no crew-state read"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1472,6 +2042,9 @@ fm_test_run \
   test_required_captain_hold_tests_fail_without_tasks_axi \
   test_nonterminal_stale_not_working_surfaced \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
+  test_declared_wait_surfaces_superseding_state \
+  test_superseded_wait_check_is_opt_in \
+  test_superseded_wait_check_skips_away_mode \
   test_exited_declared_pause_is_bounded_but_live_gate_surfaces \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
@@ -1496,5 +2069,23 @@ fm_test_run \
   test_paused_until_near_future_is_quiet_before_the_cadence \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
+  test_pause_ceiling_dated_overdue_pause_opens_one_decision \
+  test_pause_ceiling_absent_keeps_old_pauses_on_the_recheck \
+  test_overdue_resume_race_uses_pause_snapshot \
+  test_busy_overdue_pause_does_not_enter_wedge_ladder \
+  test_overdue_marker_survives_reconcile_and_closes_on_working \
+  test_overdue_terminal_status_ignores_pane_display_churn \
+  test_reused_task_id_does_not_inherit_overdue_pause \
+  test_malformed_dated_pause_is_not_undated_overdue \
+  test_undated_pause_age_uses_the_pause_line \
+  test_undated_pause_overdue_bound \
+  test_silent_recheck_flag_on_absorbs_unchanged_pause \
+  test_silent_recheck_flag_off_still_wakes \
+  test_silent_recheck_flag_on_wakes_for_an_open_decision \
+  test_silent_recheck_flag_on_wakes_for_a_changed_declaration \
+  test_silent_recheck_flag_on_absorbs_unchanged_pause_for_a_live_ship_agent \
+  test_silent_recheck_flag_on_absorbs_a_ticking_pane_for_a_live_ship_agent \
+  test_silent_recheck_flag_on_wakes_when_the_agent_exited \
+  test_silent_recheck_flag_on_wakes_when_declared_time_is_due \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends

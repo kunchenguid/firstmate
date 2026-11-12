@@ -1136,8 +1136,20 @@ else
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
-    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    INBOX_DELIVERY_LOCK=$(fm_task_inbox_delivery_lock_path "$STATE" "$INBOX_TASK_ID")
+    if ! fm_task_inbox_lock_acquire "$INBOX_DELIVERY_LOCK"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: its inbox delivery lock could not be acquired" >&2
+      exit 1
+    fi
+    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || {
+      fm_lock_release "$INBOX_DELIVERY_LOCK"
+      exit 1
+    }
     if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
+      fm_lock_release "$INBOX_DELIVERY_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -1158,6 +1170,7 @@ else
         [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } ||
       [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
+      fm_lock_release "$INBOX_DELIVERY_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -1173,6 +1186,7 @@ else
     fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
+      fm_lock_release "$INBOX_DELIVERY_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -1180,6 +1194,7 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    fm_lock_release "$INBOX_DELIVERY_LOCK"
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.
