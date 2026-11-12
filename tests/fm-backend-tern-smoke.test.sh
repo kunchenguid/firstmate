@@ -20,6 +20,14 @@
 #     smoke skips rather than claim live coverage it did not get.
 set -u
 
+# Isolate from the ambient fleet environment before anything else runs. This
+# suite does not source tests/lib.sh - it owns its own reporting - so it calls
+# the shared owner directly. bin/fm-test-env-lib.sh owns the pointer list; this
+# is a caller, never a second copy of it.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-test-env-lib.sh"
+fm_test_env_isolate || exit 2
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SESSION_NAME="fm-test-smoke-$$"

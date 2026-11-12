@@ -25,7 +25,10 @@ test_git_config_isolation() (
   git init -q "$dir/caller"
   git -C "$dir/caller" config commit.gpgsign false
   cd "$dir/caller" || exit 1
-  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" \
+    "$ROOT/bin/fm-test-env-lib.sh" "$dir/runner/bin/"
   cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
   fakebin=$(fm_fakebin "$dir/standalone")
   fm_fake_exit0 "$fakebin" pi
@@ -334,7 +337,10 @@ test_inherited_git_location_isolation() (
   mkdir -p "$dir/runner/bin" "$dir/runner/tests"
   fm_git_init_commit "$dir/ambient"
   git -C "$dir/ambient" worktree add -q --detach "$dir/linked" main
-  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" \
+    "$ROOT/bin/fm-test-env-lib.sh" "$dir/runner/bin/"
   cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
   cat > "$dir/setup.sh" <<'SH'
 case_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-git-location.XXXXXX")
