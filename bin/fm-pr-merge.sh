@@ -148,8 +148,11 @@
 # an older base is refused as stale; suite=fail refuses; and suite=none with a
 # non-empty reason= is the explicit no-suite escape, accepted and reported as
 # a worker attestation. A missing, unreadable, or unparsable record, or a
-# compare that cannot be read, refuses. An attended --attended-override waives
-# both conditions; while the away-posture record exists it waives neither.
+# compare that cannot be read, refuses. The record is read once and that copy
+# parsed, so a record being rewritten cannot mix fields from two runs. An
+# attended --attended-override waives both conditions; while the away-posture
+# record exists it waives neither, and a waiver granted before the record
+# appeared is refused when authority is rechecked under its lock.
 # GitLab and Forgejo are not covered: their merges already require the head
 # pipeline or combined status to have succeeded.
 #
@@ -650,6 +653,7 @@ if [ "$PROVIDER" = gitlab ]; then
   done
 fi
 FM_PR_AWAY_POSTURE=false
+FM_PR_GITHUB_UNCHECKED_WAIVED=false
 
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -1158,12 +1162,8 @@ github_checks_not_green() {
 # Only a live forge compare and one task-owned record are read, so no
 # repository code runs on the supervisor.
 github_unchecked_base_refusals() {  # <base> <live-head>
-  local base=$1 head=$2 position line behind='' tip='' record
+  local base=$1 head=$2 position line behind='' tip='' record contents
   local suite='' recorded_base='' reason=''
-  if [ "$ATTENDED_OVERRIDE" = true ] && [ "$FM_PR_AWAY_POSTURE" != true ]; then
-    printf 'note: base branch %s has no required checks; the behind-base and recorded-suite conditions are waived by --attended-override\n' "$base" >&2
-    return 0
-  fi
   if ! position=$(gh api "repos/$PR_OWNER/$PR_REPO/compare/$(github_urlencode_path_segment "$base")...$head?per_page=1" \
       --jq '"behind_by=" + (.behind_by | tostring), "base_sha=" + (.base_commit.sha | tostring)' 2>/dev/null) \
     || [ -z "$position" ]; then
@@ -1192,9 +1192,11 @@ FIELDS
     printf '  - base branch %s has no required checks and the worker recorded no full-suite result at %s: have the worker run the project suite and record it\n' "$base" "$record"
     return 0
   fi
-  suite=$(sed -n 's/^suite=//p' "$record" 2>/dev/null | tail -n 1 | tr -d '\000-\037')
-  recorded_base=$(sed -n 's/^base=//p' "$record" 2>/dev/null | tail -n 1 | tr -d '\000-\037')
-  reason=$(sed -n 's/^reason=//p' "$record" 2>/dev/null | tail -n 1 | tr -d '\000-\037')
+  # One read, so a worker rewriting the record cannot pair fields from two runs.
+  contents=$(cat "$record" 2>/dev/null) || contents=
+  suite=$(printf '%s\n' "$contents" | sed -n 's/^suite=//p' | tail -n 1 | tr -d '\000-\037')
+  recorded_base=$(printf '%s\n' "$contents" | sed -n 's/^base=//p' | tail -n 1 | tr -d '\000-\037')
+  reason=$(printf '%s\n' "$contents" | sed -n 's/^reason=//p' | tail -n 1 | tr -d '\000-\037')
   case "$suite" in
     pass)
       if ! fm_pr_head_valid "$recorded_base"; then
@@ -1235,6 +1237,7 @@ github_verify_mergeable() {
   FM_PR_GITHUB_OTHER_REFUSAL=false
   FM_PR_GITHUB_UNREPORTED=false
   FM_PR_GITHUB_LIVE_HEAD=
+  FM_PR_GITHUB_UNCHECKED_WAIVED=false
 
   if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
@@ -1386,11 +1389,18 @@ EOF
 
   if [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ] \
     && printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'length == 0' >/dev/null 2>&1; then
-    unchecked=$(github_unchecked_base_refusals "$base" "$live_head")
-    if [ -n "$unchecked" ]; then
-      FM_PR_GITHUB_OTHER_REFUSAL=true
-      refusals="$refusals$unchecked
+    if [ "$ATTENDED_OVERRIDE" = true ] && [ "$FM_PR_AWAY_POSTURE" != true ]; then
+      # require_current_away_authority refuses this waiver if the away record
+      # appears before the merge runs under its lock.
+      FM_PR_GITHUB_UNCHECKED_WAIVED=true
+      printf 'note: base branch %s has no required checks; the behind-base and recorded-suite conditions are waived by --attended-override\n' "$base" >&2
+    else
+      unchecked=$(github_unchecked_base_refusals "$base" "$live_head")
+      if [ -n "$unchecked" ]; then
+        FM_PR_GITHUB_OTHER_REFUSAL=true
+        refusals="$refusals$unchecked
 "
+      fi
     fi
   fi
 
@@ -1726,6 +1736,10 @@ require_current_away_authority() {
   fi
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$ALLOW_NO_PIPELINE" = true ]; then
     echo "error: --allow-no-pipeline is attended-only; while the away-posture record exists a GitLab merge requires a successful head pipeline" >&2
+    return 2
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$FM_PR_GITHUB_UNCHECKED_WAIVED" = true ]; then
+    echo "error: --attended-override is attended-only; while the away-posture record exists a base with no required checks needs a current head and a passing suite record" >&2
     return 2
   fi
 }

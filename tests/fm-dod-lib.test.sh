@@ -647,6 +647,9 @@ test_pr_based_dod_renders_the_suite_record_step() {
       "$mode: DoD must bind the record to the task's base branch"
     assert_grep 'a record made against an older base is refused at merge' "$out" \
       "$mode: DoD must say a stale record is refused"
+    # shellcheck disable=SC2016
+    assert_grep 'then `mv` it onto the record' "$out" \
+      "$mode: DoD must tell the worker to replace the record atomically"
   done
   out="$TMP_ROOT/dod-suite-manual.md"
   fm_dod_block no-mistakes dod-suite-task fm/dod-suite-task none '' '' manual "$TMP_ROOT/home/data" > "$out"

@@ -5666,13 +5666,60 @@ test_unchecked_base_override_waives_attended_only() {
     "unchecked-override-away: the missing-record refusal was waived"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "unchecked-override-away: gh pr merge ran despite the refusal"
+
+  case_dir=$(make_case unchecked-override-away-after-view)
+  add_gh_mocks "$case_dir" "$head"
+  rm -f "$case_dir/home/data/task-x1/suite-result"
+  printf '%s\n' 'behind_by=3' "base_sha=$SUITE_BASE" > "$case_dir/github-compare"
+  write_away_record "$case_dir" --words 'merge it when green'
+  mv "$case_dir/state/.afk-contract" "$case_dir/away-record-after-view"
+  run_required_case "$case_dir" 102 --attended-override
+  expect_code 2 "$RC" "unchecked-override-away-after-view: late away publication must refuse the waiver"
+  assert_grep '--attended-override is attended-only' "$case_dir/stderr" \
+    "unchecked-override-away-after-view: the late refusal did not name attended-only"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "unchecked-override-away-after-view: gh pr merge ran after late away publication"
   pass "fm-pr-merge --attended-override waives the no-required-checks conditions only while attended"
+}
+
+# A worker may rewrite its record while the merge reads it. Each wrapped reader
+# below passes through to the real tool, then replaces the record once with a
+# failing result against the current base, so a guard that reads the record in
+# more than one pass pairs the old suite=pass with the new base= and merges.
+test_unchecked_base_reads_the_suite_record_once() {
+  local case_dir head record tool real
+  head=b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5
+  case_dir=$(make_case unchecked-torn-record)
+  add_gh_mocks "$case_dir" "$head"
+  record="$case_dir/home/data/task-x1/suite-result"
+  write_suite_record "$case_dir" 'suite=pass' 'base=ffffffffffffffffffffffffffffffffffffffff' 'ran=fixture suite'
+  for tool in awk cat grep head sed tail; do
+    real=$(command -v "$tool")
+    cat > "$case_dir/fakebin/$tool" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" $record "*) ;;
+  *) exec "$real" "\$@" ;;
+esac
+[ ! -e "$case_dir/record-rewritten" ] || exec "$real" "\$@"
+status=0
+"$real" "\$@" || status=\$?
+printf '%s\n' 'suite=fail' 'base=$SUITE_BASE' 'ran=fixture suite' > "$record"
+: > "$case_dir/record-rewritten"
+exit "\$status"
+SH
+    chmod +x "$case_dir/fakebin/$tool"
+  done
+  assert_unchecked_base_refused "$case_dir" 103 \
+    "ran against base ffffffffffffffffffffffffffffffffffffffff but main is now at $SUITE_BASE" unchecked-torn-record
+  pass "fm-pr-merge parses one copy of a suite record that is rewritten while it is read"
 }
 
 test_allow_missing_follows_the_allow_red_rules
 test_unchecked_base_refuses_without_a_current_passing_suite_record
 test_unchecked_base_accepts_an_attested_no_suite_reason
 test_unchecked_base_override_waives_attended_only
+test_unchecked_base_reads_the_suite_record_once
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name

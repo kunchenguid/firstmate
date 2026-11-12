@@ -566,6 +566,7 @@ Firstmate's merge guard executes none of this repository's code, so on a base br
    \`suite=pass\` or \`suite=fail\`
    \`base=\` followed by the output of \`git merge-base HEAD $base_ref\`
    \`ran=\` followed by the command you ran
+   Write those lines to a temporary file in the same directory first, then \`mv\` it onto the record, so the merge never reads a half-written record.
 3. If the project genuinely has no test suite or gate, write \`suite=none\` and \`reason=\` followed by why there is none instead; never use none for a suite that exists.
 4. If $base_ref advances after you wrote the record, rebase, re-run the suite, and rewrite the record: a record made against an older base is refused at merge.
 EOF
