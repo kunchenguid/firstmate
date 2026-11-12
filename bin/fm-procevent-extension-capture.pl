@@ -143,18 +143,41 @@ sub publish_new {
 # can contain the same bytes on success, so only an explicit host-error sidecar
 # written for exit 70 can identify a reusable, still-unhandled capture.
 sub private_file_matches {
-  my ($name, $expected) = @_;
+  my ($name, $expected, $identity) = @_;
   sysopen(my $fh, $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return 0;
   my @st = stat($fh);
   return 0 unless @st && -f $fh && $st[4] == $< && ($st[2] & 07777) == 0600
-    && $st[3] == 1 && $st[7] == length($expected);
+    && $st[3] == 1 && ($identity ? $st[7] > 0 && $st[7] <= 1024 : $st[7] == length($expected));
   my $bytes = '';
-  while (length($bytes) < length($expected)) {
-    my $read = sysread($fh, my $buffer, length($expected) - length($bytes));
+  while (length($bytes) < $st[7]) {
+    my $read = sysread($fh, my $buffer, $st[7] - length($bytes));
     return 0 unless defined $read && $read > 0;
     $bytes .= $buffer;
   }
-  return $bytes eq $expected;
+  return $identity ? ($identity->($bytes) // '') eq $expected : $bytes eq $expected;
+}
+# Timing samples are diagnostic, not a different failure. Retain the first
+# complete capture while comparing its bound and operation on subsequent polls.
+sub host_error_identity {
+  my ($bytes) = @_;
+  my $error = eval { decode_json($bytes) };
+  return undef unless ref($error) eq 'HASH'
+    && ($error->{schema} // '') eq 'firstmate.process-event-extension-error.v1'
+    && ($error->{extension_id} // '') eq $extension_id
+    && ($error->{operation} // '') eq 'source.poll'
+    && !ref($error->{code}) && ($error->{code} // '') =~ /\A[a-z0-9-]{1,64}\z/;
+  return $bytes if keys(%$error) == 4;
+  return undef unless keys(%$error) == 5 && $error->{code} eq 'timeout';
+  my $deadline = $error->{deadline};
+  return undef unless ref($deadline) eq 'HASH' && keys(%$deadline) == 6;
+  for my $field ('bound', 'operation') {
+    return undef if ref($deadline->{$field}) || ($deadline->{$field} // '') !~ /\A[a-z][a-z0-9.-]{0,63}\z/;
+  }
+  for my $field ('timeout_ms', 'elapsed_ms', 'overrun_ms', 'grace_ms') {
+    return undef if ref($deadline->{$field}) || ($deadline->{$field} // '') !~ /\A[0-9]{1,16}\z/;
+  }
+  delete @{$deadline}{'elapsed_ms', 'overrun_ms'};
+  return JSON::PP->new->canonical->encode($error);
 }
 sub random_token {
   open(my $random, '<', '/dev/urandom') or fail('cannot create capture reservation');
@@ -256,7 +279,7 @@ if ($rc != 0 && $written == 0) {
   exit 0;
 }
 my $extension_owner = join("\n", "schema=fm-procevent-extension-owner.v1", "extension_id=$extension_id", "extension_version=$extension_version", "capability_version=$capability_version", "package_digest=$package_digest", "binding_digest=$binding_digest", "");
-my ($host_error, $error_bytes);
+my ($host_error, $error_bytes, $error_identity);
 if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
   seek($stage, 0, 0) or fail("cannot rewind host error");
   $error_bytes = '';
@@ -265,14 +288,10 @@ if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
     defined $read && $read > 0 or fail("cannot read host error");
     $error_bytes .= $buffer;
   }
-  my $error = eval { decode_json($error_bytes) };
-  if (ref($error) eq 'HASH' && keys(%$error) == 4
-      && ($error->{schema} // '') eq 'firstmate.process-event-extension-error.v1'
-      && ($error->{extension_id} // '') eq $extension_id
-      && ($error->{operation} // '') eq 'source.poll'
-      && !ref($error->{code}) && ($error->{code} // '') =~ /\A[a-z0-9-]{1,64}\z/) {
+  $error_identity = host_error_identity($error_bytes);
+  if (defined $error_identity) {
     $host_error = "schema=fm-procevent-host-error.v1\nidentity=sha256:"
-      . sha256_hex(join("\0", $adapter, $extension_owner, $error_bytes)) . "\n";
+      . sha256_hex(join("\0", $adapter, $extension_owner, $error_identity)) . "\n";
   }
 }
 chdir($inbox_dir) or fail("cannot enter inbox directory");
@@ -282,7 +301,7 @@ if (defined $host_error) {
     my $prefix = "$id.$1";
     next if -e "$prefix.handled" || -l "$prefix.handled";
     next unless private_file_matches($marker, $host_error)
-      && private_file_matches("$prefix.result", $error_bytes)
+      && private_file_matches("$prefix.result", $error_identity, \&host_error_identity)
       && private_file_matches("$prefix.adapter", "$adapter\n")
       && private_file_matches("$prefix.extension", $extension_owner);
     close($stage) or fail("cannot close staged output");

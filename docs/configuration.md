@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -820,6 +821,14 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Park on review
+
+The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
+`config/auto-land` opts into merge-time cleanup of unparked ship lanes.
+Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
+Both flags are home-local and not inherited by secondmate homes.
+The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
+
 ## PR registration scan (config/pr-register-scan)
 
 The optional local, gitignored `config/pr-register-scan` presence flag opts this home into recording, without the supervisor, each PR a task reports.
@@ -840,6 +849,24 @@ The optional local, gitignored `config/pr-degraded-watch` presence flag opts thi
 With the flag present, registration records a degraded/train baseline and each poll checks those states; repeated reports of the same transition remain silent.
 Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab JSON, pipeline, or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
 The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
+
+## Treehouse pool report (config/treehouse-pool-report)
+
+The optional local, gitignored `config/treehouse-pool-report` presence flag opts this home into a read-only Treehouse pool hygiene report at bootstrap.
+With the flag present and the Treehouse state directory and `jq` available, bootstrap prints `TREEHOUSE_POOL_REPORT:` findings for pools with unavailable project paths, unowned slots older than `FM_POOL_ORPHAN_DAYS`, duplicate-origin project clones, and `project-*` or `scratch-project-*` pools without an active owner or lease; the `treehouse` executable is not required.
+The report never changes a pool or slot; pruning or other pool cleanup remains an explicit operator action.
+With the file absent, bootstrap reads no Treehouse state and prints no pool report.
+Only the file's presence is read, at each bootstrap run.
+The flag is a home-local preference and is not inherited by secondmate homes.
+
+## Squash commit summary (config/pr-squash-summary)
+
+The optional local, gitignored `config/pr-squash-summary` presence flag opts this home into writing the commit text of the GitHub squash merges `bin/fm-pr-merge.sh` performs.
+With the flag present, a squash merge whose caller passed no subject or body of its own uses the PR title plus ` (#N)` as the commit subject and the PR body's `## What Changed` section as the commit body, so the commit on the base branch describes the change rather than listing every branch commit.
+The section is copied verbatim up to the next level-two heading, which leaves out the operator intent before it and the no-mistakes appendix and attestation after it.
+A PR body without that section, a PR whose text cannot be read, a merge method other than squash, and GitLab and Forgejo merges keep the repository's own squash text.
+Only while the flag is present does it override the repository's own squash commit message setting; it is off by default, and with the file absent `bin/fm-pr-merge.sh` reads no PR text and sends the same merge command as before.
+The flag is a home-local preference, is not inherited by secondmate homes, and takes effect on the next merge.
 
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
@@ -940,6 +967,15 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Record hygiene report (config/record-hygiene)
+
+The optional local, gitignored `config/record-hygiene` presence flag opts this home into reporting its own inconsistent task records.
+Create it with `touch "$FM_HOME/config/record-hygiene"`; remove it to stop the report.
+With the flag present, session-start bootstrap prints a `RECORD_HYGIENE:` line for each inconsistency, and the watcher heartbeat runs the scan in the background and raises one `check: record hygiene:` notification when its findings change.
+It is off by default: without the flag, session start and the heartbeat print no report, move no files, and perform no record-hygiene reads.
+The flag takes effect at the next session start or heartbeat, and is a home-local preference that is not inherited by secondmate homes.
+[`architecture.md`](architecture.md#task-status-archives) owns scan scope and status-log archiving; [`bin/fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh) owns the mechanics.
 
 ## Record export (config/record-export-root)
 
@@ -2367,6 +2403,8 @@ An absent required tool with an automated install path reports `MISSING:` with i
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
+With the opt-in [Treehouse pool report](#treehouse-pool-report-configtreehouse-pool-report), bootstrap also prints `TREEHOUSE_POOL_REPORT:` findings.
+
 **Project refresh at startup**
 
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
@@ -3609,6 +3647,7 @@ FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
 FM_TREEHOUSE_RETURN_LOCK_RETRIES=3        # retries after a treehouse return fails on the transient git index.lock signature
 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=1 # seconds fm-teardown.sh waits before each retry after that signature
+FM_POOL_ORPHAN_DAYS=30 # age in days before the opt-in Treehouse pool report flags an unowned slot; invalid values use 30
 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=   # legacy alias for FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS when the new variable is unset
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-fleet-sync.sh hits the orphaned .git/packed-refs.lock signature
 FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1 # seconds fm-fleet-sync.sh waits before each of those retries
