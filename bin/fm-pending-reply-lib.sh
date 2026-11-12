@@ -958,6 +958,44 @@ fm_pending_reply_recovery_message() {  # <record-path>
   printf '%s' "$msg"
 }
 
+# Reuse a decision fold only while every input that can affect its verdict is unchanged.
+_fm_pending_reply_decision_signature() {  # <status-file>
+  local file=$1 identity contents
+  [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 1
+  identity=$(fm_pending_reply_file_signature "$file")
+  case "$identity" in missing|unreadable) return 1 ;; esac
+  contents=$(cksum < "$file") || return 1
+  printf '%q ' "$identity" "$contents" "$(_fm_status_kind "$file")" \
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" \
+    "${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}"
+}
+
+_fm_pending_reply_decisions_allow_recovery() {  # <status-file>
+  local file=$1 signature after result=0 i
+  if [ "${_fm_pending_reply_decision_cache_active:-0}" != 1 ] \
+    || ! signature=$(_fm_pending_reply_decision_signature "$file"); then
+    [ -z "$(status_own_open_decisions "$file")" ]
+    return $?
+  fi
+  for ((i = 0; i < ${#_fm_pending_reply_decision_files[@]}; i++)); do
+    [ "${_fm_pending_reply_decision_files[$i]}" = "$file" ] || continue
+    if [ "${_fm_pending_reply_decision_signatures[$i]}" = "$signature" ]; then
+      return "${_fm_pending_reply_decision_results[$i]}"
+    fi
+    break
+  done
+  [ -z "$(status_own_open_decisions "$file")" ] || result=1
+  # A fold can be slow enough for an answer or a new blocker to land while it
+  # runs. Its verdict then stands for this request only.
+  after=$(_fm_pending_reply_decision_signature "$file") || return "$result"
+  [ "$signature" = "$after" ] || return "$result"
+  _fm_pending_reply_decision_files[i]=$file
+  _fm_pending_reply_decision_signatures[i]=$signature
+  _fm_pending_reply_decision_results[i]=$result
+  return "$result"
+}
+
 # Deliver the recovery message once. Caller must hold phase awaiting_report with
 # turn completed and grace elapsed. Uses FM_PENDING_REPLY_SEND_HOOK when set
 # (tests), otherwise invokes fm-send with FM_PENDING_REPLY_EXISTING_CORR so a
@@ -994,7 +1032,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   # config/wait-no-turns: a mate waiting on its own open decision or blocker
   # is never poked. The recovery stays unattempted until the answer lands.
   if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
-    [ -z "$(status_own_open_decisions "$state/$task_id.status")" ] || return 1
+    _fm_pending_reply_decisions_allow_recovery "$state/$task_id.status" || return 1
   fi
   status_file=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
@@ -1565,6 +1603,9 @@ fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=() records=() selected=()
+  # Dynamically scoped to this tick: direct recovery calls never reuse it.
+  local _fm_pending_reply_decision_cache_active=1
+  local -a _fm_pending_reply_decision_files=() _fm_pending_reply_decision_signatures=() _fm_pending_reply_decision_results=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do

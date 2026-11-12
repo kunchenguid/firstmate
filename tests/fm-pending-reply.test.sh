@@ -247,7 +247,133 @@ test_recovery_waits_while_the_mate_has_an_open_decision() {
   pass "recovery never pokes a mate waiting on its own decision, and runs once it closes"
 }
 
+# Each subshell keeps its instrumentation and configuration out of later tests.
+# shellcheck disable=SC2030,SC2031
+test_tick_reuses_decisions_only_within_one_tick() (
+  local home state corr task original folds hook_log expected rec
+  local FM_CONFIG_OVERRIDE FM_PENDING_REPLY_NOW FM_PENDING_REPLY_SEND_HOOK
+  home=$(setup_parent decision-reuse)
+  state="$home/state"
+  folds="$home/folds"
+  hook_log="$home/sends"
+  mkdir -p "$home/config"
+  : > "$home/config/wait-no-turns"
+  export FM_CONFIG_OVERRIDE="$home/config" FM_PENDING_REPLY_NOW=2500
+  # The recovery hook expands its log path when eval invokes it.
+  # shellcheck disable=SC2016
+  export FM_PENDING_REPLY_SEND_HOOK='printf "sent\n" >> "$hook_log"'
+  printf 'blocked [key=scope]: Choose a scope.\n' > "$state/waiting.status"
+  printf 'working: No decision is open.\n' > "$state/ready.status"
+  for task in waiting ready waiting ready; do
+    corr=$(fm_pending_reply_create "$home" "$state" "$task" "request for $task")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  done
+  original=$(declare -f status_own_open_decisions)
+  eval "${original/status_own_open_decisions/uncounted_decisions}"
+  # Count real folds, including empty results, without replacing their semantics.
+  status_own_open_decisions() {
+    printf 'fold\n' >> "$folds"
+    uncounted_decisions "$@"
+  }
+  fm_pending_reply_tick "$state"
+  [ "$(wc -l < "$folds" | tr -d ' ')" = 2 ] \
+    || fail "one tick must fold each task once, including the waiting task"
+  [ "$(wc -l < "$hook_log" | tr -d ' ')" = 2 ] \
+    || fail "only the ready task's two requests should be reposted"
+  for rec in "$state/pending-replies"/*; do
+    expected=awaiting_report
+    [ "$(fm_pending_reply_get "$rec" task_id)" != ready ] || expected=recovery_sent
+    [ "$(fm_pending_reply_get "$rec" phase)" = "$expected" ] \
+      || fail "reuse must preserve each request and the waiting-worker protection"
+  done
+  fm_pending_reply_tick "$state"
+  [ "$(wc -l < "$folds" | tr -d ' ')" = 3 ] \
+    || fail "a later tick must fold the still-waiting task again"
+  for rec in "$state/pending-replies"/*; do
+    [ "$(fm_pending_reply_get "$rec" task_id)" = waiting ] || continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    fm_pending_reply_send_recovery "$state" "$corr" || true
+    break
+  done
+  [ "$(wc -l < "$folds" | tr -d ' ')" = 4 ] \
+    || fail "a standalone recovery must not inherit the tick's cached decision"
+  pass "one tick reuses empty and nonempty decisions per task without leaking to later calls"
+)
+
+# shellcheck disable=SC2030,SC2031
+test_tick_invalidates_changed_decision_evidence() (
+  local mode home state corr original folds hook_log n processed=0 expected_sends
+  local FM_CONFIG_OVERRIDE FM_PENDING_REPLY_NOW FM_PENDING_REPLY_SEND_HOOK
+  for mode in append rewrite identity kind resolve held reserved during-fold; do
+    (
+      home=$(setup_parent "decision-invalidate-$mode")
+      state="$home/state"
+      folds="$home/folds"
+      hook_log="$home/sends"
+      mkdir -p "$home/config"
+      : > "$home/config/wait-no-turns"
+      : > "$hook_log"
+      export FM_CONFIG_OVERRIDE="$home/config" FM_PENDING_REPLY_NOW=2500
+      # shellcheck disable=SC2016
+      export FM_PENDING_REPLY_SEND_HOOK='printf "sent\n" >> "$hook_log"'
+      printf 'kind=secondmate\n' > "$state/mate.meta"
+      printf 'blocked [key=scope]: Choose a scope.\n' > "$state/mate.status"
+      expected_sends=1
+      case "$mode" in
+        rewrite) printf 'working [key=scope]: Choose a scope.\n' > "$state/mate.status"; expected_sends=2 ;;
+        identity) expected_sends=0 ;;
+        kind) printf 'done: The turn finished.\n' >> "$state/mate.status" ;;
+        resolve|held) printf 'answered [key=scope]: The scope is narrow.\n' >> "$state/mate.status" ;;
+        during-fold) printf 'working: No decision is open.\n' > "$state/mate.status" ;;
+      esac
+      for n in 1 2 3; do
+        corr=$(fm_pending_reply_create "$home" "$state" mate "request $n")
+        fm_pending_reply_mark_delivered "$state" "$corr"
+        fm_pending_reply_mark_turn_completed "$state" "$corr" request
+      done
+      original=$(declare -f status_own_open_decisions)
+      eval "${original/status_own_open_decisions/uncounted_decisions}"
+      status_own_open_decisions() {
+        printf 'fold\n' >> "$folds"
+        uncounted_decisions "$@"
+        if [ "$mode" = during-fold ] && [ "$(wc -l < "$folds" | tr -d ' ')" = 1 ]; then
+          printf 'blocked [key=scope]: Choose a scope.\n' >> "$state/mate.status"
+        fi
+      }
+      original=$(declare -f fm_pending_reply_tick_one)
+      eval "${original/fm_pending_reply_tick_one/unchanged_tick_one}"
+      fm_pending_reply_tick_one() {
+        unchanged_tick_one "$@"
+        processed=$((processed + 1))
+        [ "$processed" = 2 ] || return 0
+        case "$mode" in
+          append) printf 'resolved [key=scope]: The scope is narrow.\n' >> "$state/mate.status" ;;
+          rewrite)
+            cp -p "$state/mate.status" "$home/stamp"
+            printf 'blocked [key=scope]: Choose a scope.\n' > "$state/mate.status"
+            touch -r "$home/stamp" "$state/mate.status"
+            ;;
+          identity) cp -p "$state/mate.status" "$home/replacement"; mv "$home/replacement" "$state/mate.status" ;;
+          kind) printf 'kind=ship\n' > "$state/mate.meta" ;;
+          resolve) FM_CLASSIFY_RESOLVE_VERB=answered ;;
+          held) FM_CLASSIFY_CAPTAIN_HELD_VERB=answered ;;
+          reserved) FM_CLASSIFY_RESERVED_KEY_PREFIXES=scope ;;
+        esac
+      }
+      fm_pending_reply_tick "$state"
+      [ "$(wc -l < "$folds" | tr -d ' ')" = 2 ] \
+        || fail "$mode must invalidate the decision reuse and fold twice"
+      [ "$(wc -l < "$hook_log" | tr -d ' ')" = "$expected_sends" ] \
+        || fail "$mode must apply the current waiting-worker protection"
+    ) || exit 1
+  done
+  pass "decision reuse invalidates changed contents, identity, task kind, and classification settings"
+)
+
+
 # Without the flag, an open decision does not hold the recovery.
+# shellcheck disable=SC2031
 test_recovery_sends_during_an_open_decision_without_the_flag() {
   local home state corr hook_log
   home=$(setup_parent decision-wait-off)
@@ -2129,6 +2255,8 @@ test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_waits_while_the_mate_has_an_open_decision
 test_recovery_sends_during_an_open_decision_without_the_flag
+test_tick_reuses_decisions_only_within_one_tick || exit 1
+test_tick_invalidates_changed_decision_evidence || exit 1
 test_recovery_grace_measures_from_turn_completion
 test_recovery_fresh_status_read_resolves_before_firing
 test_partial_resolve_write_blocks_firing
