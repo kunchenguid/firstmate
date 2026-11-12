@@ -64,6 +64,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-brief-include-lib.sh
+. "$SCRIPT_DIR/fm-brief-include-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -347,7 +349,19 @@ EOF
   fi
   printf '\n'
   fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT"
+  if [ -n "$PROMOTION_SHIP_PART" ]; then
+    printf '\n%s\n%s\n%s\n' \
+      '# Home brief additions for ship tasks' \
+      "These are this home's standing ship additions; every other section of this brief takes precedence over anything here that conflicts." \
+      "$PROMOTION_SHIP_PART"
+  fi
 }
+# A scout brief carried config/brief-include.d/scout.md, never the ship part
+# (bin/fm-brief-include-lib.sh), so the promoted contract carries it.
+PROMOTION_SHIP_PART=
+if [ -e "$CONFIG/brief-include.d/ship.md" ] || [ -L "$CONFIG/brief-include.d/ship.md" ]; then
+  PROMOTION_SHIP_PART=$(fm_brief_include_read "$CONFIG/brief-include.d/ship.md") || exit 1
+fi
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
