@@ -551,6 +551,64 @@ test_explicit_heartbeat_cadence_still_governs() {
   pass "an explicit FM_HEARTBEAT cadence still governs the heartbeat"
 }
 
+test_child_process_updates_progress_marker_not_beacon() {
+  local dir home beat progress beat_before
+  dir=$(make_home child-progress-marker)
+  home=$(case_home "$dir")
+  beat="$home/state/.last-watcher-beat"
+  progress="$home/state/.last-watcher-progress"
+  : > "$beat"
+  fm_touch_epoch "$(( $(date +%s) - 50 ))" "$beat"
+  beat_before=$(age_of_beacon "$beat")
+
+  # In a child subprocess ($$ != parent FM_WATCHER_PID), fm_watch_beacon_progress
+  # touches FM_WATCH_PROGRESS_PATH, not the beacon.
+  bash -c '
+    set -u
+    . "$1"
+    FM_WATCH_BEACON_PATH=$2
+    FM_WATCH_PROGRESS_PATH=$3
+    FM_WATCHER_PID=1
+    fm_watch_beacon_progress || exit 1
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$beat" "$progress" \
+    || fail "child progress refresh failed"
+
+  [ -e "$progress" ] || fail "child progress did not create the progress marker"
+  [ "$(age_of_beacon "$beat")" -ge "$beat_before" ] \
+    || fail "child process touched the beacon directly"
+  pass "child processes update the progress marker and cannot touch the beacon directly"
+}
+
+test_frozen_watcher_during_display_sweep_trips_guard() {
+  local dir home out pid
+  dir=$(make_home frozen-display-sweep)
+  home=$(case_home "$dir")
+  out="$dir/watch.out"
+
+  # Configure Rex tint and an active task so the display sweep runs on each poll.
+  printf '%s\n' 'style=color' > "$home/config/rex-tint"
+  fm_write_meta "$home/state/task-1.meta" "kind=ship"
+  start_slow_cycle_watcher "$home" "$out" 4
+  pid=$SEED_PID
+
+  # Freeze the watcher process with SIGSTOP while a task is in flight.
+  kill -STOP "$pid" 2>/dev/null || fail "could not SIGSTOP watcher pid $pid"
+
+  # Wait past the 4-second grace window.
+  sleep 5
+
+  # The guard must fire: the frozen watcher process is not making progress.
+  out=$(run_guard "$dir" 4)
+  kill -CONT "$pid" 2>/dev/null || true
+  stop_pid "$pid"
+
+  case "$out" in
+    *"WATCHER DOWN"*) ;;
+    *) fail "a frozen watcher during display sweep did not trip the guard: $out" ;;
+  esac
+  pass "a watcher frozen with SIGSTOP during a display sweep trips the guard"
+}
+
 fm_test_run \
   test_progress_refresh_is_throttled_and_inert_outside_a_watcher \
   test_crew_classification_refreshes_progress \
@@ -564,4 +622,6 @@ fm_test_run \
   test_stalled_holder_still_trips_the_banner \
   test_stalled_holder_is_evicted_only_past_the_hard_bound \
   test_explicit_grace_overrides_the_derived_default \
-  test_explicit_heartbeat_cadence_still_governs
+  test_explicit_heartbeat_cadence_still_governs \
+  test_child_process_updates_progress_marker_not_beacon \
+  test_frozen_watcher_during_display_sweep_trips_guard

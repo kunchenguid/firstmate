@@ -267,7 +267,9 @@ What this guarantees and what it does not:
 - A watcher that stops progressing - the wedged state the beacon exists to catch - stops refreshing, and its beacon ages exactly as before, so the banner still fires and the hard bound still evicts it.
 - A single unit of work that blocks longer than the grace still reads as stale, because progress refresh happens between units; the per-unit bounds (a check's `FM_CHECK_TIMEOUT`, a sweep's own timeouts) are what keep that residual inside the grace.
 
-The beacon stays a watcher-owned signal: only the watcher process and the sweeps it runs refresh it, and no helper process can make a wedged watcher look healthy.
+The beacon stays a watcher-owned signal: only the watcher process itself directly refreshes the liveness beacon (`$BEAT`).
+Child subprocesses (such as Rex and Herdr display sweeps) update a separate progress marker (`$FM_WATCH_PROGRESS_PATH`), and the watcher process propagates those updates to the beacon only while it is actively progressing.
+A frozen watcher process (such as one stopped by `SIGSTOP`) cannot execute its progress loop, so its beacon ages and guards promptly detect the down watcher even if a child process continues running.
 The refresh throttle reads `$SECONDS`, a bash builtin, so it costs no fork inside the hot loops.
 
 The beacon is therefore a progress signal, not a cycle counter.
