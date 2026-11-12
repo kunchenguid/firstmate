@@ -14,7 +14,7 @@ The committed table records the slowest successful `duration_ms` per `tests/*.te
 Failed or cancelled scripts are ignored, so a timeout does not become a packing weight.
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 A passing coverage guard does not establish a healthy job duration; refresh the table from uploaded timing artifacts when a member grows or the lane gains scripts.
-The 2026-11-12 `tests/fm-watch-beacon-progress.test.sh` (30149 ms) and `tests/fm-nm-bounded-owned.test.sh` (3712 ms) hints are their completed, passing Ubuntu `FM_TEST_END` samples from CI run [43226301857](https://github.com/kunchenguid/firstmate/actions/runs/43226301857), replacing the provisional local measurements the suite first carried.
+The 2026-11-12 `tests/fm-watch-beacon-progress.test.sh` serial hint is its completed, passing Ubuntu `FM_TEST_END` sample of 30149 ms from CI run [43226301857](https://github.com/kunchenguid/firstmate/actions/runs/43226301857), replacing the provisional local measurement the suite first carried; the same run's 3712 ms sample is the first hint `tests/fm-nm-bounded-owned.test.sh` has carried.
 
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains a separate measurement and is skipped by the portable CI shards.
 Measure that script through the focused Git Bash runner rather than a portable skip.
