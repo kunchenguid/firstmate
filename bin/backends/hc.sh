@@ -193,9 +193,15 @@ fm_backend_hc_scoped_label() {  # <window-label>
 }
 
 # fm_backend_hc_get: `hc get --json` of the parsed target. Status 3 is hc's
-# structured not_found; any other failure is an unreadable core.
+# structured not_found; any other failure is an unreadable core. hc starts a
+# fresh, empty core when the socket it resolves is not live, and that core
+# answers not_found for every address, so the target's core socket
+# (fm_backend_detect_hc_core_sock for its recorded session) must accept a
+# connection first: a dead or absent socket is an unreadable core, never a
+# missing terminal that recovery would respawn beside a live agent.
 fm_backend_hc_get() {  # <target>
   fm_backend_hc_parse_target "$1" || return 1
+  fm_backend_unix_sock_live "$(HC_SESSION=$FM_BACKEND_HC_SESSION fm_backend_detect_hc_core_sock)" || return 1
   fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" get --json "$FM_BACKEND_HC_ADDRESS" 2>/dev/null
 }
 

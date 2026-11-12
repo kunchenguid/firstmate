@@ -102,6 +102,17 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # (docs/hc-backend.md).
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
+# The spawn-capable backends that also host a persistent --secondmate launch
+# (bin/fm-spawn.sh refuses the rest with one message, and
+# bin/fm-secondmate-move.sh checks a move target here before stopping
+# anything). A second mate runs its own firstmate home as the task directory,
+# so a backend here places that endpoint where the mate's own crew can later
+# find and join it: herdr and rex stand up the mate home's own workspace or
+# session, and hc labels the mate's terminal into that home's own Herdr.app
+# space (docs/hc-backend.md "Second mates"). orca owns the task worktree
+# itself, which a home is not; cmux, paseo, and tern have no secondmate launch
+# semantics designed yet.
+FM_BACKEND_SECONDMATE="tmux herdr zellij rex t3code hc"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -271,21 +282,18 @@ fm_backend_detect() {
 
 # fm_backend_unix_sock_live: a process is accepting unix-socket connections
 # at <path> right now - a real connect, not liveness by file shape: a stale
-# socket file refuses, an absent one never binds. python3 is required
-# (firstmate's toolchain already relies on it); nc's -U/-z flags are
-# unreliable for this on macOS.
+# socket file refuses, an absent one never binds. node does the connect
+# because it is in the universal toolchain every home already requires
+# (docs/configuration.md "Toolchain"); nc's -U/-z flags are unreliable for
+# this on macOS.
 fm_backend_unix_sock_live() {  # <path>
-  command -v python3 >/dev/null 2>&1 || return 1
   [ -S "$1" ] || return 1
-  python3 - "$1" <<'PY' >/dev/null 2>&1
-import socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.settimeout(0.75)
-try:
-    s.connect(sys.argv[1])
-except OSError:
-    sys.exit(1)
-PY
+  node -e '
+const s = require("net").connect(process.argv[1]);
+s.setTimeout(750, () => process.exit(1));
+s.on("connect", () => process.exit(0));
+s.on("error", () => process.exit(1));
+' "$1" >/dev/null 2>&1
 }
 
 # fm_backend_detect_hc_usable: an hc selection can only succeed when the
@@ -309,8 +317,11 @@ fm_backend_detect_hc_usable() {
 # hc's own layout for ${HC_SESSION:-default}, measured on hc 0.1.14:
 # $XDG_RUNTIME_DIR/herdr-core/<session>.sock when XDG_RUNTIME_DIR is set,
 # else ${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core/<session>/<session>.sock.
-# A layout this misses only fails the liveness probe - no switch, never a
-# wrong or newly started core.
+# fm_backend_hc_get (bin/backends/hc.sh) gates every passive hc read on this
+# same socket, so a layout this misses fails detection's liveness probe (no
+# switch, never a wrong or newly started core) and blocks every hc task's
+# passive reads: endpoint and agent state are unreadable, busy state is
+# unknown, and current_path returns no path.
 fm_backend_detect_hc_core_sock() {
   local session=${HC_SESSION:-default}
   if [ -n "${FM_HC_SOCKET:-}" ]; then
@@ -519,6 +530,13 @@ fm_backend_validate_spawn() {  # <name>
   fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" && return 0
   echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
   return 1
+}
+
+# fm_backend_secondmate_supported: whether <name> hosts a --secondmate launch
+# (FM_BACKEND_SECONDMATE above owns the list and why). Silent either way; the
+# callers word their own refusal.
+fm_backend_secondmate_supported() {  # <name>
+  fm_backend_list_contains "$FM_BACKEND_SECONDMATE" "$1"
 }
 
 # fm_backend_required_tools: the backend-SPECIFIC CLI tools a firstmate home on
