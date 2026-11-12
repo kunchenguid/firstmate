@@ -67,7 +67,7 @@ Before release, cleanup resolves the recorded Orca worktree id and verifies its 
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
-If Orca answers that release with `selector_not_found` (even with a non-zero exit) and the worktree path from the recorded id is gone from disk, Firstmate treats the worktree as already removed and cleanup continues; any other failure, or a path that still exists, stops cleanup with a diagnostic and the metadata intact.
+If Orca answers that release with `selector_not_found` (even with a non-zero exit) and the worktree path from the recorded id is confirmed gone (absent, with a readable, searchable parent directory), Firstmate treats the worktree as already removed and cleanup continues; any other failure, or a path that still exists or cannot be checked, stops cleanup with a diagnostic and the metadata intact.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
 
