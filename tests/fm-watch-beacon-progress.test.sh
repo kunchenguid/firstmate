@@ -262,6 +262,33 @@ test_derived_grace_follows_the_poll_cadence() {
   pass "the shared beacon grace derives from the poll cadence and honours an explicit override"
 }
 
+test_home_configured_poll_governs_readers() {
+  local dir home out
+  dir=$(make_home configured-poll)
+  home=$(case_home "$dir")
+  printf '%s\n' 'export FM_POLL=600' > "$home/config/watch.env"
+  start_stalled_holder "$home"
+  backdate_beacon "$home" 320
+  out=$(FM_POLL=15 run_guard_derived "$dir")
+  [ -z "$out" ] || fail "home-configured long poll raised an alarm: $out"
+  out=$(FM_HOME="$home" FM_POLL=15 bash -c '
+    . "$1"
+    fm_beacon_grace
+    fm_watcher_stall_bound
+    fm_poll_derived_grace 15
+    [ "$FM_POLL" = 15 ]
+  ' _ "$ROOT/bin/fm-wake-lib.sh")
+  assert_equals $'660\n1980\n300' "$out" "home poll, stall bound, and explicit poll argument"
+  printf '%s\n' 'export FM_POLL=15' > "$home/config/x-mode.env"
+  out=$(run_guard_derived "$dir")
+  stop_pid "$HOLDER_PID"
+  case "$out" in
+    *"WATCHER DOWN"*) ;;
+    *) fail "Relay cadence did not supersede the home long poll: $out" ;;
+  esac
+  pass "readers resolve home cadence and Relay precedence without leaking configuration"
+}
+
 test_standalone_supervision_uses_derived_grace() {
   local dir home
   dir=$(make_home standalone-supervision)
@@ -459,6 +486,7 @@ fm_test_run \
   test_progress_refresh_is_throttled_and_inert_outside_a_watcher \
   test_crew_classification_refreshes_progress \
   test_derived_grace_follows_the_poll_cadence \
+  test_home_configured_poll_governs_readers \
   test_standalone_supervision_uses_derived_grace \
   test_progress_throttle_has_a_fixed_interval \
   test_working_long_cycle_keeps_the_beacon_fresh \
