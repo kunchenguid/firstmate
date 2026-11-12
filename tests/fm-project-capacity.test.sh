@@ -253,6 +253,20 @@ test_available_capacity_admits_the_worker() {
   pass "a spawn is admitted while its project still has a free place"
 }
 
+test_remote_worker_does_not_consume_local_capacity() {
+  local case_dir home out rc=0
+  case_dir=$(make_case remote-holder task-c task-d)
+  home="$case_dir/home"
+  declare_capacity "$home" "project 1"
+  write_live "$home" remote-a "$case_dir/project" "backend=orca" "orca_environment=worker-mac"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a remote worker consumed local capacity: $out"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-d "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a local worker did not consume local capacity: $out"
+  pass "remote Orca occupants leave local capacity available while local occupants still count"
+}
+
 test_exhausted_capacity_defers_without_leaving_anything_behind() {
   local case_dir home out rc=0 before worktrees
   case_dir=$(make_case exhausted task-c)
@@ -717,6 +731,7 @@ test_lane_capacity_gate_refuses_an_unreadable_opt_in() {
 
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
+test_remote_worker_does_not_consume_local_capacity
 test_exhausted_capacity_defers_without_leaving_anything_behind
 test_spaced_project_name_is_declared
 test_hash_prefixed_project_name_is_declared

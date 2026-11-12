@@ -575,6 +575,12 @@ fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
 META="$STATE/$ID.meta"
+if [ -n "$(fm_meta_get "$META" orca_machine_host)" ]; then
+  orca_retire_args=("$ID")
+  [ -z "$FORCE" ] || orca_retire_args+=("$FORCE")
+  [ "$LEGACY_RECORD_GIVEN" = 0 ] || orca_retire_args+=(--legacy-record)
+  exec bash "$SCRIPT_DIR/fm-orca-worker-teardown.sh" "${orca_retire_args[@]}"
+fi
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
 TREEHOUSE_SLOT_LOCK_REQUIRED=0

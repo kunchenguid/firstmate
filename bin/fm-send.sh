@@ -1180,6 +1180,12 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    if [ -n "$(fm_meta_get "$TARGET_META" orca_machine_host)" ]; then
+      python3 "$SCRIPT_DIR/fm-orca-worker.py" sync "$STATE" "$INBOX_TASK_ID" || {
+        echo "warning: steer is queued locally for $INBOX_TASK_ID; remote delivery is unconfirmed, do not enqueue it again" >&2
+        exit 1
+      }
+    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.

@@ -571,6 +571,55 @@ test_opted_in_base_branch_stays_on_origin() {
   pass "fm-review-diff keeps an opted-in named base branch on origin's copy"
 }
 
+# A remote delivery branch is imported into the coordinator project, but its
+# recorded worker worktree exists only on the other host.
+test_remote_delivery_review() {
+  local case_dir out status
+  case_dir=$(make_case remote-delivery)
+  printf 'remote delivery\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam 'remote delivery'
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$case_dir/remote-only-worktree" "project=$case_dir/project" \
+    "branch=fm/task-x1" "backend=orca" "orca_machine_host=worker" "mode=local-only"
+  status=0
+  out=$(run_review_diff "$case_dir" task-x1 2>&1) || status=$?
+  expect_code 0 "$status" "remote delivery review must use the imported branch: $out"
+  assert_contains "$out" '+remote delivery' "review must show remote changes"
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2>&1)
+  expect_code 0 "$?" "remote delivery stat must succeed: $out"
+  assert_contains "$out" 'feature.txt' "stat must include the imported change"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$case_dir/remote-only-worktree" "project=$case_dir/project" \
+    "branch=fm/not-imported" "backend=orca" "orca_machine_host=worker" "mode=local-only"
+  status=0
+  out=$(run_review_diff "$case_dir" task-x1 2>&1) || status=$?
+  expect_code 1 "$status" "a missing remote delivery must not fall back to coordinator HEAD: $out"
+  assert_contains "$out" 'fm/not-imported' "refusal must name the missing delivery"
+  pass 'remote reviews show the imported branch and refuse a missing delivery'
+}
+
+# Publishing workers need no imported local branch when the PR head is reachable.
+test_remote_pr_review_without_imported_branch() {
+  local case_dir out status
+  case_dir=$(make_case remote-pr)
+  printf 'published remote fix\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" commit -qam 'published remote fix'
+  git -C "$case_dir/wt" push -q origin HEAD:refs/pull/17/head
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$case_dir/remote-only-worktree" "project=$case_dir/project" \
+    "branch=fm/not-imported" "backend=orca" "orca_machine_host=worker" \
+    "mode=no-mistakes" "pr=https://example.invalid/owner/repo/pull/17"
+  status=0
+  out=$(run_review_diff "$case_dir" task-x1 2>&1) || status=$?
+  expect_code 0 "$status" "remote publishing review must fetch the PR head: $out"
+  assert_contains "$out" '+published remote fix' "review must show the published PR change"
+  pass 'remote publishing reviews fetch the PR head without an imported branch'
+}
+
+test_remote_pr_review_without_imported_branch
+
+test_remote_delivery_review
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head

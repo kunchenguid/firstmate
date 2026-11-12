@@ -305,6 +305,20 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+if [ -n "$(meta_value orca_machine_host)" ]; then
+  ORCA_STATE=$(python3 "$SCRIPT_DIR/fm-orca-worker.py" run "$STATE" "$ID" fm-crew-state.sh "$ID") \
+    || emit unknown remote-endpoint 'remote Orca host unavailable; endpoint state unproven'
+  case "$ORCA_STATE" in
+    'state: done'*)
+      ORCA_DONE_LINE=$(status_current_line "$LOG" "$KIND")
+      ORCA_DONE_REASON=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" \
+        "$(meta_value project)" "$ORCA_DONE_LINE" "$STATE" "$ID" "$META") \
+        || emit blocked status-log "$ORCA_DONE_REASON"
+      ;;
+  esac
+  printf '%s\n' "$ORCA_STATE"
+  exit 0
+fi
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local

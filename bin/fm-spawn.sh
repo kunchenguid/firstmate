@@ -2413,7 +2413,11 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=hc does not support --secondmate spawns yet" >&2
     exit 1
   fi
-  fm_backend_runtime_check "$BACKEND" || exit 1
+  # Machine-routed Orca workers validate the selected runtime after selection.
+  if [ "$BACKEND" != orca ] || [ "$KIND" = secondmate ] ||
+    { [ ! -e "$CONFIG/orca-machines" ] && [ ! -L "$CONFIG/orca-machines" ]; }; then
+    fm_backend_runtime_check "$BACKEND" || exit 1
+  fi
   if [ "$BACKEND" = rex ]; then
     fm_backend_rex_local_server_ensure || exit 1
   fi
@@ -4246,6 +4250,23 @@ fi
 # worker that already holds a place, and a secondmate is not a worker.
 SPAWN_PROJECT_CAPACITY=
 SPAWN_PROJECT_CAPACITY_ANY=
+ORCA_MACHINE='{"environment":"local"}'
+ORCA_MACHINE_ENV=local
+if [ "$BACKEND" = orca ] && [ "$RELAUNCH" = 0 ] && [ "$KIND" != secondmate ] &&
+  { [ -e "$CONFIG/orca-machines" ] || [ -L "$CONFIG/orca-machines" ]; }; then
+  ORCA_MACHINE=$(python3 "$SCRIPT_DIR/fm-orca-machines.py" select \
+    "$CONFIG/orca-machines" "$PROJ_ABS" "${BASE_BRANCH:-HEAD}") || exit 1
+  ORCA_MACHINE_ENV=$(printf '%s' "$ORCA_MACHINE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["environment"])')
+fi
+if [ "$BACKEND" = orca ] && [ -e "$CONFIG/orca-machines" ]; then
+  if [ "$ORCA_MACHINE_ENV" = local ]; then
+    fm_backend_orca_runtime_check || exit 1
+  else
+    FM_ORCA_ENVIRONMENT="$ORCA_MACHINE_ENV" fm_backend_orca_runtime_check || exit 1
+  fi
+fi
+# shellcheck disable=SC2034 # Consumed by the capacity library.
+FM_ORCA_CAPACITY_ENVIRONMENT=$ORCA_MACHINE_ENV
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_CAPACITY_CONFIG=$(fm_project_capacity_config_dir "$FM_HOME" "$CONFIG") || {
     echo "error: could not resolve the root Firstmate home that declares project capacity for $PROJ_ABS" >&2
@@ -4290,7 +4311,8 @@ fi
 # local root home, held until the task record is published, so two spawns on
 # this machine can never take the same open lane. A deferral leaves the task
 # exactly as queued as it was, like a project-capacity deferral.
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -e "$CONFIG/lane-capacity" ] &&
+# A selected remote Orca worker consumes capacity on its selected machine.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$ORCA_MACHINE_ENV" = local ] && [ -e "$CONFIG/lane-capacity" ] &&
   FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
     "$SCRIPT_DIR/fm-capacity.sh" --spawn-gate-enabled </dev/null 2>/dev/null; then
   SPAWN_LANE_ROOT=$(fm_firstmate_root_home "$FM_HOME") || {
@@ -4965,7 +4987,39 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# Fuse the backlog In-flight transition into the publication that just created
+# the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
+# this task's own meta lock, so a steer or teardown racing the same id stays
+# serialized exactly as before. The call itself is deferred to the final commit
+# point below so every earlier launch-delivery failure remains unwindable.
+spawn_commit_backlog_transition() {
+  [ "$BACKLOG_TRANSITION" = 1 ] || return 0
+  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+}
+
 W="fm-$ID"
+if [ "$BACKEND" = orca ] && [ "$ORCA_MACHINE_ENV" != local ]; then
+  remote_args=("$ID" "$PROJ_ABS" --backend orca --harness "$HARNESS")
+  [ -z "$DISPATCH_OVERRIDE" ] || remote_args+=(--dispatch-override "$DISPATCH_OVERRIDE")
+  [ "$KIND" != scout ] || remote_args+=(--scout)
+  [ -z "$MODE" ] || remote_args+=(--mode "$MODE" --yolo "$YOLO" --branch-prefix "$BRANCH_PREFIX")
+  [ -z "$MODEL" ] || remote_args+=(--model "$MODEL")
+  [ -z "$EFFORT" ] || remote_args+=(--effort "$EFFORT")
+  [ "$ACCOUNT_SET" -eq 0 ] || remote_args+=(--account "$ACCOUNT_ARG")
+  [ -z "$BASE_BRANCH" ] || remote_args+=(--base-branch "$BASE_BRANCH")
+  [ -z "$UPSTREAM_CONSENT" ] || remote_args+=(--upstream-consent "$UPSTREAM_CONSENT")
+  [ "$RAW_LAUNCH" = 0 ] || {
+    echo 'error: remote Orca requires a named harness, not a raw launch command' >&2
+    exit 1
+  }
+  python3 "$SCRIPT_DIR/fm-orca-worker.py" spawn "$FM_HOME" "$FM_ROOT" "$STATE" \
+    "$DATA" "$CONFIG" "$ID" "$PROJ_ABS" "$ORCA_MACHINE" "${remote_args[@]}" || exit 1
+  spawn_commit_backlog_transition || {
+    echo "error: remote worker exists but backlog transition failed; route retained for $ID" >&2
+    exit 1
+  }
+  exit 0
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
@@ -7447,16 +7501,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_META_TMP=
 fi
-
-# Fuse the backlog In-flight transition into the publication that just created
-# the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
-# this task's own meta lock, so a steer or teardown racing the same id stays
-# serialized exactly as before. The call itself is deferred to the final commit
-# point below so every earlier launch-delivery failure remains unwindable.
-spawn_commit_backlog_transition() {
-  [ "$BACKLOG_TRANSITION" = 1 ] || return 0
-  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
-}
 
 # The deferred-signal exit path's preservation report. A claim about preserved
 # state is only trustworthy if that state is read back after the commit: the

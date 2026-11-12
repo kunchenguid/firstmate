@@ -605,7 +605,7 @@ fm_backend_target_of_meta() {  # <meta-file>
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
-    [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+    [ -n "$terminal" ] && { fm_backend_orca_qualify "$meta" "$terminal"; return $?; }
   fi
   if [ "$backend" = t3code ]; then
     terminal=$(fm_meta_get "$meta" t3_thread_id)
@@ -613,6 +613,24 @@ fm_backend_target_of_meta() {  # <meta-file>
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
+}
+
+# An environment is part of endpoint identity, not a process-global default.
+# Reject ambiguous records rather than sending a remote terminal id locally.
+fm_backend_orca_qualify() {  # <meta-file> <endpoint>
+  local meta=$1 endpoint=$2 environment runtime
+  if grep -q '^orca_environment=' "$meta"; then
+    environment=$(fm_backend_meta_exact_value "$meta" orca_environment) || return 1
+    case "$environment" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    if grep -q '^orca_runtime_id=' "$meta"; then
+      runtime=$(fm_backend_meta_exact_value "$meta" orca_runtime_id) || return 1
+      case "$runtime" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      environment="$environment@$runtime"
+    fi
+    printf 'orca-env:%s:%s' "$environment" "$endpoint"
+  else
+    printf '%s' "$endpoint"
+  fi
 }
 
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
@@ -825,7 +843,20 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      window=$terminal
+      window=$(fm_backend_orca_qualify "$meta" "$terminal") || {
+        echo "REFUSED: invalid Orca environment in $meta; preserving task state." >&2
+        return 1
+      }
+      if grep -q '^orca_environment=' "$meta"; then
+        # Remote filesystem ownership must accompany the terminal route. A
+        # remote path can exist locally too, so local safety checks prove
+        # nothing for an environment-only record.
+        local orca_host orca_workspace
+        orca_host=$(fm_backend_meta_exact_value "$meta" orca_machine_host) || return 1
+        orca_workspace=$(fm_backend_meta_exact_value "$meta" orca_machine_workspace) || return 1
+        case "$orca_host" in -*|*[!A-Za-z0-9._@-]*|'') return 1 ;; esac
+        case "$orca_workspace" in /*) ;; *) return 1 ;; esac
+      fi
       ;;
     cmux)
       [ "$binding" = "$id" ] || {
@@ -962,6 +993,9 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
       done < "$meta" 2>/dev/null || true
     fi
     [ -n "$terminal" ] || terminal=$thread
+    if [ -n "$terminal" ] && grep -q '^orca_environment=' "$meta"; then
+      terminal=$(fm_backend_orca_qualify "$meta" "$terminal") || continue
+    fi
     { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
     printf '%s' "$meta"
     return 0

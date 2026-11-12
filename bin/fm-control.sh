@@ -380,6 +380,9 @@ fi
 # cannot say is WHY, and "malformed metadata" is the wrong thing to tell an
 # operator about a correctly configured remote route. Name the placement
 # instead, using the same `remote_host` signal bin/fm-send.sh routes on.
+if [ -n "$(fm_meta_get "$META" orca_machine_host)" ]; then
+  exec python3 "$SCRIPT_DIR/fm-orca-worker.py" run "$STATE" "$ID" fm-control.sh "$ID" "$VERB" "$@"
+fi
 if [ -n "$(fm_meta_get "$META" remote_host)" ]; then
   die "task $ID is a remotely placed secondmate on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the secondmate recovery path rather than this plane"
 fi

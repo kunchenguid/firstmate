@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+python3 "$ROOT/tests/orca-worker-transport.py" || fail 'remote Orca task transport'
 # A claude spawn writes workspace trust into the launching user's own store,
 # and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
 # is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
@@ -43,7 +44,13 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   printf '\n'
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
-  printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+  runtime_environment=local
+  previous=
+  for argument in "$@"; do
+    [ "$previous" != --environment ] || runtime_environment=$argument
+    previous=$argument
+  done
+  printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready","runtimeId":"runtime-%s"}}}\n' "$runtime_environment"
   exit 0
 fi
 n=$next
@@ -1348,6 +1355,26 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   [ "$out" = "via dispatch" ] || fail "dispatcher should route capture to the Orca adapter, got '$out'"
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
+
+test_remote_environment_is_part_of_endpoint_identity() {
+  local out
+  orca_case remote-environment
+  printf '{"result":{"terminal":{"tail":["remote"]}}}\n' > "$RESP/1.out"
+  out=$(PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    ORCA_ENVIRONMENT=wrong ORCA_PAIRING_CODE=wrong bash -c '
+      . "$1/bin/fm-backend.sh"
+      fm_backend_capture orca orca-env:worker-mac@runtime-worker-mac:term-same 10
+      fm_backend_send_key orca orca-env:m5@runtime-m5:term-same Enter
+      fm_backend_kill orca term-local
+    ' _ "$ROOT")
+  assert_contains "$out" remote 'remote capture returned output'
+  assert_contains "$(cat "$LOG")" $'--terminal\x1fterm-same\x1f--limit\x1f10\x1f--json\x1f--environment\x1fworker-mac' 'capture pins environment'
+  assert_contains "$(cat "$LOG")" $'--environment\x1fm5' 'next endpoint independently pins environment'
+  assert_not_contains "$(tail -1 "$LOG")" '--environment' 'local close does not inherit remote routing'
+  pass 'Orca environment qualification prevents cross-machine endpoint collisions'
+}
+
+test_remote_environment_is_part_of_endpoint_identity
 
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields

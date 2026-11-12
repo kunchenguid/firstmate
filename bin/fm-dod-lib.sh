@@ -1128,6 +1128,21 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       return 1
     fi
   fi
+  if [ -n "$meta" ] && [ -n "$(fm_dod_meta_value "$meta" orca_machine_host)" ]; then
+    local orca_bridge
+    orca_bridge="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-orca-worker.py"
+    if [ "$mode" = local-only ]; then
+      sha=$(python3 "$orca_bridge" head "$state" "$id") || {
+        printf '%s\n' 'remote named head could not be imported and pinned safely'; return 1;
+      }
+      fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}" || {
+        printf '%s\n' 'remote local-only done head could not be recorded'; return 1;
+      }
+      return 0
+    fi
+    python3 "$orca_bridge" 'done' "$state" "$id" "$line"
+    return $?
+  fi
   if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
