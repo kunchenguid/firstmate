@@ -74,6 +74,9 @@
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
+# A merge card's `risk` is a short tier token (slug, at most 16 characters -
+# for example `low`), not prose; the rationale belongs in `detail` so the badge
+# cannot silently clip captain-facing text. Anything longer or free-form refuses.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
@@ -168,7 +171,7 @@ validate_payload() {  # <data.json>
           and (.recommend_value as $recommend
             | ([.options[].value] | index($recommend) != null))))
       and ([.options[].value] | index("reconcile") == null)
-      and (if .type == "merge" then (.risk | nonempty_string) else true end);
+      and (if .type == "merge" then (.risk | slug(16)) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
       and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
@@ -363,6 +366,18 @@ command_build() {
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
+  # Name the merge-risk contract before the generic schema refusal so a long
+  # rationale in `risk` gets a fixable message instead of a silent clip later.
+  if jq -e '
+    type == "object"
+    and (.captains_call | type == "array")
+    and any(.captains_call[];
+      .type == "merge"
+      and ((.risk | type != "string")
+        or ((.risk | test("^[A-Za-z0-9._-]{1,16}$")) | not)))
+  ' "$data" >/dev/null 2>&1; then
+    fail "merge risk must be a short tier such as low (put the rationale in detail): $data"
+  fi
   validate_payload "$data" || fail "board data does not satisfy $BOARD_SCHEMA: $data"
   [ -f "$TEMPLATE" ] && [ ! -L "$TEMPLATE" ] || fail "board template is missing: $TEMPLATE"
   [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
