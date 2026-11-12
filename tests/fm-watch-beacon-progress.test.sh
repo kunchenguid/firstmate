@@ -279,6 +279,18 @@ test_home_configured_poll_governs_readers() {
     [ "$FM_POLL" = 15 ]
   ' _ "$ROOT/bin/fm-wake-lib.sh")
   assert_equals $'660\n1980\n300' "$out" "home poll, stall bound, and explicit poll argument"
+  printf '%s\n' 'export FM_GUARD_GRACE=1200' >> "$home/config/watch.env"
+  backdate_beacon "$home" 700
+  out=$(FM_GUARD_GRACE=300 run_guard_derived "$dir")
+  [ -z "$out" ] || fail "configured grace did not override the reader environment: $out"
+  out=$(FM_HOME="$home" bash -c '
+    . "$1"
+    fm_beacon_grace
+    fm_watcher_stall_bound
+  ' _ "$ROOT/bin/fm-wake-lib.sh")
+  assert_equals $'1200\n3600' "$out" "configured grace and stall bound"
+  printf '%s\n' 'export FM_POLL=600' > "$home/config/watch.env"
+  backdate_beacon "$home" 320
   printf '%s\n' 'export FM_POLL=15' > "$home/config/x-mode.env"
   out=$(run_guard_derived "$dir")
   stop_pid "$HOLDER_PID"
@@ -287,6 +299,49 @@ test_home_configured_poll_governs_readers() {
     *) fail "Relay cadence did not supersede the home long poll: $out" ;;
   esac
   pass "readers resolve home cadence and Relay precedence without leaking configuration"
+}
+
+test_terminal_wait_refreshes_all_branches() {
+  local dir home
+  dir=$(make_home terminal-wait)
+  home=$(case_home "$dir")
+  printf '%s\n' 'export FM_POLL=600' 'export FM_GUARD_GRACE=1200' > "$home/config/watch.env"
+  FM_HOME="$home" FM_POLL=15 bash -c '
+    . "$1/bin/fm-watch.sh" || exit 1
+    [ "$POLL:$WATCHER_STALE_GRACE" = 600:1200 ] || exit 2
+    FM_WATCH_BEACON_PATH="$FM_HOME/state/.last-watcher-beat"
+    unset SECONDS
+    SECONDS=100
+    recorded_windows() { [ "$mode" = empty ] || printf "session:1\n"; }
+    window_backend() { printf "fake\n"; }
+    window_kind() { printf "ship\n"; }
+    fm_backend_has_push() { return 0; }
+    sleep() {
+      [ "$1" = 600 ] && [ "$(fm_path_age "$FM_WATCH_BEACON_PATH")" -le 1 ] || exit 3
+      printf "sleep\n"
+    }
+    watcher_waited() {
+      [ "$(fm_path_age "$FM_WATCH_BEACON_PATH")" -le 1 ] || exit 4
+      printf "native\n"
+      WATCHER_CAPTURE=
+      if [ "$mode" = fallback ]; then
+        touch -t 200001010000 "$FM_WATCH_BEACON_PATH"
+        SECONDS=$((SECONDS + 2))
+        return 2
+      fi
+      return 1
+    }
+    for mode in empty unsupported native fallback; do
+      touch -t 200001010000 "$FM_WATCH_BEACON_PATH"
+      SECONDS=$((SECONDS + 2))
+      _event_cap_key=fake:session
+      _event_cap_ok=1
+      [ "$mode" != unsupported ] || _event_cap_ok=0
+      event_wait_or_sleep || exit 5
+    done
+  ' _ "$ROOT" > "$dir/waits.out" || fail "terminal wait used stale liveness or incorrect home settings"
+  assert_equals $'sleep\nsleep\nnative\nnative\nsleep' "$(cat "$dir/waits.out")" "all terminal wait branches"
+  pass "every terminal wait refreshes progress and direct watchers load home settings"
 }
 
 test_standalone_supervision_uses_derived_grace() {
@@ -487,6 +542,7 @@ fm_test_run \
   test_crew_classification_refreshes_progress \
   test_derived_grace_follows_the_poll_cadence \
   test_home_configured_poll_governs_readers \
+  test_terminal_wait_refreshes_all_branches \
   test_standalone_supervision_uses_derived_grace \
   test_progress_throttle_has_a_fixed_interval \
   test_working_long_cycle_keeps_the_beacon_fresh \
