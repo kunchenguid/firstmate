@@ -1441,7 +1441,8 @@ Claude uses [hook-owned tokenless re-arm cycles](watcher-continuity.md#claude-st
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
 
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
-When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
+When it is absent or contains `default`, harness resolution falls back to the firstmate's own harness, subject to worker preflight.
+An Auggie primary must select a worker-capable adapter here, through a dispatch profile, or through an explicit spawn override; [Auggie's adapter reference](../.agents/skills/harness-adapters/references/harness/auggie.md) owns its primary-only restriction.
 
 ### Choose the secondmate harness
 
