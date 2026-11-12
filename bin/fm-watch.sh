@@ -4604,11 +4604,19 @@ EOF
     # a window whose pane is already gone up the escalation ladder until it
     # demands a deep inspection of a closed task. A pane that renders nothing
     # carries no evidence of a wedge, so end the episode and wait for content.
+    # The episode bookkeeping goes; the report memory does not. .stale-<key> is
+    # the one-shot-per-distinct-hash record every surface decision compares
+    # against, and a read that renders none of that content cannot prove it has
+    # been reported afresh: dropping it here bought a pane that came back
+    # byte-identical a second report of one the captain already had.
+    # .waiting-resurfaced-<key> holds for the same reason - it throttles a
+    # declared wait this read cannot observe ending - and only
+    # clear_stale_hash_tracking, the route a gone subject takes, drops either.
     if [ -z "${tail40//[[:space:]]/}" ]; then
       if [ -e "$STATE/.count-$key" ] || [ -e "$STATE/.stale-$key" ] || [ -e "$STATE/.stale-since-$key" ]; then
         triage_log "absorbed empty pane capture (endpoint renders nothing): $w"
       fi
-      rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.stale-$key"
+      rm -f "$STATE/.hash-$key" "$STATE/.count-$key"
       wedge_episode_end "$key"
       clear_write_tracking "$key"
       # The capture shows no composer dialog, so a name the away daemon saved

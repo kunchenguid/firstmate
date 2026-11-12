@@ -1318,8 +1318,15 @@ while :; do
     "$SCRIPT_DIR/fm-watch-arm.sh" --handling-delivered "$SUCCESSOR_GENERATION" --watcher-pid "$SUCCESSOR_WATCHER" >/dev/null 2>&1
     HANDOFF_RC=$?
     if [ "$HANDOFF_RC" -eq 3 ]; then
-      log_line "handling-superseded\tgeneration=$SUCCESSOR_GENERATION\twatcher=$SUCCESSOR_WATCHER"
-      stand_down "a newer watcher cycle owns this home's lock; the handling handoff is superseded"
+      log_line "handling-superseded	generation=$SUCCESSOR_GENERATION	watcher=$SUCCESSOR_WATCHER"
+      # Standing down defers this home to the cycle that superseded the handoff,
+      # so it has to leave that cycle running: this host's EXIT cleanup retires
+      # every arm it still tracks, and an arm's TERM handler stops the watcher it
+      # owns. Where the successor cannot be recorded for the next host to take
+      # over, nothing is left ownerless - main takes the wake instead.
+      detach_successor \
+        || exit_to_main "the superseding successor cycle could not be recorded; this wake is yours"
+      stand_down "a newer watcher cycle owns this home's supervision; the handling handoff is superseded"
     elif [ "$HANDOFF_RC" -ne 0 ]; then
       exit_to_main "the handling handoff to the successor watcher could not be confirmed; this wake is yours"
     fi

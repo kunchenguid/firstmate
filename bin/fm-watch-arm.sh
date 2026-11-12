@@ -617,7 +617,11 @@ if [ "$mode" = handling-delivered ]; then
   #   3  it is gone or no longer the lock owner, but another live watcher owns the
   #      lock, so a newer cycle owns the episode. docs/watcher-continuity.md
   #      ("Actionable wake ordering") owns that supersession contract, and the
-  #      drain transitions the recovery marker itself, so nothing is lost.
+  #      drain transitions the recovery marker itself, so nothing is lost. A token
+  #      whose generation the marker has moved past is that same supersession seen
+  #      from the episode side - a newer recovery generation replaced this one - so
+  #      begin_handling reports it with this status and every consumer treats the
+  #      two routes alike.
   # Only a lock no live watcher owns is a real lapse and stays rejected.
   if fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME"; then

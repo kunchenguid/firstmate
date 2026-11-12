@@ -951,7 +951,9 @@ while [ "$i" -lt 200 ]; do
 done
 printf '%s\n' "$newer" > "$FM_HOME/newer-watcher.pid"
 printf 'watcher: started pid=999999 (beacon fresh) recovery-generation=fixture.0.supersede\n'
-trap 'exit 0' TERM
+# Real arm semantics: the arm's own TERM handler stops the watcher it owns and
+# leaves 143, so a host that retires this arm takes that watcher with it.
+trap 'kill -TERM "$newer" 2>/dev/null; wait "$newer" 2>/dev/null; exit 143' TERM
 wait "$newer"
 rc=$?
 cat "$out" 2>/dev/null || true
@@ -963,10 +965,10 @@ SH
   append_status "$home" 'step one'
   wait_until_deadline 60 host_exited "$home" || fail "supersession: the host did not stand down: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
   expect_code 0 "$(cat "$home/host.rc")" "a superseded handling handoff must stand down with exit 0"
-  assert_re '^supervision-host stood down: a newer watcher cycle owns this home.s lock; the handling handoff is superseded$' "$home/host.out" \
+  assert_re '^supervision-host stood down: a newer watcher cycle owns this home.s supervision; the handling handoff is superseded$' "$home/host.out" \
     "the host must name the newer watcher as the reason it stood down"
-  assert_grep 'handling-superseded\tgeneration=fixture.0.supersede\twatcher=999999' "$home/state/.supervision-host.log" \
-    "the ledger must record the superseded handling handoff"
+  assert_grep 'handling-superseded	generation=fixture.0.supersede	watcher=999999' "$home/state/.supervision-host.log" \
+    "the ledger must record the superseded handling handoff on tab-separated fields"
   assert_grep 'handling-delivered	generation=fixture.0.supersede	watcher=999999' "$home/handoff.log" \
     "the host must confirm the successor generation and watcher it handed handling to"
   assert_no_re 'could not be confirmed' "$home/host.out" "a superseded handoff must not take the restoration-failure path"
