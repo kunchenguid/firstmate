@@ -11,8 +11,8 @@
 #
 # They also hold the outside pull request gate the maintainer approved in
 # DOP-167 (keep public CI within GitHub's 40-job limit): a PR from an author
-# without write access runs only the quick checks and a failing Full suite
-# verdict until the full-ci label is added, the label and later pushes run the
+# without write access runs the quick checks, the non-blocking Ubuntu canary,
+# and a failing Full suite verdict until full-ci is added; later pushes run the
 # whole suite, any other label neither starts nor cancels a run, and close main
 # pushes keep only the newest run.
 #
@@ -333,6 +333,8 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate full-suite'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
 HEAVY_TIER_JOBS='tests-herdr tests-hc'
+# The one job outside the tiers: its timeout must exceed its suites' summed bounds.
+CANARY_JOB='tests-ubuntu-26-canary'
 
 # Print the one timeout every listed job shares; fail on any disagreement.
 tier_timeout() {  # <tier> <job>...
@@ -415,19 +417,19 @@ test_only_the_full_ci_label_joins_the_pr_group() {
   pass "only the full-ci label joins and supersedes the PR's group; other labels cancel nothing"
 }
 
-QUICK_JOBS='test-coverage invariants full-suite'
+UNGATED_JOBS='test-coverage tests-ubuntu-26-canary invariants full-suite'
 
-# DOP-167 direction A: an outside PR without the label runs only the quick
-# checks and the Full suite verdict, which fails naming the label.
-test_outside_pr_without_label_runs_only_quick_checks() {
+# The canary must exercise outside PRs before full-ci approval; the required
+# Full suite verdict still fails naming the label.
+test_outside_pr_without_label_runs_quick_checks_and_canary() {
   local action association actual out
   # The associations open fork PRs to firstmate carried on 2026-10-29.
   for association in CONTRIBUTOR FIRST_TIME_CONTRIBUTOR NONE; do
     for action in opened synchronize reopened; do
       actual=$(jobs_running_under action="$action" association="$association" | tr '\n' ' ') \
         || fail "could not resolve outside $association $action jobs"
-      [ "$actual" = "$QUICK_JOBS " ] \
-        || fail "an unlabelled outside PR ($association, $action) must run only $QUICK_JOBS, ran: $actual"
+      [ "$actual" = "$UNGATED_JOBS " ] \
+        || fail "an unlabelled outside PR ($association, $action) must run $UNGATED_JOBS, ran: $actual"
     done
   done
   if out=$(run_full_suite_verdict); then
@@ -435,7 +437,7 @@ test_outside_pr_without_label_runs_only_quick_checks() {
   fi
   printf '%s\n' "$out" | grep -q 'full-ci' \
     || fail "the Full suite failure must name the full-ci label, got:"$'\n'"$out"
-  pass "an unlabelled outside PR runs only the quick checks and a failing Full suite naming full-ci"
+  pass "an unlabelled outside PR runs quick checks, the canary, and a failing Full suite naming full-ci"
 }
 
 # DOP-167: the full-ci label and every later push run the whole suite, and the
@@ -519,7 +521,7 @@ test_unrelated_label_never_masks_an_earlier_failure() {
       case "$expect:$name" in
         all-failed:*) want=failure ;;
         waiting:'Full suite') want=failure ;;
-        waiting:'Test coverage guard'|waiting:'Repo invariants') want=success ;;
+        waiting:'Test coverage guard'|waiting:'Repo invariants'|waiting:'Ubuntu 26.04 canary') want=success ;;
         waiting:*) want=skipped ;;
       esac
       [ "$conclusion" = "$want" ] \
@@ -551,21 +553,23 @@ end
   pass "every ci.yml job carries a finite timeout"
 }
 
-# Every job sits in exactly one tier, and the workflow carries exactly three
-# distinct job-level timeouts: one per tier, no one-off numbers.
+# Every job sits in exactly one tier or is the canary exception, and the tiers
+# carry exactly three distinct job-level timeouts: one per tier, no one-off
+# numbers.
 test_every_job_belongs_to_exactly_one_timeout_tier() {
   local expected actual distinct
   # shellcheck disable=SC2086
-  expected=$(printf '%s\n' $FAST_TIER_JOBS $NORMAL_TIER_JOBS $HEAVY_TIER_JOBS | LC_ALL=C sort)
+  expected=$(printf '%s\n' $FAST_TIER_JOBS $NORMAL_TIER_JOBS $HEAVY_TIER_JOBS $CANARY_JOB | LC_ALL=C sort)
   [ "$(printf '%s\n' "$expected" | LC_ALL=C sort -u)" = "$expected" ] \
     || fail "a job is listed in more than one timeout tier:"$'\n'"$expected"
   actual=$(workflow_jobs | LC_ALL=C sort) || fail "could not list ci.yml jobs"
   [ "$actual" = "$expected" ] \
     || fail "ci.yml jobs and the timeout tiers disagree; every job must join one tier"$'\n'"workflow: $(printf '%s' "$actual" | tr '\n' ' ')"$'\n'"tiers: $(printf '%s' "$expected" | tr '\n' ' ')"
-  distinct=$(for job in $expected; do job_timeout "$job"; done | LC_ALL=C sort -u | wc -l | tr -d ' ')
+  # shellcheck disable=SC2086
+  distinct=$(for job in $FAST_TIER_JOBS $NORMAL_TIER_JOBS $HEAVY_TIER_JOBS; do job_timeout "$job"; done | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$distinct" = 3 ] \
     || fail "ci.yml must carry exactly three distinct job timeouts (fast, normal, heavy), got $distinct"
-  pass "every ci.yml job belongs to one of the three timeout tiers"
+  pass "every ci.yml job belongs to one of the three timeout tiers or is the canary exception"
 }
 
 # Fast tier: seconds-long checks share one short tripwire in the 5-10 minute band.
@@ -593,9 +597,9 @@ test_normal_tier_shares_one_budget() {
   pass "normal tier jobs share one $normal minute budget"
 }
 
-# Heavy tier: Herdr alone carries a job-level last-resort backstop above the
-# normal tier, while its family-run step owns a tighter tripwire so the
-# always() cleanup and timing upload still run after a hang.
+# Heavy tier: the real backend lanes carry a job-level last-resort backstop
+# above the normal tier, while each family-run step owns a tighter tripwire so
+# the always() cleanup and timing upload still run after a hang.
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
   local normal heavy step
   # shellcheck disable=SC2086
@@ -723,12 +727,145 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+test_ubuntu_canary_failure_is_non_blocking() {
+  ruby -ryaml - "$CI_WORKFLOW" <<'RUBY' || fail "Ubuntu canary isolation contract"
+jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+canary = jobs.fetch("tests-ubuntu-26-canary")
+raise "canary must use Ubuntu 26.04" unless canary.fetch("runs-on") == "ubuntu-26.04"
+raise "canary failures must be tolerated" unless canary.fetch("continue-on-error") == true
+raise "canary must not wait for required jobs" unless Array(canary["needs"]).empty?
+jobs.each do |id, job|
+  raise "#{id} must not depend on the canary" if Array(job["needs"]).include?("tests-ubuntu-26-canary")
+end
+RUBY
+  pass "Ubuntu 26.04 canary failures cannot affect required jobs"
+}
+
+# The ten suites issue 7797 lists for the canary.
+CANARY_SUITES='fm-watch-checkpoint fm-fleet-ledger fm-herdr-groups fm-pr-health fm-backend-rex fm-record-export fm-supervision-host fm-public-followup fm-contributions fm-remote-secondmate-lifecycle-e2e'
+
+# Build a checkout the canary's steps can run in: the real runner, a passing
+# stand-in for each issue-listed suite, and stand-ins for the tools the setup
+# steps reach outside the repository. The runner itself runs on the host PATH:
+# stock macOS has no timeout and its sleep rejects --version, and the runner
+# would otherwise pick the timeout stand-in as its bounding mechanism.
+canary_fixture() {
+  local root suite tool
+  root=$(fm_test_tmproot fm-ci-canary) || return 1
+  mkdir -p "$root/repo/bin" "$root/repo/tests" "$root/stubs" "$root/runner-temp"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$root/repo/bin/"
+  cp "$ROOT/bin/fm-test-run.sh" "$root/repo/bin/fm-test-run.real.sh"
+  # shellcheck disable=SC2016  # wrapper text, expanded when the wrapper runs
+  printf '#!/usr/bin/env bash\nPATH=${PATH#"%s/stubs:"} exec "%s/repo/bin/fm-test-run.real.sh" "$@"\n' "$root" "$root" \
+    >"$root/repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/git-config-helpers.sh" "$root/repo/tests/"
+  for suite in $CANARY_SUITES; do
+    printf '#!/usr/bin/env bash\necho "ok - stand-in suite"\n' >"$root/repo/tests/$suite.test.sh"
+  done
+  for tool in npm tasks-axi tmux timeout sleep; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$root/stubs/$tool"
+  done
+  chmod +x "$root/repo/bin/"fm-test-run*.sh "$root/repo/tests/"*.test.sh "$root/stubs/"*
+  printf '%s\n' "$root"
+}
+
+# Run the canary job's steps in a fixture the way the runner does and print
+# the job's check conclusion. GitHub documents that a failed step fails the
+# job unless that step sets continue-on-error, that steps.<id>.outcome is the
+# result before continue-on-error applies, and that a step without a status
+# function in its `if` runs only while the job is still successful. Step
+# output goes to <fixture>/log and the job summary to <fixture>/summary.
+run_canary_job() {  # <fixture>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
+doc = YAML.load_file(ARGV.shift)
+root = ARGV.shift
+context = simulated_context(doc.fetch("name"), [])
+base_env = {
+  "PATH" => "#{root}/stubs:#{ENV.fetch("PATH")}",
+  "RUNNER_TEMP" => "#{root}/runner-temp",
+  "GITHUB_STEP_SUMMARY" => "#{root}/summary",
+  "FM_TASK_ID" => nil,
+}
+conclusion = "success"
+File.open("#{root}/log", "w") do |log|
+  doc.fetch("jobs").fetch("tests-ubuntu-26-canary").fetch("steps").each do |step|
+    next unless step.key?("run")
+    next unless Expression.condition(step["if"], context.merge("needs.status" => conclusion))
+    env = step.fetch("env", {}).to_h { |k, v| [k, interpolate(v, context)] }
+    ok = system(base_env.merge(env), "bash", "-e", "-c", step.fetch("run"),
+                chdir: "#{root}/repo", out: log, err: log)
+    context["steps.#{step["id"]}.outcome"] = ok ? "success" : "failure" if step["id"]
+    conclusion = "failure" unless ok || step["continue-on-error"] == true
+  end
+end
+puts conclusion
+' "$CI_WORKFLOW" "$1"
+}
+
+# bin/fm-pr-merge.sh refuses a PR with any red check, required or not, so a
+# canary that fails must still publish a successful check and say what failed
+# where a reader looks: the job summary and a warning annotation.
+test_failing_canary_publishes_a_green_check_and_reports_the_failure() {
+  local root conclusion suite
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  conclusion=$(run_canary_job "$root") || fail "could not run the canary steps"
+  [ "$conclusion" = success ] || fail "a passing canary must conclude success, got $conclusion:"$'\n'"$(cat "$root/log")"
+  for suite in $CANARY_SUITES; do
+    grep -qF "| \`tests/$suite.test.sh\` | pass |" "$root/summary" \
+      || fail "the summary must report $suite as pass, got:"$'\n'"$(cat "$root/summary")"
+  done
+  if grep -q '^::warning' "$root/log"; then fail "a passing canary must not warn"; fi
+
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$root/repo/tests/fm-public-followup.test.sh"
+  conclusion=$(run_canary_job "$root") || fail "could not run the canary steps"
+  [ "$conclusion" = success ] || fail "a failing canary suite must leave the check green, got $conclusion"
+  grep -qF "| \`tests/fm-public-followup.test.sh\` | fail (exit 1) |" "$root/summary" \
+    || fail "the summary must report the failing suite, got:"$'\n'"$(cat "$root/summary")"
+  grep -qF "| \`tests/fm-contributions.test.sh\` | pass |" "$root/summary" \
+    || fail "the summary must still report the suites that passed, got:"$'\n'"$(cat "$root/summary")"
+  grep '^::warning' "$root/log" | grep -q 'suites' \
+    || fail "a failing canary suite must emit a warning naming the suites step, got:"$'\n'"$(cat "$root/log")"
+
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$root/stubs/npm"
+  conclusion=$(run_canary_job "$root") || fail "could not run the canary steps"
+  [ "$conclusion" = success ] || fail "a failing canary setup step must leave the check green, got $conclusion"
+  grep '^::warning' "$root/log" | grep -q 'tasks-axi' \
+    || fail "a failing setup step must emit a warning naming it, got:"$'\n'"$(cat "$root/log")"
+  pass "a failing Ubuntu 26.04 canary publishes a green check, a per-suite summary and a warning"
+}
+
+# GitHub cancels a job that reaches its timeout, which no step-level
+# continue-on-error absorbs: the check is then not green and the report step
+# never runs. So the job timeout must exceed every suite hanging to the
+# per-suite bound the runner is actually given. The suite count is issue 7797's.
+test_canary_job_timeout_exceeds_its_suites_summed_bounds() {
+  local root bound suites job
+  root=$(canary_fixture) || fail "could not build the canary fixture"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"%s/args"\n' "$root" >"$root/repo/bin/fm-test-run.sh"
+  run_canary_job "$root" >/dev/null || fail "could not run the canary steps"
+  bound=$(grep -A1 -x -- '--per-script-timeout-secs' "$root/args" | tail -n 1)
+  case "$bound" in ''|*[!0-9]*) fail "the canary must bound each suite, got: $bound" ;; esac
+  suites=$(grep -c '^tests/.*\.test\.sh$' "$root/args")
+  # shellcheck disable=SC2086
+  [ "$suites" = "$(printf '%s\n' $CANARY_SUITES | wc -l | tr -d ' ')" ] \
+    || fail "the canary must run the ten issue-listed suites, ran $suites"
+  job=$(job_timeout "$CANARY_JOB") || fail "could not read the canary job timeout"
+  [ "$bound" -gt 0 ] && [ $((job * 60)) -gt $((suites * bound)) ] \
+    || fail "the canary job timeout (${job}m) must exceed $suites suites at ${bound}s each"
+  pass "the canary job timeout (${job}m) exceeds $suites suites at ${bound}s each"
+}
+
+test_ubuntu_canary_failure_is_non_blocking
+test_failing_canary_publishes_a_green_check_and_reports_the_failure
+test_canary_job_timeout_exceeds_its_suites_summed_bounds
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_keep_only_the_newest_run
 test_only_the_full_ci_label_joins_the_pr_group
-test_outside_pr_without_label_runs_only_quick_checks
+test_outside_pr_without_label_runs_quick_checks_and_canary
 test_full_ci_label_runs_the_whole_suite
 test_trusted_runs_are_unchanged
 test_unrelated_label_starts_no_job

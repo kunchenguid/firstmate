@@ -1,0 +1,4 @@
+# actionlint 1.7.12 predates this hosted image; keep other runner labels checked.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
