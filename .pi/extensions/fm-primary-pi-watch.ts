@@ -1482,6 +1482,7 @@ export default function (pi: ExtensionAPI) {
   // Pi loads project extensions before the first model turn can run the locked
   // session-start command. Publish this generation while the lock is absent so
   // that command can distinguish a loaded extension from a missing one; a
-  // foreign live lock still suppresses publication.
-  publishGenerationOwner(generation, "active");
+  // foreign live lock still suppresses publication. A late factory bind that
+  // did not take supervision leaves the live owner's marker untouched.
+  if (generationIsLive(generation)) publishGenerationOwner(generation, "active");
 }

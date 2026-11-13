@@ -3801,8 +3801,13 @@ mod.default(second.pi);
 // The newest replacement starts first; the superseded one loads its extension late and starts last.
 await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, second.ctx);
 await waitFor(() => armRows().length === 2 && liveArms().length === 1, "newest session arm");
+const ownerMarkerPath = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
+const ownerMarker = readFileSync(ownerMarkerPath, "utf8");
 mod.default(first.pi);
 await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
+if (readFileSync(ownerMarkerPath, "utf8") !== ownerMarker) {
+  throw new Error(`superseded session overwrote the live owner's marker: ${JSON.stringify(readFileSync(ownerMarkerPath, "utf8"))}`);
+}
 
 const owner = await second.getTool().execute("newest-session-arm", {}, undefined, undefined, {});
 if (!owner.details?.ok || !String(owner.details.message).includes("unchanged")) {
