@@ -496,6 +496,90 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_create_task_retries_delayed_title() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-delayed"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-slow)
+  # 1: pre-create list -> empty; 2: new-workspace (silent)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 3: first lookup: workspace exists but title not yet applied
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" ""
+  # 4: second lookup: title visible
+  cmux_workspace_list_response "$dir" 4 "bbbbbbbb-1111-1111-1111-111111111111" "$title"
+  cmux_panes_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_CMUX_CREATE_LOOKUP_SLEEP=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-slow /tmp/proj' "$ROOT" ) \
+    || fail "create_task should succeed once the delayed title appears"
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should echo ids after a delayed title, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" 'close-workspace' "create_task closed a workspace despite resolving it"
+  pass "fm_backend_cmux_create_task: retries the title lookup when the title is applied asynchronously"
+}
+
+test_create_task_returned_id_survives_delayed_title() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-returned-id"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-rid)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace reports the workspace id
+  printf 'OK bbbbbbbb-1111-1111-1111-111111111111\n' > "$dir/responses/2.out"
+  # 3: workspace listed, title not yet applied
+  cmux_workspace_list_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111" ""
+  cmux_panes_response "$dir" 4 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_CMUX_CREATE_LOOKUP_SLEEP=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-rid /tmp/proj' "$ROOT" ) \
+    || fail "create_task should succeed with the returned id before the title appears"
+  [ "$out" = "bbbbbbbb-1111-1111-1111-111111111111 cccccccc-2222-2222-2222-222222222222" ] \
+    || fail "create_task should target the returned workspace id, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" 'close-workspace' "create_task closed a workspace despite resolving it"
+  pass "fm_backend_cmux_create_task: uses the id new-workspace returns before its title appears"
+}
+
+test_create_task_closes_returned_id_absent_from_list() {
+  local dir fb out status title i
+  dir="$TMP_ROOT/create-returned-absent"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-rabs)
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf 'OK bbbbbbbb-1111-1111-1111-111111111111\n' > "$dir/responses/2.out"
+  for i in 3 4 5; do
+    cmux_workspace_list_response "$dir" "$i" "aaaaaaaa-0000-0000-0000-000000000000" "other"
+  done
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_CMUX_CREATE_LOOKUP_TRIES=2 FM_CMUX_CREATE_LOOKUP_SLEEP=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-rabs /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the returned id is not listed and the title never resolves"
+  assert_contains "$out" "$title" "create_task error did not name the title"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''bbbbbbbb-1111-1111-1111-111111111111' \
+    "create_task did not close the workspace id new-workspace reported"
+  assert_not_contains "$(cat "$dir/log")" 'close-workspace'$'\x1f''--workspace'$'\x1f''aaaaaaaa' "create_task closed an unrelated workspace"
+  pass "fm_backend_cmux_create_task: closes the returned id when it is absent from the list and the title never resolves"
+}
+
+test_create_task_never_closes_unreported_workspace() {
+  local dir fb out status title i
+  dir="$TMP_ROOT/create-unreported"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-gone)
+  printf '{"workspaces":[{"id":"aaaaaaaa-0000-0000-0000-000000000000","title":"other"}]}' > "$dir/responses/1.out"
+  # new-workspace prints no id; an unrelated new workspace appears in the list
+  for i in 3 4 5 6; do
+    cmux_workspace_list_response "$dir" "$i" "aaaaaaaa-0000-0000-0000-000000000000" "other" "dddddddd-3333-3333-3333-333333333333" ""
+  done
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_CMUX_CREATE_LOOKUP_TRIES=3 FM_CMUX_CREATE_LOOKUP_SLEEP=0.01 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-gone /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the workspace never resolves"
+  assert_contains "$out" "could not resolve a cmux workspace id" "create_task did not report the resolution failure"
+  assert_contains "$out" "$title" "create_task error did not name the title"
+  assert_not_contains "$(cat "$dir/log")" 'close-workspace' "create_task closed a workspace it was never told it owned"
+  pass "fm_backend_cmux_create_task: never closes a workspace that only appears in the list difference"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1214,10 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_retries_delayed_title
+test_create_task_returned_id_survives_delayed_title
+test_create_task_closes_returned_id_absent_from_list
+test_create_task_never_closes_unreported_workspace
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
