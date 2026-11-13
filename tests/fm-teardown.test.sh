@@ -4399,7 +4399,7 @@ seed_watcher_markers() {  # <case-dir> <task-id>
 }
 
 test_teardown_retires_task_watcher_markers_and_orphan_journal() {
-  local case_dir log closed restored marker
+  local case_dir log closed restored marker id
   case_dir=$(make_case retire-watcher-markers)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
@@ -4410,17 +4410,23 @@ test_teardown_retires_task_watcher_markers_and_orphan_journal() {
   seed_watcher_markers "$case_dir" task-x1
   seed_watcher_markers "$case_dir" task-y2
   seed_watcher_markers "$case_dir" task-x1_extra
+  for id in task-x1 alert-task-x1; do
+    printf 'ambiguous\t3\tepisode\n' > "$case_dir/state/.secondmate-uncertain-episode-$id"
+    printf 'alerted\n' > "$case_dir/state/.secondmate-uncertain-alert-$id"
+  done
   printf '%s\n' 'version=1' 'task_id=task-y2' 'projection_id=ZyXwVuTsRqPoNmLkJiHgFe' \
     > "$case_dir/state/task-y2.herdr-presentation"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "retire-watcher-markers: teardown failed: $(cat "$case_dir/stderr")"
-  for marker in .seen-task-x1_status .seen-task-x1_turn-ended .hb-surfaced-task-x1 task-x1.herdr-presentation; do
+  for marker in .seen-task-x1_status .seen-task-x1_turn-ended .hb-surfaced-task-x1 task-x1.herdr-presentation \
+    .secondmate-uncertain-episode-task-x1 .secondmate-uncertain-alert-task-x1; do
     assert_absent "$case_dir/state/$marker" "teardown left the torn-down task's $marker behind"
   done
   for marker in .seen-task-y2_status .seen-task-y2_turn-ended .hb-surfaced-task-y2 task-y2.herdr-presentation \
-    .seen-task-x1_extra_status .seen-task-x1_extra_turn-ended .hb-surfaced-task-x1_extra; do
+    .seen-task-x1_extra_status .seen-task-x1_extra_turn-ended .hb-surfaced-task-x1_extra \
+    .secondmate-uncertain-episode-alert-task-x1 .secondmate-uncertain-alert-alert-task-x1; do
     assert_present "$case_dir/state/$marker" "teardown removed another task's $marker"
   done
   pass "teardown retires the task's own watcher markers and orphaned presentation journal, leaving other tasks' markers alone"

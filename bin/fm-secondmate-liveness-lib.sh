@@ -135,7 +135,7 @@ fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <thre
   FM_SM_LIVE_UNCERTAIN_EPISODE=''
   case "$state" in ambiguous|unreadable) ;; *) return 1 ;; esac
   case "$threshold" in ''|*[!0-9]*|0) return 2 ;; esac
-  marker="$STATE/.secondmate-liveness-uncertain-$id"
+  marker="$STATE/.secondmate-uncertain-episode-$id"
   if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
     return 2
   fi
@@ -148,13 +148,13 @@ fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <thre
   else
     # mktemp supplies a unique episode token even when two episodes begin in
     # the same second. Keep that temporary file for the atomic marker publish.
-    tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+    tmp=$(mktemp "$STATE/.secondmate-uncertain-episode.XXXXXX") || return 2
     episode=${tmp##*.}
   fi
   # The episode is uncertainty itself, so uncertain probes stay consecutive
   # when the verdict alternates between those states.
   previous_count=$((previous_count + 1))
-  [ -n "$tmp" ] || tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+  [ -n "$tmp" ] || tmp=$(mktemp "$STATE/.secondmate-uncertain-episode.XXXXXX") || return 2
   if ! printf '%s\t%s\t%s\n' "$state" "$previous_count" "$episode" > "$tmp" || \
      ! mv -f -- "$tmp" "$marker"; then
     rm -f -- "$tmp"
@@ -163,16 +163,16 @@ fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <thre
   FM_SM_LIVE_UNCERTAIN_COUNT=$previous_count
   FM_SM_LIVE_UNCERTAIN_EPISODE=$episode
   [ "$previous_count" -ge "$threshold" ] || return 1
-  [ ! -e "$STATE/.secondmate-liveness-uncertain-alert-$id" ] && \
-    [ ! -L "$STATE/.secondmate-liveness-uncertain-alert-$id" ]
+  [ ! -e "$STATE/.secondmate-uncertain-alert-$id" ] && \
+    [ ! -L "$STATE/.secondmate-uncertain-alert-$id" ]
 }
 
 fm_secondmate_liveness_uncertain_mark_alert() {  # <id>
   local id=$1 marker tmp
-  marker="$STATE/.secondmate-liveness-uncertain-alert-$id"
+  marker="$STATE/.secondmate-uncertain-alert-$id"
   [ ! -L "$marker" ] || return 1
   [ ! -e "$marker" ] || return 0
-  tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-alert-$id.XXXXXX") || return 1
+  tmp=$(mktemp "$STATE/.secondmate-uncertain-alert.XXXXXX") || return 1
   if ! printf 'alerted\n' > "$tmp" || ! mv -f -- "$tmp" "$marker"; then
     rm -f -- "$tmp"
     return 1
@@ -180,8 +180,8 @@ fm_secondmate_liveness_uncertain_mark_alert() {  # <id>
 }
 
 fm_secondmate_liveness_uncertain_clear() {  # <id>
-  rm -f -- "$STATE/.secondmate-liveness-uncertain-$1" \
-    "$STATE/.secondmate-liveness-uncertain-alert-$1"
+  rm -f -- "$STATE/.secondmate-uncertain-episode-$1" \
+    "$STATE/.secondmate-uncertain-alert-$1"
 }
 
 # fm_secondmate_liveness_probe <meta> <id> <full|poll>
