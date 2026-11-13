@@ -2544,7 +2544,7 @@ This section is the single owner of the canonical schema.
 - `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
 - A tool whose CLI never announces its own updates (Claude Code is one) can add `version_url` to its `command` entry: one HTTPS URL without whitespace or control characters whose response body carries the newest published version.
 - It is fetched read-only with curl inside the same probe bound; the first dotted numeric version in the body is compared with the newest installed copy found.
-- `update available` is reported only when the published version is newer than every installed copy found; a failed request, a body without a readable version, or a missing curl is reported as that tool's own check failure.
+- `update available` is reported only when the published version is newer than every installed copy found; a failed request, a body without a readable version, or a missing curl is reported as that tool's own check failure, and a request that runs out of time is handled as described under probe timing below.
 - An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
 - A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
 - An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
@@ -2564,7 +2564,7 @@ Components are compared numerically, with leading zeroes and missing trailing ze
 These queries use `curl` and the existing `jq` parser, without an npm installation or a GitHub login; `curl` is required only for a `published` or `version_url` probe.
 The `published` HTTP reads ignore curl configuration and send no credentials, follow no redirects, and fail within the probe bound on an unavailable source, HTTP error, or unreadable version.
 
-All probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+All probe kinds are read-only and bounded, and a probe that cannot answer is reported rather than assumed current: as a check failure, or as timed out or not checked when it ran out of time.
 Malformed configuration stops `arm` with a diagnostic.
 During a sweep, malformed configuration is reported as a registry failure and no tools are checked.
 See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
@@ -2579,7 +2579,8 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 **Repeat reporting and inheritance**
 
-- The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
+- The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last complete sweep found.
+- Only a finding that record does not hold is reported, so the same pending update is reported once instead of on every poll, and a finding leaving the set does not announce the ones that remain.
 - A changed or returning condition is reported again.
 - Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 - This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
@@ -2592,8 +2593,9 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 | `FM_TOOL_UPDATE_PROBE_SECS` | 5 | Bounds one probe. |
 | `FM_TOOL_UPDATE_BUDGET_SECS` | 20 | Bounds a whole sweep. |
 
-- If the budget runs out before the next tool, the sweep records its partial findings and says which check it did not reach rather than reporting the remaining tools as current.
-- It waits until the next configured interval before probing again, while a final probe that finishes after the deadline still completes the sweep.
+- Running out of time is never reported as a failed tool.
+- A probe that overruns `FM_TOOL_UPDATE_PROBE_SECS` is reported as timed out.
+- A probe the sweep budget had already cut short, and a tool the sweep never reached, are reported as not checked rather than as current.
 - The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills records nothing and would then surface as a `timed out` check wake on every poll.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
