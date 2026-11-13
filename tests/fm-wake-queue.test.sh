@@ -3600,7 +3600,7 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
 # against the stale one, or acknowledging the old row would erase the only
 # evidence of the new failure.
 test_secondmate_liveness_tick_new_episode_queues_its_own_row_while_old_row_is_unacked() {
-  local dir state pid out key1 key2 seq gen i
+  local dir state pid out key1 key2 seq gen i real_date
   dir=$(make_secondmate_liveness_case liveness-episodes)
   state="$dir/state"
   # The verdict must change under one running watcher, so the fake pane reads
@@ -3611,12 +3611,13 @@ test_secondmate_liveness_tick_new_episode_queues_its_own_row_while_old_row_is_un
 FM_FAKE_TMUX_CURRENT_COMMAND=\$(cat "$dir/current-command") exec "$dir/fakebin/tmux.fixed" "\$@"
 SH
   chmod +x "$dir/fakebin/tmux"
-  cat > "$dir/fakebin/date" <<'SH'
+  real_date=$(command -v date)
+  cat > "$dir/fakebin/date" <<SH
 #!/usr/bin/env bash
-if [ "${1:-}" = +%s ]; then
+if [ "\${1:-}" = +%s ]; then
   printf '1793440000\n'
 else
-  exec /bin/date "$@"
+  exec "$real_date" "\$@"
 fi
 SH
   chmod +x "$dir/fakebin/date"
