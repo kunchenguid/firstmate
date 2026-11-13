@@ -1,0 +1,11 @@
+Last answer ended with a table:
+ └────────────┘
+
+────────────────────────
+└────────────┘
+────────────────────────
+
+────────────────────────
+~/example/project (main)
+↑53k ↓1.8k R95k CH99.4% $0.133 (sub) 7.9%/500k (auto)   (provider) model-x • high
+otel active
