@@ -181,6 +181,12 @@ The Claude Code mod reloads it on every `session.start`, including same-process 
 It also loads the preference lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Pi bash timeout cap
+
+A Pi primary can opt in to bounded Bash tool calls by setting `FM_PI_BASH_TIMEOUT_MAX_MS` in the environment used to launch Pi.
+The positive integer value is applied as the timeout when a Bash call omits one and caps an explicit larger timeout.
+Unset or invalid values leave Bash calls unchanged.
+
 ## Pi repeated-read containment
 
 The tracked `.pi/extensions/fm-primary-read-repetition.ts` extension provides an optional read-loop safeguard for a Linux Pi primary.
