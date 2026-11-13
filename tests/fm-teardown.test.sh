@@ -1470,7 +1470,7 @@ test_merged_github_pr_without_gh_requires_head_containment() {
     else
       [ ! -e "$case_dir/state/task-x1.meta" ] \
         || fail "merged-github-gh-axi-$relation: cleanup retained the task record"
-      [ "$(backlog_row_state "$case_dir")" = done ] \
+      [ "$(backlog_row_state "$case_dir")" = "done" ] \
         || fail "merged-github-gh-axi-$relation: cleanup did not close the backlog item"
     fi
   done
@@ -1542,7 +1542,7 @@ test_merged_pr_replay_excludes_landed_upstream_commits() {
   expect_code 0 "$rc" "merged-replay-landed-upstream: teardown should exclude landed upstream work: $(cat "$case_dir/stderr")"
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "merged-replay-landed-upstream: cleanup retained the task record"
-  [ "$(backlog_row_state "$case_dir")" = done ] \
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "merged-replay-landed-upstream: cleanup did not close the backlog item"
   pass "merged PR replay excludes upstream commits proven on the refreshed default branch"
 }
