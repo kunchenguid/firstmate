@@ -2086,7 +2086,7 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
@@ -3787,6 +3787,30 @@ bin/fm-teardown.sh e2e1
 | `bin/fm-teardown.sh e2e1` | `teardown e2e1 complete (window fme1:t1, ...)`; `hc ls --all` was empty and the worktree returned to the pool. |
 
 Before the launch-line fix the same spawn could not type `+`, which every launch line carries.
+
+### Agent state and relaunch
+
+Measured on 2026-11-13 with `hc 0.1.20` on macOS, read-only against the user's `default` core and with lifecycle input only inside a `bin/fm-hc-lab.sh` session (`fm-hclab-relaunch-*`).
+
+| Probe | Result |
+| --- | --- |
+| `hc get` of a live worker terminal whose login shell (pid 75972) launched `claude` | `foreground` was `claude` pid 7331, whose `ps` row showed `pgid=tpgid=7331`, and the top-level `pid` was the login shell: `foreground` is the terminal's foreground process group leader and `pid` its root program. |
+| `hc get` of a task terminal after a machine restart killed its worker | `foreground` `{"name":"zsh","argv":["/bin/zsh","-l"]}`, the same pid as the root, with no child processes. |
+| `~/.local/state/herdr-core/default/core.json` and `hc server status` after that restart | `core.json`, written when the core was created 12 days earlier, held the same `id` that `hc server status` reported, and the terminals kept their addresses. |
+| Lab terminal `bash --norc -i`, then `exec -a claude bash --norc -i`, then `/bin/zsh -f -i` | `foreground` named the nested `zsh` (its own process group, the tty's foreground group) while the harness-named shell was its parent; `fm_backend_agent_state` read `alive`. |
+| Lab terminal `zsh -f -i`: idle, `(exec -a claude sleep 300) &`, `kill %1`, `sleep 300`, Ctrl+C, `exit` | `fm_backend_agent_state` read `dead`, `alive`, `dead`, `ambiguous`, `dead`, `missing`. |
+
+`tests/fm-backend-hc-liveness-live-e2e.test.sh` and `tests/fm-backend-hc-smoke.test.sh` passed against the same binary on 2026-11-13 with the whole-terminal read in place:
+
+```text
+ok - hc liveness: claude 2.1.311 (Claude Code) classifies alive in hc 0.1.20
+ok - hc liveness: codex codex-cli 0.157.0 classifies alive in hc 0.1.20
+ok - hc liveness: pi 1.0.2 classifies alive in hc 0.1.20
+# unverified on this machine (not installed): opencode grok kimi
+ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
+```
+
+`tests/fm-backend-hc.test.sh` pins the same shapes with real process trees, and drives `bin/fm-control.sh relaunch` and `bin/fm-spawn.sh --relaunch` against a fake hc CLI for adoption, a live agent that stops, a live agent that does not, and a rebind refused on another core or a record without `hc_core`.
 
 ### Live guard
 
