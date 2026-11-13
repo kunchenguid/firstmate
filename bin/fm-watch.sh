@@ -3591,38 +3591,14 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
-# watcher_poll_sleep: wait POLL seconds in this bash, not in sleep(1).
-# Bash defers SIGINT while a child runs (watcher_stop_signals). GNU sleep dies
-# on INT so the trap still runs; uutils sleep ignores INT, so a checkpoint's
-# INT plus kill-after SIGKILLs the watcher before watcher_cleanup can drop the
-# lock. A timed read on a dummy fifo is a builtin wait, so the INT trap runs.
-# Bash 3.2's read -t is integer-only and rejects a fractional POLL, so fall
-# back to sleep(1) there and whenever read -t will not accept POLL.
+# watcher_poll_sleep: wait POLL seconds through watcher_waited. Bash defers
+# SIGINT while a foreground child runs, and uutils sleep ignores INT, so a
+# checkpoint's INT plus kill-after would SIGKILL the watcher before
+# watcher_cleanup can drop the lock. wait on a recorded background pid is
+# interrupted by the INT trap on every bash, including 3.2, and
+# watcher_cleanup reaps the sleeper.
 watcher_poll_sleep() {
-  local fifo
-  if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-    sleep "$POLL"
-    return
-  fi
-  case "$POLL" in
-    ''|*[!0-9.]*|*.*.*)
-      sleep "$POLL"
-      return
-      ;;
-  esac
-  fifo="$STATE/.watch.poll.fifo"
-  rm -f -- "$fifo"
-  if mkfifo -m 600 "$fifo" 2>/dev/null; then
-    # Open read-write so read does not block on a writer; unlink so a stop
-    # cannot leak the path. Fixed fd 8: bash 3.2 has no {var}<> redirection.
-    exec 8<>"$fifo"
-    rm -f -- "$fifo"
-    read -r -t "$POLL" _ <&8 || true
-    exec 8>&-
-    exec 8<&-
-    return
-  fi
-  sleep "$POLL"
+  watcher_waited sleep "$POLL" || true
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -3894,8 +3870,6 @@ watcher_cleanup() {
   fm_capture_output_cleanup
   fm_wait_tmp_cleanup
   fm_custom_check_snapshot_cleanup
-  { exec 8>&-; exec 8<&-; } 2>/dev/null || true
-  rm -f -- "$STATE/.watch.poll.fifo"
   # A stop can land inside a marker or queue critical section, leaving locks
   # recorded against this very pid with no frame left to release them. Drop
   # ours outright - identity-aware no-ops for any lock not ours - so the
