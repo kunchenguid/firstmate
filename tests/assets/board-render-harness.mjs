@@ -2,7 +2,8 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html>
+// Usage: node board-render-harness.mjs <built-board.html> [submissions-json]
+// Submissions are [{index, selection, note}], indexed by decision card.
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error }
@@ -24,9 +25,11 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.listeners = {};
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((v) => v !== c).join(" "); },
       toggle: (c, force) => {
         const classes = new Set(this.className.split(/\s+/).filter(Boolean));
         const enabled = force ?? !classes.has(c);
@@ -44,7 +47,7 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(event, handler) { this.listeners[event] = handler; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -67,8 +70,13 @@ dataNode.textContent = html
   .split("</script>")[0];
 byId.set("bearings-data", dataNode);
 
+const forms = [];
 globalThis.document = {
-  createElement: (tag) => new Node(tag),
+  createElement: (tag) => {
+    const node = new Node(tag);
+    if (tag === "form") forms.push(node);
+    return node;
+  },
   // Lazily mint any element the page asks for: the shim tracks whatever ids
   // the shipped template actually uses instead of pinning a fixed list.
   getElementById: (id) => {
@@ -90,6 +98,15 @@ globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
+
+const queued = [];
+window.lavish = { queuePrompt: (prompt, options) => queued.push({ prompt, data: options.data }) };
+for (const submission of JSON.parse(process.argv[3] || "[]")) {
+  globalThis.FormData = class {
+    get(name) { return name === "answer" ? submission.selection : submission.note || ""; }
+  };
+  forms[submission.index].listeners.submit({ preventDefault() {} });
+}
 
 const badgesOf = (row) =>
   row.children
@@ -133,4 +150,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText, queued }) + "\n");
