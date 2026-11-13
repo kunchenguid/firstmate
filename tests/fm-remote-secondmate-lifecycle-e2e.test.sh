@@ -1416,6 +1416,7 @@ kill -0 "$watch_pid" 2>/dev/null \
 kill "$watch_pid" 2>/dev/null || true
 wait "$watch_pid" 2>/dev/null || true
 watch_pid=''
+sleep 1
 ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 [ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
 # A watcher that survives this stop keeps probing into the fixture root until

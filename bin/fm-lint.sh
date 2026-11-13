@@ -119,7 +119,6 @@
 #   fm-lint.sh --jobs <1|2> [path]...  override concurrent worker count
 #   fm-lint.sh --partition <k>of<n>     lint one canonical CI partition (see fallback above)
 #   fm-lint.sh --changed ...            lint changed canonical roots (CI pull requests keep source-aware analysis; sourced helpers and lint-definition files upgrade to the full set)
-#   fm-lint.sh --full ...               force the full canonical set
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -728,7 +727,6 @@ ANALYSIS_MODE=full
 PARTITION=
 PARTITION_REQUESTED=0
 FORCE_CHANGED=0
-FORCE_FULL=0
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -763,10 +761,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --changed)
       FORCE_CHANGED=1
-      shift
-      ;;
-    --full)
-      FORCE_FULL=1
       shift
       ;;
     --fast)
@@ -821,10 +815,6 @@ case "$PARTITION" in
     ;;
   *) printf 'fm-lint.sh: --partition must be <k>of<n>, got %s.\n' "$PARTITION" >&2; exit 2 ;;
 esac
-if [ "$FORCE_CHANGED" -eq 1 ] && [ "$FORCE_FULL" -eq 1 ]; then
-  printf 'fm-lint.sh: --changed and --full cannot be combined.\n' >&2
-  exit 2
-fi
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
@@ -986,33 +976,31 @@ if [ "$#" -gt 0 ]; then
 else
   full_lint=1
   merge_base=
-  if [ "$FORCE_FULL" -eq 0 ]; then
-    want_changed=0
-    if [ "$FORCE_CHANGED" -eq 1 ]; then
-      want_changed=1
-    elif [ -z "$PARTITION" ] && [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
-      && command -v git >/dev/null 2>&1 \
-      && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-      && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
-      want_changed=1
-    fi
-    if [ "$want_changed" -eq 1 ]; then
-      base_ref=$(fm_lint_changed_base_ref) || base_ref=
-      [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
-      if [ -n "$merge_base" ]; then
-        if fm_lint_definition_changed "$merge_base"; then
-          printf 'fm-lint.sh: lint definition files changed; using full canonical lint\n' >&2
-          full_lint=1
-        elif fm_lint_sourced_helper_changed "$merge_base"; then
-          printf 'fm-lint.sh: a sourced helper changed; using full canonical lint\n' >&2
-          full_lint=1
-        else
-          full_lint=0
-        fi
-      elif [ "$FORCE_CHANGED" -eq 1 ]; then
-        printf 'fm-lint.sh: --changed needs a merge-base against origin/main or main.\n' >&2
-        exit 2
+  want_changed=0
+  if [ "$FORCE_CHANGED" -eq 1 ]; then
+    want_changed=1
+  elif [ -z "$PARTITION" ] && [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
+    want_changed=1
+  fi
+  if [ "$want_changed" -eq 1 ]; then
+    base_ref=$(fm_lint_changed_base_ref) || base_ref=
+    [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
+    if [ -n "$merge_base" ]; then
+      if fm_lint_definition_changed "$merge_base"; then
+        printf 'fm-lint.sh: lint definition files changed; using full canonical lint\n' >&2
+        full_lint=1
+      elif fm_lint_sourced_helper_changed "$merge_base"; then
+        printf 'fm-lint.sh: a sourced helper changed; using full canonical lint\n' >&2
+        full_lint=1
+      else
+        full_lint=0
       fi
+    elif [ "$FORCE_CHANGED" -eq 1 ]; then
+      printf 'fm-lint.sh: --changed needs a merge-base against origin/main or main.\n' >&2
+      exit 2
     fi
   fi
 

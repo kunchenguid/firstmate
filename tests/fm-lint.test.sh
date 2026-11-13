@@ -159,7 +159,6 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
   assert_contains "$help" "--changed" "fm-lint.sh --help omitted --changed"
-  assert_contains "$help" "--full" "fm-lint.sh --help omitted --full"
   assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
   assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
   assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
@@ -956,16 +955,6 @@ test_changed_flag_upgrades_when_lint_definition_changes() {
   assert_contains "$(cat "$tmp/err")" "lint definition files changed" \
     "--changed upgrade did not explain why it used the full set"
   pass "fm-lint.sh --changed upgrades to full lint when lint definition files change"
-}
-
-test_changed_and_full_cannot_combine() {
-  local out rc
-  rc=0
-  out=$("$LINT" --changed --full --list-files 2>&1) || rc=$?
-  [ "$rc" -eq 2 ] || fail "--changed --full must refuse, got $rc"$'\n'"$out"
-  assert_contains "$out" "--changed and --full cannot be combined" \
-    "combined-mode refusal did not name both flags"
-  pass "fm-lint.sh refuses combining --changed and --full"
 }
 
 test_empty_changed_partition_is_a_successful_noop() {
@@ -2339,6 +2328,5 @@ test_changed_flag_upgrades_when_a_sourced_helper_changes
 test_changed_flag_upgrades_when_a_sourced_helper_is_deleted
 test_changed_flag_upgrades_when_a_sourced_helper_is_renamed
 test_changed_flag_upgrades_when_a_lint_definition_is_renamed
-test_changed_and_full_cannot_combine
 test_empty_changed_partition_is_a_successful_noop
 test_local_exclusion_list_covers_every_no_external_sources_code
