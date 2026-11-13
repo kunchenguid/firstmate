@@ -3548,6 +3548,42 @@ test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched() {
   pass "watch liveness: alive and ambiguous endpoints are probed, logged, and never touched"
 }
 
+test_secondmate_liveness_tick_isolates_prefixed_ids() {
+  local dir state pid id
+  dir=$(make_secondmate_liveness_case liveness-prefixed-ids)
+  state="$dir/state"
+  rm "$state/sm1.meta"
+  for id in ops alert-ops; do
+    printf 'window=firstmate:fm-%s\nkind=secondmate\nharness=claude\nbackend=tmux\n' \
+      "$id" > "$state/$id.meta"
+  done
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux.fixed"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list-windows) printf 'fm-ops\nfm-alert-ops\n'; exit 0 ;;
+  display-message)
+    case "\$*" in
+      *fm-alert-ops*) export FM_FAKE_TMUX_CURRENT_COMMAND=node ;;
+      *) export FM_FAKE_TMUX_CURRENT_COMMAND=claude ;;
+    esac
+    ;;
+esac
+exec "$dir/fakebin/tmux.fixed" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+  run_liveness_leg "$dir" prefixed-ids FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3
+  pid=$LIVENESS_PID
+  wait_for_exit "$pid" 500 \
+    || fail "a healthy ops secondmate suppressed alert-ops uncertainty"
+  assert_grep 'check: secondmate alert-ops liveness remains ambiguous after 3 consecutive probes; endpoint was not changed' \
+    "$dir/watch-prefixed-ids.out" "prefixed secondmate uncertainty did not alert"
+  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-alert-ops-' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the prefixed secondmate did not queue exactly one uncertainty alert"
+  [ ! -s "$dir/tmux.log" ] || fail "uncertainty altered an endpoint: $(cat "$dir/tmux.log")"
+  pass "watch liveness: a healthy secondmate cannot reset a prefixed secondmate's uncertainty"
+}
+
 test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
   local dir state pid out
   dir=$(make_secondmate_liveness_case liveness-inconclusive)
@@ -3561,9 +3597,9 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
   grep -F 'check: secondmate sm1 liveness remains ambiguous after 3 consecutive probes; endpoint was not changed' "$out" >/dev/null \
     || fail "persistent ambiguity did not wake with its evidence: $(cat "$out" "$dir/watch-inconclusive.err")"
   [ ! -s "$dir/tmux.log" ] || fail "an inconclusive endpoint was killed or relaunched: $(cat "$dir/tmux.log")"
-  [ -e "$state/.secondmate-liveness-uncertain-sm1" ] \
+  [ -e "$state/.secondmate-uncertain-episode-sm1" ] \
     || fail "persistent inconclusive tracking marker was not written"
-  [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
+  [ -e "$state/.secondmate-uncertain-alert-sm1" ] \
     || fail "persistent inconclusive alert marker was not written"
   [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-sm1-[A-Za-z0-9._-]*\t' "$state/.wake-queue")" -eq 1 ] \
     || fail "persistent inconclusive state did not queue exactly one episode-keyed wake: $(cat "$state/.wake-queue")"
@@ -3587,9 +3623,9 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
   is_live_non_zombie "$pid" \
     || fail "the watcher exited while clearing an inconclusive episode: $(cat "$dir/watch-inconclusive-cleared.out" "$dir/watch-inconclusive-cleared.err")"
   kill_liveness_leg "$pid"
-  [ ! -e "$state/.secondmate-liveness-uncertain-sm1" ] \
+  [ ! -e "$state/.secondmate-uncertain-episode-sm1" ] \
     || fail "a live probe did not clear inconclusive tracking"
-  [ ! -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
+  [ ! -e "$state/.secondmate-uncertain-alert-sm1" ] \
     || fail "a live probe did not clear the inconclusive alert marker"
   pass "watch liveness: persistent inconclusive endpoints alert once and rearm after recovery"
 }
@@ -3643,13 +3679,13 @@ SH
   rm -f "$state/.secondmate-liveness-tick"
   run_liveness_leg "$dir" episode-two FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
   i=0
-  while [ "$i" -lt 100 ] && [ -e "$state/.secondmate-liveness-uncertain-sm1" ] && is_live_non_zombie "$pid"; do
+  while [ "$i" -lt 100 ] && [ -e "$state/.secondmate-uncertain-episode-sm1" ] && is_live_non_zombie "$pid"; do
     sleep 0.1
     i=$((i + 1))
   done
   is_live_non_zombie "$pid" \
     || fail "the watcher exited before the live probe could close the first episode: $(cat "$dir/watch-episode-two.out" "$dir/watch-episode-two.err")"
-  [ ! -e "$state/.secondmate-liveness-uncertain-sm1" ] \
+  [ ! -e "$state/.secondmate-uncertain-episode-sm1" ] \
     || fail "a live probe did not close the first uncertain episode"
   printf 'node\n' > "$dir/current-command"
   wait_for_exit "$pid" 500 || fail "the second uncertain episode did not wake while the first row was unacked"
@@ -3659,7 +3695,7 @@ SH
   key2=$(awk -F '\t' -v old="$key1" '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[A-Za-z0-9._-]+$/ && $4 != old { print $4 }' "$state/.wake-queue")
   [ "$(printf '%s\n' "$key2" | grep -c .)" -eq 1 ] \
     || fail "the second episode did not queue its own row beside the unacked first one: $(cat "$state/.wake-queue")"
-  [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
+  [ -e "$state/.secondmate-uncertain-alert-sm1" ] \
     || fail "the second episode was not marked alerted"
 
   # Acknowledging only the first row must leave the second episode's evidence.
@@ -3944,7 +3980,7 @@ SH
     || fail "the watcher exited against an unreachable remote secondmate: $(cat "$dir/watch-unreachable.out" "$dir/watch-unreachable.err")"
   kill_liveness_leg "$pid"
   [ "$(grep -c . "$dir/ssh.log")" -ge 4 ] || fail "the remote endpoint was not probed past the uncertain bound: $(cat "$dir/ssh.log")"
-  [ ! -e "$state/.secondmate-liveness-uncertain-rsm1" ] \
+  [ ! -e "$state/.secondmate-uncertain-episode-rsm1" ] \
     || fail "an unreachable remote probe opened an uncertain-liveness episode"
   cmp -s "$dir/rsm1.meta.before" "$state/rsm1.meta" \
     || fail "an unreachable remote probe changed the route metadata"
@@ -4080,6 +4116,7 @@ test_secondmate_liveness_tick_relaunches_dead_endpoint_once
 test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking
 test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched
+test_secondmate_liveness_tick_isolates_prefixed_ids
 test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once
 test_secondmate_liveness_tick_new_episode_queues_its_own_row_while_old_row_is_unacked
 test_secondmate_liveness_tick_cadence_gates_the_probe

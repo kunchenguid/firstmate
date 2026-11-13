@@ -40,6 +40,47 @@ fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
 
+test_uncertainty_records_isolate_secondmate_ids() {
+  local state="$TMP_ROOT/uncertainty-ids"
+  mkdir -p "$state"
+  FM_STATE_OVERRIDE="$state" bash -eu -c '
+    . "$1/bin/fm-secondmate-liveness-lib.sh"
+    fm_sm_live_require_locks
+    for count in 1 2; do
+      rc=0
+      fm_secondmate_liveness_uncertain_record alert-ops ambiguous 3 || rc=$?
+      [ "$rc" -eq 1 ]
+      [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq "$count" ]
+      fm_secondmate_liveness_uncertain_clear ops
+    done
+    fm_secondmate_liveness_uncertain_record alert-ops ambiguous 3
+    [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 3 ]
+    fm_secondmate_liveness_uncertain_mark_alert alert-ops
+    fm_secondmate_liveness_uncertain_record ops unreadable 1
+    fm_secondmate_liveness_uncertain_mark_alert ops
+    rc=0
+    fm_secondmate_liveness_uncertain_record alert-ops unreadable 3 || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 4 ]
+    fm_secondmate_liveness_uncertain_clear ops
+    rc=0
+    fm_secondmate_liveness_uncertain_record alert-ops ambiguous 3 || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 5 ]
+    fm_secondmate_liveness_uncertain_record ops ambiguous 1
+    [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 1 ]
+    fm_secondmate_liveness_uncertain_mark_alert ops
+    fm_secondmate_liveness_uncertain_clear alert-ops
+    rc=0
+    fm_secondmate_liveness_uncertain_record ops unreadable 1 || rc=$?
+    [ "$rc" -eq 1 ]
+    [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 2 ]
+    fm_secondmate_liveness_uncertain_record alert-ops unreadable 1
+    [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 1 ]
+  ' bash "$ROOT" || fail "uncertainty counters, alerts, or cleanup crossed secondmate IDs"
+  pass "uncertainty: prefixed secondmate IDs count, alert, and clear independently"
+}
+
 # --- unit level: fm_backend_tmux_agent_state --------------------------------
 
 # make_probe_tmux <dir> <pane_current_command>: a fake tmux whose
@@ -392,8 +433,8 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
-  printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-sm1"
-  : > "$w/home/state/.secondmate-liveness-uncertain-alert-sm1"
+  printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-uncertain-episode-sm1"
+  : > "$w/home/state/.secondmate-uncertain-alert-sm1"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
@@ -405,9 +446,9 @@ test_sweep_respawns_confirmed_dead_secondmate() {
     "a confirmed-dead secondmate should actually be relaunched"
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
     "the shared library did not leave the durable per-mate relaunch record"
-  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-sm1" ] \
+  [ ! -e "$w/home/state/.secondmate-uncertain-episode-sm1" ] \
     || fail "a successful startup recovery did not clear the stale uncertain episode"
-  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-sm1" ] \
+  [ ! -e "$w/home/state/.secondmate-uncertain-alert-sm1" ] \
     || fail "a successful startup recovery did not clear the stale uncertain alert"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
@@ -601,17 +642,17 @@ test_sweep_leaves_alive_secondmate_untouched() {
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
-  printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-sm1"
-  : > "$w/home/state/.secondmate-liveness-uncertain-alert-sm1"
+  printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-uncertain-episode-sm1"
+  : > "$w/home/state/.secondmate-uncertain-alert-sm1"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
     "an already-live secondmate should be handled silently"
   [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
-  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-sm1" ] \
+  [ ! -e "$w/home/state/.secondmate-uncertain-episode-sm1" ] \
     || fail "an alive startup probe did not clear the stale uncertain episode"
-  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-sm1" ] \
+  [ ! -e "$w/home/state/.secondmate-uncertain-alert-sm1" ] \
     || fail "an alive startup probe did not clear the stale uncertain alert"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
@@ -696,17 +737,17 @@ test_sweep_reports_relaunch_failure_and_clears_uncertainty() {
     add_sm_home "$w" sm1 firstmate:fm-sm1 pi
     fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
     log="$w/calls.log"; : > "$log"
-    printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-sm1"
-    : > "$w/home/state/.secondmate-liveness-uncertain-alert-sm1"
+    printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-uncertain-episode-sm1"
+    : > "$w/home/state/.secondmate-uncertain-alert-sm1"
 
     out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" "$mode" "$log" FM_TEST_FAIL_NEW_WINDOW=1)
 
     assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after $cause" \
       "a failed $mode-endpoint relaunch should retain its authorizing cause"
     assert_contains "$(cat "$log")" new-window "the $mode endpoint must reach the failing relaunch"
-    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-sm1" ] \
+    [ ! -e "$w/home/state/.secondmate-uncertain-episode-sm1" ] \
       || fail "a definitive $mode probe did not clear uncertainty after failed recovery"
-    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-sm1" ] \
+    [ ! -e "$w/home/state/.secondmate-uncertain-alert-sm1" ] \
       || fail "a definitive $mode probe left the old alert suppressing later episodes"
 
     FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" bash -eu -c '
@@ -1003,8 +1044,8 @@ test_sweep_alive_remote_clears_uncertainty_despite_route_failure() {
     log="$w/calls.log"; : > "$log"
     cp "$w/home/state/rsm1.meta" "$w/rsm1.meta.before"
     cp "$w/home/data/secondmates.md" "$w/secondmates.before"
-    printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-rsm1"
-    : > "$w/home/state/.secondmate-liveness-uncertain-alert-rsm1"
+    printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-uncertain-episode-rsm1"
+    : > "$w/home/state/.secondmate-uncertain-alert-rsm1"
 
     out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" \
       FM_SSH_BIN="$w/fakebin/ssh" FM_FAKE_SSH_LOG="$w/ssh.log" "${route_env[@]}")
@@ -1018,9 +1059,9 @@ test_sweep_alive_remote_clears_uncertainty_despite_route_failure() {
     [ ! -s "$log" ] || fail "a $failure route check touched a local endpoint: $(cat "$log")"
     [ ! -e "$w/home/state/.secondmate-relaunch-rsm1" ] \
       || fail "a $failure route check attempted recovery"
-    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-rsm1" ] \
+    [ ! -e "$w/home/state/.secondmate-uncertain-episode-rsm1" ] \
       || fail "a confirmed live endpoint retained uncertainty after a $failure route check"
-    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-rsm1" ] \
+    [ ! -e "$w/home/state/.secondmate-uncertain-alert-rsm1" ] \
       || fail "a confirmed live endpoint retained its old alert after a $failure route check"
 
     FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" bash -eu -c '
@@ -1084,6 +1125,7 @@ test_remote_full_probe_legacy_record_defaults_herdr() {
   pass "full probe: a record without remote_backend stays a herdr route"
 }
 
+test_uncertainty_records_isolate_secondmate_ids
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier

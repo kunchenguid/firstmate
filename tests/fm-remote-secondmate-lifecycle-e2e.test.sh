@@ -1417,7 +1417,7 @@ sleep 3
   || fail "the stopped unreachable watcher kept writing its state"
 [ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
   || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
-assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-liveness-uncertain-ios" \
+assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-uncertain-episode-ios" \
   "an unreachable remote probe opened an uncertain-liveness episode"
 assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \
   "an unreachable remote probe ledgered a relaunch attempt"
@@ -1767,6 +1767,8 @@ FM_HOME="$PARENT" bash -c '
 printf 'confirmed:%s\n' "$retired_wake_corr" > "$PARENT/state/.backlog-handoff-ios.wake-pending"
 printf '%s\tattempt\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-ios"
 printf '%s\tdead\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-bound-ios"
+printf 'ambiguous\t3\tepisode\n' > "$PARENT/state/.secondmate-uncertain-episode-ios"
+printf 'alerted\n' > "$PARENT/state/.secondmate-uncertain-alert-ios"
 liveness_lock="$PARENT/state/.secondmate-liveness-ios.lock"
 # The link is published before the claim finishes; signal only after acquire.
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
@@ -1880,6 +1882,10 @@ assert_absent "$PARENT/state/.secondmate-relaunch-ios" \
   "remote retirement left the relaunch ledger a same-id replacement would inherit"
 assert_absent "$PARENT/state/.secondmate-relaunch-bound-ios" \
   "remote retirement left the relaunch park marker a same-id replacement would inherit"
+assert_absent "$PARENT/state/.secondmate-uncertain-episode-ios" \
+  "remote retirement left the uncertainty counter a same-id replacement would inherit"
+assert_absent "$PARENT/state/.secondmate-uncertain-alert-ios" \
+  "remote retirement left the uncertainty alert a same-id replacement would inherit"
 assert_absent "$liveness_lock" "remote retirement left its liveness lock behind"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
