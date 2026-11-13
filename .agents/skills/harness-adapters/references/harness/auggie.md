@@ -1,7 +1,8 @@
 # Auggie
 
 Augment's `auggie` CLI, verified as a primary harness with auggie 1.2.0 on Linux.
-Verified as a primary only: it has no crewmate, scout, or secondmate launch, and `../../../../../bin/fm-spawn.sh` refuses it as a worker by name, including a raw launch command that runs it behind a common wrapper such as `env`.
+Verified as a primary only: it has no crewmate, scout, or secondmate launch, and `../../../../../bin/fm-spawn.sh` refuses it as a worker by name, including a raw launch command whose simple command runs it directly or behind the `env`, `command`, `exec`, `nohup`, `sudo`, or `timeout` wrappers.
+A raw launch that reaches auggie through a compound command, a shell `-c` payload, heredoc stdin, or other indirection is not guaranteed refused; the refusal's comment in that script owns the covered forms.
 `../../../../../docs/verification/auggie.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts

@@ -61,6 +61,13 @@ fm_auggie_path_is_auggie() {  # <path>
 # (which keeps a script path containing spaces intact), otherwise use <args>.
 # For flattened args, prefer the longest space-joined prefix after interpreter
 # flags that names an existing file, preserving script paths containing spaces.
+#
+# A --opt=value word is one option. The separate-operand list below is every
+# Node option `node --help` shows with a required value (Node v26.13.1), plus
+# the hidden aliases --inspect-port, --debug-port, and --loader; an option with
+# an optional value (--inspect[=...]) never consumes the next word, and V8
+# flags accept only the --flag=value form. -e, -p, and --run run no main
+# script, so they carry no auggie identity.
 fm_auggie_script_arg() {  # <args> [pid]
   local args=$1 pid=${2:-} token index=1 candidate='' script=''
   local live_argv=0 options=1
@@ -79,10 +86,31 @@ fm_auggie_script_arg() {  # <args> [pid]
     if [ -z "$candidate" ]; then
       if [ "$options" -eq 1 ]; then
         case "$token" in
-          -e|--eval|-p|--print|--eval=*|--print=*|-e?*|-p?*) return 1 ;;
+          -e|--eval|-p|--print|--run|--eval=*|--print=*|--run=*|-e?*|-p?*) return 1 ;;
           --) options=0; continue ;;
           -*=*) continue ;;
-          -r|--require|--import|--loader|--experimental-loader|--inspect-port|--env-file|--title|-C|--conditions|--input-type)
+          -r|--require|--import|--loader|--experimental-loader|-C|--conditions|--input-type|\
+          --inspect-port|--debug-port|--inspect-publish-uid|--env-file|--env-file-if-exists|\
+          --title|--allow-fs-read|--allow-fs-write|--disable-proto|--disable-warning|\
+          --dns-result-order|--unhandled-rejections|--max-http-header-size|\
+          --max-old-space-size-percentage|--network-family-autoselection-attempt-timeout|\
+          --openssl-config|--icu-data-dir|--secure-heap|--secure-heap-min|--snapshot-blob|\
+          --build-snapshot-config|--build-sea|--experimental-sea-config|--config-file|\
+          --experimental-config-file|--experimental-package-map|--localstorage-file|\
+          --redirect-warnings|--diagnostic-dir|--report-dir|--report-directory|\
+          --report-filename|--report-signal|--heapsnapshot-near-heap-limit|\
+          --heapsnapshot-signal|--cpu-prof-dir|--cpu-prof-interval|--cpu-prof-name|\
+          --heap-prof-dir|--heap-prof-interval|--heap-prof-name|--tls-cipher-list|\
+          --tls-keylog|--trace-event-categories|--trace-event-file-pattern|\
+          --trace-require-module|--use-largepages|--v8-pool-size|--vfs-load|\
+          --process-timeout|--watch-path|--watch-kill-signal|--experimental-test-isolation|\
+          --experimental-test-tag-filter|--test-isolation|--test-concurrency|\
+          --test-coverage-branches|--test-coverage-exclude|--test-coverage-functions|\
+          --test-coverage-include|--test-coverage-lines|--test-global-setup|\
+          --test-name-pattern|--test-random-seed|--test-reporter|--test-reporter-destination|\
+          --test-rerun-failures|--test-shard|--test-skip-pattern|--test-timeout|\
+          --bench-isolation|--bench-name-pattern|--bench-reporter|\
+          --bench-reporter-destination|--bench-samples|--bench-warmup)
             index=$((index + 1))
             continue
             ;;

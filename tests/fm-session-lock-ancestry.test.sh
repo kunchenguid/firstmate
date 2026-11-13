@@ -347,16 +347,24 @@ const result = spawnSync('bash', ['-c', `
   process.env.FM_TEST_AUGGIE_MODE, process.env.FM_TEST_AUGGIE_SCRIPT], {stdio: 'inherit'});
 process.exit(result.status === null ? 99 : result.status);
 JS
-  for option in --require -r; do
+  for option in --require -r --import; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
       FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
       node "$option" "$dir/preload.cjs" "$dir/Agent Tools/auggie" \
       || fail "auggie: live node $option lost script identity"
   done
-  FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
-    FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
-    node --max-old-space-size=4096 "$dir/Agent Tools/auggie" \
-    || fail "auggie: live node --option=value lost script identity"
+  for option in "--require=$dir/preload.cjs" "--import=$dir/preload.cjs" --max-old-space-size=4096; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
+      node "$option" "$dir/Agent Tools/auggie" \
+      || fail "auggie: live node $option lost script identity"
+  done
+  for option in --disable-warning --unhandled-rejections; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
+      node "$option" warn "$dir/Agent Tools/auggie" \
+      || fail "auggie: live node $option <value> lost script identity"
+  done
   for option in -e --eval -p --print; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=eval \
       FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
@@ -368,13 +376,18 @@ JS
   # script (notably --input-type): each belongs to its preceding Node option.
   bash -c '
     . "$1"
-    for option in -r --require --import --loader --experimental-loader --inspect-port --env-file --title -C --conditions --input-type; do
+    for option in -r --require --import --loader --experimental-loader --inspect-port --debug-port \
+      --env-file --env-file-if-exists --title -C --conditions --input-type --disable-warning \
+      --redirect-warnings --report-dir --watch-path --test-reporter --openssl-config; do
       [ "$(fm_auggie_script_arg "node $option operand $2")" = "$2" ] || exit 1
       [ "$(fm_auggie_script_arg "node $option=operand $2")" = "$2" ] || exit 2
     done
     [ "$(fm_auggie_script_arg "node --require operand --title operand -- $2 --eval code")" = "$2" ] || exit 3
-    for option in -e --eval -p --print --eval=code --print=code -ecode -pcode; do
+    for option in -e --eval -p --print --run --eval=code --print=code --run=start -ecode -pcode; do
       if fm_auggie_script_arg "node $option $2"; then exit 4; fi
+    done
+    for option in --inspect --inspect-brk --force-fips --no-warnings --experimental-default-config-file; do
+      [ "$(fm_auggie_script_arg "node $option $2")" = "$2" ] || exit 5
     done
   ' probe "$ROOT/bin/fm-auggie-lib.sh" "$dir/Agent Tools/auggie" \
     || fail "auggie: Node option operand parsing violated the script contract"

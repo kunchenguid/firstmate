@@ -3215,7 +3215,14 @@ launch_template() {
 # verified worker lifecycle, so an explicit, resolved, or raw auggie worker is
 # refused with that reason rather than the generic unknown-harness one. An
 # auggie primary with an absent or "default" config/crew-harness resolves here
-# too.
+# too. For a raw launch the refusal is guaranteed only for a simple command
+# that runs auggie directly or behind the env, command, exec, nohup, sudo, or
+# timeout wrappers, with leading assignments, quoted words, redirections, wrapper
+# options, and an env -S split string, using the command-position model
+# bin/fm-arm-command-policy.mjs owns. Compound commands, subshell groups, and
+# command substitutions are inspected best-effort only. A shell -c payload,
+# heredoc or here-string stdin, eval, a function, or any other indirection is not
+# inspected, so none of those forms is guaranteed refused.
 refuse_primary_only_harness() {  # <harness> <source>
   case "$1" in
     auggie)
