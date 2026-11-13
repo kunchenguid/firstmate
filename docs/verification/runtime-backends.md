@@ -1718,6 +1718,20 @@ That watcher and away-daemon reporting is covered by fakes in `tests/fm-watch-tr
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
+Measured 2026-11-12 against Claude Code 2.1.322 in an isolated tmux server with a scratch firstmate home.
+After the background job finishes, the picker stays on screen with the job still listed and adds the row `Background task update waiting while this panel is open`.
+Escape closes the picker, stops nothing, and releases that held update, which starts a turn in the same session.
+With the job still running, Escape closes the picker without a turn, and the next `/exit` reopens it.
+With no background work, `/exit` exits at once, including while a turn with no running shell is in progress.
+`/exit` during a turn's foreground shell command also opens the picker, and that turn continues while the picker is open.
+`bin/fm-control.sh <id> relaunch --note <text>` then gave these results against the live pane:
+
+- Job running when relaunch started: exit 0 after 35 seconds, the job reported `<status>completed</status>` with exit code 0 in the old session's transcript, and the fresh session replied from its instructions.
+- Job outliving `FM_CONTROL_PICKER_WAIT=15`: exit 1 naming `shell · sleep 90 && echo long-job-done`, the job process still running, the picker left open, and the task record and instructions byte-identical to before.
+- Picker left open after that job finished: exit 0 after 9 seconds, with the fresh session launched.
+
+The portable regressions are the exit picker cases in `tests/fm-control-relaunch.test.sh` and `test_exit_picker_tasks_names_the_listed_work` in `tests/fm-composer-lib.test.sh`.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

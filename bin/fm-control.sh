@@ -103,7 +103,9 @@
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
+#              resolving a Claude background-task exit picker by Escape and a
+#              bounded wait rather than refusing (do_exit owns how), then
+#              delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
@@ -153,6 +155,10 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_PICKER_WAIT       relaunch: how long background work behind the
+#                                Claude exit picker may keep running (300)
+#   FM_CONTROL_PICKER_POLL       relaunch: picker-open wait between exit
+#                                attempts while that work runs (5)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -192,6 +198,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-polytoken-lib.sh
@@ -213,6 +221,12 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+PICKER_WAIT=${FM_CONTROL_PICKER_WAIT:-300}
+PICKER_POLL=${FM_CONTROL_PICKER_POLL:-5}
+# Set by relaunch only: whether the exit step may dismiss the Claude
+# background-task exit picker and wait out its work rather than refuse.
+PICKER_RESOLVE=0
+EXIT_PICKER_DIALOG='Claude background-task exit picker'
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -452,6 +466,61 @@ require_state_verified_backend() {  # <verb>
 # or choose.
 refuse_blocking_prompt() {  # <dialog-name>
   die "task $ID is blocked on a prompt: $1. Refusing to type Enter into it."
+}
+
+# blocking_prompt_seen: a recognised dialog is on screen. `pre` means it was
+# open before this attempt typed anything, `post` that the attempt's own
+# submitting Enter opened it. Under relaunch the Claude exit picker leaves the
+# attempt with status 3 (pre) or 4 (post) for do_exit to resolve; every other
+# case refuses as before. Only a backend that can read the screen and deliver
+# Escape qualifies, because dismissing needs both.
+blocking_prompt_seen() {  # <dialog-name> <pre|post>
+  if [ "$PICKER_RESOLVE" = 1 ] && [ "$1" = "$EXIT_PICKER_DIALOG" ] \
+     && fm_backend_visible_capture_supported "$BACKEND" \
+     && fm_control_backend_supports_key "$BACKEND" Escape; then
+    case "$2" in
+      pre) exit 3 ;;
+      *) exit 4 ;;
+    esac
+  fi
+  refuse_blocking_prompt "$1"
+}
+
+exit_picker_open() {
+  local screen
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 2
+  fm_composer_blocking_dialog "$screen" >/dev/null
+}
+
+# dismiss_exit_picker: close the Claude exit picker with one Escape, which
+# cancels it and stops nothing, and prove it closed. Never Enter: its
+# selected row is "Exit and stop tasks".
+dismiss_exit_picker() {
+  local rc=0 elapsed=0
+  exit_picker_open || rc=$?
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;
+    *) die "task $ID's screen could not be read, so the exit picker cannot be proven open before an Escape; nothing was typed" ;;
+  esac
+  fm_backend_send_key "$BACKEND" "$T" Escape "$LABEL" \
+    || die "task $ID shows the $EXIT_PICKER_DIALOG and the Escape that cancels it was not delivered; nothing else was typed"
+  while :; do
+    rc=0
+    exit_picker_open || rc=$?
+    case "$rc" in
+      1) break ;;
+      0) ;;
+      *) die "task $ID's screen could not be read after the Escape, so the $EXIT_PICKER_DIALOG cannot be proven closed; nothing else was typed" ;;
+    esac
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' \
+      || die "task $ID still shows the $EXIT_PICKER_DIALOG after one Escape; nothing else was typed"
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  # Keep a later interrupt Escape from landing as a double press, which on an
+  # idle Claude composer opens its rewind menu.
+  sleep 1
 }
 
 # rendered_matches <ere>: whether any row of the visible viewport matches.
@@ -711,7 +780,54 @@ retire_busy_incarnation() {
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
+#
+# Under relaunch, the Claude background-task exit picker does not end the
+# exit. Escape cancels the picker and stops nothing, so it is the only key
+# sent to it; Enter would confirm "Exit and stop tasks" and kill the work.
+# Claude reopens the picker on /exit only while background work still runs,
+# so a reopen is Claude's own proof the work is still running. A picker that
+# was already open is dismissed at once, because its work may have finished
+# (Claude leaves it on screen). A picker this attempt's /exit opened stays
+# open for one FM_CONTROL_PICKER_POLL, since an open picker holds the work's
+# completion notification that would otherwise wake the old session, and is
+# then dismissed for the next attempt. After FM_CONTROL_PICKER_WAIT seconds of
+# reopened pickers, exit refuses naming the work and leaves the picker open.
 do_exit() {
+  local rc out waited=0 attempts=0 tasks
+  if [ "$PICKER_RESOLVE" != 1 ]; then
+    do_exit_attempt
+    return
+  fi
+  while :; do
+    rc=0
+    out=$(do_exit_attempt) || rc=$?
+    attempts=$((attempts + 1))
+    case "$rc" in
+      0)
+        printf '%s' "$out"
+        return 0
+        ;;
+      3|4)
+        if [ "$rc" = 4 ] || [ "$attempts" -gt 1 ]; then
+          if ! awk -v e="$waited" -v t="$PICKER_WAIT" 'BEGIN{exit !(e < t)}'; then
+            tasks=$(fm_composer_exit_picker_tasks \
+              "$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null || true)")
+            die "task $ID has background work still running after ${PICKER_WAIT}s (${tasks:-the picker named no work}); the $EXIT_PICKER_DIALOG is left open, which holds that work's completion so it cannot wake the old session. Nothing was stopped and no picker option was chosen. Retry once the work finishes, or allow a longer wait with FM_CONTROL_PICKER_WAIT"
+          fi
+          sleep "$PICKER_POLL"
+          waited=$(awk -v e="$waited" -v p="$PICKER_POLL" 'BEGIN{printf "%.3f", e + p}')
+        fi
+        dismiss_exit_picker
+        ;;
+      *)
+        return "$rc"
+        ;;
+    esac
+  done
+}
+
+# do_exit_attempt: one pass of the exit procedure do_exit describes.
+do_exit_attempt() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
   require_state_verified_backend exit
   fm_control_backend_exit_supported "$BACKEND" \
@@ -790,7 +906,7 @@ do_exit() {
   # rather than a function that subshell sourced.
   if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
-    refuse_blocking_prompt "$dialog"
+    blocking_prompt_seen "$dialog" pre
   fi
   case "$composer_state" in
     empty) ;;
@@ -834,7 +950,7 @@ do_exit() {
       if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
         dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
         if [ "$(agent_state)" != dead ]; then
-          refuse_blocking_prompt "$dialog"
+          blocking_prompt_seen "$dialog" post
         fi
       fi
       ;;
@@ -846,7 +962,7 @@ do_exit() {
     : > "$FM_COMPOSER_DIALOG_SINK" || true
     fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
     if [ -s "$FM_COMPOSER_DIALOG_SINK" ]; then
-      refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+      blocking_prompt_seen "$(cat "$FM_COMPOSER_DIALOG_SINK")" post
     fi
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
@@ -1257,6 +1373,7 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+  PICKER_RESOLVE=1
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
