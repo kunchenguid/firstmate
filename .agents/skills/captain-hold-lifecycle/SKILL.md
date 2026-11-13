@@ -74,8 +74,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 5. For an interview, register one keyed task before presenting the questions, feed each answer with that task id and its displayed option words, then verify that the task closed and retains its selected answer.
 6. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 7. Resolve each call through `answer`, board-requested reconciliation, or the declared PR settlement policy above, and use `--until` when the captain defers it.
-8. Close a board-requested moot call through evidence-backed `reconcile close`, record an active reconciliation through `reconcile note`, or confirm a channel already closed it.
-9. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
+8. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
 
 `bin/fm-captain-hold.sh --help` owns command syntax, close modes, legacy-identity compatibility, completion attestation, retry behavior, and close ordering.
 `docs/captain-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.

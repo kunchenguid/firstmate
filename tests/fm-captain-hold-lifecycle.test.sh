@@ -945,6 +945,17 @@ test_option_answers_keep_their_displayed_words() {
   assert_contains "$show" "Selected answer: Keep it off for now" \
     "the free-text answer did not expose its selected-answer field"
 
+  out=$(printf 'sample-option-6\tKeep it off for now\t \n' \
+    | run_captain "$home" answers --source "option fixture") \
+    || fail "answers refused a free-text answer with a blank label"
+  assert_contains "$out" "closed: sample-option-6" "the blank-label free-text answer did not close its call"
+  show=$(tasks_in "$home" show sample-option-6 --full)
+  assert_contains "$show" "Selected answer: Keep it off for now" \
+    "a blank label hid the free-text selected answer"
+  case "$show" in
+    *"Answer as shown to the captain:"*) fail "a blank label was recorded as displayed words: $show" ;;
+  esac
+
   printf 'From chat:\nAnswer: Off until checks pass.\nBecause the gate is flaky.\n' > "$home/multi.txt"
   run_captain "$home" answer sample-option-3 --decision-file "$home/multi.txt" >/dev/null \
     || fail "answer refused a multi-line decision"

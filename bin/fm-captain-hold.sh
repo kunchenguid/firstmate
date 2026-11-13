@@ -612,7 +612,7 @@ resolution_block() {  # <mode>
     *) selected=$DECISION_TEXT ;;
   esac
   selected=${selected%%$'\n'*}
-  [ -z "$selected" ] || printf 'Selected answer: %s\n' "$selected"
+  is_blank "$selected" || printf 'Selected answer: %s\n' "$selected"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -1638,7 +1638,8 @@ command_answers() {
     answer=$(sanitize_field "${answer:-}")
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
-    if is_blank "$label" && is_option_selection "$answer"; then
+    ! is_blank "$label" || label=''
+    if [ -z "$label" ] && is_option_selection "$answer"; then
       printf 'skipped: %s (option %s requires its displayed meaning)\n' "$key" "$answer"
       skipped=$((skipped + 1))
       continue
