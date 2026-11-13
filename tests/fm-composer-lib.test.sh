@@ -24,6 +24,7 @@ set -u
 # Use fixture Pi executables for modeled screens; the adapter always reads their
 # actual --version output, just as production callers do.
 FM_PI_TEST_BIN=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-test.XXXXXX")
+trap 'rm -rf "$FM_PI_TEST_BIN"' EXIT
 printf '#!/bin/sh\nprintf "0.85.1\\n"\n' > "$FM_PI_TEST_BIN/pi"
 printf '#!/bin/sh\nprintf "0.85.1\\n"\n' > "$FM_PI_TEST_BIN/pi-signed"
 chmod +x "$FM_PI_TEST_BIN/pi" "$FM_PI_TEST_BIN/pi-signed"
