@@ -186,7 +186,7 @@ test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
   pass "the daily-runs check through the session-end host spawns the queued item and refuses a held or blocked one"
 }
 
-engine_calls() { ls "$1"/engine-call.* 2>/dev/null | wc -l | tr -d ' '; }
+engine_calls() { find "$1" -maxdepth 1 -name 'engine-call.*' 2>/dev/null | wc -l | tr -d ' '; }
 latched() { grep -q '	latch	' "$1/state/.supervision-host.log" 2>/dev/null; }
 
 test_failing_engine_latches_the_window() {
