@@ -1217,7 +1217,8 @@ Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-30
 =120000,ARo=600000;
 ```
 
-Pi's bash tool runs a command with no time limit unless the call passes `timeout`, so the brief asks for at most 2700 seconds, which stays under the watcher's 3600-second busy-turn bound.
+Pi's native bash tool has no default timeout, so the worker brief asks for at most 2700 seconds, which stays under the watcher's 3600-second busy-turn bound.
+For sessions loading Firstmate's primary extension, see the [opt-in Bash timeout cap](../configuration.md#pi-bash-timeout-cap).
 Codex yields a still-running command back to the model, and one empty `write_stdin` poll then waits up to 300000 ms.
 Claude Code's Bash tool defaults to 120000 ms and accepts at most 600000 ms; `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` override those two values.
 

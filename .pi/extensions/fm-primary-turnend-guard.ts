@@ -625,6 +625,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const timeoutSetting = process.env.FM_PI_BASH_TIMEOUT_MAX_MS;
+    if (timeoutSetting !== undefined && /^[1-9][0-9]*$/.test(timeoutSetting)) {
+      const maximumMs = Number(timeoutSetting);
+      if (maximumMs <= 2_147_483_647) {
+        const maximumSeconds = maximumMs / 1000;
+        const input = event.input as { command?: unknown; timeout?: unknown };
+        if (input.timeout === undefined) input.timeout = maximumSeconds;
+        else if (typeof input.timeout === "number" && input.timeout > maximumSeconds) input.timeout = maximumSeconds;
+      }
+    }
     const command = String((event.input as { command?: unknown })?.command ?? "");
     if (!command) return {};
     const cdResult = await runCdCheck(command);
