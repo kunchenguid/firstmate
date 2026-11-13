@@ -347,6 +347,53 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
+test_version_nine_caches_refold_unbracketed_keys() {
+  local dir state status cursor out ident size timed
+  dir=$(make_case cursor-unbracketed-key-migration)
+  state="$dir/state"
+  status="$state/task.status"
+  cursor="$state/.task.open-decisions-cursor"
+  out="$dir/drain.out"
+
+  printf 'blocked [at=1] key=a: waiting\nneeds-decision key=b: choose\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain for unbracketed-key migration failed"
+  ident=$(sed -n 's/^ident=//p' "$cursor")
+  [ -n "$ident" ] || fail "bootstrap drain did not persist a file identity"
+  size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  printf 'version=9:unknown\noffset=%s\nident=%s\ndefault\tblocked\twaiting' \
+    "$size" "$ident" > "$cursor"
+  printf 'version=9:unknown:timed3\noffset=%s\nident=%s\ndefault\tblocked\tunknown\t-\twaiting' \
+    "$size" "$ident" > "$cursor.timed"
+
+  printf 'resolved key=a: answered\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while migrating version-nine unbracketed-key caches"
+  assert_contains "$(cat "$out")" 'task [key=b] needs-decision: choose' \
+    "migration must recover the previously ignored unbracketed decision"
+  assert_not_contains "$(cat "$out")" 'task [key=default]' \
+    "migration must remove the cached phantom default decision"
+  assert_not_contains "$(cat "$out")" 'task [key=a]' \
+    "migration must honor the appended unbracketed resolution"
+  timed=$(bash -c '. "$1"; status_open_decisions_incremental "$2" "" timed' \
+    _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "timed fold failed while migrating the version-nine cache"
+  [ "$timed" = $'b\tneeds-decision\tunknown\t-\tchoose' ] \
+    || fail "timed migration retained stale decisions or lost the missing key: $timed"
+
+  printf 'resolved key=b: answered\n' >> "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed after resolving the recovered decision"
+  assert_not_contains "$(cat "$out")" 'OPEN DECISIONS' \
+    "the recovered decision must stay resolved in the migrated cache"
+  timed=$(bash -c '. "$1"; status_open_decisions_incremental "$2" "" timed' \
+    _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "timed fold failed after resolving the recovered decision"
+  [ -z "$timed" ] || fail "the migrated timed cache kept a resolved decision: $timed"
+
+  pass "version-nine ordinary and timed caches recover unbracketed keys and honor resolutions"
+}
+
 test_terminal_supersession_reaches_cached_drains() {
   local dir state status cursor out kind terminal expected closing ident size span pass_number
   for kind in scout ship secondmate; do
@@ -416,4 +463,5 @@ test_read_failure_preserves_state_for_retry
 test_cursor_cache_read_failure_refolds_without_replaying_unread_status
 test_pre_fix_cursor_refolds_corr_tagged_decision
 test_previous_fold_cache_is_refolded_under_current_semantics
+test_version_nine_caches_refold_unbracketed_keys
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it
