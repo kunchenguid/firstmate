@@ -215,7 +215,7 @@ This is a property of Gerrit and no amount of tooling changes it.
 
 **There is no branch on the remote.**
 `refs/for/<branch>` is a magic ref rather than a destination: the push creates or updates a change and leaves behind no ref a later fetch can see.
-Every mechanism that reasons about a remote branch therefore has no counterpart here - the gone-upstream prune in `bin/fm-fleet-sync.sh`, the remote-reachability leg of `bin/fm-teardown.sh`'s landed-work test, and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
+Mechanisms that require a remote branch have no counterpart here, including the gone-upstream prune in `bin/fm-fleet-sync.sh` and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
 There is no separate namespace either, because there are no forks, so the change is the only remote artifact the work ever has.
 Teardown's provider and content proofs are owned by [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), while the review diff falls back to the local branch.
 The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and ship branches accumulate locally after teardown.

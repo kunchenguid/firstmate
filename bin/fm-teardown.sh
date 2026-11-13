@@ -43,26 +43,27 @@
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes.
-# An external review's backup copy never permits cleanup before its reviewed
-# content reaches the default branch.
 # A branch pushed only to the local no-mistakes mirror does not count as pushed
 # to a forge. When local refs do not show the work, refresh_remote_refs updates
-# them from each remote. Work has landed when its PR is merged and
+# them from each remote. For PR-based delivery, work has landed when its PR is merged and
 # the forge reports a PR head (Gerrit's current revision) containing the local work, or its
 # content is already present in the up-to-date default branch. This recognizes
 # the common squash-merge-then-delete-branch flow, where the branch's own commits
 # live nowhere on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch. Recorded GitLab, Forgejo, and
-# Gerrit URLs use their provider readers; these reads need neither
+# its base branch instead of the default branch. Recorded GitHub, GitLab,
+# Forgejo, and Gerrit URLs use their shared provider readers; these reads need neither
 # config/park-on-review nor config/auto-land.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
+# the PR head. Divergence alone proves nothing: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or whitespace-exact patch ids),
-# or a clean content-in-default tree match. Neither remote reachability alone
+# whose head contains local HEAD by ancestry, or whose whitespace-exact patch ids
+# cover every local commit since the common ancestor that is not already on the
+# freshly fetched default (or recorded base) branch. Commits merely pushed to
+# other branches still need that proof. A clean content-in-default tree match
+# also proves landing. Neither remote reachability alone
 # nor an open PR alone proves landing.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,

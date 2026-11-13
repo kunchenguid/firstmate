@@ -35,9 +35,8 @@ Where the backup remote points is the captain's call; firstmate cannot police it
 
 With a backup configured, the ready report is accepted only once HEAD is on the backup remote's namespace.
 Without one, the ready report is accepted on the review URL alone, because the snapshot lives in a tool firstmate cannot read; `review_head=` records what was uploaded.
-The backup does not permit teardown: with or without it, the reviewed content must be merged into origin's default branch before cleanup.
-The worker copy remains allocated while the review is unmerged, even when the backup contains HEAD.
-This stricter behavior removes cleanup based on a backup alone; Kun should weigh the longer retention of worker copies when reviewing this change.
+The backup does not permit teardown: with or without it, the worker copy remains allocated until the reviewed content reaches origin's default branch.
+See [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) for the landed-work proofs.
 
 ## Accepted residual
 
