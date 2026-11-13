@@ -204,6 +204,9 @@ fm_backend_herdr_cli() {
       printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
       ;;
     "tab get")
+      if [ "$target" = "$TAB" ] && [ -e "$FIXTURE_DIR/switch-before-close" ]; then
+        cat "$FIXTURE_DIR/switch-before-close" > "$FIXTURE_DIR/active-tab"
+      fi
       if [ "$target" = w1:t1 ] && [ -e "$FIXTURE_DIR/switch-during-restore" ]; then
         cat "$FIXTURE_DIR/switch-during-restore" > "$FIXTURE_DIR/active-tab"
       fi
@@ -237,6 +240,10 @@ fm_backend_herdr_cli() {
       ;;
     "session list")
       printf '%s\n' '{"sessions":[{"name":"test","running":true,"socket_path":"/tmp/fake.sock"}]}'
+      ;;
+    "terminal title")
+      [ "$target" = clear ] && [ -e "$FIXTURE_DIR/no-foreground-client" ] || return 1
+      printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
       ;;
     "pane close")
       : > "$FIXTURE_DIR/closed"
@@ -447,6 +454,23 @@ reset_fixture
 write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
 printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"
 assert_preserved "active empty task tab"
+reset_fixture
+: > "$FIXTURE_DIR/empty-tab"
+: > "$FIXTURE_DIR/no-foreground-client"
+printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"
+close_status=0
+fm_backend_herdr_projection_close_empty_tab_focus_preserving test "$WS" "$TAB" || close_status=$?
+[ "$close_status" -eq 1 ] || fail "focused empty tab without a viewer was not refused"
+[ ! -s "$CLOSE_LOG" ] || fail "focused empty tab without a viewer was closed"
+[ "$(fm_backend_herdr_projection_focus_snapshot test)" = "$WS"$'\t'"$TAB" ] || fail "focused empty tab refusal displaced focus"
+pass "empty tab helper preserves a focused target without a viewer"
+reset_fixture
+: > "$FIXTURE_DIR/empty-tab"
+: > "$FIXTURE_DIR/no-foreground-client"
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+printf '%s\n' "$TAB" > "$FIXTURE_DIR/switch-before-close"
+assert_preserved "empty task tab focused during close planning without a viewer"
+[ "$(fm_backend_herdr_projection_focus_snapshot test)" = "$WS"$'\t'"$TAB" ] || fail "close planning replaced the newly focused target"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
