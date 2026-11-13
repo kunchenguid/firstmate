@@ -26,6 +26,12 @@ HOST="$ROOT/bin/fm-extension.mjs"
 PROCEVENT="$ROOT/bin/fm-procevent.sh"
 TMP_ROOT_RAW=$(fm_test_tmproot fm-extension-binding)
 TMP_ROOT=$(cd "$TMP_ROOT_RAW" && pwd -P)
+# A built-in registration's argv must start with the installed adapter script
+# and its listener verb, so built-in stub sources run through this fixture code
+# root (FM_ROOT_OVERRIDE) whose Lavish adapter's `poll` runs the stub.
+STUB_ROOT="$TMP_ROOT/stub-root"
+STUB_LAVISH="$STUB_ROOT/bin/fm-procevent-lavish.sh"
+fm_test_procevent_listener_adapter "$STUB_ROOT" lavish "$ROOT/bin/fm-procevent-lavish.sh"
 first_bind_pid=
 second_bind_pid=
 handshake_orphan_pid=
@@ -1708,14 +1714,14 @@ FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" start active-source > "$TMP_ROOT/active-
 active_runner_pid=$!
 wait_for_file "$active_runner_marker" || fail "active extension runner never entered its poll"
 expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement
-expect_failure "prior runner remains active" env FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in
+expect_failure "prior runner remains active" env FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- "$STUB_LAVISH" poll /bin/echo built-in
 touch "$active_runner_release"
 active_runner_release=
 wait "$active_runner_pid" || fail "active extension runner did not complete"
 active_runner_pid=
 assert_absent "$H_ACTIVE_RUNNER/state/procevent/active-source.source" "terminal extension runner retained its registration"
-FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- /bin/echo built-in >/dev/null
-FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" retire active-source --if-matches lavish -- /bin/echo built-in >/dev/null
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register lavish active-source -- "$STUB_LAVISH" poll /bin/echo built-in >/dev/null
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" retire active-source --if-matches lavish -- "$STUB_LAVISH" poll /bin/echo built-in >/dev/null
 active_replacement=$(FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" register-extension ext-flow active-source --config-ref replacement)
 active_replacement_owner=$(printf '%s\n' "$active_replacement" | sed -n 's/^owner-token: //p')
 FM_HOME="$H_ACTIVE_RUNNER" "$PROCEVENT" retire active-source --if-owner "$active_replacement_owner" >/dev/null
@@ -1857,9 +1863,9 @@ for control_kind in tab newline; do
   control_source="control-${control_kind}-state-source"
   mkdir -p "$control_state"
   chmod 0700 "$control_state"
-  FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
-    "$PROCEVENT" register lavish "$control_source" -- /bin/echo control >/dev/null
-  expect_failure "cannot acquire source ownership" env FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
+  FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
+    "$PROCEVENT" register lavish "$control_source" -- "$STUB_LAVISH" poll /bin/echo control >/dev/null
+  expect_failure "cannot acquire source ownership" env FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_STATE_OVERRIDE" FM_STATE_OVERRIDE="$control_state" \
     "$PROCEVENT" start "$control_source"
   assert_absent "$TMP_ROOT/claims/$control_source.claim" "control-byte state root created a malformed claim"
   assert_absent "$control_state/procevent-capture-reservations" "control-byte state root created reservation state"
@@ -2063,9 +2069,9 @@ LEGACY_REAL_STATE="$TMP_ROOT/legacy-real-state"
 LEGACY_LINK_STATE="$TMP_ROOT/legacy-state-link"
 mkdir "$LEGACY_REAL_STATE"
 ln -s "$LEGACY_REAL_STATE" "$LEGACY_LINK_STATE"
-FM_HOME="$H_LEGACY_LINK" FM_STATE_OVERRIDE="$LEGACY_LINK_STATE" \
-  "$PROCEVENT" register lavish legacy-link-source -- /bin/echo legacy-link >/dev/null
-FM_HOME="$H_LEGACY_LINK" FM_STATE_OVERRIDE="$LEGACY_LINK_STATE" \
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_LEGACY_LINK" FM_STATE_OVERRIDE="$LEGACY_LINK_STATE" \
+  "$PROCEVENT" register lavish legacy-link-source -- "$STUB_LAVISH" poll /bin/echo legacy-link >/dev/null
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_LEGACY_LINK" FM_STATE_OVERRIDE="$LEGACY_LINK_STATE" \
   "$PROCEVENT" start legacy-link-source >/dev/null
 assert_present "$LEGACY_REAL_STATE/procevent-inbox/legacy-link-source.1.result" \
   "an absent-registry built-in capture no longer accepts its legacy state path"
@@ -2089,10 +2095,10 @@ assert_absent "$H_SWEEP/state/procevent/sweep-source.source" "home sweep retaine
 pass "bounded home sweep retires an extension source through its exact owner token"
 
 H_LEGACY="$HOMES/legacy"; mkdir -p "$H_LEGACY/state"
-FM_HOME="$H_LEGACY" "$PROCEVENT" register lavish legacy-source -- /bin/echo legacy >/dev/null
-expect_failure "does not match the expected owner" env FM_HOME="$H_LEGACY" "$PROCEVENT" retire legacy-source --if-matches lavish -- /bin/echo replacement
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_LEGACY" "$PROCEVENT" register lavish legacy-source -- "$STUB_LAVISH" poll /bin/echo legacy >/dev/null
+expect_failure "does not match the expected owner" env FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_LEGACY" "$PROCEVENT" retire legacy-source --if-matches lavish -- "$STUB_LAVISH" poll /bin/echo replacement
 assert_present "$H_LEGACY/state/procevent/legacy-source.source" "legacy conditional mismatch retired the registration"
-FM_HOME="$H_LEGACY" "$PROCEVENT" retire legacy-source --if-matches lavish -- /bin/echo legacy >/dev/null
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$H_LEGACY" "$PROCEVENT" retire legacy-source --if-matches lavish -- "$STUB_LAVISH" poll /bin/echo legacy >/dev/null
 pass "legacy built-in registrations retain behavior and gain exact conditional retirement"
 fi
 
@@ -2582,7 +2588,7 @@ remote_direct fm-procevent.sh register-extension ext-remote remote-active-source
 remote_direct fm-procevent.sh reconcile >/dev/null
 wait_for_file "$remote_active_marker" || fail "remote active runner never reached its addressed-home poll"
 expect_failure "prior runner remains active" remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref replacement
-expect_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in
+expect_failure "prior runner remains active" remote_direct fm-procevent.sh register lavish remote-active-source -- "$REMOTE_ROOT/bin/fm-procevent-lavish.sh" poll /bin/echo remote-built-in
 touch "$remote_active_release"
 remote_active_release=
 for _ in $(seq 1 400); do
@@ -2591,8 +2597,8 @@ for _ in $(seq 1 400); do
 done
 assert_absent "$H_REMOTE/state/procevent/remote-active-source.source" "remote terminal runner retained its registration"
 remote_direct fm-procevent.sh handled remote-active-source 1 >/dev/null
-remote_direct fm-procevent.sh register lavish remote-active-source -- /bin/echo remote-built-in >/dev/null
-remote_direct fm-procevent.sh retire remote-active-source --if-matches lavish -- /bin/echo remote-built-in >/dev/null
+remote_direct fm-procevent.sh register lavish remote-active-source -- "$REMOTE_ROOT/bin/fm-procevent-lavish.sh" poll /bin/echo remote-built-in >/dev/null
+remote_direct fm-procevent.sh retire remote-active-source --if-matches lavish -- "$REMOTE_ROOT/bin/fm-procevent-lavish.sh" poll /bin/echo remote-built-in >/dev/null
 remote_active_replacement=$(remote_direct fm-procevent.sh register-extension ext-remote remote-active-source --config-ref replacement)
 remote_active_owner=$(printf '%s\n' "$remote_active_replacement" | sed -n 's/^owner-token: //p')
 remote_direct fm-procevent.sh retire remote-active-source --if-owner "$remote_active_owner" >/dev/null

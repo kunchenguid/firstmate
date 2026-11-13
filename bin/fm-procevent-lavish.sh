@@ -12,6 +12,7 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
+#   fm-procevent-lavish.sh listener-verb
 #   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
@@ -965,6 +966,7 @@ case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  listener-verb) printf 'poll\n' ;;
   deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;

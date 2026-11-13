@@ -870,10 +870,15 @@ RESULT
 SH
   chmod +x "$source"
 
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    "$ROOT/bin/fm-procevent.sh" register lavish idle-lavish -- "$source" "$trigger" \
+  # A stored argv runs only as its installed adapter's listener, so the stub
+  # source registers through a fixture code root whose other commands are the
+  # real Lavish adapter.
+  fm_test_procevent_listener_adapter "$dir/stub-root" lavish "$ROOT/bin/fm-procevent-lavish.sh"
+  FM_ROOT_OVERRIDE="$dir/stub-root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-procevent.sh" register lavish idle-lavish -- \
+    "$dir/stub-root/bin/fm-procevent-lavish.sh" poll "$source" "$trigger" \
     >/dev/null || fail "could not register the Lavish fixture source"
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+  FM_ROOT_OVERRIDE="$dir/stub-root" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
     "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
     || fail "could not start the Lavish fixture source"

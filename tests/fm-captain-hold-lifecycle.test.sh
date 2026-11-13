@@ -53,7 +53,7 @@ run_procevent() {  # <home> <command args...>
   local home=$1
   shift
   PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$ROOT}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -1822,6 +1822,8 @@ EOF
 #!/usr/bin/env bash
 # Fixture channel: reports keyed captain answers and nothing else.
 case "\${1-}" in
+  listener-verb) printf 'poll\\n'; exit 0 ;;
+  poll) shift; exec "\$@" ;;
   answers) exec "$ROOT/bin/fm-procevent-lavish.sh" answers "\${2-}" ;;
   reconciles) exec "$ROOT/bin/fm-procevent-lavish.sh" reconciles "\${2-}" ;;
 esac
@@ -1833,7 +1835,8 @@ SH
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    "$ROOT/bin/fm-procevent.sh" register fixturechan fixture-src -- cat "$result" >/dev/null \
+    "$ROOT/bin/fm-procevent.sh" register fixturechan fixture-src -- \
+      "$home/adapter-root/bin/fm-procevent-fixturechan.sh" poll cat "$result" >/dev/null \
     || fail "could not register the fixture channel source"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -2446,12 +2449,17 @@ OUT
 SH
   chmod +x "$stub"
 
-  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+  # A stored argv runs only as its installed adapter's listener, so the stub
+  # registers through a fixture code root whose other commands are the real
+  # Lavish adapter.
+  fm_test_procevent_listener_adapter "$home/stub-root" lavish "$ROOT/bin/fm-procevent-lavish.sh"
+  FM_ROOT_OVERRIDE="$home/stub-root" run_procevent "$home" register lavish "$sid" -- \
+    "$home/stub-root/bin/fm-procevent-lavish.sh" poll "$stub" >/dev/null \
     || fail "could not register the board source"
   run_captain "$home" bind "$sid" >/dev/null \
     || fail "could not bind the board source to the keyed-answer intake"
 
-  out=$(run_procevent "$home" start "$sid" 2>&1) \
+  out=$(FM_ROOT_OVERRIDE="$home/stub-root" run_procevent "$home" start "$sid" 2>&1) \
     || fail "the board source runner did not complete: $out"
   assert_contains "$out" "$sid.1.result" "the board answer was never durably captured: $out"
   assert_contains "$out" "answers-fed: $sid" \
