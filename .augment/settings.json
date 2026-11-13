@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "bash|launch-process",
+        "matcher": "bash",
         "hooks": [
           {
             "type": "command",

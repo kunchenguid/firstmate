@@ -2,7 +2,7 @@
 
 Augment's `auggie` CLI, verified as a primary harness with auggie 1.2.0 on Linux.
 Verified as a primary only: it has no crewmate, scout, or secondmate launch, and `../../../../../bin/fm-spawn.sh` refuses it as a worker by name, including a raw launch command whose simple command runs it directly or behind the `env`, `command`, `exec`, `nohup`, `sudo`, or `timeout` wrappers.
-A raw launch that reaches auggie through a compound command, a shell `-c` payload, heredoc stdin, or other indirection is not guaranteed refused; the refusal's comment in that script owns the covered forms.
+Compound launches are refused best-effort, and a shell `-c` string, heredoc stdin, or `eval` is not inspected; that script's `--help` owns the covered forms.
 `../../../../../docs/verification/auggie.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
@@ -20,7 +20,7 @@ A raw launch that reaches auggie through a compound command, a shell `-c` payloa
 
 ## Detection
 
-`../../../../../bin/fm-auggie-lib.sh` owns auggie process identity: an exact `auggie` command name, or a node interpreter whose script argument resolves into the `@augmentcode/auggie` package or is named exactly `auggie`.
+`../../../../../bin/fm-auggie-lib.sh` owns auggie process identity: an exact `auggie` command name, or a node interpreter whose script argument resolves into the `@augmentcode/auggie` package; a script merely named `auggie` outside that package never matches.
 `../../../../../bin/fm-harness.sh` reports that match at comm strength, so it outranks a retained foreign marker such as `CLAUDECODE` or `PI_CODING_AGENT`.
 `../../../../../bin/fm-session-lock-lib.sh` delegates to the same owner, so an auggie session can hold a home's session lock; auggie is deliberately not in the session-lock name vocabulary, and a bare node process never matches.
 

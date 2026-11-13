@@ -38,11 +38,11 @@ if ! declare -F fm_cursor_canonical_path >/dev/null 2>&1; then
 fi
 
 # True when script path $1 carries auggie's own structural evidence after its
-# symlink chain is resolved: the file is named exactly auggie, or it sits
-# directly in the published @augmentcode/auggie package tree (any entrypoint
-# name, so a renamed auggie-v<N>.mjs keeps matching). A vendored dependency
-# under that package's node_modules, a directory merely named auggie-something,
-# and a sibling such as auggie-mcp never match.
+# symlink chain is resolved: it sits directly in the published
+# @augmentcode/auggie package tree (any entrypoint name, so a renamed
+# auggie-v<N>.mjs keeps matching). A script merely named auggie outside that
+# package, a vendored dependency under the package's node_modules, a directory
+# merely named auggie-something, and a sibling such as auggie-mcp never match.
 fm_auggie_path_is_auggie() {  # <path>
   local path=$1 canonical
   [ -n "$path" ] || return 1
@@ -52,7 +52,6 @@ fm_auggie_path_is_auggie() {  # <path>
     */@augmentcode/auggie/node_modules/*) return 1 ;;
     */@augmentcode/auggie/*) return 0 ;;
   esac
-  case "${canonical##*/}" in auggie) return 0 ;; esac
   return 1
 }
 
@@ -67,10 +66,14 @@ fm_auggie_path_is_auggie() {  # <path>
 # the hidden aliases --inspect-port, --debug-port, and --loader; an option with
 # an optional value (--inspect[=...]) never consumes the next word, and V8
 # flags accept only the --flag=value form. -e, -p, and --run run no main
-# script, so they carry no auggie identity.
+# script, so they carry no auggie identity. In flattened args an operand,
+# separate or after =, extends over following words while the longest
+# space-joined value names an existing path, so a preload path containing
+# spaces is skipped whole; a non-path operand containing spaces cannot be
+# recovered from flattened args.
 fm_auggie_script_arg() {  # <args> [pid]
   local args=$1 pid=${2:-} token index=1 candidate='' script=''
-  local live_argv=0 options=1
+  local live_argv=0 options=1 operand joined probe
   local -a words=()
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
     live_argv=1
@@ -88,7 +91,7 @@ fm_auggie_script_arg() {  # <args> [pid]
         case "$token" in
           -e|--eval|-p|--print|--run|--eval=*|--print=*|--run=*|-e?*|-p?*) return 1 ;;
           --) options=0; continue ;;
-          -*=*) continue ;;
+          -*=*) operand=${token#*=} ;;
           -r|--require|--import|--loader|--experimental-loader|-C|--conditions|--input-type|\
           --inspect-port|--debug-port|--inspect-publish-uid|--env-file|--env-file-if-exists|\
           --title|--allow-fs-read|--allow-fs-write|--disable-proto|--disable-warning|\
@@ -111,11 +114,24 @@ fm_auggie_script_arg() {  # <args> [pid]
           --test-rerun-failures|--test-shard|--test-skip-pattern|--test-timeout|\
           --bench-isolation|--bench-name-pattern|--bench-reporter|\
           --bench-reporter-destination|--bench-samples|--bench-warmup)
+            operand=${words[index]-}
             index=$((index + 1))
-            continue
             ;;
           -*) continue ;;
+          *) operand='' ;;
         esac
+        if [ "$token" != "${token#-}" ]; then
+          if [ "$live_argv" -eq 0 ] && [ -n "$operand" ]; then
+            joined=$operand
+            probe=$index
+            while [ "$probe" -lt "${#words[@]}" ]; do
+              joined="$joined ${words[probe]}"
+              probe=$((probe + 1))
+              [ ! -e "$joined" ] || index=$probe
+            done
+          fi
+          continue
+        fi
       fi
       if [ "$live_argv" -eq 1 ]; then
         printf '%s\n' "$token"

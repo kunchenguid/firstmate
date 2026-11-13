@@ -221,6 +221,7 @@ test_auggie_node_bundle_is_identified_by_its_package_script() {
   : > "$dir/notes/auggie-notes/run.mjs"
   : > "$dir/other/auggie-mcp"
   : > "$dir/other/myauggie"
+  : > "$dir/other/auggie"
   link="$dir/prefix/bin/auggie"
   ln -s ../lib/node_modules/@augmentcode/auggie/auggie-v2.mjs "$link"
   cat > "$fakebin/ps" <<'SH'
@@ -275,7 +276,7 @@ SH
   # Drive the signals apart: an interpreter comm with no auggie script, and the
   # auggie script under a non-interpreter comm, must each fail on its own.
   for args in node MainThread "node $dir/notes/auggie-notes/run.mjs" "node $dir/other/auggie-mcp" \
-    "node $dir/other/myauggie" "node $pkg/node_modules/dep/cli.js" "node /tmp/build.js --name auggie"; do
+    "node $dir/other/myauggie" "node $dir/other/auggie" "node $pkg/node_modules/dep/cli.js" "node /tmp/build.js --name auggie"; do
     if auggie_owns node-MainThread "$args"; then
       fail "auggie: an interpreter running '$args' was accepted as an auggie harness"
     fi
@@ -292,15 +293,16 @@ SH
 }
 
 test_auggie_live_argv_preserves_script_spaces() {
-  local dir
+  local dir pkg
   if [ ! -r "/proc/$$/cmdline" ]; then
     printf 'ok - session-lock: spaced argv # SKIP requires readable /proc cmdline\n'
     return
   fi
   dir="$TMP_ROOT/Agent Tools"
-  mkdir -p "$dir/bin" "$dir/state"
+  pkg="$dir/lib/node_modules/@augmentcode/auggie"
+  mkdir -p "$dir/bin" "$dir/state" "$pkg"
   ln -s /bin/bash "$dir/bin/node"
-  cat > "$dir/bin/auggie" <<'SH'
+  cat > "$pkg/auggie-v2.mjs" <<'SH'
 set -eu
 . "$1"
 state=$2
@@ -314,21 +316,23 @@ fm_session_lock_inspect "$state"
 fm_session_lock_owned_by_self "$state" || exit 16
 SH
   env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
-    "$dir/bin/node" "$dir/bin/auggie" "$LIB" "$dir/state" \
+    "$dir/bin/node" "$pkg/auggie-v2.mjs" "$LIB" "$dir/state" \
     || fail "auggie: a live script path with spaces lost its session-lock identity"
   pass "session-lock: spaced live argv retains auggie ancestry, liveness, reclaim protection, and inspection"
 }
 
 # Oracle: Node's CLI assigns --require's operand to a preload, not the main
 # script. Query actual live Node argv through both the native and ps fallback
-# interfaces; selecting the preload (or an eval argument) must fail this test.
+# interfaces, with a preload path containing spaces so the ps fallback must
+# keep the operand whole; selecting the preload (or an eval argument) must fail.
 test_auggie_node_options_preserve_script_identity() {
-  local dir option
+  local dir option script
   command -v node >/dev/null 2>&1 || fail "auggie option tests require node"
   dir="$TMP_ROOT/node-options"
-  mkdir -p "$dir/Agent Tools"
-  : > "$dir/preload.cjs"
-  cat > "$dir/Agent Tools/auggie" <<'JS'
+  script="$dir/Agent Tools/lib/node_modules/@augmentcode/auggie/auggie.cjs"
+  mkdir -p "${script%/*}"
+  : > "$dir/Agent Tools/preload.cjs"
+  cat > "$script" <<'JS'
 const {spawnSync} = require('node:child_process');
 const result = spawnSync('bash', ['-c', `
   . "$1"
@@ -349,26 +353,26 @@ process.exit(result.status === null ? 99 : result.status);
 JS
   for option in --require -r --import; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
-      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
-      node "$option" "$dir/preload.cjs" "$dir/Agent Tools/auggie" \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" "$dir/Agent Tools/preload.cjs" "$script" \
       || fail "auggie: live node $option lost script identity"
   done
-  for option in "--require=$dir/preload.cjs" "--import=$dir/preload.cjs" --max-old-space-size=4096; do
+  for option in "--require=$dir/Agent Tools/preload.cjs" "--import=$dir/Agent Tools/preload.cjs" --max-old-space-size=4096; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
-      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
-      node "$option" "$dir/Agent Tools/auggie" \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" "$script" \
       || fail "auggie: live node $option lost script identity"
   done
   for option in --disable-warning --unhandled-rejections; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
-      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
-      node "$option" warn "$dir/Agent Tools/auggie" \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" warn "$script" \
       || fail "auggie: live node $option <value> lost script identity"
   done
   for option in -e --eval -p --print; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=eval \
-      FM_TEST_AUGGIE_SCRIPT="$dir/Agent Tools/auggie" \
-      node "$option" 'require(process.env.FM_TEST_AUGGIE_SCRIPT)' "$dir/Agent Tools/auggie" \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" 'require(process.env.FM_TEST_AUGGIE_SCRIPT)' "$script" \
       || fail "auggie: live node $option acquired script identity"
   done
 
@@ -389,7 +393,7 @@ JS
     for option in --inspect --inspect-brk --force-fips --no-warnings --experimental-default-config-file; do
       [ "$(fm_auggie_script_arg "node $option $2")" = "$2" ] || exit 5
     done
-  ' probe "$ROOT/bin/fm-auggie-lib.sh" "$dir/Agent Tools/auggie" \
+  ' probe "$ROOT/bin/fm-auggie-lib.sh" "$script" \
     || fail "auggie: Node option operand parsing violated the script contract"
   pass "session-lock: Node option operands and eval launches cannot replace the main script"
 }

@@ -262,8 +262,17 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
-#   name from PATH once, probes that concrete path with --help, and launches the
+#   new adapters. auggie is a primary-only harness, so every kind refuses an
+#   auggie worker from config, an explicit harness arg, or a raw launch command.
+#   For a raw launch the refusal is guaranteed for a simple command that runs
+#   auggie directly or behind the env, command, exec, nohup, sudo, or timeout
+#   wrappers (for example `env auggie`), with leading assignments, quoted words,
+#   redirections, wrapper options, and an env -S split string. Compound commands,
+#   subshell groups, and command substitutions are checked best-effort only. A
+#   shell -c string, heredoc or here-string stdin, and eval are not inspected,
+#   so a launch that reaches auggie through them is not guaranteed refused.
+#   For pi and pi-signed, fm-spawn resolves the selected executable name from
+#   PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A --secondmate launch of a Firstmate-seeded home (the existing
@@ -3215,14 +3224,8 @@ launch_template() {
 # verified worker lifecycle, so an explicit, resolved, or raw auggie worker is
 # refused with that reason rather than the generic unknown-harness one. An
 # auggie primary with an absent or "default" config/crew-harness resolves here
-# too. For a raw launch the refusal is guaranteed only for a simple command
-# that runs auggie directly or behind the env, command, exec, nohup, sudo, or
-# timeout wrappers, with leading assignments, quoted words, redirections, wrapper
-# options, and an env -S split string, using the command-position model
-# bin/fm-arm-command-policy.mjs owns. Compound commands, subshell groups, and
-# command substitutions are inspected best-effort only. A shell -c payload,
-# heredoc or here-string stdin, eval, a function, or any other indirection is not
-# inspected, so none of those forms is guaranteed refused.
+# too. The usage header owns which raw launch forms the refusal guarantees;
+# bin/fm-arm-command-policy.mjs owns the command-position model it applies.
 refuse_primary_only_harness() {  # <harness> <source>
   case "$1" in
     auggie)
