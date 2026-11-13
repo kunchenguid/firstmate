@@ -46,6 +46,18 @@ printf 'state: %s · source: %s%s\n' "${FM_FAKE_CREW_STATE:-unknown}" \
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "${FM_FLOOR_PARENT_WINDOW:-0}" = 1 ] && [ "${1:-}" = list-windows ] \
+  && [ -s "${FM_FLOOR_MEASURE:-}" ]; then
+  . "$FM_FLOOR_LIB"
+  read -r read_start read_end read_deadline read_rc < "$FM_FLOOR_MEASURE"
+  printf 'parent-proof-start\n' >> "$FM_FLOOR_PARENT_LOG"
+  while :; do
+    proof_now=$(fm_nm_now_ms)
+    [ "$proof_now" -gt "$read_deadline" ] && break
+    sleep 0.01
+  done
+  printf '%s %s %s\n' "$read_deadline" "$proof_now" "$FM_READ_DEADLINE" > "$FM_FLOOR_PARENT_LOG.finished"
+fi
 case "${1:-}" in
   list-windows) [ -z "${FM_FAKE_PANE_CMD:-}" ] || printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}" ;;
   display-message)
@@ -759,7 +771,7 @@ SH
 # crew-state command. A clock frozen at a whole-second boundary cannot prove
 # that the forced visit gets a full second rather than the next clock tick.
 test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
-  local branch head out mode started elapsed deadline rc outer_expiry reader_expiry
+  local branch head out mode started elapsed deadline rc outer_expiry reader_expiry child_cutoff proof_finished parent_cutoff
   # Arm a real absolute watchdog after setup has already spent most of its
   # window. A relative timer restarted here would consume the parent's reserve.
   started=$(fm_nm_now_ms)
@@ -776,7 +788,7 @@ test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
     && [ ! -e "$TMP_ROOT/absolute-timer-escaped" ] \
     && [ "$((started + elapsed))" -lt "$((outer_expiry - 500))" ] \
     || fail 'watchdog setup restarted an absolute deadline inside its parent reserve'
-  for mode in failed stalled; do
+  for mode in failed stalled parent-window; do
   make_world "forced-cadence-floor-$mode"; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
   write_child "$MATE" a-ledger 'done: PR https://github.com/owner/repo/pull/1 checks green'
@@ -864,6 +876,8 @@ SH
     FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
     FM_FLOOR_SETUP_LOG="$WORLD/setup.log" \
     FM_FLOOR_WATCHDOGS="$WORLD/watchdogs" \
+    FM_FLOOR_PARENT_WINDOW="$([ "$mode" = parent-window ] && printf 1 || printf 0)" \
+    FM_FLOOR_PARENT_LOG="$WORLD/parent-proof" \
     FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
     FM_FLOOR_DELAY=0.6 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
@@ -897,8 +911,22 @@ SH
     [ "$(outcome_count "$MATE" reported)" = 0 ] \
       || fail 'the floor regression reported a deadline-truncated read'
   else
-    grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
-      || fail 'the forced first cadence visit lost its one-second floor after the ledger deadline'
+    if [ "$mode" = parent-window ]; then
+      grep -Fxq parent-proof-start "$WORLD/parent-proof" \
+        || fail 'the parent-window regression never began its liveness proof'
+      grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
+        || fail 'the parent outcome was discarded after its child read window ended'
+      read -r child_cutoff proof_finished parent_cutoff < "$WORLD/parent-proof.finished"
+      [ "$proof_finished" -gt "$child_cutoff" ] && [ "$proof_finished" -lt "$parent_cutoff" ] \
+        || fail 'parent publication did not use its own bounded post-read window'
+      [ "$parent_cutoff" -lt "$((outer_expiry - 500))" ] \
+        || fail 'parent publication consumed the outer cleanup reserve'
+      printf 'parent-window child_deadline=%s proof_finished=%s publication_deadline=%s\n' \
+        "$child_cutoff" "$proof_finished" "$parent_cutoff"
+    else
+      grep -Fq 'inactive-outcome-mate-0-cadence-failed' "$MAIN/state/mate.status" 2>/dev/null \
+        || fail 'the forced first cadence visit lost its one-second floor after the ledger deadline'
+    fi
     [ "$(outcome_count "$MATE" reported)" = 1 ] \
       || fail 'the floor regression reported an unproved ledger child'
   fi
