@@ -226,15 +226,15 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound() {
 # hook, an operator stopping the caller - reaches the command, and a command
 # that then exits on its own reports its own status, not the bound's.
 test_a_signal_to_the_bounding_process_reaches_the_command() {
-  local dir watchdog rc=0
-  dir="$TMP_ROOT/forward"
+  local path=${1:-$PERL_ONLY} dir watchdog rc=0
+  dir="$TMP_ROOT/forward-${path##*/}"
   mkdir -p "$dir"
   # Backgrounded directly, the subshell's pid is the watchdog it becomes.
   # The positional parameters belong to the bounded shell.
   # shellcheck disable=SC2016
   (
     . "$ROOT/bin/fm-timeout-lib.sh"
-    PATH=$PERL_ONLY
+    PATH=$path
     fm_exec_timed 60 30 bash -c '
       trap "echo forwarded > \"\$2\"; exit 3" TERM
       echo $$ > "$1"
@@ -393,27 +393,201 @@ test_rejects_malformed_bounds_before_running_anything() {
   pass "fm_exec_timed rejects a zero, padded, non-numeric, or missing bound and a missing command"
 }
 
-test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
-  local dir fb rc=0 started elapsed verdict
-  if ! command -v timeout >/dev/null 2>&1; then
-    pass "fm_exec_timed's GNU timeout fallback (skipped: no timeout binary on this host)"
-    return 0
-  fi
-  dir="$TMP_ROOT/gnu"
+test_exec_timed_requires_gnu_timeout_without_perl() {
+  local dir fb rc out name
+  dir="$TMP_ROOT/gnu-selection"
   fb="$dir/bin"
   mkdir -p "$fb"
-  # No perl here, so the call falls back to GNU timeout.
-  for tool in timeout bash sleep; do
+  ln -s "$(command -v bash)" "$fb/bash"
+  cat > "$fb/timeout" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  printf 'timeout (uutils coreutils) 0.12.0\n'
+  exit 0
+fi
+exit 99
+SH
+  chmod +x "$fb/timeout"
+  rc=0
+  out=$(exec_timed "$fb" 5 2 bash -c ': > "$1"' _ "$dir/ran" 2>&1) || rc=$?
+  [ "$rc" -eq 127 ] || fail "non-GNU timeout was not refused without Perl (rc=$rc: $out)"
+  assert_contains "$out" 'not GNU coreutils' 'the refusal did not explain the incompatible timeout'
+  [ ! -e "$dir/ran" ] || fail 'the command ran with only non-GNU timeout available'
+  for name in gtimeout timeout; do
+    printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "timeout (GNU coreutils) 9.7"; exit 0; fi\nprintf "%%s\\n" "$@" > "%s"\nexit 7\n' \
+      "$dir/argv-$name" > "$fb/$name"
+    chmod +x "$fb/$name"
+    rm -f "$dir"/argv-*
+    rc=0
+    exec_timed "$fb" 5 2 bash -c 'exit 0' || rc=$?
+    [ "$rc" -eq 7 ] || fail "GNU $name was not selected (rc=$rc)"
+    [ "$(cat "$dir/argv-$name" 2>/dev/null)" = $'-k\n2\n5\nbash\n-c\nexit 0' ] \
+      || fail "GNU $name did not receive the grace, bound, and command unchanged"
+  done
+  [ ! -e "$dir/argv-gtimeout" ] || fail 'gtimeout ran although a GNU timeout precedes it'
+  pass 'fm_exec_timed refuses non-GNU timeout and selects GNU timeout or gtimeout without Perl'
+}
+
+attended_unready() {  # <path> <home>: print why the attended host is unready
+  (
+    . "$ROOT/bin/fm-supervision-engine-lib.sh"
+    PATH=$1
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$2/engine" fm_supervision_host_attended_ready "$2/config" claude >/dev/null 2>&1
+    printf '%s\n' "$FM_SUPERVISION_HOST_UNREADY"
+  )
+}
+
+test_attended_readiness_requires_what_exec_timed_accepts() {
+  local dir fb tool why
+  dir="$TMP_ROOT/attended-ready"
+  fb="$dir/bin"
+  mkdir -p "$fb" "$dir/config"
+  printf 'claude\n' > "$dir/config/supervision-host"
+  for tool in bash dirname; do
     ln -s "$(command -v "$tool")" "$fb/$tool"
   done
-  started=$SECONDS
-  exec_timed "$fb" 1 2 bash -c 'trap "" TERM; exec sleep 300' || rc=$?
-  elapsed=$((SECONDS - started))
-  verdict=$( . "$ROOT/bin/fm-timeout-lib.sh"; fm_timed_out "$rc" && echo expired)
-  [ "$verdict" = expired ] || fail "the GNU path's expiry status $rc is not a timed-out status"
-  [ "$elapsed" -ge 3 ] || fail "the GNU path ended a TERM-ignoring command before bound plus grace (${elapsed}s)"
-  [ "$elapsed" -lt 20 ] || fail "the GNU path did not kill a TERM-ignoring command after the grace (${elapsed}s)"
-  pass "fm_exec_timed's GNU timeout fallback kills a TERM-ignoring command once the grace has passed"
+  for tool in "$fb/node" "$fb/jq" "$dir/engine"; do
+    printf '#!/bin/sh\nexit 0\n' > "$tool"
+    chmod +x "$tool"
+  done
+  printf '#!/bin/sh\necho "timeout (uutils coreutils) 0.12.0"\n' > "$fb/timeout"
+  chmod +x "$fb/timeout"
+  why=$(attended_unready "$fb" "$dir")
+  assert_contains "$why" 'can bound the engine turn' 'a host with only non-GNU timeout was not reported unready for the turn bound'
+  printf '#!/bin/sh\necho "timeout (GNU coreutils) 9.7"\n' > "$fb/gtimeout"
+  chmod +x "$fb/gtimeout"
+  why=$(attended_unready "$fb" "$dir")
+  case "$why" in
+    *'can bound the engine turn'*) fail "GNU gtimeout did not satisfy the turn bound: $why" ;;
+  esac
+  pass 'the attended host is unready without Perl or GNU timeout, exactly where fm_exec_timed refuses'
+}
+
+external_timeout_bin() {  # <name>
+  local runner dir tool
+  runner=$(type -P timeout || type -P gtimeout) || return 1
+  dir="$TMP_ROOT/external-$1"
+  mkdir -p "$dir"
+  for tool in bash sleep cat mktemp rm; do
+    ln -sf "$(command -v "$tool")" "$dir/$tool"
+  done
+  # Keep the executable's original argv[0] when exercising the gtimeout lookup.
+  printf '#!%s\nexec %q "$@"\n' "$(command -v bash)" "$runner" > "$dir/$1"
+  chmod +x "$dir/$1"
+  printf '%s\n' "$dir"
+}
+
+test_external_timeout_kills_a_term_ignoring_command_after_the_grace() {
+  local name fb rc started elapsed verdict
+  for name in timeout gtimeout; do
+    fb=$(external_timeout_bin "$name") || { echo 'skip: no external timeout installed'; return; }
+    case "$("$fb/$name" --version)" in
+      *'GNU coreutils'*) ;;
+      *) echo "skip: fm_exec_timed requires GNU $name when Perl is absent"; continue ;;
+    esac
+    rc=0
+    started=$SECONDS
+    exec_timed "$fb" 1 2 bash -c 'trap "" TERM; exec sleep 30' || rc=$?
+    elapsed=$((SECONDS - started))
+    verdict=$( . "$ROOT/bin/fm-timeout-lib.sh"; fm_timed_out "$rc" && echo expired)
+    [ "$verdict" = expired ] || fail "$name expiry status $rc is not a timed-out status"
+    [ "$elapsed" -ge 3 ] || fail "$name ended a TERM-ignoring command before bound plus grace (${elapsed}s)"
+    [ "$elapsed" -lt 20 ] || fail "$name did not kill a TERM-ignoring command after the grace (${elapsed}s)"
+    pass "fm_exec_timed's $name fallback honors the grace and then kills the command"
+  done
+}
+
+external_timeout_caller() {  # <caller> <path> <home> <script> [args...]
+  local caller=$1 path=$2 home=$3 script=$4
+  shift 4
+  (
+    case "$caller" in
+      run|exec) . "$ROOT/bin/fm-timeout-lib.sh" ;;
+      nm) . "$ROOT/bin/fm-nm-run-lib.sh" ;;
+      watch) FM_HOME=$home FM_STATE_OVERRIDE="$home/state" FM_CHECK_TIMEOUT=1 . "$ROOT/bin/fm-watch.sh" ;;
+    esac
+    PATH=$path
+    case "$caller" in
+      run) fm_run_timed 1 bash "$script" "$@" ;;
+      exec) fm_exec_timed 1 1 bash "$script" "$@" ;;
+      nm) fm_nm_bounded "$home" 1 bash "$script" "$@" ;;
+      watch) run_check_process "$script" "$@" ;;
+    esac
+  )
+}
+
+test_external_timeout_callers_preserve_status_and_kill_the_group() {
+  local name fb caller dir rc pid i
+  for name in timeout gtimeout; do
+    fb=$(external_timeout_bin "$name") || { echo 'skip: no external timeout installed'; return; }
+    "$fb/$name" --version
+    for caller in run exec nm watch; do
+      dir="$TMP_ROOT/$name-$caller"
+      mkdir -p "$dir/state" "$dir/config" "$dir/data"
+      printf 'manual\n' > "$dir/config/backlog-backend"
+      printf 'printf "stdout\\n"; printf "stderr\\n" >&2; exit 7\n' > "$dir/command"
+      rc=0
+      external_timeout_caller "$caller" "$fb" "$dir" "$dir/command" > "$dir/out" 2> "$dir/err" || rc=$?
+      if [ "$caller" = exec ]; then
+        case "$("$fb/$name" --version)" in
+          *'GNU coreutils'*) ;;
+          *)
+            [ "$rc" -eq 127 ] || fail "non-GNU $name was not refused (rc=$rc)"
+            assert_contains "$(cat "$dir/err")" 'not GNU coreutils' 'the real non-GNU tool was not identified'
+            [ ! -s "$dir/out" ] || fail "the refused command still ran through $name"
+            pass "fm_exec_timed refuses the installed non-GNU $name without Perl"
+            continue
+            ;;
+        esac
+      fi
+      [ "$rc" -eq 7 ] || fail "$caller/$name lost the command status (rc=$rc)"
+      [ "$(cat "$dir/out")" = stdout ] || fail "$caller/$name lost stdout"
+      [ "$(cat "$dir/err")" = stderr ] || fail "$caller/$name lost stderr: $(cat "$dir/err")"
+      cat > "$dir/command" <<'SH'
+echo $$ > "$1/parent"
+sleep 30 &
+echo $! > "$1/child"
+wait
+printf 'escaped the deadline\n'
+SH
+      rc=0
+      external_timeout_caller "$caller" "$fb" "$dir" "$dir/command" "$dir" > "$dir/out" 2> "$dir/err" || rc=$?
+      [ "$rc" -eq 124 ] || fail "$caller/$name did not report the deadline (rc=$rc)"
+      [ ! -s "$dir/out" ] || fail "$caller/$name ran past the deadline"
+      for pid in "$(cat "$dir/parent")" "$(cat "$dir/child")"; do
+        i=0
+        while :; do
+          case "$(ps -o stat= -p "$pid" 2>/dev/null)" in
+            ''|*Z*) break ;;
+          esac
+          i=$((i + 1))
+          [ "$i" -lt 250 ] || { kill -KILL "$pid" 2>/dev/null || true; fail "$caller/$name left process $pid alive"; }
+          sleep 0.02
+        done
+      done
+      pass "$caller preserves status and output and times out its process group through $name"
+    done
+  done
+}
+
+test_external_timeout_reaps_a_term_ignoring_descendant() {
+  local name fb dir rc out
+  for name in timeout gtimeout; do
+    fb=$(external_timeout_bin "$name") || { echo 'skip: no external timeout installed'; return; }
+    dir="$TMP_ROOT/leftover-$name"
+    mkdir -p "$dir"
+    rc=0
+    out=$(
+      . "$ROOT/bin/fm-timeout-lib.sh"
+      PATH=$fb fm_run_timed 1 bash -c '
+        ( trap "" TERM; sleep 5; echo escaped ) &
+        wait
+      '
+    ) || rc=$?
+    [ "$rc" -eq 124 ] || fail "$name leftover cleanup changed the timeout status (rc=$rc)"
+    [ -z "$out" ] || fail "$name left a TERM-ignoring descendant holding stdout: $out"
+    pass "fm_run_timed reaps a TERM-ignoring descendant after $name exits"
+  done
 }
 
 test_timed_out_names_exactly_the_bound_statuses() {
@@ -1026,11 +1200,20 @@ test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell
 test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
+if external_bin=$(external_timeout_bin timeout); then
+  case "$("$external_bin/timeout" --version)" in
+    *'GNU coreutils'*) test_a_signal_to_the_bounding_process_reaches_the_command "$external_bin" ;;
+  esac
+fi
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
 test_a_top_level_parent_that_dies_during_startup_ends_the_command
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
-test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace
+test_exec_timed_requires_gnu_timeout_without_perl
+test_attended_readiness_requires_what_exec_timed_accepts
+test_external_timeout_kills_a_term_ignoring_command_after_the_grace
+test_external_timeout_callers_preserve_status_and_kill_the_group
+test_external_timeout_reaps_a_term_ignoring_descendant
 test_timed_out_names_exactly_the_bound_statuses

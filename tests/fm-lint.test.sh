@@ -339,9 +339,7 @@ SH
 fm_lint_bounds_supported() {
   [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || return 1
   ( ulimit -v 65536 ) 2>/dev/null || return 1
-  command -v perl >/dev/null 2>&1 \
-    || command -v timeout >/dev/null 2>&1 \
-    || command -v gtimeout >/dev/null 2>&1 || return 1
+  ( . "$ROOT/bin/fm-timeout-lib.sh" && fm_exec_timed_mechanism ) >/dev/null 2>&1 || return 1
   return 0
 }
 

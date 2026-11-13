@@ -419,8 +419,8 @@ test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call() {
 
 test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child() {
   local case_dir fb out rc=0 started
-  if ! command -v timeout >/dev/null 2>&1; then
-    pass "fm_tasks_axi's GNU timeout forces termination (skipped: no timeout binary on this host)"
+  if ! command -v timeout >/dev/null 2>&1 || ! timeout --version 2>/dev/null | grep -q 'GNU coreutils'; then
+    pass "fm_tasks_axi's GNU timeout forces termination (skipped: no GNU timeout binary on this host)"
     return 0
   fi
   case_dir=$(make_home fm-tasks-axi-kill-after)
