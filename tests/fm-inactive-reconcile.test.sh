@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Behavioral coverage for bounded inactive terminal-outcome reconciliation.
+# Pass --first-read-floor-only to run only the reader-start floor regression.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -794,10 +795,19 @@ SH
   cat > "$WORLD/fakebin/measured-crew-state" <<'SH'
 #!/usr/bin/env bash
 . "$FM_FLOOR_LIB"
-started=$(fm_nm_now_ms)
 rc=0
-"${FM_FLOOR_LIB%/*}/fm-crew-state.sh" "$@" || rc=$?
-printf '%s %s %s %s\n' "$started" "$(fm_nm_now_ms)" "$FM_READ_DEADLINE" "$rc" > "$FM_FLOOR_MEASURE"
+result=$("${FM_FLOOR_LIB%/*}/fm-crew-state.sh" "$@") || rc=$?
+started=unreported
+deadline=0
+case "$result" in
+  'read-budget: '*)
+    budget=${result%%$'\n'*}
+    read -r started deadline extra <<< "${budget#read-budget: }"
+    [ -z "$extra" ] || started=unreported
+    ;;
+esac
+printf '%s %s %s %s\n' "$started" "$(fm_nm_now_ms)" "$deadline" "$rc" > "$FM_FLOOR_MEASURE"
+printf '%s\n' "$result"
 exit "$rc"
 SH
   # Startup of the timeout runner must not consume the reader's promised floor.
@@ -842,9 +852,14 @@ SH
   grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
   grep -Fxq reader-setup "$WORLD/setup.log" || fail 'the floor regression never delayed timeout setup'
   [ -s "$WORLD/measure" ] || fail 'the forced first cadence visit never completed its measured real crew-state read'
-  [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
   read -r started elapsed deadline rc < "$WORLD/measure"
+  case "$started$deadline" in
+    ''|*[!0-9]*) fail 'the reader did not record its own start and deadline' ;;
+  esac
   elapsed=$((elapsed - started))
+  printf 'floor-measure mode=%s start=%s deadline=%s budget_ms=%s elapsed_ms=%s rc=%s\n' \
+    "$mode" "$started" "$deadline" "$((deadline - started))" "$elapsed" "$rc"
+  [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
   [ "$((deadline - started))" -ge 900 ] \
     || fail 'the forced first cadence visit inherited less than a full second of real budget'
   if [ "$mode" = stalled ]; then
@@ -1889,6 +1904,16 @@ test_legacy_ledger_reports_missing_base_once() {
   done
   pass 'legacy terminal ledgers report missing-base refusal once on either parent route'
 }
+
+case ${1:-} in
+  --first-read-floor-only)
+    [ "$#" -eq 1 ] || fail 'usage: fm-inactive-reconcile.test.sh [--first-read-floor-only]'
+    test_forced_cadence_visit_keeps_floor_after_ledger_deadline
+    exit 0
+    ;;
+  '') ;;
+  *) fail 'usage: fm-inactive-reconcile.test.sh [--first-read-floor-only]' ;;
+esac
 
 test_legacy_ledger_reports_missing_base_once
 test_main_direct_terminal_presentation_receipt
