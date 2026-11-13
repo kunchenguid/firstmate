@@ -502,6 +502,10 @@ function consumeWrapperOptions(name, words, index) {
   while (words[next]) {
     const value = words[next].value;
     if (value === "--") return { index: next + 1, unresolved: false, embeddedPayloads };
+    if (name === "env" && value === "-") {
+      next += 1;
+      continue;
+    }
     if (!value.startsWith("-") || value === "-") return { index: next, unresolved: false, embeddedPayloads };
     if (value.startsWith("--")) {
       const equals = value.indexOf("=");
@@ -561,10 +565,6 @@ export function commandPosition(tokens) {
       index = options.index;
       if (name === "sudo") while (words[index] && isAssignment(words[index].value)) index += 1;
       command = words[index];
-      if (command && command.value.startsWith("-") && command.value !== "-") {
-        unresolvedWrapperOption = true;
-        break;
-      }
       continue;
     }
     if (name === "env") {
@@ -575,10 +575,6 @@ export function commandPosition(tokens) {
       index = options.index;
       while (words[index] && isAssignment(words[index].value)) index += 1;
       command = words[index];
-      if (command && command.value.startsWith("-") && command.value !== "-") {
-        unresolvedWrapperOption = true;
-        break;
-      }
       continue;
     }
     if (name === "timeout" || name === "gtimeout") {
@@ -597,14 +593,11 @@ export function commandPosition(tokens) {
         unresolvedWrapperOption = true;
         break;
       }
-      if (command.value.startsWith("-") && command.value !== "-") {
-        unresolvedWrapperOption = true;
-        break;
-      }
       continue;
     }
     break;
   }
+  if (command && command.value.startsWith("-")) unresolvedWrapperOption = true;
   return { words, index, command, wrappers, prefixAssignments, unresolvedWrapperOption, wrapperPayloads };
 }
 

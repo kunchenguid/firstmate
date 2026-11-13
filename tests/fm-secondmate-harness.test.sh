@@ -806,7 +806,7 @@ test_spawn_unverified_secondmate_harness_refused() {
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw env env-flags env-default-signal env-default-signal-value env-block-signal env-ignore-signal nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment sudo-interspersed sudo-no-update sudo-auth-type sudo-login-class sudo-auth-type-long sudo-login-class-long timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other env-unfamiliar sudo-unfamiliar; do
+    for how in config explicit raw env env-flags env-default-signal env-default-signal-value env-block-signal env-ignore-signal env-dash env-dash-end env-dash-i env-dash-nested nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment sudo-interspersed sudo-dash sudo-no-update sudo-auth-type sudo-login-class sudo-auth-type-long sudo-login-class-long timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other env-unfamiliar sudo-unfamiliar; do
       if [[ "$how" = *-unfamiliar && "$kind" != secondmate ]]; then
         continue
       fi
@@ -834,6 +834,10 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         env-default-signal-value) set -- "$@" 'env --default-signal=INT auggie --model x' ;;
         env-block-signal) set -- "$@" 'env --block-signal auggie --model x' ;;
         env-ignore-signal) set -- "$@" 'env --ignore-signal auggie --model x' ;;
+        env-dash) set -- "$@" 'env - /opt/tools/bin/auggie --model x' ;;
+        env-dash-end) set -- "$@" 'env -- - /opt/tools/bin/auggie --model x' ;;
+        env-dash-i) set -- "$@" 'env -i - /opt/tools/bin/auggie --model x' ;;
+        env-dash-nested) set -- "$@" 'env - sudo auggie --model x' ;;
         nested) set -- "$@" 'FOO=1 nohup command -p exec -a worker env BAR=2 auggie --model test-model' ;;
         quoted) set -- "$@" "env 'auggie' --model test-model" ;;
         quoted-path) set -- "$@" "env '/opt/Agent Tools/bin/auggie' --model test-model" ;;
@@ -852,6 +856,7 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         sudo) set -- "$@" 'sudo -n -u worker auggie --model test-model' ;;
         sudo-assignment) set -- "$@" 'sudo -n FOO=1 BAR=2 auggie --model test-model' ;;
         sudo-interspersed) set -- "$@" 'sudo FOO=1 -n auggie --model test-model' ;;
+        sudo-dash) set -- "$@" 'sudo - auggie --model x' ;;
         sudo-no-update) set -- "$@" 'sudo --no-update -n auggie --model test-model' ;;
         sudo-auth-type) set -- "$@" 'sudo -a passwd auggie --model test-model' ;;
         sudo-login-class) set -- "$@" 'sudo -c staff auggie --model test-model' ;;
@@ -898,7 +903,7 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         continue
       fi
       [ "$rc" -ne 0 ] || fail "auggie $kind $how: spawn should have failed"
-      if [ "$how" = sudo-interspersed ]; then
+      if [[ "$how" = sudo-interspersed || "$how" = sudo-dash || "$how" = env-dash-end ]]; then
         assert_contains "$(cat "$err")" "invalid raw launch command" "auggie $kind $how: unresolved wrapper was not refused"
       else
         assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
