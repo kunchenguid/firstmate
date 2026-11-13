@@ -359,7 +359,7 @@ read_notifications() { # deadline
   case "$status" in
     304) NOTIFY_OK=1; return 0 ;;
     200) ;;
-    4*) jq 'del(.notifications)' "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"; return 0 ;;
+    4*) jq 'del(.notifications.last_modified, .notifications.since)' "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"; return 0 ;;
     *) return 0 ;;
   esac
   next_lm=$(sed -n '1,/^$/s/^[Ll]ast-[Mm]odified: //p' "$TMP/notify.txt")
