@@ -150,7 +150,10 @@
 #      cannot be bound here is reported as unknown - history, but no proof of
 #      the present. A FAILED reading is additionally answered from a newer
 #      record where one states a terminal outcome for this worktree: a later
-#      COMPLETED run the ledger proves is current, or the ledger's own FAILED
+#      COMPLETED run the ledger proves is current, a later HANDED_OFF row the
+#      ledger proves is current - the same green delivery ended by
+#      `no-mistakes axi handoff`, so it answers terminal-green and publishes the
+#      PR that row left open for human review - or the ledger's own FAILED
 #      verdict; a later CANCELLED row carries no verdict, so it leaves the
 #      failure unprovable (unknown) like any other unbindable row. A DONE
 #      reading claims no such verdict, because unknown is already the whole
@@ -1521,8 +1524,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     && [ "$RUN_SOURCE" != coarse ]; then
     if [ "$RUN_STATE" = "failed" ]; then
       case "$LEDGER_STATUS" in
-        completed)
-          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+        completed|handed_off)
+          SUPERSEDED_DETAIL="run superseded by a newer $LEDGER_STATUS run on this branch (earlier $READING_DETAIL)"
           [ -z "$SELECTED_RUN_ID" ] \
             || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
           TERMINAL_PR=$NEWEST_PR

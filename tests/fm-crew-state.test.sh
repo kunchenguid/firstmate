@@ -4150,6 +4150,37 @@ EOF
   pass "a coarse terminal reading claims no supersession"
 }
 
+# A HANDED_OFF row the ledger proves current for this worktree states a passing
+# terminal outcome for it, so rule 2b answers an older failure with it exactly as
+# it answers a later COMPLETED run: terminal-green, carrying the PR that row left
+# open for human review. Rejecting it as unbindable history instead told the
+# captain that a run which had already delivered its work had an unprovable
+# present.
+test_newer_handed_off_ledger_row_answers_a_failure_green() {
+  reset_fakes
+  local d short out; d=$(new_case newer-handed-off-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2q
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2q.meta" "window=fm:fm-feat-s2q" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-s2q,failed,${FM_FAKE_RUN_HEAD},\"https://github.com/o/r/pull/1111\""
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2q https://github.com/o/r/pull/1111)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  handed_off fm/feat-s2q ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/2222"
+  out=$(run_crew_state "$d" feat-s2q)
+  assert_contains "$out" "state: done" "the newer handed-off row answers the older failure"
+  assert_not_contains "$out" "state: failed" "the superseded failure is not published"
+  assert_not_contains "$out" "state: unknown" "a row the ledger proves current is never an unprovable present"
+  assert_contains "$out" "run superseded by a newer handed_off run on this branch" \
+    "the verdict names the handed-off row that superseded the failure"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2222" \
+    "the pull request that row left open for review is published"
+  assert_not_contains "$out" "pull/1111" "the superseded run's pull request must not surface"
+  pass "a newer handed-off ledger row answers a failed reading terminal-green"
+}
+
 # Both readers of the `no-mistakes runs` listing must agree on when the ledger is
 # unreadable: a row the strict reader rejects must not still supply newest-row
 # evidence that unbinds the attributed run.
@@ -6976,6 +7007,7 @@ test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row
 test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last
 test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
 test_coarse_terminal_reading_claims_no_supersession
+test_newer_handed_off_ledger_row_answers_a_failure_green
 test_foreign_status_never_hides_coarse_terminal_pr
 test_stale_passed_run_publishes_no_pr_for_active_rerun
 test_cancelled_run_publishes_no_pr_for_active_rerun
