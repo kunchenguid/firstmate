@@ -864,6 +864,37 @@ test_open_decision_survives_later_unrelated_event() {
   pass "durable fold keeps an open decision past a later unrelated event"
 }
 
+test_malformed_status_line_report_names_real_state_file() {
+  local home fakebin out errors expected
+  home=$(make_home malformed-report)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/raw-epoch.meta" \
+    "window=firstmate:fm-raw-epoch" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=alpha"
+  # Line 2 is the exact line from issue #8048.
+  printf '%s\n' \
+    'blocked [at=1793378273] [key=earlier]: An earlier blocker remains open.' \
+    '1793378273 blocked [key=example] An implementation decision needs an answer.' \
+    > "$home/state/raw-epoch.status"
+  fakebin=$(make_fakebin "$home")
+  errors=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>&1 >"$home/snapshot.json")
+  out=$(cat "$home/snapshot.json")
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "raw-epoch")
+    | [.hints.open_decisions[].key] == ["earlier"]
+  ' >/dev/null || fail "a malformed later line must leave the earlier blocker open: $out"
+  expected="$home/state/raw-epoch.status:2: malformed status line; repair the timestamp to [at=<epoch>] after the verb: 1793378273 blocked [key=example] An implementation decision needs an answer."
+  [ "$errors" = "$expected" ] \
+    || fail "snapshot must report the real state file once, not its temporary copy: got '$errors' want '$expected'"
+  pass "snapshot reports a malformed status line against the real state file"
+}
+
 test_secondmate_open_decision_survives_live_endpoint() {
   local home fakebin out
   home=$(make_home active-secondmate)
@@ -1162,6 +1193,7 @@ fm_test_run \
   test_normalized_roles_and_plural_blocker_readiness \
   test_event_hints_follow_reconciled_current_state \
   test_open_decision_survives_later_unrelated_event \
+  test_malformed_status_line_report_names_real_state_file \
   test_secondmate_open_decision_survives_live_endpoint \
   test_open_decision_transfers_to_captain_hold \
   test_open_decision_clears_on_keyed_resolution \
