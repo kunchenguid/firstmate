@@ -138,7 +138,9 @@
 # send the findings with fm-send first. disposition records why no worker action
 # follows: its evidence must be a different comment or review on this same
 # contribution (a URL starting with the contribution URL and "#"), and its
-# summary must not be blank. The receipt is stored in the task's record as
+# summary must not be blank. A task with no steering inbox has no worker left to
+# steer (teardown removed it), so its disposition may cite the signal's own
+# source URL as evidence. The receipt is stored in the task's record as
 # receipts[] {token,task,kind,ref,at[,summary]}, is bound to the token and the
 # task that owns the record, and is never copied to another owner. Any other
 # signal acknowledges with the token alone. A handoff matches by source URL, so
@@ -797,8 +799,6 @@ arm() {
 
 ack_handoff_record() { # task source-url: basename of a steering-inbox record naming the exact source
   local inbox record body
-  # shellcheck source=bin/fm-task-inbox-lib.sh
-  . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
   inbox=$(fm_task_inbox_dir "$STATE" "$1")
   for record in "$inbox"/*.msg "$inbox/handled"/*.msg; do
     [ -e "$record" ] || continue
@@ -823,6 +823,8 @@ ack_receipt() { # task url handoff | disposition evidence-url summary: stage the
   local task=$1 url=$2 kind=${3:-} ref summary='' source
   shift 2
   [ "$#" -eq 0 ] || shift
+  # shellcheck source=bin/fm-task-inbox-lib.sh
+  . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
   source=$(jq -r '.source // ""' "$TMP/event.json")
   case "$kind" in
     handoff)
@@ -835,7 +837,8 @@ ack_receipt() { # task url handoff | disposition evidence-url summary: stage the
       [ "$#" -eq 2 ] || fail 'disposition needs an evidence URL and a summary'
       ref=$1; summary=$2
       case "$ref" in "$url"\#?*) ;; *) fail 'disposition evidence must be a comment or review on this contribution' ;; esac
-      [ "$ref" != "$source" ] || fail 'the signal itself cannot be the evidence for its own disposition'
+      [ "$ref" != "$source" ] || [ ! -d "$(fm_task_inbox_dir "$STATE" "$task")" ] \
+        || fail 'the signal itself cannot be the evidence for its own disposition while the owning task has a worker'
       [ -n "${summary//[[:space:]]/}" ] || fail 'disposition needs a non-empty summary'
       ;;
     *) fail "unknown receipt '$kind'; expected handoff or disposition" ;;
