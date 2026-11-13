@@ -94,7 +94,7 @@ expect_pretool() {
 test_context_read_uses_the_newest_usage_sum() {
   local rc=0
   prepare_case read
-  printf 'soft=1000\n' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' 'enabled=true' 'soft=1000' > "$CASE_CONFIG/worker-context-cap"
   {
     jq -nc '{message:{usage:{input_tokens:5,cache_read_input_tokens:7000,cache_creation_input_tokens:20}}}'
     printf '%s\n' '{"type":"user","message":{"content":"no usage here"}}' 'not json'
@@ -110,7 +110,7 @@ test_context_read_uses_the_newest_usage_sum() {
 test_soft_ask_once_per_crossing() {
   local rc=0
   prepare_case soft
-  printf '%s\n' '# note' 'soft=1000' 'hard=5000' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' '# note' 'enabled=true' 'soft=1000' 'hard=5000' > "$CASE_CONFIG/worker-context-cap"
   write_usage 999
   stop_payload | invoke_cap stop || rc=$?
   [ "$rc" -eq 0 ] || fail "below the soft limit must exit 0, got $rc"
@@ -156,9 +156,10 @@ test_soft_ask_once_per_crossing() {
   pass "the soft ask fires once per crossing, a continuation does not repeat it, and only a fall below two-thirds re-arms it"
 }
 
-test_default_limits_apply_without_a_config_file() {
+test_default_limits_apply_when_enabled() {
   local rc=0
   prepare_case defaults
+  printf '%s\n' 'enabled=true' > "$CASE_CONFIG/worker-context-cap"
   write_usage 199999
   stop_payload | invoke_cap stop || rc=$?
   [ "$rc" -eq 0 ] || fail "199999 tokens must exit 0, got $rc"
@@ -171,12 +172,69 @@ test_default_limits_apply_without_a_config_file() {
   expect_pretool "299999 tokens" allow "$(bash_payload 'ls')"
   write_usage 300000
   expect_pretool "300000 tokens" deny "$(bash_payload 'ls')"
-  pass "without a config file the soft limit is 200000 and the hard limit is 300000"
+  pass "an enabled cap without limit lines uses the soft limit 200000 and the hard limit 300000"
+}
+
+test_cap_is_off_unless_the_file_enables_it() {
+  local rc=0 file
+  prepare_case optin
+  file="$CASE_CONFIG/worker-context-cap"
+
+  # No config file at all: both hooks stay silent at any context size.
+  write_usage 900000
+  stop_payload | invoke_cap stop || rc=$?
+  [ "$rc" -eq 0 ] || fail "an absent config file must exit 0, got $rc"
+  assert_silent "an absent config file"
+  expect_pretool "an absent config file" allow "$(bash_payload 'ls')"
+  [ ! -e "$CASE_STATE/$ID.context-cap.json" ] || fail "an absent config file wrote the state file"
+
+  # A config file with limit lines but no enable line is still off.
+  printf '%s\n' 'soft=1000' 'hard=2000' 'enabled=false' > "$file"
+  stop_payload | invoke_cap stop || rc=$?
+  [ "$rc" -eq 0 ] || fail "limit lines without an enable line must exit 0, got $rc"
+  assert_silent "limit lines without an enable line"
+  expect_pretool "limit lines without an enable line" allow "$(bash_payload 'ls')"
+  [ ! -e "$CASE_STATE/$ID.context-cap.json" ] || fail "a missing enable line wrote the state file"
+
+  # The enabled query is the switch bin/fm-spawn.sh reads.
+  rc=0
+  "$CAP" enabled --config "$CASE_CONFIG" >"$OUT" 2>"$ERR" || rc=$?
+  [ "$rc" -eq 1 ] || fail "enabled must exit 1 without an enable line, got $rc"
+  assert_silent "enabled without an enable line"
+  rm -f "$file"
+  rc=0
+  "$CAP" enabled --config "$CASE_CONFIG" >"$OUT" 2>"$ERR" || rc=$?
+  [ "$rc" -eq 1 ] || fail "enabled must exit 1 without the config file, got $rc"
+  assert_silent "enabled without the config file"
+
+  # An unreadable invocation reports off, so a malformed call never turns the
+  # cap on, and the hooks stay silent for it.
+  rc=0
+  "$CAP" enabled --config >"$OUT" 2>"$ERR" || rc=$?
+  [ "$rc" -eq 1 ] || fail "enabled with a missing --config value must exit 1, got $rc"
+  assert_silent "enabled with a missing --config value"
+  rc=0
+  stop_payload | invoke_cap stop --bogus || rc=$?
+  [ "$rc" -eq 0 ] || fail "a malformed hook invocation must exit 0, got $rc"
+  assert_silent "a malformed hook invocation"
+
+  # enabled=true turns both hooks on.
+  printf '%s\n' 'enabled=true' 'soft=1000' 'hard=2000' > "$file"
+  rc=0
+  "$CAP" enabled --config "$CASE_CONFIG" >"$OUT" 2>"$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "enabled must exit 0 with an enable line, got $rc"
+  assert_silent "enabled with an enable line"
+  write_usage 1000
+  stop_payload | invoke_cap stop || rc=$?
+  assert_block "an enabled cap" "soft limit of 1000"
+  write_usage 2000
+  expect_pretool "an enabled cap at the hard limit" deny "$(bash_payload 'ls')"
+  pass "the cap is off without the config file or an enable line, and enabled=true turns both hooks on"
 }
 
 test_hard_limit_denies_every_tool_but_the_handoff_set() {
   prepare_case hard
-  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' 'enabled=true' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
   write_usage 1999
   expect_pretool "below the hard limit" allow "$(bash_payload 'ls -la')"
 
@@ -206,7 +264,7 @@ test_hard_limit_denies_every_tool_but_the_handoff_set() {
 test_deny_carries_a_usable_epoch_for_the_status_stamp() {
   local before after stamp
   prepare_case epoch
-  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' 'enabled=true' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
   write_usage 2500
   before=$(date +%s)
   expect_pretool "date" deny "$(bash_payload 'date +%s')"
@@ -221,7 +279,7 @@ test_deny_carries_a_usable_epoch_for_the_status_stamp() {
 test_status_append_accepts_a_symlinked_state_path() {
   local link
   prepare_case symlink
-  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' 'enabled=true' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
   link="$CASE_DIR/state-link"
   ln -s "$CASE_STATE" "$link"
   write_usage 2500
@@ -238,7 +296,7 @@ test_status_append_accepts_a_symlinked_state_path() {
 
 test_hard_limit_denies_chained_or_substituted_commands() {
   prepare_case chained
-  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' 'enabled=true' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
   write_usage 2500
   expect_pretool "git push" deny "$(bash_payload 'git push origin HEAD')"
   expect_pretool "git status" deny "$(bash_payload 'git status')"
@@ -275,7 +333,7 @@ test_config_parsing_keeps_defaults_for_unusable_values() {
   file="$CASE_CONFIG/worker-context-cap"
 
   # A usable hard limit applies, an unusable soft line keeps its default.
-  printf '%s\n' 'soft=abc' 'soft=0' 'soft=-5' 'soft=1e3' 'soft=99999999999' 'hard=250000' 'bogus=1' 'nonsense' > "$file"
+  printf '%s\n' 'enabled=true' 'soft=abc' 'soft=0' 'soft=-5' 'soft=1e3' 'soft=99999999999' 'hard=250000' 'bogus=1' 'nonsense' > "$file"
   write_usage 199999
   stop_payload | invoke_cap stop || rc=$?
   assert_silent "unusable soft lines"
@@ -288,31 +346,33 @@ test_config_parsing_keeps_defaults_for_unusable_values() {
   expect_pretool "at the configured hard limit" deny "$(bash_payload 'ls')"
 
   # A soft limit at or above the hard limit makes both keep their defaults.
-  printf '%s\n' 'soft=5000' 'hard=4000' > "$file"
+  printf '%s\n' 'enabled=true' 'soft=5000' 'hard=4000' > "$file"
   write_usage 250000
   expect_pretool "inverted limits keep the default hard limit" allow "$(bash_payload 'ls')"
   write_usage 300000
   expect_pretool "inverted limits at the default hard limit" deny "$(bash_payload 'ls')"
 
-  # Only the literal value false turns the cap off.
+  # Only the literal value true turns the cap on.
   printf '%s\n' 'enabled=maybe' > "$file"
   write_usage 300000
-  expect_pretool "an unusable enabled value keeps the cap on" deny "$(bash_payload 'ls')"
+  expect_pretool "an unusable enabled value keeps the cap off" allow "$(bash_payload 'ls')"
   printf '%s\n' 'enabled=false' > "$file"
-  expect_pretool "enabled=false turns the hard limit off" allow "$(bash_payload 'ls')"
+  expect_pretool "enabled=false keeps the hard limit off" allow "$(bash_payload 'ls')"
   rc=0
   rm -f "$CASE_STATE/$ID.context-cap.json"
   stop_payload | invoke_cap stop || rc=$?
   [ "$rc" -eq 0 ] || fail "enabled=false stop must exit 0, got $rc"
   assert_silent "enabled=false stop"
   [ ! -e "$CASE_STATE/$ID.context-cap.json" ] || fail "enabled=false wrote the state file"
-  pass "an unusable limit keeps its default, inverted limits fall back to both defaults, and enabled=false turns the cap off"
+  printf '%s\n' 'enabled=true' > "$file"
+  expect_pretool "enabled=true turns the hard limit on" deny "$(bash_payload 'ls')"
+  pass "an unusable limit keeps its default, inverted limits fall back to both defaults, and only enabled=true turns the cap on"
 }
 
 test_bad_input_and_hook_errors_exit_zero_silently() {
   local rc=0 fakebin="$TMP_ROOT/no-jq-bin" entry name
   prepare_case failopen
-  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  printf '%s\n' 'enabled=true' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
   write_usage 900000
 
   rc=0
@@ -399,7 +459,8 @@ test_bad_input_and_hook_errors_exit_zero_silently() {
 fm_test_run \
   test_context_read_uses_the_newest_usage_sum \
   test_soft_ask_once_per_crossing \
-  test_default_limits_apply_without_a_config_file \
+  test_default_limits_apply_when_enabled \
+  test_cap_is_off_unless_the_file_enables_it \
   test_hard_limit_denies_every_tool_but_the_handoff_set \
   test_deny_carries_a_usable_epoch_for_the_status_stamp \
   test_status_append_accepts_a_symlinked_state_path \

@@ -6562,6 +6562,10 @@ BUSY_GEN=
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
     cap_script="$(shell_quote "$FM_ROOT/bin/fm-worker-context-cap.sh")"
     cap_args="--id $(shell_quote "$ID") --state $(shell_quote "$STATE_REAL") --data $(shell_quote "$DATA") --config $(shell_quote "$CONFIG")"
+    cap_enabled=false
+    if "$FM_ROOT/bin/fm-worker-context-cap.sh" enabled --config "$CONFIG" >/dev/null 2>&1; then
+      cap_enabled=true
+    fi
     stop_entry=
     if [ "$KIND" = secondmate ] && grep -qF '.fm-busy-stop' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null; then
       {
@@ -6577,19 +6581,21 @@ BUSY_GEN=
         stop_turnend="touch $(shell_quote "$TURNEND"); "
       fi
       stop_idle="${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true"
-      if [ "$KIND" != secondmate ]; then
+      if [ "$KIND" != secondmate ] && [ "$cap_enabled" = true ]; then
         # A ship or scout's context cap (bin/fm-worker-context-cap.sh) can block
         # this Stop into a continuation that fires no UserPromptSubmit, and
         # Claude runs Stop hooks in parallel, so this one command is the worker's
         # only Stop writer: busy when the cap blocks, idle otherwise. The cap
-        # prints a block decision or nothing and always exits 0.
+        # prints a block decision or nothing and always exits 0. Without the
+        # enable line the cap is off and the plain Stop idle command above is
+        # wired exactly as main does.
         stop_idle="blk=\$($cap_script stop $cap_args 2>/dev/null) || blk=; if [ -n \"\$blk\" ]; then printf '%s\\n' \"\$blk\"; $busy_cmd_prefix busy $busy_suffix --event stop-blocked 2>/dev/null || true; else $stop_idle; fi"
       fi
       j_stop=$(json_escape "$stop_idle")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
     pretool_entry=
-    if [ "$KIND" != secondmate ]; then
+    if [ "$KIND" != secondmate ] && [ "$cap_enabled" = true ]; then
       j_pretool=$(json_escape "$cap_script pretool $cap_args")
       pretool_entry="\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_pretool\"}]}],"
     fi

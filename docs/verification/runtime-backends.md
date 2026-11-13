@@ -776,6 +776,7 @@ That is the launch-prompt backstop: the same spawn's record classified `busy fm-
 
 Verified 2026-11-11 on this host with Claude Code 2.1.322 in a scratch project.
 The project's `.claude/settings.local.json` carried `bin/fm-worker-context-cap.sh` as its `PreToolUse` and `Stop` hooks, with `soft=1` and `hard=2` in a scratch `config/worker-context-cap`.
+The cap became opt-in afterwards, so reproducing this run today also needs an `enabled=true` line in that file.
 `claude -p "<prompt>" --dangerously-skip-permissions --output-format text` ran three sequential `Bash` calls: `echo one`, `echo two`, then `git add -A`.
 The hook exited 0, 2, and 0, and the model reported that `echo two` was denied by the context-cap hook and that `git add -A` ran.
 The deny reached the model through stderr with an empty stdout, which is the shape [the PreToolUse deny contract](../arm-pretool-check.md#output-contract) requires.

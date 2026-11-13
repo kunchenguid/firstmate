@@ -1334,10 +1334,13 @@ The script header owns the transcript read, the state file, and the block messag
 ## Worker context cap (config/worker-context-cap)
 
 `config/worker-context-cap` is an optional local, gitignored file that limits how much context one Claude ship or scout worker session uses.
-The cap is on without the file, with a soft limit of 200000 tokens and a hard limit of 300000 tokens.
+The cap is opt-in and is off without the file.
+An explicit `enabled=true` line turns it on, with a soft limit of 200000 tokens and a hard limit of 300000 tokens.
+It stays opt-in because it blocks a worker's turn end and denies tools, so a home opts into that pressure rather than inheriting it.
 One fleet measured 46% of worker sessions passing 200000 tokens, and a reset at that line saved about 29% of worker spend there.
 
-`bin/fm-spawn.sh` wires two hooks into the worker's `.claude/settings.local.json`, and `bin/fm-worker-context-cap.sh` runs both.
+When the file enables the cap, `bin/fm-spawn.sh` wires two hooks into the worker's `.claude/settings.local.json`, and `bin/fm-worker-context-cap.sh` runs both.
+A spawn without the enable line writes main's hooks instead: the plain `Stop` idle command and no `PreToolUse` entry.
 Context size is the newest `input + cache_read + cache_creation` reading in the last 2MB of the transcript.
 
 - The `Stop` hook blocks one turn end at or above the soft limit.
@@ -1353,8 +1356,9 @@ After the `paused` line names the note, firstmate relaunches a fresh session in 
 The relaunch already requires a note for a ship or scout and appends it to the task's launch brief, so no other relaunch mechanism is needed.
 
 Blank lines and lines that start with `#` are ignored.
-Optional lines are `soft=<n>`, `hard=<n>`, and `enabled=false`.
-`enabled=false` turns both hooks off.
+The cap opts in with `enabled=true`.
+Without that line, or with `enabled=false`, both hooks stay off.
+Optional limit lines are `soft=<n>` and `hard=<n>`.
 An unusable value keeps its default, and a soft limit at or above the hard limit makes both keep their defaults.
 A missing `jq`, an unreadable transcript, or any hook error exits 0 and blocks nothing.
 The cap covers Claude ships and scouts only.

@@ -703,6 +703,7 @@ test_claude_worker_context_cap_wiring() {
   local rec id=busy-cl-cap out state settings transcript payload rc=0
   rec=$(make_spawn_case claude-context-cap claude "$id")
   read_case_record "$rec"
+  printf '%s\n' 'enabled=true' > "$HOME_DIR/config/worker-context-cap"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
@@ -736,6 +737,38 @@ test_claude_worker_context_cap_wiring() {
   jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$CASE_DIR/pre.err" >/dev/null \
     || fail "the PreToolUse deny is not a Claude deny object: $(cat "$CASE_DIR/pre.err")"
   pass "a claude worker spawn wires the context cap: Stop blocks once and records busy, PreToolUse denies at the hard limit"
+}
+
+test_claude_worker_context_cap_off_unless_enabled() {
+  local rec id=busy-cl-off label out state settings transcript payload
+  for label in no-config limits-without-enable-line; do
+    rec=$(make_spawn_case "claude-cap-off-$label" claude "$id")
+    read_case_record "$rec"
+    if [ "$label" = limits-without-enable-line ]; then
+      printf '%s\n' 'soft=1000' 'hard=2000' > "$HOME_DIR/config/worker-context-cap"
+    fi
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "$label spawn should succeed: $out"
+    state="$HOME_DIR/state"
+    settings="$WT_DIR/.claude/settings.local.json"
+    assert_present "$settings" "$label spawn did not write hook settings"
+    jq -e '.hooks | keys | sort == ["SessionEnd","Stop","StopFailure","UserPromptSubmit"]' "$settings" >/dev/null \
+      || fail "$label spawn wrote hooks main does not: $(jq -c '.hooks | keys' "$settings")"
+    jq -e '.hooks | has("PreToolUse") | not' "$settings" >/dev/null \
+      || fail "$label spawn wired a PreToolUse entry that main leaves out"
+
+    transcript="$CASE_DIR/transcript.jsonl"
+    jq -nc '{message:{usage:{input_tokens:900000,cache_read_input_tokens:0,cache_creation_input_tokens:0}}}' > "$transcript"
+    payload=$(jq -nc --arg t "$transcript" '{session_id:"s1",stop_hook_active:false,transcript_path:$t}')
+    rm -f "$state/$id.turn-ended"
+    out=$(run_claude_hook_with_payload "$settings" Stop "$payload") || fail "$label Stop hook failed"
+    [ -z "$out" ] || fail "$label Stop must be the plain idle command, got '$out'"
+    assert_absent "$state/$id.context-cap.json" "$label spawn ran the context cap"
+    [ -f "$state/$id.turn-ended" ] || fail "$label plain Stop no longer touches the notification marker"
+    out=$(classify claude "$id" "$state")
+    [ "$out" = "idle claude-hook" ] || fail "$label plain Stop must classify idle, got '$out'"
+  done
+  pass "a claude spawn without the enable line wires main's hooks: the plain Stop idle command and no PreToolUse entry"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -1390,6 +1423,7 @@ test_opencode_plugin_v2_applies_events_in_emission_order
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_claude_worker_context_cap_wiring
+test_claude_worker_context_cap_off_unless_enabled
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring

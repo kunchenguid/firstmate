@@ -2,18 +2,27 @@
 # fm-worker-context-cap.sh - Claude hooks that cap a ship or scout worker's
 # context size.
 #
-# bin/fm-spawn.sh wires two modes into the worker's .claude/settings.local.json:
+# The cap is opt-in: it is off unless config/worker-context-cap exists and has
+# an explicit enabled=true line. A home without that line keeps main's hooks -
+# the plain Stop idle command and no PreToolUse entry. docs/configuration.md
+# "Worker context cap" owns the config file and the relaunch handoff.
+#
+# bin/fm-spawn.sh wires two modes into the worker's .claude/settings.local.json
+# after this script confirms the cap is enabled:
 #   fm-worker-context-cap.sh stop    --id <id> --state <dir> --data <dir> --config <dir>
 #   fm-worker-context-cap.sh pretool --id <id> --state <dir> --data <dir> --config <dir>
-# Both read the hook payload on stdin. docs/configuration.md "Worker context
-# cap" owns the config file and the relaunch handoff. This header owns the
-# transcript read, the state file, the allow list, and the messages.
+# Both read the hook payload on stdin. This header owns the transcript read,
+# the state file, the allow list, and the messages.
 #
-# Limits come from config/worker-context-cap: soft=<n> (default 200000),
-# hard=<n> (default 300000), enabled=false. Blank lines and lines starting with
-# # are ignored. An unusable value keeps its default. A count above 100000000
-# is unusable, so the shell comparison stays inside integer range. A soft limit
-# at or above the hard limit makes both keep their defaults.
+# Limits come from config/worker-context-cap: soft=<n> (default 200000) and
+# hard=<n> (default 300000). Blank lines and lines starting with # are ignored.
+# An unusable value keeps its default. A count above 100000000 is unusable, so
+# the shell comparison stays inside integer range. A soft limit at or above the
+# hard limit makes both keep their defaults.
+#
+# ENABLED CHECK. `fm-worker-context-cap.sh enabled --config <dir>` exits 0 when
+# the cap is enabled and 1 when it is off. bin/fm-spawn.sh reads the enable
+# line through this mode, so the wiring and the hooks share one parser.
 #
 # Context size is the same sum the stow guard and warm-cache compaction use:
 # input + cache_read + cache_creation on the newest usage object in the last
@@ -41,7 +50,9 @@
 #
 # FAIL OPEN. A missing jq, an unreadable payload or transcript, an unusable
 # argument, an unwritable state file, or any other hook error exits 0 and prints
-# nothing, so a worker is never stuck on this hook. The off switch does the same.
+# nothing, so a worker is never stuck on this hook. With no enable line the
+# hooks exit 0 the same way, and the enabled check reports off for an unreadable
+# invocation rather than turning the cap on.
 set -u
 set -o pipefail
 
@@ -50,49 +61,46 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   cat <<'EOF'
 usage: fm-worker-context-cap.sh (stop|pretool) --id <id> --state <dir> --data <dir> --config <dir>
+       fm-worker-context-cap.sh enabled --config <dir>
 
 Claude Stop and PreToolUse hook for a ship or scout worker. Reads the hook
-payload on stdin. See the script header and docs/configuration.md "Worker
-context cap".
+payload on stdin. `enabled` exits 0 when the cap is enabled and 1 when it is
+off. See the script header and docs/configuration.md "Worker context cap".
 EOF
 }
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  stop|pretool) MODE=$1; shift ;;
+  stop|pretool|enabled) MODE=$1; shift ;;
   *) usage >&2; exit 2 ;;
 esac
 
 ID='' STATE='' DATA='' CONFIG=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --id) [ "$#" -ge 2 ] || exit 0; ID=$2; shift 2 ;;
-    --state) [ "$#" -ge 2 ] || exit 0; STATE=$2; shift 2 ;;
-    --data) [ "$#" -ge 2 ] || exit 0; DATA=$2; shift 2 ;;
-    --config) [ "$#" -ge 2 ] || exit 0; CONFIG=$2; shift 2 ;;
-    *) exit 0 ;;
+    --id) [ "$#" -ge 2 ] || break; ID=$2; shift 2 ;;
+    --state) [ "$#" -ge 2 ] || break; STATE=$2; shift 2 ;;
+    --data) [ "$#" -ge 2 ] || break; DATA=$2; shift 2 ;;
+    --config) [ "$#" -ge 2 ] || break; CONFIG=$2; shift 2 ;;
+    *) break ;;
   esac
 done
-[ -n "$ID" ] && [ -n "$STATE" ] && [ -n "$DATA" ] && [ -n "$CONFIG" ] || exit 0
-
-if [ -t 0 ]; then
-  usage
-  exit 0
+# A malformed argument list is a hook error: silent for the hooks, and off for
+# the enabled query so an unreadable invocation never turns the cap on.
+if [ "$#" -gt 0 ]; then
+  if [ "$MODE" = enabled ]; then exit 1; else exit 0; fi
 fi
-command -v jq >/dev/null 2>&1 || exit 0
-payload=$(cat || true)
-[ -n "$payload" ] || exit 0
-jq -e 'type == "object"' >/dev/null 2>&1 <<<"$payload" || exit 0
-
-# Cursor loads the project's Claude settings too and is out of scope.
-cursor=$(jq -r '.cursor_version // .cursorVersion // empty' <<<"$payload" 2>/dev/null || true)
-[ -z "$cursor" ] || exit 0
+if [ "$MODE" = enabled ]; then
+  [ -n "$CONFIG" ] || exit 1
+else
+  [ -n "$ID" ] && [ -n "$STATE" ] && [ -n "$DATA" ] && [ -n "$CONFIG" ] || exit 0
+fi
 
 SOFT_DEFAULT=200000
 HARD_DEFAULT=300000
 soft=$SOFT_DEFAULT
 hard=$HARD_DEFAULT
-enabled=true
+enabled=false
 config_file="$CONFIG/worker-context-cap"
 if [ -f "$config_file" ]; then
   line='' key='' value=''
@@ -104,7 +112,7 @@ if [ -f "$config_file" ]; then
     value=${line#*=}
     case "$key" in
       enabled)
-        [ "$value" != false ] || enabled=false
+        if [ "$value" = true ]; then enabled=true; else enabled=false; fi
         continue
         ;;
       soft|hard) ;;
@@ -122,11 +130,28 @@ if [ -f "$config_file" ]; then
     esac
   done < "$config_file"
 fi
+if [ "$MODE" = enabled ]; then
+  [ "$enabled" = true ] || exit 1
+  exit 0
+fi
 [ "$enabled" = true ] || exit 0
 if [ "$soft" -ge "$hard" ]; then
   soft=$SOFT_DEFAULT
   hard=$HARD_DEFAULT
 fi
+
+if [ -t 0 ]; then
+  usage
+  exit 0
+fi
+command -v jq >/dev/null 2>&1 || exit 0
+payload=$(cat || true)
+[ -n "$payload" ] || exit 0
+jq -e 'type == "object"' >/dev/null 2>&1 <<<"$payload" || exit 0
+
+# Cursor loads the project's Claude settings too and is out of scope.
+cursor=$(jq -r '.cursor_version // .cursorVersion // empty' <<<"$payload" 2>/dev/null || true)
+[ -z "$cursor" ] || exit 0
 
 sid=$(jq -r '.session_id // .sessionId // empty' <<<"$payload" 2>/dev/null || true)
 [ -n "$sid" ] || sid=session

@@ -8,7 +8,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. A ship or scout `Stop` hook also runs the worker context cap and records busy when the cap blocks the stop (`../../../../../docs/configuration.md#worker-context-cap-configworker-context-cap`). |
+| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. When `config/worker-context-cap` enables the cap, a ship or scout `Stop` hook also runs it and records busy when the cap blocks the stop (`../../../../../docs/configuration.md#worker-context-cap-configworker-context-cap`). |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
