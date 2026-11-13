@@ -871,8 +871,8 @@ PY
 
 
 test_orca_codex_trust_uses_selected_store() {
-  local choice dir home id fb out staged expected inherited wt
-  for choice in source source-over-ambient source-home source-unset; do
+  local choice dir home id fb out staged expected inherited wt harness
+  for choice in source source-over-ambient source-home source-unset raw; do
     id="orca-codex-$choice"
     dir="$TMP_ROOT/$id"
     home="$dir/home"
@@ -896,6 +896,11 @@ test_orca_codex_trust_uses_selected_store() {
         ;;
       *) printf 'CODEX_HOME=%s\n' "$expected" > "$dir/source-codex-record" ;;
     esac
+    harness=codex
+    if [ "$choice" = raw ]; then
+      expected="$dir/other/store"
+      harness="CODEX_HOME=$expected codex --no-daemon"
+    fi
     fm_git_init_commit "$dir/project"
     fb=$(make_orca_fakebin "$dir")
     cat > "$fb/tmux" <<'SH'
@@ -916,7 +921,7 @@ SH
       if [ "$choice" = source ]; then unset CODEX_HOME; else export CODEX_HOME="$inherited"; fi
       FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$dir/user-home" FM_SPAWN_NO_GUARD=1 \
         FM_TEST_ORCA_DIR="$dir" FM_TEST_ORCA_LOG="$dir/terminal.log" FM_TEST_ORCA_CONSUME=1 \
-        PATH="$fb:$PATH" "$SPAWN" "$id" "$dir/project" --scout --harness codex --backend orca 2>&1
+        PATH="$fb:$PATH" "$SPAWN" "$id" "$dir/project" --scout --harness "$harness" --backend orca 2>&1
     ) || fail "Codex spawn with $choice failed: $out"
     wt=$(sed -n 's/^worktree=//p' "$home/state/$id.meta")
     python3 - "$expected/config.toml" "$wt" <<'PYTEST' || fail "$choice did not register trust in the selected Codex store"
@@ -925,6 +930,7 @@ with open(sys.argv[1], 'rb') as handle:
     assert tomllib.load(handle)['projects'][sys.argv[2]]['trust_level'] == 'trusted'
 PYTEST
     assert_absent "$inherited" "$choice changed the supervisor's Codex store"
+    [ "$choice" != raw ] || assert_absent "$dir/scoped codex's home" "$choice changed the overridden source store"
     [ "$choice" = source-unset ] || assert_absent "$dir/user-home/.codex" "$choice changed the supervisor's default Codex store"
     staged=$(sed -n "s/^[^']*'\([^']*\/launch\.[^'\/]*\.sh\)'.*$/\1/p" "$dir/terminal.log" | tail -1)
     [ -f "$staged.copy" ] || fail "$choice did not deliver the staged launch"
@@ -933,7 +939,7 @@ PYTEST
       /bin/sh "$staged") || fail "$choice emitted launch failed"
     [ "$out" = "$expected" ] || fail "$choice worker did not use the registered Codex store"
   done
-  pass "Orca Codex registration and launch honor the source store over the supervisor and pane"
+  pass "Orca Codex registration and launch honor raw and source stores over the supervisor and pane"
 }
 
 test_orca_codex_trust_uses_selected_store
