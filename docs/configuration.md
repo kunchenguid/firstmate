@@ -3498,6 +3498,8 @@ The two read files use different parsing rules:
 
 Runtime tuning via environment variables (defaults shown):
 
+The [SSH transport header](../bin/fm-on.sh) owns the defaults and accepted values for `FM_SSH_CONNECT_TIMEOUT`, `FM_SSH_ALIVE_INTERVAL`, and `FM_SSH_ALIVE_COUNT_MAX`.
+
 Pi worker model-stream observation is optional.
 Set `FM_STREAM_SILENT_MAX_SECS=300` before launching workers and their watcher to inspect a foreground request that stops producing substantive content for five minutes.
 It must be present in the environment that launches both the worker and its watcher: a value only the watcher sees, such as one added only to `config/watch.env`, instruments no worker, so a worker spawned without it records no stream evidence and keeps the general busy bound.
