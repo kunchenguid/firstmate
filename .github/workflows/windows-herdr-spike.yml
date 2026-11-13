@@ -78,6 +78,10 @@ jobs:
       - name: Measure real Windows primitives and custody proofs
         id: measure
         run: |
+          # The commands sent to Herdr are literal PowerShell snippets; their
+          # $env: variables and quoted apostrophes are intentionally not Bash
+          # expansions.
+          # shellcheck disable=SC1003,SC2016
           set -uo pipefail
 
           results="$RUNNER_TEMP/windows-herdr-measurement.md"

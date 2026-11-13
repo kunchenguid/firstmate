@@ -2347,7 +2347,6 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with its exact install or upgrade command, or with manual instructions.
 It installs missing automatically supported tools only after you say go; for an installed but outdated tool, run the printed upgrade command after consent, while manual-only tools remain for you to install from the printed instructions.
-
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
 
 **Universal requirements**
@@ -2355,21 +2354,20 @@ Required tools come in two parts: a universal toolchain every home needs regardl
 Every home requires:
 
 - node and git.
-- gh, with GitHub authentication through `gh auth login`.
 - no-mistakes v1.46.0 or newer.
-- Compatible gh-axi.
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
 
+Provider-specific requirements are defined in the provider delta below; local-only homes need neither forge delta.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-
-In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+Across these requirements, no-mistakes runs the validation pipeline, browser and provider tools cover their respective operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 
 **Backend requirements**
 
+In the applicable backend delta, chrome-devtools-axi covers browser operations, lavish-axi covers rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 `fm_backend_required_tools` in `bin/fm-backend.sh` owns the backend additions:
 
@@ -2388,6 +2386,13 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 The JSON-emitting adapters (`herdr`, `zellij`, `cmux`, `paseo`, `rex`, `tern`) need `jq` because their spawn and liveness paths parse backend JSON.
 Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `paseo`, `rex`, `t3code`, `tern`) uses `treehouse` for worktrees.
 
+The provider delta is required only for registered origins discovered under `projects/`.
+GitHub projects add `gh`, GitHub authentication, and compatible `gh-axi`.
+GitLab projects add `glab` and GitLab authentication.
+Projects with `forge=gerrit` add `gerrit-axi` and `jq`.
+Projects with `forge=forgejo` add `tea` and a host login configured with `tea login add`.
+Projects with `forge=external` add no forge CLI.
+Local-only homes need neither forge delta.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI and the Rex server bundle's `rex`.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 
@@ -2408,12 +2413,18 @@ An absent required tool with an automated install path reports `MISSING:` with i
 - An absent `treehouse` reports `MISSING:` with its install command, while an installed build without `treehouse get --lease` support reports `OUTDATED:` with the `treehouse update` upgrade.
 - An absent `no-mistakes` reports `MISSING:` with its install command, while a version below 1.46.0 or an unparseable version reports `OUTDATED:` with the `no-mistakes update` upgrade.
 - An absent `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)` and a below-floor or feature-incompatible one reports `OUTDATED:` with its required version and any missing feature-probe capability, while retaining that same `npm install -g tasks-axi` upgrade; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
-- An absent `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)` and an outdated one reports `OUTDATED:` with its `gh-axi update` upgrade.
+- An absent `gh-axi` for a registered GitHub project reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)` and an outdated one reports `OUTDATED:` with its `gh-axi update` upgrade.
+- An absent `tea` for a registered `forge=forgejo` project reports `MISSING: tea` with the platform-specific install command.
 - An absent or board-incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with the 0.1.77 compatibility floor, install command, and explicit text fallback; compatible versions below 0.1.80 retain legacy board replies and report an upgrade recommendation for synchronous acceptance, while [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns diagnostic handling.
 - An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)` and an incompatible one reports `OUTDATED:` with its `quota-axi update` upgrade; firstmate cannot resolve a profile array without a compatible binary.
+- For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
+- For a project with `forge=gerrit`, an absent `gerrit-axi` or `jq` reports `MISSING` with its install command; Gerrit credentials are not probed by bootstrap.
+- For a project with `forge=forgejo`, bootstrap checks the registered `tea` requirement but does not probe its host login.
+- An unsupported registered origin reports `FORGE_UNSUPPORTED` and is skipped by forge-dependent refreshes.
 
 **Checkout diagnostics**
 
+[`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns the response and compatibility checks before visual or forge-dependent use.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
@@ -2422,7 +2433,6 @@ With the opt-in [Treehouse pool report](#treehouse-pool-report-configtreehouse-p
 **Project refresh at startup**
 
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
-
 - It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 - Normal completed runs keep local-only and no-origin skips silent.
 - If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
@@ -2455,13 +2465,17 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 
 ## Forge selection (data/projects.md forge= token)
 
-A project with no `forge=` token is served by the GitHub tooling, `gh` and `gh-axi`, exactly as before the token existed, and the token changes nothing for existing entries.
+A project with no `forge=` token is classified from its origin against the configured GitHub and GitLab host lists.
+Recognized GitHub origins use `gh` and `gh-axi`, recognized GitLab origins use `glab`, and an origin outside those lists reports `FORGE_UNSUPPORTED` until its host is configured or an explicit supported forge binding is added.
+Classification uses Git's effective `origin` URL, so `insteadOf` rewrites are included before host policy is applied.
+SSH remotes also use the effective Git SSH command and a safe projection of supported OpenSSH configuration to resolve aliases; unsupported custom executables, destination-affecting directives, or unresolved includes fail closed as `FORGE_UNSUPPORTED` instead of falling back to the raw host.
+An explicit `forge=` binding is resolved before origin classification only for the canonical registered checkout, with filesystem identity preserving bindings for registered symlinked clones and rejecting unrelated clones with the same basename.
+Fleet refresh skips unknown or unresolved origins without fetching them.
 A remote-backed project on a Forgejo or Gitea server is registered with `forge=forgejo`, one value of the same closed `forge=` binding that Gerrit uses; `bin/fm-project-mode.sh`'s header owns its grammar, values, and refusals, and `bin/fm-project-mode.sh --forge <name>` reads it back.
 Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
-A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
-A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
+Provider-specific CLI and authentication requirements are owned by the [Toolchain](#toolchain) section above.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
@@ -3537,6 +3551,8 @@ FM_SESSION_START_ENDPOINT_TIMEOUT=10   # seconds bounding each per-task endpoint
 FM_BACKLOG_ROW_TIMEOUT_SECS=10   # seconds bounding each backlog row read (bin/fm-backlog-transition-lib.sh) and the tasks-axi replay of each captain-hold Done-archive row (bin/fm-captain-hold.sh, which stops with 124 on a replay timeout); the archive scan itself is not bounded; nonpositive or invalid values fall back to 10; the first backlog read bound hit latches the sweep so later reads return immediately, each still naming its own item
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
+FM_GITHUB_HOSTS=github.com   # comma-separated GitHub/GitHub Enterprise hostnames recognized for registered-project forge detection
+FM_GITLAB_HOSTS=gitlab.com   # comma-separated GitLab hostnames recognized for registered-project forge detection
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks, including the lock waits the worker makes before them; hitting it prints an actionable NETWORK_CHECKS line, and a lock a live process still holds at the deadline ends the worker with a failed-rerun record (publication and delivery are bounded by FM_SESSION_START_TIMEOUT the same way)
 FM_SECONDMATE_CONVERGENCE_TIMEOUT=75   # shared per-mate deadline in seconds for remote startup tracked-file sync and inheritance push; bin/fm-bootstrap.sh owns its scope and timeout handling
 FM_REMOTE_INHERIT_PUSH_JOBS=4   # inherited items one remote inheritance push sends at a time, 1 for strictly one after another; capped at 16 (bin/fm-remote-inherit-push.sh)

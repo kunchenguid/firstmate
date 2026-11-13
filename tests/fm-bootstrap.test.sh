@@ -38,8 +38,10 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 # fm_backend_name and flip a default-backend case onto a non-tmux backend. Unset
 # them once so the suite resolves the tmux reference backend unless a case says
 # otherwise - the same hermeticity discipline as pinning PATH via BASE_PATH.
-unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH PASEO_AGENT_ID __CFBundleIdentifier \
-  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
+unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
+  PASEO_AGENT_ID __CFBundleIdentifier \
+  CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID \
+  FM_BACKEND FM_BACKEND_CONFIG_DIR 2>/dev/null || true
 
 # A case that simulates a tool as absent removes it from the fake bin directory,
 # which is not enough on its own: bootstrap keeps searching the fallback
@@ -200,6 +202,21 @@ add_no_origin_projects() {
   done
 }
 
+snapshot_clone_state() {
+  local project=$1 output=$2 head
+  {
+    if head=$(git -C "$project" symbolic-ref -q HEAD 2>/dev/null); then
+      printf 'HEAD=%s\n' "$head"
+    else
+      printf 'HEAD=%s\n' "$(git -C "$project" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    fi
+    printf '%s\n' REFS
+    git -C "$project" for-each-ref --format='%(refname) %(objectname)'
+    printf '%s\n' WORKTREE
+    git -C "$project" status --porcelain --untracked-files=all
+  } > "$output"
+}
+
 run_bootstrap_timeout_case() {
   local home=$1 fake_root=$2 fakebin=$3 override started_marker git_record wait_for_marker
   override=__unset__
@@ -220,14 +237,19 @@ run_bootstrap_timeout_case() {
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     git() {
       local tries
-      if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
+      if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] \
+        && [ "${1:-}" = -C ] && [[ "${2:-}" == "${FM_HOME:-}/projects/"* ]] \
+        && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
         tries=0
         while [ "$tries" -lt 5 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; do
           command sleep 0.01
           tries=$((tries + 1))
         done
       fi
-      if [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; then
+      if [ "${1:-}" = -C ] && [[ "${2:-}" == "${FM_HOME:-}/projects/"* ]] \
+        && [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] \
+        && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] \
+        && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; then
         printf '%s\n' "$*" >> "$FM_FAKE_GIT_SYNC_STARTED_RECORD"
       fi
       command git "$@"
@@ -515,8 +537,8 @@ test_bootstrap_reporting() {
     esac
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.2.6^1^manual^empty^^
-absent treehouse reports a missing tool^absent^0.2.6^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires --lease support; upgrade: treehouse update)^NEEDS_GH_AUTH
+absent treehouse reports a missing tool^absent^0.2.6^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)
+treehouse without --lease reports an upgrade^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires --lease support; upgrade: treehouse update)
 compatible tasks-axi is silent by default^1^0.2.6^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi reports an upgrade by default^1^0.1.0^1^-^exact^OUTDATED: tasks-axi (installed: 0.1.0; requires 0.2.6; upgrade: npm install -g tasks-axi)^
@@ -608,8 +630,10 @@ test_gh_axi_min_version() {
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/gh-axi-$n"
-    mkdir -p "$case_dir/home/config"
+    mkdir -p "$case_dir/home/config" "$case_dir/home/projects/github"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    git -C "$case_dir/home/projects/github" init -q
+    git -C "$case_dir/home/projects/github" remote add origin https://github.com/example/project.git
     fakebin=$(make_fake_toolchain "$case_dir")
     base=$BASE_PATH
     if [ "$version" = absent ]; then
@@ -936,6 +960,972 @@ test_herdr_install_requires_manual_action() {
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
 }
 
+test_forge_provider_cli_policy_and_auth_host() {
+  local case_dir fakebin out project calls
+
+  case_dir="$TMP_ROOT/forge-github-enterprise"
+  project="$case_dir/home/projects/enterprise"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.enterprise.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITHUB_HOSTS=github.com,github.enterprise.example FM_FAKE_GH_CALLS="$calls" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NEEDS_GH_AUTH: github.enterprise.example" ] \
+    || fail "GitHub Enterprise auth must preserve its host, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname github.enterprise.example" ] \
+    || fail "GitHub Enterprise auth must be scoped to its host, got: $(cat "$calls")"
+
+  case_dir="$TMP_ROOT/forge-gitlab-stale-gh-axi"
+  project="$case_dir/home/projects/gitlab"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://gitlab.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf '%s\n' 0.0.1
+SH
+  chmod +x "$fakebin/gh-axi"
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "GitLab-only homes must ignore stale gh-axi, got: $out"
+
+  case_dir="$TMP_ROOT/forge-local-stale-gh-axi"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --version ] && printf '%s\n' 0.0.1
+SH
+  chmod +x "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "local/no-project homes must ignore stale gh-axi, got: $out"
+
+  case_dir="$TMP_ROOT/forge-ssh-github-config"
+  project="$case_dir/home/projects/github-ssh"
+mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+printf '%s\n' 'Host github.com' '  HostName github.com' > "$case_dir/home/.ssh/config"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] && [ "${4:-}" = github.com ] && exit 0
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
+    || fail "GitHub SSH origin must authenticate against canonical host, got: $(cat "$calls")"
+  [ -z "$out" ] || fail "recognized GitHub SSH host must keep canonical auth host, got: $out"
+
+  case_dir="$TMP_ROOT/forge-space-project-id"
+  project="$case_dir/home/projects/project with spaces"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(wc -l < "$calls" | tr -d ' ')" = 1 ] \
+    || fail "a space-containing project ID must produce one GitHub auth check, got: $(cat "$calls")"
+  [ "$out" = "NEEDS_GH_AUTH: github.com" ] \
+    || fail "space-containing project IDs must retain one GitHub auth diagnostic, got: $out"
+
+  mkdir -p "$case_dir/home/projects/github-two"
+  git -C "$case_dir/home/projects/github-two" init -q
+  git -C "$case_dir/home/projects/github-two" remote add origin https://github.com/example/other.git
+  : > "$calls"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(wc -l < "$calls" | tr -d ' ')" = 1 ] \
+    || fail "same-host auth checks must be deduplicated, got: $(cat "$calls")"
+  [ "$out" = "NEEDS_GH_AUTH: github.com" ] \
+    || fail "same-host GitHub projects must retain one auth diagnostic, got: $out"
+  pass "bootstrap applies provider-specific CLI and host-scoped auth policy"
+}
+
+test_forge_ssh_effective_destination_controls_provider_and_auth() {
+  local case_dir fakebin out project calls
+
+  case_dir="$TMP_ROOT/forge-ssh-effective-destination"
+  project="$case_dir/home/projects/redirected"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Host github.com' '  HostName review.example' > "$case_dir/home/.ssh/config"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: redirected (host: review.example)" ] \
+    || fail "an SSH redirect away from GitHub must fail closed, got: $out"
+  [ ! -s "$calls" ] \
+    || fail "an unsupported effective SSH host must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap uses the effective SSH destination for provider and auth boundaries"
+}
+
+test_forge_custom_git_ssh_command_controls_provider_and_auth() {
+  local case_dir fakebin out project custom calls
+
+  case_dir="$TMP_ROOT/forge-custom-git-ssh-command"
+  project="$case_dir/home/projects/custom-ssh"
+  custom="$case_dir/custom.conf"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Host github.com' '  HostName review.example' > "$custom"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  git -C "$project" config core.sshCommand "ssh -F $custom"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: custom-ssh (host: review.example)" ] \
+    || fail "core.sshCommand must determine the effective provider host, got: $out"
+  [ ! -s "$calls" ] \
+    || fail "core.sshCommand resolving to an unsupported host must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap honors repository core.sshCommand for forge classification"
+}
+
+test_forge_explicit_ssh_config_ignores_default_system_config() {
+local case_dir custom result system_seen
+case_dir="$TMP_ROOT/forge-explicit-ssh-config-boundary"
+custom="$case_dir/custom.conf"
+system_seen="$case_dir/system-config-read"
+mkdir -p "$case_dir"
+printf '%s\n' 'Host github.com' ' HostName custom.example' > "$custom"
+result=$(HOME="$case_dir/home" bash -c '
+. "$1"
+custom=$2
+system_seen=$3
+fm_forge_effective_ssh_command() {
+printf "ssh -F %s\\n" "$custom"
+}
+fm_forge_safe_ssh_config_file() {
+case "$1" in
+"$custom")
+printf "%s\\n" "Host github.com" " HostName custom.example"
+;;
+/etc/ssh/ssh_config)
+: > "$system_seen"
+printf "%s\\n" "Host github.com" " HostName system.example"
+;;
+esac
+}
+fm_forge_resolve_host git@github.com:team/project.git 1 "$PWD"
+' _ "$ROOT/bin/fm-forge-lib.sh" "$custom" "$system_seen")
+[ "$result" = custom.example ] \
+|| fail "an explicit SSH config must retain its own HostName mapping, got: $result"
+[ ! -e "$system_seen" ] \
+|| fail "an explicit SSH config must not read the default system SSH config"
+pass "explicit SSH configs exclude default system settings"
+}
+test_forge_custom_ssh_wrapper_fails_closed() {
+  local case_dir fakebin out project wrapper marker calls
+
+  case_dir="$TMP_ROOT/forge-custom-ssh-wrapper"
+  project="$case_dir/home/projects/wrapped-ssh"
+  wrapper="$case_dir/custom-bin/ssh"
+  marker="$case_dir/wrapper-ran"
+  mkdir -p "$project" "$case_dir/home/config" "${wrapper%/*}"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '#!/usr/bin/env bash' "printf wrapper-ran > \"\$WRAPPER_MARKER\"" > "$wrapper"
+  chmod +x "$wrapper"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  git -C "$project" config core.sshCommand "$wrapper"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" WRAPPER_MARKER="$marker" FM_FAKE_GH_CALLS="$calls" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: wrapped-ssh (host: unresolved)" ] \
+    || fail "an unverified SSH wrapper must fail closed, got: $out"
+  [ ! -e "$marker" ] || fail "provider detection executed an unverified SSH wrapper"
+  [ ! -s "$calls" ] || fail "an unverified SSH wrapper must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap rejects unverified custom SSH executables"
+}
+
+test_forge_path_ssh_wrapper_fails_closed() {
+  local case_dir fakebin out project wrapper marker calls
+
+  case_dir="$TMP_ROOT/forge-path-ssh-wrapper"
+  project="$case_dir/home/projects/path-wrapped-ssh"
+  wrapper="$case_dir/custom-bin/ssh"
+  marker="$case_dir/path-wrapper-ran"
+  mkdir -p "$project" "$case_dir/home/config" "${wrapper%/*}"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '#!/usr/bin/env bash' "printf wrapper-ran > \"\$PATH_WRAPPER_MARKER\"" \
+    > "$wrapper"
+  chmod +x "$wrapper"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:${wrapper%/*}:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" PATH_WRAPPER_MARKER="$marker" FM_FAKE_GH_CALLS="$calls" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: path-wrapped-ssh (host: unresolved)" ] \
+    || fail "an unverified PATH SSH wrapper must fail closed, got: $out"
+  [ ! -e "$marker" ] || fail "provider detection executed an unverified PATH SSH wrapper"
+  [ ! -s "$calls" ] || fail "an unverified PATH SSH wrapper must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap rejects unverified PATH SSH executables"
+}
+
+test_forge_effective_remote_rewrites() {
+  local case_dir fakebin out project github_calls gitlab_calls
+
+  case_dir="$TMP_ROOT/forge-effective-remote"
+  github_calls="$case_dir/github.calls"
+  gitlab_calls="$case_dir/gitlab.calls"
+  mkdir -p "$case_dir/home/projects/github-alias" "$case_dir/home/projects/gitlab-alias" \
+    "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  project="$case_dir/home/projects/github-alias"
+  git -C "$project" init -q
+  git -C "$project" remote add origin ssh://github-alias.example/team/project.git
+  git -C "$project" config url."https://github.com/".insteadOf \
+    ssh://github-alias.example/
+  project="$case_dir/home/projects/gitlab-alias"
+  git -C "$project" init -q
+  git -C "$project" remote add origin ssh://gitlab-alias.example/team/project.git
+  git -C "$project" config url."https://gitlab.example/".insteadOf \
+    ssh://gitlab-alias.example/
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GLAB_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_FAKE_GH_CALLS="$github_calls" \
+    FM_FAKE_GLAB_CALLS="$gitlab_calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "Git URL aliases rewritten to supported providers must bootstrap cleanly, got: $out"
+  [ "$(cat "$github_calls")" = "auth status --hostname github.com" ] \
+    || fail "GitHub alias rewrite must authenticate against the effective host, got: $(cat "$github_calls")"
+  [ "$(cat "$gitlab_calls")" = "auth status --hostname gitlab.example" ] \
+    || fail "GitLab alias rewrite must authenticate against the effective host, got: $(cat "$gitlab_calls")"
+
+  case_dir="$TMP_ROOT/forge-effective-remote-unsupported"
+  project="$case_dir/home/projects/rewritten-away"
+  github_calls="$case_dir/github.calls"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/team/project.git
+  git -C "$project" config url."https://unsupported.example/".insteadOf \
+    https://github.com/
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$github_calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: rewritten-away (host: unsupported.example)" ] \
+    || fail "a GitHub URL rewritten to an unsupported host must fail closed, got: $out"
+  [ ! -s "$github_calls" ] \
+    || fail "an unsupported effective host must not invoke GitHub auth, got: $(cat "$github_calls")"
+  pass "bootstrap classifies Git remotes by their effective insteadOf destination"
+}
+
+test_forge_ssh_user_config_precedes_system_config() {
+  local case_dir result system_result
+
+  case_dir="$TMP_ROOT/forge-ssh-config-precedence"
+  mkdir -p "$case_dir/home/.ssh"
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
+    bash -c '
+      . "$1"
+      fm_forge_safe_ssh_config_file() {
+        case "$1" in
+          "$HOME/.ssh/config")
+            printf "%s\n" "Host conflicting-alias" "HostName user.example" "Host unrelated"
+            ;;
+          /etc/ssh/ssh_config)
+            printf "%s\n" "HostName system.example"
+            ;;
+        esac
+      }
+      fm_forge_resolve_host git@conflicting-alias:team/project.git 1
+    ' _ "$ROOT/bin/fm-forge-lib.sh")
+  system_result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
+    bash -c '
+. "$1"
+fm_forge_safe_ssh_config_file() {
+case "$1" in
+"$HOME/.ssh/config")
+printf "%s\n" "Host conflicting-alias" "HostName user.example" "Host unrelated"
+;;
+/etc/ssh/ssh_config)
+printf "%s\n" "HostName system.example"
+;;
+esac
+}
+fm_forge_resolve_host git@system-default:team/project.git 1
+' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = user.example ] \
+    || fail "user SSH HostName must win over the system value, got: $result"
+  [ "$system_result" = system.example ] \
+    || fail "a trailing user Host block must not suppress system global HostName, got: $system_result"
+  pass "forge SSH resolution preserves user-before-system precedence"
+}
+
+
+test_forge_provider_bootstrap_contracts() {
+  local case_dir fakebin out project project_two before after before_two after_two
+
+  case_dir="$TMP_ROOT/forge-unknown"
+  project="$case_dir/home/projects/mystery"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://code.example/team/project.git
+  project_two="$case_dir/home/projects/mystery-two"
+  mkdir -p "$project_two"
+  git -C "$project_two" init -q
+  git -C "$project_two" remote add origin https://other.example/team/project.git
+  before="$case_dir/unknown-before"
+  after="$case_dir/unknown-after"
+  before_two="$case_dir/unknown-two-before"
+  after_two="$case_dir/unknown-two-after"
+  snapshot_clone_state "$project" "$before"
+  snapshot_clone_state "$project_two" "$before_two"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  snapshot_clone_state "$project" "$after"
+  snapshot_clone_state "$project_two" "$after_two"
+  assert_contains "$out" "FORGE_UNSUPPORTED: mystery (host: code.example)" \
+    "the first unsupported project must retain its diagnostic"
+  assert_contains "$out" "FORGE_UNSUPPORTED: mystery-two (host: other.example)" \
+    "the second unsupported project must retain its diagnostic"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "unsupported projects must be reported once each, got: $out"
+  cmp -s "$before" "$after" || fail "bootstrap mutated an unsupported-origin clone"
+  cmp -s "$before_two" "$after_two" || fail "bootstrap mutated the second unsupported-origin clone"
+
+  case_dir="$TMP_ROOT/forge-malformed-binding"
+  project="$case_dir/home/projects/malformed"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- malformed [no-mistakes forge=gitub] - malformed binding (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: malformed (host: github.com)" ] \
+    || fail "malformed forge binding must fail closed instead of inferring GitHub, got: $out"
+
+  case_dir="$TMP_ROOT/forge-nested-directory"
+  project="$case_dir/home/projects/not-a-clone"
+  mkdir -p "$project/nested" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$case_dir/home" init -q
+  git -C "$case_dir/home" remote add origin https://github.com/example/parent.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "nested directories must not inherit parent forge requirements, got: $out"
+
+  case_dir="$TMP_ROOT/forge-https-ignores-ssh-config"
+  project="$case_dir/home/projects/github-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'hostname ssh.github.com'
+SH
+  chmod +x "$fakebin/ssh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "HTTPS origin must ignore SSH hostname rewriting, got: $out"
+
+  case_dir="$TMP_ROOT/forge-https-unknown-ignores-ssh-config"
+  project="$case_dir/home/projects/unknown-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://code.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'hostname github.com'
+SH
+  chmod +x "$fakebin/ssh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: unknown-project (host: code.example)" ] \
+    || fail "HTTPS unknown origin must not inherit SSH provider classification, got: $out"
+
+  case_dir="$TMP_ROOT/forge-scp-no-user"
+  project="$case_dir/home/projects/github-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "scp origin without a user must resolve as GitHub, got: $out"
+
+  case_dir="$TMP_ROOT/forge-local-origin"
+  project="$case_dir/home/projects/local-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin "file://$case_dir/local-upstream.git"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "file origin must remain local and bootstrap silently, got: $out"
+  git -C "$project" remote set-url origin subdir/repo.git
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "relative origin must remain local and bootstrap silently, got: $out"
+  git -C "$project" remote set-url origin 'C:/mirrors/upstream.git'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "Windows drive-letter origin must remain local and bootstrap silently, got: $out"
+  git -C "$project" remote set-url origin 'C:\mirrors\upstream.git'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "Windows backslash origin must remain local and bootstrap silently, got: $out"
+  git -C "$project" remote set-url origin "git+file://$case_dir/local-upstream.git"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "git+file origin must remain local and bootstrap silently, got: $out"
+
+  case_dir="$TMP_ROOT/forge-local-only-remote"
+  project="$case_dir/home/projects/local-project"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- local-project [local-only] - local work (added 2026-08-27)' > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "local-only projects must not require forge tooling or auth, got: $out"
+
+  case_dir="$TMP_ROOT/forge-upstream-only"
+  project="$case_dir/home/projects/upstream-only"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add upstream https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a non-origin remote must not create forge requirements, got: $out"
+
+  case_dir="$TMP_ROOT/forge-gitlab"
+  project="$case_dir/home/projects/gitlab-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://user@gitlab.example:8443/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: glab (install: brew install glab  # or the platform's package manager)" \
+    "GitLab remote with userinfo and port must require installable glab"
+  assert_contains "$out" "NEEDS_GLAB_AUTH: gitlab.example" \
+    "GitLab remote without glab must still surface the deferred auth diagnostic"
+
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "NEEDS_GLAB_AUTH: gitlab.example" ] \
+    || fail "GitLab auth diagnostic must retain the normalized host, got: $out"
+
+  case_dir="$TMP_ROOT/forge-network-only-mixed"
+  project="$case_dir/home/projects/unknown"
+  github_project="$case_dir/home/projects/github"
+  mkdir -p "$project" "$github_project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://code.example/team/project.git
+  git -C "$github_project" init -q
+  git -C "$github_project" remote add origin https://github.com/example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "FORGE_UNSUPPORTED: unknown (host: code.example)" \
+    "network-only bootstrap must fail closed for unknown origins"
+  assert_contains "$out" "NEEDS_GH_AUTH: github.com" \
+    "an unknown origin must not suppress GitHub auth remediation in a mixed home"
+
+  pass "bootstrap keeps origin-only local semantics and owns forge remediation"
+}
+
+test_forge_provider_explicit_gerrit_binding() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-gerrit-binding"
+  project="$case_dir/home/projects/gerrit-project"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- gerrit-project [no-mistakes forge=gerrit] - review project (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin ssh://review.example:29418/team/project
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  fm_fake_exit0 "$fakebin" jq
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: gerrit-axi (install: npm install -g gerrit-axi)" \
+    "explicit Gerrit binding must require gerrit-axi"
+  fm_fake_exit0 "$fakebin" gerrit-axi
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "explicit Gerrit binding must avoid GitHub auth and unsupported diagnostics, got: $out"
+  pass "bootstrap honors explicit Gerrit provider bindings"
+}
+
+test_forge_provider_no_origin_binding_and_refusal() {
+  local case_dir fakebin out project
+
+  case_dir="$TMP_ROOT/forge-gerrit-no-origin"
+  project="$case_dir/home/projects/gerrit-no-origin"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- gerrit-no-origin [no-mistakes forge=gerrit] - review project (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  fm_fake_exit0 "$fakebin" jq
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: gerrit-axi (install: npm install -g gerrit-axi)" \
+    "a no-origin Gerrit binding must still require gerrit-axi"
+  assert_not_contains "$out" "FORGE_UNSUPPORTED" \
+    "a no-origin Gerrit binding must not lose its provider identity"
+
+  case_dir="$TMP_ROOT/forge-local-only-no-origin"
+  project="$case_dir/home/projects/local-only-no-origin"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- local-only-no-origin [local-only forge=gerrit] - local work (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FLEET_SYNC: local-only-no-origin: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh local-only-no-origin for the refusal)" ] \
+    || fail "a no-origin local-only forge refusal must remain observable, got: $out"
+  pass "bootstrap preserves no-origin forge bindings and refusals"
+}
+
+test_forge_provider_explicit_legacy_bindings() {
+  local case_dir fakebin out forgejo external
+  case_dir="$TMP_ROOT/forge-legacy-bindings"
+  forgejo="$case_dir/home/projects/forgejo-project"
+  external="$case_dir/home/projects/external-project"
+  mkdir -p "$forgejo" "$external" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- forgejo-project [no-mistakes forge=forgejo] - review project (added 2026-09-15)' > "$case_dir/home/data/projects.md"
+  printf '%s\n' '- external-project [direct-PR forge=external] - review project (added 2026-09-15)' >> "$case_dir/home/data/projects.md"
+  git -C "$forgejo" init -q
+  git -C "$forgejo" remote add origin https://forge.example/team/project.git
+  git -C "$external" init -q
+  git -C "$external" remote add origin https://review.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING: tea (install: brew install tea  # or the platform's package manager)" ] \
+    || fail "explicit Forgejo binding must require tea, got: $out"
+  assert_not_contains "$out" "gh" \
+    "explicit Forgejo and external bindings must not require GitHub tooling or auth"
+  assert_not_contains "$out" "FORGE_UNSUPPORTED" \
+    "explicit Forgejo and external bindings must remain supported"
+  pass "bootstrap preserves explicit Forgejo and external bindings"
+}
+
+test_forge_provider_local_only_refusal_not_unsupported() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-local-only-refusal"
+  project="$case_dir/home/projects/local-project"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- local-project [local-only forge=gerrit] - local work (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://review.example/team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FLEET_SYNC: local-project: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh local-project for the refusal)" ] \
+    || fail "bootstrap must surface the local-only forge refusal, got: $out"
+  pass "bootstrap preserves local-only forge posture refusals"
+}
+
+test_forge_host_trailing_dot_is_canonicalized() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-trailing-dot"
+  project="$case_dir/home/projects/github-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://github.com./example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] \
+  && [ "${4:-}" = github.com ] && exit 0
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a trailing-dot GitHub host must use canonical auth policy, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
+    || fail "a trailing-dot GitHub host must authenticate against github.com, got: $(cat "$calls")"
+
+  : > "$calls"
+  git -C "$project" remote set-url origin https://github.com..../example/project.git
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: github-project (host: github.com...)" ] \
+    || fail "repeated trailing-dot GitHub host labels must fail closed, got: $out"
+  [ ! -s "$calls" ] || fail "malformed repeated trailing-dot host must not trigger GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap canonicalizes valid trailing-dot hosts and rejects malformed ones"
+}
+
+test_forge_configured_host_trailing_dot_is_canonicalized() {
+  local case_dir fakebin out project
+  case_dir="$TMP_ROOT/forge-configured-trailing-dot"
+  project="$case_dir/home/projects/gitlab-project"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$project" init -q
+  git -C "$project" remote add origin https://gitlab.example./team/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  calls="$case_dir/glab.calls"
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GLAB_CALLS:?}"
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] \
+  && [ "${4:-}" = gitlab.example ] && exit 0
+exit 1
+SH
+  chmod +x "$fakebin/glab"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_GITLAB_HOSTS=gitlab.example. FM_FAKE_GLAB_CALLS="$calls" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a configured trailing-dot GitLab host must use canonical auth policy, got: $out"
+  [ "$(cat "$calls")" = "auth status --hostname gitlab.example" ] \
+    || fail "a configured trailing-dot GitLab host must authenticate against gitlab.example, got: $(cat "$calls")"
+  pass "bootstrap canonicalizes configured trailing-dot forge hosts"
+}
+
+test_forge_host_resolver_rejects_invalid_resolution_flag() {
+  local result status
+  # Exercise the provider boundary directly; an invalid public argument must
+  # use its documented caller-error status instead of emitting a shell error.
+  set +e
+  result=$(. "$ROOT/bin/fm-forge-lib.sh"; fm_forge_resolve_host https://github.com invalid 2>/dev/null)
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || fail "invalid SSH-resolution flag must return caller-error status 2, got $status"
+  [ -z "$result" ] || fail "invalid SSH-resolution flag must not emit a host, got: $result"
+  pass "forge host resolver rejects invalid resolution flags"
+}
+
+test_forge_host_resolver_expands_safe_includes() {
+  local case_dir config_dir marker result status directive scope
+  case_dir="$TMP_ROOT/forge-ssh-include"
+  config_dir="$case_dir/home/.ssh"
+  marker="$case_dir/match-exec-ran"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/config" <<EOF
+Include "included hosts.conf"
+Match host github-work
+  HostName github.com
+EOF
+cat > "$config_dir/included hosts.conf" <<'EOF'
+  Host github-work
+  HostName=github.com
+  Host github-whitespace-work
+  HostName = github.com
+EOF
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
+  [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
+
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-whitespace-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github.com ] || fail "whitespace around SSH optional equals must resolve to its canonical host, got: $result"
+
+  cat > "$config_dir/config" <<EOF
+Match host github-work,exec "touch $marker"
+HostName github.com
+EOF
+  set +e
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] && [ -z "$result" ] || fail "Match exec must make SSH resolution fail closed"
+  [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
+
+  case_dir="$TMP_ROOT/forge-ssh-global-hostname"
+  config_dir="$case_dir/home/.ssh"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/config" <<'EOF'
+HostName github-global.example
+Host global-github-work
+EOF
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-global.example \
+    bash -c '. "$1"; fm_forge_resolve_host git@global-github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github-global.example ] || fail "global SSH HostName must resolve to its canonical host, got: $result"
+
+  case_dir="$TMP_ROOT/forge-ssh-match-hostname"
+  config_dir="$case_dir/home/.ssh"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/config" <<'EOF'
+Match host github-match-work
+  HostName github-match.example
+EOF
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-match.example \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-match-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github-match.example ] || fail "safe Match host HostName must resolve to its canonical host, got: $result"
+
+  case_dir="$TMP_ROOT/forge-ssh-tilde-include"
+  config_dir="$case_dir/home/.ssh"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/config" <<'EOF'
+Include ~/.ssh/hosts.conf
+EOF
+  cat > "$config_dir/hosts.conf" <<'EOF'
+Host gitlab-work
+  HostName gitlab.com
+EOF
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITLAB_HOSTS=gitlab.com \
+    bash -c '. "$1"; fm_forge_resolve_host git@gitlab-work:group/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = gitlab.com ] || fail "tilde SSH Include must resolve from HOME, got: $result"
+
+  case_dir="$TMP_ROOT/forge-ssh-host-star-include"
+  config_dir="$case_dir/home/.ssh"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/config" <<'EOF'
+Host *
+Include redirect.conf
+EOF
+  cat > "$config_dir/redirect.conf" <<'EOF'
+Host github-star-work
+  HostName github.com
+EOF
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-star-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = github.com ] || fail "Host * SSH Include must preserve a universally scoped alias, got: $result"
+
+  case_dir="$TMP_ROOT/forge-ssh-conditional-include"
+  config_dir="$case_dir/home/.ssh"
+  mkdir -p "$config_dir"
+  cat > "$config_dir/redirect.conf" <<'EOF'
+Host github.com
+  HostName review.example
+EOF
+  for scope in 'Host unrelated' 'Match host unrelated'; do
+    printf '%s\n' "$scope" 'Include redirect.conf' > "$config_dir/config"
+    set +e
+    result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
+      bash -c '. "$1"; fm_forge_resolve_host git@github.com:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] && [ -z "$result" ] \
+      || fail "an Include inside a conditional SSH block must fail closed: $scope"
+  done
+
+  case_dir="$TMP_ROOT/forge-ssh-destination-directives"
+  config_dir="$case_dir/home/.ssh"
+  mkdir -p "$config_dir"
+  for directive in 'ProxyCommand ssh review.example' 'CanonicalizeHostname yes' 'CanonicalDomains review.example'; do
+    printf '%s\n' 'Host github.com' "$directive" > "$config_dir/config"
+    set +e
+    result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
+      bash -c '. "$1"; fm_forge_resolve_host git@github.com:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] && [ -z "$result" ] \
+      || fail "unsupported SSH destination directive must fail closed: $directive"
+  done
+  pass "forge host resolver preserves SSH scope and destination boundaries"
+}
+
+test_forge_unsupported_ssh_include_fails_closed() {
+  local case_dir fakebin out project calls
+
+  case_dir="$TMP_ROOT/forge-ssh-unsupported-include"
+  project="$case_dir/home/projects/unsupported-include"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Include ~otheruser/.ssh/config' > "$case_dir/home/.ssh/config"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: unsupported-include (host: unresolved)" ] \
+    || fail "unsupported SSH Include syntax must fail closed, got: $out"
+  [ ! -s "$calls" ] || fail "unsupported SSH Include syntax must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap rejects unsupported SSH Include expansion"
+}
+
+test_forge_destination_affecting_ssh_config_fails_closed() {
+  local case_dir fakebin out project calls
+
+  case_dir="$TMP_ROOT/forge-ssh-proxy-command"
+  project="$case_dir/home/projects/proxy-command"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Host github.com' '  ProxyCommand ssh review.example' > "$case_dir/home/.ssh/config"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: proxy-command (host: unresolved)" ] \
+    || fail "ProxyCommand must make provider detection unresolved, got: $out"
+  [ ! -s "$calls" ] || fail "ProxyCommand must not invoke GitHub auth, got: $(cat "$calls")"
+
+  case_dir="$TMP_ROOT/forge-ssh-canonicalization"
+  project="$case_dir/home/projects/canonicalization"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Host github.com' '  CanonicalizeHostname yes' '  CanonicalDomains review.example' \
+    > "$case_dir/home/.ssh/config"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: canonicalization (host: unresolved)" ] \
+    || fail "hostname canonicalization must make provider detection unresolved, got: $out"
+  [ ! -s "$calls" ] || fail "hostname canonicalization must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap fails closed for destination-affecting SSH directives"
+}
+
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
@@ -1213,8 +2203,10 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 test_network_phase_partitions_the_run() {
   local case_dir fakebin all_out skip_out only_out combined
   case_dir="$TMP_ROOT/network-phase"
-  mkdir -p "$case_dir/home/config"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/projects/github-project"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  git -C "$case_dir/home/projects/github-project" init -q
+  git -C "$case_dir/home/projects/github-project" remote add origin https://github.com/example/project.git
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
@@ -1325,7 +2317,7 @@ test_network_phases_record_per_step_elapsed_times() {
     "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
 
   assert_present "$log" "the network phase recorded no elapsed times at all"
-  assert_timing_record "$log" phase gh-auth '' "the GitHub auth probe was not timed"
+  assert_timing_record "$log" phase forge-auth '' "the forge auth probe was not timed"
   assert_timing_record "$log" phase secondmate-liveness '' "the dead-secondmate relaunch sweep was not timed"
   assert_timing_record "$log" phase secondmate-sync '' "the secondmate convergence sweep was not timed"
   assert_timing_record "$log" phase handoff-delivery '' "the pending handoff sweep was not timed"
@@ -1559,7 +2551,7 @@ test_crew_dispatch_validation() {
       grep)
         printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)" ;;
     esac
-  done <<'ROWS'
+  done <<'DISPATCH_VALIDATION_ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
 codex Luna max effort is accepted^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
@@ -1622,7 +2614,7 @@ default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
 default profile floor without min_percent is flagged^{"default":[{"harness":"codex","floor":{"scope":"all_models"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
 default profile floor provider override is flagged^{"default":{"harness":"codex","floor":{"scope":"all_models","min_percent":50,"provider":"claude"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
-ROWS
+DISPATCH_VALIDATION_ROWS
 
   case_dir="$TMP_ROOT/dispatch-opt-in-gate"
   mkdir -p "$case_dir/home/config"
@@ -1926,6 +2918,18 @@ test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
+test_forge_provider_cli_policy_and_auth_host
+test_forge_ssh_effective_destination_controls_provider_and_auth
+test_forge_custom_git_ssh_command_controls_provider_and_auth
+test_forge_explicit_ssh_config_ignores_default_system_config
+test_forge_custom_ssh_wrapper_fails_closed
+test_forge_path_ssh_wrapper_fails_closed
+test_forge_effective_remote_rewrites
+test_forge_ssh_user_config_precedes_system_config
+test_forge_provider_explicit_gerrit_binding
+test_forge_provider_no_origin_binding_and_refusal
+test_forge_provider_explicit_legacy_bindings
+test_forge_provider_local_only_refusal_not_unsupported
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
@@ -1933,6 +2937,13 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
+test_forge_provider_bootstrap_contracts
+test_forge_host_trailing_dot_is_canonicalized
+test_forge_configured_host_trailing_dot_is_canonicalized
+test_forge_host_resolver_rejects_invalid_resolution_flag
+test_forge_host_resolver_expands_safe_includes
+test_forge_unsupported_ssh_include_fails_closed
+test_forge_destination_affecting_ssh_config_fails_closed
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux

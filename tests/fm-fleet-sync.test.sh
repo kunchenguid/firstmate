@@ -89,6 +89,30 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+assert_expected_provider() {
+  local home=$1 checkout=$2 expected=$3 actual
+  actual=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$home/data" \
+    bash -c '. "$1"; fm_forge_detect_provider "$2"' _ \
+    "$ROOT/bin/fm-forge-lib.sh" "$checkout")
+  [ "$actual" = "$expected" ] \
+    || fail "expected $checkout to classify as $expected before sync, got: $actual"
+}
+
+snapshot_clone_state() {
+  local project=$1 output=$2 head
+  {
+    if head=$(git -C "$project" symbolic-ref -q HEAD 2>/dev/null); then
+      printf 'HEAD=%s\n' "$head"
+    else
+      printf 'HEAD=%s\n' "$(git -C "$project" rev-parse -q --verify HEAD 2>/dev/null || true)"
+    fi
+    printf '%s\n' REFS
+    git -C "$project" for-each-ref --format='%(refname) %(objectname)'
+    printf '%s\n' WORKTREE
+    git -C "$project" status --porcelain --untracked-files=all
+  } > "$output"
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -393,6 +417,227 @@ test_no_origin_skipped() {
   assert_contains "$out" "theta: skipped: no origin remote" "no-origin clone is skipped as before"
   assert_not_contains "$out" "STUCK" "no-origin skip is not escalated to STUCK"
   pass "no-origin clone is skipped (benign), not flagged STUCK"
+}
+
+test_unknown_origin_is_skipped_even_when_invoked_directly() {
+  local home project out before after
+  home="$TMP_ROOT/unknown-origin"
+  mkdir -p "$home/projects"
+  project="$home/projects/unknown"
+  mkdir -p "$project"
+  git init -q "$project"
+  git -C "$project" remote add origin https://code.example/team/project.git
+  before="$home/unknown-before"
+  after="$home/unknown-after"
+  snapshot_clone_state "$project" "$before"
+
+  out=$(run_sync "$home")
+  snapshot_clone_state "$project" "$after"
+
+  [ -z "$out" ] || fail "direct fleet-sync must silently skip an unsupported origin, got: $out"
+  cmp -s "$before" "$after" || fail "direct fleet-sync mutated an unsupported-origin clone"
+  pass "direct fleet-sync fails closed for unsupported forge origins"
+}
+
+test_explicit_gerrit_binding_allows_sync() {
+  local home clone out remote_url
+  home=$(new_home)
+  clone=$(build_pair "$home" gerrit-project)
+  advance_origin "$home" gerrit-project C1
+  remote_url=$(git -C "$clone" remote get-url origin)
+  git -C "$clone" remote set-url origin ssh://review.example:29418/team/project
+  git -C "$clone" config url."$remote_url".insteadOf ssh://review.example:29418/team/project
+  mkdir -p "$home/data"
+  printf -- '- gerrit-project [no-mistakes forge=gerrit] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+  assert_expected_provider "$home" "$clone" gerrit
+  snapshot_clone_state "$clone" "$home/gerrit-before"
+
+  out=$(run_sync "$home" "$clone")
+  snapshot_clone_state "$clone" "$home/gerrit-after"
+
+  assert_contains "$out" "gerrit-project: synced" \
+    "an explicit Gerrit binding must allow the normal clone refresh path"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "an explicit Gerrit binding did not fast-forward the clone"
+  ! cmp -s "$home/gerrit-before" "$home/gerrit-after" \
+    || fail "an explicit Gerrit binding reported sync without changing clone state"
+  pass "direct fleet-sync honors an explicit Gerrit binding"
+}
+
+test_explicit_legacy_bindings_allow_sync() {
+  local home clone forge host remote_url origin_url
+  home=$(new_home)
+  mkdir -p "$home/data"
+  for forge in forgejo external; do
+    clone=$(build_pair "$home" "$forge-project")
+    advance_origin "$home" "$forge-project" C1
+    remote_url=$(git -C "$clone" remote get-url origin)
+    case "$forge" in
+      forgejo) host=forge.example ;;
+      external) host=review.example ;;
+    esac
+    origin_url="https://$host/$forge-project.git"
+    git -C "$clone" remote set-url origin "$origin_url"
+    git -C "$clone" config url."$remote_url".insteadOf "$origin_url"
+    printf -- '- %s-project [no-mistakes forge=%s] - review project (added 2026-09-15)\n' "$forge" "$forge" \
+      >> "$home/data/projects.md"
+    assert_expected_provider "$home" "$clone" "$forge"
+    snapshot_clone_state "$clone" "$home/$forge-before"
+  done
+
+  out=$(run_sync "$home")
+  for forge in forgejo external; do
+    snapshot_clone_state "$home/projects/$forge-project" "$home/$forge-after"
+  done
+  assert_contains "$out" "forgejo-project: synced" \
+    "an explicit Forgejo binding must allow clone refresh"
+  assert_contains "$out" "external-project: synced" \
+    "an explicit external binding must allow clone refresh"
+  [ "$(head_sha "$home/projects/forgejo-project")" = "$(git -C "$home/work-forgejo-project" rev-parse HEAD)" ] \
+    || fail "Forgejo binding did not fast-forward the unknown-origin clone"
+  [ "$(head_sha "$home/projects/external-project")" = "$(git -C "$home/work-external-project" rev-parse HEAD)" ] \
+    || fail "external binding did not fast-forward the unknown-origin clone"
+  for forge in forgejo external; do
+    ! cmp -s "$home/$forge-before" "$home/$forge-after" \
+      || fail "$forge binding reported sync without changing clone state"
+  done
+  pass "direct fleet-sync honors explicit Forgejo and external bindings"
+}
+
+test_explicit_binding_does_not_cross_same_basename() {
+  local home canonical foreign remote_url origin_url before out
+  home=$(new_home)
+  canonical=$(build_pair "$home" collision)
+  remote_url=$(git -C "$canonical" remote get-url origin)
+  mkdir -p "$home/foreign"
+  foreign="$home/foreign/collision"
+  git clone --quiet "$remote_url" "$foreign"
+  origin_url="https://unrecognized.example/team/collision.git"
+  git -C "$canonical" remote set-url origin "$origin_url"
+  git -C "$canonical" config url."$remote_url".insteadOf "$origin_url"
+  git -C "$foreign" remote set-url origin "$origin_url"
+  mkdir -p "$home/data"
+  printf -- '- collision [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+  advance_origin "$home" collision C1
+  assert_expected_provider "$home" "$canonical" external
+  out=$(run_sync "$home" "$canonical")
+  assert_contains "$out" "collision: synced" \
+    "the registered clone must still sync through its explicit forge binding"
+  before=$(head_sha "$foreign")
+
+  assert_expected_provider "$home" "$foreign" unknown
+  out=$(run_sync "$home" "$foreign")
+
+  [ -z "$out" ] || fail "an unrelated same-basename clone must be skipped silently, got: $out"
+  [ "$(head_sha "$foreign")" = "$before" ] \
+    || fail "an explicit binding crossed into an unrelated same-basename clone"
+  pass "explicit forge bindings stay scoped to registered checkout paths"
+}
+
+test_explicit_binding_survives_registered_symlink() {
+  local home clone remote_url origin_url out
+  home=$(new_home)
+  clone=$(build_pair "$home" symlinked)
+  advance_origin "$home" symlinked C1
+  remote_url=$(git -C "$clone" remote get-url origin)
+  mv "$clone" "$home/real-symlinked"
+  ln -s "$home/real-symlinked" "$clone"
+  origin_url="https://unrecognized.example/team/symlinked.git"
+  git -C "$clone" remote set-url origin "$origin_url"
+  git -C "$clone" config url."$remote_url".insteadOf "$origin_url"
+  mkdir -p "$home/data"
+  printf -- '- symlinked [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+  assert_expected_provider "$home" "$clone" external
+  snapshot_clone_state "$clone" "$home/symlinked-before"
+
+  out=$(run_sync "$home")
+  snapshot_clone_state "$clone" "$home/symlinked-after"
+
+  assert_contains "$out" "symlinked: synced" \
+    "an explicit binding must apply to its registered symlinked clone"
+  [ "$(head_sha "$clone")" = "$(git -C "$home/work-symlinked" rev-parse HEAD)" ] \
+    || fail "the registered symlinked clone did not fast-forward"
+  ! cmp -s "$home/symlinked-before" "$home/symlinked-after" \
+    || fail "a registered symlink binding reported sync without changing clone state"
+  pass "explicit forge bindings survive registered symlink paths"
+}
+
+test_registered_symlink_physical_path_preserves_posture_refusal() {
+  local home clone physical out before after
+  home=$(new_home)
+  clone=$(build_pair "$home" symlink-posture)
+  physical="$home/real-symlink-posture"
+  mv "$clone" "$physical"
+  ln -s "$physical" "$clone"
+  git -C "$physical" remote set-url origin https://review.example/team/project.git
+  mkdir -p "$home/data"
+  printf -- '- symlink-posture [local-only forge=gerrit] - local work (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+  assert_expected_provider "$home" "$physical" registry-refused
+  before="$home/symlink-posture-before"
+  after="$home/symlink-posture-after"
+  snapshot_clone_state "$physical" "$before"
+
+  out=$(run_sync "$home" "$physical")
+  snapshot_clone_state "$physical" "$after"
+
+  assert_contains "$out" "skipped: registry entry does not resolve to a delivery posture" \
+    "a physical path to a registered symlink target must preserve the posture refusal"
+  assert_contains "$out" "bin/fm-project-mode.sh symlink-posture" \
+    "the posture refusal must name the canonical registry project"
+  cmp -s "$before" "$after" \
+    || fail "a refused physical symlink target must remain unchanged"
+  pass "registered symlink physical paths preserve posture refusals"
+}
+
+test_custom_git_ssh_command_fails_closed_for_sync() {
+  local home clone custom out before after
+  home=$(new_home)
+  clone=$(build_pair "$home" custom-ssh-sync)
+  advance_origin "$home" custom-ssh-sync C1
+  custom="$home/custom.conf"
+  printf '%s\n' 'Host github.com' '  HostName review.example' > "$custom"
+  git -C "$clone" remote set-url origin git@github.com:example/project.git
+  git -C "$clone" config core.sshCommand "ssh -F $custom"
+  assert_expected_provider "$home" "$clone" unknown
+  before="$home/custom-ssh-before"
+  after="$home/custom-ssh-after"
+  snapshot_clone_state "$clone" "$before"
+
+  out=$(run_sync "$home" "$clone")
+  snapshot_clone_state "$clone" "$after"
+
+  [ -z "$out" ] || fail "sync must skip an unsupported effective custom SSH host, got: $out"
+  cmp -s "$before" "$after" || fail "sync mutated a clone whose custom SSH host was unsupported"
+  pass "fleet-sync fails closed for repository custom SSH transport"
+}
+
+test_unsupported_ssh_include_fails_closed_for_sync() {
+  local home clone out before after provider
+
+  home=$(new_home)
+  clone=$(build_pair "$home" unsupported-include-sync)
+  advance_origin "$home" unsupported-include-sync C1
+  git -C "$clone" remote set-url origin git@github.com:example/project.git
+  mkdir -p "$home/.ssh"
+  printf '%s\n' 'Include ~otheruser/.ssh/config' > "$home/.ssh/config"
+  provider=$(HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$1"; fm_forge_detect_provider "$2"' _ \
+    "$ROOT/bin/fm-forge-lib.sh" "$clone")
+  [ "$provider" = unknown ] || fail "unsupported SSH Include must classify as unknown, got: $provider"
+  before="$home/unsupported-include-before"
+  after="$home/unsupported-include-after"
+  snapshot_clone_state "$clone" "$before"
+
+  out=$(HOME="$home" run_sync "$home" "$clone")
+  snapshot_clone_state "$clone" "$after"
+
+  [ -z "$out" ] || fail "sync must skip an unsupported SSH Include, got: $out"
+  cmp -s "$before" "$after" || fail "sync mutated a clone with unsupported SSH Include syntax"
+  pass "fleet-sync fails closed for unsupported SSH Include expansion"
 }
 
 test_local_only_skipped() {
@@ -756,6 +1001,14 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
+test_unknown_origin_is_skipped_even_when_invoked_directly
+test_explicit_gerrit_binding_allows_sync
+test_explicit_legacy_bindings_allow_sync
+test_explicit_binding_does_not_cross_same_basename
+test_explicit_binding_survives_registered_symlink
+test_registered_symlink_physical_path_preserves_posture_refusal
+test_custom_git_ssh_command_fails_closed_for_sync
+test_unsupported_ssh_include_fails_closed_for_sync
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves
