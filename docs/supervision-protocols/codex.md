@@ -1,6 +1,6 @@
 Mode: Codex asynchronous Stop-hook-owned supervision.
 
-This mode is selected only in a home that opts in with `config/codex-stop-park`, for the native session registered by `bin/fm-codex-stop-park.sh` on a verified Codex CLI version.
+This mode is selected only in a home that opts in with `config/codex-stop-park`, for the native session registered by `bin/fm-codex-stop-park.sh` under the [supported-version policy](../configuration.md#codex-native-stop-park-configcodex-stop-park).
 Other sessions retain [the foreground checkpoint protocol](codex-checkpoint.md) unchanged.
 
 When this session owns supervision:
