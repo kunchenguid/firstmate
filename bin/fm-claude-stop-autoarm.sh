@@ -83,8 +83,10 @@
 #     retried instead of being judged by the healthy-watcher predicate
 #     (docs/supervision-host.md). On a home that opted out nothing below
 #     changes.
-#   - Translation: while supervision is still needed and AFK remains inactive,
-#     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
+#   - Translation: while AFK remains inactive, an actionable plain arm close
+#     (signal:/stale:/check:/heartbeat) requires supervision still to be needed;
+#     host closes follow bin/fm-supervision-host.sh's OUTPUT contract instead.
+#     A deliverable close prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
 #     ("Stop hook feedback"). The irrevocable commit point is the EXIT STATUS:
 #     the harness delivers the collected stderr only on exit 2, so an owned
@@ -117,8 +119,9 @@
 #     recorded by state/.claude-autoarm-stopfailure-rewake at its committed
 #     write: a firing inside the window holds its open claim, waits out the
 #     remainder, and only then commits and delivers - unless AFK appeared or
-#     the supervision need vanished meanwhile, which ends it silently exactly
-#     as those gates do before the arm. Otherwise the continuation is
+#     the supervision need vanished without an actionable host close to
+#     deliver under bin/fm-supervision-host.sh's OUTPUT contract. Those cases
+#     end silently. Otherwise the continuation is
 #     delayed, never dropped, because after an error end it is the only thing
 #     that guarantees another hook firing; a newer generation that supersedes
 #     the waiting claim owns continuity instead.
@@ -357,8 +360,7 @@ autoarm_record() {  # <outcome>
 # wait out whatever remains of the previous one's cooldown, and record the
 # committed one so the next is paced in turn (header "StopFailure storm
 # bound"). A Stop firing is never paced. The wait is interruptible so the
-# signal traps still run promptly, and a firing that waited goes silent when
-# AFK appeared or the supervision need vanished meanwhile.
+# signal traps still run promptly; the header owns the post-wait gates.
 stopfailure_pace() {
   local m remaining
   [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
@@ -370,7 +372,7 @@ stopfailure_pace() {
   wait "$!" 2>/dev/null || true
   if [ -e "$STATE/.afk" ]; then
     autoarm_record afk
-  elif ! need_supervision; then
+  elif { [ "${HOST_MODE:-0}" -eq 0 ] || [ "${ACTIONABLE:-0}" -eq 0 ]; } && ! need_supervision; then
     autoarm_record clean
   else
     return 0
@@ -706,8 +708,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
 done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
-# left to supervise, so close quietly instead of waking the model.
-if ! need_supervision; then
+# left to supervise, so close quietly instead of waking the model. An actionable
+# host close still carries what the turn that emptied the fleet left for main.
+if { [ "$HOST_MODE" -eq 0 ] || [ "$ACTIONABLE" -eq 0 ]; } && ! need_supervision; then
   autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
