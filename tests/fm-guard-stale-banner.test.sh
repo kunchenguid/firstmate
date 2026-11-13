@@ -662,6 +662,7 @@ printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME C
 printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\AppData\Roaming\npm\pi.exe'
 SH
   chmod +x "$fakebin/uname" "$fakebin/ps"
+  fm_fake_windows_link_tools "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

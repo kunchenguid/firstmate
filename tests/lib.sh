@@ -666,6 +666,45 @@ SH
   done
 }
 
+# fm_fake_windows_link_tools <fakebin>
+# A fixture that fakes a MINGW uname makes firstmate publish lock owners the
+# Git Bash way: cygpath spells the paths and `cmd.exe /c mklink /J` makes the
+# link. Off Windows neither tool exists, so this drops stand-ins: cygpath
+# answers the path it was given, and cmd.exe makes the link with ln -s,
+# refusing an existing destination as mklink does. On a real Cygwin-family host
+# the host's own tools stay in charge, since ln -s there may copy the directory.
+fm_fake_windows_link_tools() {
+  local fakebin=$1
+  case "$(uname -s 2>/dev/null)" in
+    CYGWIN*|MINGW*|MSYS*) return 0 ;;
+  esac
+  cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+for path in "$@"; do :; done
+printf '%s\n' "$path"
+SH
+  cat > "$fakebin/cmd.exe" <<'SH'
+#!/usr/bin/env bash
+# cmd.exe /v:on /c mklink /J <link> <target>; each path is a quoted value or a
+# !NAME! reference to one in the environment.
+set -u
+[ "$#" -eq 6 ] && [ "$3 $4" = 'mklink /J' ] || exit 1
+expand() {
+  local value=$1 name
+  case "$value" in
+    '!'*'!') name=${value#?}; name=${name%?}; value=${!name-} ;;
+  esac
+  value=${value#\"}
+  printf '%s\n' "${value%\"}"
+}
+link=$(expand "$5")
+target=$(expand "$6")
+if [ -e "$link" ] || [ -L "$link" ]; then exit 1; fi
+exec ln -sn "$target" "$link"
+SH
+  chmod +x "$fakebin/cygpath" "$fakebin/cmd.exe"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

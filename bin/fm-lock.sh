@@ -99,14 +99,23 @@ rm -f "$probe" 2>/dev/null || {
 # wait that spins on its own pid.
 case "$me" in
   win:*)
+    # An exit or signal inside the probe joins a link creation still in
+    # flight, then removes the probe link, its owner record, and the directory.
+    link_probe=
+    release_link_probe() {
+      fm_lock_wait_pending_mutation
+      [ -z "$link_probe" ] || rm -rf "$link_probe" 2>/dev/null || true
+    }
+    trap release_link_probe EXIT
+    trap 'exit 1' HUP INT TERM
     link_probe=$(mktemp -d "$STATE/.lock-links.XXXXXX") || exit 1
     if ! fm_lock_try_create "$link_probe/claim"; then
-      rmdir "$link_probe" 2>/dev/null || true
       echo "error: cannot publish a native Windows lock owner link; no fleet lock was acquired" >&2
       exit 1
     fi
     fm_lock_release "$link_probe/claim"
     rmdir "$link_probe" || exit 1
+    trap - EXIT HUP INT TERM
     ;;
 esac
 CLAIM_LOCK="$STATE/.lock.acquire"
