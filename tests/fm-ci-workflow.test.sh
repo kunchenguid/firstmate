@@ -735,8 +735,10 @@ steps = lint.fetch("steps")
 raise "lint must cache pinned tools" unless steps.any? { |s| s["uses"].to_s.start_with?("actions/cache@") }
 cache = steps.find { |s| s["uses"].to_s.start_with?("actions/cache@") } or raise "lint cache step missing"
 key = cache.dig("with", "key").to_s
-raise "lint tool cache key must include ShellCheck SHA-256 pins" unless key.include?("8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198") && key.include?("12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588")
-raise "lint tool cache key must include actionlint SHA-256 pins" unless key.include?("8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8") && key.include?("325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6")
+installer_hash = "hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh')"
+raise "lint tool cache key must hash the installer scripts" unless key.include?(installer_hash)
+raise "lint tool cache key must include runner.os and runner.arch" unless key.include?("runner.os") && key.include?("runner.arch")
+raise "lint tool cache key must not hardcode checksums" if key.match?(/[0-9a-f]{64}/)
 raise "lint checkout must fetch full history for --changed" unless steps.any? { |s|
   s["uses"].to_s.include?("actions/checkout@") && s.dig("with", "fetch-depth") == 0
 }
@@ -755,9 +757,10 @@ raise "serial matrix must be 19 shards" unless shards == (1..19).to_a
   raise "#{name} timeout-minutes must stay 30" unless job.fetch("timeout-minutes") == 30
   raise "#{name} runs-on must stay ubuntu-24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
   job_steps = job.fetch("steps")
-  raise "#{name} must cache pinned tools" unless job_steps.any? { |s|
+  tool_cache = job_steps.find { |s|
     s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?("fm-ci-tools")
-  }
+  } or raise "#{name} must cache pinned tools"
+  raise "#{name} tool cache key must hash the installer scripts" unless tool_cache.dig("with", "key").to_s.include?(installer_hash)
   raise "#{name} must cache npm" unless job_steps.any? { |s|
     s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?(".npm")
   }

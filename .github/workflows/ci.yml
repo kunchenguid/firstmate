@@ -68,15 +68,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      # Cache key includes each archive's SHA-256 pin, not just the version.
+      # Cache key hashes the installers, which own the archive SHA-256 pins.
       # The installers skip download (and checksum verification) when the
       # pinned version is already at the destination, so a pin-only key would
-      # keep a stale binary; changing a checksum must miss this cache so the
-      # installer re-downloads and re-verifies.
+      # keep a stale binary; changing a checksum in an installer must miss
+      # this cache so the installer re-downloads and re-verifies.
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/fm-ci-tools
-          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-shellcheck-0.11.0-8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198-12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588-actionlint-1.7.12-8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8-325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -149,7 +149,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/fm-ci-tools
-          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-shellcheck-0.11.0-8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198-12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588-actionlint-1.7.12-8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8-325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
       - uses: actions/cache@v4
         with:
           path: ~/.npm
@@ -202,7 +202,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/fm-ci-tools
-          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-shellcheck-0.11.0-8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198-12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588-actionlint-1.7.12-8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8-325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
       - uses: actions/cache@v4
         with:
           path: ~/.npm
@@ -266,7 +266,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/fm-ci-tools
-          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-shellcheck-0.11.0-8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198-12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588-actionlint-1.7.12-8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8-325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
       - uses: actions/cache@v4
         with:
           path: ~/.npm
