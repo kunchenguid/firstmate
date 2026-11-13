@@ -70,7 +70,7 @@ fm_forge_safe_ssh_config() {
       # block from suppressing global directives in the system file.
       printf '%s\n' 'Host *'
     fi
-    fm_forge_safe_ssh_config_file "$config" 0
+    fm_forge_safe_ssh_config_file "$config" 0 || return 1
     config_index=$((config_index + 1))
   done
 }
@@ -78,13 +78,49 @@ fm_forge_safe_ssh_config() {
 # Expand Include directives ourselves so ssh -G receives only inert Host and
 # HostName directives. Passing the original config to ssh would also evaluate
 # Match exec commands while resolving a remote's provider alias.
+fm_forge_safe_ssh_include_patterns() {
+  local input=${1:-} token= quote= escaped=0 i char
+
+  for ((i = 0; i < ${#input}; i++)); do
+    char=${input:i:1}
+    if [ "$escaped" -eq 1 ]; then
+      token+=$char
+      escaped=0
+      continue
+    fi
+    case "$char" in
+      '\\') escaped=1 ;;
+      "'"|'"')
+        if [ -z "$quote" ]; then
+          quote=$char
+        elif [ "$quote" = "$char" ]; then
+          quote=
+        else
+          token+=$char
+        fi
+        ;;
+      [[:space:]])
+        [ -z "$quote" ] || { token+=$char; continue; }
+        if [ -n "$token" ]; then
+          printf '%s\n' "$token"
+          token=
+        fi
+        ;;
+      *) token+=$char ;;
+    esac
+  done
+  [ "$escaped" -eq 0 ] && [ -z "$quote" ] || return 1
+  [ -z "$token" ] || printf '%s\n' "$token"
+}
+
 fm_forge_safe_ssh_config_file() {
   local config=${1:-} depth=${2:-0} dir line key rest pattern condition candidate included
   local -a conditions
   local in_match=0 match_safe=1
 
-  [ -r "$config" ] || return 0
-  [ "$depth" -lt 16 ] || return 0
+  [ -e "$config" ] || return 0
+  [ -r "$config" ] || return 1
+  [ "$depth" -lt 16 ] || return 1
   dir=$(dirname "$config")
   while IFS= read -r line || [ -n "$line" ]; do
     line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
@@ -115,31 +151,34 @@ fm_forge_safe_ssh_config_file() {
             condition=${condition#\!}
             condition=$(printf '%s' "$condition" | tr '[:upper:]' '[:lower:]')
             case "$condition" in
-              exec|exec=*) match_safe=0; break 2 ;;
+              exec|exec=*) return 1 ;;
             esac
           done
         done
-        [ "$match_safe" -eq 1 ] && printf '%s\n' "$line"
+        printf '%s\n' "$line"
         ;;
       hostname)
-        if [ "$in_match" -ne 0 ] && [ "$match_safe" -ne 1 ]; then
-          continue
-        fi
         printf '%s\n' "$line"
         ;;
       include)
-        [ "$in_match" -eq 0 ] || [ "$match_safe" -eq 1 ] || continue
-        for pattern in $rest; do
+        [ "$in_match" -eq 0 ] || [ "$match_safe" -eq 1 ] || return 1
+        local patterns
+        patterns=$(fm_forge_safe_ssh_include_patterns "$rest") || return 1
+        while IFS= read -r pattern; do
+          [ -n "$pattern" ] || continue
           case "$pattern" in
-            ~/*) candidate="${HOME:-}/${pattern#~/}" ;;
+            "~/"*) candidate="${HOME:-}/${pattern:2}" ;;
             /*) candidate=$pattern ;;
             *) candidate="$dir/$pattern" ;;
           esac
-          while IFS= read -r included; do
-            [ -n "$included" ] || continue
-            fm_forge_safe_ssh_config_file "$included" $((depth + 1))
-          done < <(compgen -G "$candidate" || true)
-        done
+          included=$(compgen -G "$candidate" || true)
+          if [ -n "$included" ]; then
+            while IFS= read -r included; do
+              [ -n "$included" ] || continue
+              fm_forge_safe_ssh_config_file "$included" $((depth + 1)) || return 1
+            done <<< "$included"
+          fi
+        done <<< "$patterns"
         ;;
     esac
   done < "$config"
@@ -182,7 +221,9 @@ fm_forge_ssh_command_executable() {
   esac
   ssh_path=$(command -v ssh 2>/dev/null) || return 1
   case "$ssh_path" in
-    /*) ;;
+    /bin/ssh|/usr/bin/ssh)
+      [ -x "$ssh_path" ] || return 1
+      ;;
     *) return 1 ;;
   esac
   case "$first" in
@@ -190,7 +231,11 @@ fm_forge_ssh_command_executable() {
       printf '%s\n' "$ssh_path"
       ;;
     /*)
-      [ -x "$first" ] && [ "$first" -ef "$ssh_path" ] || return 1
+      case "$first" in
+        /bin/ssh|/usr/bin/ssh) ;;
+        *) return 1 ;;
+      esac
+      [ -x "$first" ] || return 1
       printf '%s\n' "$first"
       ;;
     *) return 1 ;;
@@ -239,11 +284,11 @@ fm_forge_safe_ssh_config_for_checkout() {
   fm_forge_ssh_command_executable "$command" >/dev/null || return 1
   config=$(fm_forge_ssh_command_config "$command") || return 1
   if [ -z "$config" ]; then
-    fm_forge_safe_ssh_config
+    fm_forge_safe_ssh_config || return 1
     return 0
   fi
   case "$config" in
-    ~/*) config="${HOME:-}/${config#~/}" ;;
+    "~/"*) config="${HOME:-}/${config:2}" ;;
     /*) ;;
     *)
       checkout_root=$(cd "$checkout" 2>/dev/null && pwd -P) || return 1
@@ -251,9 +296,9 @@ fm_forge_safe_ssh_config_for_checkout() {
       ;;
   esac
   [ "$config" != /dev/stdin ] && [ -r "$config" ] || return 1
-  fm_forge_safe_ssh_config_file "$config" 0
+  fm_forge_safe_ssh_config_file "$config" 0 || return 1
   printf '%s\n' 'Host *'
-  fm_forge_safe_ssh_config_file /etc/ssh/ssh_config 0
+  fm_forge_safe_ssh_config_file /etc/ssh/ssh_config 0 || return 1
 }
 
 fm_forge_registered_project_id() {

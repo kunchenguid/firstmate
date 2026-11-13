@@ -1022,16 +1022,12 @@ SH
 
   case_dir="$TMP_ROOT/forge-ssh-github-config"
   project="$case_dir/home/projects/github-ssh"
-  mkdir -p "$project" "$case_dir/home/config"
+mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+printf '%s\n' 'Host github.com' '  HostName github.com' > "$case_dir/home/.ssh/config"
   git -C "$project" init -q
   git -C "$project" remote add origin git@github.com:example/project.git
   fakebin=$(make_fake_toolchain "$case_dir")
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' 'hostname github.com'
-SH
-  chmod +x "$fakebin/ssh"
   calls="$case_dir/gh.calls"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -1040,7 +1036,7 @@ printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
 exit 1
 SH
   chmod +x "$fakebin/gh"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_GH_CALLS="$calls" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$(cat "$calls")" = "auth status --hostname github.com" ] \
     || fail "GitHub SSH origin must authenticate against canonical host, got: $(cat "$calls")"
@@ -1085,16 +1081,12 @@ test_forge_ssh_effective_destination_controls_provider_and_auth() {
 
   case_dir="$TMP_ROOT/forge-ssh-effective-destination"
   project="$case_dir/home/projects/redirected"
-  mkdir -p "$project" "$case_dir/home/config"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Host github.com' '  HostName review.example' > "$case_dir/home/.ssh/config"
   git -C "$project" init -q
   git -C "$project" remote add origin git@github.com:example/project.git
   fakebin=$(make_fake_toolchain "$case_dir")
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' 'hostname review.example'
-SH
-  chmod +x "$fakebin/ssh"
   calls="$case_dir/gh.calls"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -1102,7 +1094,7 @@ printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
 exit 0
 SH
   chmod +x "$fakebin/gh"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "FORGE_UNSUPPORTED: redirected (host: review.example)" ] \
@@ -1174,6 +1166,38 @@ SH
   pass "bootstrap rejects unverified custom SSH executables"
 }
 
+test_forge_path_ssh_wrapper_fails_closed() {
+  local case_dir fakebin out project wrapper marker calls
+
+  case_dir="$TMP_ROOT/forge-path-ssh-wrapper"
+  project="$case_dir/home/projects/path-wrapped-ssh"
+  wrapper="$case_dir/custom-bin/ssh"
+  marker="$case_dir/path-wrapper-ran"
+  mkdir -p "$project" "$case_dir/home/config" "${wrapper%/*}"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf wrapper-ran > "$PATH_WRAPPER_MARKER"' \
+    > "$wrapper"
+  chmod +x "$wrapper"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:${wrapper%/*}:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" PATH_WRAPPER_MARKER="$marker" FM_FAKE_GH_CALLS="$calls" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: path-wrapped-ssh (host: unresolved)" ] \
+    || fail "an unverified PATH SSH wrapper must fail closed, got: $out"
+  [ ! -e "$marker" ] || fail "provider detection executed an unverified PATH SSH wrapper"
+  [ ! -s "$calls" ] || fail "an unverified PATH SSH wrapper must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap rejects unverified PATH SSH executables"
+}
+
 test_forge_effective_remote_rewrites() {
   local case_dir fakebin out project github_calls gitlab_calls
 
@@ -1243,22 +1267,11 @@ SH
 }
 
 test_forge_ssh_user_config_precedes_system_config() {
-  local case_dir fakebin real_ssh result system_result
+  local case_dir result system_result
 
   case_dir="$TMP_ROOT/forge-ssh-config-precedence"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/home/.ssh" "$fakebin"
-  real_ssh=$(command -v ssh)
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-config=$(mktemp)
-trap 'rm -f "$config"' EXIT
-cat > "$config"
-target=${!#}
-exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
-SH
-  chmod +x "$fakebin/ssh"
-  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_REAL_SSH_BIN="$real_ssh" \
+  mkdir -p "$case_dir/home/.ssh"
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
     bash -c '
       . "$1"
       fm_forge_safe_ssh_config_file() {
@@ -1273,7 +1286,7 @@ SH
       }
       fm_forge_resolve_host git@conflicting-alias:team/project.git 1
     ' _ "$ROOT/bin/fm-forge-lib.sh")
-  system_result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_REAL_SSH_BIN="$real_ssh" \
+  system_result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
     bash -c '
 . "$1"
 fm_forge_safe_ssh_config_file() {
@@ -1681,96 +1694,68 @@ test_forge_host_resolver_rejects_invalid_resolution_flag() {
 }
 
 test_forge_host_resolver_expands_safe_includes() {
-  local case_dir config_dir fakebin marker result
+  local case_dir config_dir marker result status
   case_dir="$TMP_ROOT/forge-ssh-include"
   config_dir="$case_dir/home/.ssh"
-  fakebin="$case_dir/fakebin"
   marker="$case_dir/match-exec-ran"
-  mkdir -p "$config_dir" "$fakebin"
-  real_ssh=$(command -v ssh)
+  mkdir -p "$config_dir"
   cat > "$config_dir/config" <<EOF
-Include included.conf
+Include "included hosts.conf"
 Match host github-work
   HostName github.com
-Match host github-work,exec "touch $marker"
-  HostName should-not-be-used.example
-Match host github-work,EXEC "touch $marker"
-  HostName should-not-be-used-case-variant.example
 EOF
-  cat > "$config_dir/included.conf" <<'EOF'
+cat > "$config_dir/included hosts.conf" <<'EOF'
   Host github-work
   HostName=github.com
   Host github-whitespace-work
   HostName = github.com
 EOF
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-config=$(mktemp)
-trap 'rm -f "$config"' EXIT
-cat > "$config"
-target=${!#}
-exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
-SH
-  chmod +x "$fakebin/ssh"
-  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
-    FM_REAL_SSH_BIN="$real_ssh" \
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
     bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
   [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
 
-  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
-    FM_REAL_SSH_BIN="$real_ssh" \
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github.com \
     bash -c '. "$1"; fm_forge_resolve_host git@github-whitespace-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github.com ] || fail "whitespace around SSH optional equals must resolve to its canonical host, got: $result"
 
+  cat > "$config_dir/config" <<EOF
+Match host github-work,exec "touch $marker"
+HostName github.com
+EOF
+  set +e
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" \
+    bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] && [ -z "$result" ] || fail "Match exec must make SSH resolution fail closed"
+  [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
+
   case_dir="$TMP_ROOT/forge-ssh-global-hostname"
   config_dir="$case_dir/home/.ssh"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$config_dir" "$fakebin"
+  mkdir -p "$config_dir"
   cat > "$config_dir/config" <<'EOF'
 HostName github-global.example
 Host global-github-work
 EOF
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-config=$(mktemp)
-trap 'rm -f "$config"' EXIT
-cat > "$config"
-target=${!#}
-exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
-SH
-  chmod +x "$fakebin/ssh"
-  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-global.example \
-    FM_REAL_SSH_BIN="$real_ssh" \
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-global.example \
     bash -c '. "$1"; fm_forge_resolve_host git@global-github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github-global.example ] || fail "global SSH HostName must resolve to its canonical host, got: $result"
 
   case_dir="$TMP_ROOT/forge-ssh-match-hostname"
   config_dir="$case_dir/home/.ssh"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$config_dir" "$fakebin"
+  mkdir -p "$config_dir"
   cat > "$config_dir/config" <<'EOF'
 Match host github-match-work
   HostName github-match.example
 EOF
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-config=$(mktemp)
-trap 'rm -f "$config"' EXIT
-cat > "$config"
-target=${!#}
-exec "$FM_REAL_SSH_BIN" -G -F "$config" -- "$target"
-SH
-  chmod +x "$fakebin/ssh"
-  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-match.example \
-    FM_REAL_SSH_BIN="$real_ssh" \
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITHUB_HOSTS=github-match.example \
     bash -c '. "$1"; fm_forge_resolve_host git@github-match-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github-match.example ] || fail "safe Match host HostName must resolve to its canonical host, got: $result"
 
   case_dir="$TMP_ROOT/forge-ssh-tilde-include"
   config_dir="$case_dir/home/.ssh"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$config_dir" "$fakebin"
+  mkdir -p "$config_dir"
   cat > "$config_dir/config" <<'EOF'
 Include ~/.ssh/hosts.conf
 EOF
@@ -1778,12 +1763,7 @@ EOF
 Host gitlab-work
   HostName gitlab.com
 EOF
-  cat > "$fakebin/ssh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' 'hostname gitlab.com'
-SH
-  chmod +x "$fakebin/ssh"
-  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITLAB_HOSTS=gitlab.com \
+  result=$(PATH="$BASE_PATH" HOME="$case_dir/home" FM_GITLAB_HOSTS=gitlab.com \
     bash -c '. "$1"; fm_forge_resolve_host git@gitlab-work:group/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = gitlab.com ] || fail "tilde SSH Include must resolve from HOME, got: $result"
   pass "forge host resolver expands included aliases without executing SSH config commands"
@@ -2785,6 +2765,7 @@ test_forge_provider_cli_policy_and_auth_host
 test_forge_ssh_effective_destination_controls_provider_and_auth
 test_forge_custom_git_ssh_command_controls_provider_and_auth
 test_forge_custom_ssh_wrapper_fails_closed
+test_forge_path_ssh_wrapper_fails_closed
 test_forge_effective_remote_rewrites
 test_forge_ssh_user_config_precedes_system_config
 test_forge_provider_explicit_gerrit_binding
