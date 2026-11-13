@@ -822,19 +822,25 @@ secondmate_liveness_one() {  # <meta> <id>
     return 0
   fi
   fm_secondmate_liveness_probe "$meta" "$id" full
+  case "$FM_SM_LIVE_STATE" in
+    alive|dead|missing)
+      if ! fm_secondmate_liveness_uncertain_clear "$id"; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: uncertain liveness markers could not be cleared; endpoint left $FM_SM_LIVE_STATE"
+        if [ "$FM_SM_LIVE_STATUS" = relaunchable ]; then
+          fm_secondmate_liveness_unlock "$id"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   case "$FM_SM_LIVE_STATUS" in
     silent)
       ;;
     alive)
-      if ! fm_secondmate_liveness_uncertain_clear "$id"; then
-        echo "SECONDMATE_LIVENESS: secondmate $id: uncertain liveness markers could not be cleared; endpoint left alive"
-      fi
       [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
       ;;
     relaunchable)
-      if ! fm_secondmate_liveness_uncertain_clear "$id"; then
-        echo "SECONDMATE_LIVENESS: secondmate $id: uncertain liveness markers could not be cleared; endpoint left $FM_SM_LIVE_STATE"
-      elif fm_secondmate_liveness_relaunch "$meta" "$id"; then
+      if fm_secondmate_liveness_relaunch "$meta" "$id"; then
         [ "$FM_SM_LIVE_RESUME" = 1 ] || secondmate_note_respawned "$id"
         report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
       elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then

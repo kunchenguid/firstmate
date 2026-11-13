@@ -946,7 +946,8 @@ case "$command_name:$_command_action" in
     exit "${FM_FAKE_DOCTOR_RC:-0}"
     ;;
   fm-remote-secondmate-control.sh:route)
-    [ "${FM_FAKE_REMOTE_RC:-0}" -eq 0 ] || exit "$FM_FAKE_REMOTE_RC"
+    rc=${FM_FAKE_ROUTE_RC:-${FM_FAKE_REMOTE_RC:-0}}
+    [ "$rc" -eq 0 ] || exit "$rc"
     printf 'schema=fm-remote-secondmate-control.v1\n'
     printf 'backend=%s\n' "${FM_FAKE_ROUTE_BACKEND:-rex}"
     printf 'target=%s\n' "${FM_FAKE_ROUTE_TARGET:-00000001-0000-7000-8000-000000000002:00000003-0000-7000-8000-000000000004}"
@@ -977,6 +978,60 @@ test_remote_full_probe_rex_route() {
   grep -q -- '--backend rex' "$w/ssh.log" \
     || fail "the readiness gate did not ask the remote doctor about rex: $(cat "$w/ssh.log")"
   pass "full probe: a live rex route stays alive through the rex readiness gate"
+}
+
+test_sweep_alive_remote_clears_uncertainty_despite_route_failure() {
+  local w fb tmuxfb log out failure reason
+  local -a route_env
+  for failure in unreadable unavailable drift; do
+    case "$failure" in
+      unreadable)
+        route_env=(FM_FAKE_ROUTE_RC=1)
+        reason='alive remote endpoint route is unreadable on lab-host; inspect and migrate or retire it explicitly'
+        ;;
+      unavailable)
+        route_env=(FM_FAKE_ROUTE_RC=255)
+        reason='remote host unavailable or endpoint route unknown; route preserved on lab-host'
+        ;;
+      drift)
+        route_env=(FM_FAKE_ROUTE_BACKEND=herdr)
+        reason="alive remote endpoint runs on backend 'herdr', but this home recorded 'rex'; migrate or retire it explicitly"
+        ;;
+    esac
+    w=$(make_remote_probe_world_rex "sweep-alive-route-$failure")
+    fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+    log="$w/calls.log"; : > "$log"
+    cp "$w/home/state/rsm1.meta" "$w/rsm1.meta.before"
+    cp "$w/home/data/secondmates.md" "$w/secondmates.before"
+    printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-rsm1"
+    : > "$w/home/state/.secondmate-liveness-uncertain-alert-rsm1"
+
+    out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" \
+      FM_SSH_BIN="$w/fakebin/ssh" FM_FAKE_SSH_LOG="$w/ssh.log" "${route_env[@]}")
+
+    assert_contains "$out" "SECONDMATE_LIVENESS: secondmate rsm1: skipped: $reason" \
+      "clearing uncertainty must preserve the $failure route diagnostic"
+    cmp -s "$w/rsm1.meta.before" "$w/home/state/rsm1.meta" \
+      || fail "a $failure route check changed endpoint metadata"
+    cmp -s "$w/secondmates.before" "$w/home/data/secondmates.md" \
+      || fail "a $failure route check changed the registry"
+    [ ! -s "$log" ] || fail "a $failure route check touched a local endpoint: $(cat "$log")"
+    [ ! -e "$w/home/state/.secondmate-relaunch-rsm1" ] \
+      || fail "a $failure route check attempted recovery"
+    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-rsm1" ] \
+      || fail "a confirmed live endpoint retained uncertainty after a $failure route check"
+    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-rsm1" ] \
+      || fail "a confirmed live endpoint retained its old alert after a $failure route check"
+
+    FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" bash -eu -c '
+      . "$1/bin/fm-secondmate-liveness-lib.sh"
+      fm_sm_live_require_locks
+      fm_secondmate_liveness_uncertain_record rsm1 unreadable 1
+      [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 1 ]
+      [ "$FM_SM_LIVE_UNCERTAIN_EPISODE" != stale-episode ]
+    ' bash "$ROOT" || fail "a later uncertainty episode stayed suppressed after a $failure route check"
+  done
+  pass "sweep: confirmed live remote endpoints rearm uncertainty while retaining route failures"
 }
 
 test_remote_full_probe_rex_backend_drift() {
@@ -1054,6 +1109,7 @@ test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
 test_remote_full_probe_rex_route
+test_sweep_alive_remote_clears_uncertainty_despite_route_failure
 test_remote_full_probe_rex_backend_drift
 test_remote_full_probe_rex_readiness_verdicts
 test_remote_full_probe_legacy_record_defaults_herdr
