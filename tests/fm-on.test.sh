@@ -222,26 +222,40 @@ assert_contains "$INVALID_COUNT_OUT" 'FM_SSH_ALIVE_COUNT_MAX must be a positive 
 [ "$(cat "$SSH_COUNT")" -eq "$SSH_CALLS_BEFORE_INVALID" ] || fail "invalid transport configuration launched ssh"
 pass "fm-on rejects invalid connect timeout and dead-peer settings before launching ssh"
 
-# Real unreachable-peer regression test using non-routable address ssh wrapper:
-# against an unreachable host (e.g. 10.255.255.1), OpenSSH connect timeout must
-# be passed down and bound the failure window to a short duration, returning exit 255.
-cat > "$FAKEBIN/ssh-unreachable" <<'SH'
+cat > "$FAKEBIN/ssh-silent-peer" <<'SH'
 #!/usr/bin/env bash
-exec ssh -F /dev/null -o HostName=10.255.255.1 -o BatchMode=yes \
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
-SH
-chmod +x "$FAKEBIN/ssh-unreachable"
+exec python3 - "$@" <<'PY'
+import socket
+import subprocess
+import sys
 
-start_unreachable=$(date +%s)
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        result = subprocess.run([
+            "ssh", "-F", "/dev/null", "-o", "HostName=127.0.0.1",
+            "-p", str(listener.getsockname()[1]), "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            *sys.argv[1:],
+        ], stdin=subprocess.DEVNULL, timeout=5)
+    except subprocess.TimeoutExpired:
+        sys.exit("SSH exceeded the silent-peer test deadline")
+    sys.exit(result.returncode)
+PY
+SH
+chmod +x "$FAKEBIN/ssh-silent-peer"
+
+start_silent_peer=$(date +%s)
 set +e
-unreachable_out=$(FM_SSH_BIN="$FAKEBIN/ssh-unreachable" FM_SSH_CONNECT_TIMEOUT=1 fm_on ios fm-probe-two.sh 2>&1)
-unreachable_rc=$?
+silent_peer_out=$(FM_SSH_BIN="$FAKEBIN/ssh-silent-peer" FM_SSH_CONNECT_TIMEOUT=1 fm_on ios fm-probe-two.sh 2>&1)
+silent_peer_rc=$?
 set -e
-elapsed_unreachable=$(( $(date +%s) - start_unreachable ))
-[ "$unreachable_rc" -eq 255 ] || fail "unreachable host did not exit with 255 (got $unreachable_rc, out: $unreachable_out)"
-[ "$elapsed_unreachable" -le 5 ] || fail "unreachable host took too long to fail (${elapsed_unreachable}s > 5s bound)"
-assert_contains "$unreachable_out" 'timed out' "unreachable host output did not indicate timeout: $unreachable_out"
-pass "fm-on fails fast within bounded connect timeout against an unreachable host"
+elapsed_silent_peer=$(( $(date +%s) - start_silent_peer ))
+[ "$silent_peer_rc" -eq 255 ] || fail "silent peer did not exit with 255 (got $silent_peer_rc, out: $silent_peer_out)"
+[ "$elapsed_silent_peer" -le 5 ] || fail "silent peer took too long to fail (${elapsed_silent_peer}s > 5s bound)"
+assert_contains "$silent_peer_out" 'timed out' "silent peer output did not indicate timeout: $silent_peer_out"
+pass "fm-on fails fast within bounded connect timeout against a silent loopback peer"
 
 out=$(TOP_SECRET='must-not-cross' fm_on remote-mac fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"
