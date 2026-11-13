@@ -65,7 +65,8 @@
 #                older claude). The bottom border may carry a TITLE (grok
 #                writes its model name there). A title embedded in the family's
 #                rule is tolerated at the aligned width, including Grok 1.0.44's
-#                rounded typed model/effort title with ` · always-approve`; Grok 1.0.5's
+#                rounded typed model/effort title with ` · always-approve`
+#                (Grok 1.0.77's `<version> Fast` model name too); Grok 1.0.5's
 #                typed title also permits its proven three-column overhang.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
@@ -1298,9 +1299,11 @@ EOF
   fi
 }
 
-# 0 when <title> is exactly the typed Grok model/effort title shape.
-_fm_composer_grok_typed_title_ok() {  # <title>
-  local title=$1 effort model
+# 0 when <title> is exactly the typed Grok model/effort title shape. With
+# <fast>=1 the model may also carry Grok 1.0.77's single ` Fast` word, the
+# title it draws for grok-4.7-build-fast (`Grok 4.7 Fast (medium)`).
+_fm_composer_grok_typed_title_ok() {  # <title> [fast]
+  local title=$1 fast=${2:-0} effort model
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;
@@ -1310,6 +1313,7 @@ _fm_composer_grok_typed_title_ok() {  # <title>
   esac
   model=${title#Grok }
   model=${model%" ($effort)"}
+  [ "$fast" != 1 ] || model=${model%' Fast'}
   [ -n "$model" ] || return 1
   case "$model" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   return 0
@@ -1358,11 +1362,12 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   # mid-dot. Only that exact suffix on a typed Grok title is known; the single
   # mid-dot column is swapped for an ASCII one so it cannot survive as residue
   # in the geometry comparison, while any other mid-dot stays non-space.
+  # Grok 1.0.77's ` Fast` model word was observed only with this suffix.
   case "$title" in
     *' · always-approve')
       # Only the rounded family was observed for this approval-title shape.
       [ "$family" = rounded ] || return 1
-      _fm_composer_grok_typed_title_ok "${title%' · always-approve'}" || return 1
+      _fm_composer_grok_typed_title_ok "${title%' · always-approve'}" 1 || return 1
       inner=${inner/' · always-approve'/' . always-approve'}
       ;;
   esac
