@@ -653,24 +653,20 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token names the decision. Its documented
-# position sits between the verb and the colon, and a complete token at the
-# head of the note is accepted as an EQUIVALENT position, because that
-# misplaced-colon shape is common real worker output whose stated key must
-# never silently collapse into the shared "default" bucket (issue #2109):
+# format): an optional key names the decision, in descending precedence:
+# a complete "[key=<slug>]" token before the colon, a whole-word "key=<slug>"
+# before the colon, or a complete "[key=<slug>]" token at the head of the note.
+# Accepting these worker-written forms keeps a stated key from silently
+# collapsing into the shared "default" bucket:
 #   needs-decision [key=api-shape]: <summary>
+#   needs-decision key=api-shape: <summary>
 #   needs-decision: [key=api-shape] <summary>
 #   resolved       [key=api-shape]: <how it was decided>
-# Both positions state the same key and yield the same note (a consumed
-# note-head token is key metadata, stripped from the note); when both positions
-# carry a token, the documented before-colon one wins and the note-head token
-# stays note text. A token deeper inside the note is prose, never a stated key,
+# Each form states the same key and yields the same note. A note-head token is
+# stripped only when it supplies the selected key; if either before-colon form
+# wins, the note-head token stays note text, even when it names the same key.
+# A token deeper inside the note is prose, never a stated key,
 # so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
-# An unbracketed "key=<slug>" word in the tag region (before the colon) is a
-# third equivalent spelling, read after the bracketed one and before the note
-# head, because workers write "blocked [at=1] key=a: ..." and that stated key
-# must not collapse into "default" (issue #6399). It is recognised only with a
-# valid slug, so the arbitrary-token restriction below still holds.
 # A line with no token in any position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
@@ -701,14 +697,15 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # second statement of the SHAPE alone, and tests/fm-classify-corr-token.test.sh
 # pins the two together through the real writers so they cannot drift.
 #
-# Recognition is deliberately narrow: EXACTLY the token that writer emits, whole
-# word, and nothing else. An arbitrary "<name>=<value>" token is NOT skipped.
+# Unbracketed metadata recognition is deliberately narrow: the correlation-token
+# shape above and valid key words, each in whole. An arbitrary "<name>=<value>"
+# token is NOT skipped.
 # Skipping unknown tokens would be the permissive road - it would let any
 # free-text word carrying an equals sign ("resolved x=1 [key=k]: ...") reduce to
 # a bare verb and impersonate a transition, which is the takeover the strict
 # parse and _fm_decision_key_transition_allowed exist to prevent. Recognising
-# only what a firstmate library actually writes costs one more line here each
-# time a real new token shape is introduced, and that is the intended trade: a
+# only explicitly supported token shapes requires an edit here each
+# time a new token shape is introduced, and that is the intended trade: a
 # new shape is a deliberate, reviewed edit rather than a silent widening. A line
 # whose token is malformed, wrong-length, or merely mentioned in prose keeps its
 # extra words and therefore stays a non-transition, exactly as before.
@@ -730,11 +727,9 @@ _fm_classify_is_corr_token() {  # <word>
   return 1
 }
 
-# 0 when <word> is, in whole, an unbracketed "key=<slug>" token with a valid
-# slug: the stated-key spelling workers write after a bracketed tag
-# ("blocked [at=1] key=a: ..."), read as the key rather than dropped into the
-# shared "default" bucket. An invalid slug is not recognised, so the line keeps
-# its extra word and stays a non-transition.
+# 0 when <word> is, in whole, an unbracketed key token with a valid slug.
+# Invalid key words must remain in the verb prefix so they cannot impersonate
+# a transition.
 _fm_classify_is_key_token() {  # <word>
   case "$1" in
     key=*) _fm_decision_slug_ok "${1#key=}" ;;
@@ -760,9 +755,8 @@ status_line_verb() {  # <status-line> [<out-var>] -> leading verb word
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
-  # Fast path, and the whole no-regression guarantee: a prefix that cannot
-  # contain a correlation token is returned byte-for-byte as before, so every
-  # line without one keeps its exact historical verb, spacing included.
+  # A prefix without an unbracketed metadata candidate is returned byte-for-byte,
+  # preserving its historical verb and spacing.
   case "$v" in
     *corr=*|*\ key=*|*$'\t'key=*)
       # Retain the first word, then drop only recognised tokens from the remaining
@@ -830,7 +824,7 @@ status_line_note() {  # <status-line> [<out-var>] -> text after the first colon,
     *:*)
       __fm_note_text=${__fm_note_unstamped#*:}
       __fm_note_text=${__fm_note_text#"${__fm_note_text%%[![:space:]]*}"}
-      # A note-head token is metadata only when it names the key actually selected.
+      # A note-head token is metadata only when it supplies the selected key.
       if ! _fm_key_before_colon "$__fm_note_unstamped" \
         && ! _fm_key_unbracketed "$__fm_note_unstamped" >/dev/null \
         && _fm_key_at_note_head "$__fm_note_unstamped" __fm_note_key \
@@ -1374,6 +1368,9 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # malformed worker stamp whose colons used to pose as the head/note separator
 # no longer opens or closes anything; cursors folded under that reading are
 # discarded.
+# 10: unbracketed key words now identify decisions. Rebuild ordinary and timed
+# cursors so previously ignored keys are recovered and old "default" entries
+# cannot survive a resolution of the actual key.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
