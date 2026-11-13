@@ -1927,6 +1927,7 @@ SH
   assert_present "$payload" "the promoted ship instructions were not published"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'open a PR with `fgj`' "$payload" "the promoted fgj-only worker was not told to open the PR with fgj"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_no_grep 'open a PR with `tea`' "$payload" "the promoted fgj-only worker was told to use tea"
   pass "forge=forgejo promotion resolves auto to the CLI the merge path will use"
 }
