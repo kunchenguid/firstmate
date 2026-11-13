@@ -211,7 +211,10 @@
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail: a crew whose newest line
+#      is a `resolved` event reads unknown · none with a decision-closing detail,
+#      distinct from the no-source detail. There is no `idle` token in the state
+#      vocabulary above.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux, herdr, and rex, which own a
