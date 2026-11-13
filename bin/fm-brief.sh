@@ -179,16 +179,6 @@ esac
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
-   Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
-   Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
-   Do not declare active implementation or reasoning as a wait.
-   Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
-   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for your own background job or command with a timeout, that time is its start plus its timeout, rounded up to the minute.
-   Follow the resolution rule below when the wait clears, then resume the task.
-   Use \`blocked:\` when you are stuck and need help.
-EOF
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -459,6 +449,21 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 # second mate's, runs only the append; the watcher capture is the backstop.
 STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+# A command left running past a turn end runs as a task job, whose exit
+# reaches the steering inbox and resumes the worker (bin/fm-task-job-lib.sh);
+# a harness background terminal can finish with no turn to report it to.
+TASK_JOB=$(shell_quote "$FM_ROOT/bin/fm-task-job.sh")
+IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
+   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
+   Run every command you will leave running past the end of your turn as a task job, never as a harness background terminal: \`$TASK_JOB start --timeout <seconds> -- <command> [args...]\` returns at once, and when the command exits or passes its timeout, its result arrives in your steering inbox as a record that resumes you.
+   Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
+   Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
+   Do not declare active implementation or reasoning as a wait.
+   Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
+   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for a task job, that time is the \`until\` its start printed, and for another command with a timeout, its start plus its timeout, rounded up to the minute.
+   Follow the resolution rule below when the wait clears, then resume the task.
+   Use \`blocked:\` when you are stuck and need help.
+EOF
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
