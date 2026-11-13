@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# fm-supervision-handoff.sh <token> <predecessor-arm-pid>
+# fm-supervision-handoff.sh <token|--sweep> <predecessor-arm-pid>
 # Private Claude host hand-back owner, enabled by config/supervision-handoff-ack.
+# --sweep, enabled by config/supervision-midturn-sweep, is the same arm
+# replacement with no pending token and no delivery: the host starts it at a
+# main-only pass-through so check sweeps keep running while main's turn lasts,
+# their results stay in the durable wake queue, and the next host stops it and
+# takes over its recorded arm exactly as below.
 # The host queues check: supervision-handoff:<token> and starts this detached
 # child before returning its close. Only main's sequence-bound wake-drain ack
 # removes .supervision-handoff-pending. Until then this owner replaces each
@@ -55,6 +60,12 @@ elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_SE
 fi
 TOKEN=${1:-}
 PREDECESSOR=${2:-}
+FLAG=supervision-handoff-ack
+SWEEP=0
+if [ "$TOKEN" = --sweep ]; then
+  FLAG=supervision-midturn-sweep
+  SWEEP=1
+fi
 case "$TOKEN" in ''|*[!A-Za-z0-9._-]*) exit 2 ;; esac
 case "$PREDECESSOR" in ''|*[!0-9]*) exit 2 ;; esac
 PENDING="$STATE/.supervision-handoff-pending"
@@ -65,7 +76,7 @@ GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 RETRY=${FM_SUPERVISION_HANDOFF_RETRY_SECONDS:-300}
 case "$RETRY" in ''|0*|*[!0-9]*) RETRY=300 ;; esac
 fm_session_lock_owned_by_self "$STATE" || exit 1
-[ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ] || exit 1
+[ "$SWEEP" -eq 1 ] || [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ] || exit 1
 SESSION=$(cat "$STATE/.lock" 2>/dev/null) || exit 1
 SESSION_ID=$(fm_pid_identity "$SESSION") || exit 1
 [ -n "$SESSION_ID" ] || exit 1
@@ -159,8 +170,13 @@ retry_delivery() {
   fi
 }
 
+keep_owning() {
+  session_owned && [ -e "$CONFIG/$FLAG" ] && [ ! -e "$STATE/.afk" ] \
+    && { [ "$SWEEP" -eq 1 ] || [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; }
+}
+
 NEXT_RETRY=$((SECONDS + RETRY))
-while session_owned && [ -e "$CONFIG/supervision-handoff-ack" ] && [ ! -e "$STATE/.afk" ]; do
+while keep_owning; do
   OUT=$(mktemp "$STATE/.supervision-handoff-arm.XXXXXX") || exit 1
   # The arm must survive both this owner and the original hook's process group.
   set -m
@@ -189,9 +205,8 @@ while session_owned && [ -e "$CONFIG/supervision-handoff-ack" ] && [ ! -e "$STAT
     READY_PRINTED=1
   fi
   while fm_pid_alive "$ARM"; do
-    [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ] || exit 0
-    session_owned && [ -e "$CONFIG/supervision-handoff-ack" ] && [ ! -e "$STATE/.afk" ] || exit 0
-    if [ "$SECONDS" -ge "$NEXT_RETRY" ]; then
+    keep_owning || exit 0
+    if [ "$SWEEP" -eq 0 ] && [ "$SECONDS" -ge "$NEXT_RETRY" ]; then
       retry_delivery
       NEXT_RETRY=$((SECONDS + RETRY))
     fi

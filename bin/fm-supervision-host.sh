@@ -112,6 +112,13 @@
 # verified arm for the next park to take over. Its header owns retry delivery
 # and limits. Without the flag all hand-back paths below are unchanged.
 #
+# MID-TURN SWEEP (Claude only, config/supervision-midturn-sweep). With that
+# opt-in and without the acknowledged hand-back, a main-only pass-through
+# leaves the same detached owner in --sweep mode in place of its one-shot
+# successor: it replaces each closed cycle while main's turn lasts, queues and
+# delivers nothing of its own, and the next park takes it over as above.
+# Without the flag the pass-through is unchanged.
+#
 # THE LATCH. An opted-in host persists engine health across short-lived
 # parks; docs/supervision-host.md "The broken-session latch" owns the policy.
 #
@@ -732,7 +739,7 @@ exit_to_main() {  # <why> [further lines]
 acknowledged_handback() {  # [extra output lines]; returns only when disabled
   [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] || return 1
   host_still_owner || stand_down "this session no longer owns supervision"
-  local predecessor=${SUCCESSOR_PID:-${ARM_PID:-${CLOSED_ARM_PID:-$HOST_PID}}} pid out deadline tmp
+  local predecessor=${SUCCESSOR_PID:-${ARM_PID:-${CLOSED_ARM_PID:-$HOST_PID}}} tmp
   retire_arm "$ARM_PID" "$ARM_OUT"
   ARM_PID=''
   ARM_OUT=''
@@ -745,10 +752,41 @@ acknowledged_handback() {  # [extra output lines]; returns only when disabled
     emit "$@" 'supervision-host: the acknowledged hand-back could not be recorded'
     exit 1
   fi
+  start_detached_owner "$GEN" "$predecessor" "handoff	$GEN" \
+    'supervision-host: the acknowledged hand-back successor could not be verified' "$@"
+}
+
+# The opt-in mid-turn sweep (config/supervision-midturn-sweep): a main-only
+# pass-through leaves a detached owner that keeps replacing the closed one-shot
+# successor until the next park takes it over, so check sweeps keep running
+# while main's turn lasts. It queues nothing and delivers nothing; returns only
+# when disabled.
+midturn_sweep() {
+  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-midturn-sweep" ] || return 1
+  host_still_owner || stand_down "this session no longer owns supervision"
+  local predecessor=${SUCCESSOR_PID:-${ARM_PID:-${CLOSED_ARM_PID:-$HOST_PID}}}
+  retire_arm "$ARM_PID" "$ARM_OUT"
+  ARM_PID=''
+  ARM_OUT=''
+  retire_successor
+  if ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    log_line "pass-through	downtime-unrestored	$(printf '%s\n' "$REASON" | head -n 1)"
+    printf 'watcher: FAILED - the main-only hand-back could not restore watcher downtime\n'
+    exit 1
+  fi
+  start_detached_owner --sweep "$predecessor" "pass-through	midturn-sweep" \
+    'supervision-host: the mid-turn sweep successor could not be verified'
+}
+
+# Start bin/fm-supervision-handoff.sh and verify its watcher before emitting
+# the close; exits either way.
+start_detached_owner() {  # <token|--sweep> <predecessor> <log line> <failure line> [extra output lines]
+  local arg=$1 predecessor=$2 logged=$3 failed=$4 pid out deadline
+  shift 4
   out=$(mktemp "$STATE/.supervision-handoff-start.XXXXXX") || exit 1
   set -m
   FM_SUPERVISION_HOST_READY_TIMEOUT="$READY_TIMEOUT" \
-    nohup "$SCRIPT_DIR/fm-supervision-handoff.sh" "$GEN" "$predecessor" > "$out" 2>&1 </dev/null &
+    nohup "$SCRIPT_DIR/fm-supervision-handoff.sh" "$arg" "$predecessor" > "$out" 2>&1 </dev/null &
   pid=$!
   set +m
   record_process handoff "$pid"
@@ -759,7 +797,7 @@ acknowledged_handback() {  # [extra output lines]; returns only when disabled
       disown "$pid" 2>/dev/null || true
       forget_process "$pid"
       rm -f "$out"
-      log_line "handoff	$GEN"
+      log_line "$logged"
       emit "$@"
       exit 0
     fi
@@ -767,7 +805,7 @@ acknowledged_handback() {  # [extra output lines]; returns only when disabled
   done
   kill -TERM "$pid" 2>/dev/null || true
   rm -f "$out"
-  emit "$@" 'supervision-host: the acknowledged hand-back successor could not be verified'
+  emit "$@" "$failed"
   exit 1
 }
 
@@ -1279,6 +1317,7 @@ while :; do
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
       acknowledged_handback
       if [ "$ATTENDED_WHY" = main-only ]; then
+        midturn_sweep
         leave_successor_for_main
         PASS_THROUGH_RC=$?
         if [ "$PASS_THROUGH_RC" -eq 2 ]; then

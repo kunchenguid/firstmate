@@ -598,6 +598,74 @@ test_pass_through_successor_survives_the_hook_process_group_teardown() {
 }
 
 
+# A long main turn after a main-only pass-through: a registered check prints
+# on every sweep at a 2-second check interval. Without
+# config/supervision-midturn-sweep the one-shot successor closes on the first
+# sweep and no cycle runs until the next turn end. With it, each closed cycle
+# is replaced, so the check keeps its cadence, every result lands in the wake
+# queue, one arm runs at a time, nothing reaches main mid-turn, and the next
+# turn end takes over exactly one cycle.
+assert_midturn_sweep() {  # <on|off>
+  local mode=$1 home rows arms i successor
+  home=$(make_primary_home "midturn-sweep-$mode")
+  [ "$mode" = off ] || : > "$home/config/supervision-midturn-sweep"
+  : > "$home/hook.own-group"
+  FM_CHECK_INTERVAL=2 start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "midturn $mode: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until_deadline 60 hook_exited "$home" || fail "midturn $mode: the decision close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "midturn $mode: fixture: the close was not a main-only pass-through"
+  assert_rewoke_main "$home" "midturn $mode"
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  rm -f "$home/hook.rc"
+  # Main's turn now runs long: no drain, acknowledgement, or Stop follows.
+  wait_until 150 watcher_live "$home" || fail "midturn $mode: the pass-through left no successor watcher"
+  successor=$(cat "$home/state/.watch.lock/pid")
+  printf '#!/usr/bin/env bash\necho probe due\n' > "$home/state/probe.check.sh"
+  chmod 700 "$home/state/probe.check.sh"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-check-register.sh" probe >/dev/null \
+    || fail "midturn $mode: the check could not be registered"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
+    || fail "midturn $mode: the successor did not close on the printing check"
+  if [ "$mode" = off ]; then
+    sleep 8
+    watcher_live "$home" && fail "midturn off: the absent flag changed the default one-shot successor"
+    rows=$(grep -c 'probe' "$home/state/.wake-queue" 2>/dev/null || true)
+    [ "${rows:-0}" -eq 1 ] || fail "midturn off: expected one queued check result before the turn end, got ${rows:-0}"
+    [ ! -e "$home/state/.supervision-handoff-owner" ] || fail "midturn off: the absent flag started a detached owner"
+    stop_home_processes "$home"
+    pass "host+hook: without the mid-turn sweep flag a long turn keeps the one-shot successor"
+    return
+  fi
+  i=0
+  while [ "$i" -lt 300 ]; do
+    arms=$(home_arms "$home" | grep -c . || true)
+    [ "${arms:-0}" -le 1 ] || fail "midturn on: $arms arms ran at once:"$'\n'"$(home_arms "$home")"
+    rows=$(grep -c 'probe' "$home/state/.wake-queue" 2>/dev/null || true)
+    [ "${rows:-0}" -ge 3 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "${rows:-0}" -ge 3 ] || fail "midturn on: the check did not keep its cadence during the long turn (${rows:-0} queued results):"$'\n'"$(cat "$home/state/.watch-cycle-exits.log" 2>/dev/null)"
+  ! hook_exited "$home" || fail "midturn on: a sweep result reached main mid-turn: $(cat "$home/hook.err")"
+  [ ! -e "$home/state/.supervision-handoff-pending" ] || fail "midturn on: the sweep queued a hand-back receipt"
+  [ ! -e "$home/state/.supervision-handoff.log" ] || fail "midturn on: the sweep attempted a delivery"
+  wait_until 150 watcher_live "$home" || fail "midturn on: the sweep left supervision down"
+  rm -f "$home/state/probe.check.sh"
+  turn_end "$home"
+  wait_until 250 host_owns_the_only_cycle "$home" \
+    || fail "midturn on: the next park did not take over exactly one cycle:"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  [ ! -e "$home/state/.supervision-handoff-owner" ] || fail "midturn on: the next park left the sweep owner running"
+  stop_home_processes "$home"
+  pass "host+hook: with the mid-turn sweep flag a long turn keeps checks running and the next park takes over one cycle"
+}
+
+test_midturn_sweep_flag_off_keeps_the_one_shot_successor() { assert_midturn_sweep off; }
+
+test_midturn_sweep_flag_keeps_checks_running_during_a_long_turn() { assert_midturn_sweep on; }
+
+
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   local home left_watcher left_arm
   home=$(make_primary_home hook-takeover)
@@ -710,6 +778,8 @@ fm_test_run \
   test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails \
   test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end \
   test_pass_through_successor_survives_the_hook_process_group_teardown \
+  test_midturn_sweep_flag_off_keeps_the_one_shot_successor \
+  test_midturn_sweep_flag_keeps_checks_running_during_a_long_turn \
   test_next_park_takes_over_the_cycle_a_pass_through_left_for_main \
   test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park \
   test_unrecorded_successor_is_stopped_rather_than_left_for_main
