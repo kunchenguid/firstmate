@@ -175,7 +175,7 @@ fm_cap_simple_shell() {
 # fm_cap_status_append <command>: succeeds for the launch brief's status-line
 # append, with or without its fleet-ledger suffix.
 fm_cap_status_append() {
-  local cmd=$1 rest msg append ledger
+  local cmd=$1 rest msg append ledger given given_dir
   case "$cmd" in
     'echo "'*) ;;
     *) return 1 ;;
@@ -190,6 +190,21 @@ fm_cap_status_append() {
   case "$msg" in
     *'`'*|*'$'*|*"\\"*) return 1 ;;
   esac
+  # The brief may spell the state directory through a symlink while the hook
+  # holds the physical path, so resolve the brief's path before comparing.
+  case "$rest" in
+    " >> '"*) ;;
+    *) return 1 ;;
+  esac
+  given=${rest#" >> '"}
+  given=${given%%"'"*}
+  case "$given" in
+    /*/"$ID.status") ;;
+    *) return 1 ;;
+  esac
+  given_dir=$(cd "${given%/*}" 2>/dev/null && pwd -P) || return 1
+  [ "$given_dir/$ID.status" = "$status_file" ] || return 1
+  rest=${rest//"'$given'"/"'$status_file'"}
   append=" >> '$status_file'"
   ledger=" && { [ ! -e '$CONFIG/fleet-ledger' ] || '$SCRIPT_DIR/fm-fleet-ledger.sh' appended '$CONFIG' '$status_file' >/dev/null 2>&1 || true; }"
   [ "$rest" = "$append" ] || [ "$rest" = "$append$ledger" ]
@@ -227,7 +242,8 @@ case "$MODE" in
     tool=$(jq -r '.tool_name // empty' <<<"$payload" 2>/dev/null) || exit 0
     [ -n "$tool" ] || exit 0
     fm_cap_tool_allowed && exit 0
-    reason="fm-worker-context-cap: context is ${tokens} tokens, at or above the hard limit of ${hard}. Hand off now. This call is denied. Only three actions run. One: a single git add or git commit command with no unquoted ; & | < > ( ) { } \$ or backtick. Two: Write or Edit on ${handoff}. Three: the status append from your instructions, echo \"<text>\" >> '${status_file}'. Commit, write the handoff note (done, open, exact next step, launch line), append a paused status line naming the note, then stop."
+    now=$(date +%s 2>/dev/null) || now=
+    reason="fm-worker-context-cap: context is ${tokens} tokens, at or above the hard limit of ${hard}. Hand off now. This call is denied. Only three actions run. One: a single git add or git commit command with no unquoted ; & | < > ( ) { } \$ or backtick. Two: Write or Edit on ${handoff}. Three: the status append from your instructions, echo \"<text>\" >> '${status_file}'. Use ${now} as the [at=<epoch>] value, because date is denied. Commit, write the handoff note (done, open, exact next step, launch line), append a paused status line naming the note, then stop."
     jq -nc --arg reason "$reason" \
       '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny"},systemMessage:$reason}' >&2 || exit 0
     exit 2

@@ -203,6 +203,39 @@ test_hard_limit_denies_every_tool_but_the_handoff_set() {
   pass "at the hard limit only git add, git commit, the handoff note, and the status append run"
 }
 
+test_deny_carries_a_usable_epoch_for_the_status_stamp() {
+  local before after stamp
+  prepare_case epoch
+  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  write_usage 2500
+  before=$(date +%s)
+  expect_pretool "date" deny "$(bash_payload 'date +%s')"
+  after=$(date +%s)
+  stamp=$(jq -r '.systemMessage' "$ERR" | sed -n 's/.*Use \([0-9][0-9]*\) as the \[at=<epoch>\].*/\1/p')
+  [ -n "$stamp" ] || fail "the deny names no epoch: $(cat "$ERR")"
+  [ "$stamp" -ge "$before" ] && [ "$stamp" -le "$after" ] \
+    || fail "the deny epoch $stamp is outside $before..$after"
+  pass "the hard deny hands the worker the current epoch, so the status stamp needs no date command"
+}
+
+test_status_append_accepts_a_symlinked_state_path() {
+  local link
+  prepare_case symlink
+  printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
+  link="$CASE_DIR/state-link"
+  ln -s "$CASE_STATE" "$link"
+  write_usage 2500
+  # The hook holds the physical state path; the brief spells it through the link.
+  expect_pretool "status append through a symlinked state directory" allow \
+    "$(bash_payload "echo \"paused [at=1]: handoff\" >> '$link/$ID.status'")"
+  expect_pretool "status append with the ledger suffix through a symlink" allow \
+    "$(bash_payload "echo \"paused [at=1]: handoff\" >> '$link/$ID.status' && { [ ! -e '$CASE_CONFIG/fleet-ledger' ] || '$ROOT/bin/fm-fleet-ledger.sh' appended '$CASE_CONFIG' '$link/$ID.status' >/dev/null 2>&1 || true; }")"
+  mkdir -p "$CASE_DIR/other"
+  expect_pretool "status append through a link to another directory" deny \
+    "$(bash_payload "echo \"x\" >> '$CASE_DIR/other/$ID.status'")"
+  pass "a status path spelled through a symlink to the state directory is allowed, another directory is not"
+}
+
 test_hard_limit_denies_chained_or_substituted_commands() {
   prepare_case chained
   printf '%s\n' 'soft=1000' 'hard=2000' > "$CASE_CONFIG/worker-context-cap"
@@ -368,6 +401,8 @@ fm_test_run \
   test_soft_ask_once_per_crossing \
   test_default_limits_apply_without_a_config_file \
   test_hard_limit_denies_every_tool_but_the_handoff_set \
+  test_deny_carries_a_usable_epoch_for_the_status_stamp \
+  test_status_append_accepts_a_symlinked_state_path \
   test_hard_limit_denies_chained_or_substituted_commands \
   test_config_parsing_keeps_defaults_for_unusable_values \
   test_bad_input_and_hook_errors_exit_zero_silently
