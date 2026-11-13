@@ -23,7 +23,7 @@ Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its
 Kiro suppresses its `--trust-all-tools` confirmation modal with a `chat.disableTrustAllConfirmation` setting the spawn seeds into the per-task `KIRO_HOME`; `references/harness/kiro.md` owns that recipe and where the decision persists.
 Grok renders a folder-trust gate in a linked worktree, and `references/harness/grok.md` owns how to verify the worker's real location, answer it, and where the decision persists; the project picker is a separate dialog that stays absent when the spawn starts in a git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
-Codex shows a directory-trust dialog on the first run for a repository root.
+For Codex workspace pre-registration and the separate hook-review dialog, read [its adapter reference](../harness/codex.md).
 
 Use the tool's exact skill form, or natural language only when no separate command is verified or the form remains uncertain.
 A successful send or key return is not proof of submission; require the tool-specific postcondition.
