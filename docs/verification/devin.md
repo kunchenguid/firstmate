@@ -87,6 +87,21 @@ An inherited `NO_COLOR=1` removes that distinction, so the launch clears that en
 `/quit` uses the shared slash-popup settle, returns to the shell, prints `devin -r <session-id>`, and emits `SessionEnd reason=prompt_input_exit`.
 Native `-r <session-id>` accepted a new prompt and preserved the prior conversation.
 
+## Primary Stop hook payload
+
+Verified 2026-11-11 with `devin 3000.12.43`.
+A scratch `devin -p` session whose `Stop` hook returned `{"decision":"block"}` twice produced three `Stop` payloads.
+Each carried `hook_event_name`, `stop_hook_active`, `last_assistant_message`, `session_id`, and `prompt_id`:
+
+```text
+Stop stop_hook_active=false last_assistant_message=pong session_id=four-polyester prompt_id=fa09eb79-...
+Stop stop_hook_active=true  last_assistant_message=pong session_id=four-polyester prompt_id=fa09eb79-...
+Stop stop_hook_active=true  last_assistant_message=pong session_id=four-polyester prompt_id=fa09eb79-...
+```
+
+`session_id` and `prompt_id` stayed identical across both blocked continuations, and `stop_hook_active` was true on every continuation.
+`bin/fm-turnend-guard.sh --devin` does not depend on `prompt_id` continuity: it keys its block cap on `session_id` and refills it only on a non-continuation stop with a new `prompt_id`.
+
 ## Worker config imports and attribution
 
 With the pre-fix per-task config, a project `.claude/settings.json` logger fired on `SessionStart`, `UserPromptSubmit`, and `Stop`, and the user's own Claude Code `SessionStart` hooks also ran.

@@ -51,10 +51,13 @@ fm_afk_start_usage() {
 # Durable wake-queue rows and classification positions must remain intact for
 # replay and catch-all reconciliation by bin/fm-supervise-daemon.sh.
 # .agents/skills/afk/SKILL.md "Stale-artifact lifecycle" owns the session contract.
-fm_afk_clear_stale_artifacts() {  # <state-dir>
-  local state=$1
-  rm -f "$state/.subsuper-escalations" \
-        "$state/.subsuper-escalations.since" \
+# With --keep-escalations (a daemon replaced within the same posture) the
+# escalation buffer and its .since sidecar stay for the successor to deliver.
+fm_afk_clear_stale_artifacts() {  # <state-dir> [--keep-escalations]
+  local state=$1 buffer=()
+  [ "${2:-}" = --keep-escalations ] \
+    || buffer=("$state/.subsuper-escalations" "$state/.subsuper-escalations.since")
+  rm -f ${buffer[@]+"${buffer[@]}"} \
         "$state/.subsuper-inject-wedged" \
         "$state/.subsuper-unknown-acked" \
         "$state"/.subsuper-stale-* \

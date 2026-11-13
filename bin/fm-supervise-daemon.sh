@@ -770,9 +770,14 @@ pane_is_busy() {  # <target> [backend]
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
 # every verdict except exact empty as unsafe. inject_msg reads the full verdict
-# directly and applies the same positive-proof boundary.
+# directly and applies the same positive-proof boundary. Both read the
+# supervisor endpoint with the primary's harness named in FM_COMPOSER_HARNESS,
+# the way bin/fm-send.sh names a worker's recorded harness, so a harness-scoped
+# placeholder rule applies: Devin 3000.12.43 draws its idle placeholder in a
+# grey only that scope strips (bin/fm-composer-lib.sh).
 pane_input_pending() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux}
+  local target=$1 backend=${2:-tmux} FM_COMPOSER_HARNESS
+  FM_COMPOSER_HARNESS=$(fm_daemon_primary_harness)
   [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
 }
 
@@ -1700,6 +1705,10 @@ window_for_task() {  # <task-key> [state]
 #     composer and reports the guard as empty.
 inject_msg() {  # <message> [state] [exact] [request-id]
   local msg=$1 state target backend retries sleep_s verdict composer reason encoded bytes errf err='' body exact=${3:-} request_id=${4:-}
+  # Every composer read below, the guard and the submit confirmation alike,
+  # names the primary's harness (see pane_input_pending).
+  local FM_COMPOSER_HARNESS
+  FM_COMPOSER_HARNESS=$(fm_daemon_primary_harness)
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on

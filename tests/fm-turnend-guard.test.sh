@@ -2663,6 +2663,147 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
 
+# --- DEVIN MODE: the quiet daemon owns supervision, JSON blocks --------------
+#
+# bin/fm-devin-primary.sh's Stop hook pipes each Devin Stop payload to the
+# guard with --devin. Devin blocks a turn end through a printed
+# {"decision":"block","reason":...} object (exit stays 0 either way). The
+# guard never lets stop_hook_active alone allow, bounds the loop with the
+# shared state/.turnend-blocks counter keyed on session_id (refilled only by a
+# non-continuation stop with a new prompt_id), and allows by exiting 0 with no
+# output.
+
+run_hook_devin() {  # <dir> [payload]
+  local dir=$1 payload=${2:-'{"stop_hook_active":false}'} home
+  home=$(cd "$dir" && pwd)
+  printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null
+}
+
+test_hook_devin_blocks_with_json_when_unhealthy() {
+  local dir out status decision reason
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-block")
+  out=$(run_hook_devin "$dir"); status=$?
+  expect_code 0 "$status" "--devin must report a block through stdout JSON, never a nonzero exit"
+  decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
+  [ "$decision" = block ] || fail "--devin unhealthy output was not a block object: $out"
+  reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
+  assert_contains "$reason" "TURN WOULD END BLIND" "--devin block reason lost the alarm banner"
+  assert_contains "$reason" "bin/fm-devin-primary.sh ensure" "--devin block reason lost the ensure repair line"
+  assert_contains "$reason" "never run fm-watch.sh or fm-watch-arm.sh yourself" "--devin block reason lost the no-manual-watcher rule"
+  pass "fm-turnend-guard --devin: an unhealthy daemon-supervised home blocks through JSON"
+}
+
+test_hook_devin_ignores_stop_hook_active() {
+  local dir out status decision
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-active")
+  out=$(run_hook_devin "$dir" '{"stop_hook_active":true}'); status=$?
+  expect_code 0 "$status" "--devin must keep exit 0 while blocking a continuation's stop"
+  decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
+  [ "$decision" = block ] || fail "--devin let stop_hook_active silence a real block: $out"
+  pass "fm-turnend-guard --devin: the per-turn cap bounds the loop, not stop_hook_active"
+}
+
+test_hook_devin_caps_blocks_per_prompt() {
+  local dir home out i
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-cap")
+  home=$(cd "$dir" && pwd)
+  for i in 1 2 3; do
+    out=$(printf '%s' '{"prompt_id":"p-1","stop_hook_active":true}' \
+      | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+    [ "$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)" = block ] \
+      || fail "--devin block $i of 3 was not a block object: $out"
+  done
+  out=$(printf '%s' '{"prompt_id":"p-1","stop_hook_active":true}' \
+    | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+  [ -z "$out" ] || fail "--devin blocked past FM_TURNEND_MAX_BLOCKS in one turn: $out"
+  out=$(printf '%s' '{"prompt_id":"p-2","stop_hook_active":false}' \
+    | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+  [ "$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)" = block ] \
+    || fail "--devin did not give a new prompt a fresh block budget: $out"
+  rm -f "$dir/state/task1.meta"
+  out=$(printf '%s' '{"prompt_id":"p-2","stop_hook_active":false}' \
+    | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+  [ -z "$out" ] || fail "--devin blocked with nothing in flight: $out"
+  [ ! -e "$dir/state/.turnend-blocks" ] || fail "--devin allow did not reset state/.turnend-blocks"
+  pass "fm-turnend-guard --devin: blocks are capped per prompt_id and reset on allow"
+}
+
+# Feed each payload to one --devin guard run and print one verdict per line:
+# "block" or "allow".
+devin_verdicts() {  # <dir> <payload>...
+  local dir=$1 home out payload
+  shift
+  home=$(cd "$dir" && pwd)
+  for payload in "$@"; do
+    out=$(printf '%s' "$payload" \
+      | FM_HOME="$home" FM_TURNEND_MAX_BLOCKS=3 bash "$dir/bin/fm-turnend-guard.sh" --devin 2>/dev/null)
+    if [ "$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)" = block ]; then
+      echo block
+    elif [ -z "$out" ]; then
+      echo allow
+    else
+      echo "unexpected:$out"
+    fi
+  done
+}
+
+test_hook_devin_cap_holds_when_prompt_id_rotates() {
+  local dir verdicts
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-rotating")
+  verdicts=$(devin_verdicts "$dir" \
+    '{"session_id":"s-1","prompt_id":"p-1","stop_hook_active":false}' \
+    '{"session_id":"s-1","prompt_id":"p-2","stop_hook_active":true}' \
+    '{"session_id":"s-1","prompt_id":"p-3","stop_hook_active":true}' \
+    '{"session_id":"s-1","prompt_id":"p-4","stop_hook_active":true}' \
+    '{"session_id":"s-1","prompt_id":"p-5","stop_hook_active":true}' | tr '\n' ' ')
+  [ "$verdicts" = "block block block allow allow " ] \
+    || fail "--devin let a rotating prompt_id on continuations extend the block budget: $verdicts"
+  pass "fm-turnend-guard --devin: a prompt_id that rotates on every continuation stays bounded"
+}
+
+test_hook_devin_cap_holds_without_prompt_id() {
+  local dir verdicts
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-no-prompt")
+  verdicts=$(devin_verdicts "$dir" \
+    '{"session_id":"s-1","stop_hook_active":false}' \
+    '{"session_id":"s-1","stop_hook_active":false}' \
+    '{"session_id":"s-1","stop_hook_active":false}' \
+    '{"session_id":"s-1","stop_hook_active":false}' \
+    '{"session_id":"s-1","stop_hook_active":true}' | tr '\n' ' ')
+  [ "$verdicts" = "block block block allow allow " ] \
+    || fail "--devin without prompt_id did not stay bounded: $verdicts"
+  verdicts=$(devin_verdicts "$dir" '{"session_id":"s-2","stop_hook_active":false}')
+  [ "$verdicts" = block ] || fail "--devin did not give a new session a fresh block budget: $verdicts"
+  pass "fm-turnend-guard --devin: a payload without prompt_id stays bounded per session"
+}
+
+test_hook_devin_allows_silently_when_nothing_in_flight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-devin-idle")
+  out=$(run_hook_devin "$dir"); status=$?
+  expect_code 0 "$status" "--devin must exit 0 with no supervision need"
+  [ -z "$out" ] || fail "--devin produced output with nothing in flight: $out"
+  pass "fm-turnend-guard --devin: silent allow when no supervision is needed"
+}
+
+test_hook_devin_allows_with_live_daemon_and_fresh_beacon() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-devin-daemon-live")
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live quiet-daemon holder"
+  }
+  out=$(run_hook_devin "$dir"); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--devin must allow a live identity-matched daemon with a fresh beacon"
+  [ -z "$out" ] || fail "--devin blocked despite a healthy quiet daemon: $out"
+  pass "fm-turnend-guard --devin: a live quiet daemon satisfies supervision"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -2758,3 +2899,10 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace
 test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
 test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
+test_hook_devin_blocks_with_json_when_unhealthy
+test_hook_devin_ignores_stop_hook_active
+test_hook_devin_caps_blocks_per_prompt
+test_hook_devin_cap_holds_when_prompt_id_rotates
+test_hook_devin_cap_holds_without_prompt_id
+test_hook_devin_allows_silently_when_nothing_in_flight
+test_hook_devin_allows_with_live_daemon_and_fresh_beacon

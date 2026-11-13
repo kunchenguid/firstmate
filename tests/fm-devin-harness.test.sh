@@ -47,6 +47,24 @@ done
 ! printf 'esc to cancel\n' | fm_busy_lines_match devin || fail 'borrowed another harness signal'
 pass "composer draft safety and independent delivery signals"
 
+# Devin 3000.12.43 draws its idle placeholder in 256-colour grey 38;5;244
+# (captured live in tmux). Read with devin named it is ghost text; with no
+# harness named the shared rules keep it, so the empty verdict comes from the
+# devin scope. A typed draft stays pending either way.
+esc=$'\033'
+devin_caps=$'styled=1\ncursor=1\nidentity=0\nrows=0'
+devin_rule='────────────────────────────────────────'
+devin_top="$devin_rule Request to Reveal SessionStart Hook Con… ─"
+devin_idle=$(printf '%s\n' "$devin_top" "${esc}[39m❭ ${esc}[38;5;244mAsk Devin to build features, fix bugs, or work on your code${esc}[39m" "$devin_rule")
+devin_draft=$(printf '%s\n' "$devin_top" "${esc}[39m❭ typed draft" "$devin_rule")
+[ "$(FM_COMPOSER_HARNESS=devin fm_composer_classify_screen "$devin_caps" "$devin_idle" 1)" = empty ] \
+  || fail 'Devin 3000.12.43 grey placeholder must read empty with devin named'
+[ "$(FM_COMPOSER_HARNESS='' fm_composer_classify_screen "$devin_caps" "$devin_idle" 1)" = pending ] \
+  || fail 'the grey placeholder read with no harness named must keep the shared verdict pending'
+[ "$(FM_COMPOSER_HARNESS=devin fm_composer_classify_screen "$devin_caps" "$devin_draft" 1)" = pending ] \
+  || fail 'a typed Devin draft must stay pending with devin named'
+pass "Devin's 256-colour grey placeholder reads empty only in the devin scope"
+
 state="$TMP_ROOT/hook state"
 mkdir -p "$state"
 gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" worker)
@@ -125,4 +143,5 @@ assert_present "$home/state/devin-worker.devin-config.json" 'spawn did not wire 
 if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" devin-sm "$proj" --secondmate --harness devin 2>&1)
 then fail 'Devin secondmate launch accepted'; fi
 assert_contains "$out" 'crewmate/scout adapter only' 'wrong secondmate refusal'
+assert_contains "$out" 'Devin primary' 'the Devin secondmate refusal did not point at the Devin primary setup'
 pass "scout launch carries Fusion, autonomy, typed brief and hooks; effort recorded only"

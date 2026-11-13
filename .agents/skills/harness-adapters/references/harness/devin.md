@@ -1,7 +1,7 @@
 # Devin CLI
 
 Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+The router owns the crewmate/scout boundary; a primary is supported only under the quiet daemon (see Primary integration), and a secondmate is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -36,13 +36,16 @@ The config snapshot can contain private settings and has mode 600.
 
 ## Composer and steering
 
-`../../../../../bin/fm-composer-lib.sh` owns the verified `❭` glyph, dim idle placeholder, active-turn composer, and interrupt hint.
+`../../../../../bin/fm-composer-lib.sh` owns the verified `❭` glyph, idle placeholder, active-turn composer, and interrupt hint.
+3000.11.1 draws the placeholder dim; 3000.12.43 draws it in palette grey `38;5;244`, which only the grey-ghost scope strips, so every composer read of a Devin pane must name the harness through `FM_COMPOSER_HARNESS` (`fm_composer_gray_ghost_scope`).
 The shared delivery path must preserve ANSI styling: placeholder-like text surviving a styled capture remains a draft and must not be overwritten.
 The `../../../../../bin/fm-task-inbox-lib.sh` doorbell was read and acknowledged through real `fm-send` on both SWE-2 and Fusion.
 The shared slash-command settling path also handles `/quit` autocomplete.
 
 ## Primary integration
 
-No primary Stop guard, watcher protocol, pre-tool protection, or session-start contract was verified for Devin.
-Do not launch a primary or secondmate with this adapter.
+A Devin primary is supported only under the quiet daemon, through `bin/fm-devin-primary.sh` hooks (`SessionStart`, `Stop`, `SessionEnd`) plus a `PreToolUse` `^ask_user_question$` block, `read_config_from.claude=false`, and `attribution=false` in the primary's own Devin config, launched inside tmux or Herdr with `NO_COLOR` cleared (`env -u NO_COLOR devin --config <path>`), because `NO_COLOR` removes the placeholder styling and the daemon would defer every wake.
+[`docs/configuration.md`](../../../../../docs/configuration.md#devin-primary) owns the launch command and the config shape, with a placeholder config in [`docs/examples/devin-primary-config.json`](../../../../../docs/examples/devin-primary-config.json).
+The daemon owns watcher continuity; [the Devin protocol](../../../../../docs/supervision-protocols/devin.md) owns the operating rules, and [the turn-end guard](../../../../../docs/turnend-guard.md#harness-integrations) owns the Stop-hook mechanics.
+A Devin secondmate is still refused by `bin/fm-spawn.sh`.
 ACP, quota-provider integration, and native Fusion subagent accounting remain separate follow-ups.

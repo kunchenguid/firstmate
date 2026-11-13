@@ -2552,6 +2552,33 @@ test_pane_input_pending_requires_proven_empty_prompt() {
   pass "pane_input_pending: only proven empty agent prompts pass"
 }
 
+# Devin 3000.12.43 draws its empty-composer placeholder in 256-colour grey
+# 38;5;244 (captured live on a Devin primary). The daemon must read that pane
+# with its primary harness named, or the placeholder reads as unsubmitted text
+# and every wake is deferred until the wedge alarm fires. A typed draft in the
+# same composer must still defer.
+test_pane_input_pending_devin_primary_grey_placeholder_is_empty() {
+  local dir fakebin capture esc=$'\033' rule title
+  dir=$(make_supercase pending-devin-grey)
+  fakebin="$dir/fakebin"
+  capture="$dir/pane.txt"
+  rule='────────────────────────────────────────'
+  title="${rule} Request to Reveal SessionStart Hook Con… ─"
+  printf '%s\n' " ● /tmp/lab/code" "$title" \
+    "${esc}[39m❭ ${esc}[38;5;244mAsk Devin to build features, fix bugs, or work on your code${esc}[39m" \
+    "$rule" "Adaptive · bypass                 Context: 25k tokens" > "$capture"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
+    FM_DAEMON_PRIMARY_HARNESS=devin pane_input_pending "fakepane"; then
+    fail "an idle Devin primary composer (38;5;244 placeholder) must read empty, not defer the wake"
+  fi
+  printf '%s\n' " ● /tmp/lab/code" "$title" "${esc}[39m❭ typed draft" \
+    "$rule" "Adaptive · bypass                 Context: 25k tokens" > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
+    FM_DAEMON_PRIMARY_HARNESS=devin pane_input_pending "fakepane" \
+    || fail "a typed draft in a Devin primary composer must still defer"
+  pass "pane_input_pending: a Devin primary's grey placeholder reads empty, a typed draft still defers"
+}
+
 # The safety fix at the tmux classifier (task fm-composer-shellglyph-safety): a
 # bare, unbordered shell prompt is a dead shell (the agent exited to its login
 # shell), NOT an empty agent composer. It must read `unknown` (unsafe target),
@@ -3947,6 +3974,7 @@ test_record_doorbell_detection
 test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_defers_strict
 test_pane_input_pending_requires_proven_empty_prompt
+test_pane_input_pending_devin_primary_grey_placeholder_is_empty
 test_tmux_composer_state_bare_shell_is_unknown
 test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders

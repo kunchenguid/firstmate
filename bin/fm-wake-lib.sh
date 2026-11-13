@@ -66,12 +66,30 @@ else
   fm_epoch_seconds_to() { printf -v "$1" '%s' "$(date +%s)"; }
 fi
 
+# A zombie (exited, not yet reaped by its parent) still answers kill -0, so a
+# process whose cleanup already ran would read as alive until its parent reaps
+# it. Read the state letter without forking from the real /proc stat (field 3,
+# after the last ')' that closes the comm, which may hold spaces or parens);
+# only a host without /proc/<pid> pays for ps. State Z or X is dead; an
+# unreadable state keeps the kill -0 answer.
 fm_pid_alive() {
-  local pid=$1
+  local pid=$1 stat=
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -r "/proc/$pid/stat" ]; then
+    read -r stat 2>/dev/null < "/proc/$pid/stat" || return 0
+    stat=${stat##*)}
+    stat=${stat# }
+  else
+    stat=$(ps -o stat= -p "$pid" 2>/dev/null) || return 0
+    stat=${stat#"${stat%%[![:space:]]*}"}
+  fi
+  case "$stat" in
+    Z*|X*) return 1 ;;
+  esac
+  return 0
 }
 
 # Store field 22 of a Linux-compatible /proc stat file (the process start in

@@ -264,6 +264,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | Cursor | `stop` hook in `.cursor/hooks.json` | Cannot block, so it parks and returns at most one follow-up |
 | Grok | `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` | Native blocking, or one legacy `grok --resume` fallback |
 | Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch-arm.sh` (or the supervision host) with bounded repair nag via `bin/fm-turnend-guard.sh --agy` |
+| Devin | `Stop` hook in the primary's own Devin config | Native blocking via a printed `{"decision":"block","reason":...}` object through `bin/fm-turnend-guard.sh --devin`, bounded per turn |
 
 The registrations in detail:
 
@@ -310,6 +311,15 @@ The registrations in detail:
 - Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 28800s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
   In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
   In primary or persistent secondmate homes, the hook parks synchronously on `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host), keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
+- Devin registers `SessionStart`, `Stop`, and `SessionEnd` hooks in the primary's own Devin config, whose shape [`docs/configuration.md`](configuration.md#devin-primary) owns, and delegates every turn boundary to `bin/fm-devin-primary.sh stop`.
+  That wrapper stays silent outside a genuine primary or a session that does not hold the lock, and re-ensures the daemon once per stop when none holds the home.
+  A successful restart allows that stop, because it has just proved a live daemon whose watcher has not yet had time to beat.
+  While an away-return catch-up gate (`state/.afk-return-catchup`) is pending no daemon can start, so the wrapper skips the restart and prefixes the guard's block with `bin/fm-afk-return.sh check` as the unblock action; the first stop after the gate clears restarts quiet daemon supervision.
+  Otherwise the wrapper pipes the payload to `bin/fm-turnend-guard.sh --devin` and passes its block object through.
+  The guard bounds blocking with the same `state/.turnend-blocks` counter agy uses, capped at `FM_TURNEND_MAX_BLOCKS` (default 3) and reset on allow, but keyed on the payload's `session_id`.
+  A new turn gets a fresh budget only when its stop is not a continuation (`stop_hook_active` false) and carries a new `prompt_id`, so a forced continuation never refills the budget even if `prompt_id` rotates or is absent.
+  [Devin 3000.12.43 evidence](verification/devin.md#primary-stop-hook-payload) shows `prompt_id` stable and `stop_hook_active` true across blocked continuations.
+  Past the cap it fails open silently, so a persistently unhealthy daemon cannot wedge the session.
 
 ### Claude and Codex blocking
 

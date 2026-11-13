@@ -386,6 +386,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/devin-primary-config.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/process-event-extension/file-signal.mjs",
       "audience": "operator-example"
     },
@@ -503,6 +507,10 @@
     },
     {
       "path": "docs/supervision-protocols/cursor.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/devin.md",
       "audience": "agent-runtime"
     },
     {
