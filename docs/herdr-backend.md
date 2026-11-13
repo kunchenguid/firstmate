@@ -368,7 +368,7 @@ Once the exact pane is confirmed gone, teardown retires the task's own journal w
 
 ### Restart recovery
 
-A fresh task leases its task copy durably with `treehouse get --lease` and then moves the pane's top-level shell into it.
+A fresh task durably leases its task copy from the [home's Treehouse pool](configuration.md#treehouse-worktree-pools) and then moves the pane's top-level shell into it.
 Herdr restores a pane from the cwd of that top-level shell, and the pane's `cwd` field does not follow the nested shell an interactive `treehouse get` opens, so a restart would otherwise reopen the worker in the primary clone.
 The lease outlives the pane: teardown closes the exact pane before it returns the lease, because returning the copy ends the pane's top-level shell and Herdr would then remove the pane outside the focus-preserving close.
 An aborted spawn returns the lease only when Herdr confirms the task pane gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.

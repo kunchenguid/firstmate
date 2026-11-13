@@ -39,10 +39,12 @@
 #                    tmux-dir, with no user tmux config (its plugins never run
 #                    in a lab), started from an empty environment so no inherited
 #                    TMUX, Herdr, or Pi marker reaches a lab process.
-#                    TREEHOUSE_ROOT points into <lab-root>, so a worker's pool
-#                    never lands in ~/.treehouse, and DISABLE_AUTOUPDATER=1
-#                    keeps Claude Code from replacing the shared binary under
-#                    a running lab, as every live run does (tests/lib.sh).
+#                    Pool placement follows fm_treehouse_home_root in
+#                    bin/fm-wake-lib.sh, keeping lab allocations under <lab-root>.
+#                    TREEHOUSE_ROOT keeps older --ref revisions under
+#                    <lab-root>/treehouse when they acquire without --root.
+#                    DISABLE_AUTOUPDATER=1 keeps Claude Code from replacing the
+#                    shared binary under a running lab (tests/lib.sh).
 #                    A set CLAUDE_CONFIG_DIR (absolute) is passed to every lab
 #                    process. up records the Claude store, Pi trust store, and
 #                    ~/.treehouse it selected, so check and down use those same

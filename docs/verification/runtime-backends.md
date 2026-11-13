@@ -3811,3 +3811,59 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 - A spawn with a real harness rather than the stand-in.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
+
+## Treehouse worktree pools
+
+[`configuration.md`](../configuration.md#treehouse-worktree-pools) owns current pool placement and legacy-pool handling; [`bin/fm-spawn.sh`](../../bin/fm-spawn.sh) owns backend-specific acquisition mechanics.
+The following provider observations were recorded on 2026-09-19 with treehouse v2.3.0 on macOS.
+
+Treehouse keys a pool by the repository's resolved origin, not by the clone, so separate clones of one repository share one pool under one root.
+Two clones of one origin, each acquiring under the same root, land in the same pool directory, and a slot returned by one clone is handed to the other while its checkout is still a linked worktree of the first:
+
+```sh
+git clone -q origin home-a/projects/proj
+git clone -q origin home-b/projects/proj
+(cd home-a/projects/proj && treehouse --root "$BASE" get --lease --lease-holder a)
+# .../base/.treehouse/proj-1bfb7a/1/proj
+(cd home-a/projects/proj && treehouse return --force .../base/.treehouse/proj-1bfb7a/1/proj)
+(cd home-b/projects/proj && treehouse --root "$BASE" get --lease --lease-holder b)
+# .../base/.treehouse/proj-1bfb7a/1/proj
+cat .../base/.treehouse/proj-1bfb7a/1/proj/.git
+# gitdir: .../home-a/projects/proj/.git/worktrees/proj
+```
+
+That last state is the one that blocks work: the slot reads free, its checkout belongs to another home's clone, and `bin/fm-spawn.sh`'s isolation assertion refuses it.
+
+Passing each home its own root removes the shared namespace.
+Both homes then take slot `1` of an identically named pool inside their own roots, each linked to its own clone, acquiring concurrently with no contention:
+
+```sh
+(cd home-a/projects/proj && treehouse --root "$ROOT_A" get --lease --lease-holder home-a) &
+(cd home-b/projects/proj && treehouse --root "$ROOT_B" get --lease --lease-holder home-b) &
+wait
+# .../base/.firstmate-worktrees/home-a-c4139d9ae160/.treehouse/proj-1bfb7a/1/proj
+# .../base/.firstmate-worktrees/home-b-06c78f9deddf/.treehouse/proj-1bfb7a/1/proj
+# gitdir: .../home-a/projects/proj/.git/worktrees/proj
+# gitdir: .../home-b/projects/proj/.git/worktrees/proj
+```
+
+The interactive acquisition form also honors the same flag:
+
+```sh
+(cd home-a/projects/proj && printf 'pwd -P\nexit\n' | treehouse --root "$ROOT_A" get)
+# 🌳 Entered worktree at .../base/.firstmate-worktrees/home-a-c4139d9ae160/.treehouse/clone-3ecf41/1/clone. Type 'exit' to return.
+```
+
+A return resolves its pool from the worktree path it is given, which is what leaves every worktree leased under a previously shared root returnable after its home moves to its own root:
+
+```sh
+(cd home-a/projects/proj && treehouse --root "$ROOT_A" return --force "$LEGACY_SHARED_ROOT_WORKTREE")
+# 🌳 Worktree returned to pool.
+```
+
+The global `--root` flag is the capability this rests on, and it is a floor rather than a preference: `treehouse --help` on v2.0.1 lists only `--help` and `--version`, so acquisition on that build cannot be separated per home at all.
+[`bin/fm-bootstrap.sh`](../../bin/fm-bootstrap.sh) owns capability probing and its diagnostics; [`bin/fm-install-treehouse.sh`](../../bin/fm-install-treehouse.sh) owns the exact CI pin.
+
+`bin/fm-wake-lib.sh`'s `fm_treehouse_home_root` owns root derivation and command scoping.
+`tests/fm-treehouse-pool-isolation-live-e2e.test.sh` is the guard that refreshes this record; it accepts either the historical foreign-slot collision or a vendor that relinks the returned slot to the acquirer, and always requires per-home roots to acquire without contention.
+`tests/fm-treehouse-home-root.test.sh` pins the firstmate half - the derivation, the real spawn's acquisition command, and the real seed's lease - with no provider installed; `tests/fm-bootstrap.test.sh` owns the bootstrap capability gate alongside every other tool gate.

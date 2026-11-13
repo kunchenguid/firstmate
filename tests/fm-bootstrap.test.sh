@@ -26,6 +26,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
@@ -51,7 +53,8 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH PAS
 # case keeps bare BASE_PATH.
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1,
+# and its top-level `--help` advertises the global --root unless FM_FAKE_TREEHOUSE_NO_ROOT=1.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -74,6 +77,10 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
+  # Two capabilities are gated independently: the durable lease on `get --help`,
+  # and the global worktree root on the top-level `--help`. The root is advertised
+  # by default because every supported build carries it; FM_FAKE_TREEHOUSE_NO_ROOT
+  # models the older build that cannot separate homes.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -85,6 +92,13 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
+  fi
+  exit 0
+fi
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse [command]'
+  if [ "${FM_FAKE_TREEHOUSE_NO_ROOT:-}" != 1 ]; then
+    printf '%s\n' '      --root string   Worktree root directory'
   fi
   exit 0
 fi
@@ -358,7 +372,7 @@ test_record_hygiene_watcher_absent_flag_is_inert() {
   status=0
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
     FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
-    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+    FM_RECORD_HYGIENE_TIMEOUT=1 fm_run_timed 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
   { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
     || fail "watcher failed without config/record-hygiene (exit=$status)"
   sleep 2
@@ -381,7 +395,7 @@ test_record_hygiene_reclaims_stale_running_marker() {
   status=0
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
     FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
-    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 30 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+    FM_RECORD_HYGIENE_TIMEOUT=1 fm_run_timed 30 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
   { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
     || fail "watcher failed while reclaiming stale hygiene marker (exit=$status)"
   tries=0
@@ -405,7 +419,7 @@ test_record_hygiene_watcher_data_is_defined() {
   status=0
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
     FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
-    timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+    fm_run_timed 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
   { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
     || fail "watcher failed during hygiene check (exit=$status)"
   assert_not_contains "$(cat "$case_dir/err")" 'DATA: unbound variable' \
@@ -516,7 +530,7 @@ test_bootstrap_reporting() {
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.2.6^1^manual^empty^^
 absent treehouse reports a missing tool^absent^0.2.6^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires --lease support; upgrade: treehouse update)^NEEDS_GH_AUTH
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires --lease and --root support; upgrade: treehouse update)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.6^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi reports an upgrade by default^1^0.1.0^1^-^exact^OUTDATED: tasks-axi (installed: 0.1.0; requires 0.2.6; upgrade: npm install -g tasks-axi)^
@@ -1035,7 +1049,26 @@ test_treehouse_lease_check_follows_resolved_backend() {
     "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "OUTDATED: treehouse" "backend=herdr must still require treehouse with durable lease support"
   assert_not_contains "$out" "MISSING: tmux" "backend=herdr must not demand tmux even when treehouse is too old"
-  pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
+  # The worktree root is the second required capability, and it is gated
+  # independently: a build that has the durable lease but no global --root cannot
+  # give each home its own pool, so it reports the same upgrade line.
+  case_dir="$TMP_ROOT/herdr-rootless-treehouse"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' herdr > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_NO_ROOT=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "OUTDATED: treehouse" "a treehouse with the lease but no worktree root must still report an upgrade"
+
+  # And with both capabilities present the same home is silent, so neither probe
+  # can be passing for the other's reason.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" "a treehouse with both the lease and the worktree root must be accepted"
+  assert_not_contains "$out" "OUTDATED: treehouse" "a treehouse with both the lease and the worktree root must not report an upgrade"
+  pass "bootstrap: the treehouse lease and worktree-root checks follow the resolved backend's worktree provider"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
@@ -1717,7 +1750,7 @@ SH
 }
 
 test_treehouse_pool_report_is_read_only_and_classifies_pools() {
-  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls i out
+  local case_dir home root home_root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls i out
   case_dir="$TMP_ROOT/pool-report"
   home="$case_dir/home"
   root="$case_dir/pools"
@@ -1797,16 +1830,24 @@ JSON
   cat > "$root/leased/treehouse-state.json" <<JSON
 {"worktrees":[{"path":"$leased_repo","created_at":"2020-01-01T00:00:00Z","leased":true,"lease_id":"lease-1","lease_holder":"secondmate-home","leased_at":"2026-10-01T00:00:00Z"}]}
 JSON
+  home_root=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_home_root "$2"' _ "$ROOT" "$home") \
+    || fail "could not resolve the home's pool root"
+  home_root="$home_root/.treehouse"
+  mkdir -p "$home_root/current"
+  cat > "$home_root/current/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$registered","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
   mkdir -p "$home/config"
   : > "$home/config/treehouse-pool-report"
-  before=$(find "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
+  before=$(find "$home_root" "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
   : > "$jq_count_file"
   out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" treehouse)" FM_TEST_JQ_COUNT="$jq_count_file" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   jq_calls=$(wc -l < "$jq_count_file")
-  after=$(find "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
+  after=$(find "$home_root" "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
   [ "$before" = "$after" ] || fail "pool report modified pool or repository files"
+  [ ! -e "$home/state" ] || fail "detect-only pool reporting created the home's state directory"
   assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
   assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
   assert_contains "$out" "unregistered pool $root/nested" "a slot inside a parent repository was mistaken for its own checkout"
@@ -1824,11 +1865,13 @@ JSON
   assert_contains "$out" "unowned slot older than 30d: $fractional_repo" "fractional timestamp with offset was not reported"
   assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
   assert_not_contains "$out" "unowned slot older than 30d: $leased_repo" "durably leased slot was reported stale"
+  assert_contains "$out" "unowned slot older than 30d: $registered" "old unowned slot in the home's current pool was not reported"
+  assert_contains "$out" "scanned 1 pools under $home_root" "the report did not identify the home pool it scanned"
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
 }
 
 test_treehouse_pool_report_needs_its_flag() {
-  local case_dir home root fakebin real_jq jq_log out baseline
+  local case_dir home root home_root fakebin real_jq jq_log out baseline
   case_dir="$TMP_ROOT/pool-report-flag-absent"
   home="$case_dir/home"
   root="$case_dir/pools"
@@ -1847,10 +1890,16 @@ SH
 {"worktrees":[{"path":"$case_dir/missing","created_at":"2020-01-01T00:00:00Z"}]}
 JSON
   printf '%s\n' '{"worktrees":[]}' > "$root/project-leftover/treehouse-state.json"
+  home_root=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_home_root "$2"' _ "$ROOT" "$home") \
+    || fail "could not resolve the home's pool root"
+  home_root="$home_root/.treehouse"
+  mkdir -p "$home_root/project-leftover"
+  printf '%s\n' '{"worktrees":[]}' > "$home_root/project-leftover/treehouse-state.json"
   : > "$jq_log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   ! grep -qF "$root" "$jq_log" || fail "bootstrap without config/treehouse-pool-report read Treehouse state: $(cat "$jq_log")"
+  ! grep -qF "$home_root" "$jq_log" || fail "bootstrap without config/treehouse-pool-report read the home's pool"
   baseline=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$case_dir/no-pools" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "TREEHOUSE_POOL_REPORT" "bootstrap printed a pool report without its flag"
@@ -1859,6 +1908,14 @@ JSON
   out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $root/project-leftover" "the same fixture did not report once the flag exists"
+  assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $home_root/project-leftover" "the home pool did not report once the flag exists"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$case_dir/no-pools" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $home_root/project-leftover" "a missing legacy pool hid the home pool"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$home_root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_equals 1 "$(printf '%s\n' "$out" | grep -cF "TREEHOUSE_POOL_REPORT: test-leftover pool $home_root/project-leftover")" \
+    "the same current and legacy pool was reported twice"
   pass "bootstrap reads and reports Treehouse pools only when config/treehouse-pool-report exists"
 }
 

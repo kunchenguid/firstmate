@@ -344,6 +344,10 @@ The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolatio
 A home can opt in to starting a local-only ship or a scout from the primary checkout's default branch instead of origin's tip ([`configuration.md`](configuration.md#spawn-base-from-the-primary-checkout-configspawn-base-primary-checkout)).
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
+[`configuration.md`](configuration.md#treehouse-worktree-pools) owns per-home pool placement, inspection, and legacy-pool cleanup guidance.
+The root and cross-home allocation lock helpers in [`fm-wake-lib.sh`](../bin/fm-wake-lib.sh) own the isolation mechanism and compatibility rationale.
+[`tests/fm-treehouse-home-root.test.sh`](../tests/fm-treehouse-home-root.test.sh) is the portable regression, and [`verification/runtime-backends.md`](verification/runtime-backends.md#treehouse-worktree-pools) owns the dated evidence and names the guard that refreshes it.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

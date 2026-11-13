@@ -233,9 +233,19 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  # Fail the lease after the projected pane is created, exercising the
-  # post-create abort cleanup without consuming a real pool slot.
+# --root is a GLOBAL flag that precedes the subcommand, so skip the global flags
+# before deciding whether this call is an acquire.
+sub=
+skip=0
+for arg in "$@"; do
+  if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+  case "$arg" in
+    --root) skip=1 ;;
+    --root=*) ;;
+    *) sub=$arg; break ;;
+  esac
+done
+if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "$sub" = get ]; then
   exit 0
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under

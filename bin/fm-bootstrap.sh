@@ -63,8 +63,8 @@
 #          upgrade command, which runs no first-install-only step such as
 #          `setup hooks` or a `curl | sh` installer. MISSING stays for absent
 #          tools only.
-#          treehouse is OUTDATED when its installed version lacks
-#          "treehouse get --lease" support.
+#          treehouse is OUTDATED when its installed version lacks either
+#          "treehouse get --lease" or the global "--root" worktree-root flag.
 #          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -938,8 +938,17 @@ GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.80
 LAVISH_AXI_BOARD_MIN=0.1.77
 
+# Firstmate needs two Treehouse capabilities. The durable lease keeps a
+# secondmate home allocated with no live process (bin/fm-home-seed.sh), and the
+# global worktree root is what gives each home its own pool so homes cloning one
+# origin never contend for a slot (bin/fm-wake-lib.sh's fm_treehouse_home_root).
+# An installed build missing either one reports the same upgrade line.
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+}
+
+treehouse_supports_root() {
+  treehouse --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--root([^[:alnum:]_-]|$)'
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that
@@ -1537,12 +1546,13 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
+  # The treehouse capability upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
-    echo "OUTDATED: treehouse (installed: $(tool_version treehouse); requires --lease support; upgrade: $(upgrade_cmd treehouse))"
+    && command -v treehouse >/dev/null 2>&1 \
+    && ! { treehouse_supports_lease && treehouse_supports_root; }; then
+    echo "OUTDATED: treehouse (installed: $(tool_version treehouse); requires --lease and --root support; upgrade: $(upgrade_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "OUTDATED: no-mistakes (installed: $(tool_version no-mistakes); requires $NO_MISTAKES_MIN; upgrade: $(upgrade_cmd no-mistakes))"
@@ -1564,7 +1574,21 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo slot_root identity created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
+  local home_root legacy_root=${TREEHOUSE_ROOT:-$HOME/.treehouse}
+  home_root=$(
+    # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+    FM_STATE_OVERRIDE="$SCRIPT_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
+    fm_treehouse_home_root "$FM_HOME"
+  ) || home_root=
+  if [ -n "$home_root" ]; then
+    treehouse_pool_root_report "$home_root/.treehouse"
+    [ "$legacy_root" != "$home_root/.treehouse" ] || return 0
+  fi
+  treehouse_pool_root_report "$legacy_root"
+}
+
+treehouse_pool_root_report() {
+  local root=$1 state pool records slot repo slot_root identity created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
   local -a seen_repos=() seen_pools=()
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
