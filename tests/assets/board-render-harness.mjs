@@ -4,9 +4,7 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html> [submissions-json]
 // Submissions are [{index, selection, note}], indexed by decision card.
-// Prints one JSON document:
-//   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+// Prints one JSON document; the final JSON.stringify call defines its fields.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
