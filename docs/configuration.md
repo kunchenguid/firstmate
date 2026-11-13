@@ -1815,6 +1815,7 @@ Snapshots and their metadata live under `<home>/.lavish/snapshots/`; `bin/fm-lav
 The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship and scout brief.
 This keeps private brief content out of tracked files.
 When the file exists, `bin/fm-brief.sh` appends its text verbatim as the scaffold's last section, `# Home brief additions`, which defers to every other section of the brief, including the ship contract a later scout promotion appends below it.
+The one exception is a best-practices practice section: when a brief carries one, it follows the home additions, whose precedence sentence excludes it, so the home additions outrank it.
 
 An absent or blank file changes nothing, while a present path that is not a readable regular file, or text carrying its own `Delivery contract: mode=` line, stops the scaffold before anything is written.
 The text is static and never executed or expanded; secondmate charters never take it, and the file is local to each home rather than part of secondmate inherited configuration.
@@ -2137,6 +2138,7 @@ The selected provider needs a non-empty key from the environment, else `.env`, e
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 A declared credential source that cannot supply its key is not off; see "Credential source declaration" below.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared top-level, rule, and profile fields it applies.
+`bin/fm-best-practices.sh route` and `intake` send their adapter routing requests under these same provider settings, keys, and never-send list, except that with `openai`, whose Decisions API shape only this resolver's single Choice is mapped to, they send nothing and compose the adapter's static text.
 
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
 
@@ -2289,6 +2291,8 @@ Three outcomes stay distinct:
 - **Unavailable source.** An entry whose source this host cannot run, or that yields no key, ends as the `error` outcome with exit 0 and a reason ending `nothing sent`, and makes no network or quota call.
   The reason says whether the host cannot run the source, the source holds no readable key, or it did not answer in time, and it never relays the tool's own output.
   A source that does not answer within 5 seconds ends the same way, so an unanswered Keychain access prompt cannot hold an intake.
+
+`bin/fm-best-practices.sh route` and `intake` read the same declaration through the same gate, so a configuration error also exits 2 there, and an unavailable source ends that routing as its `error` outcome, with every row keeping its fallback.
 
 A configuration installer can check a source before it writes anything:
 
@@ -2462,6 +2466,23 @@ It applies to a `no-mistakes` ship on a project with no `forge=` binding only, s
 Firstmate passes it to `bin/fm-brief.sh --pr manual` at intake the same way it passes `--forge`, `bin/fm-spawn.sh` refuses a brief whose `pr=` disagrees with the registry, and `bin/fm-promote.sh` reads it from the registry.
 The generated brief then has the worker pass `--skip pr,ci` on every `no-mistakes axi run`, write the PR title and body itself, open or update the PR with `gh-axi`, and wait for the PR's checks; `bin/fm-dod-lib.sh` owns that text.
 The token is the thin registry form of no-mistakes' own keep-text option, [kunchenguid/no-mistakes#1648](https://github.com/kunchenguid/no-mistakes/issues/1648), and is meant to map onto it once that exists.
+
+## Best-practices pack (data/projects.md best-practices= token)
+
+A project can follow one best-practices pack, named by the pack's repository on its registry line: `best-practices=addyosmani/agent-skills`, order-independent beside `+yolo`, `branch=`, `forge=`, and `pr=`.
+The value is the repository rather than the plugin name, because two packs can publish under one plugin name, and it must be a pack this firstmate carries an adapter for: `bin/fm-best-practices.sh adapters` lists them, and `bin/fm-project-mode.sh --best-practices <name>` reads the token back and refuses an empty, malformed, duplicated, or uncarried value.
+Unlike a forge it composes with every delivery mode, `local-only` included, and with every forge, because it says how the work is engineered rather than how it is published; `yolo` is untouched.
+A project without the token is exactly as it was and never causes a plugin registry read.
+
+You install and enable the pack yourself, the way the pack's own setup document says for your crew runtime; firstmate never installs, enables, or edits it.
+When you add a project, firstmate proposes the token only when a supported pack is installed and enabled by what the project itself commits, writes it only after you confirm, and checks the pack once with `bin/fm-best-practices.sh check`: you hear about the check only when your crew runtime is not one both firstmate and the pack support, firstmate's read of that runtime is not yet proven, or the pack is not installed or not enabled; a pack whose files differ from the reviewed text is reported as unreviewed, a fact rather than a refusal.
+After that, firstmate passes the token to every ship and scout brief and the spawn refuses a brief that disagrees with the registry.
+Each launch exports `FM_BEST_PRACTICES=<owner>/<repo>` and `FM_BEST_PRACTICES_VERSION`, read from the installed copy's own files: the reviewed tag they match, `unreviewed` when the pack is loaded but some file the adapter depends on differs from every reviewed text, or `missing` when there is no usable copy.
+On `unreviewed` the adapter still applies and firstmate tells you which skills differ; on `missing` firstmate tells you and the worker follows firstmate's defaults.
+A change to the line takes effect at the next launch.
+Routing inside an adapter uses the provider settings, key handling, and never-send list of [typed dispatch resolution](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model), and without a key the adapter composes its full static text.
+
+[`docs/best-practices-adapters.md`](best-practices-adapters.md) is the design, including the supported runtimes and what an adapter can and cannot change.
 
 ## GitHub Enterprise hosts (config/github-hosts)
 

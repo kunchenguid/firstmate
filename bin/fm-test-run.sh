@@ -200,7 +200,7 @@ CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=11
+PORTABLE_SERIAL_SHARDS=12
 
 # Conservative balance hint for a portable-serial script with no measurement.
 # Rounded above the current CI mean, including the capability-skipped scripts.
@@ -298,7 +298,7 @@ family_for_basename() {
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-read-repetition.test.sh|\
     fm-calm-claude-mod.test.sh|\
-    fm-harness-adapter-references.test.sh|fm-project-mode.test.sh|\
+    fm-harness-adapter-references.test.sh|fm-project-mode.test.sh|fm-best-practices.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -392,6 +392,7 @@ family_for_basename() {
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
+    fm-best-practices-fingerprints-live.test.sh|\
     fm-claude-tool-exclude-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -762,6 +763,8 @@ tests/fm-bearings-board-lavish-live-e2e.test.sh 51
 tests/fm-bearings-board-render.test.sh 15612
 tests/fm-bearings-board.test.sh 40817
 tests/fm-bearings-snapshot.test.sh 186219
+tests/fm-best-practices-fingerprints-live.test.sh 3671
+tests/fm-best-practices.test.sh 87447
 tests/fm-bootstrap-network-parallel.test.sh 30424
 tests/fm-bootstrap.test.sh 50965
 tests/fm-branch-supervision.test.sh 22979
@@ -1852,6 +1855,17 @@ families_for_changed_path() {
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-best-practices.sh|bin/fm-best-practices-lib.sh|\
+    .agents/skills/best-practices-adapters/SKILL.md|.agents/skills/best-practices-adapters/references/*)
+      printf '%s\n' "__script__:fm-best-practices.test.sh"
+      printf '%s\n' "__script__:fm-best-practices-fingerprints-live.test.sh"
+      ;;
+    bin/fm-decision-provider-lib.sh)
+      # The typed-decision provider code: the dispatch resolver and the
+      # best-practices adapter routing both send through it.
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-best-practices.test.sh"
       ;;
     .agents/skills/harness-adapters/SKILL.md|.agents/skills/harness-adapters/references/*)
       printf '%s\n' pure-contract-unit
