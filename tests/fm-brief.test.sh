@@ -340,6 +340,45 @@ EOF
   pass "fm-brief.sh follows the project's registered Forgejo CLI and refuses fj"
 }
 
+# A bare forge=forgejo binding resolves `auto` against the project clone's own
+# host exactly as arming and the merge path do: on a home where tea cannot
+# answer for that host but fgj can, the brief must name the fgj those paths
+# select rather than a tea that is not logged in. The clone's origin is the host
+# signal available at brief time, and a clone that names no host keeps the tea
+# fallback.
+test_forgejo_auto_resolves_like_the_merge_path() {
+  local home proj fakebin brief
+  home="$TMP_ROOT/forge-auto-home"
+  fakebin="$TMP_ROOT/forge-auto-bin"
+  proj="$home/projects/auto-proj"
+  mkdir -p "$fakebin" "$home/data" "$proj"
+  cat > "$home/data/projects.md" <<'EOF'
+- auto-proj [direct-PR forge=forgejo] - fixture (added 2026-07-01)
+EOF
+  git -C "$proj" init -q || fail "could not initialize the auto-resolution clone"
+  git -C "$proj" remote add origin https://forgejo.example/o/r.git \
+    || fail "could not set the auto-resolution clone origin"
+  # tea is installed but holds no login for the host, and fgj holds exactly one,
+  # so the resolver walks past tea and selects fgj the way the merge path does.
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tea"
+  cat > "$fakebin/fgj" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" = "auth status" ] || exit 1
+printf 'Authenticated instances:\n'
+printf '  \342\200\242 forgejo.example (user: fixture)\n'
+SH
+  chmod +x "$fakebin/tea" "$fakebin/fgj"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-auto auto-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
+    || fail "an fgj-only project should scaffold a ship brief"
+  brief="$home/data/brief-auto/brief.md"
+  assert_grep "3. Use fgj for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+    "an auto binding on an fgj-only home must resolve to fgj in the ship brief"
+  assert_no_grep "Use tea for Forgejo operations" "$brief" \
+    "an auto binding on an fgj-only home must not name tea"
+  pass "fm-brief.sh resolves auto against the clone host and names the CLI the merge path will use"
+}
+
 # --forge external renders the external review rail from bin/fm-dod-lib.sh: a
 # first rule that forbids every task push, the review-tool contract, and the
 # home's adapter body. It is direct-PR only, carries no base branch, and needs
@@ -1739,6 +1778,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_forge_selection_renders_correct_cli
 test_forgejo_registered_cli_reaches_the_brief
+test_forgejo_auto_resolves_like_the_merge_path
 test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

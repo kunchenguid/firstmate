@@ -75,10 +75,13 @@
 # bin/fm-project-mode.sh's header owns what the binding means, and
 # bin/fm-dod-lib.sh owns what `gerrit`, `forgejo`, and `external` change in the
 # Definition of done. On `forgejo` this script reads the binding's optional CLI
-# annotation (bin/fm-project-mode.sh --forge-cli) so the ship brief's forge-CLI
-# rule and Definition of done name the CLI the project registered, defaulting to
-# tea when it names none, and it refuses a binding to forgejo-cli (`fj`), which
-# cannot read the pull request record or bind a merge to a verified head. On
+# annotation (bin/fm-project-mode.sh --forge-cli) and resolves `auto` against the
+# project clone's own host through the same resolver the merge path uses
+# (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project), so the ship brief's
+# forge-CLI rule and Definition of done name the CLI that will actually be used,
+# falling back to tea only when the clone cannot name a host, and it refuses a
+# binding that resolves to forgejo-cli (`fj`), which cannot read the pull request
+# record or bind a merge to a verified head. On
 # `external` that rule names no forge CLI, because the home's review tool is the
 # only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.
@@ -180,6 +183,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -339,24 +344,36 @@ if [ "$KIND" = ship ]; then
     exit 1
   fi
   # A Forgejo project's pull requests are handled with the CLI its registry
-  # binding names (bin/fm-project-mode.sh --forge-cli), defaulting to tea when
-  # it names none, so the ship brief's forge-CLI rule and Definition of done
-  # name a CLI the project actually uses; an external review tool has no forge
-  # CLI at all; every other forge keeps gh-axi.
+  # binding names (bin/fm-project-mode.sh --forge-cli); a binding that names
+  # none (`auto`) is resolved against the project clone's own host through the
+  # same resolver arming and the merge path use, so the ship brief's forge-CLI
+  # rule and Definition of done name a CLI the project actually uses; an
+  # external review tool has no forge CLI at all; every other forge keeps
+  # gh-axi.
   if [ "$FORGE" = forgejo ]; then
     FORGEJO_CLI=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge-cli "${POS[1]:-}" 2>/dev/null) || {
       echo "error: could not read the registered Forgejo CLI for project '${POS[1]:-}' (bin/fm-project-mode.sh --forge-cli); correct the registry entry in data/projects.md" >&2
       exit 1
     }
     case "$FORGEJO_CLI" in
-      tea|fj) ;;
-      auto|'') FORGEJO_CLI=auto ;;
-      fgj) ;;
+      tea|fgj|fj) ;;
       *) FORGEJO_CLI=auto ;;
     esac
+    if [ "$FORGEJO_CLI" = auto ]; then
+      if [ "$PROJECT_DIR_SET" -eq 1 ] && [ -n "$PROJECT_DIR" ]; then
+        forgejo_clone=$PROJECT_DIR
+      else
+        forgejo_clone="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/${POS[1]:-}"
+      fi
+      if fm_pr_forgejo_resolve_project "$forgejo_clone" auto; then
+        FORGEJO_CLI=$FM_PR_FORGEJO_CLI
+      else
+        FORGEJO_CLI=tea
+      fi
+    fi
     case "$FORGEJO_CLI" in
       fj)
-        echo "error: project '${POS[1]:-}' is registered forge=forgejo:fj, but forgejo-cli exposes no authenticated request passthrough and cannot bind a merge to a verified head, so firstmate cannot ship this task; register forge=forgejo:tea or forge=forgejo:fgj (docs/forgejo-cli-alternatives.md)" >&2
+        echo "error: project '${POS[1]:-}' resolves to forgejo-cli (fj), but fj exposes no authenticated request passthrough and cannot bind a merge to a verified head, so firstmate cannot ship this task; register forge=forgejo:tea or forge=forgejo:fgj, or install and log in a supported Forgejo CLI for this project's host (docs/forgejo-cli-alternatives.md)" >&2
         exit 1 ;;
       fgj)
         FORGE_RULE_LINE="Use fgj for Forgejo operations and chrome-devtools-axi for browser operations." ;;

@@ -1498,6 +1498,47 @@ fm_pr_forgejo_resolve() {  # <host> [<preference>]
   return 1
 }
 
+# The forge host a project's own clone points at, read from its origin remote.
+# Accepts the spellings git itself accepts - https://host/..., ssh://[user@]host[/...],
+# and the scp-like [user@]host:path - and prints the host with any user and port
+# stripped, so it is the same host a pull request URL carries and the same one
+# fm_pr_forgejo_resolve matches a login against. A clone with no origin, or an
+# origin that is a local path, has no host and fails.
+fm_pr_forgejo_clone_host() {  # <clone-dir>
+  local dir=${1:-} url authority host
+  [ -n "$dir" ] && [ -d "$dir" ] || return 1
+  url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  case "$url" in
+    *://*)
+      authority=${url#*://}
+      authority=${authority%%/*}
+      host=${authority##*@}
+      host=${host%%:*}
+      ;;
+    *:*)
+      host=${url%%:*}
+      host=${host##*@}
+      ;;
+    *) return 1 ;;
+  esac
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  fm_pr_forge_host_valid "$host" || return 1
+  printf '%s\n' "$host"
+}
+
+# Resolve the Forgejo CLI for a project clone, so a ship brief or a promotion
+# makes the same `auto` decision the merge watch and the merge path make: the
+# host comes from the clone's own origin and the CLI and login are selected by
+# fm_pr_forgejo_resolve. Sets FM_PR_FORGEJO_CLI and FM_PR_FORGEJO_LOGIN exactly
+# as that function does and returns 1 when the clone has no host or nothing
+# resolves.
+fm_pr_forgejo_resolve_project() {  # <clone-dir> [<preference>]
+  local host
+  host=$(fm_pr_forgejo_clone_host "${1:-}") || return 1
+  fm_pr_forgejo_resolve "$host" "${2:-auto}"
+}
+
 # One authenticated REST request through the CLI fm_pr_forgejo_resolve chose.
 # <method> is GET or POST; <owner>/<repo> are the pull request's own repository;
 # <suffix> is the endpoint path after the repository ("pulls/9",

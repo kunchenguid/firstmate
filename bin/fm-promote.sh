@@ -244,6 +244,17 @@ if [ -n "$PROMOTE_PROJECT" ]; then
       echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a Forgejo CLI (see the refusal above); correct data/projects.md and promote again" >&2
       exit 1
     fi
+    case "$PROMOTE_FORGEJO_CLI" in
+      tea|fgj|fj) ;;
+      *) PROMOTE_FORGEJO_CLI=auto ;;
+    esac
+    if [ "$PROMOTE_FORGEJO_CLI" = auto ]; then
+      if fm_pr_forgejo_resolve_project "$PROMOTE_PROJECT" auto; then
+        PROMOTE_FORGEJO_CLI=$FM_PR_FORGEJO_CLI
+      else
+        PROMOTE_FORGEJO_CLI=tea
+      fi
+    fi
   fi
   refuse_impossible_forge_posture || exit 1
   if ! PROMOTE_STANDING_PR=$("$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROMOTE_PROJECT_NAME"); then

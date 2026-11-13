@@ -1898,6 +1898,41 @@ EOF
   pass "forge=forgejo:fj is refused at promotion rather than downgraded to tea"
 }
 
+# A bare forge=forgejo binding resolves auto at promotion the same way the brief
+# and the merge path do, so an fgj-only home that names no CLI receives an fgj
+# contract rather than a tea one. The clone's origin is the host signal.
+test_forge_forgejo_promotion_resolves_auto() {
+  local rec home proj fakebin id meta payload
+  rec=$(make_home forge-forgejo-auto "- proj [direct-PR +yolo forge=forgejo] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  git -C "$proj" remote add origin https://forgejo.example/o/r.git \
+    || fail "could not set the promotion clone origin"
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tea"
+  cat > "$fakebin/fgj" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" = "auth status" ] || exit 1
+printf 'Authenticated instances:\n'
+printf '  \342\200\242 forgejo.example (user: fixture)\n'
+SH
+  chmod +x "$fakebin/tea" "$fakebin/fgj"
+  id="forge-forgejo-auto-p1"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on >/dev/null 2>&1 \
+    || fail "promotion should resolve the auto binding to fgj"
+  payload="$home/data/$id/ship-instructions.md"
+  assert_present "$payload" "the promoted ship instructions were not published"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'open a PR with `fgj`' "$payload" "the promoted fgj-only worker was not told to open the PR with fgj"
+  assert_no_grep 'open a PR with `tea`' "$payload" "the promoted fgj-only worker was told to use tea"
+  pass "forge=forgejo promotion resolves auto to the CLI the merge path will use"
+}
+
 # direct-PR composes with the forge: the mode still means "publish without the
 # pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
 # plus a pull request. The worker reports the published change, never submits or
@@ -2029,6 +2064,7 @@ test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_forge_forgejo_rides_the_same_binding
 test_forge_forgejo_fj_binding_refuses_promotion
+test_forge_forgejo_promotion_resolves_auto
 test_pr_manual_brief_hands_the_pr_text_to_the_worker
 test_pr_manual_is_refused_where_it_cannot_apply
 test_spawn_requires_the_brief_to_carry_the_registered_pr_text
