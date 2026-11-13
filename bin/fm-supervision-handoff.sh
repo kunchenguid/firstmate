@@ -174,8 +174,7 @@ retry_delivery() {
 
 keep_owning() {
   session_owned && [ -e "$CONFIG/$FLAG" ] && [ ! -e "$STATE/.afk" ] \
-    && if [ "$SWEEP" -eq 1 ]; then fm_supervision_host_enabled "$CONFIG" claude
-       else [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; fi
+    && { [ "$SWEEP" -eq 0 ] || fm_supervision_host_enabled "$CONFIG" claude; }
 }
 
 NEXT_RETRY=$((SECONDS + RETRY))
@@ -208,6 +207,9 @@ while keep_owning; do
     READY_PRINTED=1
   fi
   while fm_pid_alive "$ARM"; do
+    # Hand-back checks its token only here, so an acknowledgement that lands
+    # between arms still leaves the verified replacement running.
+    [ "$SWEEP" -eq 1 ] || [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ] || exit 0
     keep_owning || exit 0
     if [ "$SWEEP" -eq 0 ] && [ "$SECONDS" -ge "$NEXT_RETRY" ]; then
       retry_delivery

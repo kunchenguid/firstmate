@@ -683,6 +683,52 @@ assert_midturn_sweep() {  # <on|off|host-off> <pass-through|at-turn>
   pass "host+hook: with the mid-turn sweep flag a long turn after a $path keeps checks running and the next park takes over one cycle"
 }
 
+# Main acknowledges the hand-back after the owner's arm closed and before the
+# owner noticed: the owner is held stopped across that gap, so the window is
+# deterministic. The owner must still start and verify one replacement, then
+# leave it running.
+test_acknowledgement_between_arms_leaves_a_verified_replacement() {
+  local home owner arm watcher state
+  home=$(make_primary_home ack-between-arms)
+  : > "$home/config/supervision-handoff-ack"
+  : > "$home/hook.own-group"
+  printf 'project=demo\nwindow=fm-other\nharness=claude\n' > "$home/state/other.meta"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "ack between arms: no initial watcher"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until_deadline 60 hook_exited "$home" || fail "ack between arms: no hand-back"
+  assert_rewoke_main "$home" "ack between arms"
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  wait_until 150 watcher_live "$home" || fail "ack between arms: the hand-back left no watcher"
+  wait_until 150 bash -c '[ -s "$1/state/.supervision-handoff-owner" ] && kill -0 "$(cut -f1 "$1/state/.supervision-host-left")"' _ "$home" \
+    || fail "ack between arms: the owner recorded no live arm"
+  owner=$(cut -f1 "$home/state/.supervision-handoff-owner")
+  arm=$(cut -f1 "$home/state/.supervision-host-left")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -STOP "$owner"
+  printf 'working [at=%s]: another event\n' "$(date +%s)" >> "$home/state/other.status"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || { kill -CONT "$owner"; fail "ack between arms: the arm's watcher did not close"; }
+  # The stopped owner cannot reap its arm: wait for it to be a zombie or gone.
+  wait_until 150 bash -c 'state=$(ps -o stat= -p "$1" 2>/dev/null); [ -z "$state" ] || [ "${state#Z}" != "$state" ]' _ "$arm" \
+    || { kill -CONT "$owner"; fail "ack between arms: the arm did not exit"; }
+  main_drain "$home" >/dev/null
+  # shellcheck disable=SC2086 # The drain's printed arguments.
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || { kill -CONT "$owner"; fail "ack between arms: main could not acknowledge"; }
+  [ ! -e "$home/state/.supervision-handoff-pending" ] || { kill -CONT "$owner"; fail "ack between arms: acknowledgement did not confirm ownership"; }
+  kill -CONT "$owner"
+  wait_until 150 bash -c '! kill -0 "$1" 2>/dev/null' _ "$owner" || fail "ack between arms: the owner did not stop after the acknowledgement"
+  watcher_live "$home" || fail "ack between arms: the owner stopped without a live watcher"
+  state=$(cut -f1 "$home/state/.supervision-host-left")
+  if [ "$state" = "$arm" ] || ! kill -0 "$state" 2>/dev/null; then
+    fail "ack between arms: no recorded replacement arm is running"
+  fi
+  [ "$(home_arms "$home" | grep -c .)" -eq 1 ] || fail "ack between arms: expected one arm:"$'\n'"$(home_arms "$home")"
+  stop_home_processes "$home"
+  pass "host+hook: an acknowledgement between arms still leaves one verified replacement running"
+}
+
 test_midturn_sweep_flag_off_keeps_the_one_shot_successor() { assert_midturn_sweep off pass-through; }
 
 test_midturn_sweep_flag_keeps_checks_running_during_a_long_turn() { assert_midturn_sweep on pass-through; }
@@ -806,6 +852,7 @@ fm_test_run \
   test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails \
   test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end \
   test_pass_through_successor_survives_the_hook_process_group_teardown \
+  test_acknowledgement_between_arms_leaves_a_verified_replacement \
   test_midturn_sweep_flag_off_keeps_the_one_shot_successor \
   test_midturn_sweep_flag_keeps_checks_running_during_a_long_turn \
   test_midturn_sweep_flag_off_keeps_the_one_shot_successor_at_the_turn \
