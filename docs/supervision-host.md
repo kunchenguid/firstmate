@@ -269,9 +269,11 @@ The opt-in [configuration flag](configuration.md#supervision-after-the-main-sess
 
 When a session that holds the lock ends any other way and no away daemon exists, the hook starts a detached keeper that runs the host and starts it again after each exit.
 It enters no away posture and writes no away record, so it grants no away merge authority.
-The host runs attended, as with the captain at the terminal, except that the main session is gone: it takes the check wakes that are normally main-only, so due work such as the daily runs starts.
+The host runs attended, as with the captain at the terminal, except that the main session is gone: it takes the check wakes that are normally main-only, so due work that a check row names, such as the daily runs, starts.
 Merges and captain decisions wait for the return, and the engine records them as captain outcomes for the next drain: `bin/fm-pr-merge.sh` and `bin/fm-send.sh --resolve-key` keep their attended refusals.
-The one authority it gains is `bin/fm-spawn.sh` of any queued, unblocked, unheld backlog item, work the captain already approved; the lease check (`fm_lease_session_end_relocated`) admits it for the branch only while the keeper is alive, still owns supervision, and the ended session's process is gone.
+The one authority it gains is `bin/fm-spawn.sh` of a task that the check row it is handling names by its task id, while that task is a queued, unblocked, unheld backlog item, work the captain already approved.
+The host writes the task ids that the turn's check rows name into its turn record, and the lease check (`fm_lease_session_end_relocated` and `fm_lease_session_end_names`) admits a branch spawn only of such a task, only while the keeper is alive, still owns supervision, and the ended session's process is gone.
+A wake that is not a check row, such as a worker finishing or a PR event, names no task, so it is handled without spawning.
 A session that ends under an `/afk` or `/quiet` record keeps that record exactly as it is, and the host runs under it.
 
 That host proves ownership without the session: it owns supervision while no later Stop has claimed an auto-arm generation and no later session has taken the session lock.
@@ -479,7 +481,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-supervision-host-park.test.sh` | Latch, park boundary, compaction, and lock ownership against the same stub-engine fixtures. |
 | `tests/fm-supervision-host-hook.test.sh` | Claude Stop-hook re-arm, successor take-over, lost hand-back continuations, and guarded retry submission. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
-| `tests/fm-supervision-session-end.test.sh` | The Claude `SessionEnd` hook through its tracked registration with the opt-in on and off: a check wake the attended engine takes after the session ended with no away record written, the spawn of a queued item admitted and a held or blocked one refused through `bin/fm-spawn.sh`, the keeper's end at the next session and at the next Stop, and no change on `/clear` or to a standing `/afk` record. |
+| `tests/fm-supervision-session-end.test.sh` | The Claude `SessionEnd` hook through its tracked registration with the opt-in on and off: a check wake the attended engine takes after the session ended with no away record written, the spawn of the queued item the check row names admitted, and a queued item it does not name or a held or blocked one refused, through `bin/fm-spawn.sh`, the keeper's end at the next session and at the next Stop, and no change on `/clear` or to a standing `/afk` record. |
 | `tests/fm-supervision-session-end-live-e2e.test.sh` | Token-free guard that the installed Claude reports `clear` for `/clear` and another reason for `/exit` and a closed terminal, and that a hook's detached child outlives the process. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |

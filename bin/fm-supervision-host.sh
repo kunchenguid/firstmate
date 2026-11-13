@@ -1033,6 +1033,13 @@ health_record() {  # <engine-error 0|1> <reports>
 # (attended_acceptor, whose offer scan is the turn's scope), else sets HANDLE_WHY and returns 1; sets ENGINE_ERROR
 # when the turn failed on the engine itself. Runs in the host's own shell,
 # never a subshell, because it advances the host's grant and turn state.
+# Every task-id-shaped word in the payloads of the claimed check rows, the only
+# tasks a session-end turn may spawn (fm_lease_session_end_names).
+check_row_task_ids() {  # <row-seqs>
+  awk -F '\t' -v rows=" $1 " '$3 == "check" && index(rows, " " $2 " ") { print $5 }' "$STATE/.wake-queue" 2>/dev/null \
+    | tr -cs 'A-Za-z0-9._-' '\n' | sed 's/[.]*$//' | grep -E '^[A-Za-z0-9]' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
 handle_wake() {  # <reason-lines>
   local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
   local receipts usage result errors unacked mirror
@@ -1097,6 +1104,7 @@ handle_wake() {  # <reason-lines>
   : > "$RECEIPTS"
   printf 'turn=%s\nrows=%s\ntasks=%s\nunscoped=%s\nwake=%s\nposture=%s\n' \
     "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" "$TURN_POSTURE" > "$TURN_FILE"
+  [ -z "$SESSION_END_PID" ] || printf 'spawn=%s\n' "$(check_row_task_ids "$rows")" >> "$TURN_FILE"
   readback=
   if [ "$TURN_POSTURE" = away ]; then
     readback=$(mktemp "$STATE/.supervision-host-readback.XXXXXX") || readback=

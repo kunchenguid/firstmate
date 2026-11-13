@@ -127,9 +127,10 @@ if (command === "scope") {
     }
   }
   const sessionEndTail =
-    "POSTURE: ATTENDED, MAIN GONE. The main session has ended and no away record exists, so the captain is not present and MAIN is not running: you take this check row. " +
-    "Start the queued standing work the check row names (for example the daily runs, each per its backlog note) with bin/fm-spawn.sh, which dispatches only queued unblocked backlog items. " +
-    "Do not merge, do not answer a decision or ask-user finding, and do not spawn anything the check row does not name; record every such need as a captain outcome for the next drain.";
+    "POSTURE: ATTENDED, MAIN GONE. The main session has ended and no away record exists, so the captain is not present and MAIN is not running: you take this wake. " +
+    "Spawn only a task the check row you are handling names by its task id, and only while it is a queued, unblocked, unheld backlog item, with bin/fm-spawn.sh, which refuses every other task. " +
+    "A wake that is not a check row, such as a worker finishing or a PR event, is handled without spawning. " +
+    "Do not merge and do not answer a decision or ask-user finding; record every such need as a captain outcome for the next drain.";
   const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : sessionEnd ? sessionEndTail : "";
   process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror)}\n`);
 } else {

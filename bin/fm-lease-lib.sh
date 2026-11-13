@@ -317,7 +317,8 @@ fm_lease_away_relocated() {
 # bin/fm-supervision-session-end.sh runs after the main session ended is alive
 # and still owns supervision (fm_supervision_host_session_end_owned), and the
 # ended session's process is gone. Read fresh on every call. Only new-task spawn
-# of queued work consults it; it is not an away record and relocates nothing else.
+# of queued work consults it, together with fm_lease_session_end_names; it is
+# not an away record and relocates nothing else.
 fm_lease_session_end_relocated() {
   local record keeper gen session
   record=$(sed -n '1p' "$STATE/.supervision-session-end" 2>/dev/null) || return 1
@@ -335,6 +336,16 @@ fm_lease_session_end_relocated() {
     . "$FM_LEASE_LIB_DIR/fm-supervision-engine-lib.sh"
     fm_supervision_host_session_end_owned "$STATE" "$gen" "$session"
   ) >/dev/null 2>&1
+}
+
+# fm_lease_session_end_names <task>: 0 iff the supervision host's live turn
+# record ($STATE/.supervision-host-turn) lists <task> on its spawn= line: a
+# task id the check row of that session-end turn names. A turn that claims no
+# check row lists none, and the host removes the record when the turn ends.
+fm_lease_session_end_names() {
+  local named
+  named=$(sed -n 's/^spawn=//p' "$STATE/.supervision-host-turn" 2>/dev/null) || return 1
+  case " $named " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
 # fm_lease_forbid_branch <action-label> [--away-relocated]: refuse (exit

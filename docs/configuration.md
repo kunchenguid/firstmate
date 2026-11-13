@@ -432,7 +432,9 @@ Create the empty, home-local `config/supervision-host-session-end` file to keep 
 The flag is off when absent, is not inherited, and has no effect on other primaries or on a home that does not run the host with an engine.
 The `SessionEnd` hook reads it when the session ends, so enabling it needs no session restart.
 With it present, a session end other than `/clear` leaves a host running in the attended posture: it writes no away record and grants no away merge authority.
-Any queued, unblocked, unheld backlog item may start; merges and captain answers wait for the return.
+The host may start only a task that the check row it is handling names by its task id, while that task is a queued, unblocked, unheld backlog item.
+A wake that is not a check row, such as a worker finishing or a PR event, is handled without starting anything.
+Merges and captain answers wait for the return.
 The host keeps taking wakes until the next session starts or its first turn ends.
 [Supervision host](supervision-host.md#after-the-main-session-ends) owns the design and its limits.
 

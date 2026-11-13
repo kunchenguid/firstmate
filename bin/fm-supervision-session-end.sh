@@ -23,8 +23,9 @@
 #   - the home needs supervision (bin/fm-supervision-lib.sh).
 # Then it starts the keeper below detached. It enters no away posture and
 # writes no away record, so no away merge authority exists: the host runs
-# attended, takes the check wakes main can no longer reach so due work such as
-# the daily runs starts, and leaves merges and captain decisions for the return.
+# attended, takes the check wakes main can no longer reach so due work that a
+# check row names, such as the daily runs, starts, and leaves merges and captain
+# decisions for the return.
 # An /afk or /quiet record already in place stays exactly as it is and the host
 # runs under it. The keeper starts: nohup, stdio closed, in a process
 # group of its own, the one way a process outlives a Claude hook

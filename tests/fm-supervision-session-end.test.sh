@@ -38,7 +38,7 @@ register_daily_check() {  # <home>
 #!/usr/bin/env bash
 [ -e '$1/check.go' ] || exit 0
 rm -f '$1/check.go'
-echo 'daily runs due - start each per its backlog note'
+echo 'daily runs due: daily-runs, held-item, blocked-item - start each per its backlog note'
 SH
   chmod 0700 "$1/state/daily.check.sh"
   FM_HOME="$1" "$ROOT/bin/fm-check-register.sh" daily >/dev/null || fail "fixture: could not register the check"
@@ -149,8 +149,10 @@ branch_merge() {  # <home>
   FM_HOME="$1" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1
 }
 
-test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
-  local home log daily
+last_spawn_done() { sed -n '/== other-item/,$p' "$1/engine-spawn.log" 2>/dev/null | grep -q '^rc='; }
+
+test_daily_check_spawns_named_and_refuses_unnamed_held_or_blocked() {
+  local home log daily other
   SPAWN_ROOT="$TMP_ROOT/spawn-root-2"
   mkdir -p "$SPAWN_ROOT"
   git init -q -b main "$SPAWN_ROOT"
@@ -162,12 +164,12 @@ test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
   mkdir -p "$home/data"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
   fm_test_tasks_toml "$home/.tasks.toml"
-  for id in daily-runs held-item blocked-item blocker; do
+  for id in daily-runs held-item blocked-item other-item blocker; do
     tasks-axi add "$id" "item $id" --kind ship --file "$home/data/backlog.md" >/dev/null || fail "fixture: could not add $id"
   done
   tasks-axi hold held-item --reason "captain decision pending" --kind captain --file "$home/data/backlog.md" >/dev/null || fail "fixture: could not hold"
   tasks-axi block blocked-item --by blocker --file "$home/data/backlog.md" >/dev/null || fail "fixture: could not block"
-  printf '%s\n' daily-runs held-item blocked-item > "$home/stub-spawn-ids"
+  printf '%s\n' daily-runs held-item blocked-item other-item > "$home/stub-spawn-ids"
   echo spawn > "$home/stub-mode"
   register_daily_check "$home"
   end_session "$home" prompt_input_exit
@@ -175,15 +177,18 @@ test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
   wait_until 300 watcher_live "$home" || fail "the keeper's host armed no watcher"
   touch "$home/check.go"
   wait_until_deadline 60 test -s "$home/engine-spawn.log" || fail "the session-end engine ran no spawn"
-  wait_until_deadline 60 grep -q '== blocked-item' "$home/engine-spawn.log" || fail "the engine did not reach its last spawn"
-  sleep 2
+  wait_until_deadline 60 last_spawn_done "$home" || fail "the engine did not finish its last spawn"
   log=$(cat "$home/engine-spawn.log")
   daily=$(printf '%s\n' "$log" | sed -n '/== daily-runs/,/== held-item/p')
-  assert_not_contains "$daily" "error: spawn refused" "the queued daily-runs item was refused"
+  assert_contains "$daily" "names task daily-runs" "the named daily-runs item did not pass the session-end allowance"
+  assert_not_contains "$daily" "refused" "the queued daily-runs item was refused"
   assert_not_contains "$daily" "rc=6" "the role partition refused the queued daily-runs item"
   assert_contains "$(printf '%s\n' "$log" | sed -n '/== held-item/,/== blocked-item/p')" "never a held item" "a held item was dispatched"
-  assert_contains "$(printf '%s\n' "$log" | sed -n '/== blocked-item/,$p')" "never a held item" "a blocked item was dispatched"
-  pass "the daily-runs check through the session-end host spawns the queued item and refuses a held or blocked one"
+  assert_contains "$(printf '%s\n' "$log" | sed -n '/== blocked-item/,/== other-item/p')" "never a held item" "a blocked item was dispatched"
+  other=$(printf '%s\n' "$log" | sed -n '/== other-item/,$p')
+  assert_contains "$other" "task other-item is not named" "a queued item the check row does not name passed the session-end allowance"
+  assert_contains "$other" "rc=6" "a queued item the check row does not name was not refused by the role partition"
+  pass "the daily-runs check through the session-end host spawns the queued item it names and refuses an unnamed queued item and a held or blocked one"
 }
 
 engine_calls() { find "$1" -maxdepth 1 -name 'engine-call.*' 2>/dev/null | wc -l | tr -d ' '; }
@@ -213,7 +218,7 @@ test_failing_engine_latches_the_window() {
   pass "repeated engine errors latch the session-end window and no turn starts inside the cooldown"
 }
 
-test_session_end_allows_only_queued_spawn() {
+test_session_end_refuses_unnamed_spawn() {
   local home out status
   SPAWN_ROOT="$TMP_ROOT/spawn-root"
   mkdir -p "$SPAWN_ROOT"
@@ -228,16 +233,15 @@ test_session_end_allows_only_queued_spawn() {
   end_session "$home" prompt_input_exit
   wait_until 100 keeper_live "$home" || fail "no keeper runs after the session ended"
   out=$(branch_spawn "$home"); status=$?
-  [ "$status" -ne 6 ] || fail "the branch spawn was refused by the role partition with a live keeper: $out"
-  assert_contains "$out" "queued work may start" "the spawn did not pass the session-end allowance"
-  assert_contains "$out" "no dispatchable backlog item" "the spawn of work that is not queued was not refused"
+  [ "$status" -eq 6 ] || fail "a branch spawn no check row names exited $status, not 6, with a live keeper: $out"
+  assert_contains "$out" "task task-new is not named" "the spawn outside a check-row turn was not refused by the session-end allowance"
   out=$(branch_merge "$home"); status=$?
   [ "$status" -eq 6 ] || fail "the branch merge exited $status, not 6, with a live keeper: $out"
   printf '%s\n' "$$" > "$home/state/.lock"
   wait_until_deadline 30 keeper_gone "$home" || fail "the keeper outlived the next session's start"
   out=$(branch_spawn "$home"); status=$?
   [ "$status" -eq 6 ] || fail "after the keeper ended the branch spawn exited $status, not 6: $out"
-  pass "a live session-end keeper admits a branch spawn of queued work only, never a merge, and ends with the keeper"
+  pass "a live session-end keeper admits no branch spawn that a check row does not name, never a merge, and ends with the keeper"
 }
 
 fm_test_run \
@@ -246,6 +250,6 @@ fm_test_run \
   test_later_stop_ends_keeper \
   test_clear_is_inert \
   test_standing_away_record_is_untouched \
-  test_session_end_allows_only_queued_spawn \
-  test_daily_check_spawns_queued_and_refuses_held_or_blocked \
+  test_session_end_refuses_unnamed_spawn \
+  test_daily_check_spawns_named_and_refuses_unnamed_held_or_blocked \
   test_failing_engine_latches_the_window
