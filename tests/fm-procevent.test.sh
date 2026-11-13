@@ -1106,7 +1106,23 @@ assert_absent "$HSCOUT/state/procevent/$scratch_id.source" \
   "a refused scout arm still registered the board"
 [ ! -e "$SCOUT_ROOT/count" ] || fail "a refused scout arm still polled the board"
 
-mkdir -p "$HSCOUT/data/scout-1/board"
+mkdir -p "$HSCOUT/data/scout-1/board" "$HSCOUT/data/scout-1-other"
+ln -s "$SCRATCH_ART" "$HSCOUT/data/scout-1/board/escape.html"
+cp "$SCRATCH_ART" "$HSCOUT/data/scout-1-other/board.html"
+for outside_art in \
+  "$HSCOUT/data/scout-1/board/escape.html" \
+  "$HSCOUT/data/scout-1-other/board.html" \
+  "$HSCOUT/data/scout-1/../scout-1-other/board.html"; do
+  outside_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$outside_art")
+  if PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$outside_art" --for scout-1 >/dev/null 2>&1; then
+    fail "a scout armed $outside_art, which resolves outside its task data directory"
+  fi
+  assert_absent "$HSCOUT/state/procevent/$outside_id.source" \
+    "a refused scout arm of $outside_art still registered the board"
+  [ ! -e "$SCOUT_ROOT/count" ] || fail "a refused scout arm of $outside_art still polled the board"
+done
+
 KEPT_ART="$HSCOUT/data/scout-1/board/board.html"
 cp "$SCRATCH_ART" "$KEPT_ART"
 lavish_session "$KEPT_ART"
@@ -1117,6 +1133,19 @@ assert_contains "$(FM_HOME="$HSCOUT" "$ROOT/bin/fm-procevent.sh" list)" "task:sc
   "the board in the task data directory has no live listener"
 PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$KEPT_ART" >/dev/null
+rm -f "$SCOUT_ROOT/count"
+
+LINKED_ART="$HSCOUT/data/scout-1/board/linked.html"
+cp "$SCRATCH_ART" "$LINKED_ART"
+lavish_session "$LINKED_ART"
+ln -s "$LINKED_ART" "$HSCOUT/worktree-scout-1/.lavish/linked.html"
+PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$HSCOUT/worktree-scout-1/.lavish/linked.html" --for scout-1 >/dev/null \
+  || fail "a scout could not arm a link whose board is inside its task data directory"
+assert_present "$HSCOUT/state/procevent/$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LINKED_ART").source" \
+  "the linked board inside the task data directory was not registered"
+PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$LINKED_ART" >/dev/null
 rm -f "$SCOUT_ROOT/count"
 
 OLD_ART="$HSCOUT/worktree-scout-2/.lavish/board.html"
