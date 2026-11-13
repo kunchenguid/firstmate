@@ -82,7 +82,7 @@ test_column_and_max_age_options() {
   rc=0
   out=$(run_gate "$report" --max-age 4h) || rc=$?
   expect_code 2 "$rc" "a report without the default column must be an input error"$'\n'"$out"
-  assert_contains "$out" "no markdown table with a 'checked_at' column" "the error must name the missing column"
+  assert_contains "$out" "  table at line 5: no 'checked_at' column" "the error must name the table and the missing column"
   pass "--column picks the timestamp column and --max-age sets the bound"
 }
 
@@ -121,6 +121,25 @@ test_unreadable_timestamps_fail_closed() {
   pass "empty, date-only, prose, and future timestamps fail closed"
 }
 
+test_a_table_without_the_column_fails_even_beside_a_fresh_table() {
+  local report out rc=0
+  report=$(write_report mixed \
+    '| item | action |' \
+    '|---|---|' \
+    '| a | send reminder |' \
+    '' \
+    '| item | checked_at |' \
+    '|---|---|' \
+    '| b | 2026-11-13T11:30Z |')
+  out=$(run_gate "$report") || rc=$?
+  expect_code 2 "$rc" "an undated table must fail the gate even when another table is fresh"$'\n'"$out"
+  assert_contains "$out" "fresh age 30m (checked_at 2026-11-13T11:30Z): | b |" "the dated table's rows are still printed with their age"
+  assert_contains "$out" "1 table(s) in '$report' have no 'checked_at' column" "the failure must count the undated tables"
+  assert_contains "$out" "  table at line 5: no 'checked_at' column" "the failure must name the undated table"
+  assert_not_contains "$out" "all 1 rows are within" "an undated table must not be reported as passing"
+  pass "a table without the timestamp column fails the gate even beside a fresh table"
+}
+
 test_input_errors_exit_two() {
   local report out rc=0
   report=$(write_report errors '| item | checked_at |' '|---|---|' '| a | 2026-11-13T11:00Z |')
@@ -136,6 +155,11 @@ test_input_errors_exit_two() {
   rc=0
   out=$(run_gate "$report" --column) || rc=$?
   expect_code 2 "$rc" "--column with no value must be an input error"
+  rc=0
+  printf '# Triage\n\nNo table here.\n' > "$TMP_ROOT/no-table.md"
+  out=$(run_gate "$TMP_ROOT/no-table.md") || rc=$?
+  expect_code 2 "$rc" "a report with no table must be an input error"
+  assert_contains "$out" "has no markdown table" "the error must say there is no table"
   pass "usage and input errors exit 2"
 }
 
@@ -144,4 +168,5 @@ fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_column_and_max_age_options \
   test_offsets_and_local_time_are_honoured \
   test_unreadable_timestamps_fail_closed \
+  test_a_table_without_the_column_fails_even_beside_a_fresh_table \
   test_input_errors_exit_two

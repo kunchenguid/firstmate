@@ -9,8 +9,9 @@
 # Reads every markdown table in <report.md> (a header row, a `|---|` separator
 # row, then body rows) and checks each table whose header has the timestamp
 # column, matched case-insensitively with surrounding backticks or emphasis
-# ignored. A table without that column is listed as skipped on stdout; a report
-# where no table has it is an input error.
+# ignored. Every table must have that column: a table without it holds rows
+# nobody dated, so each such table is named on stderr and the report is an
+# input error, as is a report with no table at all.
 #
 #   --column <name>       timestamp column (default checked_at)
 #   --max-age <duration>  oldest acceptable age (default 2h): a whole number of
@@ -28,7 +29,8 @@
 #   1  at least one row is older than --max-age or has an unreadable timestamp;
 #      those rows are named again on stderr - re-check them rather than
 #      presenting them
-#   2  usage error, unreadable report, or no table with the timestamp column
+#   2  usage error, unreadable report, no table, or a table without the
+#      timestamp column
 #
 # The report is only read, never edited. Requires python3.
 #
@@ -177,7 +179,8 @@ except (OSError, UnicodeDecodeError) as error:
 
 want = normalize(column)
 checked = 0
-tables_with_column = 0
+tables = 0
+undated = []
 bad = []
 i = 0
 while i < len(lines):
@@ -190,10 +193,10 @@ while i < len(lines):
         while i < len(lines) and lines[i].strip() and "|" in lines[i]:
             rows.append((i + 1, lines[i]))
             i += 1
+        tables += 1
         if want not in header:
-            print("table at line %d: skipped, no '%s' column" % (start, column))
+            undated.append(start)
             continue
-        tables_with_column += 1
         index = header.index(want)
         for number, row in rows:
             checked += 1
@@ -220,8 +223,17 @@ while i < len(lines):
         continue
     i += 1
 
-if tables_with_column == 0:
-    die("report '%s' has no markdown table with a '%s' column" % (report, column))
+if tables == 0:
+    die("report '%s' has no markdown table" % report)
+
+if undated:
+    sys.stderr.write(
+        "error: %d table(s) in '%s' have no '%s' column, so their rows were never dated; add the column and re-check them:\n"
+        % (len(undated), report, column)
+    )
+    for start in undated:
+        sys.stderr.write("  table at line %d: no '%s' column\n" % (start, column))
+    sys.exit(2)
 
 if bad:
     sys.stderr.write(
