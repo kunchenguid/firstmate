@@ -104,29 +104,6 @@ FM_REMOTE_JOB_TIMEOUT=${FM_REMOTE_JOB_TIMEOUT:-360}
 FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_ACTIVE_POLL_SECONDS=${FM_REMOTE_JOB_ACTIVE_POLL_SECONDS:-${FM_REMOTE_JOB_POLL_SECONDS:-0.25}}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
-# fm_remote_job_sleep: wait <seconds> without sleep(1). uutils sleep may ignore
-# fractional durations or SIGINT; a timed read on a dummy fifo is a bash
-# builtin wait (fractional timeouts need bash 4+; bash 3.2 keeps sleep(1)).
-# Fixed fd 7: bash 3.2 has no {var}<> redirection. The worker holds fd 9 on
-# its lock, and the watcher holds 6 and 8 in a different process.
-fm_remote_job_sleep_setup() {
-  [ "${FM_REMOTE_JOB_SLEEP_READY:-0}" = 1 ] && return 0
-  local dir fifo
-  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-jobsleep.XXXXXX") || return 1
-  fifo="$dir/w"
-  mkfifo -m 600 "$fifo" || { rm -rf -- "$dir"; return 1; }
-  exec 7<>"$fifo"
-  rm -rf -- "$dir"
-  FM_REMOTE_JOB_SLEEP_READY=1
-}
-fm_remote_job_sleep() { # <seconds>
-  local secs=${1:-0}
-  if [ "${BASH_VERSINFO[0]}" -ge 4 ] && fm_remote_job_sleep_setup; then
-    read -r -t "$secs" _ <&7 || true
-    return
-  fi
-  sleep "$secs"
-}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_STAGE_REAP_SECONDS=${FM_REMOTE_JOB_STAGE_REAP_SECONDS:-600}
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS=86400
@@ -802,7 +779,7 @@ fm_remote_job_wait() { # <account-home> <id>; honors FM_REMOTE_JOB_DISCONNECT_PR
         return 1
       fi
     fi
-    fm_remote_job_sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
+    sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
   done
 }
 

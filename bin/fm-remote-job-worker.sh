@@ -484,7 +484,7 @@ worker_stop_recorded_execution() { # <job-dir>
       fi
     done
     [ "$still_alive" -eq 1 ] || break
-    fm_remote_job_sleep 0.01
+    sleep 0.01
   done
   [ "$still_alive" -eq 0 ] || return 1
   rm -f -- "$job/.claim/supervisor" "$job/.claim/supervisor_start" \
@@ -713,7 +713,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   (
     while [ ! -f "$armed_file" ] || [ -L "$armed_file" ]; do
       [ -d "$job/.claim" ] && [ ! -L "$job/.claim" ] || exit 125
-      fm_remote_job_sleep 0.01
+      sleep 0.01
     done
     exec "$@"
   ) &
@@ -773,7 +773,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
         attempt=0
         while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
-          fm_remote_job_sleep 0.05
+          sleep 0.05
         done
         worker_signal_process_or_group group KILL "$group_pid"
         cancelled=1
@@ -784,7 +784,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
         attempt=0
         while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
-          fm_remote_job_sleep 0.05
+          sleep 0.05
         done
         worker_signal_process_or_group group KILL "$group_pid"
         WORKER_PREEMPTED=1
@@ -792,7 +792,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
       fi
       next_check=$((SECONDS + 1))
     fi
-    fm_remote_job_sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
+    sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
   done
   wait "$group_pid" 2>/dev/null
   rc=$?
@@ -1203,7 +1203,7 @@ worker_wait_for_work() {
   fi
   if [ "$WORKER_FAST_REMAINING" -gt 0 ]; then
     WORKER_FAST_REMAINING=$((WORKER_FAST_REMAINING - 1))
-    fm_remote_job_sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
     return 0
   fi
   sleep "$WORKER_IDLE_WAIT_SECONDS"

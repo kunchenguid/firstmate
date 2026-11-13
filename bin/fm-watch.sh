@@ -3596,8 +3596,20 @@ heartbeat_scan_finds_actionable() {
 # on INT so the trap still runs; uutils sleep ignores INT, so a checkpoint's
 # INT plus kill-after SIGKILLs the watcher before watcher_cleanup can drop the
 # lock. A timed read on a dummy fifo is a builtin wait, so the INT trap runs.
+# Bash 3.2's read -t is integer-only and rejects a fractional POLL, so fall
+# back to sleep(1) there and whenever read -t will not accept POLL.
 watcher_poll_sleep() {
   local fifo
+  if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    sleep "$POLL"
+    return
+  fi
+  case "$POLL" in
+    ''|*[!0-9.]*|*.*.*)
+      sleep "$POLL"
+      return
+      ;;
+  esac
   fifo="$STATE/.watch.poll.fifo"
   rm -f -- "$fifo"
   if mkfifo -m 600 "$fifo" 2>/dev/null; then

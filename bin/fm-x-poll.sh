@@ -71,10 +71,8 @@ fi
 # ready on its own, so each refusal wakes this home with its specific reason.
 # The queued line is removed only once it has been read AND written to this
 # poll's stdout, which is the wake: a read that fails, a line that comes back
-# empty, a write that fails, or a stdout that discards to /dev/null
-# (rust-coreutils env reopens a closed stdout there) all leave the line queued
-# for the next cycle.
-# The read is its own step because a pipeline would report the status of its last
+# empty, or a write that fails all leave the line queued for the next cycle. The
+# read is its own step because a pipeline would report the status of its last
 # stage, not of the read. Dropping a raised line is best-effort, so this wake is
 # at-least-once: a wake directory that cannot be written raises the same refusal
 # again, with the same event id and reason as the quarantine it came from.
@@ -85,15 +83,6 @@ if fm_pf_dir_has_entry "$PF_WAKES"; then
     PF_WAKE_LINE=$(sed -n '1p' "$PF_WAKE" 2>/dev/null) || continue
     PF_WAKE_LINE=$(printf '%s\n' "$PF_WAKE_LINE" | fm_pf_bound_bytes 800)
     [ -n "$PF_WAKE_LINE" ] || continue
-    # The poll's stdout IS the wake. A closed stdout cannot carry it, and
-    # rust-coreutils env reopens a closed stdout onto /dev/null so a write
-    # can succeed without reaching a reader. Either case must leave the line
-    # queued. Dup fd 1 onto 3 in THIS shell first: a command substitution's
-    # own fd 1 is the capture pipe, not this poll's stdout.
-    exec 3>&1 || continue
-    PF_STDOUT_DEST=$(readlink /dev/fd/3 2>/dev/null || readlink /proc/self/fd/3 2>/dev/null || true)
-    exec 3>&-
-    [ "$PF_STDOUT_DEST" != /dev/null ] || continue
     printf '%s\n' "$PF_WAKE_LINE" || continue
     rm -f -- "$PF_WAKE" 2>/dev/null || true
   done

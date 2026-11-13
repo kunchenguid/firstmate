@@ -18,9 +18,7 @@
 # subscribing). Per-block canned reads live in fake/process/<uuid>.json,
 # fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
 # `do` stands in for the bounded event reader: it prints "@subscribed", then
-# replays fake/events (a `sleep N` line pauses), then honors `--for <N>s` so a
-# missing events file still bounds the wait the way real `rex do` does, and
-# exits 0.
+# replays fake/events (a `sleep N` line pauses), and exits 0.
 #
 # Remote-readiness and remote-route coverage adds four controls on top:
 #   fake/endpoint    - the endpoint whoami reports (default unix:///fake/rex.sock)
@@ -106,20 +104,11 @@ has_block() {
 cmd=${1:-}; shift
 sub=
 case "$cmd" in window|block|api) sub=${1:-}; shift ;; esac
-sid=; bid=; fmt=text; wlabel=; pos=(); for_secs=
+sid=; bid=; fmt=text; wlabel=; pos=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -s) sid=$2; shift 2 ;;
     -b) bid=$2; shift 2 ;;
-    --for)
-      for_secs=${2%s}
-      shift 2
-      ;;
-    --for=*)
-      for_secs=${1#--for=}
-      for_secs=${for_secs%s}
-      shift
-      ;;
     --format=*) fmt=${1#--format=}; shift ;;
     --window) wlabel=$2; shift 2 ;;
     --cwd) shift 2 ;;
@@ -231,15 +220,6 @@ case "$cmd:$sub" in
           *) printf '%s\n' "$line" ;;
         esac
       done <"$D/events"
-    else
-      # Real rex exits at the --for deadline. Ignoring it with no events file
-      # makes `do` return at once, which turns the watcher's event wait into a
-      # tight loop. Replay of a present events file still returns after the
-      # last line, as before.
-      case "$for_secs" in
-        ''|*[!0-9]*|0) ;;
-        *) sleep "$for_secs" ;;
-      esac
     fi ;;
   kill:)
     has_session "$p0" || notfound "session"
