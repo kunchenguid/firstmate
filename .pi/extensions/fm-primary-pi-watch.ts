@@ -6,8 +6,10 @@
 // session activation. Only the active live generation may start, stop, rearm, or
 // clear the arm child. Replacement shutdown publishes a generation-bound handoff
 // phase but retains its established child until the next owning session_start (or
-// fresh factory bind) publishes a distinct active generation and commits the
-// tracked replacement arm without a model turn. A replacement handoff carries
+// a fresh factory bind while no live generation is active) publishes a distinct
+// active generation and commits the tracked replacement arm without a model turn.
+// The process-wide active owner and which session may own it are defined on
+// ReplacementCoordinator.active / expectedSessionFile. A replacement handoff carries
 // actionable closes that were still pending delivery; its durable state lives at
 // state/extensions/pi-primary-watch/session-replacement-actionable.json.
 // Terminal quit leaves the final generation stopped so late callbacks cannot rearm.
