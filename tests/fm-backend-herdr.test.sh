@@ -609,7 +609,6 @@ test_unknown_pi_status_requires_positive_process_evidence_for_recovery() (
   [ "$out" = unreadable ] || fail "a failed process read must refuse recovery, got '$out'"
   process_rc=0
   for process_reply in \
-    "$(shell_only_process_info "$$")" \
     '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv":["node","app.js"]}]}}}' \
     '{"result":{"type":"pane_process_info","process_info":{"pane_id":"other","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"pi","argv":["pi"]}]}}}' \
     'not json'; do
@@ -643,7 +642,7 @@ test_stale_registration_ignores_status_and_reads_the_process() {
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   "$sleep_bin" 300 &
   shell_pid=$!
-  for status in working 'done' blocked; do
+  for status in working 'done' blocked unknown; do
     out=$(stale_registration_case "shell-only-$status" "$status" "$(shell_only_process_info "$shell_pid")")
     [ "$out" = "stale-agent dead refused" ] \
       || { kill "$shell_pid" 2>/dev/null; fail "a lingering '$status' record over a shell-only pane must still read stale-agent/dead, got '$out'"; }
