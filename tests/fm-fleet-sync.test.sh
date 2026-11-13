@@ -521,11 +521,13 @@ test_explicit_binding_does_not_cross_same_basename() {
   printf -- '- collision [no-mistakes forge=external] - review project (added 2026-09-15)\n' \
     > "$home/data/projects.md"
   advance_origin "$home" collision C1
+  assert_expected_provider "$home" "$canonical" external
   out=$(run_sync "$home" "$canonical")
   assert_contains "$out" "collision: synced" \
     "the registered clone must still sync through its explicit forge binding"
   before=$(head_sha "$foreign")
 
+  assert_expected_provider "$home" "$foreign" unknown
   out=$(run_sync "$home" "$foreign")
 
   [ -z "$out" ] || fail "an unrelated same-basename clone must be skipped silently, got: $out"
