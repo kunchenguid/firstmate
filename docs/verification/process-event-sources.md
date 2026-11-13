@@ -133,6 +133,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | healthy-home invariance | homes with no registration or owned runner claim retain ordinary registration-only supervision and teardown behavior |
 | source-only supervision | a registered source with no task metadata trips the shared predicate and general guard |
 | argv integrity | an argument containing spaces survives as one argument, a shell-looking argument is passed literally with no interpretation, and an unrepresentable newline is rejected at registration |
+| listener argv binding | `tests/fm-procevent.test.sh` forges source records under `state/procevent/` and proves `start` and `reconcile` refuse and never execute an argv that does not begin with the record's installed adapter script and its listener verb, that `register` refuses another adapter's script, a non-listener verb, and a library name, and that the installed adapter is matched by resolved path and refused when it is itself a symlink |
 | bounded output | output beyond `FM_PROCEVENT_MAX_OUTPUT_BYTES` is drained while only the bound is staged, then truncated and captured |
 | condition->action single-fire and trust | `tests/fm-procevent-when.test.sh` drives the public `when` adapter and generic runner with real commands, proving stable true fires once, a claimed fire restarts as ambiguous without a second action, concurrent arms publish one complete watch, and mutated specs or action executables are refused before execution |
 | condition->action terminal outcomes | the same suite proves flapping true polls do not fire, action failure, condition error budget, deadline expiry, and a true poll completing after its deadline each produce the expected terminal captured result without an unsafe action |
@@ -236,6 +237,7 @@ The built-in task-owned Lavish exception validates existing task endpoint metada
 Session-derived routing happens only inside the shared Lavish poll adapter, so it changes no harness or session-provider launch, registration, steering, or lifecycle interface.
 Built-in adapters extend the runner through `bin/fm-procevent-<adapter>.sh`; the `when` adapter also uses the runner library's locked registration publisher so its private trust state and source registration are serialized under one source boundary.
 Explicit external adapters instead use the single-capability contract in [`docs/extension-bindings.md`](../extension-bindings.md), with no filename discovery or package-supplied argv.
+A built-in adapter must answer `listener-verb` with the verb its registered argv names after its own script; the runner refuses any source whose stored argv has another shape.
 An adapter's `terminal` command is optional and defaults to keeping the source armed.
 Its `silent` command is optional in the same way and defaults to announcing every result, so an adapter with no notion of a routine no-op is unchanged.
 Its `autohandle` command is optional in the same way and defaults to leaving the captured result unacknowledged, so it keeps being announced to a handler exactly as before.
