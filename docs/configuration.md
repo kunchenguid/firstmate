@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), [stow guard](#stow-guard-configstow-guard), and [worker context cap](#worker-context-cap-configworker-context-cap) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -1330,6 +1330,41 @@ Optional lines are `tokens=<n>` and `hours=<n>`.
 An unusable value keeps its default.
 Remove the file to turn the ask off.
 The script header owns the transcript read, the state file, and the block message.
+
+## Worker context cap (config/worker-context-cap)
+
+`config/worker-context-cap` is an optional local, gitignored file that limits how much context one Claude ship or scout worker session uses.
+The cap is opt-in and is off without the file.
+An explicit `enabled=true` line turns it on, with a soft limit of 200000 tokens and a hard limit of 300000 tokens.
+It stays opt-in because it blocks a worker's turn end and denies tools, so a home opts into that pressure rather than inheriting it.
+One fleet measured 46% of worker sessions passing 200000 tokens, and a reset at that line saved about 29% of worker spend there.
+
+When the file enables the cap, `bin/fm-spawn.sh` wires two hooks into the worker's `.claude/settings.local.json`, and `bin/fm-worker-context-cap.sh` runs both.
+A spawn without the enable line writes main's hooks instead: the plain `Stop` idle command and no `PreToolUse` entry.
+Context size is the newest `input + cache_read + cache_creation` reading in the last 2MB of the transcript.
+
+- The `Stop` hook blocks one turn end at or above the soft limit.
+  It tells the worker to judge whether its work splits cleanly.
+  If it does, the worker commits, writes a handoff note to `data/<id>/handoff.md`, appends a `paused` status line, or `done` when the task is complete, and stops.
+  If it does not, the worker appends a `working` status line that says why and continues.
+  The ask fires once per crossing and fires again only after a later reading falls below two-thirds of the soft limit.
+- The `PreToolUse` hook denies every tool at or above the hard limit, except one simple `git add` or `git commit`, `Write` or `Edit` on `data/<id>/handoff.md`, and the status-line append from the launch brief.
+  The deny follows [the PreToolUse deny contract](arm-pretool-check.md#output-contract).
+
+The handoff note holds what is done, what is open, the exact next step, and the launch line.
+After the `paused` line names the note, firstmate relaunches a fresh session in the same copy with `bin/fm-control.sh <id> relaunch --note-file <data>/<id>/handoff.md`.
+The relaunch already requires a note for a ship or scout and appends it to the task's launch brief, so no other relaunch mechanism is needed.
+
+Blank lines and lines that start with `#` are ignored.
+The cap opts in with `enabled=true`.
+Without that line, or with `enabled=false`, both hooks stay off.
+Optional limit lines are `soft=<n>` and `hard=<n>`.
+An unusable value keeps its default, and a soft limit at or above the hard limit makes both keep their defaults.
+A missing `jq`, an unreadable transcript, or any hook error exits 0 and blocks nothing.
+The cap covers Claude ships and scouts only.
+Secondmates, primaries, and other harnesses are unchanged.
+The file is per home and is not inherited.
+The script header owns the transcript read, the state file `state/<id>.context-cap.json`, the allow list, and the messages.
 
 ## Self-update source (config/self-update-source)
 
