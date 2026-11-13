@@ -52,8 +52,9 @@
 #   expected_return: <UTC ISO 8601> | -
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
-#   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
-#                                  records this home already holds at entry,
+#   spend_max_concurrent_workers: <n>   without --spend, the working or
+#                                  uncertain ordinary workers this home
+#                                  already runs at entry,
 #                                  and never fewer than the default
 #                                  (SPEND CAP below)
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
@@ -130,8 +131,11 @@
 # both the number written at entry and the counting rule behind it).
 # The cap bounds how many ordinary workers this home runs concurrently while an
 # away record stands; bin/fm-spawn.sh enforces it by refusing a fresh ordinary
-# spawn once the home already holds that many. An ordinary worker record is
-# every state/*.meta whose kind is not secondmate, counted by
+# spawn once the home already holds that many. An ordinary worker is a
+# state/*.meta record whose kind is not secondmate and whose bin/fm-crew-state.sh
+# reading is not provably idle: finished, paused, parked, blocked, failed, and
+# positively endpoint-gone records are not live spend, while working and merely
+# uncertain (unknown) readings count, so the cap fails safe. It is counted by
 # fm_afk_contract_live_ordinary_workers and exposed as `live-workers`, which is
 # the one implementation both the entry default and that refusal read, so the
 # two can never count differently.
@@ -155,6 +159,8 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-timeout-lib.sh"
 
 FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
@@ -185,15 +191,75 @@ fm_afk_contract_present() {  # [state-dir]
   [ -f "$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")" ]
 }
 
-# The ordinary worker records this home holds right now (the header's SPEND
-# CAP): every state/*.meta whose kind is not secondmate, because a secondmate is
-# a persistent home rather than spend. This is the one implementation of that
-# count, read by the entry default here and by bin/fm-spawn.sh's refusal.
+# The ordinary workers this home is running right now (the header's SPEND CAP):
+# every state/*.meta whose kind is not secondmate, because a secondmate is a
+# persistent home rather than spend, and whose bin/fm-crew-state.sh reading is
+# not provably idle. A finished, paused, parked, blocked, or failed reading
+# spends nothing, and so does an unknown one that positively names a gone
+# endpoint (worktree gone, or backend target gone on a backend that classifies
+# its own agent state by an id the record carries: herdr, rex, t3code). A tmux
+# window is addressed only by name, and a record does not say which tmux server
+# holds it, so a tmux reading of "gone" may just mean this shell addresses a
+# different server (another TMUX_TMPDIR) than the worker runs on: that worker
+# stays counted. Every other unknown - an
+# unreachable endpoint, a read error, or a read cut off by the time bound
+# below - counts, so the cap errs toward refusing a spawn rather than
+# admitting one on an uncertain count. The reads share one total deadline
+# (FM_AFK_LIVE_WORKERS_TIMEOUT seconds, default 20); once it is spent, each
+# remaining record counts as uncertain without being read.
+# This is the one implementation of that count, read by the entry default here
+# and by bin/fm-spawn.sh's refusal.
 fm_afk_contract_live_ordinary_workers() {  # [state-dir]
-  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0
+  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0 id reading left
+  local deadline=$((SECONDS + ${FM_AFK_LIVE_WORKERS_TIMEOUT:-20}))
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    left=$((deadline - SECONDS))
+    reading=
+    if [ "$left" -gt 0 ]; then
+      reading=$(FM_CREW_STATE_NO_FORGE=1 FM_STATE_OVERRIDE="$state" \
+        fm_run_timed "$left" "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1) || true
+    fi
+    # A reading taken from a finished validation run says nothing about what the
+    # agent is doing now: after the run it may have started its next fixes
+    # while HEAD still matches the run. Re-read from the pane and status log
+    # alone, and let a working or uncertain answer there stand.
+    case "$reading" in
+    'state: working '* | *'source: run-step'*)
+      if [ "${reading#state: working }" = "$reading" ] && [ "$(( deadline - SECONDS ))" -gt 0 ]; then
+        left=$((deadline - SECONDS))
+        recheck=$(FM_CREW_STATE_NO_FORGE=1 FM_CREW_STATE_NO_RUN=1 FM_STATE_OVERRIDE="$state" \
+          fm_run_timed "$left" "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1) || true
+        case "$recheck" in
+        'state: working '* | 'state: unknown '* | '') reading=$recheck ;;
+        esac
+      fi
+      ;;
+    esac
+    case "$reading" in
+    'state: working '*) ;;
+    'state: unknown '*)
+      case "$reading" in
+      *'worktree gone'*) continue ;;
+      *'backend target gone'*)
+        # Only the backends that address the endpoint by an id the record
+        # carries (herdr, rex, t3code) report a gone target as positive
+        # evidence. tmux names a window without its server, so a window missing
+        # from the server this shell reaches proves nothing about the worker's
+        # own server; the capture-failure backends (cmux, orca, zellij, paseo,
+        # tern, hc) print the same text when a screen read merely failed. Those
+        # workers stay counted.
+        case "$(grep '^backend=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" in
+        herdr | rex | t3code) continue ;;
+        esac
+        ;;
+      esac
+      ;;
+    'state: '*) continue ;;
+    esac
     live=$((live + 1))
   done
   printf '%s\n' "$live"

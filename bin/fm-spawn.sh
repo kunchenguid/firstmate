@@ -2258,7 +2258,7 @@ spawn_refuse_if_away_spend_cap() {
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
   esac
-  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  live=$(FM_AFK_LIVE_WORKERS_TIMEOUT="${SPAWN_SPEND_CAP_TIMEOUT:-${FM_AFK_LIVE_WORKERS_TIMEOUT:-20}}" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
   case "$live" in
   '' | *[!0-9]*)
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
@@ -2273,13 +2273,17 @@ spawn_refuse_if_away_spend_cap() {
 # Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
 # away record exists (never a quiet-mode one, whose captain is present and
 # spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
-# refuses for BOTH actors once this home already holds that many ordinary task
-# records, counted by that script's own `live-workers`, which is also the count
-# its entry records as the cap. A relaunch replaces a worker that already
+# refuses for BOTH actors once this home already holds that many ordinary workers
+# that are working or of uncertain state, counted by that script's own
+# `live-workers` (finished, paused, and positively endpoint-gone records are not counted), which is also
+# the count its entry records as the cap. A relaunch replaces a worker that already
 # counts, and a secondmate is a persistent home rather than spend, so both are
 # exempt. Checked before any endpoint, worktree, or record
 # exists, so a refusal costs nothing to unwind; rechecked after the task-set
-# lock so two fresh spawns cannot both publish from a stale count.
+# lock so two fresh spawns cannot both publish from a stale count. The locked
+# recheck caps the live-worker count at 5s (SPAWN_SPEND_CAP_TIMEOUT) so a slow
+# state read cannot hold the lock and make parallel spawns refuse each other;
+# the pre-lock check keeps the 20s default.
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -2363,7 +2367,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
-  spawn_refuse_if_away_spend_cap
+  SPAWN_SPEND_CAP_TIMEOUT=5 spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
 if [ "$KIND" = secondmate ]; then
