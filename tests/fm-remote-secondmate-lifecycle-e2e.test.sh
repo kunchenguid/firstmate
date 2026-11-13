@@ -1382,18 +1382,22 @@ cp "$WATCH_STATE/.remote-inherit-ios.generation" "$PARENT/state/" 2>/dev/null ||
 pass "watch liveness: a dead remote secondmate is auto-relaunched on its own host with one wake"
 
 # Host loss mid-supervision is never evidence of death: the same tick on an
-# unreachable route probes, preserves, and stays silent.
+# unreachable route probes, preserves, and stays silent, even past the
+# uncertain-episode bound that ambiguous or unreadable probes alert on.
 WATCH_STATE_UNREACHABLE="$TMP_ROOT/watch-liveness-unreachable"
 mkdir -p "$WATCH_STATE_UNREACHABLE"
 cp "$WATCH_STATE/ios.meta" "$WATCH_STATE_UNREACHABLE/ios.meta"
 touch "$WATCH_STATE_UNREACHABLE/home-summary.json"
 ssh_before=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
-  FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+  FM_SECONDMATE_LIVENESS_SECS=1 FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3 \
+  FM_POLL=1 FM_SIGNAL_GRACE=0 \
   FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
 watch_pid=$!
+# Four probe cadences exceed the three-tick bound, so a silent watcher here
+# proves host loss never reaches the inspection wake.
 sleep 4
 kill -0 "$watch_pid" 2>/dev/null \
   || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
@@ -1413,13 +1417,15 @@ sleep 3
   || fail "the stopped unreachable watcher kept writing its state"
 [ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
   || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
+assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-uncertain-episode-ios" \
+  "an unreachable remote probe opened an uncertain-liveness episode"
 assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \
   "an unreachable remote probe ledgered a relaunch attempt"
 assert_grep 'remote_host=remote-mac' "$WATCH_STATE_UNREACHABLE/ios.meta" \
   "an unreachable remote probe changed the route metadata"
 assert_grep '- ios ' "$PARENT/data/secondmates.md" \
   "an unreachable remote probe changed the registry route"
-pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
+pass "watch liveness: an unreachable remote secondmate is probed, preserved, never failed over, and stays silent"
 
 # --- a stale herdr client shadowing the one the server accepts --------------
 # The remote host's job PATH can resolve an older self-updated herdr ahead of
@@ -1761,6 +1767,8 @@ FM_HOME="$PARENT" bash -c '
 printf 'confirmed:%s\n' "$retired_wake_corr" > "$PARENT/state/.backlog-handoff-ios.wake-pending"
 printf '%s\tattempt\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-ios"
 printf '%s\tdead\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-bound-ios"
+printf 'ambiguous\t3\tepisode\n' > "$PARENT/state/.secondmate-uncertain-episode-ios"
+printf 'alerted\n' > "$PARENT/state/.secondmate-uncertain-alert-ios"
 liveness_lock="$PARENT/state/.secondmate-liveness-ios.lock"
 # The link is published before the claim finishes; signal only after acquire.
 # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
@@ -1874,6 +1882,10 @@ assert_absent "$PARENT/state/.secondmate-relaunch-ios" \
   "remote retirement left the relaunch ledger a same-id replacement would inherit"
 assert_absent "$PARENT/state/.secondmate-relaunch-bound-ios" \
   "remote retirement left the relaunch park marker a same-id replacement would inherit"
+assert_absent "$PARENT/state/.secondmate-uncertain-episode-ios" \
+  "remote retirement left the uncertainty counter a same-id replacement would inherit"
+assert_absent "$PARENT/state/.secondmate-uncertain-alert-ios" \
+  "remote retirement left the uncertainty alert a same-id replacement would inherit"
 assert_absent "$liveness_lock" "remote retirement left its liveness lock behind"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
