@@ -772,6 +772,18 @@ ok - secondmate busy contract live guard checked every installed harness
 Pi's real parked pane classified `unknown launch-prompt`.
 That is the launch-prompt backstop: the same spawn's record classified `busy fm-spawn` for a non-prompt mid-turn tail, which is what the active-turn gate reads while a turn is in progress.
 
+## Claude worker context cap
+
+Verified 2026-11-11 on this host with Claude Code 2.1.322 in a scratch project.
+The project's `.claude/settings.local.json` carried `bin/fm-worker-context-cap.sh` as its `PreToolUse` and `Stop` hooks, with `soft=1` and `hard=2` in a scratch `config/worker-context-cap`.
+`claude -p "<prompt>" --dangerously-skip-permissions --output-format text` ran three sequential `Bash` calls: `echo one`, `echo two`, then `git add -A`.
+The hook exited 0, 2, and 0, and the model reported that `echo two` was denied by the context-cap hook and that `git add -A` ran.
+The deny reached the model through stderr with an empty stdout, which is the shape [the PreToolUse deny contract](../arm-pretool-check.md#output-contract) requires.
+A run with one `Stop` hook wrote `state/<id>.context-cap.json` with the session recorded as asked, and the model answered the block message by explaining why it had not written a handoff note.
+The first `PreToolUse` call of a session reads no usage, because Claude has not yet written that turn's assistant entry to the transcript, so the hard limit first applies to the second tool call.
+`tests/fm-worker-context-cap.test.sh` pins the hook logic without a harness, and `tests/fm-busy-adapter-wiring.test.sh` pins the spawn wiring.
+No live guard in the `live-harness-optin` family exists for this hook yet.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

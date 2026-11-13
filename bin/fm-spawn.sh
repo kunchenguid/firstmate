@@ -6560,6 +6560,8 @@ BUSY_GEN=
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    cap_script="$(shell_quote "$FM_ROOT/bin/fm-worker-context-cap.sh")"
+    cap_args="--id $(shell_quote "$ID") --state $(shell_quote "$STATE_REAL") --data $(shell_quote "$DATA") --config $(shell_quote "$CONFIG")"
     stop_entry=
     if [ "$KIND" = secondmate ] && grep -qF '.fm-busy-stop' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null; then
       {
@@ -6574,10 +6576,24 @@ BUSY_GEN=
       if [ "$busy_notify_turnend" = true ]; then
         stop_turnend="touch $(shell_quote "$TURNEND"); "
       fi
-      j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      stop_idle="${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true"
+      if [ "$KIND" != secondmate ]; then
+        # A ship or scout's context cap (bin/fm-worker-context-cap.sh) can block
+        # this Stop into a continuation that fires no UserPromptSubmit, and
+        # Claude runs Stop hooks in parallel, so this one command is the worker's
+        # only Stop writer: busy when the cap blocks, idle otherwise. The cap
+        # prints a block decision or nothing and always exits 0.
+        stop_idle="blk=\$($cap_script stop $cap_args 2>/dev/null) || blk=; if [ -n \"\$blk\" ]; then printf '%s\\n' \"\$blk\"; $busy_cmd_prefix busy $busy_suffix --event stop-blocked 2>/dev/null || true; else $stop_idle; fi"
+      fi
+      j_stop=$(json_escape "$stop_idle")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
-    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
+    pretool_entry=
+    if [ "$KIND" != secondmate ]; then
+      j_pretool=$(json_escape "$cap_script pretool $cap_args")
+      pretool_entry="\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_pretool\"}]}],"
+    fi
+    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}${pretool_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
     if [ "$KIND" = secondmate ]; then
       session_keys='"feedbackDrafts":"off",'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then

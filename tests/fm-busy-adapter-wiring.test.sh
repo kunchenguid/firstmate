@@ -634,7 +634,8 @@ run_claude_hook() {  # <settings.json> <hook-event>
   local cmd
   cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
   [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
-  sh -c "$cmd"
+  # Claude sends a payload and closes stdin, so the hook must not wait on this test's stdin.
+  sh -c "$cmd" </dev/null
 }
 
 test_claude_hooks_semantic_lifecycle() {
@@ -689,6 +690,52 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+run_claude_hook_with_payload() {  # <settings.json> <hook-event> <payload>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  printf '%s\n' "$3" | sh -c "$cmd"
+}
+
+test_claude_worker_context_cap_wiring() {
+  local rec id=busy-cl-cap out state settings transcript payload rc=0
+  rec=$(make_spawn_case claude-context-cap claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  jq -e '.hooks.PreToolUse[0].hooks[0].command
+      | contains("fm-worker-context-cap.sh") and contains(" pretool ")' "$settings" >/dev/null \
+    || fail "claude worker spawn did not wire the context-cap PreToolUse hook"
+  transcript="$CASE_DIR/transcript.jsonl"
+  jq -nc '{message:{usage:{input_tokens:250000,cache_read_input_tokens:0,cache_creation_input_tokens:0}}}' > "$transcript"
+  payload=$(jq -nc --arg t "$transcript" '{session_id:"s1",stop_hook_active:false,transcript_path:$t}')
+
+  rm -f "$state/$id.turn-ended"
+  out=$(run_claude_hook_with_payload "$settings" Stop "$payload") || fail "Stop hook failed at the soft limit"
+  printf '%s' "$out" | jq -e '.decision == "block" and (.reason | contains("soft limit"))' >/dev/null \
+    || fail "Stop at the soft limit did not print the block decision, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a blocked Stop touched the turn-ended marker"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "a blocked Stop must leave the continuation busy, got '$out'"
+
+  out=$(run_claude_hook_with_payload "$settings" Stop "$payload") || fail "second Stop hook failed"
+  [ -z "$out" ] || fail "the second Stop above the line must not block again, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "an allowed Stop no longer touches the notification marker"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "an allowed Stop must classify idle, got '$out'"
+
+  jq -nc '{message:{usage:{input_tokens:350000,cache_read_input_tokens:0,cache_creation_input_tokens:0}}}' > "$transcript"
+  payload=$(jq -nc --arg t "$transcript" '{session_id:"s1",transcript_path:$t,tool_name:"Bash",tool_input:{command:"ls"}}')
+  run_claude_hook_with_payload "$settings" PreToolUse "$payload" >"$CASE_DIR/pre.out" 2>"$CASE_DIR/pre.err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "the PreToolUse hook must deny a shell call at the hard limit with exit 2, got $rc"
+  [ ! -s "$CASE_DIR/pre.out" ] || fail "the PreToolUse deny wrote stdout"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny"' "$CASE_DIR/pre.err" >/dev/null \
+    || fail "the PreToolUse deny is not a Claude deny object: $(cat "$CASE_DIR/pre.err")"
+  pass "a claude worker spawn wires the context cap: Stop blocks once and records busy, PreToolUse denies at the hard limit"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -994,6 +1041,8 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
     "claude secondmate launch did not pass the state settings file"
   [ ! -e "$sm/.claude/settings.local.json" ] \
     || fail "claude secondmate spawn wrote the home's settings.local.json"
+  jq -e '.hooks | has("PreToolUse") | not' "$settings" >/dev/null \
+    || fail "claude secondmate spawn wired the worker context-cap PreToolUse hook"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seeded secondmate must classify busy fm-spawn, got '$out'"
   out=$(fm_busy_classify tmux "firstmate:fm-$id" claude "$id" "$state" 'working on the charter')
@@ -1340,6 +1389,7 @@ test_opencode_plugin_applies_events_in_emission_order
 test_opencode_plugin_v2_applies_events_in_emission_order
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_worker_context_cap_wiring
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
