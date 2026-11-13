@@ -35,6 +35,8 @@ set -u
 
 fm_live_gate default-on FM_COMPOSER_PI_BANNER_LIVE pi tmux node
 
+export FM_COMPOSER_PI_EXECUTABLE=pi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SOCKET="fm-pi-banner-$$"
@@ -73,11 +75,6 @@ PATH="$WORK:$PATH"
 
 VERSION=$(pi --version 2>/dev/null | head -1)
 [ -n "$VERSION" ] || VERSION='version-unknown'
-# Production callers never set the override, so neither does this guard: the
-# adapter must resolve the installed release itself. A pinned release must read
-# the banner screen empty; an unpinned one must keep the adapter's refusal (a
-# stale status stays unknown) and is named so its pin can be refreshed, rather
-# than turning every newer Pi release into a red build.
 if fm_composer_pi_adapter_version_pinned "$VERSION"; then
   PINNED=1
 else

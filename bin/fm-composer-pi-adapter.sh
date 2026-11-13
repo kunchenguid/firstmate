@@ -59,12 +59,6 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
   local v=${1:-} pin
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
-  # Accept "0.85.1" or "pi 0.85.1"; anything after the version word is ignored,
-  # but the version itself must equal a pin exactly (1.0.0 never admits 1.0.01).
-  v=${v#pi }
-  v=${v#Pi }
-  [ -n "$v" ] || return 1
-  v=${v%%[[:space:]]*}
   for pin in $FM_COMPOSER_PI_BANNER_PINNED_VERSIONS; do
     [ "$v" = "$pin" ] && return 0
   done
