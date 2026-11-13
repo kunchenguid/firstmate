@@ -3796,13 +3796,13 @@ await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", re
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s2.jsonl" }, original.ctx);
 const first = makePi("/tmp/s1.jsonl");
 const second = makePi("/tmp/s2.jsonl");
-mod.default(first.pi);
 mod.default(second.pi);
 
-// The newest replacement finishes starting first; the superseded one finishes last.
+// The newest replacement starts first; the superseded one loads its extension late and starts last.
 await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, second.ctx);
-await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
 await waitFor(() => armRows().length === 2 && liveArms().length === 1, "newest session arm");
+mod.default(first.pi);
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
 
 const owner = await second.getTool().execute("newest-session-arm", {}, undefined, undefined, {});
 if (!owner.details?.ok || !String(owner.details.message).includes("unchanged")) {
@@ -3935,24 +3935,23 @@ mod.default(original.pi);
 await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, original.ctx);
 await waitFor(() => liveArms().length === 1, "original session arm");
 
-// Chained /new where the first replacement's createRuntime finishes last.
+// Chained /new where both extensions load early but the first replacement is applied last.
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s1.jsonl" }, original.ctx);
 await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s2.jsonl" }, original.ctx);
 const first = makePi("/tmp/s1.jsonl");
 const second = makePi("/tmp/s2.jsonl");
+mod.default(first.pi);
 mod.default(second.pi);
 await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, second.ctx);
 await waitFor(() => armRows().length === 2 && liveArms().length === 1, "newest target arm");
-
-// The slower runtime loads its extension only after the other session started.
-mod.default(first.pi);
-const kept = await second.getTool().execute("late-factory-current-arm", {}, undefined, undefined, {});
-if (!kept.details?.ok || !String(kept.details.message).includes("unchanged")) {
-  throw new Error(`late factory took supervision from the started session: ${JSON.stringify(kept.details)}`);
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
+const refused = await first.getTool().execute("late-applied-before-input", {}, undefined, undefined, {});
+if (refused.details?.ok !== false) {
+  throw new Error(`late-applied session owned supervision before interactive input: ${JSON.stringify(refused.details)}`);
 }
 
-// That runtime is applied last, so its session is the visible one and owns supervision.
-await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
+// Pi delivers interactive input only to the session it applied last, the one the user sees.
+await first.handlers.get("input")?.({ type: "input", text: "hello", source: "interactive" }, first.ctx);
 await waitFor(() => armRows().length === 3 && liveArms().length === 1, "last applied session arm");
 const owner = await first.getTool().execute("last-applied-arm", {}, undefined, undefined, {});
 if (!owner.details?.ok || !String(owner.details.message).includes("unchanged")) {
@@ -3976,9 +3975,9 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi late-applied replacement must own supervision without a late factory stealing it: $out"
+  expect_code 0 "$status" "Pi late-applied replacement must own supervision after its interactive input: $out"
   [ -z "$out" ] || fail "Pi late-applied replacement test printed output: $out"
-  pass "Pi late factory never steals supervision and the last applied replacement owns it"
+  pass "Pi last applied replacement takes supervision on its first interactive input"
 }
 
 test_pi_reloaded_module_copy_keeps_single_owner() {
