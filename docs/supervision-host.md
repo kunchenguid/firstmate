@@ -270,8 +270,8 @@ The opt-in [configuration flag](configuration.md#supervision-after-the-main-sess
 When a session that holds the lock ends any other way and no away daemon exists, the hook starts a detached keeper that runs the host and starts it again after each exit.
 It enters no away posture and writes no away record, so it grants no away merge authority.
 The host runs attended, as with the captain at the terminal, except that the main session is gone: it takes the check wakes that are normally main-only, so due work such as the daily runs starts.
-Merges and captain decisions wait for the return, and the engine records them as captain outcomes for the next drain.
-The one authority it gains is `bin/fm-spawn.sh` of any queued, unblocked, unheld backlog item, work the captain already approved; the lease check (`fm_lease_session_end_relocated`) admits it for the branch only while the keeper is alive, still owns supervision, and the ended session's process is gone. Merges and captain answers wait for the return: `bin/fm-pr-merge.sh` and `bin/fm-send.sh --resolve-key` keep their attended refusals.
+Merges and captain decisions wait for the return, and the engine records them as captain outcomes for the next drain: `bin/fm-pr-merge.sh` and `bin/fm-send.sh --resolve-key` keep their attended refusals.
+The one authority it gains is `bin/fm-spawn.sh` of any queued, unblocked, unheld backlog item, work the captain already approved; the lease check (`fm_lease_session_end_relocated`) admits it for the branch only while the keeper is alive, still owns supervision, and the ended session's process is gone.
 A session that ends under an `/afk` or `/quiet` record keeps that record exactly as it is, and the host runs under it.
 
 That host proves ownership without the session: it owns supervision while no later Stop has claimed an auto-arm generation and no later session has taken the session lock.
