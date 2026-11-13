@@ -250,6 +250,11 @@ test_canonical_partitions_preserve_full_lint() {
 #   FM_TEST_GIT_MERGE_BASE_OK    1 (default) or 0
 #   FM_TEST_GIT_MERGE_BASE       merge-base value to print when OK
 #   FM_TEST_GIT_DIFF_FILE        path to a file of NUL-separated changed paths
+#   FM_TEST_GIT_NAME_STATUS_FILE path to a git diff --name-status listing
+#                                (tab-separated status and paths). When unset,
+#                                the name-status stub synthesizes M lines from
+#                                FM_TEST_GIT_DIFF_FILE so existing tests keep
+#                                driving both collectors from one fixture.
 fm_lint_stub_git() {
   local fakebin=$1
   cat > "$fakebin/git" <<'SH'
@@ -310,6 +315,17 @@ case "$*" in
     fi
     exit 0
     ;;
+  "diff --name-status --diff-filter=ACDMR "*)
+    if [ -n "${FM_TEST_GIT_NAME_STATUS_FILE:-}" ] && [ -f "$FM_TEST_GIT_NAME_STATUS_FILE" ]; then
+      cat "$FM_TEST_GIT_NAME_STATUS_FILE"
+    elif [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
+      tr '\0' '\n' < "$FM_TEST_GIT_DIFF_FILE" | while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        printf 'M\t%s\n' "$path"
+      done
+    fi
+    exit 0
+    ;;
   *)
     exit 1
     ;;
@@ -324,6 +340,14 @@ fm_lint_write_diff_file() {
   local file=$1
   shift
   printf '%s\0' "$@" > "$file"
+}
+
+# fm_lint_write_name_status <file> <line>...: writes `git diff --name-status`
+# lines for FM_TEST_GIT_NAME_STATUS_FILE (status, then tab-separated paths).
+fm_lint_write_name_status() {
+  local file=$1
+  shift
+  printf '%s\n' "$@" > "$file"
 }
 
 # fm_lint_stub_shellcheck <fakebin-dir> <log-file>: install a ShellCheck stub
@@ -993,6 +1017,65 @@ test_changed_flag_upgrades_when_a_sourced_helper_changes() {
   assert_contains "$(cat "$tmp/err")" "a sourced helper changed" \
     "--changed upgrade did not explain why a sourced helper used the full set"
   pass "fm-lint.sh --changed upgrades to full lint when a sourced helper changes"
+}
+
+test_changed_flag_upgrades_when_a_sourced_helper_is_deleted() {
+  local tmp fakebin listed expected status_file
+  tmp=$(fm_test_tmproot fm-lint-deleted-helper)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  status_file="$tmp/name-status"
+  fm_lint_write_name_status "$status_file" $'D\tbin/fm-wake-lib.sh' $'M\tREADME.md'
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' ! -name '.*' -print | LC_ALL=C sort)
+
+  listed=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_NAME_STATUS_FILE="$status_file" \
+    "$LINT" --changed --list-files 2>"$tmp/err")
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "--changed did not upgrade to the full canonical set when a sourced helper was deleted"
+  assert_contains "$(cat "$tmp/err")" "a sourced helper changed" \
+    "--changed upgrade did not explain why a deleted sourced helper used the full set"
+  pass "fm-lint.sh --changed upgrades to full lint when a sourced helper is deleted"
+}
+
+test_changed_flag_upgrades_when_a_sourced_helper_is_renamed() {
+  local tmp fakebin listed expected status_file
+  tmp=$(fm_test_tmproot fm-lint-renamed-helper)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  status_file="$tmp/name-status"
+  fm_lint_write_name_status "$status_file" \
+    $'R100\tbin/fm-wake-lib.sh\tbin/fm-wake-lib-moved.sh'
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' ! -name '.*' -print | LC_ALL=C sort)
+
+  listed=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_NAME_STATUS_FILE="$status_file" \
+    "$LINT" --changed --list-files 2>"$tmp/err")
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "--changed did not upgrade to the full canonical set when a sourced helper was renamed"
+  assert_contains "$(cat "$tmp/err")" "a sourced helper changed" \
+    "--changed upgrade did not explain why a renamed sourced helper used the full set"
+  pass "fm-lint.sh --changed upgrades to full lint when a sourced helper is renamed"
+}
+
+test_changed_flag_upgrades_when_a_lint_definition_is_renamed() {
+  local tmp fakebin listed expected status_file
+  tmp=$(fm_test_tmproot fm-lint-renamed-definition)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  status_file="$tmp/name-status"
+  fm_lint_write_name_status "$status_file" \
+    $'R100\tbin/fm-timeout-lib.sh\tbin/fm-timeout-lib-moved.sh' $'M\tREADME.md'
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' ! -name '.*' -print | LC_ALL=C sort)
+
+  listed=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_NAME_STATUS_FILE="$status_file" \
+    "$LINT" --changed --list-files 2>"$tmp/err")
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "--changed did not upgrade to the full canonical set when a lint definition file was renamed"
+  assert_contains "$(cat "$tmp/err")" "lint definition files changed" \
+    "--changed upgrade did not explain why a renamed lint definition used the full set"
+  pass "fm-lint.sh --changed upgrades to full lint when a lint definition file is renamed"
 }
 
 test_installer_skips_download_when_pinned_binary_is_present() {
@@ -2253,6 +2336,9 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees
 test_changed_flag_keeps_source_following_in_ci
 test_changed_flag_upgrades_when_lint_definition_changes
 test_changed_flag_upgrades_when_a_sourced_helper_changes
+test_changed_flag_upgrades_when_a_sourced_helper_is_deleted
+test_changed_flag_upgrades_when_a_sourced_helper_is_renamed
+test_changed_flag_upgrades_when_a_lint_definition_is_renamed
 test_changed_and_full_cannot_combine
 test_empty_changed_partition_is_a_successful_noop
 test_local_exclusion_list_covers_every_no_external_sources_code

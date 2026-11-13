@@ -80,7 +80,7 @@ Its hint-coverage and modeled-budget checks are described in [Portable serial CI
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
-The timing-aggregate job then runs `bin/fm-ci-budget-warn.sh`, which emits a GitHub warning annotation (never a failure) when any lane or lint partition's measured wall time is at or above 20 minutes.
+The timing-aggregate job then runs `bin/fm-ci-budget-warn.sh`, which emits a GitHub warning annotation (never a failure) when any lane or lint partition's measured command time is at or above 20 minutes.
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Lint partitions and end-to-end latency
@@ -88,8 +88,9 @@ The timing-aggregate job then runs `bin/fm-ci-budget-warn.sh`, which emits a Git
 `bin/fm-lint.sh` owns four canonical CI partitions.
 Each partition attempts full source-aware ShellCheck analysis and runs workflow validation and backend-purity checks.
 Pull requests pass `--changed` so only the canonical-set files changed since the merge-base are analyzed, still with `--external-sources` and full dataflow.
-A change to lint definition files (`bin/fm-lint.sh`, `bin/fm-lint-workflows.sh`, the pinned installers, or `bin/fm-timeout-lib.sh`) upgrades that PR to the full canonical set.
+A change to lint definition files (`bin/fm-lint.sh`, `bin/fm-lint-workflows.sh`, the pinned installers, or `bin/fm-timeout-lib.sh`), including a delete or rename of any of those paths, upgrades that PR to the full canonical set.
 A change to a file that another canonical script sources, found from `# shellcheck source=` directives rather than a hand list, also upgrades to the full set so an unchanged consumer cannot hide a new ShellCheck finding from the PR and then fail the full gate on main.
+A delete or rename of that helper counts, including the old path of a rename.
 Main pushes keep the full canonical gate.
 CI caches the pinned ShellCheck and actionlint binaries and skips the download when the pin is already present.
 `FM_LINT_JOBS=1` stays in force because a second concurrent ShellCheck process does not fit the hosted runner's memory envelope.

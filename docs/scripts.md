@@ -51,7 +51,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-osc7501.sh`          | Launch-driven [OSC 7501 worker status bridge](configuration.md#osc-7501-worker-status-reporting); its header owns commands and reporting rules |
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, bounded concurrency, budgets, coverage guard, timing/JSON; refuses to execute in the repository primary checkout when `FM_TASK_ID` marks a task worker |
 | `fm-refresh-ci-timings.sh` | Rebuild `tests/fm-test-ci-timings.tsv` from green main timing artifacts for shard packing |
-| `fm-ci-budget-warn.sh`   | Emit a warning-only annotation when a CI lane's measured wall time crosses twenty minutes |
+| `fm-ci-budget-warn.sh`   | Emit a warning-only annotation when a CI lane's measured command time crosses twenty minutes |
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Manually initialize project agent-memory files (see the helper's header and help) |
 | `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target, or a measured `auto` budget, and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json`, and `--spawn-gate` is the opt-in spawn check |

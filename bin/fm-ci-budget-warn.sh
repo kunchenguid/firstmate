@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# fm-ci-budget-warn.sh - emit a warning when a CI lane's measured wall time
+# fm-ci-budget-warn.sh - emit a warning when a CI lane's measured command time
 # crosses the healthy ~20-minute budget. Never fails the job.
 #
 # The timing-aggregate CI job runs this after combining per-lane timing JSON
-# and any lint telemetry sidecars. A value at or above 20 minutes prints a
-# GitHub warning annotation (and a plain warning line for local tests). Shorter
-# lanes stay silent. Missing inputs print a warning and still exit 0.
+# and any lint telemetry sidecars. duration_ms and lint wall_seconds are the
+# test or lint command's own elapsed time, not the GitHub Actions job wall.
+# A value at or above 20 minutes prints a GitHub warning annotation (and a
+# plain warning line for local tests). Shorter lanes stay silent. Missing
+# inputs print a warning and still exit 0.
 #
 # Usage:
 #   fm-ci-budget-warn.sh [--budget-ms <n>] <aggregate.json> [lint-telemetry-dir]
@@ -126,7 +128,8 @@ while IFS=$'\t' read -r kind selection duration || [ -n "$kind" ]; do
       ;;
     LANE)
       selection=${selection#lane=}
-      warn "lane ${selection} ran $(minutes "$duration") minutes, above the 20-minute healthy budget"
+      selection=${selection%%;*}
+      warn "lane ${selection} command time was $(minutes "$duration") minutes, above the 20-minute healthy budget"
       ;;
   esac
 done <"$tmp"
@@ -141,7 +144,7 @@ if [ -n "$LINT_DIR" ] && [ -d "$LINT_DIR" ]; then
     esac
     wall_ms=$(awk -v s="$wall" 'BEGIN { printf "%d", s * 1000 }')
     if [ "$wall_ms" -ge "$BUDGET_MS" ]; then
-      warn "lint partition ${partition:-unknown} ran $(minutes "$wall_ms") minutes, above the 20-minute healthy budget"
+      warn "lint partition ${partition:-unknown} command time was $(minutes "$wall_ms") minutes, above the 20-minute healthy budget"
     fi
   done < <(find "$LINT_DIR" -type f -name '*.tsv' ! -name '*.roots.tsv' | LC_ALL=C sort)
 fi

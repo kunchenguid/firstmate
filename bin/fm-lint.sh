@@ -31,8 +31,11 @@
 #   - --changed (CI pull requests) lints only the canonical-set files changed
 #     since the merge-base, still with --external-sources and full dataflow, so
 #     the PR gate stays source-aware on the files it checks. If a lint-definition
-#     file changed, or a changed file is sourced by another canonical script
-#     (via `# shellcheck source=`), selection upgrades to the full canonical set.
+#     file changed (including a delete or rename of fm-lint.sh,
+#     fm-lint-workflows.sh, a pinned installer, or fm-timeout-lib.sh), or a
+#     changed, deleted, or renamed file is sourced by another canonical script
+#     (via `# shellcheck source=` on the merge-base tree), selection upgrades
+#     to the full canonical set.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -877,58 +880,103 @@ fm_lint_collect_changed_roots() {  # <merge-base>
   done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
 }
 
+# git diff --name-only drops a rename's old path, and --diff-filter=ACMR drops
+# deletions, so both upgrade checks walk name-status ACDMR and treat a rename
+# or copy as both of its paths.
+fm_lint_changed_paths() {  # <merge-base>
+  local merge_base=$1 status p1 p2
+  while IFS=$'\t' read -r status p1 p2; do
+    [ -n "$status" ] || continue
+    case "$status" in
+      R*|C*)
+        [ -n "$p1" ] && printf '%s\n' "$p1"
+        [ -n "$p2" ] && printf '%s\n' "$p2"
+        ;;
+      *)
+        [ -n "$p1" ] && printf '%s\n' "$p1"
+        ;;
+    esac
+  done < <(git diff --name-status --diff-filter=ACDMR "$merge_base" -- 2>/dev/null)
+}
+
 # Changing the lint owner, its pinned installers, or the bounds watchdog is a
 # definition change: a PR that only lists those files still needs the full
-# canonical, source-aware gate rather than a changed-file subset.
+# canonical, source-aware gate rather than a changed-file subset. A delete or
+# rename of any of those paths counts, including the old name of a rename.
+fm_lint_is_definition_path() {  # <path>
+  case "$1" in
+    bin/fm-lint.sh|bin/fm-lint-workflows.sh|bin/fm-install-shellcheck.sh|bin/fm-install-actionlint.sh|bin/fm-timeout-lib.sh)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 fm_lint_definition_changed() {  # <merge-base>
-  local merge_base=$1
-  git diff --name-only --diff-filter=ACMR "$merge_base" -- \
-    bin/fm-lint.sh bin/fm-lint-workflows.sh \
-    bin/fm-install-shellcheck.sh bin/fm-install-actionlint.sh \
-    bin/fm-timeout-lib.sh 2>/dev/null | grep -q .
+  local merge_base=$1 path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    fm_lint_is_definition_path "$path" && return 0
+  done < <(fm_lint_changed_paths "$merge_base")
+  return 1
 }
 
 # A changed canonical file that another canonical script sources (via a
 # `# shellcheck source=` directive) can introduce a ShellCheck finding only in
 # that unchanged consumer. Changed-file lint would miss it and leave main's
 # full gate red, so those PRs take the full set like a lint-definition change.
+# Resolve targets lexically so a deleted or renamed-away helper still matches;
+# walk the merge-base source graph when git can list that tree.
 fm_lint_resolve_source_target() {  # <consumer> <target>
   local consumer=$1 target=$2 dir
   case "$target" in
     ''|/dev/null|/*) return 1 ;;
   esac
-  if [ -f "$target" ]; then
-    printf '%s\n' "$target"
-    return 0
-  fi
+  case "$target" in
+    */*)
+      printf '%s\n' "$target"
+      return 0
+      ;;
+  esac
   dir=$(dirname "$consumer")
-  if [ -f "$dir/$target" ]; then
-    printf '%s/%s\n' "$dir" "$target"
-    return 0
-  fi
-  return 1
+  printf '%s/%s\n' "$dir" "$target"
+}
+
+fm_lint_source_targets_from_text() {
+  awk '
+    /^[[:space:]]*# shellcheck source=/ {
+      target=$0
+      sub(/^[[:space:]]*# shellcheck source=/, "", target)
+      sub(/[[:space:]].*$/, "", target)
+      print target
+    }
+  '
 }
 
 fm_lint_sourced_helper_changed() {  # <merge-base>
-  local merge_base=$1 consumer target resolved changed
-  changed=$(git diff --name-only --diff-filter=ACMR "$merge_base" -- 2>/dev/null) || return 1
+  local merge_base=$1 consumer target resolved changed consumers body
+  changed=$(fm_lint_changed_paths "$merge_base") || return 1
   [ -n "$changed" ] || return 1
-  for consumer in bin/*.sh bin/backends/*.sh tests/*.sh; do
-    [ -f "$consumer" ] || continue
+  consumers=$(git ls-tree -r --name-only "$merge_base" 2>/dev/null \
+    | grep -E '^(bin/[^/]+\.sh|bin/backends/[^/]+\.sh|tests/[^/]+\.sh)$' || true)
+  if [ -z "$consumers" ]; then
+    consumers=$(printf '%s\n' bin/*.sh bin/backends/*.sh tests/*.sh)
+  fi
+  while IFS= read -r consumer; do
+    [ -n "$consumer" ] || continue
+    if ! body=$(git show "$merge_base:$consumer" 2>/dev/null); then
+      [ -f "$consumer" ] || continue
+      body=$(cat "$consumer")
+    fi
     while IFS= read -r target; do
       resolved=$(fm_lint_resolve_source_target "$consumer" "$target") || continue
       [ "$resolved" != "$consumer" ] || continue
       printf '%s\n' "$changed" | grep -Fxq "$resolved" || continue
       return 0
-    done < <(awk '
-      /^[[:space:]]*# shellcheck source=/ {
-        target=$0
-        sub(/^[[:space:]]*# shellcheck source=/, "", target)
-        sub(/[[:space:]].*$/, "", target)
-        print target
-      }
-    ' "$consumer")
-  done
+    done < <(printf '%s\n' "$body" | fm_lint_source_targets_from_text)
+  done <<EOF
+$consumers
+EOF
   return 1
 }
 
