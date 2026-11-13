@@ -3167,6 +3167,7 @@ test_pi_arm_distinguishes_session_lock_ownership() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
@@ -3229,8 +3230,23 @@ try {
   other.kill("SIGTERM");
 }
 
+writeFileSync(lock, `${process.ppid}\n`);
+const guardHandlers = new Map();
+const guard = await import(new URL("fm-primary-turnend-guard.ts", pathToFileURL(process.env.PLUGIN)).href);
+guard.default({ on(name, handler) { guardHandlers.set(name, handler); } });
+const guardMarker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
+guardHandlers.get("session_start")({ reason: "reload" }, {});
+if (existsSync(guardMarker)) throw new Error("guard marked loaded for enclosing foreign session");
+const ancestor = await callArm();
+if (ancestor.details?.ok !== false || !ancestor.details.message.includes("held by another firstmate session")) {
+  throw new Error(`enclosing process incorrectly treated as Pi owner: ${JSON.stringify(ancestor.details)}`);
+}
+
 if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without lock ownership");
 writeFileSync(lock, `${process.pid}\n`);
+guardHandlers.get("session_start")({ reason: "reload" }, {});
+if (!existsSync(guardMarker)) throw new Error("guard rejected its own Pi session");
+await guardHandlers.get("session_shutdown")();
 const owned = await callArm();
 if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
   throw new Error(`owned lock did not arm: ${JSON.stringify(owned.details)}`);
@@ -3330,8 +3346,8 @@ EOF
 }
 
 # A Pi command started from inside the live session, such as the `pi --help`
-# capability probe, auto-loads this extension too and passes the ancestor walk
-# in lockOwnership. Its pid dies at once, so the marker must stay on the live
+# capability probe, auto-loads this extension too. It does not own the lock and
+# its pid dies at once, so the marker must stay on the live
 # session above it, generation line included, while a dead or foreign marker pid
 # is still replaced.
 test_pi_extension_keeps_marker_of_live_ancestor_session() {
@@ -3351,9 +3367,10 @@ import { pathToFileURL } from "node:url";
 
 const marker = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
 const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
-// The lock names the parent of this process: a live strict ancestor, exactly where
-// the real session sits above a nested `pi --help`.
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.ppid}\n`);
+// A nested probe is a separate process below the live lock owner. The other
+// cases are the owning Pi engine itself, whose identity is its exact pid.
+const lockHolder = process.env.MARKER_CASE === "nested" ? process.ppid : process.pid;
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${lockHolder}\n`);
 
 const pi = {
   on() {},

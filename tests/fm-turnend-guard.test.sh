@@ -1306,9 +1306,10 @@ import { pathToFileURL } from "node:url";
 
 const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
 const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
-// The lock names the parent of this process: a live strict ancestor, exactly where
-// the real session sits above a nested `pi --help`.
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.ppid}\n`);
+// A nested probe is a separate process below the live lock owner. The other
+// cases are the owning Pi engine itself, whose identity is its exact pid.
+const lockHolder = process.env.MARKER_CASE === "nested" ? process.ppid : process.pid;
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${lockHolder}\n`);
 
 const handlers = new Map();
 const pi = {
