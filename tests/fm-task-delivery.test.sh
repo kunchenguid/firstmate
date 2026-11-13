@@ -1887,10 +1887,8 @@ EOF
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "scout brief generation should succeed"
   fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
-  set +e
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
-  status=$?
-  set -e
+  status=0
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "a forge=forgejo:fj project was promoted"
   assert_contains "$out" "fj" "the promotion refusal did not name the refused CLI"
   [ ! -e "$home/data/$id/ship-instructions.md" ] || fail "the refused promotion published ship instructions"
