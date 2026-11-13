@@ -116,7 +116,7 @@ fm_forge_safe_ssh_include_patterns() {
 fm_forge_safe_ssh_config_file() {
   local config=${1:-} depth=${2:-0} dir line key rest pattern condition candidate included
   local -a conditions
-  local in_match=0 match_safe=1
+  local conditional_scope=0
 
   [ -e "$config" ] || return 0
   [ -r "$config" ] || return 1
@@ -138,13 +138,12 @@ fm_forge_safe_ssh_config_file() {
     key=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')
     case "$key" in
       host)
-        in_match=0
-        match_safe=1
+        conditional_scope=1
+        [ "$rest" = '*' ] && conditional_scope=0
         printf '%s\n' "$line"
         ;;
       match)
-        in_match=1
-        match_safe=1
+        conditional_scope=1
         for pattern in $rest; do
           IFS=',' read -ra conditions <<< "$pattern"
           for condition in "${conditions[@]}"; do
@@ -155,13 +154,17 @@ fm_forge_safe_ssh_config_file() {
             esac
           done
         done
+        [ "$rest" = all ] && conditional_scope=0
         printf '%s\n' "$line"
         ;;
       hostname)
         printf '%s\n' "$line"
         ;;
+      proxycommand|proxyjump|canonicalizehostname|canonicaldomains|canonicalizemaxdots|canonicalizefallbacklocal|canonicalizepermittedcnames)
+        return 1
+        ;;
       include)
-        [ "$in_match" -eq 0 ] || [ "$match_safe" -eq 1 ] || return 1
+        [ "$conditional_scope" -eq 0 ] || return 1
         local patterns
         patterns=$(fm_forge_safe_ssh_include_patterns "$rest") || return 1
         [ -n "$patterns" ] || return 1
