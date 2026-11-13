@@ -628,7 +628,7 @@ export default function (pi: ExtensionAPI) {
     const timeoutSetting = process.env.FM_PI_BASH_TIMEOUT_MAX_MS;
     if (timeoutSetting !== undefined && /^[1-9][0-9]*$/.test(timeoutSetting)) {
       const maximumMs = Number(timeoutSetting);
-      if (Number.isSafeInteger(maximumMs)) {
+      if (maximumMs <= 2_147_483_647) {
         const maximumSeconds = maximumMs / 1000;
         const input = event.input as { command?: unknown; timeout?: unknown };
         if (input.timeout === undefined) input.timeout = maximumSeconds;

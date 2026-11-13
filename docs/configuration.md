@@ -184,7 +184,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## Pi bash timeout cap
 
 Pi and Pi-signed sessions loading [the primary extension](../.pi/extensions/fm-primary-turnend-guard.ts) can opt in by setting `FM_PI_BASH_TIMEOUT_MAX_MS` in their launch environment.
-The value must be a positive decimal integer in milliseconds, without leading zeros and within JavaScript's safe-integer range.
+The value must be a decimal integer from `1` through `2147483647` milliseconds (Pi's native timer maximum), without leading zeros.
 It is converted to seconds for Pi's Bash tool (`5000` becomes `5` seconds), supplying a missing timeout and capping an explicit larger numeric timeout.
 Explicit numeric timeouts at or below the cap are preserved.
 Unset or invalid values leave Bash calls unchanged.
