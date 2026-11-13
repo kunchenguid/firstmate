@@ -155,6 +155,79 @@ fm_forge_checkout_remote() {
   return 1
 }
 
+fm_forge_effective_ssh_command() {
+  local checkout=${1:-} command
+
+  if [ -n "${GIT_SSH_COMMAND:-}" ]; then
+    printf '%s\n' "$GIT_SSH_COMMAND"
+  elif [ -n "$checkout" ] \
+    && command=$(command git -C "$checkout" config --get core.sshCommand 2>/dev/null); then
+    printf '%s\n' "$command"
+  elif [ -n "${GIT_SSH:-}" ]; then
+    printf '%s\n' "$GIT_SSH"
+  else
+    printf '%s\n' ssh
+  fi
+}
+
+fm_forge_ssh_command_config() {
+  local command=${1:-} token first config= i
+  local -a argv
+
+  case "$command" in
+    *$'\n'*) return 2 ;;
+  esac
+  read -r -a argv <<< "$command"
+  [ "${#argv[@]}" -gt 0 ] || return 2
+  first=${argv[0]}
+  case "$first" in
+    ssh|*/ssh) ;;
+    *) return 2 ;;
+  esac
+  i=1
+  while [ "$i" -lt "${#argv[@]}" ]; do
+    token=${argv[$i]}
+    case "$token" in
+      -F)
+        i=$((i + 1))
+        [ "$i" -lt "${#argv[@]}" ] || return 2
+        [ -z "$config" ] || return 2
+        config=${argv[$i]}
+        ;;
+      -F?*)
+        [ -z "$config" ] || return 2
+        config=${token#-F}
+        ;;
+      *) return 2 ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s\n' "$config"
+}
+
+fm_forge_safe_ssh_config_for_checkout() {
+  local checkout=${1:-} command config checkout_root
+
+  command=$(fm_forge_effective_ssh_command "$checkout") || return 1
+  config=$(fm_forge_ssh_command_config "$command") || return 1
+  if [ -z "$config" ]; then
+    fm_forge_safe_ssh_config
+    return 0
+  fi
+  case "$config" in
+    ~/*) config="${HOME:-}/${config#~/}" ;;
+    /*) ;;
+    *)
+      checkout_root=$(cd "$checkout" 2>/dev/null && pwd -P) || return 1
+      config="$checkout_root/$config"
+      ;;
+  esac
+  [ "$config" != /dev/stdin ] && [ -r "$config" ] || return 1
+  fm_forge_safe_ssh_config_file "$config" 0
+  printf '%s\n' 'Host *'
+  fm_forge_safe_ssh_config_file /etc/ssh/ssh_config 0
+}
+
 fm_forge_registered_project_id() {
   local checkout=${1:-} entry projects
 
@@ -257,7 +330,7 @@ fm_forge_detect_provider() {
       return 0
       ;;
   esac
-  host=$(fm_forge_resolve_host "$remote_url" 1 2>/dev/null) || host=""
+  host=$(fm_forge_resolve_host "$remote_url" 1 "$checkout" 2>/dev/null) || host=""
   if [ -z "$host" ]; then
     echo unknown
   elif fm_forge_host_is_github "$host"; then
@@ -272,7 +345,7 @@ fm_forge_detect_provider() {
 # fm_forge_resolve_host <remote-url-or-ssh-alias> [resolve-ssh]
 # Resolves HTTPS, Git, and SSH remote URLs to a lowercase hostname.
 fm_forge_resolve_host() {
-  local remote_url=${1:-} host="" resolve_ssh=0 resolve_requested=${2:-1}
+  local remote_url=${1:-} host="" resolve_ssh=0 resolve_requested=${2:-1} checkout=${3:-}
 
   [ -n "$remote_url" ] || return 1
   case "$resolve_requested" in
@@ -312,8 +385,9 @@ fm_forge_resolve_host() {
   esac
   if [ "$resolve_ssh" -eq 1 ] && [ "$resolve_requested" -eq 1 ]; then
     command -v ssh >/dev/null 2>&1 || return 1
-    local resolved
-    resolved=$(fm_forge_safe_ssh_config | ssh -G -F /dev/stdin -- "$host" 2>/dev/null \
+    local resolved ssh_config
+    ssh_config=$(fm_forge_safe_ssh_config_for_checkout "$checkout") || return 1
+    resolved=$(printf '%s\n' "$ssh_config" | ssh -G -F /dev/stdin -- "$host" 2>/dev/null \
       | awk '$1=="hostname"{print $2; exit}') || return 1
     [ -n "$resolved" ] || return 1
     host=$resolved
@@ -424,7 +498,7 @@ fm_forge_scan_registered_projects() {
     host=""
     remote_url=$(fm_forge_checkout_remote "$entry" 2>/dev/null) || remote_url=""
     if [ -n "$remote_url" ]; then
-      host=$(fm_forge_resolve_host "$remote_url" 1 2>/dev/null || true)
+      host=$(fm_forge_resolve_host "$remote_url" 1 "$entry" 2>/dev/null || true)
     fi
     printf '%s\t%s\t%s\n' "$project_id" "$provider" "${host:-}"
   done

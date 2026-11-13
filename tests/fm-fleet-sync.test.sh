@@ -591,6 +591,28 @@ test_registered_symlink_physical_path_preserves_posture_refusal() {
   pass "registered symlink physical paths preserve posture refusals"
 }
 
+test_custom_git_ssh_command_fails_closed_for_sync() {
+  local home clone custom out before after
+  home=$(new_home)
+  clone=$(build_pair "$home" custom-ssh-sync)
+  advance_origin "$home" custom-ssh-sync C1
+  custom="$home/custom.conf"
+  printf '%s\n' 'Host github.com' '  HostName review.example' > "$custom"
+  git -C "$clone" remote set-url origin git@github.com:example/project.git
+  git -C "$clone" config core.sshCommand "ssh -F $custom"
+  assert_expected_provider "$home" "$clone" unknown
+  before="$home/custom-ssh-before"
+  after="$home/custom-ssh-after"
+  snapshot_clone_state "$clone" "$before"
+
+  out=$(run_sync "$home" "$clone")
+  snapshot_clone_state "$clone" "$after"
+
+  [ -z "$out" ] || fail "sync must skip an unsupported effective custom SSH host, got: $out"
+  cmp -s "$before" "$after" || fail "sync mutated a clone whose custom SSH host was unsupported"
+  pass "fleet-sync fails closed for repository custom SSH transport"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -958,6 +980,7 @@ test_explicit_legacy_bindings_allow_sync
 test_explicit_binding_does_not_cross_same_basename
 test_explicit_binding_survives_registered_symlink
 test_registered_symlink_physical_path_preserves_posture_refusal
+test_custom_git_ssh_command_fails_closed_for_sync
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves

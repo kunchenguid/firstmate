@@ -1112,6 +1112,36 @@ SH
   pass "bootstrap uses the effective SSH destination for provider and auth boundaries"
 }
 
+test_forge_custom_git_ssh_command_controls_provider_and_auth() {
+  local case_dir fakebin out project custom calls
+
+  case_dir="$TMP_ROOT/forge-custom-git-ssh-command"
+  project="$case_dir/home/projects/custom-ssh"
+  custom="$case_dir/custom.conf"
+  mkdir -p "$project" "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Host github.com' '  HostName review.example' > "$custom"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  git -C "$project" config core.sshCommand "ssh -F $custom"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: custom-ssh (host: review.example)" ] \
+    || fail "core.sshCommand must determine the effective provider host, got: $out"
+  [ ! -s "$calls" ] \
+    || fail "core.sshCommand resolving to an unsupported host must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap honors repository core.sshCommand for forge classification"
+}
+
 test_forge_effective_remote_rewrites() {
   local case_dir fakebin out project github_calls gitlab_calls
 
@@ -2686,6 +2716,7 @@ test_gh_axi_min_version
 test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
 test_forge_ssh_effective_destination_controls_provider_and_auth
+test_forge_custom_git_ssh_command_controls_provider_and_auth
 test_forge_effective_remote_rewrites
 test_forge_ssh_user_config_precedes_system_config
 test_forge_provider_explicit_gerrit_binding
