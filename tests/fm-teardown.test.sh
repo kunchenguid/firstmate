@@ -340,20 +340,19 @@ SH
 add_gh_pr_open() {
   local case_dir=$1 head
   head=${2-$(git -C "$case_dir/wt" rev-parse HEAD)}
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
+case "\${1:-} \${2:-}" in
   "pr view")
-    printf '%s\n' "pull_request:" "  number: 7" "  state: open" ; exit 0 ;;
+    printf '%s\n' "pull_request:" "  number: 7" "  state: open" "  headRefOid: $head" ; exit 0 ;;
 esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-} \${2:-}" = "pr view" ]; then
-  case " \$* " in
-    *" --json headRefOid "*) printf '%s\n' '$head'; exit 0 ;;
-  esac
+if [ "\${1:-} \${2:-}" = "api graphql" ]; then
+  printf '%s\n' 'state=OPEN' 'merged=false' 'head=$head'
+  exit 0
 fi
 echo "error: graphql unavailable" >&2
 exit 1
@@ -1292,15 +1291,24 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
 }
 
 test_open_pr_requires_current_head_containment() {
-  local provider relation case_dir head pr_head url expected rc
-  for provider in github gitlab forgejo gerrit; do
-    for relation in unrelated stale current descendant missing; do
+  local provider relation case_dir head pr_head url expected rc test_path path_without_gh
+  path_without_gh=$(fm_test_base_path_sans "$PATH" gh)
+  for provider in github github-gh-axi gitlab forgejo gerrit; do
+    for relation in unrelated stale current descendant missing malformed; do
       case_dir=$(make_case "open-pr-$provider-$relation")
       write_meta "$case_dir" direct-PR ship
       wt_commit_file "$case_dir" feature.txt hello "task work"
       head=$(git -C "$case_dir/wt" rev-parse HEAD)
       seed_backlog_in_flight "$case_dir"
-      git -C "$case_dir/wt" push -q origin fm/task-x1
+      if [ "$provider" = gerrit ]; then
+        git -C "$case_dir/wt" push -q origin HEAD:refs/for/main
+        [ "$(git -C "$case_dir/wt" log --format=%H HEAD --not --remotes --)" = "$head" ] \
+          || fail "open-pr-gerrit-$relation: task HEAD unexpectedly has a remote-tracking ref"
+        git -C "$case_dir/wt" show-ref --verify --quiet refs/remotes/origin/fm/task-x1 \
+          && fail "open-pr-gerrit-$relation: fixture pushed a branch"
+      else
+        git -C "$case_dir/wt" push -q origin fm/task-x1
+      fi
       expected=1
       case "$relation" in
         unrelated) pr_head=$(commit_tree_from_wt_head "$case_dir" origin/main "unrelated review") ;;
@@ -1308,11 +1316,19 @@ test_open_pr_requires_current_head_containment() {
         current) pr_head=$head; expected=0 ;;
         descendant) pr_head=$(commit_tree_from_wt_head "$case_dir" "$head" "review follow-up"); expected=0 ;;
         missing) pr_head= ;;
+        malformed) pr_head=not-a-commit ;;
       esac
+      test_path=$PATH
       case "$provider" in
-        github)
+        github|github-gh-axi)
           url=https://github.com/example/repo/pull/7
           add_gh_pr_open "$case_dir" "$pr_head"
+          if [ "$provider" = github-gh-axi ]; then
+            rm "$case_dir/fakebin/gh"
+            test_path=$path_without_gh
+            PATH="$case_dir/fakebin:$test_path" command -v gh >/dev/null 2>&1 \
+              && fail "open-pr-$provider-$relation: fixture path unexpectedly exposes gh"
+          fi
           ;;
         gitlab)
           url=https://gitlab.example.org/team/repo/-/merge_requests/7
@@ -1335,8 +1351,9 @@ SH
       # A previously recorded matching head cannot replace the forge's live head.
       printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
       rc=0
-      FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-      expect_code "$expected" "$rc" "open-pr-$provider-$relation: containment verdict"
+      FM_TEARDOWN_TEST_PATH="$test_path" FM_HOME="$case_dir" \
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code "$expected" "$rc" "open-pr-$provider-$relation: containment verdict: $(cat "$case_dir/stderr")"
       if [ "$expected" = 1 ]; then
         assert_refusal_retained_task_state "$case_dir" "open-pr-$provider-$relation" "$head"
         [ "$(backlog_row_state "$case_dir")" = in_flight ] \

@@ -1016,15 +1016,16 @@ fm_pr_poll_retirement_receipt_valid() {
 
 fm_pr_github_read_record_with_gh() {  # <host> <owner> <repo> <number>
   local host=$1 owner=$2 repo=$3 number=$4 fields line total=0 named=0
-  local state='' merged=''
+  local state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
   if ! fields=$(GH_HOST=$host gh api graphql \
-    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged}}}' \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged headRefOid}}}' \
     -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
-    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring)' \
+    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "head=" + (.headRefOid // "")' \
     2>/dev/null) || [ -z "$fields" ]; then
     return 1
   fi
@@ -1033,13 +1034,14 @@ fm_pr_github_read_record_with_gh() {  # <host> <owner> <repo> <number>
     case "$line" in
       state=*) state=${line#state=} ;;
       merged=*) merged=${line#merged=} ;;
+      head=*) head=${line#head=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
     || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
     return 1
   fi
@@ -1050,13 +1052,17 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
+  # Consumed and validated by bin/fm-teardown.sh; empty when the forge omitted it.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
 }
 
 fm_pr_github_read_record_with_gh_axi() {  # <host> <owner> <repo> <number>
   local host=$1 owner=$2 repo=$3 number=$4 output state
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
-  if ! output=$(GH_HOST=$host gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
+  FM_PR_RECORD_HEAD=
+  if ! output=$(GH_HOST=$host gh-axi pr view "$number" --repo "$owner/$repo" --fields state,headRefOid 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -1065,6 +1071,11 @@ fm_pr_github_read_record_with_gh_axi() {  # <host> <owner> <repo> <number>
   '); then
     return 1
   fi
+  # Missing or ambiguous heads cannot supply a teardown retention proof.
+  FM_PR_RECORD_HEAD=$(printf '%s\n' "$output" | awk '
+    $1 == "headRefOid:" { count++; if (NF == 2) value=$2 }
+    END { if (count == 1) print value }
+  ')
   case "$state" in
     MERGED|merged)
       # Consumed by bin/fm-crew-state.sh passed_pr_detail.
