@@ -203,6 +203,9 @@ case " $* " in
   *" api --paginate repos/"*"/rules/branches/"*)
     printf '%s\n' '[]'
     ;;
+  *" api repos/"*"/compare/"*)
+    printf '%s\n' 'behind_by=0' 'base_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+    ;;
   *" api repos/"*"/branches/"*)
     printf '%s\n' '{"name":"main","protected":false}'
     ;;
@@ -366,8 +369,17 @@ SH
   printf '%s\n' "$dir"
 }
 
+# The fake base reports no required checks, so a merge also reads the worker's
+# recorded full-suite result: a passing one against the compare tip and the head the fake gh reports.
+write_suite_record() {  # <dir> <task-id>
+  mkdir -p "$1/home/data/$2"
+  printf '%s\n' 'suite=pass' 'head=0123456789abcdef0123456789abcdef01234567' 'base=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' 'ran=fixture suite' \
+    > "$1/home/data/$2/suite-result"
+}
+
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
+  write_suite_record "$dir" "$id"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
@@ -1681,6 +1693,7 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
+    write_suite_record "$dir" "$id"
     run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
@@ -5145,6 +5158,7 @@ test_teardown_cannot_race_authority_consumption() {
     'kind=ship' \
     'mode=no-mistakes' \
     'yolo=on'
+  write_suite_record "$dir" task-a
   write_away_record "$dir"
   run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
     || fail "teardown race: could not arm the merge poll"
