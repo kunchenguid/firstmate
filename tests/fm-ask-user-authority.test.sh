@@ -39,4 +39,25 @@ test_primary_and_secondmate_instruction_generation() {
   pass "primary workers and secondmates receive the authority rule through generated instructions"
 }
 
+test_emitted_prompt_applies_recorded_same_theme_answer() {
+  local prompt
+  prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+
+  # The emitted supervision prompt is the contract the away supervisor reads.
+  assert_contains "$prompt" \
+    "When the captain has already answered a decision on the same task and the new finding is the same theme, apply that recorded answer instead of escalating again." \
+    "emitted prompt escalates a same-theme finding the captain already answered"
+  assert_contains "$prompt" \
+    "Fix with the chosen remedy, or decline as already ruled, and cite the earlier answer in the decision." \
+    "emitted prompt drops the recorded remedy, the decline, or the citation"
+  assert_contains "$prompt" \
+    "Still escalate when the new finding asks for something that answer did not cover, or when the choice is destructive, irreversible, or security-sensitive." \
+    "emitted prompt applies an earlier answer to an uncovered or sensitive choice"
+  assert_contains "$prompt" \
+    "repeated same-theme findings when incremental corrections are preserving a questionable abstraction rather than closing independent defects, except when a recorded answer on that task already covers the finding" \
+    "emitted prompt leaves the questionable-abstraction escalation unconditional"
+  pass "emitted supervision prompt applies a recorded same-theme answer"
+}
+
 test_primary_and_secondmate_instruction_generation
+test_emitted_prompt_applies_recorded_same_theme_answer
