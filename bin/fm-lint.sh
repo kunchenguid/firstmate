@@ -31,7 +31,8 @@
 #   - --changed (CI pull requests) lints only the canonical-set files changed
 #     since the merge-base, still with --external-sources and full dataflow, so
 #     the PR gate stays source-aware on the files it checks. If a lint-definition
-#     file changed, selection upgrades to the full canonical set.
+#     file changed, or a changed file is sourced by another canonical script
+#     (via `# shellcheck source=`), selection upgrades to the full canonical set.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -114,7 +115,7 @@
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override concurrent worker count
 #   fm-lint.sh --partition <k>of<n>     lint one canonical CI partition (see fallback above)
-#   fm-lint.sh --changed ...            lint changed canonical roots (CI pull requests keep source-aware analysis)
+#   fm-lint.sh --changed ...            lint changed canonical roots (CI pull requests keep source-aware analysis; sourced helpers and lint-definition files upgrade to the full set)
 #   fm-lint.sh --full ...               force the full canonical set
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
@@ -887,6 +888,50 @@ fm_lint_definition_changed() {  # <merge-base>
     bin/fm-timeout-lib.sh 2>/dev/null | grep -q .
 }
 
+# A changed canonical file that another canonical script sources (via a
+# `# shellcheck source=` directive) can introduce a ShellCheck finding only in
+# that unchanged consumer. Changed-file lint would miss it and leave main's
+# full gate red, so those PRs take the full set like a lint-definition change.
+fm_lint_resolve_source_target() {  # <consumer> <target>
+  local consumer=$1 target=$2 dir
+  case "$target" in
+    ''|/dev/null|/*) return 1 ;;
+  esac
+  if [ -f "$target" ]; then
+    printf '%s\n' "$target"
+    return 0
+  fi
+  dir=$(dirname "$consumer")
+  if [ -f "$dir/$target" ]; then
+    printf '%s/%s\n' "$dir" "$target"
+    return 0
+  fi
+  return 1
+}
+
+fm_lint_sourced_helper_changed() {  # <merge-base>
+  local merge_base=$1 consumer target resolved changed
+  changed=$(git diff --name-only --diff-filter=ACMR "$merge_base" -- 2>/dev/null) || return 1
+  [ -n "$changed" ] || return 1
+  for consumer in bin/*.sh bin/backends/*.sh tests/*.sh; do
+    [ -f "$consumer" ] || continue
+    while IFS= read -r target; do
+      resolved=$(fm_lint_resolve_source_target "$consumer" "$target") || continue
+      [ "$resolved" != "$consumer" ] || continue
+      printf '%s\n' "$changed" | grep -Fxq "$resolved" || continue
+      return 0
+    done < <(awk '
+      /^[[:space:]]*# shellcheck source=/ {
+        target=$0
+        sub(/^[[:space:]]*# shellcheck source=/, "", target)
+        sub(/[[:space:]].*$/, "", target)
+        print target
+      }
+    ' "$consumer")
+  done
+  return 1
+}
+
 if [ "$#" -gt 0 ]; then
   EXPLICIT_PATHS=1
   ROOTS=("$@")
@@ -909,6 +954,9 @@ else
       if [ -n "$merge_base" ]; then
         if fm_lint_definition_changed "$merge_base"; then
           printf 'fm-lint.sh: lint definition files changed; using full canonical lint\n' >&2
+          full_lint=1
+        elif fm_lint_sourced_helper_changed "$merge_base"; then
+          printf 'fm-lint.sh: a sourced helper changed; using full canonical lint\n' >&2
           full_lint=1
         else
           full_lint=0
@@ -1020,10 +1068,6 @@ if [ "$ROOT_COUNT" -eq 0 ]; then
   else
     printf 'fm-lint.sh: no lint targets\n'
   fi
-  overall_rc=0
-  fm_lint_run_backend_purity || overall_rc=$?
-  fm_lint_run_workflows || overall_rc=$?
-  exit "$overall_rc"
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -1071,7 +1115,7 @@ for bound_pair in \
 done
 
 BOUND_MECH=none
-if [ "${FM_LINT_REQUIRE_BOUNDS:-0}" = 1 ]; then
+if [ "$ROOT_COUNT" -gt 0 ] && [ "${FM_LINT_REQUIRE_BOUNDS:-0}" = 1 ]; then
   bounds_problems=()
   if declare -F fm_exec_timed >/dev/null 2>&1; then
     # perl is mandatory above, so fm_exec_timed always takes its perl watchdog.
@@ -1186,27 +1230,31 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   worker=$((worker + 1))
 done
 
-fm_lint_root_weights > "$WEIGHTS" || exit $?
-
-# Largest-first deterministic greedy assignment balances the two worker
-# queues without affecting replay order. Direct bytes are a stable portable
-# proxy after the expensive dynamic adapter source fan-out is cut.
 WORKER_LOADS=(0 0)
-LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
-while IFS="$TAB" read -r weight index path; do
+if [ "$ROOT_COUNT" -gt 0 ]; then
+  fm_lint_root_weights > "$WEIGHTS" || exit $?
+
+  # Largest-first deterministic greedy assignment balances the two worker
+  # queues without affecting replay order. Direct bytes are a stable portable
+  # proxy after the expensive dynamic adapter source fan-out is cut.
+  LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
+  while IFS="$TAB" read -r weight index path; do
+    worker=0
+    if [ "${WORKER_LOADS[1]}" -lt "${WORKER_LOADS[0]}" ]; then
+      worker=1
+    fi
+    printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/manifest.$worker"
+    WORKER_LOADS[worker]=$((WORKER_LOADS[worker] + weight))
+  done < "$WEIGHTS.sorted"
   worker=0
-  if [ "${WORKER_LOADS[1]}" -lt "${WORKER_LOADS[0]}" ]; then
-    worker=1
-  fi
-  printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/manifest.$worker"
-  WORKER_LOADS[worker]=$((WORKER_LOADS[worker] + weight))
-done < "$WEIGHTS.sorted"
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  LC_ALL=C sort -t "$TAB" -k1,1n "$TMP_ROOT/manifest.$worker" > "$TMP_ROOT/manifest.$worker.sorted"
-  mv "$TMP_ROOT/manifest.$worker.sorted" "$TMP_ROOT/manifest.$worker"
-  worker=$((worker + 1))
-done
+  while [ "$worker" -lt "$SHARD_COUNT" ]; do
+    LC_ALL=C sort -t "$TAB" -k1,1n "$TMP_ROOT/manifest.$worker" > "$TMP_ROOT/manifest.$worker.sorted"
+    mv "$TMP_ROOT/manifest.$worker.sorted" "$TMP_ROOT/manifest.$worker"
+    worker=$((worker + 1))
+  done
+else
+  : > "$WEIGHTS"
+fi
 
 fm_lint_shellcheck_count() {
   if command -v pgrep >/dev/null 2>&1; then
@@ -1295,41 +1343,43 @@ fm_lint_wait_workers() {
   done
 }
 
-if [ "$JOBS" -eq 1 ]; then
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    fm_lint_wait_workers
-    worker=$((worker + 1))
-  done
-else
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    worker=$((worker + 1))
-  done
-  fm_lint_wait_workers
-fi
-
-# Replay both stable shards in deterministic order and select the first nonzero
-# shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  output="$OUTPUT_DIR/shard.$worker"
-  [ ! -f "$output.out" ] || cat "$output.out"
-  if [ -f "$output.rc" ]; then
-    rc=$(cat "$output.rc" 2>/dev/null || printf '2')
-    case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
+if [ "$ROOT_COUNT" -gt 0 ]; then
+  if [ "$JOBS" -eq 1 ]; then
+    worker=0
+    while [ "$worker" -lt "$SHARD_COUNT" ]; do
+      fm_lint_start_worker "$worker"
+      fm_lint_wait_workers
+      worker=$((worker + 1))
+    done
   else
-    printf 'fm-lint.sh: worker produced no result for shard %s.\n' "$worker" >&2
-    rc=2
+    worker=0
+    while [ "$worker" -lt "$SHARD_COUNT" ]; do
+      fm_lint_start_worker "$worker"
+      worker=$((worker + 1))
+    done
+    fm_lint_wait_workers
   fi
-  if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
-    overall_rc=$rc
-  fi
-  worker=$((worker + 1))
-done
+
+  # Replay both stable shards in deterministic order and select the first nonzero
+  # shard status. ShellCheck processes every root in a shard after earlier findings.
+  worker=0
+  while [ "$worker" -lt "$SHARD_COUNT" ]; do
+    output="$OUTPUT_DIR/shard.$worker"
+    [ ! -f "$output.out" ] || cat "$output.out"
+    if [ -f "$output.rc" ]; then
+      rc=$(cat "$output.rc" 2>/dev/null || printf '2')
+      case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
+    else
+      printf 'fm-lint.sh: worker produced no result for shard %s.\n' "$worker" >&2
+      rc=2
+    fi
+    if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
+      overall_rc=$rc
+    fi
+    worker=$((worker + 1))
+  done
+fi
 
 # Close the roots log with completion counts so a mid-run kill leaves
 # begun-but-unfinished roots attributable by name. result_exit is appended
@@ -1368,7 +1418,10 @@ if [ -n "$TELEMETRY" ]; then
   TELEMETRY_LOAD_END=$(fm_lint_load_average)
   TELEMETRY_CPU_END=$(fm_lint_aggregate_cpu)
 
-  direct_lines=$(awk 'END {print NR + 0}' "${ROOTS[@]}" 2>/dev/null || printf 'unavailable')
+  direct_lines=0
+  if [ "$ROOT_COUNT" -gt 0 ]; then
+    direct_lines=$(awk 'END {print NR + 0}' "${ROOTS[@]}" 2>/dev/null || printf 'unavailable')
+  fi
   direct_bytes=0
   : > "$TMP_ROOT/content-cksums"
   : > "$TMP_ROOT/source-targets"
@@ -1377,29 +1430,31 @@ if [ -n "$TELEMETRY" ]; then
   source_followed=0
   awk -F '\t' '$1 == "end" && $12 == 0 { print $2 }' "$ROOTS_LOG" > "$TMP_ROOT/no-source-indices"
   root_index=0
-  for path in "${ROOTS[@]}"; do
-    root_index=$((root_index + 1))
-    if [ -f "$path" ]; then
-      bytes=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
-      case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
-      direct_bytes=$((direct_bytes + bytes))
-      cksum "$path" >> "$TMP_ROOT/content-cksums" 2>/dev/null || true
-      awk '
-        /^[[:space:]]*# shellcheck source=/ {
-          target=$0
-          sub(/^[[:space:]]*# shellcheck source=/, "", target)
-          sub(/[[:space:]].*$/, "", target)
-          print target
-        }
-      ' "$path" > "$TMP_ROOT/root-source-targets"
-      cat "$TMP_ROOT/root-source-targets" >> "$TMP_ROOT/source-targets"
-      if [ "$FOLLOW_SOURCES" -eq 1 ] \
-        && ! grep -qx "$root_index" "$TMP_ROOT/no-source-indices"; then
-        followed_here=$(grep -cv '^/dev/null$' "$TMP_ROOT/root-source-targets" || true)
-        source_followed=$((source_followed + followed_here))
+  if [ "$ROOT_COUNT" -gt 0 ]; then
+    for path in "${ROOTS[@]}"; do
+      root_index=$((root_index + 1))
+      if [ -f "$path" ]; then
+        bytes=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
+        case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+        direct_bytes=$((direct_bytes + bytes))
+        cksum "$path" >> "$TMP_ROOT/content-cksums" 2>/dev/null || true
+        awk '
+          /^[[:space:]]*# shellcheck source=/ {
+            target=$0
+            sub(/^[[:space:]]*# shellcheck source=/, "", target)
+            sub(/[[:space:]].*$/, "", target)
+            print target
+          }
+        ' "$path" > "$TMP_ROOT/root-source-targets"
+        cat "$TMP_ROOT/root-source-targets" >> "$TMP_ROOT/source-targets"
+        if [ "$FOLLOW_SOURCES" -eq 1 ] \
+          && ! grep -qx "$root_index" "$TMP_ROOT/no-source-indices"; then
+          followed_here=$(grep -cv '^/dev/null$' "$TMP_ROOT/root-source-targets" || true)
+          source_followed=$((source_followed + followed_here))
+        fi
       fi
-    fi
-  done
+    done
+  fi
   source_directives=$(wc -l < "$TMP_ROOT/source-targets" | tr -d '[:space:]')
   source_boundaries=$(grep -c '^/dev/null$' "$TMP_ROOT/source-targets" 2>/dev/null || true)
   case "$source_boundaries" in ''|*[!0-9]*) source_boundaries=0 ;; esac

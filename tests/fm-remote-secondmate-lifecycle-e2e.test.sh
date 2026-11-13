@@ -1394,15 +1394,28 @@ FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
 watch_pid=$!
-sleep 4
+i=0
+ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
+while [ "$i" -lt 50 ]; do
+  kill -0 "$watch_pid" 2>/dev/null \
+    || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
+  ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
+  [ "$ssh_after" -gt "$ssh_before" ] && break
+  sleep 0.1
+  i=$((i + 1))
+done
 kill -0 "$watch_pid" 2>/dev/null \
   || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
+[ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
 kill "$watch_pid" 2>/dev/null || true
+i=0
+while kill -0 "$watch_pid" 2>/dev/null; do
+  [ "$i" -lt 50 ] || break
+  sleep 0.1
+  i=$((i + 1))
+done
 wait "$watch_pid" 2>/dev/null || true
 watch_pid=''
-sleep 1
-ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
-[ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
 # A watcher that survives this stop keeps probing into the fixture root until
 # the EXIT trap races its removal, so prove nothing polls past a few cycles.
 touch "$TMP_ROOT/watch-unreachable.stopped"

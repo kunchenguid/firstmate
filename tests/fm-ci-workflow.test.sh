@@ -733,6 +733,10 @@ raise "lint runs-on must stay ubuntu-24.04" unless lint.fetch("runs-on") == "ubu
 raise "lint matrix must be four partitions" unless lint.fetch("strategy").fetch("matrix").fetch("partition") == [1, 2, 3, 4]
 steps = lint.fetch("steps")
 raise "lint must cache pinned tools" unless steps.any? { |s| s["uses"].to_s.start_with?("actions/cache@") }
+cache = steps.find { |s| s["uses"].to_s.start_with?("actions/cache@") } or raise "lint cache step missing"
+key = cache.dig("with", "key").to_s
+raise "lint tool cache key must include ShellCheck SHA-256 pins" unless key.include?("8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198") && key.include?("12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588")
+raise "lint tool cache key must include actionlint SHA-256 pins" unless key.include?("8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8") && key.include?("325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6")
 raise "lint checkout must fetch full history for --changed" unless steps.any? { |s|
   s["uses"].to_s.include?("actions/checkout@") && s.dig("with", "fetch-depth") == 0
 }
@@ -744,12 +748,26 @@ serial = jobs.fetch("tests-portable-serial")
 raise "serial timeout-minutes must stay 30" unless serial.fetch("timeout-minutes") == 30
 raise "serial runs-on must stay ubuntu-24.04" unless serial.fetch("runs-on") == "ubuntu-24.04"
 shards = serial.fetch("strategy").fetch("matrix").fetch("shard")
-raise "serial matrix must be 18 shards" unless shards == (1..18).to_a
+raise "serial matrix must be 19 shards" unless shards == (1..19).to_a
 
-%w[tests-portable-parallel-1 tests-portable-parallel-2].each do |name|
+%w[tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial].each do |name|
   job = jobs.fetch(name)
   raise "#{name} timeout-minutes must stay 30" unless job.fetch("timeout-minutes") == 30
   raise "#{name} runs-on must stay ubuntu-24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
+  job_steps = job.fetch("steps")
+  raise "#{name} must not fetch full history" if job_steps.any? { |s|
+    s["uses"].to_s.include?("actions/checkout@") && s.dig("with", "fetch-depth") == 0
+  }
+  raise "#{name} must cache pinned tools" unless job_steps.any? { |s|
+    s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?("fm-ci-tools")
+  }
+  raise "#{name} must cache npm" unless job_steps.any? { |s|
+    s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?(".npm")
+  }
+end
+
+%w[tests-portable-parallel-1 tests-portable-parallel-2].each do |name|
+  job = jobs.fetch(name)
   run = job.fetch("steps").find { |s| s["run"].to_s.include?("fm-test-run.sh --lane") } or raise "#{name} run step missing"
   raise "#{name} must run with --jobs 2" unless run.fetch("run").include?("--jobs 2")
 end
@@ -758,6 +776,9 @@ agg = jobs.fetch("tests-timing-aggregate")
 raise "timing aggregate must depend on lint" unless Array(agg["needs"]).include?("lint")
 agg_run = agg.fetch("steps").find { |s| s["run"].to_s.include?("fm-ci-budget-warn.sh") } or raise "budget warn step missing"
 raise "budget warn must stay a warning, not a failing gate" if agg_run["continue-on-error"]
+lint_up = lint.fetch("steps").find { |s| s["name"] == "Upload lint telemetry" } or raise "lint telemetry upload missing"
+raise "lint telemetry upload must not fail the lint job when a partition has no files" unless lint_up.dig("with", "if-no-files-found") == "warn"
+raise "lint telemetry download must stay a hard dependency of the aggregate" unless agg.fetch("steps").any? { |s| s["name"] == "Download lint telemetry" }
 
 jobs.each do |name, job|
   next unless job.is_a?(Hash)

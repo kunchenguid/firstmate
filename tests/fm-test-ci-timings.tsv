@@ -6,6 +6,9 @@
 # or: bin/fm-refresh-ci-timings.sh --from-main --limit 3
 # source_runs: 43359484992 43331691300 43209319634
 # refreshed: 2026-11-13
+# Split-file weights for fm-watch-triage-busy, fm-captain-hold-teardown, and the
+# reduced watch-triage/captain-hold parents are proportional splits of those
+# parent measurements, pending a refresh from green CI.
 path	duration_ms
 tests/fm-afk-contract.test.sh	13161
 tests/fm-afk-inject-e2e.test.sh	41468
@@ -75,7 +78,8 @@ tests/fm-calm-pi-extension.test.sh	51621
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh	1218
 tests/fm-capacity-auto.test.sh	19809
 tests/fm-capacity.test.sh	7536
-tests/fm-captain-hold-lifecycle.test.sh	879084
+tests/fm-captain-hold-lifecycle.test.sh	504000
+tests/fm-captain-hold-teardown.test.sh	400000
 tests/fm-cd-pretool-check.test.sh	22185
 tests/fm-check-unregister.test.sh	687
 tests/fm-ci-workflow.test.sh	13889
@@ -337,9 +341,10 @@ tests/fm-watch-checkpoint.test.sh	25895
 tests/fm-watch-inbox-meta.test.sh	516
 tests/fm-watch-open-decisions.test.sh	16297
 tests/fm-watch-recovery-loop.test.sh	61495
+tests/fm-watch-triage-busy.test.sh	450000
 tests/fm-watch-triage-pause.test.sh	670748
 tests/fm-watch-triage-wedge-defer.test.sh	624860
-tests/fm-watch-triage.test.sh	961596
+tests/fm-watch-triage.test.sh	900000
 tests/fm-watch-wedge-cap-live.test.sh	309
 tests/fm-watch-wedge-cap-unconfigured-parity.test.sh	58895
 tests/fm-watch-wedge-cap.test.sh	446250

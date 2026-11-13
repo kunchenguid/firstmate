@@ -709,7 +709,9 @@ test_changed_mode_invokes_shellcheck_once_per_root() {
   fm_lint_stub_shellcheck "$fakebin" "$log"
   diff_file="$tmp/diff.nul"
   first="bin/fm-afk-launch.sh"
-  second="bin/fm-watch.sh"
+  # Pick two entrypoints that nothing else `# shellcheck source=`s: a sourced
+  # helper would upgrade this pair to the full canonical set.
+  second="bin/fm-on.sh"
   fm_lint_write_diff_file "$diff_file" "$first" "$second"
 
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
@@ -943,23 +945,54 @@ test_changed_and_full_cannot_combine() {
 }
 
 test_empty_changed_partition_is_a_successful_noop() {
-  local tmp fakebin diff_file out rc
+  local tmp fakebin diff_file out rc telemetry roots_log
   tmp=$(fm_test_tmproot fm-lint-empty-partition)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
   fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
   diff_file="$tmp/diff.nul"
+  telemetry="$tmp/partition-2.tsv"
+  roots_log="$tmp/partition-2.roots.tsv"
   fm_lint_write_diff_file "$diff_file" "bin/fm-afk-launch.sh"
 
   rc=0
   out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
-    "$LINT" --changed --partition 2of4 2>&1) || rc=$?
+    "$LINT" --changed --partition 2of4 --telemetry "$telemetry" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "an empty changed partition must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "no lint targets in this partition" \
     "empty changed partition did not note the empty target set"
   [ ! -s "$tmp/shellcheck.log" ] || fail "empty partition invoked ShellCheck"
-  pass "fm-lint.sh treats an empty --changed partition as a successful no-op"
+  [ -f "$telemetry" ] || fail "empty partition wrote no --telemetry snapshot"$'\n'"$out"
+  assert_grep $'format\tfm-lint-telemetry-v1' "$telemetry" \
+    "empty partition telemetry omitted the format marker"
+  assert_grep $'root_count\t0' "$telemetry" \
+    "empty partition telemetry did not record root_count=0"
+  assert_grep $'partition\t2of4' "$telemetry" \
+    "empty partition telemetry did not record its partition"
+  assert_grep $'wall_seconds\t' "$telemetry" \
+    "empty partition telemetry omitted wall_seconds"
+  [ -f "$roots_log" ] || fail "empty partition wrote no roots sidecar beside telemetry"
+  pass "fm-lint.sh treats an empty --changed partition as a successful no-op that still writes telemetry"
+}
+
+test_changed_flag_upgrades_when_a_sourced_helper_changes() {
+  local tmp fakebin listed expected diff_file out
+  tmp=$(fm_test_tmproot fm-lint-sourced-helper)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  fm_lint_write_diff_file "$diff_file" "bin/fm-wake-lib.sh" "README.md"
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' ! -name '.*' -print | LC_ALL=C sort)
+
+  listed=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    "$LINT" --changed --list-files 2>"$tmp/err")
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "--changed did not upgrade to the full canonical set when a sourced helper changed"
+  assert_contains "$(cat "$tmp/err")" "a sourced helper changed" \
+    "--changed upgrade did not explain why a sourced helper used the full set"
+  pass "fm-lint.sh --changed upgrades to full lint when a sourced helper changes"
 }
 
 test_installer_skips_download_when_pinned_binary_is_present() {
@@ -2219,6 +2252,7 @@ test_fast_mode_on_a_local_branch_keeps_source_following
 test_changed_mode_hides_cross_file_codes_that_ci_still_sees
 test_changed_flag_keeps_source_following_in_ci
 test_changed_flag_upgrades_when_lint_definition_changes
+test_changed_flag_upgrades_when_a_sourced_helper_changes
 test_changed_and_full_cannot_combine
 test_empty_changed_partition_is_a_successful_noop
 test_local_exclusion_list_covers_every_no_external_sources_code

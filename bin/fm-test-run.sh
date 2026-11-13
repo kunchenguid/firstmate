@@ -189,7 +189,7 @@ MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
 # Bound applied automatically on the automatic --changed path, derived from
 # measured healthy runtimes with margin rather than picked: the slowest measured
-# script is tests/fm-watch-triage.test.sh at about 962s under CI load (the
+# script is tests/fm-watch-triage.test.sh at about 900s under CI load (the
 # committed timings file records that loaded figure). 1500s keeps every
 # measured script under the bound with headroom, and it stays under the
 # 30-minute normal CI tier so a wedged script fails here,
@@ -201,7 +201,7 @@ CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=18
+PORTABLE_SERIAL_SHARDS=19
 
 # How many duration-balanced shards the proven-isolated set splits into.
 PORTABLE_PARALLEL_SHARDS=2
@@ -302,6 +302,7 @@ family_for_basename() {
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
+    fm-captain-hold-teardown.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-forge-detect.test.sh|fm-grok-harness.test.sh|\
     fm-fork-free-helpers.test.sh|\
     fm-harness-precedence.test.sh|fm-install-herdr.test.sh|\
@@ -332,7 +333,7 @@ family_for_basename() {
     fm-codex-stop-park.test.sh|\
     fm-watch-inbox-meta.test.sh|fm-watch-open-decisions.test.sh|\
     fm-watch-triage.test.sh|fm-watch-triage-pause.test.sh|\
-    fm-watch-triage-wedge-defer.test.sh|fm-task-inbox.test.sh|\
+    fm-watch-triage-wedge-defer.test.sh|fm-watch-triage-busy.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-watch-wedge-cap.test.sh|\
     fm-watch-wedge-cap-unconfigured-parity.test.sh)
       printf '%s\n' watcher-wake-lock

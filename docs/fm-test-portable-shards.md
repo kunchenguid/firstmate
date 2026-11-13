@@ -55,7 +55,7 @@ Membership is derived rather than enumerated, so a newly added test lands here b
 `portable-serial-<k>of<n>` splits the remainder across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
-`bin/fm-test-run.sh` owns `n` (currently 18) and refuses any lane whose `of<n>` disagrees with it.
+`bin/fm-test-run.sh` owns `n` (currently 19) and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over the committed duration hints.
@@ -89,6 +89,7 @@ The timing-aggregate job then runs `bin/fm-ci-budget-warn.sh`, which emits a Git
 Each partition attempts full source-aware ShellCheck analysis and runs workflow validation and backend-purity checks.
 Pull requests pass `--changed` so only the canonical-set files changed since the merge-base are analyzed, still with `--external-sources` and full dataflow.
 A change to lint definition files (`bin/fm-lint.sh`, `bin/fm-lint-workflows.sh`, the pinned installers, or `bin/fm-timeout-lib.sh`) upgrades that PR to the full canonical set.
+A change to a file that another canonical script sources, found from `# shellcheck source=` directives rather than a hand list, also upgrades to the full set so an unchanged consumer cannot hide a new ShellCheck finding from the PR and then fail the full gate on main.
 Main pushes keep the full canonical gate.
 CI caches the pinned ShellCheck and actionlint binaries and skips the download when the pin is already present.
 `FM_LINT_JOBS=1` stays in force because a second concurrent ShellCheck process does not fit the hosted runner's memory envelope.
@@ -98,9 +99,9 @@ Its `--list-files` interface exposes partition membership; `tests/fm-lint.test.s
 The workflow uploads each partition's quiet telemetry plus its per-root lifecycle sidecar to distinguish analysis cost, memory use, and host contention.
 
 The packing target is a complete green run under fifteen minutes including start delay.
-Two indivisible serial suites currently measure above that target on their own; they occupy singleton shards rather than raising the job timeout.
+One indivisible serial suite (`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`) currently measures above that target on its own; it occupies a singleton shard rather than raising the job timeout. It is one sequential fixture lifecycle, not independently invocable cases, so splitting it would re-run provision/seed/launch per file and change how the lifecycle is asserted.
 Job timeouts remain hang tripwires under the policy in [Timeouts](#timeouts) below; they are not the desired healthy duration.
-The layout uses eighteen serial jobs, two parallel jobs with `--jobs 2`, four lint partitions, Herdr, herdr-core, plus short checks and macOS.
+The layout uses nineteen serial jobs, two parallel jobs with `--jobs 2`, four lint partitions, Herdr, herdr-core, plus short checks and macOS.
 The workflow retains per-PR supersession and keeps only the newest of close main pushes' runs, without changing the compliance workflow's event semantics.
 
 ## Local entry points
