@@ -74,7 +74,12 @@
 #              a tmux `missing` cannot be proven absent from a task record, so
 #              it refuses.
 #              An explicit `default` model or effort clears that
-#              axis for the replacement. With no explicit axis, a secondmate
+#              axis for the replacement. --model without --harness refuses
+#              before anything stops, naming the harness the task record
+#              names and the exact command that keeps it: a model alone never
+#              says which runtime it belongs to, and for a secondmate the
+#              implicit harness is its configured pin, which may resolve to
+#              this home's own runtime. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
@@ -107,7 +112,10 @@
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
-#              running.
+#              running. When a secondmate's replacement does not come up, the
+#              failure also prints the bin/fm-spawn.sh <id> --secondmate
+#              command, with the target harness and model, that the operator
+#              runs next; it is never run automatically.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -251,6 +259,7 @@ RAW_ID=${1:-}
 VERB=${2:-}
 [ -n "$RAW_ID" ] && [ -n "$VERB" ] || { usage >&2; exit 2; }
 shift 2
+CONTROL_ARGS=("$@")
 
 if ! fm_control_verb_allowed "$VERB"; then
   {
@@ -975,9 +984,35 @@ relaunch_rollback() {
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       fi
+      if [ "$RELAUNCH_AGENT_CONFIRMED" != 1 ] && [ "$KIND" = secondmate ]; then
+        echo "recovery: once no agent is running at $ID's endpoint, bring the secondmate back on its intended runtime with: $(relaunch_recovery_command)" >&2
+      fi
       ;;
   esac
   return 0
+}
+
+# The spawn command an operator runs to bring a secondmate back after its
+# replacement failed to launch. Printed only; never run from here.
+relaunch_recovery_command() {
+  local cmd
+  cmd="bin/fm-spawn.sh $(printf '%q' "$ID") --secondmate --harness $(printf '%q' "$TARGET_HARNESS")"
+  [ "$TARGET_MODEL" = default ] || [ -z "$TARGET_MODEL" ] \
+    || cmd="$cmd --model $(printf '%q' "$TARGET_MODEL")"
+  [ "$TARGET_EFFORT" = default ] || [ -z "$TARGET_EFFORT" ] \
+    || cmd="$cmd --effort $(printf '%q' "$TARGET_EFFORT")"
+  printf '%s' "$cmd"
+}
+
+# The relaunch command that keeps the recorded harness: the caller's own
+# arguments, verbatim, behind an explicit --harness.
+relaunch_keep_harness_command() {
+  local cmd arg
+  cmd="bin/fm-control.sh $(printf '%q' "$ID") relaunch --harness $(printf '%q' "$HARNESS")"
+  for arg in ${CONTROL_ARGS[@]+"${CONTROL_ARGS[@]}"}; do
+    cmd="$cmd $(printf '%q' "$arg")"
+  done
+  printf '%s' "$cmd"
 }
 
 resolve_relaunch_profile() {
@@ -1220,6 +1255,12 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
+  # A model names no runtime, and an implicit harness is not necessarily the
+  # one running: a secondmate re-resolves its configured pin, which can fall
+  # back to this home's own runtime. Refuse before anything is touched.
+  if [ "$MODEL_SET" = 1 ] && [ "$HARNESS_SET" = 0 ]; then
+    die "relaunch of $ID was given --model without --harness, so the replacement runtime would be implied rather than chosen; nothing was stopped. Task $ID records harness '$RECORDED_HARNESS' in state/$ID.meta. To keep it, run: $(relaunch_keep_harness_command)"
+  fi
   require_state_verified_backend relaunch
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"
