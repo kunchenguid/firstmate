@@ -2105,7 +2105,8 @@ runs[1]{id,branch,status,head,pr}:
           assert_contains "$out" "unrecognized run status" "an undefined status stays unrecognized" ;;
         interrupted-no-ci-log|coarse-interrupted)
           assert_contains "$out" "state: unknown" "$scenario: no green evidence, no verdict: $out"
-          assert_contains "$out" "ci_monitor_interrupted" "$scenario: detail names the status"
+          assert_contains "$out" "ci_monitor_interrupted: PR open, no green-checks evidence" "$scenario: detail names the status and the open PR"
+          assert_not_contains "$out" "runs list status" "$scenario: not the generic ledger fallback"
           assert_not_contains "$out" "unrecognized" "$scenario: a defined status is recognized" ;;
         *)
           assert_contains "$out" "state: done" "$scenario: finished green: $out"
@@ -4099,6 +4100,30 @@ runs[1]{id,branch,status,head,pr}:
   pass "a precedence verdict reads as one sentence with the run id last"
 }
 
+# checks_passed is a successful terminal run (no-mistakes RunStatus), so a
+# newer checks_passed ledger row answers an older selected failure the same way
+# a newer completed row does, instead of leaving it unbindable.
+test_newer_checks_passed_row_supersedes_selected_failure() {
+  reset_fakes
+  local d short out; d=$(new_case precedence-checks-passed)
+  make_repo_on_branch "$d/wt" fm/feat-s2p
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2p.meta" "window=fm:fm-feat-s2p" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01RUN,fm/feat-s2p,failed,${FM_FAKE_RUN_HEAD},\"\""
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2p)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  checks_passed  fm/feat-s2p ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/5"
+  out=$(run_crew_state "$d" feat-s2p)
+  assert_contains "$out" "state: done" "a newer checks_passed row supersedes the earlier failure"
+  assert_contains "$out" "run superseded by a newer checks_passed run" "the detail names the newer successful run"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/5" "the newer run's pull request is published"
+  assert_not_contains "$out" "cannot be bound" "a successful newer row is not unbindable"
+  pass "a newer checks_passed ledger row supersedes a selected failure"
+}
+
 # A verdict taken from the ledger row must not be labelled with the attributed
 # run's identity. This arm fires only when the newest row is NOT provably the
 # attributed run - here it carries a different pull request at the same head -
@@ -4139,6 +4164,7 @@ EOF
   assert_not_contains "$out" "state: failed" "the earlier failure must not override cancellation"
   assert_not_contains "$out" "pr=" "cancellation publishes neither run's terminal pull request"
   pass "a newer cancelled ledger row leaves an earlier failure unprovable"
+
 }
 
 # A record cannot supersede itself. On the coarse path the emitted reading is
@@ -6954,6 +6980,7 @@ test_unbindable_later_terminal_run_reports_unknown
 test_same_head_terminal_rerun_publishes_newest_pr
 test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row
 test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last
+test_newer_checks_passed_row_supersedes_selected_failure
 test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
 test_coarse_terminal_reading_claims_no_supersession
 test_foreign_status_never_hides_coarse_terminal_pr

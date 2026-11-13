@@ -113,7 +113,7 @@
 #      verdict unless the green delivery safeguard below applies). The run
 #      status words checks_passed, handed_off, and ci_monitor_interrupted read
 #      as their outcome words, and the coarse ledger reads checks_passed and
-#      handed_off as done. A cancelled outcome takes precedence over an
+#      handed_off as done and ci_monitor_interrupted as unknown (PR open). A cancelled outcome takes precedence over an
 #      interrupted step's failed status or outstanding gate findings;
 #      it does not rewrite historical events or backlog records.
 #      passed-with-override is a passing outcome
@@ -153,8 +153,8 @@
 #      cannot be bound here is reported as unknown - history, but no proof of
 #      the present. A FAILED reading is additionally answered from a newer
 #      record where one states a terminal outcome for this worktree: a later
-#      COMPLETED run the ledger proves is current, or the ledger's own FAILED
-#      verdict; a later CANCELLED row carries no verdict, so it leaves the
+#      COMPLETED, CHECKS_PASSED, or HANDED_OFF run the ledger proves is
+#      current, or the ledger's own FAILED verdict; a later CANCELLED row carries no verdict, so it leaves the
 #      failure unprovable (unknown) like any other unbindable row. A DONE
 #      reading claims no such verdict, because unknown is already the whole
 #      answer a contradicted success may publish.
@@ -1321,6 +1321,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
       cancelled) RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict" ;;
+      ci_monitor_interrupted) RUN_STATE=unknown; RUN_DETAIL="run ci_monitor_interrupted: PR open, no green-checks evidence" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -1533,8 +1534,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     && [ "$RUN_SOURCE" != coarse ]; then
     if [ "$RUN_STATE" = "failed" ]; then
       case "$LEDGER_STATUS" in
-        completed)
-          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+        completed|checks_passed|handed_off)
+          SUPERSEDED_DETAIL="run superseded by a newer $LEDGER_STATUS run on this branch (earlier $READING_DETAIL)"
           [ -z "$SELECTED_RUN_ID" ] \
             || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
           TERMINAL_PR=$NEWEST_PR
