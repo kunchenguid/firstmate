@@ -1662,8 +1662,25 @@ SH
 }
 
 test_pi_native_real_processes() {
-  local dir out
-  dir="$TMP_ROOT/pi-native-processes"
+  local dir out fakebin ps_status=${1:-0}
+  if [ "$ps_status" != 0 ]; then
+    case "$(uname -s)" in
+      Linux) ;;
+      Darwin)
+        command -v python3 >/dev/null 2>&1 \
+          || { pass "real Pi/native tree with ps exit $ps_status: python3 absent, skipped"; return; } ;;
+      *) pass "real Pi/native tree with ps exit $ps_status: no platform provider, skipped"; return ;;
+    esac
+  fi
+  dir="$TMP_ROOT/pi-native-processes-$ps_status"
+  fakebin=$(fm_fakebin "$dir")
+  if [ "$ps_status" != 0 ]; then
+    cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit "$FM_TEST_PS_RC"
+SH
+    chmod +x "$fakebin/ps"
+  fi
   mkdir -p "$dir/state" "$dir/bin" "$dir/lib/node_modules/@openai/codex/bin"
   ln -s /bin/bash "$dir/pi"
   ln -s /bin/bash "$dir/codex"
@@ -1702,8 +1719,8 @@ fi
 [ "$(cat state/.lock)" = "$$" ] || exit 1
 [ "$(sort -u state/children | wc -l | tr -d ' ')" = "$expected" ] || exit 1
 SH
-  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_NATIVE_ROOT="$ROOT" "$dir/pi" "$dir/pi-session" 2>&1) || fail "real Pi/native tree: $out"
-  pass "real Pi/native tree: lock acquisition and shell checks survive child replacement, direct and npm-launched"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_PS_RC="$ps_status" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_NATIVE_ROOT="$ROOT" "$dir/pi" "$dir/pi-session" 2>&1) || fail "real Pi/native tree with ps exit $ps_status: $out"
+  pass "real Pi/native tree with ps exit $ps_status: lock acquisition and shell checks survive child replacement, direct and npm-launched"
 }
 
 # A re-anchor moves leases recorded against the old live line 1 onto the new
@@ -1814,6 +1831,8 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 }
 
 test_pi_native_real_processes
+test_pi_native_real_processes 126
+test_pi_native_real_processes 127
 test_pi_native_owner
 test_claude_inside_native_codex_keeps_its_own_session
 test_version_named_session_is_identified_on_both_platforms

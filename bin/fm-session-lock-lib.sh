@@ -175,26 +175,21 @@ fm_pi_native_npm_launcher() {  # <args>
   fm_pi_native_transport_args "$1" 2
 }
 
-fm_pi_native_parent_pid() {  # <pid>
-  local parent
-  parent=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ') || return 1
-  case "$parent" in ''|1|*[!0-9]*) return 1 ;; esac
-  printf '%s\n' "$parent"
-}
-
 fm_pi_native_owner_pid() {  # <pid> <comm> <args>
-  local pid=$1 comm=$2 args=$3 parent parent_comm parent_args
+  local pid=$1 comm=$2 args=$3 parent
   [ "$(basename -- "$comm")" = codex ] || return 1
   fm_pi_native_transport_args "$args" 1 || return 1
-  parent=$(fm_pi_native_parent_pid "$pid") || return 1
-  parent_comm=$(ps -o comm= -p "$parent" 2>/dev/null) || return 1
-  if [ "$(basename -- "$parent_comm")" = node ]; then
-    parent_args=$(ps -o args= -p "$parent" 2>/dev/null)
-    fm_pi_native_npm_launcher "$parent_args" || return 1
-    parent=$(fm_pi_native_parent_pid "$parent") || return 1
-    parent_comm=$(ps -o comm= -p "$parent" 2>/dev/null) || return 1
+  fm_proc_info "$pid" || return 1
+  parent=$FM_PROC_PPID
+  case "$parent" in ''|1|*[!0-9]*) return 1 ;; esac
+  fm_proc_info "$parent" || return 1
+  if [ "$(basename -- "$FM_PROC_COMM")" = node ]; then
+    fm_pi_native_npm_launcher "$FM_PROC_ARGS" || return 1
+    parent=$FM_PROC_PPID
+    case "$parent" in ''|1|*[!0-9]*) return 1 ;; esac
+    fm_proc_info "$parent" || return 1
   fi
-  case "$(basename -- "$parent_comm")" in
+  case "$(basename -- "$FM_PROC_COMM")" in
     pi|pi-signed) printf '%s\n' "$parent" ;;
     *) return 1 ;;
   esac
