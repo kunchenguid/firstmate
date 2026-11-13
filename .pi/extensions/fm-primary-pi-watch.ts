@@ -670,6 +670,11 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
   }
 }
 
+function displaceActiveGeneration(successor: SessionGeneration): void {
+  const displaced = replacementCoordinator.active;
+  if (displaced && displaced !== successor && !displaced.stopping) void stopSessionGeneration(displaced, true);
+}
+
 const cleanupOnProcessExit = () => {
   for (const generation of retiringGenerations) stopGeneration(generation);
   if (replacementCoordinator.active) stopGeneration(replacementCoordinator.active);
@@ -1377,6 +1382,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (generation.stopping) generation = createGeneration();
+    displaceActiveGeneration(generation);
     activateGeneration(generation);
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
@@ -1385,6 +1391,7 @@ export default function (pi: ExtensionAPI) {
     if (event.source !== "interactive" || generationIsLive(generation)) return;
     if (generation.stopping) generation = createGeneration();
     replacementCoordinator.expectedSessionFile = sessionFileOf(ctx) || null;
+    displaceActiveGeneration(generation);
     activateGeneration(generation);
     if (lockOwnership() === "owned") activateOwnedWatch(generation);
   });

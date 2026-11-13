@@ -3980,6 +3980,147 @@ EOF
   pass "Pi last applied replacement takes supervision on its first interactive input"
 }
 
+test_pi_displaced_owner_hands_off_inflight_actionable() {
+  local repo home plugin log marker_root trigger stop out status
+  repo="$TMP_ROOT/pi-displaced-handoff-root"
+  home="$TMP_ROOT/pi-displaced-handoff-home"
+  log="$TMP_ROOT/pi-displaced-handoff.log"
+  marker_root="$TMP_ROOT/pi-displaced-handoff-markers"
+  trigger="$TMP_ROOT/pi-displaced-handoff.trigger"
+  stop="$TMP_ROOT/pi-displaced-handoff.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+previous=$(sed -n '1p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+previous_marker=$(sed -n '2p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+printf '%s\n%s\n' "$$" "$marker" > "$FM_ARM_LOG.pid"
+if [ -n "$previous" ] && [ -f "$previous_marker" ]; then
+  kill -TERM "$previous" 2>/dev/null || true
+fi
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=displaced-fixture\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    outcome=$(cat "$FM_TRIGGER_FILE")
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: %s\n' "$outcome"
+    # The actionable line is out, but the child has not closed yet.
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    exit 0
+  fi
+  [ ! -e "$FM_STOP_FILE" ] || exit 0
+  sleep 0.02
+done
+ARM
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_MARKER_ROOT="$marker_root" FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi(sessionFile) {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {} },
+  };
+  const ctx = { sessionManager: { getSessionFile: () => sessionFile } };
+  return { pi, handlers, getTool: () => tool, prompts, ctx };
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function armRows() {
+  if (!existsSync(process.env.FM_ARM_LOG)) return [];
+  return readFileSync(process.env.FM_ARM_LOG, "utf8")
+    .trim()
+    .split(/\n/)
+    .map((row) => /^arm pid=(\d+) marker=(\S+)/.exec(row))
+    .filter(Boolean);
+}
+
+function liveArms() {
+  return armRows().filter((match) => existsSync(match[2]) && pidAlive(match[1])).map((match) => match[1]);
+}
+
+async function waitFor(pred, label, attempts = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/displaced-race.meta`, "project=/projects/displaced-race\nwindow=fm-displaced-race\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+
+const original = makePi("/tmp/s0.jsonl");
+mod.default(original.pi);
+await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, original.ctx);
+await waitFor(() => liveArms().length === 1, "original session arm");
+
+// Chained /new where the hidden session owns supervision when its arm reports an actionable outcome.
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s1.jsonl" }, original.ctx);
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s2.jsonl" }, original.ctx);
+const first = makePi("/tmp/s1.jsonl");
+const second = makePi("/tmp/s2.jsonl");
+mod.default(first.pi);
+mod.default(second.pi);
+await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, second.ctx);
+await waitFor(() => armRows().length === 2 && liveArms().length === 1, "hidden session arm");
+const displacedArm = liveArms()[0];
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
+
+writeFileSync(process.env.FM_TRIGGER_FILE, "displaced-race actionable outcome\n");
+await waitFor(() => !existsSync(process.env.FM_TRIGGER_FILE), "hidden arm reporting the outcome");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (!liveArms().includes(displacedArm)) throw new Error("hidden arm closed before the visible session took over");
+
+await first.handlers.get("input")?.({ type: "input", text: "hello", source: "interactive" }, first.ctx);
+await waitFor(() => first.prompts.some((message) => message.includes("displaced-race actionable outcome")), "in-flight wake reaching the visible session");
+await waitFor(() => !liveArms().includes(displacedArm), "displaced arm retired");
+await new Promise((resolve) => setTimeout(resolve, 300));
+const delivered = first.prompts.filter((message) => message.includes("displaced-race actionable outcome"));
+if (delivered.length !== 1) throw new Error(`visible session got ${delivered.length} copies of the in-flight wake: ${first.prompts.join(" | ")}`);
+if (second.prompts.length !== 0) throw new Error(`wake reached the hidden session: ${second.prompts.join(" | ")}`);
+if (liveArms().length !== 1) throw new Error(`expected one live arm, got ${liveArms().join(",")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi displaced owner must hand its in-flight actionable to the visible session: $out"
+  [ -z "$out" ] || fail "Pi displaced-owner handoff test printed output: $out"
+  pass "Pi displaced owner hands its in-flight actionable to the visible session"
+}
+
 test_pi_reloaded_module_copy_keeps_single_owner() {
   local repo home plugin log marker_root stop out status
   repo="$TMP_ROOT/pi-module-copy-root"
@@ -6759,6 +6900,7 @@ test_pi_extension_keeps_marker_of_live_ancestor_session
 test_pi_session_transition_generation_owner
 test_pi_superseded_replacement_never_owns_watch
 test_pi_late_applied_replacement_owns_watch
+test_pi_displaced_owner_hands_off_inflight_actionable
 test_pi_reloaded_module_copy_keeps_single_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
