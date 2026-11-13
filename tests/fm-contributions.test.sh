@@ -2048,7 +2048,6 @@ review_home() { # name state body: delivery with one pending maintainer review
   forge_home "$home"
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register the owned delivery'
-  mkdir -p "$home/state/delivery.inbox/handled"
   registered_checks "$home" >/dev/null
   jq -n --arg head "$HEAD_A" --arg state "$2" --arg body "$3" '[{id:12,user:{login:"maintainer"},author_association:"OWNER",
     body:$body,html_url:"https://github.com/o/r/pull/8#pullrequestreview-12",
@@ -2166,7 +2165,13 @@ test_torn_down_task_disposes_of_a_review_by_citing_it_and_then_retires() {
   local home token url=https://github.com/o/r/pull/8
   home=$(review_home review-torn-down CHANGES_REQUESTED 'The retry loop drops errors')
   token=$(review_token "$home") || fail 'the review was never captured'
-  rm -rf "$home/state/delivery.inbox"
+  [ ! -e "$home/state/delivery.inbox" ] || fail 'the fixture gave the never-steered task a steering inbox'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery "$url" "$token" disposition \
+    "$url#pullrequestreview-12" 'approved, non-blocking' 2>/dev/null; then
+    fail 'a live task with no steering inbox disposed of a review by citing it'
+  fi
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused self-citing disposition removed the review'
+  rm -f "$home/state/delivery.meta"
   if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery "$url" "$token" disposition \
     "$url#pullrequestreview-12" '  ' 2>/dev/null; then
     fail 'a torn-down task disposed of a review with a blank summary'
