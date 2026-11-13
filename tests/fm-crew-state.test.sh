@@ -3332,6 +3332,40 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+test_secondmate_lost_endpoint_ignores_terminal_status() {
+  local endpoint verb d out
+  for endpoint in missing dead; do
+    for verb in 'done' failed; do
+      reset_fakes
+      d=$(new_case "secondmate-$endpoint-$verb")
+      make_repo_on_branch "$d/wt" fm/secondmate
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/mate.meta" "window=default:w1:p1" \
+        "worktree=$d/wt" "kind=secondmate" "backend=herdr" "harness=claude"
+      printf '%s: routed task finished\n' "$verb" > "$d/state/mate.status"
+      case "$endpoint" in
+        missing) FM_FAKE_HERDR_MISSING=1 ;;
+        dead)
+          FM_FAKE_HERDR_READ_FAIL=1
+          FM_FAKE_HERDR_HUSK=1
+          ;;
+      esac
+      out=$(run_crew_state "$d" mate)
+      assert_contains "$out" "state: unknown" \
+        "$endpoint secondmate with $verb must report lost liveness: $out"
+      assert_contains "$out" "source: none" \
+        "$endpoint secondmate must not reuse a terminal task event"
+      assert_contains "$out" "backend target gone" \
+        "$endpoint secondmate with $verb must report its lost endpoint"
+      if [ "$endpoint" = dead ]; then
+        assert_contains "$out" "agent gone, pane shell remains" \
+          "a dead secondmate must report the agent loss even when its pane exists"
+      fi
+    done
+  done
+  pass "secondmate endpoint loss outranks done and failed task events"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -6034,6 +6068,7 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_secondmate_lost_endpoint_ignores_terminal_status
 test_dead_window_ignores_stale_status_log
 test_gone_window_in_live_session_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
