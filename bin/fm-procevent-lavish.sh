@@ -101,9 +101,9 @@
 # An unreadable or missing session stops before the staged reply is consumed.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
-# bin/fm-procevent.sh. It reports what the captain actually chose, as
-# `<task-id>\t<answer>\t<label>[\t<mode>[\t<defer-until>]]` lines, and stops there. It maps nothing to a
-# task, records no decision, and closes nothing: a captain answer is not special
+# bin/fm-procevent.sh. It reports what the captain actually chose using the
+# keyed-line format owned by bin/fm-captain-hold.sh's header. It maps nothing to
+# a task, records no decision, and closes nothing: a captain answer is not special
 # to Lavish, so every rule about what a keyed answer DOES belongs to the one
 # intake in bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is
 # just an ephemeral discussion format that happens to carry answers.
@@ -758,10 +758,8 @@ cmd_silent() {
   [ "$content_rc" -eq 1 ]
 }
 
-# Print `key<TAB>answer<TAB>label[<TAB>mode[<TAB>defer-until]]` for each
-# non-reconcile structured choice. The optional columns relay the card close
-# mode and selected option deferral date to the keyed-answer intake, which owns
-# date validation and hold mutation.
+# Relay structured choices using the keyed-answer contract named in the header;
+# the intake owns date validation and hold mutation.
 # Items come from the shared result parser above, in either emission form, and
 # only items whose `tag` field is `choice` are read.
 # The header owns the partial-output and failure contract.
@@ -771,6 +769,8 @@ cmd_silent() {
 # is skipped. A time-limited rollout branch accepts the old question/answer
 # shape only for ordinary answers and rejects its bare or annotated reconcile
 # values because old rows do not separate the selected option from its note.
+# Deferrals require a versioned non-reconcile selection, so legacy captures
+# and note-only choices cannot acquire scheduling authority.
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.

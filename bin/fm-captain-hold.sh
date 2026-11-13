@@ -86,23 +86,28 @@
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
-# `<task-id>\t<answer>\t<label>[\t<mode>[\t<defer-until>]]` lines on stdin and resolves each named
-# task through `answer` or a locked deferral update, so the same
-# guards apply no matter which channel the answer arrived on. The key IS the
+# `<task-id>\t<answer>\t<label>[\t<mode>[\t<defer-until>]]` lines on stdin.
+# It applies `answer` or a locked deferral update, with the same guards for
+# each operation no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A non-empty fifth field is a future UTC
 # YYYY-MM-DD deferral date: it overrides the close mode and re-holds the original
-# captain-held task through `tasks-axi hold --until`, preserving its reason and
-# origin and recording the selected deferral in its body. Eligibility is checked
-# under the task control lock used to apply the date.
+# captain-held task through `tasks-axi hold --until`, preserving its question,
+# options, origin, and hold-set timestamp, and recording the selected deferral
+# and answer provenance in its body. Eligibility is rechecked under the task
+# control lock used to apply the date.
 # Invalid dates are skipped, never downgraded to closing answers.
+# A successful deferral reports `deferred: <task-id> until <date>`; an exact
+# retry of the latest deferral keeps one body note while the task remains
+# captain-held and the date is still future.
 # A `release` line without a deferral date while the away-posture
 # record exists is reported as `refused:` under the same attended-only rule as
 # `answer --release` and feeds nothing. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing. A replayed delivery whose answer digest and requested
-# close mode both match the newest record is reported `closed:` and is a no-op;
+# and feeds nothing. Without a deferral date, a replayed delivery whose answer
+# digest and requested close mode both match the newest record is reported
+# `closed:` and is a no-op;
 # a mode mismatch is skipped. The command exits nonzero when any key was
 # skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
@@ -220,8 +225,10 @@
 # links, hold-set timestamp and resolution count), occurrence.
 # `close` asserts the task contains only the decision; `release` preserves
 # unfinished work. `terminal` accepts either merge or unmerged closure.
-# No policy is inferred from links or prose. Re-holding invalidates the policy,
-# and editing the reason or title makes it stale; linking another PR does not.
+# No policy is inferred from links or prose. Re-holding, including a keyed
+# deferral, invalidates the policy under the same task control lock used for
+# the hold update. Editing the reason or title makes it stale; linking another
+# PR does not.
 # A policy that can no longer settle is removed: silently once the task is done
 # or no longer a captain hold, and with a non-zero exit naming the cause when
 # the question changed or the PR ended in the other terminal state.

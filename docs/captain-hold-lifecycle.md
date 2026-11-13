@@ -89,7 +89,8 @@ The `answer` subcommand records the captain's exact words and resolves the call 
 | `answer --release` | Frees a captain-gated work item to proceed without completing it. |
 
 It requires a non-empty captain decision file of at most 8192 bytes.
-`answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, and the keyed-answer intake refuses a `release` line the same way, because only the captain in an attended session releases a captain hold.
+`answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, because only the captain in an attended session releases a captain hold.
+The [keyed-answer contract](../bin/fm-captain-hold.sh) owns how that restriction applies to captured choices.
 A quiet record is a present captain and does not refuse.
 It then works in this order:
 
@@ -211,26 +212,8 @@ The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy)
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point.
-Its keyed-line format and locked deferral update are owned by `bin/fm-captain-hold.sh`'s header; ordinary choices use `answer`.
-Every guard therefore applies identically no matter which channel the answer arrived on.
-
-The optional mode column carries a card-declared close:
-
-| Mode | Effect |
-| --- | --- |
-| `done` (default) | Completes the task. |
-| `release` | Lifts the hold so held work resumes. |
-| Any other value | Skipped. |
-
-Each key is reported as follows:
-
-| Key | Result |
-| --- | --- |
-| Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
-| A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
-| A replay with a mode mismatch | Skipped. |
-
-The command exits nonzero when any key was skipped.
+Ordinary choices use `answer`; a dated board choice instead reaches a locked deferral update.
+[`bin/fm-captain-hold.sh`'s header](../bin/fm-captain-hold.sh) owns the keyed-line format, close modes, deferral validation and preservation rules, result labels, and retry behavior.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch.
 
 ### Source bindings
@@ -258,7 +241,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 
 `bin/fm-procevent-lavish.sh answers` is one such built-in adapter command.
 It reads only rows tagged `choice` and relays the selected option's structured deferral date or the card's declared close mode.
-It can never let freeform captain prose forge a task id or a mode.
+It can never let freeform captain prose forge a task id, a mode, or a deferral date.
 
 Trusted external process-event adapters intentionally expose no answer operation and cannot feed this authority-bearing intake; [`extension-bindings.md`](extension-bindings.md#trust-boundary) owns that boundary.
 
@@ -576,6 +559,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+- `test_board_later_answer_keeps_the_original_hold`, `test_board_deferral_rechecks_hold_after_concurrent_release`, and `test_board_deferral_invalidates_pr_policy` cover dated board answers through captured input, concurrent release, PR settlement, and the due-date snapshot.
 
 ### Legacy paths
 
