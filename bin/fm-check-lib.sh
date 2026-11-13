@@ -14,25 +14,10 @@ fm_custom_check_sha256() {
   fi
 }
 
-# Trust records live in the home's operator-owned config/trust/, beside state/,
-# so a writer confined to state/ cannot authorize its own check. Only
-# fm-check-register.sh and fm-procevent-when.sh write there. The state path is
-# resolved physically first, so spellings such as state/. or a symlink to state
-# still name the real parent, and a trust directory that resolves inside state
-# is refused. A state path that does not exist yet has nothing to protect.
-fm_trust_dir() {  # <state-dir>
-  local state=$1 real config
-  real=$(cd -P -- "$state" 2>/dev/null && pwd -P) || {
-    printf '%s/config/trust\n' "$(dirname -- "$state")"
-    return 0
-  }
-  config="$(dirname -- "$real")/config"
-  if [ -e "$config" ]; then
-    config=$(cd -P -- "$config" 2>/dev/null && pwd -P) || return 1
-  fi
-  case "$config/trust/" in "$real"/*) return 1 ;; esac
-  printf '%s/trust\n' "$config"
-}
+# fm_trust_dir is owned by the hook-copied supervision lib, so the supervision
+# predicate and the check sweep resolve the trust root the same way.
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-supervision-lib.sh"
 
 fm_custom_check_trust_path() {  # <state-dir> <id>
   local dir

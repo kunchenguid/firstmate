@@ -21,6 +21,26 @@ fm_sup_stat_mtime() {
   fi
 }
 
+# Trust records live in the home's operator-owned config/trust/, beside state/,
+# so a writer confined to state/ cannot authorize its own check. Only
+# fm-check-register.sh and fm-procevent-when.sh write there. The state path is
+# resolved physically first, so spellings such as state/. or a symlink to state
+# still name the real parent, and a trust directory that resolves inside state
+# is refused. A state path that does not exist yet has nothing to protect.
+fm_trust_dir() {  # <state-dir>
+  local state=$1 real config
+  real=$(cd -P -- "$state" 2>/dev/null && pwd -P) || {
+    printf '%s/config/trust\n' "$(dirname -- "$state")"
+    return 0
+  }
+  config="$(dirname -- "$real")/config"
+  if [ -e "$config" ]; then
+    config=$(cd -P -- "$config" 2>/dev/null && pwd -P) || return 1
+  fi
+  case "$config/trust/" in "$real"/*) return 1 ;; esac
+  printf '%s/trust\n' "$config"
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
@@ -45,7 +65,7 @@ fm_sup_stat_mtime() {
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id trust_dir beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -62,6 +82,7 @@ fm_supervision_status() {
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
   FM_SUP_CHECKS=0
+  trust_dir=$(fm_trust_dir "$state") || trust_dir=
   for check in "$state"/*.check.sh; do
     [ -e "$check" ] || continue
     id=${check##*/}
@@ -69,9 +90,7 @@ fm_supervision_status() {
     if [ "$id" = x-watch ]; then
       continue
     fi
-    # Path owner: fm_custom_check_trust_path in bin/fm-check-lib.sh, kept
-    # inline so hook entry points that copy this lib need no extra file.
-    [ -e "$(dirname -- "$state")/config/trust/$id.check-trust" ] || continue
+    [ -n "$trust_dir" ] && [ -e "$trust_dir/$id.check-trust" ] || continue
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
