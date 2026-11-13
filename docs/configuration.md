@@ -1143,6 +1143,15 @@ Pass them in the watcher's environment, or export them in `config/watch.env` for
 The flag is home-local and is not inherited by secondmate homes.
 `bin/fm-watch.sh`'s `open_decision_reminder_tick` owns the per-key schedule, which persists across watcher restarts.
 
+## Claimed-run verification (config/verify-claimed-run)
+
+The optional local, gitignored `config/verify-claimed-run` presence flag opts this home into checking that a ship worker's claimed validation run exists.
+With it present, no-mistakes ship briefs tell the worker to append `working [at=<epoch>]: validation started` before starting validation, and the watcher reads each new status line for that claim.
+180 seconds after a claim, the watcher looks up no-mistakes runs for the task's branch and queues one `check: validation claim has no run for <branch> (worker reported validation started)` wake when none exists; a run on the branch clears the claim silently, and a failed lookup keeps it pending.
+With the file absent, generated briefs omit the validation-started line, and the watcher reads no status log for claims, looks up no runs, and raises no such wake.
+The flag is home-local and is not inherited by secondmate homes.
+`bin/fm-watch.sh`'s `claimed_run_tick` owns the per-log cursor and claim records.
+
 ## Validating-run deferral (config/wedge-defer-validating)
 
 The optional local, gitignored `config/wedge-defer-validating` presence flag opts this home into a default-off deferral in the watcher's wedge timer.
