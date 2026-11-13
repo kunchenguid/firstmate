@@ -1572,7 +1572,7 @@ defer_keyed_answer() (
   trap captain_hold_cleanup EXIT
   acquire_task_control_lock "$id" || fail "cannot acquire task control for $id"
   task_show_or_fail "$id" "captain-held task $id is absent"
-  [ "$(show_field "$show" state)" != done ] || fail "task $id is already closed"
+  [ "$(show_field "$show" state)" != "done" ] || fail "task $id is already closed"
   [ "$(show_field_value "$show" hold_kind)" = captain ] \
     || fail "task $id is not held for the captain"
   reason=$(show_field_value "$show" hold_reason) || fail "could not read the hold reason for $id"
