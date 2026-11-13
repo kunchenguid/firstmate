@@ -187,7 +187,6 @@ const repairOnlyHint = "call fm_watch_arm_pi again only after a later notificati
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
 let nextHandoffId = 0;
-let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
 type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
 type ActionableDeliveryClaim = {
@@ -200,6 +199,10 @@ type ReplacementCoordinator = {
   nextTokenId: number;
   nextGenerationId: number;
   deliveries: Map<string, ActionableDeliveryClaim>;
+  // One active owner per process, shared by every module copy that Pi imports (for example after /reload).
+  active: SessionGeneration | null;
+  // Session file the latest replacement is moving to; an older session starting after it never owns supervision.
+  expectedSessionFile: string | null;
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
   __firstmatePiWatchReplacements?: Map<string, ReplacementCoordinator>;
@@ -215,6 +218,8 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
     nextTokenId: 0,
     nextGenerationId: 0,
     deliveries: new Map(),
+    active: null,
+    expectedSessionFile: null,
   };
   replacementCoordinators.set(handoff, created);
   return created;
@@ -586,12 +591,17 @@ function createGeneration(): SessionGeneration {
   };
 }
 
+function sessionFileOf(ctx: unknown): string {
+  const manager = (ctx as { sessionManager?: { getSessionFile?: () => string | undefined } } | undefined)?.sessionManager;
+  return manager?.getSessionFile?.() ?? "";
+}
+
 function activateGeneration(generation: SessionGeneration): void {
-  activeGeneration = generation;
+  replacementCoordinator.active = generation;
 }
 
 function generationIsLive(generation: SessionGeneration): boolean {
-  return activeGeneration === generation && !generation.stopping;
+  return replacementCoordinator.active === generation && !generation.stopping;
 }
 
 function relinquishGeneration(generation: SessionGeneration): void {
@@ -660,7 +670,7 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
 
 const cleanupOnProcessExit = () => {
   for (const generation of retiringGenerations) stopGeneration(generation);
-  if (activeGeneration) stopGeneration(activeGeneration);
+  if (replacementCoordinator.active) stopGeneration(replacementCoordinator.active);
 };
 process.once("exit", cleanupOnProcessExit);
 
@@ -1355,14 +1365,25 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(event.message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    const expected = replacementCoordinator.expectedSessionFile;
+    const sessionFile = sessionFileOf(ctx);
+    if (expected && sessionFile && sessionFile !== expected) {
+      // A newer replacement already superseded this session, so it never takes ownership.
+      generation.stopping = true;
+      return;
+    }
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
-  pi.on?.("session_shutdown", async (event) => {
+  pi.on?.("session_shutdown", async (event, ctx) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
+    if (replacement) {
+      replacementCoordinator.expectedSessionFile =
+        (event as { targetSessionFile?: string }).targetSessionFile || sessionFileOf(ctx) || null;
+    }
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   });
