@@ -723,7 +723,70 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+test_ci_keeps_the_timecap_safeguards() {
+  ruby -ryaml - "$CI_WORKFLOW" <<'RUBY' || fail "CI timecap safeguards"
+doc = YAML.load_file(ARGV[0])
+jobs = doc.fetch("jobs")
+lint = jobs.fetch("lint")
+raise "lint timeout-minutes must stay 30" unless lint.fetch("timeout-minutes") == 30
+raise "lint matrix must be four partitions" unless lint.fetch("strategy").fetch("matrix").fetch("partition") == [1, 2, 3, 4]
+steps = lint.fetch("steps")
+raise "lint must cache pinned tools" unless steps.any? { |s| s["uses"].to_s.start_with?("actions/cache@") }
+cache = steps.find { |s| s["uses"].to_s.start_with?("actions/cache@") } or raise "lint cache step missing"
+key = cache.dig("with", "key").to_s
+installer_hash = "hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh')"
+raise "lint tool cache key must hash the installer scripts" unless key.include?(installer_hash)
+raise "lint tool cache key must include runner.os and runner.arch" unless key.include?("runner.os") && key.include?("runner.arch")
+raise "lint tool cache key must not hardcode checksums" if key.match?(/[0-9a-f]{64}/)
+raise "lint checkout must fetch full history for --changed" unless steps.any? { |s|
+  s["uses"].to_s.include?("actions/checkout@") && s.dig("with", "fetch-depth") == 0
+}
+lint_run = steps.find { |s| s["name"] == "Lint canonical partition" } or raise "lint step missing"
+raise "PR lint must pass --changed" unless lint_run.fetch("run").include?("--changed")
+raise "lint must keep FM_LINT_JOBS=1" unless lint_run.dig("env", "FM_LINT_JOBS") == "1"
+
+serial = jobs.fetch("tests-portable-serial")
+raise "serial timeout-minutes must stay 30" unless serial.fetch("timeout-minutes") == 30
+shards = serial.fetch("strategy").fetch("matrix").fetch("shard")
+raise "serial matrix must be 19 shards" unless shards == (1..19).to_a
+
+%w[tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial].each do |name|
+  job = jobs.fetch(name)
+  raise "#{name} timeout-minutes must stay 30" unless job.fetch("timeout-minutes") == 30
+  job_steps = job.fetch("steps")
+  tool_cache = job_steps.find { |s|
+    s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?("fm-ci-tools")
+  } or raise "#{name} must cache pinned tools"
+  raise "#{name} tool cache key must hash the installer scripts" unless tool_cache.dig("with", "key").to_s.include?(installer_hash)
+end
+
+%w[tests-portable-parallel-1 tests-portable-parallel-2].each do |name|
+  job = jobs.fetch(name)
+  run = job.fetch("steps").find { |s| s["run"].to_s.include?("fm-test-run.sh --lane") } or raise "#{name} run step missing"
+  raise "#{name} must run with --jobs 2" unless run.fetch("run").include?("--jobs 2")
+end
+
+agg = jobs.fetch("tests-timing-aggregate")
+raise "timing aggregate must depend on lint" unless Array(agg["needs"]).include?("lint")
+agg_run = agg.fetch("steps").find { |s| s["run"].to_s.include?("fm-ci-budget-warn.sh") } or raise "budget warn step missing"
+raise "budget warn must stay a warning, not a failing gate" if agg_run["continue-on-error"]
+lint_up = lint.fetch("steps").find { |s| s["name"] == "Upload lint telemetry" } or raise "lint telemetry upload missing"
+raise "lint telemetry upload must not fail the lint job when a partition has no files" unless lint_up.dig("with", "if-no-files-found") == "warn"
+raise "lint telemetry download must stay a hard dependency of the aggregate" unless agg.fetch("steps").any? { |s| s["name"] == "Download lint telemetry" }
+
+jobs.each do |name, job|
+  next unless job.is_a?(Hash)
+  raise "#{name} must not set continue-on-error" if job["continue-on-error"]
+  Array(job["steps"]).each do |step|
+    raise "#{name} step must not set continue-on-error" if step.is_a?(Hash) && step["continue-on-error"]
+  end
+end
+RUBY
+  pass "CI keeps the 15-minute packing layout, 30-minute caps, lint cache, and warning-only budget check"
+}
+
 test_ci_matrices_match_executable_partitions
+test_ci_keeps_the_timecap_safeguards
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_keep_only_the_newest_run
