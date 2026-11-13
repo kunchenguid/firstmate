@@ -170,6 +170,33 @@ fm_forge_effective_ssh_command() {
   fi
 }
 
+fm_forge_ssh_command_executable() {
+  local command=${1:-} first ssh_path
+  local -a argv
+
+  read -r -a argv <<< "$command"
+  [ "${#argv[@]}" -gt 0 ] || return 1
+  first=${argv[0]}
+  case "$first" in
+    ~/*) first="${HOME:-}/${first#~/}" ;;
+  esac
+  ssh_path=$(command -v ssh 2>/dev/null) || return 1
+  case "$ssh_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$first" in
+    ssh)
+      printf '%s\n' "$ssh_path"
+      ;;
+    /*)
+      [ -x "$first" ] && [ "$first" -ef "$ssh_path" ] || return 1
+      printf '%s\n' "$first"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_forge_ssh_command_config() {
   local command=${1:-} token first config= i
   local -a argv
@@ -209,6 +236,7 @@ fm_forge_safe_ssh_config_for_checkout() {
   local checkout=${1:-} command config checkout_root
 
   command=$(fm_forge_effective_ssh_command "$checkout") || return 1
+  fm_forge_ssh_command_executable "$command" >/dev/null || return 1
   config=$(fm_forge_ssh_command_config "$command") || return 1
   if [ -z "$config" ]; then
     fm_forge_safe_ssh_config
@@ -288,7 +316,7 @@ fm_forge_clone_root() {
 }
 
 fm_forge_detect_provider() {
-  local checkout=${1:-} remote_url host binding project_id
+  local checkout=${1:-} remote_url host binding project_id binding_status
 
   if [ -z "$checkout" ] || [ ! -d "$checkout" ]; then
     echo "unknown"
@@ -298,16 +326,17 @@ fm_forge_detect_provider() {
     echo "local"
     return 0
   fi
-  remote_url=$(fm_forge_checkout_remote "$checkout") || {
-    echo "local"
-    return 0
-  }
+  remote_url=$(fm_forge_checkout_remote "$checkout" 2>/dev/null || true)
   project_id=$(fm_forge_registered_project_id "$checkout" 2>/dev/null || true)
   if binding=$(fm_forge_registered_binding "$checkout"); then
     echo "$binding"
     return 0
   else
     binding_status=$?
+    if [ "$binding_status" -eq 2 ] && [ -n "$project_id" ] && [ -z "$remote_url" ]; then
+      echo registry-refused
+      return 0
+    fi
     if [ "$binding_status" -eq 2 ] \
       && [ -n "$project_id" ] \
       && fm_forge_registry_refuses_local_only "$project_id"; then
@@ -318,6 +347,10 @@ fm_forge_detect_provider() {
       echo unknown
       return 0
     fi
+  fi
+  if [ -z "$remote_url" ]; then
+    echo "local"
+    return 0
   fi
   case "$remote_url" in
     file://*|git+file://*|/*|./*|../*|[[:alpha:]]:[/\\]*)
@@ -346,6 +379,7 @@ fm_forge_detect_provider() {
 # Resolves HTTPS, Git, and SSH remote URLs to a lowercase hostname.
 fm_forge_resolve_host() {
   local remote_url=${1:-} host="" resolve_ssh=0 resolve_requested=${2:-1} checkout=${3:-}
+  local ssh_command ssh_executable
 
   [ -n "$remote_url" ] || return 1
   case "$resolve_requested" in
@@ -384,10 +418,11 @@ fm_forge_resolve_host() {
     *:*) resolve_ssh=$resolve_requested ;;
   esac
   if [ "$resolve_ssh" -eq 1 ] && [ "$resolve_requested" -eq 1 ]; then
-    command -v ssh >/dev/null 2>&1 || return 1
     local resolved ssh_config
+    ssh_command=$(fm_forge_effective_ssh_command "$checkout") || return 1
+    ssh_executable=$(fm_forge_ssh_command_executable "$ssh_command") || return 1
     ssh_config=$(fm_forge_safe_ssh_config_for_checkout "$checkout") || return 1
-    resolved=$(printf '%s\n' "$ssh_config" | ssh -G -F /dev/stdin -- "$host" 2>/dev/null \
+    resolved=$(printf '%s\n' "$ssh_config" | "$ssh_executable" -G -F /dev/stdin -- "$host" 2>/dev/null \
       | awk '$1=="hostname"{print $2; exit}') || return 1
     [ -n "$resolved" ] || return 1
     host=$resolved

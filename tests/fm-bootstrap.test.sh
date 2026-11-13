@@ -1142,6 +1142,38 @@ SH
   pass "bootstrap honors repository core.sshCommand for forge classification"
 }
 
+test_forge_custom_ssh_wrapper_fails_closed() {
+  local case_dir fakebin out project wrapper marker calls
+
+  case_dir="$TMP_ROOT/forge-custom-ssh-wrapper"
+  project="$case_dir/home/projects/wrapped-ssh"
+  wrapper="$case_dir/custom-bin/ssh"
+  marker="$case_dir/wrapper-ran"
+  mkdir -p "$project" "$case_dir/home/config" "${wrapper%/*}"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf wrapper-ran > "$WRAPPER_MARKER"' > "$wrapper"
+  chmod +x "$wrapper"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  git -C "$project" config core.sshCommand "$wrapper"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" WRAPPER_MARKER="$marker" FM_FAKE_GH_CALLS="$calls" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: wrapped-ssh (host: unresolved)" ] \
+    || fail "an unverified SSH wrapper must fail closed, got: $out"
+  [ ! -e "$marker" ] || fail "provider detection executed an unverified SSH wrapper"
+  [ ! -s "$calls" ] || fail "an unverified SSH wrapper must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap rejects unverified custom SSH executables"
+}
+
 test_forge_effective_remote_rewrites() {
   local case_dir fakebin out project github_calls gitlab_calls
 
@@ -1491,6 +1523,41 @@ test_forge_provider_explicit_gerrit_binding() {
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "explicit Gerrit binding must avoid GitHub auth and unsupported diagnostics, got: $out"
   pass "bootstrap honors explicit Gerrit provider bindings"
+}
+
+test_forge_provider_no_origin_binding_and_refusal() {
+  local case_dir fakebin out project
+
+  case_dir="$TMP_ROOT/forge-gerrit-no-origin"
+  project="$case_dir/home/projects/gerrit-no-origin"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- gerrit-no-origin [no-mistakes forge=gerrit] - review project (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh" "$fakebin/gh-axi"
+  fm_fake_exit0 "$fakebin" jq
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: gerrit-axi (install: npm install -g gerrit-axi)" \
+    "a no-origin Gerrit binding must still require gerrit-axi"
+  assert_not_contains "$out" "FORGE_UNSUPPORTED" \
+    "a no-origin Gerrit binding must not lose its provider identity"
+
+  case_dir="$TMP_ROOT/forge-local-only-no-origin"
+  project="$case_dir/home/projects/local-only-no-origin"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '- local-only-no-origin [local-only forge=gerrit] - local work (added 2026-09-15)' \
+    > "$case_dir/home/data/projects.md"
+  git -C "$project" init -q
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FLEET_SYNC: local-only-no-origin: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh local-only-no-origin for the refusal)" ] \
+    || fail "a no-origin local-only forge refusal must remain observable, got: $out"
+  pass "bootstrap preserves no-origin forge bindings and refusals"
 }
 
 test_forge_provider_explicit_legacy_bindings() {
@@ -2717,9 +2784,11 @@ test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
 test_forge_ssh_effective_destination_controls_provider_and_auth
 test_forge_custom_git_ssh_command_controls_provider_and_auth
+test_forge_custom_ssh_wrapper_fails_closed
 test_forge_effective_remote_rewrites
 test_forge_ssh_user_config_precedes_system_config
 test_forge_provider_explicit_gerrit_binding
+test_forge_provider_no_origin_binding_and_refusal
 test_forge_provider_explicit_legacy_bindings
 test_forge_provider_local_only_refusal_not_unsupported
 test_tasks_axi_min_version
