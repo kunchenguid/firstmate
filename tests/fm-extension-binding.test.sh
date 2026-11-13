@@ -574,7 +574,7 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
-      run_extension_section_lanes lifecycle-flow lifecycle-order remote-lifecycle example deadlines
+      run_extension_section_lanes lifecycle-flow lifecycle-orphan-readiness lifecycle-order remote-lifecycle example deadlines
     ) &
     section_coordinator_pid=$!
   fi
@@ -2211,7 +2211,7 @@ assert_absent "$H_INVOCATION_CLEANUP/config/extensions.d/org.example.invocation-
 pass "host-crash recovery retires only after exact invocation-group extinction"
 fi
 
-if section_enabled lifecycle-flow lifecycle-orphan-readiness; then
+if section_enabled lifecycle-orphan-readiness; then
 # Ownerless readiness records have no source selector or signalling authority.
 # Use only private fixture groups, and keep an unrelated live PID as a reuse case.
 P_INVOCATION_CLEANUP="$PACKAGES/orphan-cleanup"
