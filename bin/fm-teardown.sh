@@ -1610,12 +1610,16 @@ retire_busy_state() {
 }
 
 validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  local state_dir=$1 id=$2 state_device trust trust_dir artifact_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
+  # Empty when the trust directory resolves inside state/; nothing trusts a
+  # record there, so there is nothing outside state/ to check or remove.
+  trust=$(fm_custom_check_trust_path "$state_dir" "$id") || trust=
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
-    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
+    ${trust:+"$trust"}; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1625,10 +1629,20 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
-    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
+    ${trust:+"$trust"}; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    artifact_device=$state_device
+    if [ "$artifact" = "$trust" ]; then
+      trust_dir=$(dirname -- "$trust")
+      if [ ! -d "$trust_dir" ] || [ -L "$trust_dir" ]; then
+        echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+        return 1
+      fi
+      artifact_device=$(fm_pr_file_device "$trust_dir") || return 1
+    fi
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$artifact_device" ] \
       || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
       || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
         && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then

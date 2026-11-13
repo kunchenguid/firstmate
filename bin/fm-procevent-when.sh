@@ -109,17 +109,20 @@ FM_ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || FM_ROOT_REAL=$FM_ROOT
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
 WHEN_DIR="$STATE/when"
-TRUST_DIR=$(fm_trust_dir "$STATE")
+# Empty when the trust directory would resolve inside state/; every trust
+# check then fails closed.
+TRUST_DIR=$(fm_trust_dir "$STATE") || TRUST_DIR=
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }
-trust_file() { printf '%s/%s.when-trust\n' "$TRUST_DIR" "$1"; }
+trust_file() { [ -z "$TRUST_DIR" ] || printf '%s/%s.when-trust\n' "$TRUST_DIR" "$1"; }
 legacy_trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
 
 trust_dir_ready() {  # create the operator-owned trust directory; print its device
+  [ -n "$TRUST_DIR" ] || return 1
   (umask 077; mkdir -p -- "$TRUST_DIR") 2>/dev/null
   [ -d "$TRUST_DIR" ] && [ ! -L "$TRUST_DIR" ] || return 1
   fm_pr_file_device "$TRUST_DIR"

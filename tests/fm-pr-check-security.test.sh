@@ -2809,6 +2809,29 @@ test_state_only_custom_check_trust_is_refused() {
   fm_custom_check_snapshot_cleanup
   [ ! -e "$mark" ] || fail "a check with a forged state/ trust record executed"
 
+  # Other spellings of the same state directory must not move trust into it.
+  mkdir -p "$state/config/trust" "$state/trust"
+  cp -p "$state/evil.check-trust" "$state/config/trust/evil.check-trust"
+  cp -p "$state/evil.check-trust" "$state/trust/evil.check-trust"
+  ln -s "$state" "$dir/state-link"
+  mv "$dir/home/config" "$dir/home/config.real"
+  ln -s state "$dir/home/config"
+  local spelling
+  for spelling in "$state/." "$dir/state-link/." "$state"; do
+    ! fm_custom_check_registered "$spelling" evil \
+      || fail "a trust record under state/ registered the check via $spelling"
+    if fm_custom_check_snapshot_prepare "$spelling" evil; then
+      bash "$FM_CUSTOM_CHECK_SNAPSHOT"
+    fi
+    fm_custom_check_snapshot_cleanup
+    [ ! -e "$mark" ] || fail "a check trusted from state/ executed via $spelling"
+    ! FM_HOME="$dir/home" FM_STATE_OVERRIDE="$spelling" "$REGISTER" evil >/dev/null 2>&1 \
+      || fail "registration accepted a trust directory inside state/ via $spelling"
+  done
+  rm -f "$dir/home/config"
+  mv "$dir/home/config.real" "$dir/home/config"
+  rm -rf "$state/config" "$state/trust"
+
   out=$(FM_HOME="$dir/home" "$REGISTER" evil) || fail "operator registration failed"
   assert_contains "$out" "registered: state/evil.check.sh" "registration reports the check"
   fm_custom_check_registered "$state" evil \
@@ -3093,6 +3116,45 @@ SH
     ! grep -qF 'finding after the cut' "$dir/watch.out" || fail "$backend watcher let the check run past its timeout"
   done
   pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
+}
+
+# An unsafe entry at the config/trust/ record must stop teardown before any
+# task cleanup, exactly as an unsafe entry beside it in state/ does.
+test_teardown_refuses_unsafe_trust_record() {
+  local dir fakebin kind rc trust
+  for kind in symlink directory; do
+    dir=$(make_case "teardown-unsafe-trust-$kind")
+    fakebin="$dir/fakebin"
+    fm_write_meta "$dir/home/state/task-a.meta" \
+      'window=firstmate:fm-task-a' \
+      'endpoint_task_id=task-a' \
+      "worktree=$dir/missing-worktree" \
+      "project=$dir/project" \
+      'kind=ship' \
+      'mode=local-only'
+    printf 'check\n' > "$dir/home/state/task-a.check.sh"
+    trust="$dir/home/config/trust/task-a.check-trust"
+    mkdir -p "$dir/home/config/trust"
+    if [ "$kind" = symlink ]; then
+      printf 'outside\n' > "$dir/outside"
+      ln -s "$dir/outside" "$trust"
+    else
+      mkdir "$trust"
+    fi
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/tmux"
+    chmod +x "$fakebin/tmux"
+    touch "$dir/home/state/.last-watcher-beat"
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+      "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "teardown accepted a $kind at the trust record path"
+    assert_contains "$(cat "$dir/teardown.err")" "REFUSED: unsafe task PR-check artifact" \
+      "teardown names the unsafe $kind trust record"
+    [ -e "$dir/home/state/task-a.check.sh" ] || fail "teardown removed the check before refusing a $kind trust record"
+    [ -e "$dir/home/state/task-a.meta" ] || fail "teardown removed task state before refusing a $kind trust record"
+    [ -e "$trust" ] || [ -L "$trust" ] || fail "teardown removed the unsafe $kind trust record"
+  done
+  pass "teardown refuses an unsafe trust record under config/ before any cleanup"
 }
 
 test_teardown_removes_poll_artifacts() {
@@ -5784,3 +5846,4 @@ test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts
+test_teardown_refuses_unsafe_trust_record

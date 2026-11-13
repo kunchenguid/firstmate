@@ -16,13 +16,28 @@ fm_custom_check_sha256() {
 
 # Trust records live in the home's operator-owned config/trust/, beside state/,
 # so a writer confined to state/ cannot authorize its own check. Only
-# fm-check-register.sh and fm-procevent-when.sh write there.
+# fm-check-register.sh and fm-procevent-when.sh write there. The state path is
+# resolved physically first, so spellings such as state/. or a symlink to state
+# still name the real parent, and a trust directory that resolves inside state
+# is refused. A state path that does not exist yet has nothing to protect.
 fm_trust_dir() {  # <state-dir>
-  printf '%s/config/trust\n' "$(dirname -- "$1")"
+  local state=$1 real config
+  real=$(cd -P -- "$state" 2>/dev/null && pwd -P) || {
+    printf '%s/config/trust\n' "$(dirname -- "$state")"
+    return 0
+  }
+  config="$(dirname -- "$real")/config"
+  if [ -e "$config" ]; then
+    config=$(cd -P -- "$config" 2>/dev/null && pwd -P) || return 1
+  fi
+  case "$config/trust/" in "$real"/*) return 1 ;; esac
+  printf '%s/trust\n' "$config"
 }
 
 fm_custom_check_trust_path() {  # <state-dir> <id>
-  printf '%s/%s.check-trust\n' "$(fm_trust_dir "$1")" "$2"
+  local dir
+  dir=$(fm_trust_dir "$1") || return 1
+  printf '%s/%s.check-trust\n' "$dir" "$2"
 }
 
 fm_custom_check_trust_read() {
@@ -30,10 +45,10 @@ fm_custom_check_trust_read() {
   FM_CUSTOM_CHECK_HASH=
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  trust_dir=$(fm_trust_dir "$state")
+  trust_dir=$(fm_trust_dir "$state") || return 1
   [ -d "$trust_dir" ] && [ ! -L "$trust_dir" ] || return 1
   trust_device=$(fm_pr_file_device "$trust_dir") || return 1
-  trust=$(fm_custom_check_trust_path "$state" "$id")
+  trust="$trust_dir/$id.check-trust"
   fm_pr_private_file_valid "$trust" 600 "$trust_device" || return 1
   exec 9< "$trust" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }

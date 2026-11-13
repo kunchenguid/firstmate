@@ -665,4 +665,28 @@ assert_grep 'status: rejected' "$RESULT" "the outcome reports the trust refusal"
 assert_absent "$FORGED_LOG" "the action of a watch trusted only from state/ was not executed"
 pass "a trust record written only under state/ never makes a watch fire"
 
+# Other spellings of the same state directory must not move trust into it:
+# state/. and a symlink to state/ name the real parent, and a config/ that
+# resolves into state/ is refused outright.
+FORGED=$(cat "$H/state/when/$SID.trust")
+mkdir -p "$H/state/config/trust" "$H/state/trust"
+printf '%s\n' "$FORGED" > "$H/state/config/trust/$SID.when-trust"
+printf '%s\n' "$FORGED" > "$H/state/trust/$SID.when-trust"
+chmod 0600 "$H/state/config/trust/$SID.when-trust" "$H/state/trust/$SID.when-trust"
+ln -s "$H/state" "$TMP_ROOT/state-trust-link"
+rm -rf "$H/config"
+ln -s state "$H/config"
+for SPELLING in "$H/state/." "$TMP_ROOT/state-trust-link/." "$H/state"; do
+  OUT=$(FM_HOME="$H" FM_STATE_OVERRIDE="$SPELLING" "$ROOT/bin/fm-procevent-when.sh" run "$SID")
+  assert_contains "$OUT" "rejected" "a watch trusted from state/ is refused via $SPELLING"
+  assert_absent "$FORGED_LOG" "a watch trusted from state/ did not fire via $SPELLING"
+done
+rm -f "$H/config"
+for SPELLING in "$H/state/." "$TMP_ROOT/state-trust-link/."; do
+  OUT=$(FM_HOME="$H" FM_STATE_OVERRIDE="$SPELLING" "$ROOT/bin/fm-procevent-when.sh" run "$SID")
+  assert_contains "$OUT" "rejected" "a watch trusted from state/config/ is refused via $SPELLING"
+  assert_absent "$FORGED_LOG" "a watch trusted from state/config/ did not fire via $SPELLING"
+done
+pass "no spelling of the state directory lets a state/ trust record fire a watch"
+
 printf 'all fm-procevent-when tests passed\n'

@@ -25,8 +25,9 @@ fi
 
 ID=$1
 CHECK="$STATE/$ID.check.sh"
-TRUST_DIR=$(fm_trust_dir "$STATE")
-TRUST=$(fm_custom_check_trust_path "$STATE" "$ID")
+TRUST_DIR=$(fm_trust_dir "$STATE") \
+  || { echo "error: custom check trust directory is unavailable" >&2; exit 1; }
+TRUST="$TRUST_DIR/$ID.check-trust"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
