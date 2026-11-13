@@ -1067,6 +1067,7 @@ test_treehouse_lease_check_follows_resolved_backend() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: treehouse" "a treehouse with both the lease and the worktree root must be accepted"
+  assert_not_contains "$out" "OUTDATED: treehouse" "a treehouse with both the lease and the worktree root must not report an upgrade"
   pass "bootstrap: the treehouse lease and worktree-root checks follow the resolved backend's worktree provider"
 }
 

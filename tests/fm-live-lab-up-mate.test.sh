@@ -27,6 +27,8 @@ fi
 SH
 cat > "$TMP_ROOT/source/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
+# An older revision's bare Treehouse acquisition uses the environment root.
+mkdir -p "${TREEHOUSE_ROOT:-$HOME/.treehouse}/legacy-slot"
 # The lab's explicit socket, never TMUX_TMPDIR alone, which falls back to the
 # user's default server when its directory is missing.
 lab_tmux() { tmux -S "${TMUX_TMPDIR:?}/tmux-$(id -u)/default" "$@"; }
@@ -44,6 +46,7 @@ chmod +x "$TMP_ROOT/source/bin/"{fm-home-seed,fm-spawn}.sh "$TMP_ROOT/fakebin/cl
 git -C "$TMP_ROOT/source" init -q -b main
 git -C "$TMP_ROOT/source" add -A
 git -C "$TMP_ROOT/source" -c user.name=t -c user.email=t@example.invalid commit -qm stub
+git -C "$TMP_ROOT/source" tag legacy
 
 cleanup_labs() {
   local root
@@ -59,16 +62,21 @@ for mode in off on; do
   lab="$TMP_ROOT/lab-$mode"
   host=claude
   [ "$mode" = off ] && host=off
-  out=$(PATH="$TMP_ROOT/fakebin:$PATH" SHELL=/bin/sh "$ROOT/bin/fm-live-lab.sh" up --harness claude --mate --supervision-host "$host" --source "$TMP_ROOT/source" --timeout 0 "$lab" 2>&1)
+  out=$(PATH="$TMP_ROOT/fakebin:$PATH" SHELL=/bin/sh "$ROOT/bin/fm-live-lab.sh" up --harness claude --mate --supervision-host "$host" --source "$TMP_ROOT/source" --ref legacy --timeout 0 "$lab" 2>&1)
   rc=$?
   expect_code 1 "$rc" "unanswered probe leaves the $mode mate lab for inspection"
   assert_not_contains "$out" 'HOST_OFF: unbound variable' "up $mode sets mate readiness state"
   assert_contains "$out" 'ok mate:' "up $mode checks the launched mate"
   assert_contains "$out" 'primary: claude' "up $mode reaches primary launch"
+  assert_present "$lab/treehouse/legacy-slot" "an older --ref uses the lab's private Treehouse pool"
+  assert_absent "$HOME/.treehouse/legacy-slot" "an older --ref leaves the operator's pool unchanged"
   if [ "$mode" = off ]; then
     assert_present "$lab/mate/config/supervision-host-off" "off mate receives inherited opt-out"
   else
     assert_absent "$lab/mate/config/supervision-host-off" "on mate has no opt-out"
   fi
   pass "up --mate with supervision host $mode reaches readiness"
+  out=$(PATH="$TMP_ROOT/fakebin:$PATH" "$ROOT/bin/fm-live-lab.sh" down "$lab" 2>&1)
+  expect_code 0 "$?" "down cleans the older revision's lab: $out"
+  assert_absent "$lab" "down removes the older revision's pool with its lab"
 done

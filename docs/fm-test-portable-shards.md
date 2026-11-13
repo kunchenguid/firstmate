@@ -51,6 +51,11 @@ The T3 Code backend suites carry the slowest successful Ubuntu samples from CI r
 
 The new `tests/fm-remote-herdr-identity.test.sh` serial hint is provisionally 6158 ms, from a successful local macOS arm64 `bin/fm-test-run.sh` sample on 2026-11-08. Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
 
+The 2026-11-13 `tests/fm-treehouse-home-root.test.sh` serial hint is a provisional local measurement of 453650 ms from a successful `bin/fm-test-run.sh tests/fm-treehouse-home-root.test.sh` run on a heavily loaded macOS arm64 host.
+Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
+The ten previously unhinted capability-skipped serial scripts now use their slowest successful samples from Ubuntu runs [43296251257](https://github.com/kunchenguid/firstmate/actions/runs/43296251257), [43331691300](https://github.com/kunchenguid/firstmate/actions/runs/43331691300), and [43359484992](https://github.com/kunchenguid/firstmate/actions/runs/43359484992).
+These measure the portable runner's capability skips, not the unavailable live integrations, and replace the 45000 ms default weights so the new Treehouse measurement fits within the existing shard budget.
+
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over those hints.

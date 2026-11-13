@@ -41,6 +41,8 @@
 #                    TMUX, Herdr, or Pi marker reaches a lab process.
 #                    Pool placement follows fm_treehouse_home_root in
 #                    bin/fm-wake-lib.sh, keeping lab allocations under <lab-root>.
+#                    TREEHOUSE_ROOT keeps older --ref revisions under
+#                    <lab-root>/treehouse when they acquire without --root.
 #                    DISABLE_AUTOUPDATER=1 keeps Claude Code from replacing the
 #                    shared binary under a running lab (tests/lib.sh).
 #                    A set CLAUDE_CONFIG_DIR (absolute) is passed to every lab
@@ -195,7 +197,7 @@ lab_kill_server() {
 lab_env_base() {
   printf '%s\n' "HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${USER:-$(id -un)}" \
     "PATH=$PATH" "SHELL=${SHELL:-/bin/zsh}" "TERM=xterm-256color" "LANG=${LANG:-en_US.UTF-8}" \
-    "TMUX_TMPDIR=$TMUX_DIR" "FM_BACKEND=tmux" "DISABLE_AUTOUPDATER=1"
+    "TMUX_TMPDIR=$TMUX_DIR" "TREEHOUSE_ROOT=$ROOT/treehouse" "FM_BACKEND=tmux" "DISABLE_AUTOUPDATER=1"
   [ -z "${CLAUDE_DIR:-}" ] || printf '%s\n' "CLAUDE_CONFIG_DIR=$CLAUDE_DIR"
 }
 

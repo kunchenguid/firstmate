@@ -742,12 +742,16 @@ tests/fm-approval-failover.test.sh 5410
 tests/fm-ask-user-authority.test.sh 171
 tests/fm-backend-cmux-smoke.test.sh 34
 tests/fm-backend-cmux.test.sh 3754
+tests/fm-backend-hc-appdetect-smoke.test.sh 163
 tests/fm-backend-hc-liveness-live-e2e.test.sh 9000
 tests/fm-backend-hc-smoke.test.sh 3700
 tests/fm-backend-hc.test.sh 4000
 tests/fm-backend-orca.test.sh 27102
 tests/fm-backend-paseo-smoke.test.sh 40
 tests/fm-backend-paseo.test.sh 8000
+tests/fm-backend-rex-composer-live-e2e.test.sh 161
+tests/fm-backend-rex-eventwait-smoke.test.sh 45
+tests/fm-backend-rex-smoke.test.sh 45
 tests/fm-backend-t3code-live-e2e.test.sh 51
 tests/fm-backend-t3code-pr-tools-live-e2e.test.sh 52
 tests/fm-backend-tern-smoke.test.sh 60
@@ -829,6 +833,9 @@ tests/fm-herdr-projected-cd-live-e2e.test.sh 28000
 tests/fm-herdr-session-cleanup.test.sh 7425
 tests/fm-herdr-submit-confirm-live-e2e.test.sh 51
 tests/fm-herdr-version-floor-live-e2e.test.sh 50
+tests/fm-hermes-gateway-coexistence-live-e2e.test.sh 163
+tests/fm-hermes-profile-safety-live-e2e.test.sh 160
+tests/fm-hermes-signals-live-e2e.test.sh 195
 tests/fm-home-summary-refresh.test.sh 37057
 tests/fm-host-mirror-live-e2e.test.sh 79
 tests/fm-host-mirror.test.sh 11587
@@ -838,6 +845,7 @@ tests/fm-install-herdr.test.sh 1000
 tests/fm-jev-mem-guard.test.sh 336
 tests/fm-kimi-harness.test.sh 58917
 tests/fm-kimi-trust-prompt-live-e2e.test.sh 60
+tests/fm-kiro-signals-live-e2e.test.sh 148
 tests/fm-lane-capacity-integration.test.sh 48000
 tests/fm-lane-vitals.test.sh 5077
 tests/fm-launch-prompt-signals-live-e2e.test.sh 50
@@ -856,6 +864,7 @@ tests/fm-no-mistakes-required.test.sh 270
 tests/fm-omp-harness.test.sh 63796
 tests/fm-omp-primary-live-e2e.test.sh 74
 tests/fm-on.test.sh 11473
+tests/fm-opencode-abs-cwd-rail-live-e2e.test.sh 147
 tests/fm-opencode-primary-live-e2e.test.sh 47
 tests/fm-operational-input.test.sh 2404
 tests/fm-osc7501.test.sh 14000
@@ -937,6 +946,7 @@ tests/fm-subagent-pretool-check.test.sh 998
 tests/fm-supervision-events.test.sh 673
 tests/fm-supervision-host-attended-live-e2e.test.sh 49
 tests/fm-supervision-host-drain.test.sh 45950
+tests/fm-supervision-host-herdr-live-e2e.test.sh 167
 tests/fm-supervision-host-hook.test.sh 403793
 tests/fm-supervision-host-live-e2e.test.sh 75
 tests/fm-supervision-host-park.test.sh 329326
@@ -957,6 +967,7 @@ tests/fm-tmux-agent-liveness.test.sh 3770
 tests/fm-tool-update-check.test.sh 14383
 tests/fm-trace-context-lib.test.sh 221
 tests/fm-trace-context-spawn.test.sh 57488
+tests/fm-treehouse-home-root.test.sh 453650
 tests/fm-treehouse-pool-isolation-live-e2e.test.sh 6000
 tests/fm-turnend-foreign-owner-arm-fix.test.sh 5575
 tests/fm-turnend-guard.test.sh 34727
