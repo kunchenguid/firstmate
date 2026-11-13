@@ -152,17 +152,20 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux, herdr, and rex, which own a
+#      than trusting a stale status log. On tmux, herdr, rex, and t3code, which own a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
 #      unreachable, and an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
-#      A readable endpoint holding only its shell (the harness exited, for
-#      example on a provider usage-limit error) reads unknown · none as agent
-#      gone before a stale busy record or non-terminal status log can report
-#      working; a valid terminal done/failed declaration is still preserved.
+#      For non-secondmates on tmux, herdr, and rex, positive agent-gone evidence
+#      from a readable endpoint (the harness exited, for example on a provider
+#      usage-limit error) reads unknown · none before a stale busy record or
+#      non-terminal status log can report working; a valid terminal done/failed
+#      declaration is still preserved, including the ship-done check above.
+#      Secondmates skip this readable-endpoint check and semantic busy state;
+#      their routed status log answers instead.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -1338,9 +1341,9 @@ fi
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
 # is no run to consult, so only positive evidence that the target is gone may
 # read as death - a backend that failed to answer is unknown, never death, for
-# the classifier-backed backends (tmux, herdr, rex, and t3code) - and every death-class
-# verdict reports unknown rather than trusting a possibly-stale status log as
-# the current state.
+# the classifier-backed backends (tmux, herdr, rex, and t3code) - and every
+# death-class verdict after a failed endpoint read reports unknown rather than
+# trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
