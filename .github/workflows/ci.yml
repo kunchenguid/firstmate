@@ -589,6 +589,11 @@ jobs:
           FM_TEST_STOCK_BASH=1 FM_TEST_BASH=/bin/bash \
             /bin/bash bin/fm-test-tap-verify.sh tests/fm-backend.test.sh
 
+          # The inbox's empty-body check must stay linear under stock Bash 3.2
+          # in a UTF-8 locale, where whole-body substitution is quadratic.
+          FM_TEST_STOCK_BASH=1 /bin/bash bin/fm-test-tap-verify.sh \
+            tests/fm-inbox.test.sh
+
   invariants:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Repo invariants
     runs-on: ubuntu-24.04

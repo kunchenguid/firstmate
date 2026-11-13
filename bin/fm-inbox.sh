@@ -428,7 +428,7 @@ queue_note() {
   if [ -n "$request_id" ] || [ "$json" -eq 1 ]; then
     strict=1
   fi
-  [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
+  case "$body" in *[![:space:]]*) ;; *) die "refusing to queue an empty note" ;; esac
   mkdir -p "$INBOX"
 
   local tmp id summary staging_name reserved
@@ -607,7 +607,7 @@ cmd_reply() {
   else
     body="$*"
   fi
-  [ -n "${body//[[:space:]]/}" ] || die "refusing to record an empty reply"
+  case "$body" in *[![:space:]]*) ;; *) die "refusing to record an empty reply" ;; esac
   mkdir -p "$REPLIES"
   load_wake_lib || die "the reply sequence needs $FM_ROOT/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$REPLY_SEQ_LOCK" || die "could not claim the reply sequence"
