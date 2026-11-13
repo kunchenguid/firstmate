@@ -2470,13 +2470,19 @@ SH
 }
 
 test_board_later_answer_keeps_the_original_hold() {
-  local home sid stub out show snapshot invalid
+  local home sid stub out show snapshot invalid question before
   home=$(make_home board-later)
   sid=lavish-b0a4d0000000defe
+  question=$'Choose the deployment route:\nA (staged rollout) or B (direct rollout)?'
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
-  run_captain "$home" hold sample-later-call --title "Choose the route later" \
-    --reason "route choice pending" --repo sample >/dev/null \
+  tasks_in "$home" add sample-route-review "Review deployment routes" --kind scout --repo sample >/dev/null \
+    || fail "could not create the route review"
+  write_origin_meta "$home" sample-route-review
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-later-call \
+    --title "Deployment route" --reason "$question" --repo sample --origin sample-route-review >/dev/null \
     || fail "could not register the later call"
+  run_captain "$home" complete sample-route-review sample-later-call >/dev/null \
+    || fail "could not register the review's captain call"
   stub="$home/board-source.sh"
   cat > "$stub" <<'SH'
 #!/usr/bin/env bash
@@ -2499,11 +2505,18 @@ SH
   assert_contains "$show" "state: queued" "later closed the original task"
   assert_contains "$show" "hold_kind: captain" "later removed the captain hold"
   assert_contains "$show" "hold_until: 2099-07-20" "later lost the selected date"
+  assert_contains "$show" "Origin: sample-route-review" "later lost the original review context"
+  assert_contains "$show" "Captain hold origin: sample-route-review" "later lost its recorded origin"
+  assert_contains "$show" "Captain hold set: 2026-07-14T12:00:00Z" "later reset the original hold's age"
+  run_captain "$home" verify sample-route-review >/dev/null \
+    || fail "later invalidated the review's captain-call inventory"
+  before=$show
   # Decode the stored reason through its public reader before checking words.
   # shellcheck source=bin/fm-hold-reason-lib.sh
   . "$ROOT/bin/fm-hold-reason-lib.sh"
   show=$(printf '%s\n' "$show" | fm_hold_reason_decode_stream toon)
   assert_contains "$show" "after the release" "later lost the displayed answer"
+  assert_contains "$show" "the captured result $sid sequence 1" "later lost its answer provenance"
   snapshot=$(run_bearings "$home")
   printf '%s' "$snapshot" | jq -e '
     ([.decisions_open[] | select(.id == "sample-later-call")] | length) == 0
@@ -2511,11 +2524,18 @@ SH
   ' >/dev/null || fail "the deferred call disappeared instead of moving to Charted Next: $snapshot"
   # Re-delivery must remain a hold, never fall through to the card close mode.
   run_lavish "$home" answers "$home/state/procevent-inbox/$sid.1.result" \
-    | run_captain "$home" answers --source "later replay" >/dev/null \
+    | run_captain "$home" answers --source "the captured result $sid sequence 1" >/dev/null \
     || fail "later replay failed"
   show=$(tasks_in "$home" show sample-later-call --full)
+  [ "$show" = "$before" ] || fail "later replay changed the original decision or duplicated its deferral"
   assert_contains "$show" "hold_until: 2099-07-20" "later replay lost the hold date"
   assert_contains "$show" "state: queued" "later replay closed the task"
+  snapshot=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2099-07-20T12:00:00Z \
+    "$BEARINGS" --json) || fail "could not read the board when the deferral became due"
+  printf '%s' "$snapshot" | jq -e --arg question "Deployment route: $question" '
+    [.decisions_open[] | select(.id == "sample-later-call")] as $calls
+    | ($calls | length) == 1 and $calls[0].question == $question
+  ' >/dev/null || fail "the due card lost the original question or options: $snapshot"
   # A dated option overrides a work card's release mode too, including away.
   : > "$home/state/.afk"
   printf 'sample-later-call\tlater\tRevisit after the release\trelease\t2099-07-20\n' \
@@ -2541,6 +2561,71 @@ SH
     fail "a dated option reopened a closed task"
   fi
   pass "a bound board later answer keeps the original captain hold with its date"
+}
+
+test_board_deferral_rechecks_hold_after_concurrent_release() {
+  local home release_pid defer_pid before show rc=0
+  home=$(make_home board-later-race)
+  run_captain "$home" hold sample-later-race --title "Deployment route" \
+    --reason "Staged rollout or direct rollout?" --repo sample >/dev/null \
+    || fail "could not create the concurrent decision"
+  cat > "$home/board.result" <<'EOF'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Revisit after the release","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-later-race\",\"selection\":\"later\",\"note\":\"\",\"defer_until\":\"2099-07-20\"}"
+EOF
+  run_lavish "$home" answers "$home/board.result" > "$home/answers.tsv" \
+    || fail "could not parse the captured board deferral"
+  [ -s "$home/answers.tsv" ] || fail "the board did not emit a deferral"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = unhold ] && [ "${2:-}" = sample-later-race ]; then
+  : > "$FM_HOME/release-ready"
+  for ((i=0; i<3000; i++)); do
+    [ ! -e "$FM_HOME/release-go" ] || break
+    /bin/sleep 0.01
+  done
+  [ -e "$FM_HOME/release-go" ] || exit 91
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  cat > "$home/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_DEFER_WAIT:-}" = 1 ] && [ "${1:-}" = 0.1 ]; then
+  : > "$FM_HOME/defer-waiting"
+  for ((i=0; i<3000; i++)); do
+    [ ! -e "$FM_HOME/defer-go" ] || break
+    /bin/sleep 0.01
+  done
+  [ -e "$FM_HOME/defer-go" ] || exit 92
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi" "$home/fakebin/sleep"
+  printf 'Use the staged rollout.\n' > "$home/release.txt"
+  run_captain "$home" answer sample-later-race --release --decision-file "$home/release.txt" \
+    > "$home/release.out" 2> "$home/release.err" &
+  release_pid=$!
+  wait_for_test_file "$home/release-ready" "$release_pid" \
+    || fail "the chat release did not reach the locked backend transition"
+  FM_TEST_DEFER_WAIT=1 run_captain "$home" answers --source "captured board deferral" \
+    < "$home/answers.tsv" > "$home/defer.out" 2> "$home/defer.err" &
+  defer_pid=$!
+  wait_for_test_file "$home/defer-waiting" "$defer_pid" \
+    || fail "the captured deferral did not wait behind the chat release"
+  : > "$home/release-go"
+  wait "$release_pid" || fail "the chat release failed: $(cat "$home/release.err")"
+  before=$(tasks_in "$home" show sample-later-race --full)
+  assert_contains "$before" "held: no" "the chat answer did not release the task"
+  : > "$home/defer-go"
+  wait "$defer_pid" || rc=$?
+  show=$(tasks_in "$home" show sample-later-race --full)
+  [ "$show" = "$before" ] || fail "the stale board deferral changed the released task"
+  [ "$rc" -ne 0 ] || fail "the stale board deferral succeeded after the chat release"
+  assert_grep "not held for the captain" "$home/defer.out" "the stale deferral did not explain its refusal"
+  pass "a waiting board deferral cannot re-hold work released by a concurrent chat answer"
 }
 
 # The intake is channel-agnostic, so chat must reach it the same way a captured
@@ -5226,6 +5311,7 @@ test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
 test_board_later_answer_keeps_the_original_hold
+test_board_deferral_rechecks_hold_after_concurrent_release
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled

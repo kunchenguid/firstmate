@@ -211,7 +211,7 @@ The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy)
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point.
-Its keyed-line format is owned by `bin/fm-captain-hold.sh`'s header: ordinary choices use `answer`, while a structured dated deferral uses `hold --until` on the original task.
+Its keyed-line format and locked deferral update are owned by `bin/fm-captain-hold.sh`'s header; ordinary choices use `answer`.
 Every guard therefore applies identically no matter which channel the answer arrived on.
 
 The optional mode column carries a card-declared close:

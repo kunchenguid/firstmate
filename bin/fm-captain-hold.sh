@@ -87,13 +87,15 @@
 # "A keyed answer resolves its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
 # `<task-id>\t<answer>\t<label>[\t<mode>[\t<defer-until>]]` lines on stdin and resolves each named
-# task through `answer` or, for a dated deferral, `hold --until`, so the same
+# task through `answer` or a locked deferral update, so the same
 # guards apply no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A non-empty fifth field is a future UTC
 # YYYY-MM-DD deferral date: it overrides the close mode and re-holds the original
-# captain-held task through `hold --until`, recording the answer as its reason.
+# captain-held task through `tasks-axi hold --until`, preserving its reason and
+# origin and recording the selected deferral in its body. Eligibility is checked
+# under the task control lock used to apply the date.
 # Invalid dates are skipped, never downgraded to closing answers.
 # A `release` line without a deferral date while the away-posture
 # record exists is reported as `refused:` under the same attended-only rule as
@@ -349,7 +351,7 @@ validate_one_line() {  # <label> <value>
 
 acquire_task_control_lock() {  # <task-id>
   CAPTAIN_CONTROL_LOCK="$STATE/.control-$1.lock"
-  fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK"
+  fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK" || return $?
   CAPTAIN_CONTROL_LOCK_HELD=1
 }
 
@@ -1558,6 +1560,40 @@ sanitize_reconcile_provenance() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-1024
 }
 
+defer_keyed_answer() (
+  local id=$1 until=$2 decision_file=$3 show reason body note tmp occurrence
+  trap captain_hold_cleanup EXIT
+  acquire_task_control_lock "$id" || fail "cannot acquire task control for $id"
+  task_show_or_fail "$id" "captain-held task $id is absent"
+  [ "$(show_field "$show" state)" != done ] || fail "task $id is already closed"
+  [ "$(show_field_value "$show" hold_kind)" = captain ] \
+    || fail "task $id is not held for the captain"
+  reason=$(show_field_value "$show" hold_reason) || fail "could not read the hold reason for $id"
+  body=$(show_field_value "$show" body) || fail "could not decode the existing body for $id"
+  load_decision "$decision_file"
+  note=$(printf 'Captain hold deferred until: %s\n%s' "$until" "$DECISION_TEXT")
+  tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
+    || fail "could not defer task $id for the captain"
+  case "$body" in
+    "$note"|*"$NL_SEP$NL_SEP$note") ;;
+    *)
+      tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-defer.XXXXXX") \
+        || fail "cannot stage the deferral record"
+      if ! printf '%s\n\n%s\n' "$body" "$note" > "$tmp" \
+        || ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
+        rm -f -- "$tmp"
+        fail "could not record the deferral on $id"
+      fi
+      rm -f -- "$tmp"
+      ;;
+  esac
+  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+  show=$(printf '%s\n' "$show" | fm_hold_reason_decode_stream toon) \
+    || fail "could not decode the hold reason for $id"
+  reason=$(show_field_value "$show" hold_reason) || fail "could not read the hold reason for $id"
+  publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
+)
+
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
@@ -1700,7 +1736,7 @@ command_answers() {
       continue
     fi
     if [ -n "$until" ]; then
-      if "$0" hold "$id" --reason "Deferred until $until. $(<"$tmp")" --until "$until" \
+      if defer_keyed_answer "$id" "$until" "$tmp" \
         </dev/null >/dev/null 2>"$err"; then
         [ ! -s "$err" ] || cat "$err" >&2
         printf 'deferred: %s until %s\n' "$id" "$until"
