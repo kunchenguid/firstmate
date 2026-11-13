@@ -138,8 +138,7 @@
 # --check-coverage also reports serial_max_ms (largest packed hint sum, including
 # default weights) and serial_budget_ms (the 15-minute packing target), refusing
 # a split above that target unless the shard holds exactly one indivisible
-# suite. Neither figure is an execution timeout or proof of observed headroom:
-# refresh growing files from CI measurements with bin/fm-refresh-ci-timings.sh.
+# suite. Neither figure is an execution timeout or proof of observed headroom.
 # --changed is conservative: it over-selects related families rather than
 # under-selecting, and never expands to the complete suite unless --all. The one
 # place it is deliberately narrow is a bin/ path with no curated family: a test
@@ -217,8 +216,7 @@ PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=45000
 # rather than raising the job timeout.
 PORTABLE_SERIAL_MAX_WEIGHT_MS=900000
 
-# Committed CI duration hints. bin/fm-refresh-ci-timings.sh rebuilds this file
-# from green main timing artifacts; docs/fm-test-portable-shards.md owns the
+# Committed CI duration hints. docs/fm-test-portable-shards.md owns the
 # measurement provenance.
 CI_TIMINGS_FILE="$ROOT/tests/fm-test-ci-timings.tsv"
 
@@ -1619,8 +1617,7 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     docs/fm-test-portable-shards.md|docs/fm-test-isolation-proof.md|\
-    docs/fm-test-isolation-proof.json|tests/fm-test-ci-timings.tsv|\
-    bin/fm-refresh-ci-timings.sh)
+    docs/fm-test-isolation-proof.json|tests/fm-test-ci-timings.tsv)
       printf '%s\n' pure-contract-unit
       printf '%s\n' __script__:fm-test-run.test.sh
       ;;

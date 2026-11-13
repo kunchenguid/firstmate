@@ -1414,12 +1414,6 @@ done
 kill -0 "$watch_pid" 2>/dev/null \
   || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
 kill "$watch_pid" 2>/dev/null || true
-i=0
-while kill -0 "$watch_pid" 2>/dev/null; do
-  [ "$i" -lt 50 ] || break
-  sleep 0.1
-  i=$((i + 1))
-done
 wait "$watch_pid" 2>/dev/null || true
 watch_pid=''
 ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')

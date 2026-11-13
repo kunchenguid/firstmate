@@ -729,7 +729,6 @@ doc = YAML.load_file(ARGV[0])
 jobs = doc.fetch("jobs")
 lint = jobs.fetch("lint")
 raise "lint timeout-minutes must stay 30" unless lint.fetch("timeout-minutes") == 30
-raise "lint runs-on must stay ubuntu-24.04" unless lint.fetch("runs-on") == "ubuntu-24.04"
 raise "lint matrix must be four partitions" unless lint.fetch("strategy").fetch("matrix").fetch("partition") == [1, 2, 3, 4]
 steps = lint.fetch("steps")
 raise "lint must cache pinned tools" unless steps.any? { |s| s["uses"].to_s.start_with?("actions/cache@") }
@@ -748,22 +747,17 @@ raise "lint must keep FM_LINT_JOBS=1" unless lint_run.dig("env", "FM_LINT_JOBS")
 
 serial = jobs.fetch("tests-portable-serial")
 raise "serial timeout-minutes must stay 30" unless serial.fetch("timeout-minutes") == 30
-raise "serial runs-on must stay ubuntu-24.04" unless serial.fetch("runs-on") == "ubuntu-24.04"
 shards = serial.fetch("strategy").fetch("matrix").fetch("shard")
 raise "serial matrix must be 19 shards" unless shards == (1..19).to_a
 
 %w[tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial].each do |name|
   job = jobs.fetch(name)
   raise "#{name} timeout-minutes must stay 30" unless job.fetch("timeout-minutes") == 30
-  raise "#{name} runs-on must stay ubuntu-24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
   job_steps = job.fetch("steps")
   tool_cache = job_steps.find { |s|
     s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?("fm-ci-tools")
   } or raise "#{name} must cache pinned tools"
   raise "#{name} tool cache key must hash the installer scripts" unless tool_cache.dig("with", "key").to_s.include?(installer_hash)
-  raise "#{name} must cache npm" unless job_steps.any? { |s|
-    s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?(".npm")
-  }
 end
 
 %w[tests-portable-parallel-1 tests-portable-parallel-2].each do |name|

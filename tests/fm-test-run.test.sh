@@ -1943,49 +1943,6 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
-test_refresh_ci_timings_from_dir_keeps_successful_maxima() {
-  local tmp out tsv
-  tmp=$(fm_test_tmproot fm-refresh-ci-timings)
-  mkdir -p "$tmp/artifacts/run-a" "$tmp/artifacts/run-b"
-  cat >"$tmp/artifacts/run-a/fm-test-timing-portable-serial-1.json" <<'JSON'
-{
-  "kind": "lane",
-  "scripts": [
-    {"path": "tests/fm-watch-triage.test.sh", "duration_ms": 100, "exit": 0},
-    {"path": "tests/fm-afk.test.sh", "duration_ms": 50, "exit": 1}
-  ]
-}
-JSON
-  cat >"$tmp/artifacts/run-b/fm-test-timing-portable-serial-1.json" <<'JSON'
-{
-  "scripts": [
-    {"path": "tests/fm-watch-triage.test.sh", "duration_ms": 250, "exit": 0},
-    {"path": "tests/fm-afk.test.sh", "duration_ms": 80, "exit": 0},
-    {"path": "bin/not-a-test.sh", "duration_ms": 9, "exit": 0}
-  ]
-}
-JSON
-  cat >"$tmp/artifacts/run-b/fm-test-timing-aggregate.json" <<'JSON'
-{
-  "kind": "aggregate",
-  "scripts": [
-    {"path": "tests/fm-watch-triage.test.sh", "duration_ms": 9999, "exit": 0}
-  ]
-}
-JSON
-  tsv="$tmp/out.tsv"
-  out=$(bash "$ROOT/bin/fm-refresh-ci-timings.sh" --from-dir "$tmp/artifacts" --out "$tsv") \
-    || fail "refresh --from-dir failed"$'\n'"$out"
-  assert_contains "$out" "scripts=2" "refresh did not report the successful script count"
-  grep -Fxq $'tests/fm-watch-triage.test.sh\t250' "$tsv" \
-    || fail "refresh did not keep the slowest successful sample"$'\n'"$(cat "$tsv")"
-  grep -Fxq $'tests/fm-afk.test.sh\t80' "$tsv" \
-    || fail "refresh kept a failed sample or missed the later success"$'\n'"$(cat "$tsv")"
-  grep -q 'bin/not-a-test.sh' "$tsv" && fail "refresh included a non-test path"
-  grep -q $'\t9999$' "$tsv" && fail "refresh used an aggregate JSON as a sample"
-  pass "refresh --from-dir writes the slowest successful per-script timings"
-}
-
 test_ci_budget_warn_annotates_over_budget_lanes_without_failing() {
   local tmp out rc
   tmp=$(fm_test_tmproot fm-ci-budget-warn)
@@ -2084,5 +2041,4 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
-test_refresh_ci_timings_from_dir_keeps_successful_maxima
 test_ci_budget_warn_annotates_over_budget_lanes_without_failing

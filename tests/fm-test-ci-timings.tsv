@@ -2,8 +2,6 @@
 # Each duration_ms is the slowest successful sample of that tests/*.test.sh
 # script across the listed green main CI runs.
 # bin/fm-test-run.sh reads this file to pack portable parallel and serial shards.
-# Refresh with: bin/fm-refresh-ci-timings.sh --from-dir <downloaded-artifacts>
-# or: bin/fm-refresh-ci-timings.sh --from-main --limit 3
 # source_runs: 43359484992 43331691300 43209319634
 # refreshed: 2026-11-13
 # Split-file weights for fm-watch-triage-busy, fm-captain-hold-teardown, and the

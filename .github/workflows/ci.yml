@@ -150,10 +150,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/fm-ci-tools
           key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
-      - uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: fm-npm-${{ runner.os }}-${{ runner.arch }}-tasks-axi-pi
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -203,10 +199,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/fm-ci-tools
           key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
-      - uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: fm-npm-${{ runner.os }}-${{ runner.arch }}-tasks-axi-pi
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -267,10 +259,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/fm-ci-tools
           key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-actionlint.sh') }}
-      - uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: fm-npm-${{ runner.os }}-${{ runner.arch }}-tasks-axi-pi
       - name: Install pinned ShellCheck
         run: |
           set -eu

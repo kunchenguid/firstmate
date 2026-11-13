@@ -3,7 +3,6 @@
 `bin/fm-test-run.sh` owns portable lane composition and execution.
 `bin/fm-test-isolation-proof.sh` owns the proven-isolated candidate set.
 `tests/fm-test-ci-timings.tsv` holds the committed per-script CI duration hints the packer reads.
-`bin/fm-refresh-ci-timings.sh` rebuilds that file from green main timing artifacts.
 
 ## Verification inputs
 
@@ -19,16 +18,7 @@ A passing coverage guard does not establish a healthy job duration; refresh the 
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains a separate measurement and is skipped by the portable CI shards.
 Measure that script through the focused Git Bash runner rather than a portable skip.
 
-Refresh the table from already-downloaded artifacts or from the newest green main runs:
-
-```sh
-bin/fm-refresh-ci-timings.sh --from-dir /tmp/fm-timings
-bin/fm-refresh-ci-timings.sh --from-main --limit 3
-bin/fm-test-run.sh --check-coverage
-```
-
-`bin/fm-refresh-ci-timings.sh --help` owns the exact flags, default output path, and which JSON records it keeps.
-A timed-out shard may upload no artifact, so include a complete green run or the slowest scripts go unmeasured in exactly the shard that needs them most.
+A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
 ## Parallel lanes
 
