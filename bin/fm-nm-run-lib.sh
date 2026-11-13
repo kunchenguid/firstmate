@@ -40,12 +40,14 @@ fm_nm_now_ms() {
 
 # A reader may consume a one-shot FM_READ_BUDGET_MS floor (1..1000 ms) after
 # startup, before reading task state. Descendants inherit only the resulting
-# FM_READ_DEADLINE. FM_READ_BUDGET_REPORT=1 prefixes its captured output with
+# FM_READ_DEADLINE. FM_READ_CEILING bounds that promise by the enclosing
+# watchdog; an impossible floor returns 124 before reading state.
+# FM_READ_BUDGET_REPORT=1 prefixes its captured output with
 # the reader's own start and deadline; ordinary state reads keep their output.
 fm_nm_read_budget_start() {
   local budget=${FM_READ_BUDGET_MS:-} report=${FM_READ_BUDGET_REPORT:-0}
-  local deadline=${FM_READ_DEADLINE:-} started floor
-  unset FM_READ_BUDGET_MS FM_READ_BUDGET_REPORT
+  local deadline=${FM_READ_DEADLINE:-} ceiling=${FM_READ_CEILING:-} started floor
+  unset FM_READ_BUDGET_MS FM_READ_BUDGET_REPORT FM_READ_CEILING
   [ -n "$budget" ] || return 0
   case "$budget" in 0*|*[!0-9]*) return 124 ;; esac
   [ "${#budget}" -le 4 ] && [ "$budget" -le 1000 ] || return 124
@@ -57,6 +59,11 @@ fm_nm_read_budget_start() {
   [ "${#deadline}" -le 18 ] || return 124
   started=$(fm_nm_now_ms) || return 124
   floor=$((started + budget))
+  if [ -n "$ceiling" ]; then
+    case "$ceiling" in 0*|*[!0-9]*) return 124 ;; esac
+    [ "${#ceiling}" -le 18 ] && [ "$floor" -le "$ceiling" ] || return 124
+    [ -z "$deadline" ] || [ "$deadline" -le "$ceiling" ] || deadline=$ceiling
+  fi
   if [ -z "$deadline" ] || [ "$deadline" -lt "$floor" ]; then
     deadline=$floor
   fi

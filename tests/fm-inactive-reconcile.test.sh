@@ -823,6 +823,9 @@ for arg in "$@"; do
     bash|env) [ -n "$seconds" ] || seconds=$previous ;;
     _scan-locked) kind=outer ;;
   esac
+  if [ -n "${FM_FLOOR_SCAN_BIN:-}" ] && [ "$arg" = "$FM_FLOOR_SCAN_BIN" ]; then
+    [ -n "$seconds" ] || seconds=$previous
+  fi
   if [ -n "${FM_FLOOR_READER:-}" ] && [ "$arg" = "$FM_FLOOR_READER" ]; then
     kind=reader
     printf 'reader-setup\n' >> "$FM_FLOOR_SETUP_LOG"
@@ -870,6 +873,7 @@ SH
     FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
     FM_FLOOR_READER="$WORLD/fakebin/measured-crew-state" FM_FLOOR_SETUP_LOG="$WORLD/setup.log" \
     FM_FLOOR_WATCHDOGS="$WORLD/watchdogs" \
+    FM_FLOOR_SCAN_BIN="$RECON" \
     FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
     FM_FLOOR_DELAY=0.6 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
