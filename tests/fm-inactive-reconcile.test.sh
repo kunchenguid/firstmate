@@ -844,6 +844,13 @@ SH
     printf 'exec %q "$@"\n' "$real_tool" >> "$WORLD/fakebin/$tool"
   done
   chmod +x "$WORLD/fakebin/"*
+  rc=0
+  out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
+    FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' \
+    FM_READ_BUDGET_MS=1000 FM_READ_BUDGET_REPORT=1 FM_READ_CEILING="$(fm_nm_now_ms)" \
+    FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
+    "$ROOT/bin/fm-crew-state.sh" 0-cadence) || rc=$?
+  [ "$rc" = 124 ] || fail 'the reader accepted a floor outside its enclosing deadline'
   out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
     FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
