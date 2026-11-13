@@ -166,6 +166,19 @@ registered_checks() {
   done
 }
 
+steer() { # home task text: one durable steering-inbox record, as fm-send writes it
+  # shellcheck source=bin/fm-task-inbox-lib.sh
+  ( . "$ROOT/bin/fm-task-inbox-lib.sh" && fm_task_inbox_write "$1/state" "$2" "$3" >/dev/null )
+}
+
+ack_with_handoff() { # home task url token: steer the owner with the signal's source, then acknowledge
+  local source
+  source=$(with_home "$1" "$ROOT/bin/fm-contributions.sh" pending | jq -er --arg token "$4" '.[] | select(.token == $token) | .source') \
+    || fail 'the signal to hand off was not pending'
+  steer "$1" "$2" "Handle $source"
+  with_home "$1" "$ROOT/bin/fm-contributions.sh" ack "$2" "$3" "$4" handoff
+}
+
 test_incoming_signal() { # comment|review|inline
   local type=$1 home out count fixture wake_count
   case "$type" in comment) fixture=comments ;; review) fixture=reviews ;; *) fixture=inline ;; esac
@@ -261,7 +274,7 @@ test_review_bot_inline_wake() {
     | jq -e '.rows[0].actor == "fleet" and .rows[0].reason == "incoming review-bot finding needs triage"' >/dev/null \
     || fail 'a review-bot finding must route to the fleet'
   token=$(printf '%s' "$out" | jq -er '.[0].token') || fail 'the review-bot signal had no token'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
+  ack_with_handoff "$home" delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
     || fail 'the review-bot signal could not be acknowledged'
   poll_at "$home" 2026-09-17T09:01:00Z >/dev/null || fail 'the unanswered review-bot thread was not polled again'
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
@@ -313,7 +326,7 @@ test_review_bot_allowlist_is_configurable() {
   printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "custom-review[bot]"' >/dev/null \
     || fail "the armed check did not retain its configured review-bot allowlist: $out"
   token=$(printf '%s' "$out" | jq -er '.[0].token') || fail 'the configured review-bot signal had no token'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
+  ack_with_handoff "$home" delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
     || fail 'the configured review-bot signal could not be acknowledged'
   : > "$home/$config/contribution-review-bots"
   registered_checks "$home" >/dev/null
@@ -1817,7 +1830,7 @@ test_many_reviews_stay_readable() {
       {id:1290,state:"CHANGES_REQUESTED",submitted_at:"2026-09-16T06:48:20Z",commit_id:$a,user:{login:"maintainer"},freshness:"current"}]' \
     >/dev/null || fail "the stored review projection changed the classified reviews: $out"
   token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[0].token') || fail 'no review token to acknowledge'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" \
+  ack_with_handoff "$home" delivery https://github.com/o/r/pull/8 "$token" \
     || fail 'a many-review record refused an exact acknowledgement'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_A" \
     https://github.com/o/r/pull/8#pullrequestreview-1290 fleet 'address requested changes' \
@@ -1846,7 +1859,7 @@ poll_at() { with_home "$1" env FM_CONTRIBUTIONS_REPLY_AGE=86400 FM_CONTRIBUTIONS
 ack_pending() { # home: acknowledge the one pending signal
   local home=$1 token
   token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'first | .token') || fail 'no pending signal to acknowledge'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
+  ack_with_handoff "$home" delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
 }
 
 test_unanswered_thread_is_raised_again_under_hold() {
@@ -2027,6 +2040,268 @@ test_arm_plumbs_the_reply_age_into_the_check_shim() {
     || fail 'unconfigured check shim failed'
   [ -z "$out" ] || fail "a check armed without a reply age raised a thread: $out"
   pass 'arm copies a configured reply age into the generated check'
+}
+
+review_home() { # name state body: delivery with one pending maintainer review
+  local home
+  home=$(new_home "$1")
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  registered_checks "$home" >/dev/null
+  jq -n --arg head "$HEAD_A" --arg state "$2" --arg body "$3" '[{id:12,user:{login:"maintainer"},author_association:"OWNER",
+    body:$body,html_url:"https://github.com/o/r/pull/8#pullrequestreview-12",
+    submitted_at:"2026-09-16T08:01:00Z",commit_id:$head,state:$state}]' > "$home/forge/reviews.json"
+  registered_checks "$home" >/dev/null
+  printf '%s\n' "$home"
+}
+
+review_token() { with_home "$1" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'first | .token'; }
+
+pending_count() { with_home "$1" "$ROOT/bin/fm-contributions.sh" pending | jq 'length'; }
+
+test_approved_review_with_findings_is_not_acknowledged_on_its_label() {
+  local home token
+  home=$(review_home approved-findings APPROVED 'Approved, but the retry loop drops errors and the cache never expires')
+  token=$(review_token "$home") || fail 'the approved review was never captured'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" 2>"$home/err"; then
+    fail 'an approved review with findings was acknowledged with no handoff or disposition'
+  fi
+  grep -Fq 'handoff' "$home/err" || fail "the refusal did not name the handoff the review needs: $(cat "$home/err")"
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused acknowledgement still removed the review'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" disposition \
+    https://github.com/o/r/pull/8#pullrequestreview-12 'approved, non-blocking' 2>/dev/null; then
+    fail 'the review itself was accepted as the evidence for its own disposition'
+  fi
+  [ "$(pending_count "$home")" = 1 ] || fail 'a label-only disposition removed the review'
+  pass 'an approved review with findings is not acknowledged on its label'
+}
+
+test_inline_comment_and_its_reraise_are_not_acknowledged_with_the_token_alone() {
+  local home token
+  home=$(unanswered_home inline-token-only)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  token=$(review_token "$home") || fail 'the inline comment was never captured'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" 2>"$home/err"; then
+    fail 'an inline review comment was acknowledged with no handoff or disposition'
+  fi
+  grep -Fq 'handoff' "$home/err" || fail "the refusal did not name the handoff the comment needs: $(cat "$home/err")"
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused acknowledgement still removed the inline comment'
+  ack_pending "$home"
+  poll_at "$home" 2026-09-17T09:00:00Z >/dev/null || fail 'poll 25 hours after the comment failed'
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[] | select(.type == "unanswered") | .token') \
+    || fail 'the unanswered thread was not raised again'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" 2>"$home/err"; then
+    fail 'a re-raised unanswered thread was acknowledged with no handoff or disposition'
+  fi
+  grep -Fq 'handoff' "$home/err" || fail "the refusal did not name the handoff the re-raise needs: $(cat "$home/err")"
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused acknowledgement still removed the re-raised thread'
+  pass 'an inline review comment and its re-raise are not acknowledged with the token alone'
+}
+
+test_review_handoff_must_name_the_review_in_the_owning_task_inbox() {
+  local home token
+  home=$(review_home review-handoff CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff 2>/dev/null; then
+    fail 'a handoff was accepted with no steer to the owning worker'
+  fi
+  steer "$home" other 'Read https://github.com/o/r/pull/8#pullrequestreview-12 and fix it'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-123 and fix it'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff 2>/dev/null; then
+    fail 'a steer to another task or about another review was accepted as the handoff'
+  fi
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused handoff still removed the review'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-12 and fix it'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff >/dev/null \
+    || fail 'a steer naming the review to the owning worker was refused'
+  [ "$(pending_count "$home")" = 0 ] || fail 'the handed-off review stayed pending'
+  jq -e --arg token "$token" '.records[0].receipts == [{token:$token,task:"delivery",kind:"handoff",ref:"002.msg",at:"2026-09-16T08:00:00Z"}]' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "the receipt is not bound to the review token and owning task: $(cat "$home/data/delivery/contributions.json")"
+  registered_checks "$home" >/dev/null
+  jq -e '(.records[0].receipts | length) == 1 and (.records[0].pending | length) == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a later poll lost the receipt or raised the acknowledged review again'
+  pass 'a review is handed off only by a steer to the owning worker that names it'
+}
+
+test_review_handoff_is_found_under_a_home_path_with_spaces() {
+  local home token
+  home=$(review_home 'spaced home' CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-12 and fix it'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff >/dev/null \
+    || fail 'a steer naming the review was not found when the home path contains a space'
+  [ "$(pending_count "$home")" = 0 ] || fail 'the handed-off review stayed pending'
+  jq -e '.records[0].receipts[0].ref == "001.msg"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "the receipt does not name the steer record: $(cat "$home/data/delivery/contributions.json")"
+  pass 'a handoff finds the steer when the home path contains a space'
+}
+
+test_review_disposition_needs_evidence_on_this_contribution() {
+  local home token
+  home=$(review_home review-disposition CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" disposition \
+    https://github.com/o/r/pull/99#issuecomment-40 'fixed' 2>/dev/null; then
+    fail 'evidence from another contribution was accepted'
+  fi
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" disposition \
+    https://github.com/o/r/pull/8#issuecomment-40 '  ' 2>/dev/null; then
+    fail 'a blank disposition summary was accepted'
+  fi
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused disposition still removed the review'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" disposition \
+    https://github.com/o/r/pull/8#issuecomment-40 'author replied that the loop is bounded by the caller' >/dev/null \
+    || fail 'a disposition citing a reply on the contribution was refused'
+  jq -e --arg token "$token" '.records[0].receipts
+    == [{token:$token,task:"delivery",kind:"disposition",ref:"https://github.com/o/r/pull/8#issuecomment-40",
+         summary:"author replied that the loop is bounded by the caller",at:"2026-09-16T08:00:00Z"}]' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the disposition receipt was not stored with its evidence'
+  pass 'a disposition is stored only with evidence on the same contribution'
+}
+
+test_torn_down_task_disposes_of_a_review_by_citing_it_and_then_retires() {
+  local home token url=https://github.com/o/r/pull/8
+  home=$(review_home review-torn-down CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  [ ! -e "$home/state/delivery.inbox" ] || fail 'the fixture gave the never-steered task a steering inbox'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery "$url" "$token" disposition \
+    "$url#pullrequestreview-12" 'approved, non-blocking' 2>/dev/null; then
+    fail 'a live task with no steering inbox disposed of a review by citing it'
+  fi
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused self-citing disposition removed the review'
+  rm -f "$home/state/delivery.meta"
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery "$url" "$token" disposition \
+    "$url#pullrequestreview-12" '  ' 2>/dev/null; then
+    fail 'a torn-down task disposed of a review with a blank summary'
+  fi
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" retire delivery "$url" captain 'task finished' >/dev/null 2>&1 \
+    && fail 'retire dropped the unacknowledged review'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery "$url" "$token" disposition \
+    "$url#pullrequestreview-12" 'task finished and torn down; follow-up filed' >/dev/null \
+    || fail 'a torn-down task could not dispose of a review by citing it'
+  jq -e --arg token "$token" --arg ref "$url#pullrequestreview-12" '.records[0].receipts
+    == [{token:$token,task:"delivery",kind:"disposition",ref:$ref,
+         summary:"task finished and torn down; follow-up filed",at:"2026-09-16T08:00:00Z"}]' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the self-citing disposition receipt was not stored'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" retire delivery "$url" captain 'task finished' >/dev/null \
+    || fail 'retire was refused after the review was disposed of'
+  jq -e '.records[0].retired.reason == "task finished"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'retire did not record its provenance'
+  pass 'a torn-down task disposes of a review by citing it, then retires'
+}
+
+test_review_text_after_a_long_whitespace_run_still_needs_a_receipt() {
+  local home token
+  home=$(review_home padded-findings APPROVED "$(printf '%600s' '')The retry loop drops errors")
+  token=$(review_token "$home") || fail 'the padded review was never captured'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" 2>"$home/err"; then
+    fail 'a review whose text follows 600 blanks was acknowledged with no handoff or disposition'
+  fi
+  grep -Fq 'handoff' "$home/err" || fail "the refusal did not name the handoff the review needs: $(cat "$home/err")"
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused acknowledgement still removed the padded review'
+  pass 'a review whose text follows a long whitespace run still needs a receipt'
+}
+
+test_review_handoff_matches_a_steer_already_handled() {
+  local home token inbox
+  home=$(review_home handled-handoff CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  inbox="$home/state/delivery.inbox"
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-123 and fix it'
+  mv "$inbox/001.msg" "$inbox/handled/001.msg" || fail 'could not mark the first steer handled'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff 2>/dev/null; then
+    fail 'a handled steer about another review was accepted as the handoff'
+  fi
+  [ "$(pending_count "$home")" = 1 ] || fail 'a refused handoff still removed the review'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-12 and fix it'
+  mv "$inbox/002.msg" "$inbox/handled/002.msg" || fail 'could not mark the second steer handled'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff >/dev/null \
+    || fail 'a handled steer naming the review was refused as the handoff'
+  [ "$(pending_count "$home")" = 0 ] || fail 'the handed-off review stayed pending'
+  jq -e '.records[0].receipts[0].kind == "handoff" and .records[0].receipts[0].ref == "002.msg"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "the receipt does not name the handled steer: $(cat "$home/data/delivery/contributions.json")"
+  pass 'a handoff is satisfied by a steer the worker already handled'
+}
+
+test_review_handoff_follows_a_steer_moved_during_the_read() {
+  local home token inbox real_awk rc=0
+  home=$(review_home moving-handoff CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-12 and fix it'
+  inbox="$home/state/delivery.inbox"
+  real_awk=$(command -v awk)
+  # Move the already-listed record just before the real reader opens it.
+  cat > "$home/fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$MOVING_STEER" ] && [ -f "$MOVING_STEER" ]; then
+    mv "$MOVING_STEER" "${MOVING_STEER%/*}/handled/" || exit 99
+  fi
+done
+exec "$REAL_AWK" "$@"
+SH
+  chmod +x "$home/fakebin/awk"
+  with_home "$home" env REAL_AWK="$real_awk" MOVING_STEER="$inbox/001.msg" \
+    "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff \
+    >"$home/ack.out" 2>"$home/ack.err" || rc=$?
+  [ ! -e "$inbox/001.msg" ] && [ -f "$inbox/handled/001.msg" ] \
+    || fail 'the fixture did not move the listed record before the read'
+  [ "$rc" -eq 0 ] || fail "the handoff missed the concurrently handled steer: $(cat "$home/ack.err")"
+  [ "$(pending_count "$home")" = 0 ] || fail 'the handed-off review stayed pending'
+  jq -e --arg token "$token" '.records[0].receipts
+    == [{token:$token,task:"delivery",kind:"handoff",ref:"001.msg",at:"2026-09-16T08:00:00Z"}]' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the receipt did not match the moved steer'
+  pass 'a handoff follows a steer moved into handled while its body is being read'
+}
+
+test_saved_disposition_receipt_without_a_reason_is_unreadable() {
+  local home token mutation
+  home=$(review_home receipt-reason CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" disposition \
+    https://github.com/o/r/pull/8#issuecomment-40 'author replied that the loop is bounded by the caller' >/dev/null \
+    || fail 'could not record the disposition'
+  cp "$home/data/delivery/contributions.json" "$home/well-formed.json"
+  for mutation in 'del(.records[0].receipts[0].summary)' '.records[0].receipts[0].summary = "  "' '.records[0].receipts[0].summary = 3'; do
+    cp "$home/well-formed.json" "$home/data/delivery/contributions.json"
+    mutate_record "$home" delivery "$mutation"
+    if with_home "$home" "$ROOT/bin/fm-contributions.sh" pending >/dev/null 2>&1; then
+      fail "a disposition receipt without a written reason was read as valid: $mutation"
+    fi
+    bearings "$home" | jq -e '.contributions.unreadable_records == 1 and .contributions.complete == false' >/dev/null \
+      || fail "a disposition receipt without a written reason was counted as measured: $mutation"
+  done
+  cp "$home/well-formed.json" "$home/data/delivery/contributions.json"
+  [ "$(pending_count "$home")" = 0 ] || fail 'the well-formed disposition receipt was not read back'
+  pass 'a saved disposition receipt is valid only with a written reason'
+}
+
+test_signals_without_findings_acknowledge_without_a_receipt() {
+  local home token
+  home=$(review_home bare-approval APPROVED '')
+  token=$(review_token "$home") || fail 'the bare approval was never captured'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
+    || fail 'an approval with no text needed a receipt'
+  [ "$(pending_count "$home")" = 0 ] || fail 'the bare approval stayed pending'
+  pass 'an approval with no text acknowledges without a receipt'
+}
+
+test_late_owner_does_not_inherit_a_receipt() {
+  local home token
+  home=$(review_home late-owner CHANGES_REQUESTED 'The retry loop drops errors')
+  token=$(review_token "$home") || fail 'the review was never captured'
+  steer "$home" delivery 'Read https://github.com/o/r/pull/8#pullrequestreview-12'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" handoff >/dev/null \
+    || fail 'could not hand off the review'
+  printf 'merged\n' > "$home/forge/state"
+  registered_checks "$home" >/dev/null
+  printf -- '- [ ] latecomer - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  registered_checks "$home" >/dev/null
+  jq -e '(.records[0].receipts // []) | length == 0' "$home/data/latecomer/contributions.json" >/dev/null \
+    || fail 'a task that arrived after the handoff inherited another task receipt'
+  pass 'a task that owns a pull request later does not inherit another task receipt'
 }
 
 test_forge_settles_only_declared_holds() {
@@ -2322,7 +2597,7 @@ test_settled_task_gets_no_closed_event_for_its_other_pr() {
 }
 
 failures=0
-for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable test_approved_review_with_findings_is_not_acknowledged_on_its_label test_inline_comment_and_its_reraise_are_not_acknowledged_with_the_token_alone test_review_handoff_must_name_the_review_in_the_owning_task_inbox test_review_handoff_is_found_under_a_home_path_with_spaces test_review_disposition_needs_evidence_on_this_contribution test_torn_down_task_disposes_of_a_review_by_citing_it_and_then_retires test_review_text_after_a_long_whitespace_run_still_needs_a_receipt test_review_handoff_matches_a_steer_already_handled test_review_handoff_follows_a_steer_moved_during_the_read test_saved_disposition_receipt_without_a_reason_is_unreadable test_signals_without_findings_acknowledge_without_a_receipt test_late_owner_does_not_inherit_a_receipt; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
