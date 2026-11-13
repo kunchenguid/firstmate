@@ -34,6 +34,7 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse, Gemini, Devin, Command Code, Polytoken, Cortex, Kiro, and Hermes are verified only for crewmate and scout work, never a secondmate or primary.
+Auggie is verified only as a primary, never a crewmate, scout, or secondmate.
 
 ## Detection
 
@@ -94,6 +95,7 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "rovo": "references/harness/rovo.md",
     "omp": "references/harness/omp.md",
     "agy": "references/harness/agy.md",
+    "auggie": "references/harness/auggie.md",
     "devin": "references/harness/devin.md",
     "commandcode": "references/harness/commandcode.md",
     "polytoken": "references/harness/polytoken.md",

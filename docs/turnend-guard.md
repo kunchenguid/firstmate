@@ -264,6 +264,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | Cursor | `stop` hook in `.cursor/hooks.json` | Cannot block, so it parks and returns at most one follow-up |
 | Grok | `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` | Native blocking, or one legacy `grok --resume` fallback |
 | Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch-arm.sh` (or the supervision host) with bounded repair nag via `bin/fm-turnend-guard.sh --agy` |
+| Auggie | None registered | Instruction-only: the [auggie protocol](supervision-protocols/auggie.md) tells the model to start the next foreground checkpoint before every turn end |
 
 The registrations in detail:
 
@@ -310,6 +311,7 @@ The registrations in detail:
 - Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 28800s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
   In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
   In primary or persistent secondmate homes, the hook parks synchronously on `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host), keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
+- Auggie registers no turn-end hook; the tracked `.augment/settings.json` carries only the `PreToolUse` seatbelts.
 
 ### Claude and Codex blocking
 
@@ -592,6 +594,10 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
+- Auggie has no enforced turn-end guard, so on an auggie primary "no turn ends blind" is instruction-only.
+  auggie 1.x runs `Stop` hooks in the background: they cannot block a turn end and their output never reaches the model, so neither a block nor a bounded follow-up is available.
+- An auggie foreground checkpoint is bounded by auggie's bash tool timeout, which kills the whole process tree, so each checkpoint call must pass a timeout above `FM_CODEX_WATCH_CHECKPOINT`.
+  The tool's maximum timeout is unverified ([`verification/auggie.md`](verification/auggie.md)), so a longer bound such as `FM_CODEX_WATCH_CHECKPOINT_AWAY`, which applies only on a home that runs the supervision host, may need to be set shorter if auggie ever runs one.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
 ## Regression coverage

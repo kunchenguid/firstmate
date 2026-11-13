@@ -201,6 +201,203 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+# Auggie runs as a node bundle: comm reads node-MainThread (Node v26), a bare
+# MainThread (Node 24), or node, and only the script argument - a symlink into
+# the published @augmentcode/auggie package - carries the identity
+# (bin/fm-auggie-lib.sh owns the rule).
+test_auggie_node_bundle_is_identified_by_its_package_script() {
+  local dir fakebin pkg link comm args
+  # PID 2147483647 cannot expose a real /proc argv, so these cases exercise
+  # the macOS ps fallback on either platform. The shorter existing file
+  # ensures extraction chooses the full script path, not the first file.
+  dir="$TMP_ROOT/auggie Agent Tools"
+  : > "$TMP_ROOT/auggie"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/prefix/bin" "$dir/notes/auggie-notes" "$dir/other"
+  pkg="$dir/prefix/lib/node_modules/@augmentcode/auggie"
+  mkdir -p "$pkg/node_modules/dep"
+  : > "$pkg/auggie-v2.mjs"
+  : > "$pkg/node_modules/dep/cli.js"
+  : > "$dir/notes/auggie-notes/run.mjs"
+  : > "$dir/other/auggie-mcp"
+  : > "$dir/other/myauggie"
+  : > "$dir/other/auggie"
+  link="$dir/prefix/bin/auggie"
+  ln -s ../lib/node_modules/@augmentcode/auggie/auggie-v2.mjs "$link"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  2147483647:comm=) printf '%s\n' "$FM_TEST_AUGGIE_COMM" ;;
+  2147483647:args=) printf '%s\n' "$FM_TEST_AUGGIE_ARGS" ;;
+  2147483647:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash -c bin/fm-session-start.sh' ;;
+  *:ppid=) printf '%s\n' 2147483647 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '2147483647\n' > "$dir/state/.lock"
+
+  auggie_owns() {  # <comm> <args>
+    FM_TEST_AUGGIE_COMM=$1 FM_TEST_AUGGIE_ARGS=$2 lib_eval "$fakebin" "
+      [ \"\$(fm_harness_ancestry_pid)\" = 2147483647 ] || exit 1
+      fm_harness_pid_alive 2147483647 || exit 2
+      fm_session_lock_owned_by_self '$dir/state' || exit 3
+      fm_session_lock_pid_blocks_reclaim 2147483647 || exit 4
+      fm_session_lock_inspect '$dir/state'
+      [ \"\$FM_LOCK_INSPECT_STATE\" = held ] || exit 5
+      [ \"\$FM_LOCK_INSPECT_LIVE_HARNESS\" = true ] || exit 6
+      [ \"\$(bash '$ROOT/bin/fm-harness.sh' ancestry 2147483647)\" = 'comm auggie' ] || exit 7
+    "
+  }
+
+  # The extracted path is a public result too: the oracle is the actual
+  # symlink created above, even with an existing shorter prefix and CLI args.
+  lib_eval "$fakebin" "
+    [ \"\$(fm_auggie_script_arg 'node --no-warnings $link --resume session' 2147483647)\" = '$link' ]
+  " || fail "auggie: flattened ps args did not preserve the complete script path"
+
+  for comm in node-MainThread MainThread node /usr/local/bin/node; do
+    for args in "node $link" "node --no-warnings $link --resume session" "node $pkg/auggie-v2.mjs"; do
+      auggie_owns "$comm" "$args" \
+        || fail "auggie: comm '$comm' args '$args' was not identified as the lock-holding harness"
+    done
+  done
+
+  # Drive the signals apart: an interpreter comm with no auggie script, and the
+  # auggie script under a non-interpreter comm, must each fail on its own.
+  for args in node MainThread "node $dir/notes/auggie-notes/run.mjs" "node $dir/other/auggie-mcp" \
+    "node $dir/other/myauggie" "node $dir/other/auggie" "node $pkg/node_modules/dep/cli.js" "node /tmp/build.js --name auggie"; do
+    if auggie_owns node-MainThread "$args"; then
+      fail "auggie: an interpreter running '$args' was accepted as an auggie harness"
+    fi
+  done
+  if auggie_owns bash "bash $link"; then
+    fail "auggie: the auggie script under a non-interpreter comm was accepted as a harness"
+  fi
+  # The positive verdict above rests on the script path, not the comm: the same
+  # comm with an unrelated script is rejected while the auggie script is accepted.
+  if ! auggie_owns node-MainThread "node $link" || auggie_owns node-MainThread "node $dir/other/myauggie"; then
+    fail "auggie: the comm alone decided the verdict, so the script-path case is vacuous"
+  fi
+  pass "session-lock: an auggie node bundle is identified from its package script, and only from it"
+}
+
+test_auggie_live_argv_preserves_script_spaces() {
+  local dir pkg
+  if [ ! -r "/proc/$$/cmdline" ]; then
+    printf 'ok - session-lock: spaced argv # SKIP requires readable /proc cmdline\n'
+    return
+  fi
+  dir="$TMP_ROOT/Agent Tools"
+  pkg="$dir/lib/node_modules/@augmentcode/auggie"
+  mkdir -p "$dir/bin" "$dir/state" "$pkg"
+  ln -s /bin/bash "$dir/bin/node"
+  cat > "$pkg/auggie-v2.mjs" <<'SH'
+set -eu
+. "$1"
+state=$2
+printf '%s\n' "$$" > "$state/.lock"
+[ "$(fm_harness_ancestry_pid)" = "$$" ] || exit 11
+fm_harness_pid_alive "$$" || exit 12
+fm_session_lock_pid_blocks_reclaim "$$" || exit 13
+fm_session_lock_inspect "$state"
+[ "$FM_LOCK_INSPECT_STATE" = held ] || exit 14
+[ "$FM_LOCK_INSPECT_LIVE_HARNESS" = true ] || exit 15
+fm_session_lock_owned_by_self "$state" || exit 16
+SH
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+    "$dir/bin/node" "$pkg/auggie-v2.mjs" "$LIB" "$dir/state" \
+    || fail "auggie: a live script path with spaces lost its session-lock identity"
+  pass "session-lock: spaced live argv retains auggie ancestry, liveness, reclaim protection, and inspection"
+}
+
+# Oracle: Node's CLI assigns --require's operand to a preload, not the main
+# script. Query actual live Node argv through both the native and ps fallback
+# interfaces, with a preload path containing spaces so the ps fallback must
+# keep the operand whole; selecting the preload (or an eval argument) must fail.
+test_auggie_node_options_preserve_script_identity() {
+  local dir option script
+  command -v node >/dev/null 2>&1 || fail "auggie option tests require node"
+  dir="$TMP_ROOT/node-options"
+  script="$dir/Agent Tools/lib/node_modules/@augmentcode/auggie/auggie.cjs"
+  mkdir -p "${script%/*}"
+  : > "$dir/Agent Tools/preload.cjs"
+  cat > "$script" <<'JS'
+const {spawnSync} = require('node:child_process');
+const result = spawnSync('bash', ['-c', `
+  . "$1"
+  args=$(LC_ALL=C ps -p "$2" -o args=) || exit 1
+  comm=$(LC_ALL=C ps -p "$2" -o comm=) || exit 2
+  for pid in "$2" ''; do
+    if [ "$3" = script ]; then
+      [ "$(fm_auggie_script_arg "$args" "$pid")" = "$4" ] || exit 3
+      fm_auggie_process_matches "$comm" "$args" "$pid" || exit 4
+    else
+      if fm_auggie_script_arg "$args" "$pid"; then exit 5; fi
+      if fm_auggie_process_matches "$comm" "$args" "$pid"; then exit 6; fi
+    fi
+  done
+`, 'probe', process.env.FM_TEST_AUGGIE_LIB, String(process.pid),
+  process.env.FM_TEST_AUGGIE_MODE, process.env.FM_TEST_AUGGIE_SCRIPT], {stdio: 'inherit'});
+process.exit(result.status === null ? 99 : result.status);
+JS
+  for option in --require -r --import; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" "$dir/Agent Tools/preload.cjs" "$script" \
+      || fail "auggie: live node $option lost script identity"
+  done
+  for option in "--require=$dir/Agent Tools/preload.cjs" "--import=$dir/Agent Tools/preload.cjs" --max-old-space-size=4096 --unhandled_rejections=warn; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" "$script" \
+      || fail "auggie: live node $option lost script identity"
+  done
+  for option in --disable-warning --unhandled-rejections --unhandled_rejections; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" warn "$script" \
+      || fail "auggie: live node $option <value> lost script identity"
+  done
+  for option in -e --eval -p --print; do
+    FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=eval \
+      FM_TEST_AUGGIE_SCRIPT="$script" \
+      node "$option" 'require(process.env.FM_TEST_AUGGIE_SCRIPT)' "$script" \
+      || fail "auggie: live node $option acquired script identity"
+  done
+
+  # Public parser contract for operands that cannot all accompany a running
+  # script (notably --input-type): each belongs to its preceding Node option.
+  bash -c '
+    . "$1"
+    for option in -r --require --import --loader --experimental-loader --inspect-port --debug-port \
+      --env-file --env-file-if-exists --title -C --conditions --input-type --disable-warning \
+      --redirect-warnings --report-dir --watch-path --test-reporter --openssl-config; do
+      [ "$(fm_auggie_script_arg "node $option operand $2")" = "$2" ] || exit 1
+      [ "$(fm_auggie_script_arg "node $option=operand $2")" = "$2" ] || exit 2
+    done
+    [ "$(fm_auggie_script_arg "node --require operand --title operand -- $2 --eval code")" = "$2" ] || exit 3
+    for option in -e --eval -p --print --run --eval=code --print=code --run=start -ecode -pcode; do
+      if fm_auggie_script_arg "node $option $2"; then exit 4; fi
+    done
+    for option in --inspect --inspect-brk --force-fips --no-warnings --experimental-default-config-file; do
+      [ "$(fm_auggie_script_arg "node $option $2")" = "$2" ] || exit 5
+    done
+  ' probe "$ROOT/bin/fm-auggie-lib.sh" "$script" \
+    || fail "auggie: Node option operand parsing violated the script contract"
+  pass "session-lock: Node option operands and eval launches cannot replace the main script"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -881,6 +1078,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-omp-process-lib.sh" "$dir/bin/fm-omp-process-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-auggie-lib.sh" "$dir/bin/fm-auggie-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
   cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
@@ -1191,7 +1389,7 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
 }
 
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
-  local dir frontend daemon ptyhost spare i
+  local dir frontend daemon ptyhost spare i adopted_parent
   dir="$TMP_ROOT/e2e-background-session"
   make_background_session_home "$dir"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
@@ -1217,15 +1415,16 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
   expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain"
 
-  # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
-  # the front-end that holds the lock stays alive.
+  # Recycle the bridge: the daemon ends, the pty-host is adopted by init or a
+  # subreaper, and the front-end that holds the lock stays alive.
   kill -TERM "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = "$daemon" ]; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  adopted_parent=$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')
+  [ -n "$adopted_parent" ] && [ "$adopted_parent" != "$daemon" ] || fail "the pty-host was not reparented after the daemon ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phases 2-4: before the spare proves anything, a different id, the right id
@@ -1661,6 +1860,9 @@ test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_auggie_node_bundle_is_identified_by_its_package_script
+test_auggie_live_argv_preserves_script_spaces
+test_auggie_node_options_preserve_script_identity
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain

@@ -97,6 +97,8 @@ test_supervision_host_protocol_on_every_arm_owner() {
   assert_not_contains "$hosted" 'fm-watch-arm.sh` call' "grok with the file must re-arm the supervision host, not the plain arm"
   assert_contains "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --repair-line)" \
     'bin/fm-supervision-host.sh park as its own Grok tracked background task' "grok's repair line must name the host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness auggie)
+  assert_not_contains "$hosted" "Supervision host" "auggie, where the supervision host is unsupported, rendered the host protocol"
   hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex)
   assert_contains "$hosted" 'FM_CODEX_WATCH_CHECKPOINT_AWAY' "codex must learn that an away checkpoint holds longer"
   assert_contains "$hosted" 'checkpoint: no actionable wake within' "codex must learn how the park boundary arrives"
@@ -281,6 +283,23 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
+  out=$("$RENDER" --harness auggie)
+  assert_contains "$out" "primary harness: auggie" "auggie heading missing"
+  assert_contains "$out" "Mode: Auggie foreground checkpoint." "auggie mode line missing"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds" "auggie block lost the checkpoint command"
+  assert_contains "$out" "explicit tool timeout above the checkpoint bound" "auggie block lost the bash tool timeout requirement"
+  assert_contains "$out" "before ending any turn while supervision is needed" "auggie block lost the instruction-only turn-end rule"
+  assert_contains "$out" ".augment/settings.json" "auggie block lost its PreToolUse seatbelt registration"
+  assert_not_contains "$out" "Mode: Codex foreground checkpoint." "auggie rendered the codex block"
+  assert_not_contains "$out" "__FM_" "auggie block leaked a placeholder"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "auggie ordinary-wake line lost the checkpoint command"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "auggie ordinary-wake line incorrectly uses a background arm"
+  out=$("$RENDER" --harness auggie --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 180" "auggie recovery line lost the checkpoint command"
+  assert_contains "$out" "explicit timeout above that bound" "auggie recovery line lost the bash tool timeout requirement"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "auggie recovery line must not use the background arm"
+
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
@@ -375,7 +394,7 @@ test_literal_paths_in_rendered_snippets() {
     mkdir -p "$home/config" "$home/state"
     : > "$home/config/supervision-host-off"
     quoted_config="'$(printf '%s' "$home/config/x-mode.env" | sed "s/'/'\\\\''/g")'"
-    for harness in pi pi-signed omp codex grok cursor opencode claude; do
+    for harness in pi pi-signed omp codex grok cursor opencode claude auggie; do
       out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$RENDER" --harness "$harness" --x-mode 1)
       assert_not_contains "$out" '__FM_' "$harness: literal path leaked a placeholder"
       case "$harness" in

@@ -794,6 +794,127 @@ test_spawn_unverified_secondmate_harness_refused() {
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
 }
 
+# auggie is verified as a primary only: an auggie worker, whether resolved from
+# config, passed explicitly, or run by a raw launch command is refused with that
+# reason before any meta. Each guaranteed raw form has a case: bare, behind the
+# env, command, exec, nohup, sudo, and timeout wrappers, with assignments
+# (including sudo's), quoting, redirections, and wrapper options. The
+# whole-payload env -S, compound, pipeline, group, and substitution cases pin
+# the best-effort checks.
+# A wrapped raw launch of another program that merely mentions auggie is not
+# refused for that reason.
+test_spawn_auggie_secondmate_refused_as_primary_only() {
+  local w sm fakebin err rc how kind
+  for kind in secondmate ship scout; do
+    for how in config explicit raw env env-flags env-default-signal env-default-signal-value env-block-signal env-ignore-signal env-dash env-dash-end env-dash-i env-dash-nested nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment sudo-interspersed sudo-dash sudo-no-update sudo-auth-type sudo-login-class sudo-auth-type-long sudo-login-class-long timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other env-unfamiliar sudo-unfamiliar; do
+      if [[ "$how" = *-unfamiliar && "$kind" != secondmate ]]; then
+        continue
+      fi
+      w="$TMP_ROOT/spawn-auggie-$kind-$how"
+      sm="$w/sm"
+      mkdir -p "$w/home/config" "$w/home/state"
+      make_seeded_home "$sm" sm
+      fakebin=$(make_noop_tmux "$w/tmux")
+      err="$w/spawn.err"
+      rc=0
+      set -- sm "$sm"
+      case "$how" in
+        config)
+          if [ "$kind" = secondmate ]; then
+            printf 'auggie\n' > "$w/home/config/secondmate-harness"
+          else
+            printf 'auggie\n' > "$w/home/config/crew-harness"
+          fi
+          ;;
+        explicit) set -- "$@" auggie ;;
+        raw) set -- "$@" 'auggie --model test-model' ;;
+        env) set -- "$@" 'env auggie --model test-model' ;;
+        env-flags) set -- "$@" 'env -i -u CLAUDECODE --chdir /tmp PATH=/usr/bin /opt/tools/bin/auggie --model test-model' ;;
+        env-default-signal) set -- "$@" 'env --default-signal auggie --model x' ;;
+        env-default-signal-value) set -- "$@" 'env --default-signal=INT auggie --model x' ;;
+        env-block-signal) set -- "$@" 'env --block-signal auggie --model x' ;;
+        env-ignore-signal) set -- "$@" 'env --ignore-signal auggie --model x' ;;
+        env-dash) set -- "$@" 'env - /opt/tools/bin/auggie --model x' ;;
+        env-dash-end) set -- "$@" 'env -- - /opt/tools/bin/auggie --model x' ;;
+        env-dash-i) set -- "$@" 'env -i - /opt/tools/bin/auggie --model x' ;;
+        env-dash-nested) set -- "$@" 'env - sudo auggie --model x' ;;
+        nested) set -- "$@" 'FOO=1 nohup command -p exec -a worker env BAR=2 auggie --model test-model' ;;
+        quoted) set -- "$@" "env 'auggie' --model test-model" ;;
+        quoted-path) set -- "$@" "env '/opt/Agent Tools/bin/auggie' --model test-model" ;;
+        double-quoted) set -- "$@" 'env "/opt/Agent Tools/bin/auggie" --model test-model' ;;
+        escaped) set -- "$@" 'env /opt/Agent\ Tools/bin/auggie --model test-model' ;;
+        assignment) set -- "$@" "FOO='two words' env BAR='two words' auggie --model test-model" ;;
+        operand) set -- "$@" "env -C '/opt/Agent Tools' auggie --model test-model" ;;
+        exec-name) set -- "$@" "exec -a 'worker name' env 'auggie' --model test-model" ;;
+        substitution) set -- "$@" "FOO=\$(touch '$w/evaluated') env 'auggie' --model test-model" ;;
+        redirect) set -- "$@" 'env 2>worker.log auggie --model test-model' ;;
+        leading-redirect) set -- "$@" '2>worker.log env auggie --model test-model' ;;
+        split) set -- "$@" "env -S 'auggie --model test-model'" ;;
+        split-attached) set -- "$@" "env -S'auggie --model test-model'" ;;
+        split-long) set -- "$@" "env --split-string='auggie --model test-model'" ;;
+        search-path) set -- "$@" 'env -P /usr/bin auggie --model test-model' ;;
+        sudo) set -- "$@" 'sudo -n -u worker auggie --model test-model' ;;
+        sudo-assignment) set -- "$@" 'sudo -n FOO=1 BAR=2 auggie --model test-model' ;;
+        sudo-interspersed) set -- "$@" 'sudo FOO=1 -n auggie --model test-model' ;;
+        sudo-dash) set -- "$@" 'sudo - auggie --model x' ;;
+        sudo-no-update) set -- "$@" 'sudo --no-update -n auggie --model test-model' ;;
+        sudo-auth-type) set -- "$@" 'sudo -a passwd auggie --model test-model' ;;
+        sudo-login-class) set -- "$@" 'sudo -c staff auggie --model test-model' ;;
+        sudo-auth-type-long) set -- "$@" 'sudo --auth-type passwd auggie --model test-model' ;;
+        sudo-login-class-long) set -- "$@" 'sudo --login-class staff auggie --model test-model' ;;
+        env-unfamiliar) set -- "$@" 'env FOO=1 /path/my-agent' ;;
+        sudo-unfamiliar) set -- "$@" 'sudo FOO=1 /path/my-agent' ;;
+        timeout) set -- "$@" 'timeout -s TERM 1h env auggie --model test-model' ;;
+        compound) set -- "$@" 'cd /tmp && env auggie --model test-model' ;;
+        pipeline) set -- "$@" 'true | env auggie --model test-model' ;;
+        group) set -- "$@" '(env auggie --model test-model)' ;;
+        nested-substitution) set -- "$@" "true \"\$(env auggie --model test-model)\"" ;;
+        redirect-other) set -- "$@" 'env 2>auggie true auggie --model test-model' ;;
+        compound-other) set -- "$@" 'cd /tmp && env true auggie --model test-model' ;;
+        search-path-other) set -- "$@" 'env -P /opt/auggie true auggie --model test-model' ;;
+        split-other) set -- "$@" "env -S 'true auggie --model test-model'" ;;
+        quoted-other) set -- "$@" "env -u 'auggie' BAR='two words' 'true' auggie --model test-model" ;;
+        other) set -- "$@" 'env -u auggie AUGGIE=auggie true auggie --model test-model' ;;
+      esac
+      case "$kind" in
+        secondmate) set -- "$@" --secondmate ;;
+        ship) set -- "$@" --mode no-mistakes --yolo off ;;
+        scout) set -- "$@" --scout ;;
+      esac
+      PATH="$fakebin:$BASE_PATH" TMUX='' \
+        FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" HOME="$w/home/user-home" CLAUDE_CONFIG_DIR='' \
+        FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+        FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+        FM_SPAWN_NO_GUARD=1 \
+        "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
+
+      [ ! -e "$w/evaluated" ] || fail "auggie $kind $how: parsing executed the raw command"
+      if [[ "$how" = *-unfamiliar ]]; then
+        [ "$rc" -eq 0 ] || fail "auggie $kind $how: unfamiliar program failed: $(cat "$err")"
+        [ -e "$w/home/state/sm.meta" ] || fail "auggie $kind $how: accepted launch wrote no meta"
+        assert_not_contains "$(cat "$err")" "primary harness only" "auggie $kind $how: unfamiliar program refused as auggie"
+        assert_not_contains "$(cat "$err")" "invalid raw launch" "auggie $kind $how: unfamiliar program refused as invalid"
+        continue
+      fi
+      if [[ "$how" = other || "$how" = *-other ]]; then
+        if grep -q "primary harness only" "$err"; then
+          fail "auggie $kind $how: a wrapped non-auggie program was refused as auggie"
+        fi
+        continue
+      fi
+      [ "$rc" -ne 0 ] || fail "auggie $kind $how: spawn should have failed"
+      if [[ "$how" = sudo-dash ]]; then
+        assert_contains "$(cat "$err")" "invalid raw launch command" "auggie $kind $how: unresolved wrapper was not refused"
+      else
+        assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
+          "auggie $kind $how: error names the primary-only boundary"
+      fi
+      [ -e "$w/home/state/sm.meta" ] && fail "auggie $kind $how: a meta was written despite the abort"
+    done
+  done
+  pass "B6b spawn: configured, explicit, raw, and wrapped raw auggie workers are refused for every task kind"
+}
+
 test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
   local w sm fakebin launchlog launch meta rc
   w="$TMP_ROOT/spawn-cursor-secondmate"
@@ -2974,6 +3095,7 @@ test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
+test_spawn_auggie_secondmate_refused_as_primary_only
 test_spawn_cursor_secondmate_launches_with_its_primary_contract
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config

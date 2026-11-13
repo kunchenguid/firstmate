@@ -262,8 +262,22 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
-#   name from PATH once, probes that concrete path with --help, and launches the
+#   new adapters. auggie is a primary-only harness, so every kind refuses an
+#   auggie worker from config, an explicit harness arg, or a raw launch command.
+#   For a raw launch the refusal is guaranteed for a simple command that runs
+#   auggie directly or behind the env, command, exec, nohup, sudo, or timeout
+#   wrappers (for example `env auggie`), with leading assignments, sudo
+#   assignments, quoted words, redirections, and recognised wrapper options;
+#   a wrapper whose options cannot be resolved, or whose program token begins
+#   with -, is refused rather than launched. An env -S
+#   split string, compound commands, subshell groups, and command substitutions
+#   are checked best-effort only: an env -S string that holds the whole command
+#   is inspected, but one split across -S and the remaining argv is not
+#   guaranteed. A shell -c string, heredoc or here-string stdin, and eval are
+#   not inspected, so a launch that reaches auggie through them is not
+#   guaranteed refused.
+#   For pi and pi-signed, fm-spawn resolves the selected executable name from
+#   PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A --secondmate launch of a Firstmate-seeded home (the existing
@@ -2670,7 +2684,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | auggie | devin | commandcode | polytoken | cortex | kiro | hermes)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -3211,18 +3225,61 @@ launch_template() {
   esac
 }
 
+# auggie is verified as a PRIMARY harness only: it has no launch template and no
+# verified worker lifecycle, so an explicit, resolved, or raw auggie worker is
+# refused with that reason rather than the generic unknown-harness one. An
+# auggie primary with an absent or "default" config/crew-harness resolves here
+# too. The usage header owns which raw launch forms the refusal guarantees;
+# bin/fm-arm-command-policy.mjs owns the command-position model it applies.
+refuse_primary_only_harness() {  # <harness> <source>
+  case "$1" in
+    auggie)
+      echo "error: auggie is verified as a primary harness only and cannot run a crewmate, scout, or secondmate; $2 must name a verified worker harness" >&2
+      exit 1
+      ;;
+  esac
+}
+
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
   LAUNCH=$ARG3
   HARNESS=""
-  for word in $LAUNCH; do
-    case "$word" in [A-Za-z_]*=*) continue ;; *)
-      HARNESS=$(basename "$word")
-      break
-      ;;
-    esac
-  done
+  harness_src='the raw launch command'
+  raw_analysis=$(node --input-type=module - "$SCRIPT_DIR/fm-arm-command-policy.mjs" "$LAUNCH" <<'JS'
+import { pathToFileURL } from "node:url";
+import { basename } from "node:path";
+const { Lexer, splitProgram, commandPosition } = await import(pathToFileURL(process.argv[2]).href);
+const programs = new Set();
+let harness = "";
+function inspect(source, topLevel = false) {
+  const { tokens, error } = new Lexer(source).tokenize();
+  if (error) throw new Error(`invalid raw launch command: ${error}`);
+  for (const node of splitProgram(tokens).nodes) {
+    const position = commandPosition(node);
+    if (position.unresolvedWrapperOption) throw new Error('invalid raw launch command: wrapper options could not be resolved');
+    const entry = position.words[position.prefixAssignments];
+    if (topLevel && !harness && entry) {
+      harness = basename(entry.value);
+    }
+    if (position.command) programs.add(basename(position.command.value));
+    for (const payload of position.wrapperPayloads) inspect(payload);
+    for (const token of node) {
+      if (token.type === "group") inspect(token.content);
+      for (const substitution of token.subs || []) inspect(substitution.content);
+    }
+  }
+}
+try {
+  inspect(process.argv[3], true);
+  console.log(JSON.stringify({ harness, programs: [...programs] }));
+} catch (error) {
+  console.error(`error: ${error.message}`);
+  process.exit(1);
+}
+JS
+  ) || exit 1
+  HARNESS=$(jq -r '.harness' <<<"$raw_analysis")
   ;;
 '')
   # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -3244,19 +3301,29 @@ case "$ARG3" in
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
     harness_src='config/crew-harness'
   fi
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
-    exit 1
-  }
   ;;
 *)
   HARNESS=$ARG3
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
-    exit 1
-  }
+  harness_src='the explicit harness argument'
   ;;
 esac
+
+refuse_primary_only_harness "$HARNESS" "$harness_src"
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  while IFS= read -r -d '' program; do
+    refuse_primary_only_harness "$program" "$harness_src"
+  done < <(jq -j '.programs[] | ., "\u0000"' <<<"$raw_analysis")
+fi
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+    if [ -z "$ARG3" ]; then
+      echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
+    else
+      echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
+    fi
+    exit 1
+  }
+fi
 
 case "$DISPATCH_OVERRIDE" in *[![:print:]]*) echo 'error: --dispatch-override must be a printable reason' >&2; exit 1 ;; esac
 DISPATCH_RECORD="$DATA/$ID/dispatch-resolution.json"

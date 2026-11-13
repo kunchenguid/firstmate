@@ -111,7 +111,12 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+# auggie is the same node-bundle shape (comm node-MainThread), but it is a
+# primary-only harness with no worker endpoint, so only its detection half is
+# asserted; pane liveness classifies worker endpoints and claims nothing for it.
+# A bare launch parks on auggie's workspace-indexing dialog, which is never
+# answered, so it spends no tokens and indexes nothing.
+for harness in claude codex opencode pi pi-signed grok kimi cursor muse auggie; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -132,21 +137,26 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
-  for _ in $(seq 1 300); do
+  for i in $(seq 1 300); do
     state=$(fm_backend_agent_state tmux "$target")
     [ "$state" = alive ] && break
+    [ "$harness" = auggie ] && [ "$i" -ge 25 ] && break
     sleep 0.2
   done
 
   title=$(fm_backend_tmux_current_command "$target")
   comms=$(fm_backend_tmux_foreground_comms "$target" | tr '\n' ' ')
 
-  [ "$state" = alive ] || fail \
+  [ "$state" = alive ] || [ "$harness" = auggie ] || fail \
     "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/fm-agent-process-lib.sh's fm_agent_process_classify_name the identity this release actually reports."
 
   note "$harness $version: title='$title' foreground=[$comms]"
 
-  pass "harness liveness: $harness $version classifies alive"
+  if [ "$harness" = auggie ]; then
+    note "$harness $version: primary-only, so pane liveness ($state) is not asserted"
+  else
+    pass "harness liveness: $harness $version classifies alive"
+  fi
 
   # Detection: ask the ancestry walk what it makes of this real harness process.
   # Both Pi identities share one launcher name, so ancestry can only ever prove

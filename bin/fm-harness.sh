@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|auggie|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
@@ -83,6 +83,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-auggie-lib.sh
+. "$SCRIPT_DIR/fm-auggie-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -153,7 +155,7 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, agy, devin, commandcode, polytoken, cortex, and kiro publish no harness-identity marker at all, so
+  # codex, opencode, kimi, muse, agy, auggie, devin, commandcode, polytoken, cortex, and kiro publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
@@ -213,6 +215,14 @@ harness_process_verdict() {  # <pid>
   # glob would otherwise claim it if that subtree were ever walked.
   if fm_omp_process_matches "$comm" "$args"; then
     echo "comm omp"
+    return
+  fi
+  # auggie is a node bundle (comm node-MainThread or MainThread), so its
+  # identity is the script argument resolved into its own package
+  # (bin/fm-auggie-lib.sh). That is a structural fact about the running
+  # program, so it is comm strength and outranks a retained foreign marker.
+  if fm_auggie_process_matches "$comm" "$args" "$pid"; then
+    echo "comm auggie"
     return
   fi
   case "$(basename -- "$comm")" in
@@ -451,7 +461,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|hermes)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|auggie|devin|commandcode|polytoken|cortex|hermes)
       printf '%s\n' "$pin"
       ;;
     *)

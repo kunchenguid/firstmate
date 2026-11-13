@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'root=${AUGMENT_PROJECT_DIR:-$(pwd -P)}; [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] && [ -f \"$root/AGENTS.md\" ] || { cat >/dev/null 2>&1; exit 0; }; exec \"$root/bin/fm-arm-pretool-check.sh\"'",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'root=${AUGMENT_PROJECT_DIR:-$(pwd -P)}; [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] && [ -f \"$root/AGENTS.md\" ] || { cat >/dev/null 2>&1; exit 0; }; exec \"$root/bin/fm-cd-pretool-check.sh\"'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

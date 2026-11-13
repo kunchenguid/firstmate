@@ -176,12 +176,13 @@ When that script is absent the message still defers to intake classification and
 
 ## Harness wiring
 
-Every supported primary harness was reviewed except omp, whose row below rests on its bundled material rather than a live enumeration.
+Every supported primary harness was reviewed except omp, whose row below rests on its bundled material rather than a live enumeration, and auggie, which has no recorded tool enumeration.
 Applicability turns on one question: does the harness expose built-in delegation tools that a primary session could use instead of `bin/fm-spawn.sh`?
 
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
+| Auggie | unverified | Not wired and unverified. No live tool enumeration is recorded, and `.augment/settings.json` registers only the bash-tool seatbelts; its status stays unverified until one is recorded the way the Codex row was. |
 | Antigravity | present (`invoke_subagent`, `define_subagent`) | Scoped guard wired and live-verified via `.agents/hooks.json` PreToolUse hook (`bin/fm-subagent-pretool-check.sh --agy`). |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |

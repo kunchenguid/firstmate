@@ -85,7 +85,7 @@ It does not permit `cd /home/project`, because an absolute-path `cd` to anything
 `bin/fm-cd-pretool-check.sh` supports every harness-engine entry shape used by the tracked adapters, with pi-signed sharing Pi's shape:
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
-- Codex sends stdin JSON at `.tool_input.command` without `--claude`.
+- Codex and Auggie send stdin JSON at `.tool_input.command` without `--claude`.
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
 - Pi, pi-signed, and omp send the exact command string through `--command <exact string>`.
@@ -123,6 +123,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | --- | --- | --- |
 | Claude | `.claude/settings.json` PreToolUse Bash hook forwarding stdin with `--claude` | Blocks the tool call; stderr deny object, stdout empty. |
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
+| Auggie | `.augment/settings.json` PreToolUse registration; [arm seatbelt wiring](arm-pretool-check.md#harness-wiring) owns the shared transport | Uses the default deny renderer; live blocking remains [unverified](verification/auggie.md#not-verified). |
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
 | OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` on 1.x, `execute.before` for the `shell` tool on 2.x | Throws, which surfaces as the failed tool result. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |

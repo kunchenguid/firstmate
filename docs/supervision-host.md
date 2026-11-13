@@ -23,6 +23,7 @@ An arm owner is the component in each primary harness that starts watcher cycles
 The host runs by default on a Claude primary and is opt-in per home on the other six primaries it supports; [configuration.md](configuration.md#supervision-host-configsupervision-host) owns the home gate and inherited opt-out.
 A home that does not run the host behaves exactly as it does without it.
 Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, Codex, or Antigravity (`agy`) primary: away on all seven, and attended on Claude and Cursor, the primaries with a verified [dialog mirror](#the-dialog-mirror).
+It is unsupported on an auggie primary: `bin/fm-watch-checkpoint.sh` pins the host's primary to Codex, so keep `config/supervision-host` absent on an auggie home.
 
 ### Behavior by posture and harness
 
