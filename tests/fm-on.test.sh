@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for the generic SSH transport and fixed remote entrypoint.
 set -u
+unset FM_SSH_BIN
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
