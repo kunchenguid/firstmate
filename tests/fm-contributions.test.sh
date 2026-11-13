@@ -2029,8 +2029,300 @@ test_arm_plumbs_the_reply_age_into_the_check_shim() {
   pass 'arm copies a configured reply age into the generated check'
 }
 
+test_forge_settles_only_declared_holds() {
+  local home mode action id state body out
+  for mode in merged closed; do
+    home=$(new_home "hold-terminal-$mode")
+    forge_home "$home"
+    rm "$home/state/delivery.meta"
+    touch "$home/config/hold-pr-settle"
+    for action in close release; do
+      id="question-$action"
+      with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" 'Decide this PR' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'add failed'
+      with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason 'Decide this PR' >/dev/null || fail 'hold failed'
+      with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy "$id" https://github.com/o/r/pull/8 terminal "$action" >/dev/null || fail 'policy failed'
+    done
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Unrelated unfinished work' >/dev/null || fail 'unrelated hold failed'
+    with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add bystander 'Work without a captain hold' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'bystander add failed'
+    printf '%s\n' "$mode" > "$home/forge/state"
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'terminal poll failed'
+    # Settlement must not cost a model turn: the watcher wakes on any poll line.
+    [ "$mode" = closed ] || [ -z "$out" ] || fail "a successful settlement produced poll output: $out"
+    for action in close release; do
+      id="question-$action"
+      if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id"; then fail "$mode left $id held"; fi
+      body=$(with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show "$id" --full)
+      printf '%s\n' "$body" | grep -F 'Reconciliation evidence:' >/dev/null || fail 'forge evidence missing'
+      printf '%s\n' "$body" | grep -F "Forge PR $mode: https://github.com/o/r/pull/8" >/dev/null || fail 'terminal event missing'
+      printf '%s\n' "$body" | grep -F 'Captain decision:' >/dev/null && fail 'forge event claimed a captain answer'
+      state=$(printf '%s\n' "$body" | sed -n 's/^  state: //p')
+      if [ "$action" = close ]; then [ "$state" = "done" ] || fail 'decision-only row stayed unfinished'
+      else [ "$state" != "done" ] || fail 'forge event completed unfinished work'; fi
+    done
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'unrelated question was settled'
+    if [ "$mode" = closed ]; then
+      with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e '[.[] | select(.type == "closed" and .url == "https://github.com/o/r/pull/8") | .task] == ["delivery"]' >/dev/null \
+        || fail 'unmerged closure was not reported to exactly the task that is still held'
+    fi
+    cp "$home/data/backlog.md" "$home/settled.md"
+    with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'retry failed'
+    cmp -s "$home/data/backlog.md" "$home/settled.md" || fail 'retry changed the settled task'
+  done
+  pass 'forge events settle only declared questions and preserve unfinished work'
+}
+
+test_forge_hold_policy_guards() {
+  local home mode out
+  for mode in disabled unmatched reheld; do
+    home=$(new_home "hold-guard-$mode")
+    forge_home "$home"
+    touch "$home/config/hold-pr-settle"
+    with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --pr https://github.com/o/r/pull/8 >/dev/null || fail 'link failed'
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Decide the PR' >/dev/null || fail 'hold failed'
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
+    case "$mode" in
+      disabled) rm "$home/config/hold-pr-settle" ;;
+      reheld) with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Another question about this work' >/dev/null || fail 'rehold failed' ;;
+    esac
+    if [ "$mode" = unmatched ]; then printf 'closed\n'; else printf 'merged\n'; fi > "$home/forge/state"
+    out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'guard poll failed'
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail "$mode policy settled the question"
+    if [ "$mode" = unmatched ]; then
+      printf '%s\n' "$out" | grep -F 'contributions: PR hold settlement failed for delivery https://github.com/o/r/pull/8' >/dev/null \
+        || fail 'a policy that can never match was dropped without a diagnostic'
+      out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'unmatched repeat poll failed'
+      [ -z "$out" ] || fail "a dropped policy was reported again: $out"
+    fi
+    if [ "$mode" = disabled ]; then
+      [ -z "$out" ] || fail 'disabled feature emitted a terminal notification'
+      touch "$home/config/hold-pr-settle"
+      with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'cached terminal poll failed'
+      if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'cached forge event did not settle the hold'; fi
+    fi
+  done
+  pass 'disabled, unmatched, and superseded policies cannot settle a hold'
+}
+
+test_forge_hold_settlement_retry() {
+  local home real body
+  home=$(new_home hold-settlement-retry)
+  forge_home "$home"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
+  # Retaining a finished worker's deliverable must not invalidate its question.
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show delivery --full | sed -n 's/^  body: //p' | jq -r . > "$home/body.txt"
+  printf '\nDeliverable of the finished work: https://github.com/o/r/pull/8\n' >> "$home/body.txt"
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --body-file "$home/body.txt" >/dev/null || fail 'deliverable update failed'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --report data/delivery/report.md >/dev/null || fail 'report link failed'
+  real=$(command -v tasks-axi)
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1:$2" = done:delivery ] && [ ! -e "$FORGE/close-failed" ]; then
+  touch "$FORGE/close-failed"
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  printf 'merged\n' > "$home/forge/state"
+  with_home "$home" env REAL_TASKS_AXI="$real" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'interrupted poll failed'
+  with_home "$home" env REAL_TASKS_AXI="$real" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'failed close lost the hold'
+  body=$(with_home "$home" env REAL_TASKS_AXI="$real" "$ROOT/bin/fm-tasks-axi.sh" show delivery --full)
+  printf '%s\n' "$body" | grep -F 'Reconciliation evidence:' >/dev/null || fail 'no durable evidence before the failed close'
+  with_home "$home" env REAL_TASKS_AXI="$real" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'retry poll failed'
+  if with_home "$home" env REAL_TASKS_AXI="$real" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'retry did not settle the hold'; fi
+  body=$(with_home "$home" env REAL_TASKS_AXI="$real" "$ROOT/bin/fm-tasks-axi.sh" show delivery --full)
+  [ "$(printf '%s\n' "$body" | grep -o 'Resolution recorded by fm-captain-hold.' | wc -l | tr -d ' ')" = 1 ] || fail 'retry duplicated the resolution'
+  pass 'retained delivery keeps its PR policy and interrupted settlement replays once'
+}
+
+test_forge_hold_settlement_rejects_uncertain_evidence() {
+  local home
+  home=$(new_home hold-uncertain)
+  forge_home "$home"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 terminal close >/dev/null || fail 'policy failed'
+  mutate_record "$home" delivery '.records[0].observation.state="merged" | .records[0].error="forge unavailable"'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" settle-pr delivery https://github.com/o/r/pull/8 || fail 'uncertain evidence command failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'errored evidence settled a hold'
+  mutate_record "$home" delivery '.records[0].error=null'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" settle-pr delivery https://github.com/o/r/pull/9 || fail 'different URL command failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'another PR settled the hold'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --title 'A different question' >/dev/null || fail 'title update failed'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" settle-pr delivery https://github.com/o/r/pull/8 2>/dev/null; then
+    fail 'a policy for a changed question was dropped without a failure'
+  fi
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'a stale policy settled the hold'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" settle-pr delivery https://github.com/o/r/pull/8 || fail 'a dropped policy was retried'
+  pass 'errored evidence, a different PR, and a changed question cannot settle a hold'
+}
+
+test_forge_release_waits_for_an_attended_session() {
+  local home out
+  home=$(new_home hold-away-release)
+  forge_home "$home"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged release >/dev/null || fail 'policy failed'
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'watch the fleet' >/dev/null || fail 'could not enter away posture'
+  printf 'merged\n' > "$home/forge/state"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'away poll failed'
+  [ -z "$out" ] || fail "a deferred release produced poll output: $out"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'a merged PR released a captain hold while the home was away'
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail 'could not archive the away record'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'attended poll failed'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'the hold stayed after the captain returned'; fi
+  pass 'a declared release waits while the home is away and applies on the next attended poll'
+}
+
+hold_lock() { # home lock: hold the lock until $home/release exists; sets HOLDER_PID
+  local home=$1 lock=$2 i=0
+  rm -f "$home/holder.ready" "$home/release"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$home/holder.ready" "$home/release" &
+  HOLDER_PID=$!
+  while [ "$i" -lt 100 ] && [ ! -s "$home/holder.ready" ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$home/holder.ready" ] || { kill "$HOLDER_PID" 2>/dev/null || true; fail "the fixture never took $lock"; }
+}
+
+test_forge_release_waits_for_the_away_record_lock() {
+  local home out holder_pid i started
+  home=$(new_home hold-away-lock)
+  forge_home "$home"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged release >/dev/null || fail 'policy failed'
+  # An away entry in progress holds this lock before its record exists.
+  hold_lock "$home" "$home/state/.afk-contract.lock"
+  holder_pid=$HOLDER_PID
+  printf 'merged\n' > "$home/forge/state"
+  started=$SECONDS
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll)
+  i=$?
+  touch "$home/release"
+  wait "$holder_pid" || fail 'the lock holder failed'
+  [ "$i" -eq 0 ] || fail 'locked poll failed'
+  # The watcher cuts a check after 30 seconds; a merge may hold this lock longer.
+  [ $((SECONDS - started)) -lt 20 ] || fail "a busy away-record lock held the poll for $((SECONDS - started))s"
+  [ -z "$out" ] || fail "a release deferred by the lock produced poll output: $out"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'a merged PR released a captain hold while the away record was locked'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'unlocked poll failed'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'the hold stayed after the lock was released'; fi
+  pass 'a declared release waits while another process holds the away-record lock'
+}
+
+test_forge_policy_survives_a_follow_up_pr_link() {
+  local home
+  home=$(new_home hold-follow-up-link)
+  forge_home "$home"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --pr https://github.com/o/r/pull/10 >/dev/null || fail 'follow-up link failed'
+  printf 'merged\n' > "$home/forge/state"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'poll failed'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'linking a follow-up PR left the merged PR hold open'; fi
+  pass 'linking a follow-up PR keeps the declared policy valid'
+}
+
+closed_event_tasks() { # home
+  with_home "$1" "$ROOT/bin/fm-contributions.sh" pending | jq -c '[.[] | select(.type == "closed") | .task] | sort'
+}
+
+test_closed_pr_is_reported_only_to_open_captain_holds() {
+  local home out
+  home=$(new_home hold-closed-scope)
+  forge_home "$home"
+  rm "$home/state/delivery.meta"
+  printf 'closed\n' > "$home/forge/state"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'closing poll failed'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" "done" delivery >/dev/null || fail 'could not finish the task'
+  touch "$home/config/hold-pr-settle"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'first enabled poll failed'
+  [ -z "$out" ] || fail "enabling the flag reported a historical closed PR: $out"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'enabling the flag queued a wake for a task without a hold'
+  [ "$(closed_event_tasks "$home")" = '[]' ] || fail 'a task without a captain hold got a closed event'
+  pass 'a closed PR of a task without a captain hold raises no event'
+}
+
+test_late_linked_hold_gets_its_own_closed_event_once() {
+  local home out
+  home=$(new_home hold-closed-late)
+  forge_home "$home"
+  rm "$home/state/delivery.meta"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Rework or drop?' >/dev/null || fail 'hold failed'
+  printf 'closed\n' > "$home/forge/state"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'closing poll failed'
+  [ "$(closed_event_tasks "$home")" = '["delivery"]' ] || fail 'the first held owner was not told about the closure'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add late 'Second question on the PR' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'late add failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold late --reason 'Reopen it?' >/dev/null || fail 'late hold failed'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'late-owner poll failed'
+  [ "$(closed_event_tasks "$home")" = '["delivery","late"]' ] || fail 'a hold linked after the closure inherited the report of the first owner'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'repeat poll failed'
+  [ -z "$out" ] || fail "the closure was reported again: $out"
+  [ "$(closed_event_tasks "$home")" = '["delivery","late"]' ] || fail 'a repeat poll changed the closed events'
+  pass 'a hold linked after the closure gets its own closed event once'
+}
+
+test_forge_settlement_defers_while_the_task_is_busy() {
+  local home out rc started
+  home=$(new_home hold-busy-task)
+  forge_home "$home"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
+  # A captain answer in progress holds the task control lock.
+  hold_lock "$home" "$home/state/.control-delivery.lock"
+  printf 'merged\n' > "$home/forge/state"
+  started=$SECONDS
+  rc=0
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || rc=$?
+  [ "$rc" -ne 0 ] || [ -n "$out" ] || { out=$(with_home "$home" "$ROOT/bin/fm-captain-hold.sh" settle-pr delivery https://github.com/o/r/pull/8 2>&1) || rc=$?; }
+  touch "$home/release"
+  wait "$HOLDER_PID" || fail 'the lock holder failed'
+  [ "$rc" -eq 0 ] || fail "a busy task failed the settlement: $out"
+  # The watcher cuts a check after 30 seconds; an answer may hold this lock longer.
+  [ $((SECONDS - started)) -lt 20 ] || fail "a busy task control lock held the settlement for $((SECONDS - started))s"
+  [ -z "$out" ] || fail "a settlement deferred by a busy task produced output: $out"
+  [ -f "$home/data/delivery/hold-pr-policy.json" ] || fail 'a busy task lost its declared policy'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery || fail 'a busy task was settled under its lock holder'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'unlocked poll failed'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'the hold stayed after the task was free'; fi
+  pass 'a declared settlement defers quietly while another command holds the task'
+}
+
+test_settled_task_gets_no_closed_event_for_its_other_pr() {
+  local home out
+  home=$(new_home hold-two-terminal)
+  forge_home "$home"
+  rm "$home/state/delivery.meta"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Decide this PR' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 terminal close >/dev/null || fail 'policy failed'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --pr https://github.com/o/r/pull/9 >/dev/null || fail 'second link failed'
+  # Retain both closures first, so the enabled poll settles them in URL order.
+  rm "$home/config/hold-pr-settle"
+  printf 'closed\n' > "$home/forge/state"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'closing poll failed'
+  touch "$home/config/hold-pr-settle"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'settling poll failed'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open delivery; then fail 'the first closed PR did not settle the hold'; fi
+  [ -z "$out" ] || fail "the second closed PR woke a task settled in the same poll: $out"
+  [ ! -s "$home/state/.wake-queue" ] || fail 'the second closed PR queued a wake for a settled task'
+  [ "$(closed_event_tasks "$home")" = '[]' ] || fail 'a task settled in the same poll got a closed event'
+  pass 'a task settled by its first PR gets no closed event for its second closed PR'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
