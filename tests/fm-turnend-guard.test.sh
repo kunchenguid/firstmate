@@ -114,12 +114,13 @@ register_custom_check() {
   local state=$1 id=$2
   printf '#!/usr/bin/env bash\nexit 0\n' > "$state/$id.check.sh"
   chmod 700 "$state/$id.check.sh"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+  FM_HOME="$(cd "$state/.." && pwd)" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
     || fail "fm-check-register.sh could not register $id"
 }
 
 test_predicate_registered_check_needs_supervision() {
   local state="$TMP_ROOT/pred-check/state"
+  local FM_HOME="$TMP_ROOT/pred-check"
   mkdir -p "$state"
   register_custom_check "$state" issue-comments
   fm_supervision_needed "$state" 300 || fail "a registered custom check did not register as supervision need"
@@ -129,8 +130,23 @@ test_predicate_registered_check_needs_supervision() {
   pass "fm_supervision_needed: a registered custom check needs supervision with no task in flight"
 }
 
+test_predicate_registered_check_counts_through_dot_state_spelling() {
+  local home="$TMP_ROOT/pred-check-dot" state
+  local FM_HOME="$home"
+  state="$home/state/."
+  mkdir -p "$home/state"
+  register_custom_check "$state" issue-comments
+  [ -f "$home/config/trust/issue-comments.check-trust" ] \
+    || fail "registration through state/. must write the trust record under the home's config/trust"
+  fm_supervision_needed "$state" 300 \
+    || fail "a check registered through state/. must still count as ongoing work"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one registered custom check through state/., got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: a check registered with FM_STATE_OVERRIDE=state/. still needs supervision"
+}
+
 test_predicate_registered_check_survives_rebinding_drift() {
   local state="$TMP_ROOT/pred-check-drift/state"
+  local FM_HOME="$TMP_ROOT/pred-check-drift"
   mkdir -p "$state"
   register_custom_check "$state" issue-comments
   printf '#!/usr/bin/env bash\necho drifted\n' > "$state/issue-comments.check.sh"
@@ -2671,6 +2687,7 @@ test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_predicate_registered_check_needs_supervision
+test_predicate_registered_check_counts_through_dot_state_spelling
 test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check

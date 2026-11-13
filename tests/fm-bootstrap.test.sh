@@ -1502,7 +1502,7 @@ test_pr_health_monitor_arms_only_with_its_flag() {
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     [ -z "$out" ] || fail "bootstrap with the PR health flag $flag printed: $out"
     if [ "$flag" = on ]; then
-      [ -f "$case_dir/home/state/pr-health.check.sh" ] && [ -f "$case_dir/home/state/pr-health.check-trust" ] \
+      [ -f "$case_dir/home/state/pr-health.check.sh" ] && [ -f "$case_dir/home/config/trust/pr-health.check-trust" ] \
         || fail "bootstrap did not register the PR health monitor: $(ls -A "$case_dir/home/state")"
     else
       [ -z "$(ls -A "$case_dir/home/state")" ] \

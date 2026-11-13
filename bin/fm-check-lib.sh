@@ -14,14 +14,27 @@ fm_custom_check_sha256() {
   fi
 }
 
+# fm_trust_dir is owned by the hook-copied supervision lib, so the supervision
+# predicate and the check sweep resolve the trust root the same way.
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-supervision-lib.sh"
+
+fm_custom_check_trust_path() {  # <state-dir> <id>
+  local dir
+  dir=$(fm_trust_dir "$1") || return 1
+  printf '%s/%s.check-trust\n' "$dir" "$2"
+}
+
 fm_custom_check_trust_read() {
-  local state=$1 id=$2 trust state_device version hash
+  local state=$1 id=$2 trust trust_dir trust_device version hash
   FM_CUSTOM_CHECK_HASH=
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
-  trust="$state/$id.check-trust"
-  fm_pr_private_file_valid "$trust" 600 "$state_device" || return 1
+  trust_dir=$(fm_trust_dir "$state") || return 1
+  [ -d "$trust_dir" ] && [ ! -L "$trust_dir" ] || return 1
+  trust_device=$(fm_pr_file_device "$trust_dir") || return 1
+  trust="$trust_dir/$id.check-trust"
+  fm_pr_private_file_valid "$trust" 600 "$trust_device" || return 1
   exec 9< "$trust" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
   IFS= read -r hash <&9 || { exec 9<&-; return 1; }

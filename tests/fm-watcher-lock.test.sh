@@ -2130,6 +2130,8 @@ test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out check_file rc
   dir=$(make_case arm-immediate-wake)
   state="$dir/state"
+  # Register and watch in the same home, so trust lands under $dir/config.
+  local -x FM_HOME="$dir"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   drain_out="$dir/drain.out"
@@ -2241,6 +2243,8 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded() {
   local dir state fakebin armout check_file first_arm successor_arm successor_pid i size iteration
   dir=$(make_case cycle-ledger)
   state="$dir/state"
+  # Register and watch in the same home, so trust lands under $dir/config.
+  local -x FM_HOME="$dir"
   fakebin="$dir/fakebin"
   armout="$dir/first-arm.out"
   check_file="$state/task.check.sh"
@@ -2262,7 +2266,7 @@ SH
     || fail "first ledger record omitted its actionable classification"
   drain_and_ack "$state" || fail "first ledger wake handling acknowledgement failed"
 
-  rm -f "$check_file" "$state/task.check-trust"
+  rm -f "$check_file" "$(dirname "$state")/config/trust/task.check-trust"
   armout="$dir/successor-arm.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   successor_arm=$!

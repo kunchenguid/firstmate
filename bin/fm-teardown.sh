@@ -392,6 +392,7 @@ for _teardown_source in \
   fm-classify-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \
+  fm-check-lib.sh \
   fm-public-followup-lib.sh \
   fm-x-lib.sh \
   fm-env-lib.sh \
@@ -428,6 +429,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1607,12 +1610,16 @@ retire_busy_state() {
 }
 
 validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 state_device artifact has_artifact=0
+  local state_dir=$1 id=$2 state_device trust trust_dir artifact_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
+  # Empty when the trust directory resolves inside state/; nothing trusts a
+  # record there, so there is nothing outside state/ to check or remove.
+  trust=$(fm_custom_check_trust_path "$state_dir" "$id") || trust=
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
-    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
+    ${trust:+"$trust"}; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1622,10 +1629,20 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
-    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
+    ${trust:+"$trust"}; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    artifact_device=$state_device
+    if [ "$artifact" = "$trust" ]; then
+      trust_dir=$(dirname -- "$trust")
+      if [ ! -d "$trust_dir" ] || [ -L "$trust_dir" ]; then
+        echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+        return 1
+      fi
+      artifact_device=$(fm_pr_file_device "$trust_dir") || return 1
+    fi
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$artifact_device" ] \
       || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
       || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
         && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
@@ -1650,7 +1667,8 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_degraded_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
+    "$(fm_custom_check_trust_path "$state_dir" "$id")" || return 1
 }
 
 pr_number_from_target() {
@@ -3341,7 +3359,8 @@ validate_firstmate_home_children_removal() {
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
-    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
+    # The child home owns its own trust root, not this home's config.
+    FM_HOME="$home" FM_CONFIG_OVERRIDE='' validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -3658,7 +3677,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
-    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
+    FM_HOME="$home" FM_CONFIG_OVERRIDE='' remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)

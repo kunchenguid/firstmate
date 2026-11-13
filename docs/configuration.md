@@ -116,6 +116,13 @@ Each effective `FM_HOME` contains private operational directories.
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
+`config/trust/` holds the trust records that let the watcher run a custom check and let a `when` watch fire: `<id>.check-trust` written by `bin/fm-check-register.sh` and `<source-id>.when-trust` written by `bin/fm-procevent-when.sh arm`.
+They live in operator configuration rather than `state/`, so a process that can write only `state/` can break a registered check or watch but cannot add or replace one.
+The folder is the home's own `trust/` under `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}`, keyed to the home rather than to the state directory, so `FM_STATE_OVERRIDE` never moves it and two homes whose state overrides share a parent never share bindings.
+A trust folder that resolves inside the real state directory, for example through a `config` symlink into `state/` or an `FM_CONFIG_OVERRIDE` that points inside it, is refused, so no custom check runs and no `when` watch fires.
+Trust records left in `state/` by an older version are ignored, never migrated, because nothing could tell a legitimate old record from a forged one.
+After updating from such a version, run `bin/fm-check-register.sh <id>` once for each `state/<id>.check.sh` you still want, re-run the `arm` command of each generated check (for example `bin/fm-tool-update-check.sh arm`), and run `bin/fm-procevent-when.sh retire <name>` then `arm` again for each live `when` watch.
+
 `projects/` holds local project clones.
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
@@ -3160,7 +3167,7 @@ Its blocking child polls the condition without waking firstmate.
 A stable true fires the action at most once.
 One terminal outcome is then durably captured and published as a wake, which remains eligible for re-announcement until handled.
 
-The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.
+The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record under `config/trust/` (see "Operational home layout and state" above), while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.
 A repo update that fast-forwards an in-repo action's bytes in place would otherwise desync every already-armed watch's trust binding with no tampering involved; `bin/fm-procevent-when.sh rebind-all` re-hashes and republishes the binding for every registered watch whose action lives under `FM_ROOT`, including one already polling, so it keeps firing across such an update instead of being refused on its next fire.
 
 Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
