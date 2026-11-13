@@ -480,7 +480,7 @@ const WRAPPER_OPTIONS = {
   env: { noArgument: new Set(["0", "i", "v"]), takesArgument: new Set(["a", "C", "P", "S", "u"]) },
   exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
   nohup: { noArgument: new Set(), takesArgument: new Set() },
-  sudo: { noArgument: new Set(["A", "B", "b", "E", "e", "H", "i", "K", "k", "l", "N", "n", "P", "S", "s", "v", "V"]), takesArgument: new Set(["C", "D", "g", "h", "p", "r", "R", "t", "T", "u", "U"]) },
+  sudo: { noArgument: new Set(["A", "B", "b", "E", "e", "H", "i", "K", "k", "l", "N", "n", "P", "S", "s", "v", "V"]), takesArgument: new Set(["a", "c", "C", "D", "g", "h", "p", "r", "R", "t", "T", "u", "U"]) },
   timeout: { noArgument: new Set(["f", "p", "v"]), takesArgument: new Set(["k", "s"]) },
 };
 
@@ -489,7 +489,7 @@ const WRAPPER_LONG_OPTIONS = {
   env: { noArgument: new Set(["ignore-environment", "null", "help", "version", "block-signal", "default-signal", "ignore-signal", "list-signal-handling"]), takesArgument: new Set(["argv0", "chdir", "split-string", "unset"]) },
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
-  sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"]) },
+  sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "no-update", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["auth-type", "chdir", "chroot", "close-from", "command-timeout", "group", "host", "login-class", "other-user", "prompt", "role", "type", "user"]) },
   timeout: { noArgument: new Set(["foreground", "preserve-status", "verbose", "help", "version"]), takesArgument: new Set(["kill-after", "signal"]) },
 };
 
@@ -561,6 +561,10 @@ export function commandPosition(tokens) {
       index = options.index;
       if (name === "sudo") while (words[index] && isAssignment(words[index].value)) index += 1;
       command = words[index];
+      if (command && command.value.startsWith("-") && command.value !== "-") {
+        unresolvedWrapperOption = true;
+        break;
+      }
       continue;
     }
     if (name === "env") {
@@ -569,8 +573,12 @@ export function commandPosition(tokens) {
       unresolvedWrapperOption ||= options.unresolved;
       wrapperPayloads.push(...options.embeddedPayloads);
       index = options.index;
-      while (words[index] && (words[index].value.startsWith("-") || isAssignment(words[index].value))) index += 1;
+      while (words[index] && isAssignment(words[index].value)) index += 1;
       command = words[index];
+      if (command && command.value.startsWith("-") && command.value !== "-") {
+        unresolvedWrapperOption = true;
+        break;
+      }
       continue;
     }
     if (name === "timeout" || name === "gtimeout") {
@@ -586,6 +594,10 @@ export function commandPosition(tokens) {
       index += 1;
       command = words[index];
       if (!command) {
+        unresolvedWrapperOption = true;
+        break;
+      }
+      if (command.value.startsWith("-") && command.value !== "-") {
         unresolvedWrapperOption = true;
         break;
       }

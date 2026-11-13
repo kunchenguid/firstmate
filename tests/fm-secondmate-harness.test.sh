@@ -806,7 +806,10 @@ test_spawn_unverified_secondmate_harness_refused() {
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw env env-flags env-default-signal env-default-signal-value env-block-signal env-ignore-signal nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other; do
+    for how in config explicit raw env env-flags env-default-signal env-default-signal-value env-block-signal env-ignore-signal nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment sudo-interspersed sudo-no-update sudo-auth-type sudo-login-class sudo-auth-type-long sudo-login-class-long timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other env-unfamiliar sudo-unfamiliar; do
+      if [[ "$how" = *-unfamiliar && "$kind" != secondmate ]]; then
+        continue
+      fi
       w="$TMP_ROOT/spawn-auggie-$kind-$how"
       sm="$w/sm"
       mkdir -p "$w/home/config" "$w/home/state"
@@ -848,6 +851,14 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         search-path) set -- "$@" 'env -P /usr/bin auggie --model test-model' ;;
         sudo) set -- "$@" 'sudo -n -u worker auggie --model test-model' ;;
         sudo-assignment) set -- "$@" 'sudo -n FOO=1 BAR=2 auggie --model test-model' ;;
+        sudo-interspersed) set -- "$@" 'sudo FOO=1 -n auggie --model test-model' ;;
+        sudo-no-update) set -- "$@" 'sudo --no-update -n auggie --model test-model' ;;
+        sudo-auth-type) set -- "$@" 'sudo -a passwd auggie --model test-model' ;;
+        sudo-login-class) set -- "$@" 'sudo -c staff auggie --model test-model' ;;
+        sudo-auth-type-long) set -- "$@" 'sudo --auth-type passwd auggie --model test-model' ;;
+        sudo-login-class-long) set -- "$@" 'sudo --login-class staff auggie --model test-model' ;;
+        env-unfamiliar) set -- "$@" 'env FOO=1 /path/my-agent' ;;
+        sudo-unfamiliar) set -- "$@" 'sudo FOO=1 /path/my-agent' ;;
         timeout) set -- "$@" 'timeout -s TERM 1h env auggie --model test-model' ;;
         compound) set -- "$@" 'cd /tmp && env auggie --model test-model' ;;
         pipeline) set -- "$@" 'true | env auggie --model test-model' ;;
@@ -873,6 +884,13 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         "$ROOT/bin/fm-spawn.sh" "$@" >/dev/null 2>"$err" || rc=$?
 
       [ ! -e "$w/evaluated" ] || fail "auggie $kind $how: parsing executed the raw command"
+      if [[ "$how" = *-unfamiliar ]]; then
+        [ "$rc" -eq 0 ] || fail "auggie $kind $how: unfamiliar program failed: $(cat "$err")"
+        [ -e "$w/home/state/sm.meta" ] || fail "auggie $kind $how: accepted launch wrote no meta"
+        assert_not_contains "$(cat "$err")" "primary harness only" "auggie $kind $how: unfamiliar program refused as auggie"
+        assert_not_contains "$(cat "$err")" "invalid raw launch" "auggie $kind $how: unfamiliar program refused as invalid"
+        continue
+      fi
       if [[ "$how" = other || "$how" = *-other ]]; then
         if grep -q "primary harness only" "$err"; then
           fail "auggie $kind $how: a wrapped non-auggie program was refused as auggie"
@@ -880,8 +898,12 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         continue
       fi
       [ "$rc" -ne 0 ] || fail "auggie $kind $how: spawn should have failed"
-      assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
-        "auggie $kind $how: error names the primary-only boundary"
+      if [ "$how" = sudo-interspersed ]; then
+        assert_contains "$(cat "$err")" "invalid raw launch command" "auggie $kind $how: unresolved wrapper was not refused"
+      else
+        assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
+          "auggie $kind $how: error names the primary-only boundary"
+      fi
       [ -e "$w/home/state/sm.meta" ] && fail "auggie $kind $how: a meta was written despite the abort"
     done
   done

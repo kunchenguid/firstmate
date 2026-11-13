@@ -267,7 +267,9 @@
 #   For a raw launch the refusal is guaranteed for a simple command that runs
 #   auggie directly or behind the env, command, exec, nohup, sudo, or timeout
 #   wrappers (for example `env auggie`), with leading assignments, sudo
-#   assignments, quoted words, redirections, and wrapper options. An env -S
+#   assignments, quoted words, redirections, and recognised wrapper options;
+#   a wrapper whose options cannot be resolved, or whose program token begins
+#   with -, is refused rather than launched. An env -S
 #   split string, compound commands, subshell groups, and command substitutions
 #   are checked best-effort only: an env -S string that holds the whole command
 #   is inspected, but one split across -S and the remaining argv is not
@@ -3255,6 +3257,7 @@ function inspect(source, topLevel = false) {
   if (error) throw new Error(`invalid raw launch command: ${error}`);
   for (const node of splitProgram(tokens).nodes) {
     const position = commandPosition(node);
+    if (position.unresolvedWrapperOption) throw new Error('invalid raw launch command: wrapper options could not be resolved');
     const entry = position.words[position.prefixAssignments];
     if (topLevel && !harness && entry) {
       harness = basename(entry.value);
