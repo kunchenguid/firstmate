@@ -104,6 +104,16 @@ The push path only shortens latency, and polling stays the fallback.
 Supervision polls when the CLI or server is below API revision 5 or unreachable (the reader never starts a server), when the reader cannot start or ends before its deadline, and after the watcher's consecutive-reader-failure threshold is reached (three by default).
 Task tabs in a second Rex session stay on polling, because one reader covers one session.
 
+## Task copy lease
+
+A home that creates `config/rex-durable-lease` opts in to a durable lease for the task copy.
+[Rex durable lease](configuration.md#rex-durable-lease-configrex-durable-lease) owns the setting.
+With it, a fresh task leases its copy with `treehouse get --lease` and then moves the block's top-level shell into it, exactly as on Herdr.
+Without it, the spawn types the interactive `treehouse get` into the block.
+That command holds a slot only through its live subshell, so a Rex Server stop would free the slot of a worker that is about to be relaunched, and another task could take it first.
+The lease outlives the block and the server: cleanup returns it with the copy, and a relaunch reuses the recorded copy.
+An aborted spawn returns the lease only when Rex confirms the task block gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
+
 ## Cleanup and the absence proof
 
 Cleanup closes only the task's block, which closes its tab, and then proves it gone: only an exact not-found after the close counts, so a close that failed or left the block alive keeps the task's records.
