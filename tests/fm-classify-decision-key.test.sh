@@ -105,22 +105,25 @@ test_raw_epoch_prefix_is_reported_without_erasing_open_decisions() {
   f="$dir/task.status"
   # Line 2 is the exact line from issue #8048; lines 3-5 are the same mistake
   # in the colon-first, indented and transfer-verb shapes the canonical reader
-  # accepts. Line 6 merely starts with a number and is ordinary prose.
+  # accepts. Lines 6-8 merely start with a number and are ordinary prose, even
+  # where a recognized verb follows a count or a year.
   printf '%s\n' \
-    'blocked [at=1793378273] [key=example]: An earlier blocker remains open.' \
-    '1793378273 blocked [key=broken] A malformed later event.' \
+    'blocked [at=1793378273] [key=earlier]: An earlier blocker remains open.' \
+    '1793378273 blocked [key=example] An implementation decision needs an answer.' \
     '1793378273 blocked: [key=colon] A colon-first raw epoch.' \
     ' 1793378273 needs-decision [key=indent] An indented raw epoch.' \
     '1793378273 captain-held [key=other] A raw epoch transfer.' \
-    '2026 release notes: nothing malformed here.' > "$f"
+    '2026 release notes: nothing malformed here.' \
+    '2 failed: lint and unit' \
+    '2026 note: x' > "$f"
 
   # assert_fold's stderr is the report channel under test, so capture it in a
   # subshell and replay a captured failure instead of hiding it.
-  expected=$(printf 'example\tblocked\tAn earlier blocker remains open.\n')
+  expected=$(printf 'earlier\tblocked\tAn earlier blocker remains open.\n')
   errors=$(assert_fold "$f" "$expected" "raw epoch lines after an open blocker" 2>&1) \
     || { printf '%s\n' "$errors" >&2; exit 1; }
   report='malformed status line; repair the timestamp to [at=<epoch>] after the verb'
-  expected="$f:2: $report: 1793378273 blocked [key=broken] A malformed later event.
+  expected="$f:2: $report: 1793378273 blocked [key=example] An implementation decision needs an answer.
 $f:3: $report: 1793378273 blocked: [key=colon] A colon-first raw epoch.
 $f:4: $report:  1793378273 needs-decision [key=indent] An indented raw epoch.
 $f:5: $report: 1793378273 captain-held [key=other] A raw epoch transfer."

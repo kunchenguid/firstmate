@@ -212,9 +212,12 @@ _fm_status_corr_attempt() {  # <word>
 # verb: the brief's <epoch> placeholder written before the verb instead of as
 # the [at=<epoch>] tag after it. Such a line matches no fold rule, so a reader
 # that would otherwise drop the declaration silently can name it for repair.
+# Fewer than 9 digits is a count or a year opening continuation prose
+# ("2 failed: lint and unit"), not an epoch.
 _fm_status_raw_epoch_verb() {  # <verb>
   local epoch=${1%%[[:space:]]*} verb=${1#*[[:space:]]}
   case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#epoch}" -ge 9 ] || return 1
   [ "$verb" != "$1" ] || return 1
   verb=${verb#"${verb%%[![:space:]]*}"}
   _fm_status_verb_recognized "$verb"
