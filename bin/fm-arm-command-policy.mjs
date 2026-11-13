@@ -486,7 +486,7 @@ const WRAPPER_OPTIONS = {
 
 const WRAPPER_LONG_OPTIONS = {
   command: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
-  env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
+  env: { noArgument: new Set(["ignore-environment", "null", "help", "version", "block-signal", "default-signal", "ignore-signal", "list-signal-handling"]), takesArgument: new Set(["argv0", "chdir", "split-string", "unset"]) },
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
   sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"]) },

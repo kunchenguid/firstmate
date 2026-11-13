@@ -806,7 +806,7 @@ test_spawn_unverified_secondmate_harness_refused() {
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw env env-flags nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other; do
+    for how in config explicit raw env env-flags env-default-signal env-default-signal-value env-block-signal env-ignore-signal nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other; do
       w="$TMP_ROOT/spawn-auggie-$kind-$how"
       sm="$w/sm"
       mkdir -p "$w/home/config" "$w/home/state"
@@ -827,6 +827,10 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         raw) set -- "$@" 'auggie --model test-model' ;;
         env) set -- "$@" 'env auggie --model test-model' ;;
         env-flags) set -- "$@" 'env -i -u CLAUDECODE --chdir /tmp PATH=/usr/bin /opt/tools/bin/auggie --model test-model' ;;
+        env-default-signal) set -- "$@" 'env --default-signal auggie --model x' ;;
+        env-default-signal-value) set -- "$@" 'env --default-signal=INT auggie --model x' ;;
+        env-block-signal) set -- "$@" 'env --block-signal auggie --model x' ;;
+        env-ignore-signal) set -- "$@" 'env --ignore-signal auggie --model x' ;;
         nested) set -- "$@" 'FOO=1 nohup command -p exec -a worker env BAR=2 auggie --model test-model' ;;
         quoted) set -- "$@" "env 'auggie' --model test-model" ;;
         quoted-path) set -- "$@" "env '/opt/Agent Tools/bin/auggie' --model test-model" ;;
