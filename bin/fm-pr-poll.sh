@@ -267,6 +267,13 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
+    if ! command -v jq >/dev/null 2>&1; then
+      if [ "$retirement_only" -eq 0 ] && [ -n "$meta" ]; then
+        base_refusal_notice "$meta" pr-base-notified \
+          'GitLab destination proof unavailable without jq; install jq or re-arm the watch'
+      fi
+      exit "$unknown"
+    fi
     # glab resolves the instance from the project URL passed to -R, so the host
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out

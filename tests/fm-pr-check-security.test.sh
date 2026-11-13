@@ -3922,7 +3922,7 @@ SH
 }
 
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab nojq noperl entry bindir name wide train started elapsed poll_pid waited hung
+  local dir state out rc url value noglab nojq noperl entry bindir name wide train started elapsed poll_pid waited hung degraded base_field notice
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   # The poll reads the merge request as JSON, so the fixture's search path
@@ -4241,16 +4241,49 @@ $(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
 EOF
   ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
     || fail "the jq-free search path still resolved jq"
-  # Without jq a legacy poll cannot prove destination and stays silent even
-  # when the rendered state alone says merged.
   printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$url" gitlab.example group/subgroup/project 7 \
     > "$state/task-a.pr-poll"
-  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" \
-    bash "$state/task-a.check.sh")
-  [ -z "$out" ] || fail "GitLab poll claimed a merge without destination proof from jq: $out"
-  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" \
-    bash "$state/task-a.check.sh")
-  [ -z "$out" ] || fail "GitLab poll emitted a non-merged line without jq: $out"
+  notice='task task-a merge/readiness refused: GitLab destination proof unavailable without jq; install jq or re-arm the watch. Follow bin/fm-pr-check.sh recovery steps.'
+  for degraded in 0 1; do
+    if [ "$degraded" = 1 ]; then
+      : > "$dir/home/config/pr-degraded-watch"
+    else
+      rm -f "$dir/home/config/pr-degraded-watch"
+    fi
+    for base_field in base_branch expected_base; do
+      fm_write_meta "$state/task-a.meta" "$base_field=main" "pr=$url"
+      for value in merged opened; do
+        out=$(FM_HOME="$dir/home" FM_TEST_GLAB_STATE="$value" FM_TEST_GLAB_PIPELINE=failed \
+          FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" bash "$state/task-a.check.sh")
+        [ "$out" = "$notice" ] \
+          || fail "GitLab $base_field poll without jq lost its recovery notice or claimed a state: $out"
+        [ ! -e "$state/task-a.pr-base-notified" ] \
+          || fail "GitLab poll recorded delivery before its caller delivered the recovery notice"
+      done
+      out=$(FM_HOME="$dir/home" PATH="$nojq" bash "$POLL" --validated gitlab "$url" \
+        gitlab.example group/subgroup/project 7 main "$state/task-a.meta")
+      [ "$out" = "$notice" ] || fail "direct GitLab poll without jq lost its recovery notice: $out"
+      : > "$state/task-a.pr-base-notified"
+      out=$(FM_HOME="$dir/home" FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_LOG="$dir/glab.log" \
+        PATH="$nojq" bash "$state/task-a.check.sh")
+      [ -z "$out" ] || fail "GitLab poll repeated a delivered recovery notice or claimed a merge: $out"
+      rm -f "$state/task-a.pr-base-notified"
+      out=$(FM_HOME="$dir/home" FM_TEST_GLAB_STATE=merged run_poll "$dir")
+      [ "$out" = merged ] || fail "GitLab $base_field poll did not recover after jq was restored: $out"
+    done
+  done
+  out=$(FM_HOME="$dir/home" PATH="$nojq" bash "$POLL" --validated gitlab "$url" \
+    gitlab.example group/subgroup/project 7 main)
+  [ -z "$out" ] || fail "metadata-free GitLab poll without jq emitted a claim: $out"
+  rc=0
+  out=$(FM_HOME="$dir/home" PATH="$nojq" bash "$POLL" --baseline gitlab "$url" \
+    gitlab.example group/subgroup/project 7 main) || rc=$?
+  [ "$rc" -eq 3 ] && [ -z "$out" ] || fail "GitLab baseline without jq changed its unknown result: rc=$rc $out"
+  fm_write_meta "$state/task-a.meta" kind=secondmate "pr=$url"
+  out=$(FM_HOME="$dir/home" PATH="$nojq" bash "$POLL" --retire-secondmate gitlab "$url" \
+    gitlab.example group/subgroup/project 7 "$state/task-a.meta")
+  [ -z "$out" ] || fail "GitLab retirement without jq emitted a task recovery notice: $out"
+  write_poll_meta "$state" task-a "$url"
   set +e
   out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
