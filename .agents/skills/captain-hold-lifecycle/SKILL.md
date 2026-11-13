@@ -72,6 +72,17 @@ The absence of a routed work item is not a divergence and the guard never requir
 3. Firstmate holds that task - or creates one captain-held task for the review's open questions - with a concise reason carrying the question and options.
 4. Attest the full inventory for that review pass under the caller authority in Policy above.
 5. For an interview, register one keyed task before presenting the questions, feed each answer with that task id and its displayed option words, then verify that the task closed and retains its selected answer.
+   Example for task `sample-start-state`, whose question shows the options `A: Off until checks pass.` and `B: On now.`, when the captain picks A:
+
+   ```sh
+   bin/fm-captain-hold.sh hold sample-start-state --title "Choose the start state" \
+     --reason "Should the feature start enabled? A: Off until checks pass. B: On now."
+   printf 'sample-start-state\tA\tOff until checks pass.\n' \
+     | bin/fm-captain-hold.sh answers --source "captain interview"
+   tasks-axi show sample-start-state --full
+   ```
+
+   The last command must print `state: done` and `Selected answer: Off until checks pass.`.
 6. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 7. Resolve each call through `answer`, board-requested reconciliation, or the declared PR settlement policy above, and use `--until` when the captain defers it.
 8. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
