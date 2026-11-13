@@ -5,8 +5,9 @@
 # Sourced, and executed only for the home-gate query below.
 # docs/supervision-host.md owns the host design and
 # bin/fm-supervision-host.sh the loop; this file owns two contracts, plus the
-# main-session key (fm_supervision_host_main_key) and the attended readiness
-# check (fm_supervision_host_attended_ready) the host's parts share.
+# main-session key (fm_supervision_host_main_key), the attended readiness
+# check (fm_supervision_host_attended_ready), and the session-end ownership
+# test (fm_supervision_host_session_end_owned) the host's parts share.
 #
 # THE HOME GATE (config/supervision-host-off, config/supervision-host).
 # docs/configuration.md "Supervision host" owns both files: the inherited
@@ -198,6 +199,21 @@ fm_supervision_host_main_key() {
   identity=$(fm_session_pid_identity "$pid" 2>/dev/null) && [ -n "$identity" ] || return 1
   printf '%s:%s:%s\n' "$pid" "$(printf '%s\n' "$identity" | cksum | awk '{ print $1 }')" \
     "$(sed -n '1p' "$1/.lock-session" 2>/dev/null | cksum | awk '{ print $1 }')"
+}
+
+# fm_supervision_host_session_end_owned <state-dir> <autoarm-gen> <confirmed-epoch>:
+# 0 while a host started after the Claude main session ended
+# (bin/fm-supervision-session-end.sh) still owns supervision: no later Stop has
+# claimed an auto-arm generation past <autoarm-gen> (empty when no ledger
+# existed), and the away record whose confirmed_epoch is <confirmed-epoch>
+# still stands. Needs bin/fm-wake-lib.sh and bin/fm-afk-contract.sh sourced
+# first.
+fm_supervision_host_session_end_owned() {
+  local gen=
+  ! fm_autoarm_ledger_read "$1" || gen=$FM_AUTOARM_GEN
+  [ "$gen" = "$2" ] || return 1
+  [ -n "$3" ] && fm_afk_contract_present "$1" \
+    && [ "$(fm_afk_contract_read_field "$(fm_afk_contract_path "$1")" confirmed_epoch 2>/dev/null)" = "$3" ]
 }
 
 # fm_supervision_host_health_key <state-dir>: the key the host's

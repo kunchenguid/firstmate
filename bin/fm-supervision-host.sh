@@ -140,8 +140,12 @@
 # the host proves this session still holds the fleet lock
 # (bin/fm-session-lock-lib.sh) and, when launched by the auto-arm, that the
 # auto-arm generation it serves (FM_SUPERVISION_HOST_AUTOARM_GEN owned by
-# FM_SUPERVISION_HOST_OWNER_PID) is still current; otherwise it stands down
-# with a "supervision-host:" line and leaves the decision to its owner; a
+# FM_SUPERVISION_HOST_OWNER_PID) is still current. A host the session-end
+# keeper runs (bin/fm-supervision-session-end.sh) has no session left to hold
+# the lock, so it proves fm_supervision_host_session_end_owned instead, with the
+# FM_SUPERVISION_HOST_SESSION_END_GEN and FM_SUPERVISION_HOST_SESSION_END_RECORD
+# the keeper passes, and never starts an acknowledged hand-back. Otherwise it
+# stands down with a "supervision-host:" line and leaves the decision to its owner; a
 # host that stands down before activation leaves the owner's host record,
 # processes, arms, and leases alone. The engine runs with
 # FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID,
@@ -247,6 +251,8 @@ COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
+SESSION_END_GEN=${FM_SUPERVISION_HOST_SESSION_END_GEN:-}
+SESSION_END_RECORD=${FM_SUPERVISION_HOST_SESSION_END_RECORD:-}
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
 [ -n "$PRIMARY" ] || PRIMARY=$(fm_supervision_host_primary)
 # The owner's predecessor arm belongs to the first cycle only.
@@ -487,6 +493,10 @@ retire_arm() {  # <pid> <output-file>
 }
 
 host_still_owner() {
+  if [ -n "$SESSION_END_RECORD" ]; then
+    fm_supervision_host_session_end_owned "$STATE" "$SESSION_END_GEN" "$SESSION_END_RECORD"
+    return
+  fi
   fm_session_lock_owned_by_self "$STATE" || return 1
   [ -n "$AUTOARM_GEN" ] || return 0
   fm_autoarm_ledger_read "$STATE" || return 1
@@ -730,7 +740,7 @@ exit_to_main() {  # <why> [further lines]
 # The opt-in path never changes the default hand-back paths. It must verify
 # protection before emitting the close, not assume a detached process started.
 acknowledged_handback() {  # [extra output lines]; returns only when disabled
-  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] || return 1
+  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] && [ -z "$SESSION_END_RECORD" ] || return 1
   host_still_owner || stand_down "this session no longer owns supervision"
   local predecessor=${SUCCESSOR_PID:-${ARM_PID:-${CLOSED_ARM_PID:-$HOST_PID}}} pid out deadline tmp
   retire_arm "$ARM_PID" "$ARM_OUT"
