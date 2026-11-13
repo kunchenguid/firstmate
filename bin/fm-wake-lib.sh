@@ -586,10 +586,25 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
 }
 
-# The acquiring process's own fm_pid_start_time, probed once per pid: a
-# process's start time never changes, so a long-lived lock user pays it once.
+# fm_lock_record_start <dir> <pid>: write <pid>'s fm_pid_start_time to
+# <dir>/pid-start when it can be probed. The last probed pid's token is cached:
+# a process's start time never changes, so a long-lived lock user pays it once.
 _FM_LOCK_SELF_START_PID=
 _FM_LOCK_SELF_START=
+fm_lock_record_start() {
+  local dir=$1 pid=$2 token=
+  if [ "$pid" = "$_FM_LOCK_SELF_START_PID" ]; then
+    token=$_FM_LOCK_SELF_START
+  else
+    token=$(fm_pid_start_time "$pid" 2>/dev/null || true)
+    if [ -n "$token" ]; then
+      _FM_LOCK_SELF_START_PID=$pid
+      _FM_LOCK_SELF_START=$token
+    fi
+  fi
+  [ -n "$token" ] || return 0
+  printf '%s\n' "$token" > "$dir/pid-start" 2>/dev/null || true
+}
 
 # Record the holder's pid and, when it can be probed, its start time, before
 # the owner directory is published, so fm_lock_holder_alive can tell this
@@ -600,12 +615,7 @@ fm_lock_prepare_owner() {
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ] || return 1
-  if [ "$_FM_LOCK_SELF_START_PID" != "$mypid" ]; then
-    _FM_LOCK_SELF_START=$(fm_pid_start_time "$mypid" 2>/dev/null || true)
-    _FM_LOCK_SELF_START_PID=$mypid
-  fi
-  [ -z "$_FM_LOCK_SELF_START" ] \
-    || printf '%s\n' "$_FM_LOCK_SELF_START" > "$ownerdir/pid-start" 2>/dev/null || true
+  fm_lock_record_start "$ownerdir" "$mypid"
 }
 
 # fm_lock_holder_alive <lockdir> <pid>
@@ -1715,7 +1725,7 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
 # every interruption safe: before transfer the helper is the owner; after
 # transfer the still-live caller is the owner.
 _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
-  local lockdir=$1 caller_pid=$2 ownerdir current back caller_start
+  local lockdir=$1 caller_pid=$2 ownerdir current back
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
@@ -1744,9 +1754,7 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
     fm_lock_release "$lockdir"
     return 1
   fi
-  caller_start=$(fm_pid_start_time "$caller_pid" 2>/dev/null || true)
-  [ -z "$caller_start" ] \
-    || printf '%s\n' "$caller_start" > "$ownerdir/pid-start" 2>/dev/null || true
+  fm_lock_record_start "$ownerdir" "$caller_pid"
   trap - TERM INT
 }
 
@@ -1755,6 +1763,7 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 # Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
 # until fm-timeout-lib.sh's hard deadline, returns 124 for retriable contention,
 # and leaves FM_LOCK_HELD_PID naming a live holder when one is known.
+# A live PID whose recorded identity no longer matches returns 1 instead.
 # Use it where a caller must refuse rather than block: wake presentation, and
 # the guarded remote link clear, whose whole contract is to return a
 # reconciliation refusal instead of wedging an unattended close.
@@ -1803,8 +1812,10 @@ fm_lock_acquire_wait_bounded() {
         ;;
       *[!0-9]*|0) return 1 ;;
       *)
-        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
+        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_lock_holder_alive "$lockdir" "$owner_pid"; then
           FM_LOCK_HELD_PID=$owner_pid
+        elif fm_pid_alive "$owner_pid"; then
+          return 1
         fi
         ;;
     esac
