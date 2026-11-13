@@ -982,6 +982,7 @@ test_spawn_bare_harness_no_model_effort_flag() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'claude\n' > "$w/home/config/secondmate-harness"
+  : > "$w/home/config/disable-worker-auto-memory"
   make_seeded_home "$sm" sm
 
   out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
@@ -993,6 +994,8 @@ test_spawn_bare_harness_no_model_effort_flag() {
   launch=$(cat "$launchlog")
   assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0 claude" \
     "bare-tokens: Claude secondmate launch did not disable feedback drafts"
+  assert_not_contains "$launch" "CLAUDE_CODE_DISABLE_AUTO_MEMORY" \
+    "bare-tokens: Claude secondmate launch must keep auto memory even with config/disable-worker-auto-memory"
   assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
   pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
