@@ -689,4 +689,16 @@ for SPELLING in "$H/state/." "$TMP_ROOT/state-trust-link/."; do
 done
 pass "no spelling of the state directory lets a state/ trust record fire a watch"
 
+# A watch armed through a state/. override still fires once the runner sees
+# the canonical state path, because trust is keyed to the home.
+H="$TMP_ROOT/h-dot-state"; new_home "$H"
+ACTLOG="$TMP_ROOT/dot-state-act"
+FM_STATE_OVERRIDE="$H/state/." when "$H" arm dotstate --stable 1 \
+  --condition true --action "$ACT" "$ACTLOG" >/dev/null || fail "arm via state/. failed"
+assert_present "$H/config/trust/when-dotstate.when-trust" "arm via state/. binds under the home's config/"
+FM_STATE_OVERRIDE="$H/state/." pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-dotstate || fail "no outcome for a watch armed via state/."
+assert_grep 'status: fired' "$(first_result "$H" when-dotstate)" "a watch armed via state/. fires"
+pass "a watch armed through a state/. override fires under the canonical state path"
+
 printf 'all fm-procevent-when tests passed\n'

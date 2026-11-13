@@ -2717,7 +2717,7 @@ test_poll_publication_refuses_unsafe_destinations() {
 }
 
 test_live_artifact_single_link_and_privacy_validation() {
-  local artifact dir state alias rc
+  local artifact dir state alias rc FM_HOME
   for artifact in check.sh pr-poll pr-poll-registration; do
     dir=$(make_case "single-link-live-${artifact//./-}")
     state="$dir/home/state"
@@ -2738,6 +2738,7 @@ test_live_artifact_single_link_and_privacy_validation() {
 
   dir=$(make_case single-link-custom-check-registration)
   state="$dir/home/state"
+  FM_HOME="$dir/home"
   printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
   chmod 0700 "$state/custom.check.sh"
   alias="$dir/custom-check.alias"
@@ -2769,6 +2770,7 @@ test_live_artifact_single_link_and_privacy_validation() {
 
   dir=$(make_case private-custom-check-source)
   state="$dir/home/state"
+  FM_HOME="$dir/home"
   printf '#!/usr/bin/env bash\nprintf "custom-ready\\n"\n' > "$state/custom.check.sh"
   chmod 0755 "$state/custom.check.sh"
   set +e
@@ -2792,9 +2794,10 @@ test_live_artifact_single_link_and_privacy_validation() {
 # A writer confined to state/ can compute a well-formed trust record for its own
 # check; the watcher must refuse it because trust lives outside state/.
 test_state_only_custom_check_trust_is_refused() {
-  local dir state mark hash out
+  local dir state mark hash out FM_HOME
   dir=$(make_case state-only-custom-check-trust)
   state="$dir/home/state"
+  FM_HOME="$dir/home"
   mark="$dir/ran"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$mark" > "$state/evil.check.sh"
   chmod 0700 "$state/evil.check.sh"
@@ -2842,6 +2845,41 @@ test_state_only_custom_check_trust_is_refused() {
   ! fm_custom_check_registered "$state" evil \
     || fail "the leftover state/ record still authenticated the check"
   pass "a trust record written only under state/ never makes a custom check run"
+}
+
+# Two homes whose state overrides are siblings share a parent directory; each
+# home's check must stay bound to that home's own trust record.
+test_sibling_state_overrides_keep_separate_trust() {
+  local dir home_a home_b state_a state_b
+  dir=$(make_case sibling-state-override-trust)
+  home_a="$dir/home-a"
+  home_b="$dir/home-b"
+  state_a="$dir/run/a"
+  state_b="$dir/run/b"
+  mkdir -p "$home_a/config" "$home_b/config" "$state_a" "$state_b"
+  printf '#!/usr/bin/env bash\necho a\n' > "$state_a/shared.check.sh"
+  printf '#!/usr/bin/env bash\necho b\n' > "$state_b/shared.check.sh"
+  chmod 0700 "$state_a/shared.check.sh" "$state_b/shared.check.sh"
+
+  FM_HOME="$home_a" FM_STATE_OVERRIDE="$state_a" "$REGISTER" shared >/dev/null \
+    || fail "home A registration failed"
+  FM_HOME="$home_b" FM_STATE_OVERRIDE="$state_b" "$REGISTER" shared >/dev/null \
+    || fail "home B registration failed"
+  [ -f "$home_a/config/trust/shared.check-trust" ] \
+    || fail "home A's trust record is not under home A's config/"
+  [ -f "$home_b/config/trust/shared.check-trust" ] \
+    || fail "home B's trust record is not under home B's config/"
+  [ ! -e "$dir/run/config" ] || fail "trust was written beside the sibling state overrides"
+  FM_HOME="$home_a" fm_custom_check_registered "$state_a" shared \
+    || fail "home B's registration displaced home A's binding"
+  FM_HOME="$home_b" fm_custom_check_registered "$state_b" shared \
+    || fail "home B's check was not accepted"
+
+  FM_HOME="$home_b" FM_STATE_OVERRIDE="$state_b" "$ROOT/bin/fm-check-unregister.sh" shared >/dev/null \
+    || fail "home B unregistration failed"
+  FM_HOME="$home_a" fm_custom_check_registered "$state_a" shared \
+    || fail "home B's unregistration removed home A's binding"
+  pass "sibling state overrides keep each home's check trust separate"
 }
 
 install_final_publication_fault() {
@@ -5835,6 +5873,7 @@ test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_state_only_custom_check_trust_is_refused
+test_sibling_state_overrides_keep_separate_trust
 test_registered_poll_survives_template_update_and_relaunch
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts

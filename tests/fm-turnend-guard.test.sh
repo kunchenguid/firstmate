@@ -114,12 +114,13 @@ register_custom_check() {
   local state=$1 id=$2
   printf '#!/usr/bin/env bash\nexit 0\n' > "$state/$id.check.sh"
   chmod 700 "$state/$id.check.sh"
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+  FM_HOME="$(cd "$state/.." && pwd)" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
     || fail "fm-check-register.sh could not register $id"
 }
 
 test_predicate_registered_check_needs_supervision() {
   local state="$TMP_ROOT/pred-check/state"
+  local FM_HOME="$TMP_ROOT/pred-check"
   mkdir -p "$state"
   register_custom_check "$state" issue-comments
   fm_supervision_needed "$state" 300 || fail "a registered custom check did not register as supervision need"
@@ -131,6 +132,7 @@ test_predicate_registered_check_needs_supervision() {
 
 test_predicate_registered_check_counts_through_dot_state_spelling() {
   local home="$TMP_ROOT/pred-check-dot" state
+  local FM_HOME="$home"
   state="$home/state/."
   mkdir -p "$home/state"
   register_custom_check "$state" issue-comments
@@ -144,6 +146,7 @@ test_predicate_registered_check_counts_through_dot_state_spelling() {
 
 test_predicate_registered_check_survives_rebinding_drift() {
   local state="$TMP_ROOT/pred-check-drift/state"
+  local FM_HOME="$TMP_ROOT/pred-check-drift"
   mkdir -p "$state"
   register_custom_check "$state" issue-comments
   printf '#!/usr/bin/env bash\necho drifted\n' > "$state/issue-comments.check.sh"

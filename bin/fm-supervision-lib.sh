@@ -21,23 +21,22 @@ fm_sup_stat_mtime() {
   fi
 }
 
-# Trust records live in the home's operator-owned config/trust/, beside state/,
-# so a writer confined to state/ cannot authorize its own check. Only
-# fm-check-register.sh and fm-procevent-when.sh write there. The state path is
-# resolved physically first, so spellings such as state/. or a symlink to state
-# still name the real parent, and a trust directory that resolves inside state
-# is refused. A state path that does not exist yet has nothing to protect.
+# Trust records live in the home's operator-owned config/trust/
+# (${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/trust), so a writer confined to state/
+# cannot authorize its own check, and homes whose state overrides share a parent
+# never share bindings. Only fm-check-register.sh and fm-procevent-when.sh write
+# there. Without a home it refuses. Both paths are resolved physically when they
+# exist, so spellings such as state/. or a symlink cannot hide a trust directory
+# inside state; one that resolves there is refused.
 fm_trust_dir() {  # <state-dir>
-  local state=$1 real config
-  real=$(cd -P -- "$state" 2>/dev/null && pwd -P) || {
-    printf '%s/config/trust\n' "$(dirname -- "$state")"
-    return 0
-  }
-  config="$(dirname -- "$real")/config"
+  local real config=${FM_CONFIG_OVERRIDE:-${FM_HOME:+$FM_HOME/config}}
+  [ -n "$config" ] || return 1
   if [ -e "$config" ]; then
     config=$(cd -P -- "$config" 2>/dev/null && pwd -P) || return 1
   fi
-  case "$config/trust/" in "$real"/*) return 1 ;; esac
+  if real=$(cd -P -- "$1" 2>/dev/null && pwd -P); then
+    case "$config/trust/" in "$real"/*) return 1 ;; esac
+  fi
   printf '%s/trust\n' "$config"
 }
 

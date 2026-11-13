@@ -15,8 +15,8 @@
 #
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
-#            hash-bound by a trust record in config/trust/ beside the state
-#            directory, the same trust root fm-check-register.sh uses, so a
+#            hash-bound by a trust record in the home's config/trust/, the
+#            same trust root fm-check-register.sh uses (fm_trust_dir), so a
 #            state/ writer cannot forge a watch. The action executable is resolved and its
 #            bytes are hash-bound at registration, then checked again immediately
 #            before the fire is claimed. The runner refuses a mutated spec or
@@ -109,8 +109,8 @@ FM_ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || FM_ROOT_REAL=$FM_ROOT
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
 WHEN_DIR="$STATE/when"
-# Empty when the trust directory would resolve inside state/; every trust
-# check then fails closed.
+# Empty when there is no home or the trust directory would resolve inside
+# state/; every trust check then fails closed.
 TRUST_DIR=$(fm_trust_dir "$STATE") || TRUST_DIR=
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
 

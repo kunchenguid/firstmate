@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
-# The trust record is written to config/trust/<id>.check-trust beside the
-# state directory, never under state/, so a state/ writer cannot register a check.
+# The trust record is written to the home's config/trust/<id>.check-trust
+# (fm_trust_dir), never under state/, so a state/ writer cannot register a check.
 # Re-run this for each check registered before trust moved out of state/; the
 # watcher ignores the old state/<id>.check-trust records.
 # Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.

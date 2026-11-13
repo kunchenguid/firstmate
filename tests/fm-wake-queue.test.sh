@@ -250,6 +250,8 @@ test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check)
   state="$dir/state"
+  # Register and watch in the same home, so trust lands under $dir/config.
+  local -x FM_HOME="$dir"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
@@ -274,6 +276,8 @@ test_multiline_check_output_wakes_as_one_line() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check-multiline)
   state="$dir/state"
+  # Register and watch in the same home, so trust lands under $dir/config.
+  local -x FM_HOME="$dir"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   drain_out="$dir/drain.out"

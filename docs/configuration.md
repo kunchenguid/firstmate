@@ -118,8 +118,8 @@ Each effective `FM_HOME` contains private operational directories.
 
 `config/trust/` holds the trust records that let the watcher run a custom check and let a `when` watch fire: `<id>.check-trust` written by `bin/fm-check-register.sh` and `<source-id>.when-trust` written by `bin/fm-procevent-when.sh arm`.
 They live in operator configuration rather than `state/`, so a process that can write only `state/` can break a registered check or watch but cannot add or replace one.
-The folder is always the `config/trust/` beside the state directory in use, found after resolving that directory's real path (so `state/.` or a symlink to `state/` still names the real parent), so writers and the watcher agree on it even under `FM_STATE_OVERRIDE`, and `FM_CONFIG_OVERRIDE` does not move it.
-A trust folder that resolves inside the state directory, for example through a `config` symlink into `state/`, is refused, so no custom check runs and no `when` watch fires.
+The folder is the home's own `trust/` under `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}`, keyed to the home rather than to the state directory, so `FM_STATE_OVERRIDE` never moves it and two homes whose state overrides share a parent never share bindings.
+A trust folder that resolves inside the real state directory, for example through a `config` symlink into `state/` or an `FM_CONFIG_OVERRIDE` that points inside it, is refused, so no custom check runs and no `when` watch fires.
 Trust records left in `state/` by an older version are ignored, never migrated, because nothing could tell a legitimate old record from a forged one.
 After updating from such a version, run `bin/fm-check-register.sh <id>` once for each `state/<id>.check.sh` you still want, re-run the `arm` command of each generated check (for example `bin/fm-tool-update-check.sh arm`), and run `bin/fm-procevent-when.sh retire <name>` then `arm` again for each live `when` watch.
 
