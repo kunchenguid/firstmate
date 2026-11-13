@@ -14,6 +14,10 @@
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
 #   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
+# arm        Register the board's listener and confirm it is running. With
+#            --for, the first arm of a scout's board is refused unless the
+#            artifact is inside that task's data directory, because cleanup
+#            discards a scout's worktree and keeps data/<task-id>/.
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, disconnected, missing, or unknown.
 # read       Print a structured presentation of one already-captured result so a
@@ -216,11 +220,15 @@ post_lavish_reply() {  # <artifact> <reply-file>
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
 # source and must never become two owners.
+physical_path() {  # <path>
+  perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$1" 2>/dev/null
+}
+
 cmd_source_id() {
   local artifact=${1-} real
   [ -n "$artifact" ] || usage
   case "$artifact" in *$'\n'*) die "artifact paths cannot contain newlines" ;; esac
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  real=$(physical_path "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
   [ -f "$real" ] || die "artifact does not exist: $artifact"
   if command -v shasum >/dev/null 2>&1; then
@@ -228,6 +236,20 @@ cmd_source_id() {
   else
     printf 'lavish-%s\n' "$(printf '%s' "$real" | sha256sum | awk '{print substr($1,1,16)}')"
   fi
+}
+
+# Cleanup discards a scout's worktree and keeps its data directory, so a board
+# a scout arms for the first time must already be inside that directory. A
+# board registered before this rule keeps its registration until concluded,
+# because moving it would end the session the captain has open.
+scout_board_would_be_discarded() {  # <task> <source-id> <real-artifact>
+  local state=${FM_STATE_OVERRIDE:-$FM_HOME/state} task_data
+  fm_pr_task_id_valid "$1" || return 1
+  [ "$(sed -n 's/^kind=//p' "$state/$1.meta" 2>/dev/null | tail -n 1)" = scout ] || return 1
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
+    | awk -v id="$2" '$1 == id { found = 1 } END { exit !found }' && return 1
+  task_data=$(physical_path "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$1") || return 0
+  case "$3" in "$task_data"/*) return 1 ;; *) return 0 ;; esac
 }
 
 cmd_arm() {
@@ -258,8 +280,11 @@ cmd_arm() {
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  real=$(physical_path "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
+  if [ -n "$task" ] && scout_board_would_be_discarded "$task" "$id" "$real"; then
+    die "cleanup discards scout $task's worktree, so its board must be inside ${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/; move the artifact to ${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/board/, open it there with lavish-axi, and arm that copy"
+  fi
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
   if [ -n "$task" ]; then

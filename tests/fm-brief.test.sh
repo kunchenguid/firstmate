@@ -1130,9 +1130,10 @@ test_scout_completion_write_exception_is_task_scoped() {
 }
 
 # A scout brief offers the Lavish review loop for every compatible board version,
-# including older builds that use the legacy reply path.
+# including older builds that use the legacy reply path, and an offered board is
+# placed in the task data directory that cleanup keeps.
 test_scout_lavish_line_follows_presentation_floor() {
-  local base label version expect case_dir fakebin brief n=0
+  local base label version expect case_dir fakebin brief board n=0
   local hosting='use the lavish-axi rule'
   local text_only='deliver your findings as a text report without Lavish'
   base=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" lavish-axi)
@@ -1147,12 +1148,22 @@ test_scout_lavish_line_follows_presentation_floor() {
       "$ROOT/bin/fm-brief.sh" scout-lavish alpha --scout >/dev/null \
       || fail "$label: scout scaffold failed"
     brief="$case_dir/home/data/scout-lavish/brief.md"
+    board="\`$case_dir/home/data/scout-lavish/board/\`"
     if [ "$expect" = hosting ]; then
       assert_grep "$hosting" "$brief" "$label: scout brief did not offer the Lavish review loop"
       assert_no_grep "$text_only" "$brief" "$label: scout brief withheld Lavish from a compatible build"
+      assert_grep "write the artifact and its assets under $board" "$brief" \
+        "$label: scout brief did not place the board in the task data directory"
+      assert_grep "outside it, write only the report, a review board under $board, and the status file below" "$brief" \
+        "$label: scout outside-write rule did not allow the board directory"
+      assert_no_grep 'The report is the only thing that survives' "$brief" \
+        "$label: scout brief still said that only the report survives cleanup"
     else
       assert_grep "$text_only" "$brief" "$label: scout brief did not ask for a text report"
       assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
+      assert_no_grep "$board" "$brief" "$label: scout brief named a board directory without Lavish"
+      assert_grep 'outside it, write only the report and status file below' "$brief" \
+        "$label: scout outside-write rule changed without Lavish"
     fi
   done <<'ROWS'
 lavish-axi at the board compatibility floor^0.1.77^hosting
@@ -1162,7 +1173,7 @@ lavish-axi above the reply feature floor^0.2.0^hosting
 lavish-axi below the board compatibility floor^0.1.76^text
 absent lavish-axi^absent^text
 ROWS
-  pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
+  pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor and keeps the board in task data"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.

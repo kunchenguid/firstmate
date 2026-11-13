@@ -21,6 +21,7 @@
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
 #   confirms the legacy board-compatibility floor; otherwise it asks for a text report.
+#   An offered board lives in data/<task-id>/board/, which cleanup keeps.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -697,8 +698,12 @@ fi
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
-  LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
+  SCOUT_KEPT="Only the report and a review board under \`$DATA/$ID/board/\` survive, so anything worth keeping must be in one of them."
+  SCOUT_OUTSIDE_WRITES="the report, a review board under \`$DATA/$ID/board/\`, and the status file below"
+  LAVISH_LINE="If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: write the artifact and its assets under \`$DATA/$ID/board/\`, because the arm refuses a scout's board anywhere else; arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board."
 else
+  SCOUT_KEPT='The report is the only thing that survives, so anything worth keeping must be in it.'
+  SCOUT_OUTSIDE_WRITES='the report and status file below'
   LAVISH_LINE='Lavish is unavailable (lavish-axi is missing or below its supported version floor), so deliver your findings as a text report without Lavish, even for a visual deliverable.'
 fi
 cat > "$BRIEF" <<EOF
@@ -712,11 +717,11 @@ $HERDR_SECTION
 $SETUP_BASE
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+$SCOUT_KEPT
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
+2. Stay inside this worktree; outside it, write only $SCOUT_OUTSIDE_WRITES, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
