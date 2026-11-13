@@ -16,6 +16,7 @@ unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/t3-fake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
+. "$ROOT/bin/fm-watch-key-lib.sh"
 
 command -v node >/dev/null 2>&1 || { echo "skip: node absent"; exit 0; }
 
@@ -908,42 +909,51 @@ test_native_restart_rearms_undelivered_stale_warning() {
         housekeeping "$1"
       ' "$state" || exit 1
       [ -s "$state/.subsuper-escalations" ] || exit 1
-      # The native daemon has stopped without delivering its buffer.
+      # The native daemon has stopped without delivering its buffer. Stop keeps
+      # the delivery buffer for the return/catch-up path but ends the session's
+      # per-task episode state: the stale clock and its report marker are gone.
       "$ROOT/bin/fm-afk-launch.sh" stop || exit 1
       [ -s "$state/.subsuper-escalations" ] || exit 1
-      [ -f "$state/.subsuper-reported-stale-worker" ] || exit 1
-      # A warning already delivered for another condition must stay suppressed.
+      [ ! -e "$state/.subsuper-reported-stale-worker" ] || exit 1
+      [ ! -e "$marker" ] || exit 1
+      # A warning already delivered for another condition is the same
+      # session-scoped episode state; the next entry clears it too.
       printf 900 > "$state/.subsuper-reported-stale-delivered"
       "$ROOT/bin/fm-afk-launch.sh" enter --words 'supervise pending work' >/dev/null || exit 1
       first=$(cat "$state/.subsuper-escalations")
-      # Failed startup must restore both the queue and its suppression markers.
+      # Failed startup must restore both the queue and the markers it captured.
       bash -c '
         . "$0/bin/fm-afk-launch.sh"
         fm_afk_launch_record_write() { return 1; }
         ! fm_afk_launch_main start-native
       ' "$ROOT" || exit 1
       [ "$(cat "$state/.subsuper-escalations")" = "$first" ] || exit 1
-      [ -f "$state/.subsuper-reported-stale-worker" ] || exit 1
+      [ -f "$state/.subsuper-reported-stale-delivered" ] || exit 1
       "$ROOT/bin/fm-afk-launch.sh" start-native || exit 1
       assert_absent "$state/.subsuper-escalations" "fresh startup must discard the old queue"
       assert_absent "$state/.subsuper-reported-stale-worker" "discarding an undelivered warning must re-arm reporting"
-      assert_present "$state/.subsuper-reported-stale-delivered" "startup must preserve suppression of delivered warnings"
-      [ "$(cat "$marker")" = 1 ] || fail "restart must preserve the stale condition's age"
+      assert_absent "$state/.subsuper-reported-stale-delivered" "startup must drop the prior session's suppression markers"
+      [ ! -e "$marker" ] || fail "restart must drop the prior session's stale clock"
       out=$(t3_run 'fm_backend_t3code_busy_state thread-live')
       [ "$out" = unknown ] || fail "the restarted thread must remain unknown"
+      # The still-unknown thread is re-derived on THIS session's fresh clock: a
+      # new stale wake opens a new episode at 1000, so the recheck reports its
+      # own 100s, never the prior session's 999s.
       t3_run '
         . "$0/bin/fm-supervise-daemon.sh"
         _now() { printf 1000; }
         LOG="$1/daemon.log"
+        handle_wake "stale: thread-live" "$1"
         housekeeping "$1"
         _now() { printf 1100; }
         housekeeping "$1"
         housekeeping "$1"
       ' "$state" || exit 1
+      [ "$(cat "$marker")" = 1000 ] || fail "the new session must restart the stale clock"
       [ "$(wc -l < "$state/.subsuper-escalations" | tr -d "[:space:]")" = 1 ] \
         || fail "persistent uncertainty must queue exactly one replacement warning"
       assert_contains "$(cat "$state/.subsuper-escalations")" \
-        'stale persisted 999s (possible wedge): thread-live' "restart must report the retained stale condition"
+        'stale persisted 100s (possible wedge): thread-live' "restart must re-derive the stale condition on a fresh clock"
       # Once that replacement is delivered, uncertainty must not report again.
       t3_run '
         . "$0/bin/fm-supervise-daemon.sh"
@@ -958,7 +968,7 @@ test_native_restart_rearms_undelivered_stale_warning() {
       [ "$(wc -l < "$state/delivered.log" | tr -d "[:space:]")" = 1 ] || exit 1
     ) || fail "$session restart lost or duplicated the stale warning"
   done
-  pass "native restart re-arms discarded T3 stale warnings exactly once and preserves delivered suppression"
+  pass "native restart clears session episode state and re-derives T3 stale warnings once on a fresh clock"
 }
 
 test_housekeeping_preserves_unknown_stale_recheck() {
@@ -1105,8 +1115,7 @@ test_t3_stale_watcher() {  # <thread-status> <absorb|surface|dead> [harness] [fr
   local session=$1 expected=$2 harness=${3:-codex} state fb hash out _
   local fresh=${4:-} turn=${5:-} busy_bound=3600 turn_at
   local thread=mcp:6a0e1f2b-3c4d-4a5b-8c6d-0123456789ab key
-  # The watcher's per-window marker key turns `:` into `_` (fm-watch.sh window_key).
-  key=${thread//:/_}
+  key=$(window_key "$thread")
   t3_case "watch-$session-$harness-$fresh-$turn" "$session"
   t3_world "$(t3_thread_json "$thread" "$session" false)"
   # The spawn record below is aged past the bound, so only T3's own run
@@ -1552,12 +1561,13 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR, got '$(t3_json_field "$settings" 'd.env')'"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_ID')" = "$id" ] || fail "a ship worker's settings env must carry FM_TASK_ID"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_INBOX')" = "$state/$id.inbox" ] || fail "a ship worker's settings env must carry its steering inbox"
+  [ "$(t3_json_field "$settings" 'd.env.FM_HOME')" = "$CASE_DIR/home" ] || fail "a ship worker's settings env must carry the active home"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_VALUE_0')" = "$state/$id.git-hooks" ] || fail "T3 workers must select the installed Git hook"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_KEY_0')" = core.hooksPath ] || fail "T3 workers must select core.hooksPath"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_COUNT')" = 1 ] || fail "T3 workers must select one Git config override"
   [ "$(t3_json_field "$settings" 'd.env.TRACEPARENT')" = undefined ] || fail "TRACEPARENT must be absent when trace context is off"
   [ "$(t3_json_field "$settings" 'd.env.COMPACT_ADVISER_DISABLE')" = 1 ] || fail "settings env must carry the compact-adviser kill switch every launch carries"
-  [ "$(t3_json_field "$settings" 'Object.keys(d.env).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR" ] || fail "a worker env block carries the task inbox and Git hook with the launch environment"
+  [ "$(t3_json_field "$settings" 'Object.keys(d.env).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE FM_HOME FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR" ] || fail "a worker env block carries the task inbox and Git hook with the launch environment"
   t3_excluded "$wt" .claude/settings.local.json || fail "the settings file must be git-excluded"
   assert_present "$wt/CLAUDE.local.md" "a claude worker gets the task-worker channel statement as CLAUDE.local.md"
   assert_grep "task worker launched by Firstmate" "$wt/CLAUDE.local.md" "CLAUDE.local.md must carry the channel statement"

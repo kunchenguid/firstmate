@@ -82,6 +82,35 @@ test_sync_copies_only_the_v1_allowlist() {
   pass "record export sync copies only the fixed v1 allowlist with restrictive modes"
 }
 
+test_sync_treats_empty_path_overrides_as_unset() {
+  local home export_root rc=0
+  home=$(make_home sync-empty-overrides)
+  export_root="$TMP_ROOT/export-empty-overrides"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf 'projects\n' > "$home/data/projects.md"
+  printf 'working: underway\n' > "$home/state/task-a.status"
+  FM_HOME="$home" FM_ROOT_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_DATA_OVERRIDE='' FM_STATE_OVERRIDE='' \
+    "$EXPORTER" sync > "$home/stdout" 2> "$home/stderr" || rc=$?
+  expect_code 0 "$rc" "sync with empty path overrides: $(cat "$home/stderr")"
+  assert_grep 'projects' "$export_root/live/data/projects.md" "sync with empty overrides skipped the home data tree"
+  assert_grep 'underway' "$export_root/live/state/task-a.status" "sync with empty overrides skipped the home state tree"
+  pass "record export sync treats empty FM_*_OVERRIDE variables as unset"
+}
+
+test_sync_skips_hidden_state_records() {
+  local home export_root rc=0
+  home=$(make_home sync-hidden-state)
+  export_root="$TMP_ROOT/export-hidden-state"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  printf 'status\n' > "$home/state/task-a.status"
+  printf 'network checks\n' > "$home/state/.startup-network.status"
+  run_export "$home" sync > "$home/stdout" 2> "$home/stderr" || rc=$?
+  expect_code 0 "$rc" "sync with a hidden state status file: $(cat "$home/stderr")"
+  assert_grep 'status' "$export_root/live/state/task-a.status" "sync dropped the task status beside a hidden record"
+  assert_absent "$export_root/live/state/.startup-network.status" "sync exported a hidden non-task status file"
+  pass "record export sync skips hidden state records instead of failing"
+}
+
 test_sync_replaces_files_atomically() {
   local home export_root rc=0
   home=$(make_home sync-atomic)
@@ -770,6 +799,8 @@ test_export_root_stays_cold_to_firstmate_readers() {
 
 test_sync_is_off_when_config_is_absent
 test_sync_copies_only_the_v1_allowlist
+test_sync_treats_empty_path_overrides_as_unset
+test_sync_skips_hidden_state_records
 test_sync_replaces_files_atomically
 test_sync_accepts_an_absolute_export_root_with_spaces
 test_sync_refuses_malformed_config_and_unsafe_paths
