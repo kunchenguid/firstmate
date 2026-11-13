@@ -388,31 +388,25 @@ fm_pr_file_mode() {
 # a file inherits from its folder, which for a firstmate home is the user's own
 # profile. Only on a Cygwin-family kernel, a probe in the same directory decides
 # it: the mount stores modes when chmod 644 and then chmod 600 both read back.
-# Anything else, including a probe that cannot be created, keeps modes strict.
-# Each verdict is cached per directory for the life of the shell.
-_FM_PR_MODELESS_DIRS=
+# Anything else, including a probe that cannot be created, changed, or read,
+# keeps modes strict.
 fm_pr_mode_unrepresentable() {  # <path>
-  local dir probe first second
+  local dir probe first='' second=''
   case "$(uname -s 2>/dev/null)" in
     CYGWIN*|MINGW*|MSYS*) ;;
     *) return 1 ;;
   esac
   if [ -d "$1" ] && [ ! -L "$1" ]; then dir=$1; else dir=$(dirname -- "$1"); fi
-  case $'\n'"$_FM_PR_MODELESS_DIRS"$'\n' in
-    *$'\n'"+$dir"$'\n'*) return 0 ;;
-    *$'\n'"-$dir"$'\n'*) return 1 ;;
-  esac
   probe=$(mktemp "$dir/.fm-mode-probe.XXXXXX" 2>/dev/null) || return 1
-  chmod 644 "$probe" 2>/dev/null
-  first=$(fm_pr_file_mode "$probe")
-  chmod 600 "$probe" 2>/dev/null
-  second=$(fm_pr_file_mode "$probe")
-  rm -f -- "$probe"
-  if [ "$first" = 644 ] && [ "$second" = 600 ]; then
-    _FM_PR_MODELESS_DIRS="$_FM_PR_MODELESS_DIRS"$'\n'"-$dir"
-    return 1
+  if chmod 644 "$probe" 2>/dev/null; then
+    first=$(fm_pr_file_mode "$probe")
+    chmod 600 "$probe" 2>/dev/null && second=$(fm_pr_file_mode "$probe")
   fi
-  _FM_PR_MODELESS_DIRS="$_FM_PR_MODELESS_DIRS"$'\n'"+$dir"
+  rm -f -- "$probe"
+  case "$first:$second" in
+    :*|*:|*[!0-7:]*) return 1 ;;
+  esac
+  [ "$first" != 644 ] || [ "$second" != 600 ]
 }
 
 # True when $1 has exactly octal mode $2, or sits on a mount that cannot store

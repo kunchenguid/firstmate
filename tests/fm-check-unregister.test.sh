@@ -237,6 +237,17 @@ test_registration_on_a_mount_that_cannot_store_modes() {
   PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-check-lib.sh"; fm_custom_check_registered "$2" demo' _ "$ROOT" "$home/state" \
     || fail "the watcher did not trust a check registered on a modeless Windows mount"
 
+  # A probe whose chmod fails proves nothing about the mount, so a Windows
+  # kernel keeps the strict test and refuses the check itself.
+  rm -f "$home/state/demo.check-trust"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/chmod"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" demo >/dev/null 2>"$home/err" || status=$?
+  expect_code 1 "$status" "register a mode-$mode check on a Windows kernel whose probe chmod fails"
+  grep -q 'custom check is unavailable' "$home/err" \
+    || fail "a failed mode probe did not keep the strict test: $(cat "$home/err")"
+  assert_absent "$home/state/demo.check-trust" "a failed mode probe bound a check that is not mode 700"
+
   # Where this host's own mount does store modes, a Windows kernel still gets
   # the strict test: a real chmod that takes effect leaves no excuse.
   chmod 0600 "$home/state/demo.check.sh"
