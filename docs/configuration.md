@@ -1694,12 +1694,40 @@ The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
-The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
+The stored-login check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
 
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
+With a [Claude token source](#claude-token-source-configclaude-account-credential-sourcejson), the launch sets `CLAUDE_CODE_OAUTH_TOKEN` from that source instead of unsetting it.
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
 
 A home that authenticates Claude through environment credentials on purpose should leave the pin absent.
+
+### Claude token source (config/claude-account-credential-source.json)
+
+A Claude pin may use a long-lived OAuth token from a declared credential source instead of the login stored in its config directory.
+Keep `config/claude-account` as the account pin and add `config/claude-account-credential-source.json` beside it, using the same credential-source declaration schema as [shared credential-source declaration](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model):
+
+```json
+{
+  "claude": { "source": "macos-keychain", "service": "firstmate-claude", "account": "worker" }
+}
+```
+
+The declaration names only the Keychain item, never its token.
+Store the long-lived OAuth token created by `claude setup-token` with `security add-generic-password -s <service> -a <account> -w`, using the declared service and account; it prompts for the token, keeps it out of arguments, and lets `security` read it back without an access dialog.
+For a local secondmate, place the same file beside its pin in `config/secondmate-accounts/<id>/`.
+This file maps the single `config/claude-account` pin.
+For pool declarations, see [several Claude accounts](#several-claude-accounts-configclaude-accounts).
+
+Before launch or relaunch, Firstmate loads the token through the shared credential-source adapter and requires `claude auth status` to report `authMethod` as `oauth_token`.
+The check proves only that the token loads and is the auth method Claude will use; an expired or revoked token is not detected before launch.
+The launch loads the token again into `CLAUDE_CODE_OAUTH_TOKEN`; it exists only in process memory and the worker's environment, never in arguments, files, or logs, including inherited shell tracing.
+If that second read fails, Claude does not start, even if the pre-launch check succeeded.
+A missing, unreadable, unsupported, or malformed source, or a check that does not report `authMethod` as `oauth_token`, refuses the launch without falling back to the config directory's stored login.
+The source file without its matching pin also refuses.
+On relaunch with an expired token, the check passes, the running worker is stopped, and the replacement fails on its first request; the local copy and its commits are kept, so store a fresh token and relaunch.
+
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns how the source is bound to a pin, and [`bin/fm-claude-token.sh`](../bin/fm-claude-token.sh) loads it for the command; [`bin/fm-credential-source-lib.sh`](../bin/fm-credential-source-lib.sh) owns the shared source schema and adapters.
 
 ### Failures, reporting, and inheritance
 
@@ -1714,26 +1742,38 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ### Several Claude accounts (config/claude-accounts)
 
 A home with more than one Claude subscription can let each ship and scout launch on whichever declared account has quota to spare, instead of pinning every Claude worker to one account.
-Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it:
+Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it.
+An entry may optionally add a tab and the name of its credential-source declaration file in this home's `config/` directory:
 
 ```text
 ordinary
-/home/me/.claude-second
+/home/me/.claude-second<TAB>claude-account-credential-source-second.json
 ```
 
-A final newline is optional; a blank line, a relative path, a repeated entry, or a control character refuses.
+`<TAB>` denotes one literal tab.
+The source filename must match `claude-account-credential-source-<name>.json`, where `<name>` starts with an ASCII letter or digit and continues with ASCII letters, digits, `.`, `_`, or `-`.
+Its contents use the same [credential-source declaration schema](#claude-token-source-configclaude-account-credential-sourcejson) as a single pin.
+A final newline is optional; a blank line, relative account path, repeated account, malformed source filename, or control character other than the separator tab refuses.
 The list is opt-in: without it, every launch, including the single pin above, behaves exactly as before, and `--account` refuses.
 A home keeps either the list or `config/claude-account`, never both; with both present, every Claude launch refuses.
 
 While the list is present, every Claude ship or scout spawn must name one declared entry with `--account <entry>`.
+Pass only the account value before the tab, without the source filename.
 Firstmate chooses that entry at dispatch intake under the [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) procedure, and [`bin/fm-claude-account-quota.sh`](../bin/fm-claude-account-quota.sh) measures each entry for it by running `quota-axi --provider claude --profile-only` under that entry's own config directory (`~/.claude` for `ordinary`).
 Firstmate never picks an entry by default, by file order, or from the ambient account, and never discovers, adds, or copies a login.
 
+Quota for a Keychain-sourced entry is read from that config directory's stored login.
+Without a stored login, the entry is reported unmeasured and remains eligible with disclosed uncertainty under `quota-array-dispatch`.
+The directory login and Keychain token must belong to the same account for the reading to describe the worker's quota; if the login belongs to a different subscription, the reading belongs to that other account.
+
 The named entry passes the same refusals as a pin before anything launches: its directory must exist, a raw Claude command must not override it, and `claude auth status` must say it is signed in, with the stripped environment and credential unsetting described above.
+If its line names a source file, Firstmate validates and reads only that entry's declaration, applying the [Claude token source](#claude-token-source-configclaude-account-credential-sourcejson) checks, containment, and refusal rules.
+Entries without a source file continue to use the selected account's stored login.
+The single-pin `config/claude-account-credential-source.json` cannot be used with the pool list.
 An undeclared, missing, or signed-out entry refuses rather than falling back to another entry or the ambient account.
 The spawn line and the task record carry the entry as `account=`.
 
-A relaunch or recovery of that task keeps its recorded account, re-checking that it is still declared and signed in before the running worker stops.
+A relaunch or recovery of that task keeps its recorded account, re-reading its current source mapping and re-checking that it is still declared and signed in before the running worker stops.
 To move a task to another declared account, for example when its own account is exhausted, relaunch it explicitly with `bin/fm-control.sh <id> relaunch --account <entry> --note <text>`; nothing moves a running task automatically.
 A task with no recorded account, or one whose account is no longer declared, refuses a plain relaunch and needs that explicit `--account`.
 
@@ -1749,13 +1789,13 @@ Use the secondmate's registered identifier for `<id>`.
 These private files use the same [file format and provider selection](#file-format-and-provider-selection), sign-in checks, and refusal rules as the home-wide worker pins.
 
 The matching per-secondmate file overrides the primary home's matching worker pin for that secondmate alone.
-An absent per-secondmate file preserves the existing home-wide pin or unpinned behavior exactly.
+An absent per-secondmate pin preserves the existing home-wide pin or unpinned behavior; for Claude, its [token-source declaration](#claude-token-source-configclaude-account-credential-sourcejson) must also be absent.
 Other secondmates and ordinary workers remain unchanged.
 A pin for another runner does not apply, and `pi` and `pi-signed` share `pi-account`.
 An empty, malformed, unreadable, or unusable per-secondmate pin refuses with its path and reason rather than falling back to the primary's account.
 
 For example, `config/secondmate-accounts/work/claude-account` containing `/home/me/.claude-work` selects that existing Claude login for the local secondmate named `work`.
-Removing that file restores the primary home's account selection on the next launch.
+Removing that file restores the primary home's account selection on the next launch, provided its matching token-source declaration is also absent.
 Every spawn, control-plane relaunch, and automatic recovery reads the durable setting again, never a previous task record or ambient account choice.
 After changing a live mate's pin, use `bin/fm-control.sh <id> relaunch` to apply it.
 The relaunch checks the selected pin before stopping the current agent.
@@ -2276,7 +2316,7 @@ It requires `service`, accepts an optional `account`, and reads that generic-pas
 Store the item with `security add-generic-password -s <service> [-a <account>] -w`, which prompts for the key and lets `security` read it back without an access dialog.
 Only the service and account reach `security`'s argument list, and the key comes back on a pipe.
 No other field is accepted, so the file has nowhere to put a key.
-`bin/fm-credential-source-lib.sh` owns the schema and the adapters, so a further source adds an adapter there rather than a special case in the resolver.
+`bin/fm-credential-source-lib.sh` owns the shared schema and adapters, so another credential consumer reuses them instead of implementing a parallel source path.
 
 The resolver reads the file only after the environment and `.env` have supplied no key for the selected provider, and it uses only that provider's entry.
 A declaration for one provider never feeds another provider and never selects a provider.

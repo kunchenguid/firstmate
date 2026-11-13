@@ -1,10 +1,10 @@
 # shellcheck shell=bash
-# Declared credential sources for provider keys.
+# Shared adapters for declared credentials, including provider keys and OAuth tokens.
 # Usage: . bin/fm-credential-source-lib.sh
 #
 # This file is the single owner of the credential-source declaration: a JSON
-# object keyed by provider whose values say WHERE that provider's key lives and
-# never hold the key itself, for example
+# object keyed by consumer whose values say WHERE its secret lives and never
+# hold the secret itself, for example
 #   {"typesafe": {"source": "macos-keychain", "service": "typesafe-api-key"}}
 # bin/fm-dispatch-resolve.sh reads it only after the environment and .env have
 # supplied no key, and bin/fm-bootstrap.sh only checks whether it declares a
@@ -13,16 +13,18 @@
 #
 # A source is an adapter: FM_CREDSRC_SCHEMA names each adapter and its fields,
 # fm_credsrc_supported says whether this host can run it, and fm_credsrc_read
-# fetches the key through it. macos-keychain is the first. A further adapter
+# fetches the secret through it. macos-keychain is the first. A further adapter
 # adds one schema entry and one arm to those two functions; nothing here knows
-# which provider is asking, so the shared surface binds to no one OS or vendor.
+# which consumer is asking, so the shared surface binds to no one OS or vendor.
 #
-# Secret containment: a key leaves fm_credsrc_read on stdout for the caller's
-# command substitution and nowhere else. It is never an argument, an
-# environment variable, a file, or a log line. An adapter passes only the
-# fields that identify the item to its tool, and discards the tool's stderr
-# because that can echo what it was given. fm_credsrc_supported never runs the
-# tool, so asking whether a source is available retrieves no credential.
+# Secret containment: a secret leaves fm_credsrc_read only on stdout for the
+# caller's command substitution. The adapter never puts it in argv, an
+# environment variable, a file, or a log line; its consumer owns the next hop.
+# Dispatch sends a key on its request descriptor, while the Claude token helper
+# places an OAuth token only in the target command's environment. An adapter
+# passes only item-identifying fields to its tool and discards tool stderr
+# because that can echo inputs. fm_credsrc_supported never runs the tool, so
+# asking whether a source is available retrieves no credential.
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
@@ -109,8 +111,8 @@ fm_credsrc_field() {
   jq -r --arg p "$2" --arg f "$3" '.[$p][$f] // empty' "$1"
 }
 
-# fm_credsrc_read <file> <provider>
-# Print the key <provider>'s declared source yields. Status 0 means a non-empty
+# fm_credsrc_read <file> <consumer>
+# Print the secret the declared source yields for <consumer>. Status 0 means a non-empty
 # read; fm_timed_out accepts the status when the source did not answer within
 # its bound; any other status means the source holds no readable key. Call only
 # on a file fm_credsrc_check accepted and fm_credsrc_supported agreed to run.

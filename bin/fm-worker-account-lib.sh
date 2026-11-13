@@ -33,9 +33,13 @@
 # with config/pi-account refuses raw Pi launches. A raw Claude launch command
 # runs after the pinned root and shed credentials are applied, so its own
 # leading CLAUDE_CONFIG_DIR or shed-credential assignment would override the
-# pin; a home with config/claude-account refuses such a command.
+# pin; a home with config/claude-account refuses such a command. A Claude pin
+# may have config/claude-account-credential-source.json beside it, using the
+# shared credential-source schema for its OAuth token. The token helper loads
+# it separately for the pre-launch check and worker command, without falling
+# back to the pinned root's stored login.
 #
-# The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
+# The stored-login check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential
 # variable left in the caller cannot answer for a root that has no login:
 #   Claude: `claude auth status`, which exits 0 only when signed in.
@@ -47,30 +51,42 @@
 #           a root can authenticate; a row whose provider column is exactly
 #           <p> passes. --no-refresh keeps the check from rewriting a root's
 #           tokens while other workers use them.
-# A pinned Claude launch also unsets the environment credentials Claude ranks
-# above the root's stored login, so an ambient API key or token cannot outrank
-# the pin. Pi ranks a root's stored credentials above environment variables,
+# A pinned Claude launch sheds ambient credentials; a declared source supplies
+# CLAUDE_CODE_OAUTH_TOKEN through the helper instead of the root's stored login.
+# Pi ranks a root's stored credentials above environment variables,
 # and the check refuses a provider the root has not stored, so a pinned Pi
 # launch unsets nothing.
 #
 # A home that spends several Claude subscriptions declares them instead in
 # config/claude-accounts: one entry per line, each `ordinary` or an absolute
-# path exactly as config/claude-account would hold it, with no blank lines,
-# duplicates, or control characters, and an optional final newline. The list is
-# opt-in in the same way: absent, nothing here changes. Present, it replaces the
-# home-wide pin, which must then be absent, and every Claude ship or scout
-# launch names one declared entry with --account; Firstmate chooses it at
-# intake (bin/fm-claude-account-quota.sh measures each entry) and never
-# defaults to the first entry, another entry, or the ambient account. The named
-# entry passes the same root, raw-command, and sign-in refusals as a pin and is
-# recorded as account=, which a ship or scout relaunch reuses unless an
-# explicit --account moves it. A local secondmate's agent never draws from the
-# list: it needs its own per-secondmate pin.
+# path exactly as config/claude-account would hold it, optionally followed by
+# a tab and a config-local `claude-account-credential-source-<name>.json` file.
+# The list has no blank lines, duplicate accounts, or other control characters, and
+# an optional final newline. The list is opt-in in the same way: absent, nothing
+# here changes. Present, it replaces the home-wide pin, which must then be
+# absent, and every Claude ship or scout launch names one declared entry with
+# --account; Firstmate chooses it at intake and never picks from file order. A
+# selected entry's source file uses the shared credential-source schema, and
+# the launch reads only that entry's source. The named entry passes the same
+# root, raw-command, and sign-in refusals as a pin and is recorded as account=,
+# which a ship or scout relaunch reuses unless an explicit --account moves it.
+# A local secondmate's agent never draws from the list: it needs its own pin.
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-credential-source-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-credential-source-lib.sh"
 
 FM_WORKER_ACCOUNT_CHECK_SECONDS=${FM_WORKER_ACCOUNT_CHECK_SECONDS:-30}
+FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE=claude-account-credential-source.json
+
+# fm_worker_account_has_credential_source <config-dir>
+# Succeeds when <config-dir> holds a Claude credential-source declaration
+# entry of any kind, including a dangling symlink.
+fm_worker_account_has_credential_source() {
+  [ -e "$1/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ] || [ -L "$1/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]
+}
+FM_WORKER_ACCOUNT_TOKEN_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-claude-token.sh"
 
 # Credentials Claude Code ranks above the /login stored in its config root
 # (code.claude.com/docs/en/authentication, "Authentication precedence"; the
@@ -118,10 +134,11 @@ fm_worker_account_read() {
 }
 
 # fm_worker_account_config <harness> <config-dir> [<secondmate-id>]
-# Prints the directory containing the applicable pin. Only a missing per-mate
-# file falls back to the home pin; unreadable or malformed files still select
-# the override so the ordinary parser refuses them. Non-pinnable runners and
-# ordinary workers keep the supplied directory unchanged.
+# Prints the directory containing the applicable pin. A missing per-mate pin
+# falls back to the home pin, except for Claude with an orphaned token source:
+# that source must reach validation rather than silently inherit a login.
+# Unreadable or malformed pins still select the override for parser refusal.
+# Non-pinnable runners and ordinary workers keep the supplied directory unchanged.
 fm_worker_account_config() {
   local harness=$1 config=$2 mate=${3:-} file candidate rc
   if [ -z "$mate" ] || ! file=$(fm_worker_account_file "$harness"); then
@@ -132,7 +149,13 @@ fm_worker_account_config() {
   fm_worker_account_read "$harness" "$candidate/$file" >/dev/null
   rc=$?
   case "$rc" in
-  3) printf '%s\n' "$config" ;;
+  3)
+    if [ "$file" = claude-account ] && fm_worker_account_has_credential_source "$candidate"; then
+      printf '%s\n' "$candidate"
+    else
+      printf '%s\n' "$config"
+    fi
+    ;;
   4) return 1 ;;
   *) printf '%s\n' "$candidate" ;;
   esac
@@ -152,7 +175,13 @@ fm_worker_account_resolve() {
   rc=$?
   case "$rc" in
   0) ;;
-  3) return 0 ;;
+  3)
+    if [ "$file" = claude-account ] && fm_worker_account_has_credential_source "$config"; then
+      echo "error: $config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE requires a Claude account pin: $cfg" >&2
+      return 1
+    fi
+    return 0
+    ;;
   4) return 1 ;;
   5)
     echo "error: $setting must be a readable regular file: $cfg" >&2
@@ -188,10 +217,9 @@ fm_worker_account_resolve() {
 }
 
 # fm_worker_account_list <harness> <config-dir>
-# Prints the entries config/claude-accounts declares, one per line, for a
-# Claude launch. Prints nothing and returns 0 for another runner or when the
-# list is absent. On a malformed or unreadable list prints one error naming the
-# file and returns 1.
+# Prints account entries from config/claude-accounts, preserving an optional
+# tab-separated credential-source filename. Prints nothing for another runner
+# or an absent list. On a malformed or unreadable list, prints one error.
 fm_worker_account_list() {
   local harness=$1 cfg="$2/claude-accounts" out rc
   [ "$harness" = claude ] || return 0
@@ -205,10 +233,11 @@ fm_worker_account_list() {
     (-f $f && -r _) or exit 5;
     open(my $fh, "<", $f) or exit 5;
     my $body = do { local $/; <$fh> } // "";
-    $body =~ /\A(?:(?:ordinary|\/[^\x00-\x1f\x7f]*)\n)*(?:ordinary|\/[^\x00-\x1f\x7f]*)\n?\z/ or exit 6;
+    $body =~ /\A(?:(?:ordinary|\/[^\x00-\x1f\x7f]*)(?:\tclaude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json)?\n)*(?:ordinary|\/[^\x00-\x1f\x7f]*)(?:\tclaude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json)?\n?\z/ or exit 6;
     my %seen;
     for my $entry (split /\n/, $body) {
-      exit 7 if $seen{$entry}++;
+      my ($account) = split /\t/, $entry, 2;
+      exit 7 if $seen{$account}++;
       print $entry, "\n";
     }
   ' -- "$cfg")
@@ -226,7 +255,7 @@ fm_worker_account_list() {
     return 1
     ;;
   *)
-    echo "error: config/claude-accounts must hold one account per line, each 'ordinary' or an absolute path, with no blank lines or control characters: $cfg" >&2
+    echo "error: config/claude-accounts must hold one 'ordinary' or absolute-path account per line, optionally followed by a tab and claude-account-credential-source-<name>.json; no blank lines or control characters: $cfg" >&2
     return 1
     ;;
   esac
@@ -265,11 +294,40 @@ fm_worker_account_pi_provider() {
   esac
 }
 
-# fm_worker_account_check <harness> <declared> <root> <executable> [<provider>] [<setting>]
-# Returns 0 only when the runner's own check says the selected root is signed
-# in for this launch; otherwise prints one error and returns 1.
+# fm_worker_account_credential_source_file <config-dir> [<filename>]
+# Prints the checked Claude credential-source declaration path, or nothing
+# when this account uses the selected root's stored login.
+fm_worker_account_credential_source_file() {
+  local config=$1 filename=${2:-$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE} path source problem
+  if [ "$filename" = "$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE" ]; then
+    fm_worker_account_has_credential_source "$config" || return 0
+  elif [[ ! "$filename" =~ ^claude-account-credential-source-[A-Za-z0-9][A-Za-z0-9._-]*\.json$ ]]; then
+    echo "error: invalid Claude credential-source filename: $filename" >&2
+    return 1
+  fi
+  path="$config/$filename"
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+    echo "error: $path must be a readable regular file" >&2
+    return 1
+  fi
+  problem=$(fm_credsrc_check "$path" claude) || {
+    echo "error: malformed $path - $problem" >&2
+    return 1
+  }
+  source=$(fm_credsrc_field "$path" claude source)
+  fm_credsrc_supported "$source" || {
+    echo "error: $path declares unsupported source $source on this host" >&2
+    return 1
+  }
+  printf '%s\n' "$path"
+}
+
+# fm_worker_account_check <harness> <declared> <root> <executable> [<provider>] [<setting>] [<credential-source-file>]
+# Returns 0 when the runner confirms a stored login or selects the declared
+# OAuth token as its auth method; this does not validate the token remotely.
+# Otherwise prints one error and returns 1.
 fm_worker_account_check() {
-  local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} setting=${6:-} out verdict name
+  local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} setting=${6:-} source_file=${7:-} out verdict name rc method
   [ -n "$setting" ] || setting="config/$(fm_worker_account_file "$harness")"
   local -a clean=(env -i "HOME=${HOME:-}" "PATH=${PATH:-}")
   for name in TMPDIR USER LOGNAME; do
@@ -278,6 +336,25 @@ fm_worker_account_check() {
   case "$harness" in
   claude)
     [ -z "$root" ] || clean+=("CLAUDE_CONFIG_DIR=$root")
+    if [ -n "$source_file" ]; then
+      out=$(fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
+        "$FM_WORKER_ACCOUNT_TOKEN_HELPER" exec "$source_file" -- "$executable" auth status </dev/null)
+      rc=$?
+      if [ "$rc" -eq 0 ]; then
+        method=$(printf '%s\n' "$out" | jq -r 'if type == "object" and .loggedIn == true then (.authMethod // "") else "" end' 2>/dev/null)
+        [ "$method" = oauth_token ] && return 0
+        echo "error: $source_file maps the pinned Claude account to a token source, but claude auth status did not confirm authMethod oauth_token; the launch never falls back to the stored login" >&2
+        return 1
+      fi
+      if [ "$rc" -eq 3 ]; then
+        echo "error: $source_file token could not be loaded; the launch never falls back to the stored login" >&2
+      elif fm_timed_out "$rc"; then
+        echo "error: $source_file sign-in check timed out; the launch never falls back to the stored login" >&2
+      else
+        echo "error: $source_file token did not load as Claude's auth method (claude auth status exit $rc); the launch never falls back to the stored login" >&2
+      fi
+      return 1
+    fi
     if fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
       "$executable" auth status >/dev/null 2>&1 </dev/null; then
       return 0
@@ -334,14 +411,15 @@ fm_worker_account_request_valid() {
 # The whole launch-time decision. Prints nothing for an unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one, or a Claude
 # ship or scout launching on a declared config/claude-accounts entry named by
-# <account>, prints "declared<TAB>root<TAB>provider", where provider is the
-# Pi launch model's own (empty for Claude), after the model guard and the
-# sign-in check pass. On refusal prints one error and returns 1.
+# <account>, prints "declared<TAB>root<TAB>provider<TAB>source-file", where
+# provider is the Pi launch model's own (empty for Claude) and source-file is
+# the checked Claude credential-source declaration (empty without one), after
+# the model guard and the sign-in check pass. On refusal prints one error and returns 1.
 # bin/fm-spawn.sh runs it before any endpoint exists, and bin/fm-control.sh
 # before a relaunch stops the live agent.
 fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-} account=${7:-}
-  local selection declared root providers word provider='' selected_config setting listed count
+  local selection declared root providers word provider='' selected_config setting listed count source_file='' source_name=''
   fm_worker_account_request_valid "$account" || return 1
   if [ -n "$account" ] && [ "$harness" != claude ]; then
     echo "error: --account names one of config/claude-accounts and applies to Claude workers only, not $harness" >&2
@@ -375,7 +453,11 @@ fm_worker_account_select() {
     fi
     declared=
     while IFS= read -r word; do
-      [ "$word" != "$account" ] || { declared=$account; break; }
+      [ "${word%%$'\t'*}" != "$account" ] || {
+        declared=$account
+        [[ "$word" == *$'\t'* ]] && source_name=${word#*$'\t'}
+        break
+      }
     done <<< "$listed"
     [ -n "$declared" ] || {
       echo "error: account '$account' is not declared in config/claude-accounts; name a declared entry with --account" >&2
@@ -403,6 +485,17 @@ fm_worker_account_select() {
     root=${root%%$'\t'*}
   fi
   if [ "$harness" = claude ]; then
+    if [ -n "$listed" ] && [ -z "$mate" ]; then
+      if fm_worker_account_has_credential_source "$selected_config"; then
+        echo "error: $selected_config/$FM_WORKER_ACCOUNT_CREDENTIAL_SOURCE_FILE applies to one config/claude-account pin, not config/claude-accounts" >&2
+        return 1
+      fi
+      if [ -n "$source_name" ]; then
+        source_file=$(fm_worker_account_credential_source_file "$selected_config" "$source_name") || return 1
+      fi
+    else
+      source_file=$(fm_worker_account_credential_source_file "$selected_config") || return 1
+    fi
     for word in $raw; do
       case "$word" in
       [A-Za-z_]*=*)
@@ -433,17 +526,19 @@ fm_worker_account_select() {
       ;;
     esac
   fi
-  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" "$setting" || return 1
-  printf '%s\t%s\t%s\n' "$declared" "$root" "$provider"
+  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" "$setting" "$source_file" || return 1
+  printf '%s\t%s\t%s\t%s\n' "$declared" "$root" "$provider" "$source_file"
 }
 
-# fm_worker_account_claude_shed
-# Prints the `env` launch prefix that unsets the environment credentials Claude
-# ranks above a pinned root's stored login. The caller appends the root
-# assignment, or -u CLAUDE_CONFIG_DIR for the ordinary account.
+# fm_worker_account_claude_shed [<credential-source-file>]
+# Prints the `env` launch prefix that unsets ambient credentials which could
+# override the pin. With a credential source, it preserves the OAuth variable
+# the token helper sets; the caller appends the pinned root or unsets
+# CLAUDE_CONFIG_DIR for the ordinary Claude account.
 fm_worker_account_claude_shed() {
-  local var prefix=env
+  local token_source=${1:-} var prefix=env
   for var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do
+    [ "$var" != CLAUDE_CODE_OAUTH_TOKEN ] || [ -z "$token_source" ] || continue
     prefix="$prefix -u $var"
   done
   printf '%s\n' "$prefix"
