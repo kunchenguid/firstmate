@@ -1303,6 +1303,33 @@ test_matrix_grok_144_approval_titled_bottom_border() {
   pass "matrix: grok 1.0.44's approval-titled equal-width bottom is empty while typed and unknown titles stay safe"
 }
 
+test_matrix_grok_1077_fast_model_title() {
+  # Grok 1.0.77 (50ca579fa996) launched with --always-approve --model
+  # grok-4.7-build-fast, captured live on 2026-11-12 through the Rex adapter's
+  # styled viewport read (24 rows, cursor row 19) after one turn and a Ctrl+C
+  # interrupt. Its bottom title `Grok 4.7 Fast (medium) · always-approve`
+  # carries a two-word model name, which read unknown, so exit and relaunch
+  # refused the idle pane (#8388).
+  local fixtures idle typed top empty_row bottom
+  fixtures="$ROOT/tests/fixtures/rex-grok-1.0.77"
+  idle=$(<"$fixtures/grok-1.0.77-fast-idle-after-interrupt.vt")
+  typed=$(<"$fixtures/grok-1.0.77-fast-typed.vt")
+  assert_screen "grok 1.0.77 fast idle with cursor" empty "$CAPS_TMUX" "$idle" 19
+  assert_screen "grok 1.0.77 fast idle cursorless" empty "$CAPS_STYLED" "$idle"
+  assert_screen "grok 1.0.77 fast idle plain" empty "$CAPS_PLAIN" "$(printf '%s' "$idle" | fm_composer_strip_ansi)"
+  assert_screen "grok 1.0.77 fast typed with cursor" pending "$CAPS_TMUX" "$typed" 19
+  assert_screen "grok 1.0.77 fast typed cursorless" pending "$CAPS_STYLED" "$typed"
+  top='  ╭'$(_grok_rule 74)'╮'
+  empty_row='  │ ❯'"$(printf '%*s' 72 '')"'│'
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 Fast Mini (medium) · always-approve')
+  assert_screen "grok second model word after Fast" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 74 'Grok 4.7 Turbo (medium) · always-approve')
+  assert_screen "grok model word other than Fast" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  bottom=$(_grok_titled_bottom 77 'Grok 4.7 Fast (medium)')
+  assert_screen "grok Fast title with 1.0.5 overhang" unknown "$CAPS_TMUX" "$top"$'\n'"$empty_row"$'\n'"$bottom" 1
+  pass "matrix: grok 1.0.77's Fast-model approval title is empty while typed and unobserved titles stay safe"
+}
+
 # <count> box-drawing rule glyphs, one glyph per iteration so the emitted width
 # never depends on whether ${#} counts bytes or characters in the ambient locale.
 _grok_rule() {  # <count>
@@ -1705,6 +1732,7 @@ test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_grok_144_approval_titled_bottom_border
+test_matrix_grok_1077_fast_model_title
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

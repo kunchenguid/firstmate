@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|review-park|none> · <detail>
 #
 # A run-step reading whose run came from inventory selection ends its detail
 # with a `run: <id>` field naming that run, and a terminal one appends
@@ -35,7 +35,9 @@
 # from (rule 2b).
 #
 # Logic, numbered for reference; rules 2b and 3 each record that rule 3's
-# status-log reconciliation is applied before rule 2b:
+# status-log reconciliation is applied before rule 2b. A lane parked on review
+# by bin/fm-park.sh short-circuits after the worktree check: paused, or blocked
+# when its relaunch failed.
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
 #      live on that host, so the local worktree and pane reads are skipped and
@@ -313,6 +315,23 @@ if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
 
+# A lane parked on review (bin/fm-park.sh) stopped its agent on purpose; its
+# record, not the stopped pane or an old run, is the current state.
+PARK_RECORD=$STATE/$ID.review-park
+if [ -f "$PARK_RECORD" ]; then
+  PARK_PR=$(fm_meta_get "$PARK_RECORD" pr)
+  PARK_HEAD=$(fm_meta_get "$PARK_RECORD" head)
+  PARK_AT=$(fm_meta_get "$PARK_RECORD" parked_at)
+  PARK_WHEN=$(date -u -r "$PARK_AT" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$PARK_AT" +%Y-%m-%dT%H:%MZ 2>/dev/null || printf '%s' "$PARK_AT")
+  if [ -n "$(fm_meta_get "$PARK_RECORD" resume_error)" ]; then
+    emit blocked review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12}; the relaunch on review activity failed - run bin/fm-park.sh resume"
+  fi
+  if [ -n "$(fm_meta_get "$PARK_RECORD" pending)" ]; then
+    emit paused review-park "parking on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; the agent's stop is not yet confirmed"
+  fi
+  emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; agent stopped, relaunches on review activity"
+fi
+
 # --- status log ------------------------------------------------------------
 
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
@@ -323,6 +342,12 @@ fi
 # A ship `done:` is not current-state done while bin/fm-dod-lib.sh refuses the
 # named-head reachability gate: that claim is blocked so a disposable copy is
 # not treated as finished-and-safe.
+# This read never refreshes remote-tracking refs: a fetch bounded at 30 seconds
+# per remote does not fit a caller's per-task bound (bin/fm-fleet-snapshot.sh
+# defaults to 10 seconds) and would repeat on every read. bin/fm-pr-check.sh,
+# which runs when a ready report is registered, and on each watcher sweep when
+# config/pr-register-scan is on, refreshes the same copy before it refuses, so
+# a read after it sees the fetched head.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
   if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then

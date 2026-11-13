@@ -159,6 +159,11 @@ fm_task_inbox_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox' "$1" "$2"
 }
 
+# Serializes a local inbox enqueue with parking the same task.
+fm_task_inbox_delivery_lock_path() {  # <state-dir> <task-id>
+  printf '%s/.%s.inbox-delivery.lock' "$1" "$2"
+}
+
 fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
 }
