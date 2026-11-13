@@ -4,6 +4,10 @@ Empirical record for the merge watch and the merge path on GitLab, alongside the
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
 
+The transcripts predate the [task-owned destination checks](architecture.md#delivery-modes-are-explicit-per-task) and the JSON-based poll.
+Their historical poll invocations do not include the expected-base argument now required by `bin/fm-pr-poll.sh`, whose header owns the current invocation contract.
+The focused PR/check and merge suites verify destination checks without a live server.
+
 ## Versions
 
 ```
@@ -33,7 +37,7 @@ That `glab` is a locally built 1.82.0; only its build tag and commit are elided,
 
 All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
 It holds one deliberately merged merge request and one deliberately open one, so both outcomes can be shown against real data.
-Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
+The fixture permits credential-free reads of both merge requests.
 Its README asks that the open merge request be left open.
 
 A non-default host appears below only as the placeholder `gitlab.example`, which resolves nowhere.
@@ -52,8 +56,10 @@ Two things about plain `glab` were established by running it, because assuming e
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-The merged check therefore reads glab's own field output, which needs no JSON processor; the poll's degraded read (head pipeline, merge-train car) is JSON-only and needs `jq`, and without `jq` the poll falls back to this field read so merged wakes keep working.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+The historical poll therefore read glab's text fields, as shown below.
+The current poll reads state and destination from one JSON response through `jq`, preventing a retarget between separate reads from combining a matching base with a later merged state.
+The optional degraded watch reads the head pipeline and merge-train car from structured responses too.
+[`configuration.md`](configuration.md#forge-selection-dataprojectsmd-forge-token) owns the current tool requirements.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -154,7 +160,7 @@ merged
 
 ## A missing CLI produces no wake, never a false merge
 
-The poll is silent on every error by design, so a missing `glab` would otherwise be indistinguishable from a merge request that is never merged.
+The poll is silent on failed forge reads by design, so a missing `glab` would otherwise be indistinguishable from a merge request that is never merged.
 With `glab` removed from `PATH`, the poll stays silent even for the merge request that is genuinely merged:
 
 ```
@@ -205,12 +211,14 @@ $ echo $?
 
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
-When `config/pr-degraded-watch` is present, `bin/fm-pr-check.sh` refuses to arm a GitLab watch without `jq` because its degraded-state baseline is JSON-only; with the flag absent, it arms the existing merged-only watch without `jq`.
+The merge path reads `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline from glab's JSON.
+Registration and merging report missing tools before recording anything.
+An already armed poll with task metadata emits a one-time `merge/readiness refused` recovery notice when `jq` is missing, withholding merge/readiness claims until destination proof is available.
+Install `jq`, then re-arm the watch through `bin/fm-pr-check.sh` to reset the registration's notice receipt.
+Other record-read failures stay silent.
 A car-endpoint 404 is confirmed with one bounded read of the project's active merge-train list; only a readable list omitting the merge request triggers one bounded MR-state re-read, while list errors stay silent.
-An `opened` or `locked` re-read reports the drop; `closed` stays silent, `merged` reports the merge, and an unreadable re-read reports the confirmed drop with `mr_state=unconfirmed`.
+An `opened` or `locked` re-read reports the drop; `closed` stays silent, `merged` reports the merge only with matching destination proof, and an unreadable re-read reports the confirmed drop with `mr_state=unconfirmed`.
 The watcher emits a drop only after it has recorded the merge request on the train.
-The merge path cannot read the field output: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
-The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
 The merged half of the fixture is refused, and every failing condition is listed rather than just the first:
 

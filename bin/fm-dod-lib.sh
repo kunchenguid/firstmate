@@ -58,9 +58,11 @@
 # content. In no-mistakes mode that live read is preceded by
 # fm_dod_nm_custody_returned: a copy that publishes before recovering the
 # pipeline's fix commits agrees with its own unfixed patch set, so the copy must
-# also hold the result of a passed run. These live reads are the one check at the ready
-# decision; a later rebase or patch set on the server does not revoke an armed
-# task's done. Teardown's landed-work test remains the complete discard gate.
+# also hold the result of a passed run. Custody and patch-set reads establish
+# head/tree proof at arming; a later rebase or patch set on the server does not
+# revoke that proof. The live destination gate in fm_dod_accept_ship_done below
+# still applies to an armed task's done. Teardown's landed-work test remains the
+# complete discard gate.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
 # appends " forge=gerrit shape=squash" to that line, and a forge=forgejo or
@@ -515,6 +517,7 @@ fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffi
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
 Ship branch: $branch
+Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.
 This project's pull-request text is written by hand: the pipeline's \`pr\` step would rewrite the title and body you write on every validated push, so **no-mistakes runs here as a validation pass that pushes the branch**, and you then open the PR yourself.
 Pass \`--skip pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, \`lint\`, and \`push\` still run, and \`ci\` has no pipeline-opened PR to watch.
 The task is complete only when committed on your branch.
@@ -647,6 +650,7 @@ EOF
 # Definition of done
 Delivery contract: mode=direct-PR$contract_forge$contract_consent
 Ship branch: $branch
+Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
@@ -682,6 +686,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
+Before reporting ready, verify the live PR base against the task-owned expected destination and inspect the diff against that base for task-only changes. Refuse readiness when the expected or actual base is unavailable or differs.
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
@@ -935,18 +940,73 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
         "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; } )
 }
 
+fm_dod_read_timeout() {
+  fm_nm_read_timeout "$1" || {
+    printf '%s\n' 'PR destination deadline expired or invalid' >&2
+    return 1
+  }
+}
+
+# One destination predicate for status-log readiness, run-step readiness and
+# inactive terminal presentation. All live reads share the
+# caller's remaining scan deadline, including timeout cleanup.
+fm_dod_claim_destination() {  # <kind> <mode> <meta> <claim-pr-url> [<destination-proof>]
+  local kind=${1:-ship} mode=$2 meta=$3 url=$4 read_timeout reason expected proof_key
+  [ "$kind" = ship ] || return 0
+  [ "$mode" != local-only ] || return 0
+  [ "$(fm_dod_meta_value "$meta" forge)" != external ] || return 0
+  if ! fm_pr_url_parse "$url"; then
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf 'expected PR base %s, actual base unavailable: no canonical PR identity\n' "$expected"
+    return 1
+  fi
+  # Registration may carry fm_pr_require_base's proof from this invocation.
+  # A changed task snapshot or PR identity falls back to live verification.
+  if [ -n "${5:-}" ] && expected=$(fm_pr_expected_base "$meta") \
+    && proof_key=$(fm_pr_base_proof_key "$meta" "$expected" "$FM_PR_PROVIDER" "$url" \
+      "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER") \
+    && [ "$proof_key" = "$5" ]; then
+    return 0
+  fi
+  if ! read_timeout=$(fm_dod_read_timeout 5 2>&1); then
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf 'expected PR base %s, actual base unavailable: %s\n' "$expected" "$read_timeout"
+    return 1
+  fi
+  # shellcheck disable=SC2016  # Positional arguments expand in the bounded child.
+  if ! reason=$(fm_run_timed "$read_timeout" bash -c '
+    . "$1"
+    shift
+    fm_pr_require_base "$@"
+  ' _ "$_FM_PR_LIB_ROOT/bin/fm-pr-lib.sh" "$meta" "$FM_PR_PROVIDER" "$url" \
+    "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" 2>&1); then
+    if ! expected=$(fm_pr_expected_base "$meta"); then
+      printf 'expected PR base unavailable, actual base unavailable: %s\n' "$reason"
+      return 1
+    fi
+    printf '%s\n' "${reason:-expected PR base $expected, actual base unavailable}"
+    return 1
+  fi
+  if ! fm_dod_read_timeout 5 >/dev/null 2>&1; then
+    expected=$(fm_pr_expected_base "$meta") || expected=unavailable
+    printf 'expected PR base %s, actual base unavailable: scan deadline expired\n' "$expected"
+    return 1
+  fi
+}
+
 # 0 when <url> names a Gerrit change whose current patch set carries the tree of
 # the worktree's HEAD. The revision is read live and bounded, because the server
 # is the only place a refs/for/ push leaves it, and it must already be an object
 # in the worktree - the publish that made it ran there - so a patch set pushed
 # from elsewhere matches only once this copy holds it.
 fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
-  local wt=$1 url=$2 revision head_tree revision_tree lib
+  local wt=$1 url=$2 revision head_tree revision_tree lib read_timeout
   fm_pr_url_parse "$url" || return 1
   [ "$FM_PR_PROVIDER" = gerrit ] || return 1
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+  read_timeout=$(fm_dod_read_timeout 10) || return 1
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
-  revision=$(fm_run_timed 10 bash -c '
+  revision=$(fm_run_timed "$read_timeout" bash -c '
     . "$1"
     fm_pr_gerrit_read_revision "$2" "$3" || exit 1
     printf "%s\n" "$FM_PR_RECORD_REVISION"
@@ -954,7 +1014,8 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
   fm_pr_head_valid "$revision" || return 1
   head_tree=$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null) || return 1
   revision_tree=$(git -C "$wt" rev-parse --verify --quiet "$revision^{tree}" 2>/dev/null) || return 1
-  [ -n "$head_tree" ] && [ "$head_tree" = "$revision_tree" ]
+  [ -n "$head_tree" ] && [ "$head_tree" = "$revision_tree" ] \
+    && fm_dod_read_timeout 10 >/dev/null
 }
 
 # 0 when the worker copy holds the result of its own passed no-mistakes run:
@@ -969,8 +1030,12 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 # rewrites the branch's messages. An unreadable status refuses, as an unreadable
 # change does. 1 when refused; stdout then holds a one-line reason.
 fm_dod_nm_custody_returned() {  # <worktree>
-  local wt=$1 out outcome code pipeline_head head_tree pipeline_tree
-  if ! out=$(fm_nm_run_checked "$wt" 15 axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
+  local wt=$1 out outcome code pipeline_head head_tree pipeline_tree read_timeout
+  if ! read_timeout=$(fm_dod_read_timeout 15 2>&1); then
+    printf '%s\n' "$read_timeout"
+    return 1
+  fi
+  if ! out=$(fm_nm_run_checked "$wt" "$read_timeout" axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
     printf '%s\n' "the no-mistakes run for this copy could not be read, so its fixes cannot be proven recovered"
     return 1
   fi
@@ -996,6 +1061,10 @@ fm_dod_nm_custody_returned() {  # <worktree>
   fi
   if [ -z "$head_tree" ] || [ -z "$pipeline_tree" ] || [ "$head_tree" != "$pipeline_tree" ]; then
     printf '%s\n' "this copy's HEAD does not carry the no-mistakes run's result ${pipeline_head:-(unknown head)}, so the pipeline's fixes are not in the published work"
+    return 1
+  fi
+  if ! read_timeout=$(fm_dod_read_timeout 15 2>&1); then
+    printf '%s\n' "$read_timeout"
     return 1
   fi
   return 0
@@ -1105,20 +1174,27 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   fm_dod_named_head_on_surviving_ref "$@"
 }
 
-# 0 when <line> is not a ship done: to gate, when the task's meta records
-# forge=external and fm_dod_accept_external_review_done accepts it, when it
-# names the task's recorded PR whose head the forge holds, when it names a
-# Gerrit change whose current patch set carries the worker copy's HEAD tree, or otherwise when its named
-# head - the worker copy's HEAD - is reachable outside that disposable copy. A
-# published-for-review report that names no Gerrit change is refused.
+# 0 when <line> is not a ship done: to gate, or when its readiness proof passes.
+# forge=external delegates to fm_dod_accept_external_review_done. Every other
+# gated publishing claim must start its note with PR <canonical-supported-url>
+# and supply task metadata whose expected destination matches the live forge.
+# This applies to every direct-PR done: and to the no-mistakes ready reports
+# selected by fm_dod_should_gate_ship_done. On the non-recorded path, cheap
+# local head proofs run before the destination gate. Recorded-head acceptance
+# follows the destination gate. Head proof accepts the task's recorded PR whose
+# head the forge holds, a Gerrit change whose current patch set carries the
+# worker copy's HEAD tree,
+# or otherwise the worker copy's HEAD reachable outside that disposable copy.
+# A published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
 # not the named head. 1 when
 # the claim is refused; stdout then holds a one-line reason and no other
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
+# The inherited FM_READ_DEADLINE caps readiness reads at the scan budget remaining.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked [<destination-proof>]]]
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url note sha gerrit captured='' recorded=0
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1132,28 +1208,43 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
   fi
-  if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
-    && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
-    return 0
-  fi
-  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    printf '%s\n' "named head cannot be verified: worktree missing"
-    return 1
-  fi
-  if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
-    printf '%s\n' "named head cannot be verified: worktree is not a git copy"
-    return 1
-  fi
-  sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || {
-    printf '%s\n' "named head could not be resolved"
-    return 1
-  }
+  note=$(status_line_note "$line")
+  url=$(fm_dod_pr_url_from_done_note "$note") || url=
   gerrit=0
   [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] && gerrit=1
-  if [ "$gerrit" = 0 ] && fm_dod_note_reports_published_change "$(status_line_note "$line")"; then
+  if [ "$gerrit" = 0 ] && fm_dod_note_reports_published_change "$note"; then
     printf '%s\n' "the published-for-review report does not name a Gerrit change in the canonical https://<host>/c/<project>/+/<number> form"
     return 1
   fi
+  if [ -n "$url" ] && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
+    recorded=1
+  fi
+  if [ "$recorded" = 0 ]; then
+    if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+      printf '%s\n' "named head cannot be verified: worktree missing"
+      return 1
+    fi
+    if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+      printf '%s\n' "named head cannot be verified: worktree is not a git copy"
+      return 1
+    fi
+    sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || {
+      printf '%s\n' "named head could not be resolved"
+      return 1
+    }
+    if [ "$gerrit" = 0 ] && ! fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+      if [ -n "$FM_DOD_REFRESH_FAILED" ]; then
+        printf '%s\n' "named head $sha is unreachable outside the worker copy; could not refresh remote: $FM_DOD_REFRESH_FAILED, so this verdict used the last-known refs and the work may be there; retry once the remote is reachable"
+        return 1
+      fi
+      printf '%s\n' "named head $sha is unreachable outside the worker copy"
+      return 1
+    fi
+  fi
+  if [ "$mode" != local-only ]; then
+    fm_dod_claim_destination "$kind" "$mode" "$meta" "$url" "${10:-}" || return 1
+  fi
+  [ "$recorded" = 0 ] || return 0
   if [ "$gerrit" = 1 ]; then
     case "$mode" in
       no-mistakes|'')
@@ -1165,20 +1256,12 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
   fi
-  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
-    if [ "$mode" = local-only ] && [ -n "$meta" ]; then
-      if [ -z "$state" ] || [ -z "$id" ] \
-        || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
-        printf '%s\n' "local-only done head could not be recorded or differs from the recorded head; revised work requires a new task/approval record"
-        return 1
-      fi
+  if [ "$mode" = local-only ] && [ -n "$meta" ]; then
+    if [ -z "$state" ] || [ -z "$id" ] \
+      || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
+      printf '%s\n' "local-only done head could not be recorded or differs from the recorded head; revised work requires a new task/approval record"
+      return 1
     fi
-    return 0
   fi
-  if [ -n "$FM_DOD_REFRESH_FAILED" ]; then
-    printf '%s\n' "named head $sha is unreachable outside the worker copy; could not refresh remote: $FM_DOD_REFRESH_FAILED, so this verdict used the last-known refs and the work may be there; retry once the remote is reachable"
-    return 1
-  fi
-  printf '%s\n' "named head $sha is unreachable outside the worker copy"
-  return 1
+  return 0
 }

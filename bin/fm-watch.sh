@@ -4251,8 +4251,23 @@ while :; do
             triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
             continue
           fi
+          if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
+            # Legacy residue on a persistent worker has no delivery destination.
+            # This state-only reading can clean up the poll, never reach the
+            # task-outcome publication path below, even if kind changes later.
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --retire-secondmate \
+              "$provider" "$url" "$host" "$path" "$number" "$STATE/$id.meta" || exit 1
+            if [ "$FM_CHECK_RESULT" = merged ]; then
+              retire_merged_pr_poll "$id"
+              touch "$STATE/.last-check"
+              triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
+            fi
+            pr_poll_control_release || exit 1
+            continue
+          fi
+          expected_base=$(fm_pr_expected_base "$STATE/$id.meta" 2>/dev/null || true)
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" "$expected_base" "$STATE/$id.meta" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -4408,8 +4423,18 @@ EOF
           touch "$STATE/.last-check"
           wake "$reason"
         fi
-        pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ]; then
+          case "$out" in
+            "task $id merge/readiness refused: "*)
+              # Keep the control lock through delivery and its receipt so a
+              # concurrent re-arm cannot reset the notice between those writes.
+              (umask 077; set -C; printf '%s-%s\n' "$$" "$RANDOM" \
+                > "$STATE/$id.pr-base-notified") || exit 1
+              ;;
+          esac
+        fi
+        pr_poll_control_release || exit 1
         touch "$STATE/.last-check"
         wake "$reason"
       fi

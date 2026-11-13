@@ -366,10 +366,34 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_relaunch_refuses_corrupt_expected_destination() {
+  local dir out rc before mutation id
+  for mutation in drift duplicate empty; do
+    id="base-$mutation"
+    dir=$(new_case "$id" "$id")
+    add_ship_task "$dir" "$id" claude
+    case "$mutation" in
+      drift) printf 'expected_base=main\nbase_branch=other\n' >> "$dir/home/state/$id.meta" ;;
+      duplicate) printf 'expected_base=main\nexpected_base=main\n' >> "$dir/home/state/$id.meta" ;;
+      empty) printf 'expected_base=\n' >> "$dir/home/state/$id.meta" ;;
+    esac
+    before=$(cat "$dir/home/state/$id.meta")
+    printf zsh > "$dir/fake/command"
+    rc=0
+    out=$(run_spawn "$dir" "$id" --relaunch --harness claude) || rc=$?
+    expect_code 1 "$rc" 'corrupt expected destination must refuse relaunch'
+    assert_contains "$out" 'recorded expected PR base is unavailable or inconsistent' 'destination refusal was not explicit'
+    [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] || fail 'relaunch erased destination conflict evidence'
+    [ ! -s "$dir/fake/literal" ] || fail 'corrupt destination launched a replacement'
+  done
+  pass 'relaunch preserves and refuses conflicting, duplicate, and empty expected destinations'
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
+  printf 'expected_base=main\n' >> "$dir/home/state/rl1.meta"
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
@@ -381,6 +405,9 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the worktree must be reused, not reallocated"
   [ "$(meta_field "$dir" rl1 kind)" = ship ] || fail "kind must survive the relaunch"
   [ "$(meta_field "$dir" rl1 project)" = "$dir/proj" ] || fail "project must survive the relaunch"
+  [ "$(meta_field "$dir" rl1 expected_base)" = main ] || fail 'expected destination changed on relaunch'
+  [ "$(grep -c '^expected_base=' "$dir/home/state/rl1.meta")" = 1 ] || fail 'relaunch duplicated the expected destination'
+  assert_grep 'Expected PR base: main' "$dir/home/data/rl1/launch-brief.md" 'replacement instructions lost the pinned destination'
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
@@ -398,9 +425,12 @@ test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
   local dir out rc url=https://github.com/example/repo/pull/7 check
   dir=$(new_case keeps-pr rl44)
   add_ship_task "$dir" rl44 claude
+  printf 'expected_base=main\n' >> "$dir/home/state/rl44.meta"
   cat > "$dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  *'--json state,baseRefName'*) printf 'main\tMERGED\n' ;;
+  *baseRefName*) printf 'main\n' ;;
   *headRefOid*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
   *isDraft*) printf '%s\n' '{"isDraft":false}' ;;
   *state*) printf '%s\n' MERGED ;;
@@ -3253,6 +3283,7 @@ SH
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
+test_relaunch_refuses_corrupt_expected_destination
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text

@@ -17,9 +17,9 @@
 # merge-time re-record (FM_PR_CHECK_MERGE=1) refreshes the same way, while
 # bin/fm-pr-merge.sh holds that one task's control lock.
 # The published check is a byte-for-byte copy of bin/fm-pr-poll.sh bound by its
-# own registration, so a later repository update does not invalidate it; task and
-# PR data live only in a private sidecar and are never interpolated into shell
-# source.
+# own registration; bin/fm-pr-lib.sh's header owns template-update compatibility.
+# Task and PR identity data live only in a private sidecar and are never
+# interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
 # instance and a GitHub Enterprise pull request on a host this home names in
@@ -32,8 +32,8 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
-# That merge-time re-record also skips the degraded baseline read below, so it
-# makes no forge read the merge's own live reads would duplicate.
+# That merge-time re-record skips the degraded baseline read below and carries
+# its destination proof into the named-head gate rather than reading it twice.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 #
@@ -68,6 +68,8 @@
 # starts no further registration, so the cursor stays on the last task that
 # had a full turn; the first registration of a sweep still runs, and with no
 # time left to fetch it decides on the last-known refs.
+# Registration requires the live destination to match task-owned expected_base
+# (or a legacy explicit base_branch); missing destination proof refuses.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 #        fm-pr-check.sh scan
 set -eu
@@ -249,12 +251,9 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
-# The GitLab poll reads the merge request as JSON (glab -F json), the same
-# read the merge path makes, because its head pipeline state - the readable
-# trace of a merge train dropping the merge request - exists only there. A
-# missing jq would leave the poll silent on every read, so arming refuses for
-# the same reason it refuses without glab.
-if [ "$PROVIDER" = gitlab ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ] && ! command -v jq >/dev/null 2>&1; then
+# State and destination must come from the same structured response, including
+# when degraded monitoring is disabled.
+if [ "$PROVIDER" = gitlab ] && ! command -v jq >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires jq on PATH" >&2
   exit 1
 fi
@@ -299,6 +298,10 @@ if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v g
   fi
 fi
 
+PR_DESTINATION_PROOF=
+fm_pr_require_base "$META" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" PR_DESTINATION_PROOF || exit 1
+EXPECTED_BASE=$(fm_pr_expected_base "$META") || exit 1
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
@@ -337,7 +340,7 @@ case "$PROVIDER:$MODE" in
 esac
 FM_DOD_REFRESH_REMOTES=1
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
-  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
+  && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META" '' "$PR_DESTINATION_PROOF"); then
   echo "error: $GATE_REASON" >&2
   exit 1
 fi
@@ -399,16 +402,20 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 # identity, so it can only ever match the PR it was written for.
 BASELINE_TRAIN=0
 BASELINE_DEGRADED=
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   CONTROL_LOCK="$STATE/.control-$ID.lock"
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
   CONTROL_LOCK_HELD=1
+fi
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   # The read runs under the control lock the watcher waits on, so it is
   # bounded by the watcher's own check bound.
   BASELINE_RC=0
-  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$EXPECTED_BASE" 2>/dev/null) || BASELINE_RC=$?
   if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
-    if [ "$BASELINE_RC" = 124 ]; then
+    if [ "$BASELINE_RC" = 4 ]; then
+      echo "error: baseline read could not verify the expected PR destination" >&2
+    elif [ "$BASELINE_RC" = 124 ]; then
       echo "error: baseline read of the PR poll timed out" >&2
     else
       echo "error: baseline read of the PR poll failed" >&2

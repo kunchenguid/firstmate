@@ -854,6 +854,7 @@ When the status log named the recorded `pr=` and the ready report names a differ
 The flag also covers the PR a secondmate home's parent-channel report carries for a child's ready report (`bin/fm-inactive-reconcile.sh`): with it present, that report applies the same ready-report spellings, accepts any recognized forge URL, and lets the same replacement override the recorded `pr=`, while with it absent a recorded `pr=` always stands and only a GitHub-shaped `PR <url>` or `PR <url> checks green` line fills in a missing one.
 It skips persistent secondmate and scout records, a `pr=` the status log never named because that is the supervisor's own choice, and a PR whose merge was already reported or whose poll was retired.
 A refused registration, such as a draft, or one cut at the scan's time bound, which reports that the PR merge watch could not be armed, queues one `check: pr-register:` wake for each task, PR and reason before marking it sent, and later sweeps retry without a new wake, so a PR marked ready later is recorded.
+The [task-owned destination contract and legacy recovery](architecture.md#delivery-modes-are-explicit-per-task) apply to both scanned and manual registration.
 With the file absent, the check sweep does not run the scan, and `pr=` and the merge poll come only from a manual `bin/fm-pr-check.sh <id> <PR url>` run.
 The flag takes effect at the next check sweep, and is a home-local preference that is not inherited by secondmate homes.
 
@@ -861,7 +862,7 @@ The flag takes effect at the next check sweep, and is a home-local preference th
 
 The optional local, gitignored `config/pr-degraded-watch` presence flag opts this home into waking once when a ready PR or MR degrades, including a GitHub failing check, a GitLab failed pipeline, or a merge-train drop.
 With the flag present, registration records a degraded/train baseline and each poll checks those states; repeated reports of the same transition remain silent.
-Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab JSON, pipeline, or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
+Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab pipeline or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
 The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
 
 ## Treehouse pool report (config/treehouse-pool-report)
@@ -893,7 +894,7 @@ An existing ledger is left untouched while recording is disabled.
 The optional local, gitignored `config/nm-home-resolver` file opts this home into finding each task's no-mistakes home through a site-provided resolver, for sites that run one no-mistakes daemon per isolated workspace, each against its own `NM_HOME`.
 The home cannot be derived from a task copy's `no-mistakes` remote, because every workspace of a project shares one gate URL.
 The file's first line is the absolute path of an executable the site provides; Firstmate calls it with the task copy's path as its only argument and never interprets the layout itself.
-When the resolver exits successfully within 5 seconds and prints exactly one line naming an existing directory by absolute path, that directory is exported as `NM_HOME` for that one call.
+When the resolver exits successfully within five seconds or the caller's shorter remaining deadline and prints exactly one line naming an existing directory by absolute path, that directory is exported as `NM_HOME` for that one call.
 
 Only host-side reads use it: current-state reads, pipeline-spend recording, the custody check, and teardown's parked-run lookup and `axi abort --run`, which read `axi status`, the `axi` overview, `axi logs`, `runs`, `daemon status`, and the state database.
 It never starts a daemon and never changes how runs are launched or driven, account routing, or no-mistakes' own `config.yaml`.
@@ -2461,7 +2462,7 @@ Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
-A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
+A GitLab project needs no forge token, but its merge-request watch and merge paths require `glab` and `jq` on `PATH`, with `glab` authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.

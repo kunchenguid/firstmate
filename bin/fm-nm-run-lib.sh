@@ -18,11 +18,89 @@
 #
 # Bounded call to an arbitrary command in dir $1, timeout $2 seconds, and its
 # `no-mistakes "$@"` specialization. The bounded
-# form preserves stdout, stderr, and exit status; the checked form discards
-# stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# form preserves stdout and stderr; the checked form discards stderr.
+# Both preserve command exit status unless the shared deadline expires, returning 124.
+# fm_nm_run suppresses command failures for read-only callers but retains that deadline status.
 # The no-mistakes forms route host reads through the opt-in home resolver below.
+# The inherited FM_READ_DEADLINE caps both resolver and command reads at the
+# remaining fractional seconds and refuses the command after the deadline expires.
+fm_nm_now_ms() {
+  local raw sec frac
+  raw=${EPOCHREALTIME:-}
+  if [ -n "$raw" ]; then
+    sec=${raw%%[.,]*}
+    frac=${raw#*[.,]}
+    frac="${frac}000"
+    frac=${frac:0:3}
+    printf '%s\n' "$((sec * 1000 + 10#$frac))"
+  else
+    perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000'
+  fi
+}
+
+# A reader may consume a one-shot FM_READ_BUDGET_MS floor (1..1000 ms) after
+# startup, before reading task state. Descendants inherit only the resulting
+# FM_READ_DEADLINE. The parent and watchdog deadlines and cleanup reserve form
+# a strict hierarchy: the watchdog leaves the parent its reserve, and the read
+# leaves the watchdog another reserve. Missing proof or an impossible floor
+# returns 124 before reading state.
+# FM_READ_BUDGET_REPORT=1 prefixes its captured output with
+# the reader's own start and deadline; ordinary state reads keep their output.
+fm_nm_read_budget_start() {
+  local budget=${FM_READ_BUDGET_MS:-} report=${FM_READ_BUDGET_REPORT:-0}
+  local deadline=${FM_READ_DEADLINE:-} parent=${FM_READ_PARENT_DEADLINE:-}
+  local watchdog=${FM_READ_WATCHDOG_DEADLINE:-} reserve=${FM_READ_CLEANUP_RESERVE_MS:-} value ceiling started floor
+  unset FM_READ_BUDGET_MS FM_READ_BUDGET_REPORT FM_READ_PARENT_DEADLINE FM_READ_WATCHDOG_DEADLINE FM_READ_CLEANUP_RESERVE_MS
+  [ -n "$budget" ] || return 0
+  case "$budget" in 0*|*[!0-9]*) return 124 ;; esac
+  [ "${#budget}" -le 4 ] && [ "$budget" -le 1000 ] || return 124
+  case "$report" in 0|1) ;; *) return 124 ;; esac
+  case "$deadline" in
+    '') ;;
+    0*|*[!0-9]*) return 124 ;;
+  esac
+  [ "${#deadline}" -le 18 ] || return 124
+  for value in "$parent" "$watchdog" "$reserve"; do
+    case "$value" in ''|0*|*[!0-9]*) return 124 ;; esac
+    [ "${#value}" -le 18 ] || return 124
+  done
+  [ "$watchdog" -lt "$((parent - reserve))" ] || return 124
+  ceiling=$((watchdog - reserve - 1))
+  started=$(fm_nm_now_ms) || return 124
+  floor=$((started + budget))
+  [ "$floor" -le "$ceiling" ] || return 124
+  [ -z "$deadline" ] || [ "$deadline" -le "$ceiling" ] || deadline=$ceiling
+  if [ -z "$deadline" ] || [ "$deadline" -lt "$floor" ]; then
+    deadline=$floor
+  fi
+  export FM_READ_DEADLINE=$deadline
+  [ "$report" != 1 ] || printf 'read-budget: %s %s %s %s %s\n' "$started" "$deadline" "$watchdog" "$parent" "$reserve"
+}
+
+fm_nm_read_timeout() {
+  local timeout_secs=$1 deadline=${FM_READ_DEADLINE:-} remaining now sec frac timeout_ms
+  if [ -n "$deadline" ]; then
+    case "$deadline" in 0*|*[!0-9]*) return 124 ;; esac
+    [ "${#deadline}" -le 18 ] || return 124
+    now=$(fm_nm_now_ms) || return 124
+    remaining=$((deadline - now))
+    [ "$remaining" -gt 0 ] || return 124
+    sec=${timeout_secs%%.*}
+    frac=${timeout_secs#*.}
+    [ "$frac" != "$timeout_secs" ] || frac=0
+    frac="${frac}000"
+    frac=${frac:0:3}
+    timeout_ms=$((sec * 1000 + 10#$frac))
+    [ "$remaining" -ge "$timeout_ms" ] || timeout_ms=$remaining
+    printf '%d.%03d\n' "$((timeout_ms / 1000))" "$((timeout_ms % 1000))"
+  else
+    printf '%s\n' "$timeout_secs"
+  fi
+}
+
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs have_timeout=none rc=0
+  timeout_secs=$(fm_nm_read_timeout "$2") || return 124
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
@@ -31,9 +109,11 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   case "$have_timeout" in
     timeout)  ( cd "$dir" && timeout "$timeout_secs" "$@" ) ;;
     gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -MTime::HiRes=alarm -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$@" ) ;;
     *)        return 1 ;;
-  esac
+  esac || rc=$?
+  fm_nm_read_timeout 1 >/dev/null || return 124
+  return "$rc"
 }
 
 # Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
@@ -42,7 +122,8 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
 # a project shares one gate URL, so the site provides a resolver and Firstmate
 # only calls it. The resolver is the executable whose absolute path is the
 # first line of this home's config/nm-home-resolver; it is called with the
-# worktree path as its only argument, bounded by 5 seconds, and its stdout,
+# worktree path as its only argument, bounded by 5 seconds or the caller's
+# shorter remaining deadline, and its stdout,
 # when it exits 0 with exactly one line naming an existing directory by
 # absolute path, is the no-mistakes home for that worktree. The directory
 # must already exist because the CLI creates a fresh home's skeleton on first
@@ -53,7 +134,7 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
 # and every read uses the ambient home exactly as without the hook.
 # Prints the resolved home, or nothing. Never starts a daemon.
 fm_nm_home_resolver_home() {  # <worktree>
-  local wt=$1 cfg cmd out
+  local wt=$1 timeout_secs=5 cfg cmd out
   [ -z "${NM_HOME:-}" ] || return 0
   cfg=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/config}/nm-home-resolver
   [ -f "$cfg" ] || return 0
@@ -61,7 +142,7 @@ fm_nm_home_resolver_home() {  # <worktree>
   cmd=$(fm_nm_trim "$cmd")
   case "$cmd" in /*) ;; *) return 0 ;; esac
   [ -f "$cmd" ] && [ -x "$cmd" ] || return 0
-  out=$(fm_nm_bounded "$wt" 5 "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
+  out=$(fm_nm_bounded "$wt" "$timeout_secs" "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
   case "$out" in
     /*) ;;
     *) return 0 ;;
@@ -108,7 +189,9 @@ fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
 }
 
 fm_nm_run() {  # <dir> <timeout_secs> <args...>
-  fm_nm_run_checked "$@" || true
+  fm_nm_run_checked "$@" || {
+    fm_nm_read_timeout 1 >/dev/null || return 124
+  }
 }
 
 fm_nm_trim() {

@@ -1611,6 +1611,7 @@ validate_pr_poll_cleanup() {
   fm_task_id_path_safe "$id" || return 0
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-base-notified" "$state_dir/$id.pr-base-parent-notified" \
     "$state_dir/$id.pr-poll-merge-notified" "$state_dir/$id.pr-poll-degraded" \
     "$state_dir/$id.pr-poll-train" "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
@@ -1650,6 +1651,7 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_degraded_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+    "$state_dir/$id.pr-base-notified" "$state_dir/$id.pr-base-parent-notified" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 

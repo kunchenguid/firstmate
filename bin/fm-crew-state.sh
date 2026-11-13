@@ -10,17 +10,17 @@
 # current state from a tail of the log: it reads the authoritative source (a
 # no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
 # the pane busy-signature) and reconciles the possibly-stale log against it.
-# A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
-# named head as reachable outside the worker's disposable copy; otherwise blocked.
+# A status-log ship `done:` is current-state done only when bin/fm-dod-lib.sh's
+# fm_dod_accept_ship_done accepts its readiness proof; otherwise blocked.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
 # with no heuristics and no LLM.
 # For a terminal passed no-mistakes run, a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
-# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
-# An absent or unreadable PR identity yields an honest unknown, never an
-# optimistic merged claim.
+# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips that forge fallback;
+# it does not bypass ship readiness gates' live reads.
+# An absent or unreadable PR identity never proves a merge.
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
@@ -104,6 +104,8 @@
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
 #      disagreement reports unknown with available candidate ids.
+#      These run-step mappings are provisional until emit_run applies
+#      bin/fm-dod-lib.sh's fm_dod_claim_destination to every done reading.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -251,6 +253,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
+# Startup is complete. The reader, not its launcher, starts any requested floor.
+fm_nm_read_budget_start || exit 124
+
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
 # An override is honoured only when its basename is this task's own file name.
@@ -278,8 +283,12 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Emit the one canonical line. Detail is optional.
 emit() {  # <state> <source> [detail]
+  if ! fm_nm_read_timeout 1 >/dev/null; then
+    printf 'state: unknown%ssource: none%sscan read deadline expired\n' "$SEP" "$SEP"
+    exit 124
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
@@ -287,9 +296,20 @@ emit() {  # <state> <source> [detail]
 }
 
 emit_run() {  # <state> <detail> [pr]
-  local detail=$2
+  local detail=$2 reason pr=${3:-} destination_pr=${3:-}
+  # All run classifications are provisional until this shared publication
+  # boundary: passed outcomes, green monitors, recovered monitors and merged
+  # detail must prove the destination before publication.
+  if [ "$1" = 'done' ]; then
+    if [ -z "$destination_pr" ] && fm_pr_metadata_identity_parse "$META"; then
+      destination_pr=$FM_PR_META_URL
+    fi
+    if ! reason=$(fm_dod_claim_destination "$KIND" "$(meta_value mode)" "$META" "$destination_pr"); then
+      emit blocked run-step "$reason"
+    fi
+  fi
   case "$1" in
-    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+    done|failed) [ -z "$pr" ] || detail="$detail${SEP}pr=$pr" ;;
   esac
   emit "$1" run-step "$detail"
 }
