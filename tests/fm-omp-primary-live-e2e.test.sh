@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-# Opt-in credentialed omp (Oh My Pi) primary regression in an isolated lab
+# Token-free omp (Oh My Pi) process-identity probe plus an opt-in credentialed
+# omp primary regression, both in isolated labs.
+#
+# The token-free half starts the installed omp in JSON-RPC mode with no prompt,
+# so it spends no model tokens, and has a loaded extension run bin/fm-harness.sh
+# and bin/fm-lock.sh from inside that process. It proves the installed omp,
+# whether the compiled binary or the bun global package (process name `bun`),
+# is detected as omp and can own the session lock.
+# FM_OMP_LIVE_E2E=1 selects the credentialed half below instead.
+#
+# The credentialed half is an omp (Oh My Pi) primary regression in an isolated lab
 # checkout. It drives a real omp through its JSON-RPC stdio mode so no terminal
 # multiplexer is needed, uses the captain's existing omp login without copying
 # any credential, and defaults to the captain-approved openai-codex model.
@@ -18,6 +28,60 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+if [ "${FM_OMP_LIVE_E2E:-0}" != 1 ]; then
+  fm_live_gate default-on FM_OMP_IDENTITY_LIVE omp git
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  fm_git_identity fmtest fmtest@example.invalid
+  OMP_BIN=$(command -v omp)
+  OMP_VERSION=$(omp --version 2>/dev/null | head -1)
+  case "$(head -c 64 "$OMP_BIN" 2>/dev/null | head -1)" in
+    '#!'*bun*) INSTALL=bun-package ;;
+    *) INSTALL=compiled-binary ;;
+  esac
+  LAB=$(fm_test_tmproot fm-omp-identity-live)
+  HOME_DIR="$LAB/home"
+  mkdir -p "$HOME_DIR/state"
+  git init -q "$HOME_DIR"
+  git -C "$HOME_DIR" commit -q --allow-empty -m init
+  : > "$HOME_DIR/AGENTS.md"
+  cat > "$LAB/probe.sh" <<SH
+env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \\
+  '$ROOT/bin/fm-harness.sh' > '$LAB/harness.out' 2>&1
+env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID FM_HOME='$HOME_DIR' '$ROOT/bin/fm-lock.sh' > '$LAB/lock.out' 2>&1
+printf '%s\\n' "\$?" > '$LAB/lock.rc'
+SH
+  cat > "$LAB/probe.ts" <<TS
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+export default function () {
+  writeFileSync("$LAB/omp.pid", String(process.pid));
+  spawnSync("bash", ["$LAB/probe.sh"], { stdio: "ignore" });
+}
+TS
+  mkfifo "$LAB/rpc.in"
+  (cd "$LAB" && omp --mode rpc --no-session --cwd "$LAB" -e "$LAB/probe.ts" < "$LAB/rpc.in" > "$LAB/rpc.log" 2> "$LAB/rpc.err") &
+  OMP_PID=$!
+  exec 3> "$LAB/rpc.in"
+  i=0
+  while [ "$i" -lt 240 ] && [ ! -s "$LAB/lock.rc" ]; do
+    sleep 0.5
+    i=$((i + 1))
+  done
+  exec 3>&-
+  sleep 1
+  kill -TERM "$OMP_PID" 2>/dev/null || true
+  wait "$OMP_PID" 2>/dev/null || true
+  [ -s "$LAB/lock.rc" ] || { printf 'not ok - omp %s (%s) never ran the identity probe: %s\n' "$OMP_VERSION" "$INSTALL" "$(tail -3 "$LAB/rpc.err")" >&2; exit 1; }
+  [ "$(cat "$LAB/harness.out")" = omp ] \
+    || { printf 'not ok - omp %s (%s) was detected as %s, not omp\n' "$OMP_VERSION" "$INSTALL" "$(cat "$LAB/harness.out")" >&2; exit 1; }
+  [ "$(cat "$LAB/lock.rc")" = 0 ] \
+    || { printf 'not ok - omp %s (%s) could not own the session lock: %s\n' "$OMP_VERSION" "$INSTALL" "$(cat "$LAB/lock.out")" >&2; exit 1; }
+  [ "$(sed -n 1p "$HOME_DIR/state/.lock")" = "$(cat "$LAB/omp.pid" 2>/dev/null)" ] \
+    || { printf 'not ok - omp %s (%s) acquired the session lock for pid %s, not the omp process %s\n' "$OMP_VERSION" "$INSTALL" "$(sed -n 1p "$HOME_DIR/state/.lock")" "$(cat "$LAB/omp.pid" 2>/dev/null)" >&2; exit 1; }
+  printf 'ok - omp %s (%s): detected as omp and acquired the session lock with no model tokens\n' "$OMP_VERSION" "$INSTALL"
+  exit 0
+fi
 
 fm_live_gate opt-in FM_OMP_LIVE_E2E omp node jq
 
