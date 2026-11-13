@@ -6227,6 +6227,97 @@ test_legacy_notice_audiences_are_independent() {
   pass 'legacy watcher and parent notices are independent in either order and reset on re-arm'
 }
 
+test_rearm_serializes_base_notice_delivery() {
+  local enabled dir state real_rm real_mktemp i rc
+  real_rm=$(command -v rm)
+  real_mktemp=$(command -v mktemp)
+  for enabled in off on; do
+    dir=$(make_case "base-notice-rearm-$enabled")
+    state="$dir/home/state"
+    [ "$enabled" = on ] || rm -f -- "$dir/home/config/pr-degraded-watch"
+    write_task_meta "$dir"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+      || fail 'could not arm the original base-notice poll'
+    retire_contributions_observer "$dir"
+    printf 'old-parent-receipt\n' > "$state/task-a.pr-base-parent-notified"
+    cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+for file in "$@"; do
+  case "$file" in
+    "$FM_TEST_NOTICE_RACE/home/state/.control-task-a.lock.owner."*)
+      [ ! -e "$FM_TEST_NOTICE_RACE/poll-captured" ] || : > "$FM_TEST_NOTICE_RACE/rearm-progress"
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+    cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for file in "$@"; do
+  case "$file" in
+    */.fm-check-output.*)
+      if grep -qF 'task task-a merge/readiness refused' "$file" 2>/dev/null \
+        && [ ! -e "$FM_TEST_NOTICE_RACE/poll-captured" ]; then
+        : > "$FM_TEST_NOTICE_RACE/poll-captured"
+        (
+          rc=0
+          FM_TEST_BASE=main FM_ROOT_OVERRIDE="$FM_TEST_NOTICE_RACE/root" \
+            bash "$FM_TEST_PR_CHECK" task-a https://github.com/o/r/pull/1 \
+            > "$FM_TEST_NOTICE_RACE/rearm.out" 2> "$FM_TEST_NOTICE_RACE/rearm.err" || rc=$?
+          printf '%s\n' "$rc" > "$FM_TEST_NOTICE_RACE/rearm-exit"
+        ) &
+        i=0
+        while [ ! -e "$FM_TEST_NOTICE_RACE/rearm-progress" ]; do
+          [ "$i" -lt 600 ] && [ -d "$FM_TEST_NOTICE_RACE" ] || exit 91
+          [ ! -e "$FM_TEST_NOTICE_RACE/rearm-exit" ] || exit 92
+          sleep 0.1
+          i=$((i + 1))
+        done
+      fi
+      ;;
+    */task-a.pr-base-notified)
+      "$FM_TEST_REAL_RM" "$@" || exit 93
+      : > "$FM_TEST_NOTICE_RACE/rearm-progress"
+      exit 0
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+    chmod +x "$dir/fakebin/rm" "$dir/fakebin/mktemp"
+    rc=0
+    FM_TEST_NOTICE_RACE="$dir" FM_TEST_REAL_RM="$real_rm" FM_TEST_REAL_MKTEMP="$real_mktemp" \
+      FM_TEST_PR_CHECK="$PR_CHECK" FM_TEST_BASE=other \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" \
+        > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    i=0
+    while [ ! -e "$dir/rearm-exit" ] && [ "$i" -lt 600 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ "$rc" = 0 ] || fail "base-notice watcher failed: $(cat "$dir/watch.err")"
+    assert_present "$dir/rearm-exit" 'concurrent re-arm did not finish'
+    [ "$(cat "$dir/rearm-exit")" = 0 ] || fail "concurrent re-arm failed: $(cat "$dir/rearm.err")"
+    assert_grep 'expected base main, actual base other' "$state/.wake-queue" 'old poll did not deliver its refusal'
+    assert_absent "$state/task-a.pr-base-notified" 'old poll left a stale receipt on the new registration'
+    assert_absent "$state/task-a.pr-base-parent-notified" 're-arm retained the old parent receipt'
+    assert_absent "$state/.control-task-a.lock" 're-arm left the task control lock held'
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail 're-arm lost poll provenance'
+    if [ "$enabled" = off ]; then
+      assert_no_grep 'statusCheckRollup' "$dir/gh.log" 'default registration read a degraded baseline'
+    fi
+    rm -f -- "$dir/fakebin/rm" "$dir/fakebin/mktemp"
+    retire_contributions_observer "$dir"
+    ack_watcher_cycle "$state" || fail 'could not acknowledge the old poll notice'
+    FM_TEST_BASE=other run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/retry.out" 2> "$dir/retry.err" || fail 'fresh registration did not wake'
+    assert_grep 'expected base main, actual base other' "$state/.wake-queue" 'stale receipt suppressed the fresh registration'
+    assert_present "$state/task-a.pr-base-notified" 'fresh notice did not record its receipt'
+  done
+  pass 're-arm serializes base-notice delivery with degraded watching off and on'
+}
+
+test_rearm_serializes_base_notice_delivery
 test_legacy_notice_retries_failed_delivery queue-failure
 test_legacy_notice_retries_failed_delivery interrupted
 test_legacy_parent_notice_retries_after_delivery

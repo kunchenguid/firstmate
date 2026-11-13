@@ -402,10 +402,12 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 # identity, so it can only ever match the PR it was written for.
 BASELINE_TRAIN=0
 BASELINE_DEGRADED=
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   CONTROL_LOCK="$STATE/.control-$ID.lock"
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
   CONTROL_LOCK_HELD=1
+fi
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   # The read runs under the control lock the watcher waits on, so it is
   # bounded by the watcher's own check bound.
   BASELINE_RC=0
