@@ -501,6 +501,10 @@ function consumeWrapperOptions(name, words, index) {
   let next = index;
   while (words[next]) {
     const value = words[next].value;
+    if (name === "sudo" && isAssignment(value)) {
+      next += 1;
+      continue;
+    }
     if (value === "--") return { index: next + 1, unresolved: false, embeddedPayloads };
     if (name === "env" && value === "-") {
       next += 1;
@@ -573,6 +577,8 @@ export function commandPosition(tokens) {
       unresolvedWrapperOption ||= options.unresolved;
       wrapperPayloads.push(...options.embeddedPayloads);
       index = options.index;
+      // env also accepts its legacy ignore-environment operand after --.
+      if (words[index]?.value === "-") index += 1;
       while (words[index] && isAssignment(words[index].value)) index += 1;
       command = words[index];
       continue;

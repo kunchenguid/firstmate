@@ -903,7 +903,7 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         continue
       fi
       [ "$rc" -ne 0 ] || fail "auggie $kind $how: spawn should have failed"
-      if [[ "$how" = sudo-interspersed || "$how" = sudo-dash || "$how" = env-dash-end ]]; then
+      if [[ "$how" = sudo-dash ]]; then
         assert_contains "$(cat "$err")" "invalid raw launch command" "auggie $kind $how: unresolved wrapper was not refused"
       else
         assert_contains "$(cat "$err")" "auggie is verified as a primary harness only" \
