@@ -10,26 +10,18 @@ Where a finding is inferable only from source rather than from the CLI's own out
 
 ## Versions
 
-```
-$ fj version
-fj v0.7.0
+All evidence below was collected on 2026-11-12 against a released build of each CLI on the development machine.
+This record deliberately embeds no versions, revisions, or installation paths of those builds: they are properties of the machine the evidence was gathered on, not of the interfaces the findings describe, and a reader cannot reproduce them.
+Reproducing the record needs only a released build of each tool whose interface matches the generation named at each finding.
 
-$ fgj --version
-fgj version dev
+Findings are bounded by interface generation rather than by a local version pin:
 
-$ readlink -f "$(command -v fj)"
-/nix/store/0yqa1d57r03chkv61dz4xbl25r1gp685-forgejo-cli-0.7.0/bin/fj
-
-$ readlink -f "$(command -v fgj)"
-/nix/store/vcmn1zakvr84zcwaj61znfp3awrl1xc3-fgj-0.5.0/bin/fgj
-```
-
-`fgj`'s own binary reports `dev`, so its version is taken from the package that installed it, `fgj-0.5.0`, whose source the package builds at `codeberg.org/romaintb/fgj` revision `bd46964712a7ff832d8c1883ee3419273512a42e`.
-`fj`'s source is `codeberg.org/forgejo-contrib/forgejo-cli` tag `v0.7.0`.
+- The `fj` refusal is bounded by the `forgejo-cli` interface generation this record covers: it has no `api` passthrough, cannot address a repository by slug, renders its pull request views as localized prose with no commit id, and hard-codes `head_commit_id: None` in its merge request. If a later generation changes any of these, the refusal must be re-verified against that generation before it is relaxed.
+- The `fgj` acceptance is bounded by the `fgj` interface generation that ships `fgj api`, the `gh api`-style request passthrough the whole acceptance rests on; an earlier generation without it cannot serve this record at all.
 
 ## `fj` cannot serve this contract, and why
 
-Firstmate's Forgejo path needs three things from a CLI: a machine-readable record (`state`, `merged`, `head.sha`), the combined commit status, and a merge call that can carry Forgejo's `head_commit_id`. `forgejo-cli` 0.7.0 offers none of them.
+Firstmate's Forgejo path needs three things from a CLI: a machine-readable record (`state`, `merged`, `head.sha`), the combined commit status, and a merge call that can carry Forgejo's `head_commit_id`. The released `forgejo-cli` interface generation this record covers offers none of them.
 
 **It has no authenticated request passthrough.** `fj --help` lists `repo`, `issue`, `pr`, `milestone`, `wiki`, `actions`, `whoami`, `auth`, `release`, `tag`, `user`, `org`, `version`, and `completion`; there is no `api` command, and the shipped completions agree:
 
@@ -96,7 +88,7 @@ Nothing is silently dropped, and nothing about the head-binding guarantee change
 
 ## `fgj` can serve the contract, through `fgj api`
 
-`fgj` 0.5.0 added `fgj api`, which mirrors `gh api` and reaches any endpoint the CLI has no dedicated command for. It is enough on its own:
+The `fgj` interface generation this record covers ships `fgj api`, which mirrors `gh api` and reaches any endpoint the CLI has no dedicated command for. It is enough on its own:
 
 ```
 $ fgj api --help
