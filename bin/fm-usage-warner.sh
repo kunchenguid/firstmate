@@ -77,7 +77,6 @@ RECORD_SCHEMA_V1=fm-usage-warner-v1
 CHECK_LOCK="$STATE/.usage-warner.lock"
 CHECK_ID=usage-warner
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
-CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 PROVIDER=claude
 MAX_LINE=1000
@@ -90,6 +89,7 @@ MAX_LINE=1000
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+CHECK_TRUST=$(fm_custom_check_trust_path "$STATE" "$CHECK_ID")
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 

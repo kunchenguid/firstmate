@@ -392,6 +392,7 @@ for _teardown_source in \
   fm-classify-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \
+  fm-check-lib.sh \
   fm-public-followup-lib.sh \
   fm-x-lib.sh \
   fm-env-lib.sh \
@@ -428,6 +429,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -1650,7 +1653,8 @@ remove_pr_poll_artifacts() {
   fm_pr_poll_degraded_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+    "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
+    "$(fm_custom_check_trust_path "$state_dir" "$id")" || return 1
 }
 
 pr_number_from_target() {

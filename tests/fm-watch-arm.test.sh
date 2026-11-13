@@ -1937,7 +1937,7 @@ EOF
     config="$dir/home/config"
     case "$case_name" in
       source) mkdir -p "$state/procevent"; : > "$state/procevent/fixture.source" ;;
-      registered-check) : > "$state/fixture.check.sh"; : > "$state/fixture.check-trust" ;;
+      registered-check) : > "$state/fixture.check.sh"; mkdir -p "$config/trust"; : > "$config/trust/fixture.check-trust" ;;
       empty) : ;;
       afk-with-source)
         mkdir -p "$state/procevent"

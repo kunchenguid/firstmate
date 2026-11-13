@@ -14,14 +14,27 @@ fm_custom_check_sha256() {
   fi
 }
 
+# Trust records live in the home's operator-owned config/trust/, beside state/,
+# so a writer confined to state/ cannot authorize its own check. Only
+# fm-check-register.sh and fm-procevent-when.sh write there.
+fm_trust_dir() {  # <state-dir>
+  printf '%s/config/trust\n' "$(dirname -- "$1")"
+}
+
+fm_custom_check_trust_path() {  # <state-dir> <id>
+  printf '%s/%s.check-trust\n' "$(fm_trust_dir "$1")" "$2"
+}
+
 fm_custom_check_trust_read() {
-  local state=$1 id=$2 trust state_device version hash
+  local state=$1 id=$2 trust trust_dir trust_device version hash
   FM_CUSTOM_CHECK_HASH=
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
-  trust="$state/$id.check-trust"
-  fm_pr_private_file_valid "$trust" 600 "$state_device" || return 1
+  trust_dir=$(fm_trust_dir "$state")
+  [ -d "$trust_dir" ] && [ ! -L "$trust_dir" ] || return 1
+  trust_device=$(fm_pr_file_device "$trust_dir") || return 1
+  trust=$(fm_custom_check_trust_path "$state" "$id")
+  fm_pr_private_file_valid "$trust" 600 "$trust_device" || return 1
   exec 9< "$trust" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
   IFS= read -r hash <&9 || { exec 9<&-; return 1; }

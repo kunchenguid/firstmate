@@ -90,7 +90,7 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
   out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || fail "arm must succeed: $out"
   assert_contains "$out" "armed: state/mail.check.sh" "arm names the shim it wrote"
   assert_present "$home/state/mail.check.sh" "arm writes the check shim"
-  assert_present "$home/state/mail.check-trust" "arm binds the shim for the watcher"
+  assert_present "$home/config/trust/mail.check-trust" "arm binds the shim for the watcher"
   assert_contains "$(cat "$home/state/mail.check.sh")" "fm-mail-check.sh check" "shim dispatches the check action"
   assert_contains "$(cat "$home/state/mail.check.sh")" "FM_HOME=$home" "shim pins the absolute home"
 
@@ -99,7 +99,7 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
 
   out=$(FM_HOME="$home" "$CHECK" disarm 2>&1) || fail "disarm must succeed: $out"
   assert_absent "$home/state/mail.check.sh" "disarm removes the check shim"
-  assert_absent "$home/state/mail.check-trust" "disarm removes the trust binding"
+  assert_absent "$home/config/trust/mail.check-trust" "disarm removes the trust binding"
   assert_absent "$home/state/.mail-check" "disarm removes the report record"
   pass "fm-mail-check: arm writes and binds, re-arm is idempotent, disarm removes"
 }
@@ -125,7 +125,7 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || rc=$?
   expect_code 1 "$rc" "arm must refuse a symlink at the shim path"
   assert_contains "$out" "could not write" "arm reports the shim write failure"
-  assert_absent "$home/state/mail.check-trust" "no trust binding is left behind by a refused arm"
+  assert_absent "$home/config/trust/mail.check-trust" "no trust binding is left behind by a refused arm"
   pass "fm-mail-check: arm refuses a symlink at the shim path"
 }
 

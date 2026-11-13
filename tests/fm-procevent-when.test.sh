@@ -88,7 +88,7 @@ out=$(when "$H" arm arm-test --interval 0.1 \
   --action "$ACT" "$TMP_ROOT/arm-act")
 assert_contains "$out" "armed: when-arm-test" "arm reports the canonical source id"
 assert_present "$H/state/when/when-arm-test.spec" "arm writes the private spec"
-assert_present "$H/state/when/when-arm-test.trust" "arm writes the trust binding"
+assert_present "$H/config/trust/when-arm-test.when-trust" "arm writes the trust binding"
 assert_present "$H/state/procevent/when-arm-test.source" "arm registers the process-event source"
 mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/when/when-arm-test.spec")
@@ -102,7 +102,7 @@ assert_contains "$sid" "when-arm-test" "source-id prints the canonical id"
 out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire reports the source"
 assert_absent "$H/state/when/when-arm-test.spec" "retire removes the spec"
-assert_absent "$H/state/when/when-arm-test.trust" "retire removes the trust binding"
+assert_absent "$H/config/trust/when-arm-test.when-trust" "retire removes the trust binding"
 assert_absent "$H/state/procevent/when-arm-test.source" "retire drops the registration"
 out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
@@ -424,8 +424,8 @@ when_ro "$H" arm rebind-out-of-repo --interval 0.1 --stable 1 \
   --condition true --action "$OUT_OF_REPO_ACT" "$TMP_ROOT/rebind-out-of-repo.log" >/dev/null
 
 SPEC_IN="$H/state/when/when-rebind-in-repo.spec"
-TRUST_IN="$H/state/when/when-rebind-in-repo.trust"
-TRUST_OUT="$H/state/when/when-rebind-out-of-repo.trust"
+TRUST_IN="$H/config/trust/when-rebind-in-repo.when-trust"
+TRUST_OUT="$H/config/trust/when-rebind-out-of-repo.when-trust"
 
 OUT=$(when_ro "$H" rebind-all) || fail "rebind-all failed with nothing to rebind: $OUT"
 assert_contains "$OUT" "0 rebound, 2 unchanged or out of scope, 0 failed" \
@@ -578,7 +578,7 @@ when "$H" arm torn-race --interval 0.05 --stable 1 \
   --action "$TORN_ACT" "$TORN_LOG" >/dev/null
 SID=$(when "$H" source-id torn-race)
 SPEC_TORN="$H/state/when/$SID.spec"
-TRUST_TORN="$H/state/when/$SID.trust"
+TRUST_TORN="$H/config/trust/$SID.when-trust"
 
 # Start the poller now, with the condition still false, so reconcile's own
 # brief use of this same per-sid lock (to claim and launch the source) is
@@ -645,5 +645,24 @@ assert_grep 'status: fired' "$RESULT" \
   "the reload must wait past the torn spec/trust window, not reject a legitimate rebind mid-publish"
 assert_grep 'v2 ran against' "$RESULT" "the fired action ran the rebound (v2) bytes, not a rejection from a torn read"
 pass "the fire-time reload never observes rebind_one's spec/trust publish mid-rename"
+
+# --- a trust record written only under state/ is refused ----------------------
+# A writer confined to state/ can hash a spec it wrote and forge the trust
+# record beside it; the runner must refuse because trust lives outside state/.
+H="$TMP_ROOT/h-state-trust"; new_home "$H"
+FORGED_LOG="$TMP_ROOT/state-trust-act"
+when "$H" arm state-trust --interval 0.1 --stable 1 \
+  --condition true --action "$ACT" "$FORGED_LOG" >/dev/null
+SID=$(when "$H" source-id state-trust)
+assert_present "$H/config/trust/$SID.when-trust" "arm writes the trust record under config/"
+rm -f "$H/config/trust/$SID.when-trust"
+printf 'fm-when-trust-v1\n%s\n' "$(fm_pr_sha256 "$H/state/when/$SID.spec")" > "$H/state/when/$SID.trust"
+chmod 0600 "$H/state/when/$SID.trust"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" "$SID" || fail "no outcome was captured for the state-only trust record"
+RESULT=$(first_result "$H" "$SID")
+assert_grep 'status: rejected' "$RESULT" "the outcome reports the trust refusal"
+assert_absent "$FORGED_LOG" "the action of a watch trusted only from state/ was not executed"
+pass "a trust record written only under state/ never makes a watch fire"
 
 printf 'all fm-procevent-when tests passed\n'

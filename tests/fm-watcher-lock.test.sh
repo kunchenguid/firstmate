@@ -2262,7 +2262,7 @@ SH
     || fail "first ledger record omitted its actionable classification"
   drain_and_ack "$state" || fail "first ledger wake handling acknowledgement failed"
 
-  rm -f "$check_file" "$state/task.check-trust"
+  rm -f "$check_file" "$(dirname "$state")/config/trust/task.check-trust"
   armout="$dir/successor-arm.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   successor_arm=$!

@@ -3076,7 +3076,7 @@ test_herdr_reclaim_keeps_the_task_whole() {
   [ "$(meta_field "$dir" rl75 pr)" = "https://example.invalid/pr/7" ] \
     || fail "a reclaim dropped a record row it does not own"
   assert_present "$dir/home/state/rl75.check.sh" "a reclaim retired the task's armed check"
-  assert_present "$dir/home/state/rl75.check-trust" "a reclaim broke the armed check's registration"
+  assert_present "$dir/home/config/trust/rl75.check-trust" "a reclaim broke the armed check's registration"
   assert_contains "$(cat "$dir/home/state/rl75.status")" "parked on an approval nobody can answer" \
     "a reclaim truncated the status log"
   assert_contains "$(cat "$dir/home/data/rl75/brief.md")" "the pane was destroyed" \

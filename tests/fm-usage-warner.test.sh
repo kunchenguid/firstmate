@@ -470,14 +470,14 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it() {
   out=$(FM_HOME="$home" "$WARNER" arm 2>&1) || fail "arm must succeed: $out"
   assert_contains "$out" "armed: state/usage-warner.check.sh" "arm names the shim it wrote"
   assert_present "$home/state/usage-warner.check.sh" "arm writes the check shim"
-  assert_present "$home/state/usage-warner.check-trust" "arm registers a trust binding"
+  assert_present "$home/config/trust/usage-warner.check-trust" "arm registers a trust binding"
   [ "$(stat -c %a "$home/state/usage-warner.check.sh" 2>/dev/null || stat -f %Lp "$home/state/usage-warner.check.sh")" = 700 ] \
     || fail "the shim must be mode 700"
 
   out=$(FM_HOME="$home" "$WARNER" disarm 2>&1)
   assert_contains "$out" "disarmed: state/usage-warner.check.sh" "disarm names the shim it removed"
   assert_absent "$home/state/usage-warner.check.sh" "disarm removes the shim"
-  assert_absent "$home/state/usage-warner.check-trust" "disarm removes the trust binding"
+  assert_absent "$home/config/trust/usage-warner.check-trust" "disarm removes the trust binding"
   assert_absent "$home/state/.usage-warner" "disarm removes the de-dupe record"
   pass "fm-usage-warner: arm writes a bound shim the watcher can run, disarm removes it cleanly"
 }
@@ -493,7 +493,7 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   out=$(FM_HOME="$home" "$WARNER" arm 2>&1) || rc=$?
   expect_code 1 "$rc" "arm must refuse a symlink at the shim path"
   assert_contains "$out" "could not write" "arm reports the shim write failure"
-  assert_absent "$home/state/usage-warner.check-trust" "no trust binding is left behind by a refused arm"
+  assert_absent "$home/config/trust/usage-warner.check-trust" "no trust binding is left behind by a refused arm"
   [ -f "$target" ] || fail "arm must never write through the symlink to its target"
   pass "fm-usage-warner: arm refuses a symlink at the shim path instead of following it"
 }

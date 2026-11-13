@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+# The trust record is written to config/trust/<id>.check-trust beside the
+# state directory, never under state/, so a state/ writer cannot register a check.
+# Re-run this for each check registered before trust moved out of state/; the
+# watcher ignores the old state/<id>.check-trust records.
 # Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.
 set -u
 
@@ -21,21 +25,26 @@ fi
 
 ID=$1
 CHECK="$STATE/$ID.check.sh"
-TRUST="$STATE/$ID.check-trust"
+TRUST_DIR=$(fm_trust_dir "$STATE")
+TRUST=$(fm_custom_check_trust_path "$STATE" "$ID")
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
   || { echo "error: custom check is unavailable" >&2; exit 1; }
-fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
+(umask 077; mkdir -p -- "$TRUST_DIR") 2>/dev/null
+[ -d "$TRUST_DIR" ] && [ ! -L "$TRUST_DIR" ] \
+  || { echo "error: custom check trust directory is unavailable" >&2; exit 1; }
+TRUST_DEVICE=$(fm_pr_file_device "$TRUST_DIR") || exit 1
+fm_pr_regular_destination_on_device_or_absent "$TRUST" "$TRUST_DEVICE" \
   || { echo "error: custom check trust path is unavailable" >&2; exit 1; }
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }
 umask 077
-TMP=$(mktemp "$STATE/.fm-custom-check-trust.XXXXXX") || exit 1
+TMP=$(mktemp "$TRUST_DIR/.fm-custom-check-trust.XXXXXX") || exit 1
 trap '[ -z "$TMP" ] || rm -f -- "$TMP"' EXIT HUP INT TERM
 printf '%s\n%s\n' fm-custom-check-v1 "$HASH" > "$TMP" || exit 1
 chmod 0600 "$TMP" || exit 1
-fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1
+fm_pr_regular_destination_on_device_or_absent "$TRUST" "$TRUST_DEVICE" || exit 1
 mv -f -- "$TMP" "$TRUST" || exit 1
 TMP=
 fm_custom_check_registered "$STATE" "$ID" || { rm -f -- "$TRUST"; exit 1; }

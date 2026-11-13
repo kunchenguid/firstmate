@@ -2747,7 +2747,7 @@ test_live_artifact_single_link_and_privacy_validation() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "custom check registration accepted a hard-linked source"
-  [ ! -e "$state/custom.check-trust" ] || fail "rejected hard-linked custom check received a trust record"
+  [ ! -e "$dir/home/config/trust/custom.check-trust" ] || fail "rejected hard-linked custom check received a trust record"
   rm -f "$alias"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
     || fail "could not register the custom check single-link fixture"
@@ -2759,7 +2759,7 @@ test_live_artifact_single_link_and_privacy_validation() {
   fm_custom_check_snapshot_cleanup
   rm -f "$alias"
   alias="$dir/custom-trust.alias"
-  ln "$state/custom.check-trust" "$alias"
+  ln "$dir/home/config/trust/custom.check-trust" "$alias"
   ! fm_custom_check_registered "$state" custom \
     || fail "hard-linked custom check trust remained authenticated"
   ! fm_custom_check_snapshot_prepare "$state" custom \
@@ -2776,7 +2776,7 @@ test_live_artifact_single_link_and_privacy_validation() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "custom check registration accepted a non-private source"
-  [ ! -e "$state/custom.check-trust" ] || fail "non-private custom check received a trust record"
+  [ ! -e "$dir/home/config/trust/custom.check-trust" ] || fail "non-private custom check received a trust record"
   chmod 0700 "$state/custom.check.sh"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
     || fail "could not register private custom check fixture"
@@ -2787,6 +2787,38 @@ test_live_artifact_single_link_and_privacy_validation() {
     || fail "watcher snapshot accepted a non-private custom check source"
   fm_custom_check_snapshot_cleanup
   pass "live poll and custom-check artifacts require private single-link files"
+}
+
+# A writer confined to state/ can compute a well-formed trust record for its own
+# check; the watcher must refuse it because trust lives outside state/.
+test_state_only_custom_check_trust_is_refused() {
+  local dir state mark hash out
+  dir=$(make_case state-only-custom-check-trust)
+  state="$dir/home/state"
+  mark="$dir/ran"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$mark" > "$state/evil.check.sh"
+  chmod 0700 "$state/evil.check.sh"
+  hash=$(fm_custom_check_sha256 "$state/evil.check.sh")
+  printf 'fm-custom-check-v1\n%s\n' "$hash" > "$state/evil.check-trust"
+  chmod 0600 "$state/evil.check-trust"
+  ! fm_custom_check_registered "$state" evil \
+    || fail "a trust record forged under state/ registered the check"
+  if fm_custom_check_snapshot_prepare "$state" evil; then
+    bash "$FM_CUSTOM_CHECK_SNAPSHOT"
+  fi
+  fm_custom_check_snapshot_cleanup
+  [ ! -e "$mark" ] || fail "a check with a forged state/ trust record executed"
+
+  out=$(FM_HOME="$dir/home" "$REGISTER" evil) || fail "operator registration failed"
+  assert_contains "$out" "registered: state/evil.check.sh" "registration reports the check"
+  fm_custom_check_registered "$state" evil \
+    || fail "an operator-registered check was not accepted"
+  [ -f "$dir/home/config/trust/evil.check-trust" ] \
+    || fail "registration did not write the trust record under config/"
+  rm -f "$dir/home/config/trust/evil.check-trust"
+  ! fm_custom_check_registered "$state" evil \
+    || fail "the leftover state/ record still authenticated the check"
+  pass "a trust record written only under state/ never makes a custom check run"
 }
 
 install_final_publication_fault() {
@@ -3079,6 +3111,8 @@ test_teardown_removes_poll_artifacts() {
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'degraded\n' > "$dir/home/state/task-a.pr-poll-degraded"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  mkdir -p "$dir/home/config/trust"
+  printf 'trust\n' > "$dir/home/config/trust/task-a.check-trust"
   printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-refused"
   printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-timed-out"
   cat > "$fakebin/tmux" <<'SH'
@@ -3096,6 +3130,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.pr-poll-degraded" ] || fail "teardown left the degraded dedupe marker"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/config/trust/task-a.check-trust" ] || fail "teardown left the custom check trust record"
   [ ! -e "$dir/home/state/task-a.pr-register-refused" ] || fail "teardown left the PR registration refusal marker"
   [ ! -e "$dir/home/state/task-a.pr-register-timed-out" ] || fail "teardown left the PR registration timeout marker"
 
@@ -4786,7 +4821,7 @@ test_external_merge_transition_retires_only_terminal_poll() {
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
 
-  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
+  rm -f "$state/z-stop.check.sh" "$dir/home/config/trust/z-stop.check-trust" "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err"
   rc=$?
@@ -4885,7 +4920,7 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "merged custom watcher failed: $(cat "$dir/custom.err")"
-  [ -f "$state/custom.check.sh" ] && [ -f "$state/custom.check-trust" ] \
+  [ -f "$state/custom.check.sh" ] && [ -f "$dir/home/config/trust/custom.check-trust" ] \
     || fail "custom merged output was retired as a PR poll"
   [ ! -e "$state/custom.pr-poll-retirement" ] || fail "custom check received a PR receipt"
   pass "replacement, nonterminal, tampered, and custom results receive no deletion authority"
@@ -5333,7 +5368,7 @@ SH
     fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
       || fail "$scenario disarmed an intact generation before its merge"
     ack_watcher_cycle "$state" || fail "$scenario could not acknowledge the open cycle"
-    rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check" "$dir/gh.log"
+    rm -f "$state/z-stop.check.sh" "$dir/home/config/trust/z-stop.check-trust" "$state/.last-check" "$dir/gh.log"
     rc=0
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
       run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
@@ -5737,6 +5772,7 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_state_only_custom_check_trust_is_refused
 test_registered_poll_survives_template_update_and_relaunch
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts

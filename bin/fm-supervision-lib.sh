@@ -26,7 +26,7 @@ fm_sup_stat_mtime() {
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
 #   FM_SUP_CHECKS         count of registered custom checks: a state/<id>.check.sh
-#                         with the state/<id>.check-trust binding that
+#                         with the config/trust/<id>.check-trust binding that
 #                         bin/fm-check-register.sh writes. Task PR polls carry no
 #                         such binding and are torn down with their task, and the
 #                         relay shim keeps its own trust path, so neither counts
@@ -69,7 +69,9 @@ fm_supervision_status() {
     if [ "$id" = x-watch ]; then
       continue
     fi
-    [ -e "$state/$id.check-trust" ] || continue
+    # Path owner: fm_custom_check_trust_path in bin/fm-check-lib.sh, kept
+    # inline so hook entry points that copy this lib need no extra file.
+    [ -e "$(dirname -- "$state")/config/trust/$id.check-trust" ] || continue
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
