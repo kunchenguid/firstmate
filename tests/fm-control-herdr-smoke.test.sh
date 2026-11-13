@@ -209,7 +209,7 @@ done
 [ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" = "$PROJ_REAL" ] \
   || fail "the real Herdr pane did not drift out of its recorded worktree"
 
-OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 CODEX_HOME="$SCRATCH/codex-home" \
   "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex) \
   || fail "a drifted, agent-free Herdr pane should be re-homed and relaunched: $OUT"
 for _ in $(seq 1 20); do
@@ -323,7 +323,7 @@ esac
 pass "real herdr: exit on a pane with a stale registration is idempotent success"
 
 rm -f "$SCRATCH/codex-launched"
-OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 CODEX_HOME="$SCRATCH/codex-home" \
   "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex) \
   || fail "a stale-registration Herdr pane should be relaunched: $OUT"
 for _ in $(seq 1 20); do

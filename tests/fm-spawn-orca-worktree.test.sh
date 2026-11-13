@@ -28,6 +28,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-orca-worktree)
+export CODEX_HOME="$TMP_ROOT/codex-home"
 
 # make_orca_fakebin <dir>: a fake `orca` CLI that performs a REAL `git
 # worktree add` for `worktree create` (so spawn_worktree_isolated's checks are
@@ -868,6 +869,80 @@ PY
   pass "real tmux preserves absent/C locale values and reported raw bytes, rejects missing/phantom names and excludes the automatic SSH agent"
 }
 
+
+test_orca_codex_trust_uses_selected_store() {
+  local choice dir home id fb out staged expected inherited wt harness
+  for choice in source source-over-ambient source-home source-unset raw; do
+    id="orca-codex-$choice"
+    dir="$TMP_ROOT/$id"
+    home="$dir/home"
+    fm_test_spawn_home "$home" codex
+    fm_test_spawn_brief "$home" "$id"
+    printf 'manual\n' > "$home/config/backlog-backend"
+    printf 'scoped-source\n' > "$home/config/launch-env-tmux-session"
+    printf 'CODEX_HOME\n' > "$home/config/launch-env-allowlist"
+    expected="$dir/scoped codex's home"
+    inherited="$dir/ambient-codex"
+    case "$choice" in
+      source-home)
+        printf 'HOME\n' >> "$home/config/launch-env-allowlist"
+        printf 'HOME=%s\n' "$dir/source-home" > "$dir/source-home-record"
+        expected="$dir/source-home/.codex"
+        printf '%s\n' '-CODEX_HOME' > "$dir/source-codex-record"
+        ;;
+      source-unset)
+        expected="$dir/user-home/.codex"
+        printf '%s\n' '-CODEX_HOME' > "$dir/source-codex-record"
+        ;;
+      *) printf 'CODEX_HOME=%s\n' "$expected" > "$dir/source-codex-record" ;;
+    esac
+    harness=codex
+    if [ "$choice" = raw ]; then
+      expected="$dir/other/store"
+      harness="CODEX_HOME=$expected codex --no-daemon"
+    fi
+    fm_git_init_commit "$dir/project"
+    fb=$(make_orca_fakebin "$dir")
+    cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${5:-}" in
+  CODEX_HOME) cat "$FM_TEST_ORCA_DIR/source-codex-record" ;;
+  HOME) cat "$FM_TEST_ORCA_DIR/source-home-record" ;;
+  '') exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+    cat > "$fb/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$CODEX_HOME"
+SH
+    chmod +x "$fb/tmux" "$fb/codex"
+    out=$(
+      if [ "$choice" = source ]; then unset CODEX_HOME; else export CODEX_HOME="$inherited"; fi
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$dir/user-home" FM_SPAWN_NO_GUARD=1 \
+        FM_TEST_ORCA_DIR="$dir" FM_TEST_ORCA_LOG="$dir/terminal.log" FM_TEST_ORCA_CONSUME=1 \
+        PATH="$fb:$PATH" "$SPAWN" "$id" "$dir/project" --scout --harness "$harness" --backend orca 2>&1
+    ) || fail "Codex spawn with $choice failed: $out"
+    wt=$(sed -n 's/^worktree=//p' "$home/state/$id.meta")
+    python3 - "$expected/config.toml" "$wt" <<'PYTEST' || fail "$choice did not register trust in the selected Codex store"
+import sys, tomllib
+with open(sys.argv[1], 'rb') as handle:
+    assert tomllib.load(handle)['projects'][sys.argv[2]]['trust_level'] == 'trusted'
+PYTEST
+    assert_absent "$inherited" "$choice changed the supervisor's Codex store"
+    [ "$choice" != raw ] || assert_absent "$dir/scoped codex's home" "$choice changed the overridden source store"
+    [ "$choice" = source-unset ] || assert_absent "$dir/user-home/.codex" "$choice changed the supervisor's default Codex store"
+    staged=$(sed -n "s/^[^']*'\([^']*\/launch\.[^'\/]*\.sh\)'.*$/\1/p" "$dir/terminal.log" | tail -1)
+    [ -f "$staged.copy" ] || fail "$choice did not deliver the staged launch"
+    cp "$staged.copy" "$staged"
+    out=$(env -i HOME="$dir/pane-home" CODEX_HOME="$dir/pane-codex" PATH="$fb:$PATH" \
+      /bin/sh "$staged") || fail "$choice emitted launch failed"
+    [ "$out" = "$expected" ] || fail "$choice worker did not use the registered Codex store"
+  done
+  pass "Orca Codex registration and launch honor raw and source stores over the supervisor and pane"
+}
+
+test_orca_codex_trust_uses_selected_store
 test_orca_source_preserves_values_without_utf8_locale
 test_orca_launch_uses_controlled_tmux_environment
 test_orca_allowlist_without_source_warns

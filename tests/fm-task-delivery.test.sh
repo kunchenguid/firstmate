@@ -64,7 +64,7 @@ fill_brief_subsections() {  # <file> <intent> <spec>
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" CODEX_HOME="$home/codex-home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
