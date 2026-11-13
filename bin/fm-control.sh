@@ -118,8 +118,9 @@
 #              (its replacement does not come up, or the stop left the old
 #              agent dead), the failure also prints the
 #              bin/fm-spawn.sh <id> --secondmate
-#              command, with the target harness and model, that the operator
-#              runs next; it is never run automatically.
+#              command, with the recorded backend and the target harness and
+#              model, that the operator runs next; it is never run
+#              automatically.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -1003,7 +1004,7 @@ relaunch_rollback() {
 # relaunch left it with no running agent. Printed only; never run from here.
 relaunch_recovery_command() {
   local cmd
-  cmd="bin/fm-spawn.sh $(printf '%q' "$ID") --secondmate --harness $(printf '%q' "$TARGET_HARNESS")"
+  cmd="bin/fm-spawn.sh $(printf '%q' "$ID") --secondmate --backend $(printf '%q' "$BACKEND") --harness $(printf '%q' "$TARGET_HARNESS")"
   [ "$TARGET_MODEL" = default ] || [ -z "$TARGET_MODEL" ] \
     || cmd="$cmd --model $(printf '%q' "$TARGET_MODEL")"
   [ "$TARGET_EFFORT" = default ] || [ -z "$TARGET_EFFORT" ] \

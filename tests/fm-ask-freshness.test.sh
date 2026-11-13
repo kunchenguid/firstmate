@@ -121,6 +121,48 @@ test_unreadable_timestamps_fail_closed() {
   pass "empty, date-only, prose, and future timestamps fail closed"
 }
 
+test_pipeless_and_short_rows_are_checked_not_skipped() {
+  local report out rc=0
+  report=$(write_report pipeless \
+    'item | checked_at' \
+    '--- | ---' \
+    'old ask')
+  out=$(run_gate "$report") || rc=$?
+  expect_code 1 "$rc" "a pipe-less row holding only an ask must fail the gate"$'\n'"$out"
+  assert_contains "$out" "line 7: UNREADABLE unknown age (checked_at ''): old ask" "the pipe-less row must be named with its line"
+  assert_not_contains "$out" "rows are within" "an undated row must not pass"
+  rc=0
+  report=$(write_report short \
+    '| item | action | checked_at |' \
+    '|---|---|---|' \
+    '| a | send | 2026-11-13T11:30Z |' \
+    '| b | merge |' \
+    '| c | ping | 2026-11-13T11:40Z |')
+  out=$(run_gate "$report") || rc=$?
+  expect_code 1 "$rc" "a short row with no timestamp cell must fail the gate"$'\n'"$out"
+  assert_contains "$out" "1 of 3 rows are older than 2h or have no readable checked_at" "every row must be counted"
+  assert_contains "$out" "  line 8: UNREADABLE unknown age (checked_at ''): | b | merge |" "the short row must be named with its line"
+  assert_contains "$out" "line 9: fresh age 20m" "rows after the short row are still checked"
+  pass "pipe-less and short rows are checked and fail when undated"
+}
+
+test_out_of_range_offsets_are_unreadable_and_later_rows_still_checked() {
+  local report out rc=0
+  report=$(write_report offsets \
+    '| item | checked_at |' \
+    '|---|---|' \
+    '| a | 2026-11-13T12:00+24:00 |' \
+    '| b | 2026-11-13T12:00+01:99 |' \
+    '| c | 2026-11-13T11:30Z |')
+  out=$(run_gate "$report") || rc=$?
+  expect_code 1 "$rc" "out-of-range offsets must fail the gate"$'\n'"$out"
+  assert_contains "$out" "  line 7: UNREADABLE unknown age (checked_at '2026-11-13T12:00+24:00'): | a |" "a +24:00 offset is unreadable and named"
+  assert_contains "$out" "  line 8: UNREADABLE unknown age (checked_at '2026-11-13T12:00+01:99'): | b |" "a +01:99 offset is unreadable, not normalized"
+  assert_contains "$out" "line 9: fresh age 30m (checked_at 2026-11-13T11:30Z): | c |" "the row after them is still checked"
+  assert_not_contains "$out" "Traceback" "a bad offset must not crash the report"
+  pass "out-of-range offsets are unreadable and later rows are still checked"
+}
+
 test_a_table_without_the_column_fails_even_beside_a_fresh_table() {
   local report out rc=0
   report=$(write_report mixed \
@@ -160,6 +202,11 @@ test_input_errors_exit_two() {
   out=$(run_gate "$TMP_ROOT/no-table.md") || rc=$?
   expect_code 2 "$rc" "a report with no table must be an input error"
   assert_contains "$out" "has no markdown table" "the error must say there is no table"
+  rc=0
+  report=$(write_report header-only '| item | checked_at |' '|---|---|')
+  out=$(run_gate "$report") || rc=$?
+  expect_code 2 "$rc" "a table with no rows must not report success"$'\n'"$out"
+  assert_contains "$out" "has no table rows to check" "the error must say no row was checked"
   pass "usage and input errors exit 2"
 }
 
@@ -168,5 +215,7 @@ fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_column_and_max_age_options \
   test_offsets_and_local_time_are_honoured \
   test_unreadable_timestamps_fail_closed \
+  test_pipeless_and_short_rows_are_checked_not_skipped \
+  test_out_of_range_offsets_are_unreadable_and_later_rows_still_checked \
   test_a_table_without_the_column_fails_even_beside_a_fresh_table \
   test_input_errors_exit_two

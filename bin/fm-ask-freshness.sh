@@ -9,9 +9,11 @@
 # Reads every markdown table in <report.md> (a header row, a `|---|` separator
 # row, then body rows) and checks each table whose header has the timestamp
 # column, matched case-insensitively with surrounding backticks or emphasis
-# ignored. Every table must have that column: a table without it holds rows
-# nobody dated, so each such table is named on stderr and the report is an
-# input error, as is a report with no table at all.
+# ignored. A table's body runs to the next blank line, so a row with no outer
+# pipes or fewer cells than the header is still checked, and a missing
+# timestamp cell is unreadable. Every table must have that column: a table
+# without it holds rows nobody dated, so each such table is named on stderr
+# and the report is an input error, as is a report with no table or no row.
 #
 #   --column <name>       timestamp column (default checked_at)
 #   --max-age <duration>  oldest acceptable age (default 2h): a whole number of
@@ -21,16 +23,17 @@
 # A timestamp is ISO 8601 date and time (`2026-11-13T09:30Z`,
 # `2026-11-13T09:30:00+01:00`, seconds and fractions optional) or
 # `YYYY-MM-DD HH:MM[:SS]`. A value with no Z or offset is read in the local
-# timezone (TZ). A date with no time, an empty cell, or any other shape is
-# unreadable, and so is a time more than five minutes in the future.
+# timezone (TZ). A date with no time, an empty cell, an offset beyond 23:59,
+# or any other shape is unreadable, and so is a time more than five minutes
+# in the future.
 #
 # Prints every checked row with its age, then exits:
 #   0  every checked row is within --max-age
 #   1  at least one row is older than --max-age or has an unreadable timestamp;
 #      those rows are named again on stderr - re-check them rather than
 #      presenting them
-#   2  usage error, unreadable report, no table, or a table without the
-#      timestamp column
+#   2  usage error, unreadable report, no table, no body row, or a table
+#      without the timestamp column
 #
 # The report is only read, never edited. Requires python3.
 #
@@ -141,7 +144,10 @@ def parse_ts(text):
         offset = timedelta(0)
     else:
         digits = zone[1:].replace(":", "")
-        offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+        hours, minutes = int(digits[:2]), int(digits[2:])
+        if hours > 23 or minutes > 59:
+            return None
+        offset = timedelta(hours=hours, minutes=minutes)
         if zone[0] == "-":
             offset = -offset
     return int(moment.replace(tzinfo=timezone(offset)).timestamp())
@@ -190,7 +196,7 @@ while i < len(lines):
         start = i + 1
         i += 2
         rows = []
-        while i < len(lines) and lines[i].strip() and "|" in lines[i]:
+        while i < len(lines) and lines[i].strip():
             rows.append((i + 1, lines[i]))
             i += 1
         tables += 1
@@ -225,6 +231,9 @@ while i < len(lines):
 
 if tables == 0:
     die("report '%s' has no markdown table" % report)
+
+if checked == 0 and not undated:
+    die("report '%s' has no table rows to check" % report)
 
 if undated:
     sys.stderr.write(
