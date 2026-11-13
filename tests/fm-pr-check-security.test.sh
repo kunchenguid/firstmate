@@ -4243,7 +4243,7 @@ EOF
     || fail "the jq-free search path still resolved jq"
   printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$url" gitlab.example group/subgroup/project 7 \
     > "$state/task-a.pr-poll"
-  notice='task task-a merge/readiness refused: GitLab destination proof unavailable without jq; install jq or re-arm the watch. Follow bin/fm-pr-check.sh recovery steps.'
+  notice='task task-a merge/readiness refused: GitLab destination proof unavailable without jq; install jq, then re-arm the watch. Follow bin/fm-pr-check.sh recovery steps.'
   for degraded in 0 1; do
     if [ "$degraded" = 1 ]; then
       : > "$dir/home/config/pr-degraded-watch"

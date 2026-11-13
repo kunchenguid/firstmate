@@ -445,7 +445,8 @@ Relaunch preserves the pinned destination across default-branch changes and refu
 Registration, ship readiness, and merge observations for delivered work require the live forge destination to match that task-owned destination, and merge checks it again before calling the forge.
 Missing, unreadable, invalid, or inconsistent destination proof prevents those claims or actions without replacing the existing head and delivery checks.
 For legacy delivery tasks without destination proof, follow the recovery instructions emitted by `bin/fm-pr-check.sh` rather than inferring a base from the current PR or repository default.
-An armed delivery poll emits one local recovery wake if task-owned destination metadata is invalid or the live base differs from it.
+An armed delivery poll emits one local recovery wake if task-owned destination metadata is invalid, the live base differs from it, or a GitLab poll cannot prove the destination because `jq` is missing.
+For missing-`jq` recovery, install `jq`, then re-arm the watch through `bin/fm-pr-check.sh`.
 A secondmate ledger delivery refused for unavailable task-owned destination metadata independently publishes one `blocked` parent notice.
 Successful re-registration resets both notices.
 Secondmates cannot arm new merge polls. A legacy poll on a persistent secondmate reads merge state only and retires silently after merge, without a task outcome, destination metadata, or changes to its lifecycle records.

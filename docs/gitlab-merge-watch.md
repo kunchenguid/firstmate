@@ -212,7 +212,10 @@ $ echo $?
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
 The merge path reads `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline from glab's JSON.
-Registration and merging report missing tools before recording anything, while an already armed poll stays silent when it cannot read the record.
+Registration and merging report missing tools before recording anything.
+An already armed poll with task metadata emits a one-time `merge/readiness refused` recovery notice when `jq` is missing, withholding merge/readiness claims until destination proof is available.
+Install `jq`, then re-arm the watch through `bin/fm-pr-check.sh` to reset the registration's notice receipt.
+Other record-read failures stay silent.
 A car-endpoint 404 is confirmed with one bounded read of the project's active merge-train list; only a readable list omitting the merge request triggers one bounded MR-state re-read, while list errors stay silent.
 An `opened` or `locked` re-read reports the drop; `closed` stays silent, `merged` reports the merge only with matching destination proof, and an unreadable re-read reports the confirmed drop with `mr_state=unconfirmed`.
 The watcher emits a drop only after it has recorded the merge request on the train.

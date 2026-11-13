@@ -270,7 +270,7 @@ case "$provider" in
     if ! command -v jq >/dev/null 2>&1; then
       if [ "$retirement_only" -eq 0 ] && [ -n "$meta" ]; then
         base_refusal_notice "$meta" pr-base-notified \
-          'GitLab destination proof unavailable without jq; install jq or re-arm the watch'
+          'GitLab destination proof unavailable without jq; install jq, then re-arm the watch'
       fi
       exit "$unknown"
     fi
