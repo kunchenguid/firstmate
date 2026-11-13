@@ -999,6 +999,33 @@ tests/fm-supervision-host-hook.test.sh
 tests/fm-backend-herdr.test.sh
 ```
 
+### Claude SessionEnd reasons and detached survival, 2026-11-13
+
+This supports [After the main session ends](../supervision-host.md#after-the-main-session-ends): the `SessionEnd` hook tells `/clear` from a process end by the payload's `reason`, and its keeper outlives the Claude process.
+It was measured on 2026-11-13 on macOS arm64 with Claude Code 2.1.323, driven on a pseudo-terminal with a private config directory, a synthetic API key, and an unreachable API endpoint, so no prompt was submitted and no tokens were spent.
+
+```text
+$ tests/fm-supervision-session-end-live-e2e.test.sh
+ok - claude (2.1.323 (Claude Code)): /clear ends a session with reason clear, /exit with prompt_input_exit, and a detached hook child survives
+ok - claude (2.1.323 (Claude Code)): a closed terminal ends the session with reason other, and a detached hook child survives
+```
+
+| Case | Observed |
+| --- | --- |
+| `/clear` | `reason` is `clear`; the Claude process runs on |
+| `/exit` | `reason` is `prompt_input_exit`; the process exits |
+| Closed terminal | `reason` is `other`; the process exits |
+| Detached child | started with `nohup` in its own process group, it was alive with parent pid 1 after the process exited |
+
+A production home's host ledger on 2026-11-12 shows the other half: a host parked before a `/clear` delivered its next close, about two hours later, to the session `/clear` opened, while a host parked before a process exit recorded no line after it.
+The `/clear` survival rests on that observation only; the live guard does not start a Stop hook, because that needs a model turn.
+
+Deterministic entry point:
+
+```sh
+tests/fm-supervision-session-end.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

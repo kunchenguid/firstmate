@@ -49,7 +49,7 @@ const dispatch = await import(pathToFileURL(path.join(root, ".pi", "extensions",
 
 function usage() {
   process.stderr.write(
-    "usage: fm-branch-dispatch.mjs scope [--heartbeat] [--afk] | offer [--afk] | wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]\n",
+    "usage: fm-branch-dispatch.mjs scope [--heartbeat] [--afk] | offer [--afk] | wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>] | --session-end]\n",
   );
   process.exit(2);
 }
@@ -103,12 +103,14 @@ if (command === "scope") {
 } else if (command === "wake-prompt") {
   let report = "";
   let away = false;
+  let sessionEnd = false;
   let readbackFile = "";
   let mirrorFile = "";
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--report" && index + 1 < args.length) report = args[++index];
     else if (arg === "--away") away = true;
+    else if (arg === "--session-end") sessionEnd = true;
     else if (arg === "--readback-file" && index + 1 < args.length) readbackFile = args[++index];
     else if (arg === "--mirror-file" && index + 1 < args.length) mirrorFile = args[++index];
     else usage();
@@ -124,7 +126,12 @@ if (command === "scope") {
       process.exit(3);
     }
   }
-  const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : "";
+  const sessionEndTail =
+    "POSTURE: ATTENDED, MAIN GONE. The main session has ended and no away record exists, so the captain is not present and MAIN is not running: you take this wake. " +
+    "Spawn only a task the check row you are handling names by its task id, and only while it is a queued, unblocked, unheld backlog item, with bin/fm-spawn.sh, which refuses every other task. " +
+    "A wake that is not a check row, such as a worker finishing or a PR event, is handled without spawning. " +
+    "Do not merge and do not answer a decision or ask-user finding; record every such need as a captain outcome for the next drain.";
+  const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : sessionEnd ? sessionEndTail : "";
   process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror)}\n`);
 } else {
   usage();

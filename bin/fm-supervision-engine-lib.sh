@@ -5,8 +5,9 @@
 # Sourced, and executed only for the home-gate query below.
 # docs/supervision-host.md owns the host design and
 # bin/fm-supervision-host.sh the loop; this file owns two contracts, plus the
-# main-session key (fm_supervision_host_main_key) and the attended readiness
-# check (fm_supervision_host_attended_ready) the host's parts share.
+# main-session key (fm_supervision_host_main_key), the attended readiness
+# check (fm_supervision_host_attended_ready), and the session-end ownership
+# test (fm_supervision_host_session_end_owned) the host's parts share.
 #
 # THE HOME GATE (config/supervision-host-off, config/supervision-host).
 # docs/configuration.md "Supervision host" owns both files: the inherited
@@ -200,13 +201,35 @@ fm_supervision_host_main_key() {
     "$(sed -n '1p' "$1/.lock-session" 2>/dev/null | cksum | awk '{ print $1 }')"
 }
 
+# fm_supervision_host_session_end_owned <state-dir> <autoarm-gen> <session-pid>:
+# 0 while a host started after the Claude main session <session-pid> ended
+# (bin/fm-supervision-session-end.sh) still owns supervision: no later Stop has
+# claimed an auto-arm generation past <autoarm-gen> (empty when no ledger
+# existed), and no later session has taken the session lock from <session-pid>.
+# Needs bin/fm-wake-lib.sh sourced first.
+fm_supervision_host_session_end_owned() {
+  local gen="" holder
+  ! fm_autoarm_ledger_read "$1" || gen=$FM_AUTOARM_GEN
+  [ "$gen" = "$2" ] || return 1
+  [ -n "$3" ] || return 1
+  holder=$(sed -n '1p' "$1/.lock" 2>/dev/null)
+  [ -z "$holder" ] || [ "$holder" = "$3" ]
+}
+
 # fm_supervision_host_health_key <state-dir>: the key the host's
 # broken-session latch (bin/fm-supervision-host.sh, state/.supervision-host-health)
 # is kept under: the current main session, engine, and model; fails with no
-# main-session key. Needs fm_supervision_host_config first.
+# main-session key. A host the session-end keeper runs
+# (FM_SUPERVISION_HOST_SESSION_END_PID set) has no live main session and keys it
+# to the ended session's pid and auto-arm generation instead. Needs
+# fm_supervision_host_config first.
 fm_supervision_host_health_key() {
   local key
-  key=$(fm_supervision_host_main_key "$1") || return 1
+  if [ -n "${FM_SUPERVISION_HOST_SESSION_END_PID:-}" ]; then
+    key="session-end:$FM_SUPERVISION_HOST_SESSION_END_PID:${FM_SUPERVISION_HOST_SESSION_END_GEN:-}"
+  else
+    key=$(fm_supervision_host_main_key "$1") || return 1
+  fi
   printf '%s|%s|%s\n' "$key" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL"
 }
 

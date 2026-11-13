@@ -313,6 +313,41 @@ fm_lease_away_relocated() {
   [ "$(FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]
 }
 
+# fm_lease_session_end_relocated: 0 iff the supervision-host keeper that
+# bin/fm-supervision-session-end.sh runs after the main session ended is alive
+# and still owns supervision (fm_supervision_host_session_end_owned), and the
+# ended session's process is gone. Read fresh on every call. Only new-task spawn
+# of queued work consults it, together with fm_lease_session_end_names; it is
+# not an away record and relocates nothing else.
+fm_lease_session_end_relocated() {
+  local record keeper gen session
+  record=$(sed -n '1p' "$STATE/.supervision-session-end" 2>/dev/null) || return 1
+  keeper=$(printf '%s\n' "$record" | cut -f1)
+  gen=$(printf '%s\n' "$record" | cut -f3)
+  session=$(printf '%s\n' "$record" | cut -f4)
+  [ -n "$keeper" ] && [ -n "$session" ] || return 1
+  case "$keeper$session" in *[!0-9]*) return 1 ;; esac
+  kill -0 "$keeper" 2>/dev/null || return 1
+  ! kill -0 "$session" 2>/dev/null || return 1
+  (
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
+    # shellcheck source=bin/fm-supervision-engine-lib.sh
+    . "$FM_LEASE_LIB_DIR/fm-supervision-engine-lib.sh"
+    fm_supervision_host_session_end_owned "$STATE" "$gen" "$session"
+  ) >/dev/null 2>&1
+}
+
+# fm_lease_session_end_names <task>: 0 iff the supervision host's live turn
+# record ($STATE/.supervision-host-turn) lists <task> on its spawn= line: a
+# task id the check row of that session-end turn names. A turn that claims no
+# check row lists none, and the host removes the record when the turn ends.
+fm_lease_session_end_names() {
+  local named
+  named=$(sed -n 's/^spawn=//p' "$STATE/.supervision-host-turn" 2>/dev/null) || return 1
+  case " $named " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
 # fm_lease_forbid_branch <action-label> [--away-relocated]: refuse (exit
 # FM_LEASE_REFUSE_EXIT) when the current actor is the supervision branch.
 # Guards the main-owned role partition; a home with no branch never sets the

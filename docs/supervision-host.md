@@ -260,6 +260,30 @@ A failed watcher restart or a terminated retry owner is not a guarantee of conti
 [verification/supervision.md](verification/supervision.md#supervision-host) owns the dated live results and verification entry points for both transports.
 All other primaries and the host-off Stop path retain their existing behavior.
 
+## After the main session ends
+
+On Claude the host runs inside the main session's Stop hook, and Claude kills that hook when its process exits.
+So by default nothing supervises the home from that exit until the next session's first turn ends, and a check wake such as a daily run starts nobody.
+A `/clear` is not such an end: the same process runs on, and the parked host survives it and delivers its next close to the new session.
+The opt-in [configuration flag](configuration.md#supervision-after-the-main-session-ends-configsupervision-host-session-end) closes that gap with a Claude `SessionEnd` hook, `bin/fm-supervision-session-end.sh`, whose header owns the gates and the keeper.
+
+When a session that holds the lock ends any other way and no away daemon exists, the hook starts a detached keeper that runs the host and starts it again after each exit.
+It enters no away posture and writes no away record, so it grants no away merge authority.
+The host runs attended, as with the captain at the terminal, except that the main session is gone: it takes the check wakes that are normally main-only, so due work that a check row names, such as the daily runs, starts.
+Merges and captain decisions wait for the return, and the engine records them as captain outcomes for the next drain: `bin/fm-pr-merge.sh` and `bin/fm-send.sh --resolve-key` keep their attended refusals.
+The one authority it gains is `bin/fm-spawn.sh` of a task whose id the check row it is handling prints, while that task is already filed as a queued, unblocked, unheld backlog item, work the captain already approved.
+A check that wants work started must print each such task id.
+The host writes the task ids that the turn's check rows name into its turn record, and the lease check (`fm_lease_session_end_relocated` and `fm_lease_session_end_names`) admits a branch spawn only of such a task, only while the keeper is alive, still owns supervision, and the ended session's process is gone.
+A wake that is not a check row, such as a worker finishing or a PR event, names no task, so it is handled without spawning.
+A session that ends under an `/afk` or `/quiet` record keeps that record exactly as it is, and the host runs under it.
+
+That host proves ownership without the session: it owns supervision while no later Stop has claimed an auto-arm generation and no later session has taken the session lock.
+So the next session's start or first Stop ends the keeper.
+A wake the host hands back has no main to reach, so it stays durable in the queue for the next drain, and the keeper starts the host again.
+Each wake in the window starts a fresh engine conversation, because the conversation is keyed to a main session whose process is gone.
+The broken-session latch is keyed instead to the ended session and its auto-arm generation, so two consecutive engine errors pause the window for the same cooldown as an attended host, and the next session starts clean.
+Other primaries have no such hook.
+
 ## Failure direction
 
 With acknowledged hand-back disabled, every path that cannot finish a wake the engine took hands that wake to main, with one `supervision-host: <why>` line after the close.
@@ -458,6 +482,8 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-supervision-host-park.test.sh` | Latch, park boundary, compaction, and lock ownership against the same stub-engine fixtures. |
 | `tests/fm-supervision-host-hook.test.sh` | Claude Stop-hook re-arm, successor take-over, lost hand-back continuations, and guarded retry submission. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
+| `tests/fm-supervision-session-end.test.sh` | The Claude `SessionEnd` hook through its tracked registration with the opt-in on and off: a check wake the attended engine takes after the session ended with no away record written, the spawn of the queued item the check row names admitted, and a queued item it does not name or a held or blocked one refused, through `bin/fm-spawn.sh`, the keeper's end at the next session and at the next Stop, and no change on `/clear` or to a standing `/afk` record. |
+| `tests/fm-supervision-session-end-live-e2e.test.sh` | Token-free guard that the installed Claude reports `clear` for `/clear` and another reason for `/exit` and a closed terminal, and that a hook's detached child outlives the process. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |
 | `tests/fm-omp-harness.test.sh` | The omp arm owner's host mode against a stub host. |

@@ -426,6 +426,19 @@ The host reads its presence at each hand-back, so enabling it needs no session r
 Removing it stops further retries and leaves the current watcher for the ordinary next park.
 [Supervision host](supervision-host.md#acknowledged-hand-back) owns the acknowledgement, retry transport, and limits.
 
+### Supervision after the main session ends (config/supervision-host-session-end)
+
+Create the empty, home-local `config/supervision-host-session-end` file to keep a Claude primary's supervision host running after the main session ends.
+The flag is off when absent, is not inherited, and has no effect on other primaries or on a home that does not run the host with an engine.
+The `SessionEnd` hook reads it when the session ends, so enabling it needs no session restart.
+With it present, a session end other than `/clear` leaves a host running in the attended posture: it writes no away record and grants no away merge authority.
+The host may start only a task whose id the check row it is handling prints, while that task is already filed as a queued, unblocked, unheld backlog item.
+A check that wants work started must print each such task id.
+A wake that is not a check row, such as a worker finishing or a PR event, is handled without starting anything.
+Merges and captain answers wait for the return.
+The host keeps taking wakes until the next session starts or its first turn ends.
+[Supervision host](supervision-host.md#after-the-main-session-ends) owns the design and its limits.
+
 ## Codex native Stop park (config/codex-stop-park)
 
 Create the empty, home-local `config/codex-stop-park` file to let a Codex primary wait for watcher wakes outside the model between turns.
@@ -3705,6 +3718,7 @@ FM_SUPERVISION_HOST_TURN_TIMEOUT=1200    # bound on one engine turn; a turn that
 FM_SUPERVISION_HOST_ROTATE_TURNS=20      # the engine conversation starts fresh after this many turns (and at every main session start)
 FM_SUPERVISION_ENGINE_GRACE=30           # seconds between TERM and KILL when an engine turn is stopped
 FM_SUPERVISION_HANDOFF_RETRY_SECONDS=300 # with config/supervision-handoff-ack, seconds between the detached owner's delivery retries of an unacknowledged hand-back
+FM_SUPERVISION_SESSION_END_RESTART_SECONDS=60 # with config/supervision-host-session-end, the shortest interval between two host starts after the main session ended
 # spoken interface and captain inbox; see "Spoken interface and captain inbox" above
 FM_VOICE_REGION=        # overrides config/voice-region for one relay run
 FM_VOICE_MODEL=         # overrides config/voice-model for one relay run

@@ -383,6 +383,7 @@ family_for_basename() {
     fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-supervision-host-live-e2e.test.sh|fm-supervision-host-attended-live-e2e.test.sh|\
+    fm-supervision-session-end-live-e2e.test.sh|\
     fm-host-mirror-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -418,7 +419,7 @@ family_for_basename() {
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
     fm-supervision-host.test.sh|fm-supervision-host-drain.test.sh|\
     fm-supervision-host-hook.test.sh|fm-supervision-host-park.test.sh|\
-    fm-host-mirror.test.sh)
+    fm-supervision-session-end.test.sh|fm-host-mirror.test.sh)
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
@@ -940,6 +941,8 @@ tests/fm-supervision-host-hook.test.sh 403793
 tests/fm-supervision-host-live-e2e.test.sh 75
 tests/fm-supervision-host-park.test.sh 329326
 tests/fm-supervision-host.test.sh 435581
+tests/fm-supervision-session-end-live-e2e.test.sh 75
+tests/fm-supervision-session-end.test.sh 40000
 tests/fm-tangle-guard.test.sh 8501
 tests/fm-task-delivery.test.sh 32789
 tests/fm-task-inbox.test.sh 31965

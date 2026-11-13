@@ -2242,10 +2242,25 @@ fi
 # one already queued at entry, or one the branch filed itself because the
 # captain's away words explicitly call for that work (its backlog note cites
 # the words); filing the item the captain asked for is not inventing work.
+# After the main session ended with no away record, the session-end host's
+# branch may spawn only the queued work the check row of its live turn names.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-if [ "$RELAUNCH" -ne 1 ]; then
+spawn_forbid_branch() {
+  local actor
+  actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  if [ "$actor" = branch ] && ! fm_lease_away_relocated && fm_lease_session_end_relocated; then
+    if ! fm_lease_session_end_names "$ID"; then
+      echo "error: new-task spawn (fm-spawn) refused - after the main session ended the supervision branch may start only a task the check row it is handling names, and task $ID is not named; report the outcome and leave it to main" >&2
+      exit "$FM_LEASE_REFUSE_EXIT"
+    fi
+    echo "note: new-task spawn (fm-spawn) proceeds for the supervision branch after the main session ended: the check row it is handling names task $ID; merges and captain answers still wait for main" >&2
+    return 0
+  fi
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+}
+if [ "$RELAUNCH" -ne 1 ]; then
+  spawn_forbid_branch
 fi
 spawn_refuse_if_away_spend_cap() {
   local cap live
@@ -2289,9 +2304,9 @@ spawn_require_relocated_queued_work() {
   if [ "$KIND" = secondmate ]; then
     fm_lease_forbid_branch "new-task spawn (fm-spawn)"
   fi
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+  spawn_forbid_branch
   if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "queued no no" ]; then
-    echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
+    echo "error: spawn refused - the supervision branch may dispatch only queued unblocked work, never a held item (already queued, or under the away-posture record filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
     exit 1
   fi
 }
@@ -4940,7 +4955,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
   if [ "$RELAUNCH" -ne 1 ] && [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
     if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
-      echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
+      echo "error: spawn refused - the supervision branch may dispatch only queued unblocked work, never a held item (already queued, or under the away-posture record filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
     fi
   elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then

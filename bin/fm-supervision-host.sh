@@ -140,8 +140,12 @@
 # the host proves this session still holds the fleet lock
 # (bin/fm-session-lock-lib.sh) and, when launched by the auto-arm, that the
 # auto-arm generation it serves (FM_SUPERVISION_HOST_AUTOARM_GEN owned by
-# FM_SUPERVISION_HOST_OWNER_PID) is still current; otherwise it stands down
-# with a "supervision-host:" line and leaves the decision to its owner; a
+# FM_SUPERVISION_HOST_OWNER_PID) is still current. A host the session-end
+# keeper runs (bin/fm-supervision-session-end.sh) has no session left to hold
+# the lock, so it proves fm_supervision_host_session_end_owned instead, with the
+# FM_SUPERVISION_HOST_SESSION_END_GEN and FM_SUPERVISION_HOST_SESSION_END_PID
+# the keeper passes, reads no dialog mirror (the main session is gone), and never starts an acknowledged hand-back. Otherwise it
+# stands down with a "supervision-host:" line and leaves the decision to its owner; a
 # host that stands down before activation leaves the owner's host record,
 # processes, arms, and leases alone. The engine runs with
 # FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID,
@@ -247,6 +251,8 @@ COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
+SESSION_END_GEN=${FM_SUPERVISION_HOST_SESSION_END_GEN:-}
+SESSION_END_PID=${FM_SUPERVISION_HOST_SESSION_END_PID:-}
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
 [ -n "$PRIMARY" ] || PRIMARY=$(fm_supervision_host_primary)
 # The owner's predecessor arm belongs to the first cycle only.
@@ -487,6 +493,10 @@ retire_arm() {  # <pid> <output-file>
 }
 
 host_still_owner() {
+  if [ -n "$SESSION_END_PID" ]; then
+    fm_supervision_host_session_end_owned "$STATE" "$SESSION_END_GEN" "$SESSION_END_PID"
+    return
+  fi
   fm_session_lock_owned_by_self "$STATE" || return 1
   [ -n "$AUTOARM_GEN" ] || return 0
   fm_autoarm_ledger_read "$STATE" || return 1
@@ -730,7 +740,7 @@ exit_to_main() {  # <why> [further lines]
 # The opt-in path never changes the default hand-back paths. It must verify
 # protection before emitting the close, not assume a detached process started.
 acknowledged_handback() {  # [extra output lines]; returns only when disabled
-  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] || return 1
+  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] && [ -z "$SESSION_END_PID" ] || return 1
   host_still_owner || stand_down "this session no longer owns supervision"
   local predecessor=${SUCCESSOR_PID:-${ARM_PID:-${CLOSED_ARM_PID:-$HOST_PID}}} pid out deadline tmp
   retire_arm "$ARM_PID" "$ARM_OUT"
@@ -1023,6 +1033,13 @@ health_record() {  # <engine-error 0|1> <reports>
 # (attended_acceptor, whose offer scan is the turn's scope), else sets HANDLE_WHY and returns 1; sets ENGINE_ERROR
 # when the turn failed on the engine itself. Runs in the host's own shell,
 # never a subshell, because it advances the host's grant and turn state.
+# Every task-id-shaped word in the payloads of the claimed check rows, the only
+# tasks a session-end turn may spawn (fm_lease_session_end_names).
+check_row_task_ids() {  # <row-seqs>
+  awk -F '\t' -v rows=" $1 " '$3 == "check" && index(rows, " " $2 " ") { print $5 }' "$STATE/.wake-queue" 2>/dev/null \
+    | tr -cs 'A-Za-z0-9._-' '\n' | sed 's/[.]*$//' | grep -E '^[A-Za-z0-9]' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
 handle_wake() {  # <reason-lines>
   local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
   local receipts usage result errors unacked mirror
@@ -1087,6 +1104,7 @@ handle_wake() {  # <reason-lines>
   : > "$RECEIPTS"
   printf 'turn=%s\nrows=%s\ntasks=%s\nunscoped=%s\nwake=%s\nposture=%s\n' \
     "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" "$TURN_POSTURE" > "$TURN_FILE"
+  [ -z "$SESSION_END_PID" ] || printf 'spawn=%s\n' "$(check_row_task_ids "$rows")" >> "$TURN_FILE"
   readback=
   if [ "$TURN_POSTURE" = away ]; then
     readback=$(mktemp "$STATE/.supervision-host-readback.XXXXXX") || readback=
@@ -1100,7 +1118,7 @@ handle_wake() {  # <reason-lines>
   # away wake never reads the mirror or moves its cursor.
   mirror=$MIRROR_FEED
   rm -f "$mirror"
-  if [ "$TURN_POSTURE" = attended ] \
+  if [ "$TURN_POSTURE" = attended ] && [ -z "$SESSION_END_PID" ] \
     && ! (umask 077; exec "$SCRIPT_DIR/fm-host-mirror.sh" feed "$ENGINE_SESSION" "$ENGINE_MODE" > "$mirror" 2>/dev/null); then
     rm -f "$TURN_FILE" "$mirror"
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
@@ -1110,8 +1128,10 @@ handle_wake() {  # <reason-lines>
   set -- --report "the bin/fm-branch-report.sh command"
   if [ "$TURN_POSTURE" = away ]; then
     set -- "$@" --away ${readback:+--readback-file "$readback"}
-  else
+  elif [ -z "$SESSION_END_PID" ]; then
     set -- "$@" --mirror-file "$mirror"
+  else
+    set -- "$@" --session-end
   fi
   rm -f "$WAKE_FILE"
   rc=0
@@ -1216,11 +1236,11 @@ attended_acceptor() {  # <first-reason-line>
   ATTENDED_OFFER=
   if ! fm_supervision_host_attended_ready "$CONFIG" "$PRIMARY"; then
     ATTENDED_WHY=$FM_SUPERVISION_HOST_UNREADY
-  elif ! fm_supervision_host_main_key "$STATE" >/dev/null; then
+  elif [ -z "$SESSION_END_PID" ] && ! fm_supervision_host_main_key "$STATE" >/dev/null; then
     ATTENDED_WHY="the main session could not be identified"
   elif health_cooling; then
     ATTENDED_WHY="the supervision session is cooling down after engine errors"
-  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>/dev/null); then
+  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer ${SESSION_END_PID:+--afk} 2>/dev/null); then
     ATTENDED_WHY="branch eligibility could not be computed"
   elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
     ATTENDED_WHY="main-only"

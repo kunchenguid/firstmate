@@ -54,6 +54,9 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   return-lookup-fail handle, then corrupt the store before the return lookup
 #   return-first the captain returns first, then handle, then block until the
 #               host is stopped (an owner killing its host at the turn's end)
+#   spawn       the same as handle, but first run bin/fm-spawn.sh as the branch for each
+#               task id in $FM_HOME/stub-spawn-ids, logging its output to
+#               $FM_HOME/engine-spawn.log
 #   noack       the same as handle, but skip the acknowledgement
 #   held        handle, but first block reading the $FM_HOME/stub-release FIFO
 #               until the test writes to it, so the test chooses when the turn
@@ -106,11 +109,16 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|spawn|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
+    if [ "$mode" = spawn ]; then
+      while read -r spawn_id; do
+        { printf '== %s\n' "$spawn_id"; "$FM_REPO/bin/fm-spawn.sh" "$spawn_id" --mode no-mistakes --yolo off 2>&1; printf 'rc=%s\n' "$?"; } >> "$FM_HOME/engine-spawn.log"
+      done < "$FM_HOME/stub-spawn-ids"
+    fi
     [ "$mode" != hold-lease ] || "$FM_REPO/bin/fm-lease.sh" check "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     if [ "$mode" = captain ] || [ "$mode" = captain-held ] \
       || [ "$mode" = captain-close-before-return ]; then
