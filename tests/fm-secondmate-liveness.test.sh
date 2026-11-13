@@ -980,7 +980,7 @@ test_remote_full_probe_rex_readiness_verdicts() {
   esac
 
   out=$(probe_remote "$w" full FM_FAKE_DOCTOR_RC=255)
-  [ "$out" = 'skipped|unknown|0|||remote host unavailable or endpoint state unknown; route preserved on lab-host' ] \
+  [ "$out" = 'skipped|unavailable|0|||remote host unavailable or endpoint state unknown; route preserved on lab-host' ] \
     || fail "an unreachable rex readiness probe must preserve the route, got: $out"
   pass "full probe: rex readiness gaps and unreachable hosts stay explicit"
 }
