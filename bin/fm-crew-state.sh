@@ -113,8 +113,9 @@
 #      verdict unless the green delivery safeguard below applies). The run
 #      status words checks_passed, handed_off, and ci_monitor_interrupted read
 #      as their outcome words, and the coarse ledger reads checks_passed and
-#      handed_off as done and ci_monitor_interrupted as unknown (PR open). A cancelled outcome takes precedence over an
-#      interrupted step's failed status or outstanding gate findings;
+#      handed_off as done and ci_monitor_interrupted as unknown (PR open).
+#      A cancelled outcome takes precedence over an interrupted step's failed
+#      status or outstanding gate findings;
 #      it does not rewrite historical events or backlog records.
 #      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
@@ -154,10 +155,11 @@
 #      the present. A FAILED reading is additionally answered from a newer
 #      record where one states a terminal outcome for this worktree: a later
 #      COMPLETED, CHECKS_PASSED, or HANDED_OFF run the ledger proves is
-#      current, or the ledger's own FAILED verdict; a later CANCELLED row carries no verdict, so it leaves the
-#      failure unprovable (unknown) like any other unbindable row. A DONE
-#      reading claims no such verdict, because unknown is already the whole
-#      answer a contradicted success may publish.
+#      current, or the ledger's own FAILED verdict; a later CANCELLED row
+#      carries no verdict, so it leaves the failure unprovable (unknown) like
+#      any other unbindable row. A DONE reading claims no such verdict,
+#      because unknown is already the whole answer a contradicted success may
+#      publish.
 #      Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
 #      truth when its observable status, head, or PR differs. Nothing else does,
