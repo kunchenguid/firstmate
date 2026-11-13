@@ -7,10 +7,10 @@
 # account queue, refuses symlinks and malformed records, and executes only a
 # tracked non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
 #
-# Each child runs under env -i with the shared filesystem-composed PATH, HOME,
-# FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. Commands receive their
-# captured stdin and have a 360-second default timeout. Their stdout and stderr
-# are independently constrained to the job library's 1048576-byte bound. A
+# The shared library header owns the child environment contract. Commands
+# receive their captured stdin and have a 360-second default timeout. Their
+# stdout and stderr are independently constrained to the job library's
+# 1048576-byte bound. A
 # record is marked done only after its bounded outputs and numeric exit status
 # have been committed. The library header owns the exact record fields and
 # lifecycle.
@@ -945,6 +945,9 @@ worker_run_job() { # <account-home> <job-dir>
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi
+  # macOS credential lookups (claude auth status) key on the login identity.
+  [ -z "${USER:-}" ] || child_env+=("USER=$USER")
+  [ -z "${LOGNAME:-}" ] || child_env+=("LOGNAME=$LOGNAME")
   remaining=$((deadline - $(date +%s)))
   [ "$remaining" -gt 0 ] || {
     worker_cleanup_output_capture "$job" "$stdout_reader" "$stderr_reader"
