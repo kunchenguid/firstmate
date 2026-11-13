@@ -1507,8 +1507,8 @@ Remote secondmate routes accept verified harness adapters only and reject raw la
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 Such a spawn also refuses until `bin/fm-dispatch-resolve.sh data/<id>/brief.md` has written that task's record, `data/<id>/dispatch-resolution.json`.
 Both paths are under `FM_DATA_OVERRIDE` instead of `data/` when it is set.
-When the record is `clear`, the spawn must match its harness, and its model and effort where the record sets them, with no raw launch command, unless `--dispatch-override <reason>` records a task override in `state/<id>.meta` as `dispatch_override=<reason>`.
-A model or effort the record leaves empty is not bound, so the documented effort fallback still applies.
+When the record is `clear`, the spawn must match its harness, and its model, effort, and `--account` where the record sets them, with no raw launch command, unless `--dispatch-override <reason>` records a task override in `state/<id>.meta` as `dispatch_override=<reason>`.
+A model, effort, or account the record leaves empty is not bound, so the documented effort fallback still applies.
 When the record is `ambiguous`, `escalate`, `error`, or `off`, the explicit flags from the manual intake are enough.
 An `fm-spawn.sh --relaunch` skips this check.
 
@@ -1728,11 +1728,12 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ### Several Claude accounts (config/claude-accounts)
 
 A home with more than one Claude subscription can let each ship and scout launch on whichever declared account has quota to spare, instead of pinning every Claude worker to one account.
-Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it:
+Create `config/claude-accounts` with one account per line, each `ordinary` or the absolute path of an existing Claude config directory, written exactly as `config/claude-account` would hold it, or a [setup-token account](#setup-token-accounts) written as `token:<absolute path of a setup-token file>`:
 
 ```text
 ordinary
 /home/me/.claude-second
+token:/home/me/.config/claude-tokens/third.token
 ```
 
 A final newline is optional; a blank line, a relative path, a repeated entry, or a control character refuses.
@@ -1748,8 +1749,27 @@ An undeclared, missing, or signed-out entry refuses rather than falling back to 
 The spawn line and the task record carry the entry as `account=`.
 
 A relaunch or recovery of that task keeps its recorded account, re-checking that it is still declared and signed in before the running worker stops.
+A [dispatch profile](#crew-dispatch-profiles-configcrew-dispatchjson) may fix the account itself with an optional `account` field, which `bin/fm-dispatch-resolve.sh` passes through as `--account` on its `profile:` line; the spawn applies the same membership and sign-in refusals to it.
 To move a task to another declared account, for example when its own account is exhausted, relaunch it explicitly with `bin/fm-control.sh <id> relaunch --account <entry> --note <text>`; nothing moves a running task automatically.
 A task with no recorded account, or one whose account is no longer declared, refuses a plain relaunch and needs that explicit `--account`.
+
+#### Setup-token accounts
+
+A `token:<absolute path>` entry is a subscription reached through a long-lived `claude setup-token` credential instead of a config directory of its own, so a second subscription needs no second interactive login.
+Only `config/claude-accounts` accepts this kind; `config/claude-account` and the per-secondmate pins keep their own grammar and refuse it.
+
+The token file holds the token alone (surrounding whitespace is ignored), is a regular file owned by the user, and grants no group or other access (for example mode `0600`).
+A missing, empty, unreadable, non-regular, group- or other-readable, foreign-owned, or multi-token file refuses a launch that names the entry, with a message naming the file, never its content.
+
+A launch on the entry is otherwise an ordinary Claude launch.
+It unsets `CLAUDE_CONFIG_DIR` and every credential variable a pinned launch unsets, then runs the worker through [`bin/fm-claude-token-exec.sh`](../bin/fm-claude-token-exec.sh), which reads the file and exports `CLAUDE_CODE_OAUTH_TOKEN` for that one process only.
+The launch text carries the helper and the file path, never the token, so the value does not appear in argv, the staged launch file, task records, status lines, or the digest.
+The spawn line and the task record carry the entry itself as `account=`, so relaunch and recovery reuse it like any other entry.
+A raw Claude launch command that sets `CLAUDE_CODE_OAUTH_TOKEN` itself refuses.
+
+The sign-in check runs `claude auth status` through the same helper, with the stripped environment above, and requires it to report `loggedIn` with `authMethod` `oauth_token`.
+Claude reads the token offline, so a revoked or expired token passes this check and fails when the worker first calls the API; replace the file with a new `claude setup-token` result.
+`bin/fm-claude-account-quota.sh` reports the entry as unmeasured without running `quota-axi`, because `--profile-only` reads only a config directory's credential file.
 
 The list covers Claude ships and scouts only.
 A local secondmate's own agent never draws from it: under a list it needs its own [per-secondmate account pin](#per-secondmate-account-pins), and `--account` refuses for every secondmate, local or remote.
@@ -1990,7 +2010,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, `--effort`, and (for a Claude profile that names one) `--account` flags to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -2034,6 +2054,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
+| Profile `account` | Optional, Claude profiles only: one [`config/claude-accounts`](#several-claude-accounts-configclaude-accounts) entry (`ordinary`, an absolute path, or `token:<absolute path>`), passed through as `--account`; its JSON string is matched exactly, including leading or trailing spaces in an absolute path, and `fm-spawn.sh` still refuses it unless the home declares that entry. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
@@ -2234,7 +2255,8 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 - Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 - Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
-- On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+- On the opted-in path, duplicate concrete profiles with the same harness, model, effort, and `account` inside one rule or the default array are configuration errors rather than ties.
+  Two profiles that differ only by `account` read the same quota row, so they are a genuine tie and the account choice returns to `quota-array-dispatch`.
 
 **Outcomes and exit status**
 
@@ -2264,7 +2286,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 For a brief at `data/<id>/brief.md`, or `<FM_DATA_OVERRIDE>/<id>/brief.md` when that override is set, each run first removes that task's `dispatch-resolution.json`, so a decision never outlives a later run.
 Every outcome that exits 0, including off, then writes one JSON object there: `task` (the `<id>`), `status` (`clear`, `ambiguous`, `escalate`, `error`, or `off`), and `profile`.
-On `clear`, `profile` holds `harness`, `model`, and `effort`, each `null` when the chosen profile leaves it unset; otherwise `profile` is `null`.
+On `clear`, `profile` holds `harness`, `model`, and `effort`, each `null` when the chosen profile leaves it unset, plus `account` only when the chosen profile names one; otherwise `profile` is `null`.
 A usage or configuration error (exit 2) writes no record.
 `fm-spawn.sh` reads this record as the task's decision, as "Per-launch overrides and inherited defaults" describes.
 
