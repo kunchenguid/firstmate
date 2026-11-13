@@ -6,15 +6,13 @@
 # break on that vendor's next release. This file owns Pi's Codex usage-limit
 # banner recognition for composer classification (issue #5000).
 #
-# Verified pins (refresh via tests/fm-composer-pi-codex-banner-live-e2e.test.sh
-# and docs/verification/runtime-backends.md "Pi Codex usage-limit banner"):
-#   - pi 0.85.1: banner alone above the separator pair
-#   - pi 0.87.1: banner plus one fixed "/bug sends a report" hint row
-#   - pi 0.99.2, 1.0.0: same banner plus hint-row shape as 0.87.1
+# Refresh the pin set below via tests/fm-composer-pi-codex-banner-live-e2e.test.sh;
+# docs/verification/runtime-backends.md "Pi Codex usage-limit banner" owns the
+# per-release rendering evidence.
 #
-# The adapter reads the installed release from the first line of `--version`,
-# once per process per executable. A caller that knows the task names the Pi
-# executable that drew the pane in FM_COMPOSER_PI_EXECUTABLE (`pi` or
+# The adapter matches the trimmed complete first line of `--version` against
+# the pin set, reading it once per process per executable. A caller that knows
+# the task names the Pi executable that drew the pane in FM_COMPOSER_PI_EXECUTABLE (`pi` or
 # `pi-signed`, from the task's recorded harness); the adapter then checks only
 # that executable. Unset (or any other value), the pane's executable is unknown
 # because the identity probe reports `pi` for both, so the adapter checks every

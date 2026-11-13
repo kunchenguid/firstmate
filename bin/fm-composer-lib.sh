@@ -81,7 +81,7 @@
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
+#                glyph and no side border. Normally provable only with a live agent
 #                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
@@ -90,15 +90,8 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
-#                A live pi whose identity STATUS is stale is the one admitted
-#                exception to the idle/done requirement (issue #5000): when the
-#                last non-blank row above the pair's solid opening rule is the
-#                fixed terminal provider-error banner pi draws once a turn has
-#                ended (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT below), the
-#                banner plus the solid rule plus the empty interior is the
-#                settled-turn proof the status failed to deliver. The identity
-#                must still name a live pi; probe-absent and foreign identities
-#                stay `unknown`.
+#                For Pi's status-only exception after a Codex usage-limit
+#                error, see bin/fm-composer-pi-adapter.sh (issue #5000).
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -2565,17 +2558,13 @@ _fm_composer_pi_terminal_banner_above() {  # <screen>
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# live pi state; an empty composer normally requires an idle/done pi. A blocked
 # pi is parked on an interactive prompt waiting for a human keystroke: its menu
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
-# cannot disprove that, so a blocked pi defers rather than claiming empty.
-# The one status the structure CAN disprove is a stale one: a live pi whose
-# last non-blank row above the pair is its terminal provider-error banner
-# (fm_composer_pi_adapter_terminal_banner_above, version-pinned) has ended its turn on that banner
-# whatever its integration last reported, so that shape reads empty on every
-# registered status (issue #5000). A blocked pi's menu, a running pi's
-# retitled rule, and a fresh prompt all displace the banner from that row.
+# alone cannot disprove that. The sole status exception is owned by
+# bin/fm-composer-pi-adapter.sh; it never relaxes the identity, valid-pair, or
+# pending-input checks here, and does not apply to Polytoken.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then

@@ -1068,7 +1068,7 @@ ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is
 Verified on 2026-10-21 on macOS arm64 against installed pi 1.3.0, using the live guard's isolated tmux server and loopback Codex error endpoint.
 Before adding 1.3.0 to the default pin set, the candidate-pin command below passed all five live checks.
 The same guard then passed without a pin override, exercising the adapter's installed-version lookup and refreshed default pin set.
-Pi 1.3.0 renders the same usage-limit banner and fixed bug-report hint as the earlier pinned releases.
+Pi 1.3.0 renders the same usage-limit banner and fixed bug-report hint as Pi 0.87.1, 0.99.2, and 1.0.0.
 The stale `working` and `unknown` identities classify `empty`, while an absent Pi identity remains `unknown`.
 
 Refresh the pin only after the candidate-pin guard passes, then verify the default:
@@ -1093,7 +1093,7 @@ ok - live pi banner guard verified 5 live surface(s)
 ### 2026-10-02 Pi Codex usage-limit banner on pi 0.99.2 and 1.0.0
 
 Verified on 2026-10-02 on macOS arm64 with the same live guard and stub Codex endpoint as the 2026-09-25 entry below, against pi 0.87.1 (installed), and pi 0.99.2 and 1.0.0 installed into isolated npm prefixes from `@earendil-works/pi-coding-agent`.
-All three render the banner as `Error: Codex error: The usage limit has been reached` followed by the fixed bug-report hint row, and each classified the banner screen `empty` on all five live surfaces, so 0.99.2 and 1.0.0 joined the adapter's pin set.
+All three render the banner as `Error: Codex error: The usage limit has been reached` followed by the fixed bug-report hint row, and each passed all five live checks shown below, so 0.99.2 and 1.0.0 joined the adapter's pin set.
 With the pin set forced to `0.85.1`, pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
 The guard exercises the adapter's own `pi --version` read that production callers use.
 
@@ -1111,7 +1111,8 @@ ok - live pi banner guard verified 5 live surface(s)
 
 Verified on 2026-09-25 on macOS arm64 (Darwin 25.5.0) against pi 0.85.1 with Herdr's Pi integration file at version 9, driving the installed Pi TUI in an isolated tmux server against a local stub Codex endpoint whose only answer is the `{"type":"error","message":"The usage limit has been reached"}` stream event, so no provider request leaves the machine and no model tokens are spent.
 Pi renders that turn end as one red truecolor row, `Error: Codex error: The usage limit has been reached`, then a blank row, its solid opening rule, the empty composer row, its solid closing rule, and the path and model footer; while the turn is running the opening rule is retitled `── ⠏ Working ──`, which is no longer a solid separator.
-The unmodified integration reported `working` at the prompt and `idle` once the error rendered, so on this pi and integration the status recovers; the fix covers the status that does not follow the failed turn, which is what issue #5000's two incidents left behind on the pi and integration installed before 2026-09-22.
+The unmodified integration reported `working` at the prompt and `idle` once the error rendered, so on this Pi and integration the status recovers.
+The cursorless checks below supply stale statuses over the captured screen to exercise the case where the integration does not follow the failed turn.
 
 The live guard is the command that refreshes this entry:
 
