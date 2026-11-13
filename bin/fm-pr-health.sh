@@ -66,10 +66,11 @@
 # outages for the same URLs. Forge reads stop FM_CHECK_TIMEOUT (default 30)
 # minus 5 seconds after the pass starts, and each read is capped at 5 seconds.
 # Branch discovery fans out in one concurrent wave, and so does each pass's
-# owned-PR reads, capped at FM_PR_HEALTH_BATCH (default 20) PRs so a large
+# owned-PR reads, capped at 20 PRs so a large
 # backlog cannot time every read out at once. PRs beyond the cap stay pending
 # and head the next pass, so every selected PR is read within a bounded number
-# of passes; there is no serial network wait per PR.
+# of passes; there is no serial network wait per PR. FM_PR_HEALTH_BATCH
+# overrides the cap for tests only; it is not a supported setting.
 # Fingerprints and the notifications cursor (Last-Modified, newest seen
 # updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
 # state/pr-health.json, written by rename
@@ -340,7 +341,8 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
 # conditional request, so a changed feed answers with its newest page and the
 # cursor is applied here.
 READ_BATCH=${FM_PR_HEALTH_BATCH:-20}
-case "$READ_BATCH" in ''|*[!0-9]*|0) READ_BATCH=20 ;; esac
+case "$READ_BATCH" in ''|*[!0-9]*) READ_BATCH=20 ;; *) READ_BATCH=$((10#$READ_BATCH)) ;; esac
+[ "$READ_BATCH" -gt 0 ] || READ_BATCH=20
 FALLBACK_SECONDS=900 # ponytail: fixed fallback sweep; make it a config value if a home needs a faster unattended sweep
 read_notifications() { # deadline
   local lm since status next_lm next_since

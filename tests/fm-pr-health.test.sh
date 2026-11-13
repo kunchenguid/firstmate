@@ -690,6 +690,17 @@ test_backlog_beyond_one_batch_is_read_by_later_passes() {
   pass 'a backlog larger than one batch is read in full by later passes'
 }
 
+test_leading_zero_batch_override_still_polls() {
+  local home out
+  home=$(new_home batch-leading-zero)
+  task "$home" ship1 pr=https://github.com/o/r/pull/8
+  pr "$home" 8 "$HEAD_A" "$BASE_1" false false
+  arm "$home"
+  out=$(FM_PR_HEALTH_BATCH=08 pass_once "$home") || fail 'a leading-zero batch size aborted the poll'
+  printf '%s\n' "$out" | grep -q 'pull/8 conflicts with its base' || fail "a leading-zero batch size read nothing: $out"
+  pass 'a leading-zero batch size does not abort the poll'
+}
+
 feed() { # home : serve an empty notifications feed
   printf '[]\n' > "$1/forge/notifications.json"
   printf 'Sun, 01 Nov 2026 00:00:00 GMT\n' > "$1/forge/notifications-lm"
@@ -1003,7 +1014,7 @@ for test_name in test_maintainer_author_and_approval_states_are_distinct \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
   test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \
   test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again \
-  test_many_recorded_contributions_do_not_starve_a_new_branch_pr test_backlog_beyond_one_batch_is_read_by_later_passes; do
+  test_many_recorded_contributions_do_not_starve_a_new_branch_pr test_backlog_beyond_one_batch_is_read_by_later_passes test_leading_zero_batch_override_still_polls; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures PR health regressions"

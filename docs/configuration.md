@@ -810,7 +810,7 @@ When a required check has reported, optional failures do not notify.
 A conflict and an author action each wake once per latest commit, and a missing approval is recorded once per latest commit.
 A failing check wakes once per latest commit and check name, so a check that newly fails at an already reported commit wakes once more while an already reported check never repeats.
 A maintainer-gated suite is recorded once per latest commit and workflow name.
-A pass reads at most 20 PRs at once (`FM_PR_HEALTH_BATCH` overrides the cap), and PRs beyond the cap head the next pass, so a large backlog is read in full within a bounded number of passes.
+A pass reads at most 20 PRs at once, and PRs beyond the cap head the next pass, so a large backlog is read in full within a bounded number of passes.
 A home owns a PR it recorded, linked, or observed before, and the open PR on a live task copy's current branch, drafts and adopted branches included, until the PR merges or closes.
 A PR URL that only appears in a task's status lines is not owned.
 Retiring a contribution with `bin/fm-contributions.sh retire` ends that task's ownership for the monitor too, and the branch lookup does not reclaim it.
