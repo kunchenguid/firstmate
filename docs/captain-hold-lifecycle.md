@@ -54,22 +54,33 @@ It works in this order:
 3. It invokes the underlying tasks-axi hold operation.
 4. It verifies the captain-hold annotations and timestamp.
 5. In a secondmate home, it publishes the verified hold to the parent channel.
-6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
+6. When `--origin` is supplied, it records the origin on the task only after the backend hold succeeds.
+   Re-held released work replaces any previous association, while an open call keeps its other origins; adding a new origin to an open call skips steps 2 to 5 (see the shared-call case below).
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
 Repeat and edge cases:
 
 - Retries of an active hold preserve its hold-set timestamp.
-- Re-holding released work starts a new timestamped lifecycle.
+- Re-holding released work, or a deferral past its `--until` date, starts a new timestamped lifecycle.
+  A deferral past its date is still an open call, so it keeps its origins.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
-  The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
-  The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
+  Each association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
+  The ordering above prevents an interrupted or refused backend hold from publishing the new association.
+- One call found by several investigations or reviews stays one held task.
+  While the call is open, `hold --origin` with an origin the call does not record yet only adds that origin beside the ones the call records, and skips steps 2 to 5.
+  The recorded reason, `--until` date, hold-set timestamp, and parent decision stay unchanged; the new `--reason` and `--until` are ignored.
+  With an origin the call already records, compared by backend identity so a stored alias spelling counts, `hold` is the normal re-hold: it updates the reason and `--until`, retries parent publication, and keeps the other origins.
+  An open call that has no hold-set timestamp yet also takes the normal re-hold, which records the timestamp.
+  Only an open call takes a further origin this way: a closed call is refused, and re-holding a released call starts a new lifecycle.
+  The call's origins are every `Captain hold origin:` line in its body, including those below a resolution record that an interrupted `answer` left.
+  On an open call, `--origin` only adds an origin and never replaces one; to correct a wrong origin, release the call and hold it again.
 - If the backend hold fails, `hold` attempts to restore the previous body.
   If restoration also fails, the new stamp can remain, but the previous origin is unchanged.
   If the subsequent origin write fails, the command returns nonzero, but the successful captain hold and its stamp remain with the previous association (or with no recorded origin for a new task).
+  The call is then open, so a retry adds the new origin beside that association.
   Parent publication is attempted before that write in a secondmate home, so an origin-write failure cannot skip delivery; a channel failure retains the existing `actionable:` diagnostic.
   Re-running `hold` retries origin publication without duplicating the parent decision.
 - If an incomplete hold leaves a stamp above an earlier answer, the [completion durability boundary](#recording-a-reviewed-inventory-complete) applies.
@@ -128,7 +139,7 @@ A Done task still requires a recorded resolution, but is not subject to that sta
 An answered entry that markdown Done retention moved into the configured Done archive still counts, while an archived close with no recorded answer does not.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
-An entry whose recorded origin differs from the one being completed is refused, comparing backend identities rather than alias spellings.
+An entry whose recorded origins do not include the one being completed is refused, comparing backend identities rather than alias spellings.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 
 With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
@@ -547,8 +558,12 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
-- `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new, active, and released holds, including secondmate publication and retry deduplication.
-- `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, active and expired holds, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
+- `test_hold_origins_follow_backend_holds` exercises lookup, backend-hold, and origin-write failures for new and released holds, including secondmate publication and retry deduplication.
+- `test_interrupted_origin_move_does_not_inherit_the_previous_answer` exercises failed restoration, TERM interruption, earlier-answer replay, and normal released-work completion against the [hold failure semantics](#creating-a-hold-hold) and inventory checks above.
+- One open call, held or deferred past its date, serves several origins.
+  `hold --origin` adds a new origin without changing the reason, `--until` date, stamp, or parent decision, and a same-origin re-hold still retries publication and updates the call.
+  An origin never added is refused.
+  An origin added after an interrupted `answer` keeps the origins the call already records.
 - An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
 
 ### Answers, stamps, and deferral
@@ -557,7 +572,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
-- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
+- Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release or when a lapsed deferral is held again.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 

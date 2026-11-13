@@ -4411,9 +4411,311 @@ test_complete_refuses_an_entry_held_for_another_origin() {
   pass "complete refuses an entry held for another origin and flags one with none recorded"
 }
 
+# One captain call can be found by two reviews of the same work. Holding the
+# already-held task again with the second origin only adds that origin to the
+# same call: the captain's reason, deferral date, hold-set stamp, and parent
+# decision stay as the first hold recorded them, both reviews complete and
+# verify against one decision, and an origin never added is still refused.
+test_one_active_hold_serves_several_origins() {
+  local home parent channel o id=sample-shared-call shown stamp parent_before reason_before
+  home=$(make_home shared-origin)
+  parent=$(make_home shared-origin-parent)
+  channel="$parent/state/shared-mate.status"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  printf 'shared-mate\n' > "$home/.fm-secondmate-home"
+  for o in review-a review-b review-c; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold "$id" --title "Publish the shared change" \
+    --reason "captain must decide for A" --until 2099-01-01 --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the call for the first review"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the first review could not complete against its call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  stamp=$(printf '%s\n' "$shown" | grep -o 'Captain hold set: [0-9TZ:-]*')
+  [ -n "$stamp" ] || fail "the shared call has no hold-set stamp"
+  reason_before=$(printf '%s\n' "$shown" | grep '^  hold_reason: ')
+  [ -n "$reason_before" ] || fail "the shared call has no hold reason"
+  parent_before=$(cat "$channel")
+  assert_equals 1 "$(grep -Fc "needs-decision [key=captain-hold-$id-1] [until=2099-01-01]" "$channel")" \
+    "the first hold did not publish its deferred parent decision"
+
+  if run_captain "$home" complete review-b "$id" > "$home/active.out" 2> "$home/active.err"; then
+    fail "complete accepted the active call for a review never added"
+  fi
+  assert_grep "was held for origin review-a, not review-b; hold a task for review-b or list the right one" \
+    "$home/active.err" "the active-hold refusal does not name the recorded origin"
+
+  FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
+    --reason "different words from B" --until 2099-06-01 --origin review-b >/dev/null \
+    || fail "could not add the second review to the active call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "adding an origin lifted the active hold"
+  assert_equals "$reason_before" "$(printf '%s\n' "$shown" | grep '^  hold_reason: ')" \
+    "adding an origin replaced the captain's reason"
+  assert_contains "$shown" 'hold_until: 2099-01-01' "adding an origin changed the captain's deferral date"
+  assert_contains "$shown" "$stamp" "adding an origin restarted the call's lifecycle"
+  assert_equals "$parent_before" "$(cat "$channel")" "adding an origin published a parent decision"
+  assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: review-a' | wc -l | tr -d ' ')" \
+    "the shared call did not keep exactly one first-review origin"
+  assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: review-b' | wc -l | tr -d ' ')" \
+    "adding the second review duplicated its origin"
+  run_captain "$home" complete review-b "$id" >/dev/null \
+    || fail "the second review could not complete against the shared call"
+  run_captain "$home" verify review-b >/dev/null || fail "the second review could not verify"
+  run_captain "$home" verify review-a >/dev/null \
+    || fail "adding the second review invalidated the first review"
+
+  if run_captain "$home" complete review-c "$id" > "$home/other.out" 2> "$home/other.err"; then
+    fail "complete accepted the shared call for an origin never added"
+  fi
+  assert_grep "was held for origins review-a, review-b, not review-c" "$home/other.err" \
+    "the refusal does not name every recorded origin"
+
+  printf 'Publish it.\n' > "$home/shared-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/shared-answer.txt" >/dev/null \
+    || fail "could not answer the shared call"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null || fail "the answered shared call no longer verifies $o"
+  done
+  if run_captain "$home" complete review-c "$id" > "$home/closed.out" 2> "$home/closed.err"; then
+    fail "complete accepted the answered call for an origin never added"
+  fi
+  assert_grep "was held for origins review-a, review-b, not review-c" "$home/closed.err" \
+    "the answered-call refusal does not name every recorded origin"
+  pass "one active captain hold serves several origins without changing or duplicating the call"
+}
+
+# Re-holding an active call with an origin it already records is the normal
+# re-hold, not an added origin: it retries a parent publication that failed,
+# takes the new reason and deferral date, and keeps every other origin.
+test_same_origin_rehold_retries_and_updates_a_shared_call() {
+  local home parent channel o id=sample-retried-call shown stamp reason_before
+  home=$(make_home same-origin-rehold)
+  parent=$(make_home same-origin-rehold-parent)
+  channel="$parent/state/retry-mate.status"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  printf 'retry-mate\n' > "$home/.fm-secondmate-home"
+  for o in review-a review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  mkdir -p "$channel"
+  run_captain "$home" hold "$id" --title "Publish the retried change" \
+    --reason "first wording" --repo sample --origin review-a > "$home/first.out" 2> "$home/first.err" \
+    || fail "a parent-channel failure made the local hold fail"
+  assert_grep "did not reach the parent channel" "$home/first.err" \
+    "the failed parent publication was not reported"
+  run_captain "$home" hold "$id" --reason "words from B" --origin review-b >/dev/null \
+    || fail "could not add the second review to the active call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  stamp=$(printf '%s\n' "$shown" | grep -o 'Captain hold set: [0-9TZ:-]*')
+  [ -n "$stamp" ] || fail "the call has no hold-set stamp"
+  reason_before=$(printf '%s\n' "$shown" | grep '^  hold_reason: ')
+  rmdir "$channel"
+
+  FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
+    --reason "second wording" --until 2099-03-01 --origin review-a >/dev/null \
+    || fail "the same-origin re-hold failed"
+  assert_equals 'needs-decision [key=captain-hold-sample-retried-call-1] [until=2099-03-01]: captain hold sample-retried-call: second wording' \
+    "$(sed -E 's/ \[at=[0-9]+\]//' "$channel")" "the same-origin re-hold did not retry the parent publication"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "the same-origin re-hold lifted the hold"
+  assert_contains "$shown" 'hold_until: 2099-03-01' "the same-origin re-hold dropped the new deferral date"
+  [ "$(printf '%s\n' "$shown" | grep '^  hold_reason: ')" != "$reason_before" ] \
+    || fail "the same-origin re-hold dropped the new reason"
+  assert_contains "$shown" "$stamp" "the same-origin re-hold restarted the call's lifecycle"
+  for o in review-a review-b; do
+    assert_equals 1 "$(printf '%s\n' "$shown" | grep -o "Captain hold origin: $o" | wc -l | tr -d ' ')" \
+      "the same-origin re-hold did not keep exactly one $o origin"
+    run_captain "$home" complete "$o" "$id" >/dev/null || fail "the re-held call no longer completes $o"
+  done
+  pass "a same-origin re-hold retries publication and updates the call while keeping its other origins"
+}
+
+# An answer whose close fails leaves the call open with its resolution record
+# between the hold-set stamp and the origins it already records. A second
+# review that shares the call then adds its origin beside those origins, so
+# both reviews still verify before and after the answer is retried.
+test_origin_added_after_an_interrupted_answer_keeps_the_others() {
+  local home o id=sample-interrupted-shared-call shown
+  home=$(make_home interrupted-answer-shared-origin)
+  for o in review-a review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold "$id" --title "Publish the interrupted change" \
+    --reason "captain must decide for A" --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the call for the first review"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the first review could not complete against its call"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ -f "$FM_HOME/fail-close" ]; then
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/fail-close"
+  printf 'Publish it.\n' > "$home/answer.txt"
+  if run_captain "$home" answer "$id" --decision-file "$home/answer.txt" \
+    > "$home/answer.out" 2> "$home/answer.err"; then
+    fail "the forced answer close failure reported success"
+  fi
+  rm "$home/fail-close"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "the interrupted answer released the call"
+  assert_contains "$shown" 'Resolution recorded by fm-captain-hold.' "the interrupted answer left no resolution record"
+  assert_contains "$shown" 'Captain hold origin: review-a' "the interrupted answer dropped the first origin"
+
+  run_captain "$home" hold "$id" --reason "words from B" --origin review-b >/dev/null \
+    || fail "could not add the second review to the interrupted call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  for o in review-a review-b; do
+    assert_equals 1 "$(printf '%s\n' "$shown" | grep -o "Captain hold origin: $o" | wc -l | tr -d ' ')" \
+      "adding the second review did not keep exactly one $o origin"
+  done
+  run_captain "$home" complete review-b "$id" >/dev/null \
+    || fail "the second review could not complete against the interrupted call"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null \
+      || fail "adding the second review after the interrupted answer broke verification for $o"
+  done
+
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not finish the interrupted answer"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null || fail "the finished answer no longer verifies $o"
+  done
+  pass "an origin added after an interrupted answer keeps the origins the call records"
+}
+
+# A deferral whose --until date has passed is still the captain's open call:
+# tasks-axi reports it as not held, but it keeps its captain annotations. A
+# second review that finds it shares it as it would share a held call, and a
+# later re-hold of the same call restarts its age but keeps every review's
+# origin.
+test_expired_deferral_serves_several_origins() {
+  local home parent channel o id=sample-expired-call shown stamp parent_before reason_before
+  home=$(make_home expired-shared-origin)
+  parent=$(make_home expired-shared-origin-parent)
+  channel="$parent/state/expired-mate.status"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$home/.fm-secondmate-parent"
+  printf 'expired-mate\n' > "$home/.fm-secondmate-home"
+  for o in review-a review-b; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Review $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold "$id" --title "Publish the deferred change" \
+    --reason "captain deferred this for A" --until 2000-01-01 --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the deferred call for the first review"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the first review could not complete against its deferred call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: no' "the fixture deferral has not passed"
+  assert_contains "$shown" 'hold_kind: captain' "the passed deferral lost its captain annotations"
+  stamp=$(printf '%s\n' "$shown" | grep -o 'Captain hold set: [0-9TZ:-]*')
+  [ -n "$stamp" ] || fail "the deferred call has no hold-set stamp"
+  reason_before=$(printf '%s\n' "$shown" | grep '^  hold_reason: ')
+  parent_before=$(cat "$channel")
+
+  if run_captain "$home" complete review-b "$id" > "$home/expired.out" 2> "$home/expired.err"; then
+    fail "complete accepted the deferred call for a review never added"
+  fi
+  assert_grep "was held for origin review-a, not review-b; hold a task for review-b or list the right one" \
+    "$home/expired.err" "the passed-deferral refusal does not name the recorded origin"
+
+  FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
+    --reason "words from B" --origin review-b >/dev/null \
+    || fail "could not add the second review to the passed deferral"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'hold_until: 2000-01-01' "adding an origin changed the captain's deferral date"
+  assert_equals "$reason_before" "$(printf '%s\n' "$shown" | grep '^  hold_reason: ')" \
+    "adding an origin replaced the captain's reason"
+  assert_contains "$shown" "$stamp" "adding an origin restarted the deferred call's lifecycle"
+  assert_equals "$parent_before" "$(cat "$channel")" "adding an origin published a parent decision"
+  run_captain "$home" complete review-b "$id" >/dev/null \
+    || fail "the second review could not complete against the passed deferral"
+  for o in review-a review-b; do
+    run_captain "$home" verify "$o" >/dev/null || fail "the passed deferral does not verify $o"
+  done
+
+  FM_CAPTAIN_HOLD_NOW=2098-12-31T00:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain deferred this again" --until 2099-01-01 --origin review-a >/dev/null \
+    || fail "could not defer the shared call again"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "deferring the shared call again did not hold it"
+  assert_contains "$shown" 'Captain hold set: 2098-12-31T00:00:00Z' \
+    "deferring the lapsed call again kept its old hold age"
+  for o in review-a review-b; do
+    assert_equals 1 "$(printf '%s\n' "$shown" | grep -o "Captain hold origin: $o" | wc -l | tr -d ' ')" \
+      "deferring the shared call again did not keep exactly one $o origin"
+    run_captain "$home" verify "$o" >/dev/null || fail "the re-deferred call no longer verifies $o"
+  done
+  pass "a captain call deferred past its date stays one shared call for several origins"
+}
+
+# A lapsed deferral that firstmate asks again without a date is a new
+# lifecycle: its age restarts, so the fleet snapshot reads it as a live call
+# rather than an aged one, while the call keeps the origin it already records.
+test_lapsed_deferral_rehold_restarts_its_age() {
+  local home id=sample-lapsed-call shown snap
+  home=$(make_home lapsed-rehold)
+  mkdir -p "$home/data/review-a"
+  tasks_in "$home" add review-a "Review review-a" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the review fixture"
+  write_origin_meta "$home" review-a
+  printf 'done: report complete\n' > "$home/state/review-a.status"
+  FM_CAPTAIN_HOLD_NOW=2026-10-01T12:00:00Z run_captain "$home" hold "$id" --title "Decide the lapsed call" \
+    --reason "captain deferred this" --until 2026-11-01 --repo sample --origin review-a >/dev/null \
+    || fail "could not hold the deferred call"
+  run_captain "$home" complete review-a "$id" >/dev/null \
+    || fail "the review could not complete against its deferred call"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: no' "the fixture deferral has not lapsed"
+
+  FM_CAPTAIN_HOLD_NOW=2026-11-02T12:00:00Z run_captain "$home" hold "$id" \
+    --reason "Decide now" >/dev/null || fail "could not ask the lapsed call again"
+  shown=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$shown" 'held: yes' "asking the lapsed call again did not hold it"
+  assert_contains "$shown" 'Captain hold set: 2026-11-02T12:00:00Z' \
+    "asking the lapsed call again kept its old hold age"
+  assert_not_contains "$shown" '2026-10-01T12:00:00Z' "asking the lapsed call again kept its old stamp"
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-11-02T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
+  printf '%s' "$snap" | jq -e --arg id "$id" '
+    ([.backlog.records[] | select(.id == $id)][0]) as $call
+    | $call.hold_set == "2026-11-02T12:00:00Z" and $call.hold_age_days == 0
+      and $call.hold_bucket == "live" and $call.hold_until == null
+      and $call.captain_actionable == true
+  ' >/dev/null || fail "the re-asked lapsed call does not read as a live call: $snap"
+  run_captain "$home" verify review-a >/dev/null \
+    || fail "asking the lapsed call again dropped the origin it records"
+  pass "a lapsed deferral asked again restarts its age and keeps its origin"
+}
+
 test_hold_origins_follow_backend_holds() {
   local home phase timing failure id shown origin out parent channel occurrence until_args=() until_field
-  for phase in new active released; do
+  for phase in new released; do
     for timing in plain dated; do
       home=$(make_home "origin-failure-$phase-$timing")
       parent=$(make_home "origin-parent-$phase-$timing")
@@ -4446,7 +4748,6 @@ if [ "${1:-}" = update ]; then
   previous=''
   for arg in "$@"; do
     if [ "$previous" = --body-file ] && grep -qx 'Captain hold origin: origin-b' "$arg"; then
-      [ -f "$FM_HOME/backend-held" ] || exit 8
       "$REAL_TASKS_AXI" show "$2" --full > "$FM_HOME/before-origin-write" || exit $?
       if [ -f "$FM_HOME/fail-write" ]; then
         channel="$(sed -n 's/^parent_home=//p' "$FM_HOME/.fm-secondmate-parent")/state/origin-mate.status"
@@ -4509,7 +4810,7 @@ SH
         shown=$(tasks_in "$home" show "$id" --full)
         assert_not_contains "$shown" 'Captain hold origin: origin-b' \
           "$phase $timing origin $failure failure published the new association"
-        if [ "$phase" = active ] || [ "$failure" = write ]; then
+        if [ "$failure" = write ]; then
           assert_contains "$shown" 'held: yes' "an origin $failure failure lost the successful hold"
         else
           assert_contains "$shown" 'held: no' "$phase $timing origin $failure failure left the task held"
@@ -4547,33 +4848,32 @@ SH
       done
       run_captain "$home" hold "$id" --reason "Choose for B" --origin origin-b \
         ${until_args[@]+"${until_args[@]}"} >/dev/null || fail "$phase $timing successful retry failed"
-      assert_present "$home/before-backend-hold" "the successful retry did not reach the backend hold"
-      shown=$(cat "$home/before-backend-hold")
-      assert_not_contains "$shown" 'Captain hold origin: origin-b' "the backend hold ran with the new association already published"
-      if [ "$phase" != new ]; then
-        assert_contains "$shown" 'Captain hold origin: origin-a' "the backend hold lost the old association before succeeding"
-      fi
+      assert_absent "$home/before-backend-hold" "the retry re-ran the backend hold of the live call"
       assert_grep 'held: yes' "$home/before-origin-write" "the successful origin write preceded a live hold"
       shown=$(tasks_in "$home" show "$id" --full)
       assert_contains "$shown" 'held: yes' "the successful retry did not hold the task"
       assert_contains "$shown" 'Captain hold origin: origin-b' "a successful hold lost its association"
-      assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
       assert_equals 1 "$(grep -Fc "needs-decision [key=captain-hold-$id-$occurrence]" "$channel")" \
         "retrying the origin write duplicated the parent decision"
       run_captain "$home" complete origin-b "$id" >/dev/null \
         || fail "a successful hold could not complete B"
       run_captain "$home" verify origin-b >/dev/null || fail "a successful hold could not verify B"
-      if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
-        fail "a successful reassociation still certified A"
+      if [ "$phase" = released ]; then
+        assert_contains "$shown" 'Captain hold origin: origin-a' \
+          "$phase $timing adding B to the open call dropped the origin it already records"
+        run_captain "$home" complete origin-a "$id" >/dev/null \
+          || fail "$phase $timing adding B to the open call invalidated completion for A"
+      elif run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/old-origin.err"; then
+        fail "$phase $timing hold for B certified the unrelated A"
       fi
     done
   done
-  pass "new, active, and released holds publish origins after backend success with and without deferral"
+  pass "new and released holds publish origins after backend success with and without deferral"
 }
 
 test_interrupted_origin_move_does_not_inherit_the_previous_answer() {
-  local home id=sample-moved-call shown phase failure o rc until_args=()
-  for phase in active expired released-replay released-done; do
+  local home id=sample-moved-call shown phase failure o rc
+  for phase in released-replay released-done; do
     for failure in refused interrupted; do
       home=$(make_home "interrupted-origin-move-$phase-$failure")
       for o in origin-a origin-b; do
@@ -4586,14 +4886,6 @@ test_interrupted_origin_move_does_not_inherit_the_previous_answer() {
       printf 'Release this work.\n' > "$home/answer.txt"
       run_captain "$home" answer "$id" --release --decision-file "$home/answer.txt" >/dev/null \
         || fail "could not release the call for A"
-      until_args=()
-      [ "$phase" != expired ] || until_args=(--until 2000-01-01)
-      case "$phase" in
-        active|expired)
-          run_captain "$home" hold "$id" --reason "Choose again for A" --origin origin-a \
-            ${until_args[@]+"${until_args[@]}"} >/dev/null || fail "could not re-hold the call for A"
-          ;;
-      esac
       run_captain "$home" complete origin-a "$id" >/dev/null \
         || fail "the genuine call for A did not complete A"
 
@@ -4639,14 +4931,7 @@ SH
       assert_not_contains "$shown" 'Captain hold origin: origin-b' "the failed move published B's association"
       assert_contains "$shown" 'Captain hold set:' "the fixture did not retain the uncommitted stamp"
       assert_contains "$shown" 'Release this work.' "the failed move lost the earlier answer"
-      if [ "$phase" = active ]; then
-        assert_contains "$shown" 'held: yes' "the failed move lifted A's active hold"
-      else
-        assert_contains "$shown" 'held: no' "the failed move created a live hold"
-      fi
-      if [ "$phase" = expired ]; then
-        assert_contains "$shown" 'hold_kind: captain' "the expired fixture lost A's captain annotations"
-      fi
+      assert_contains "$shown" 'held: no' "the failed move created a live hold"
       rm "$home/fakebin/tasks-axi"
 
       if run_captain "$home" complete origin-b "$id" > "$home/complete.out" 2> "$home/complete.err"; then
@@ -4658,33 +4943,29 @@ SH
       if run_captain "$home" verify origin-b > "$home/verify.out" 2> "$home/verify.err"; then
         fail "verify accepted the previous call for B"
       fi
-      case "$phase" in
-        released-*)
-          if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/incomplete.err"; then
-            fail "the verification boundary accepted a released answer beneath an incomplete hold"
-          fi
-          assert_grep "newer hold never completed" "$home/incomplete.err" "the stamp guard did not refuse the incomplete hold"
-          if run_captain "$home" verify origin-a >/dev/null 2> "$home/incomplete-verify.err"; then
-            fail "verify accepted a released answer beneath an incomplete hold"
-          fi
-          if [ "$phase" = released-replay ]; then
-            run_captain "$home" answer "$id" --release --decision-file "$home/answer.txt" >/dev/null \
-              || fail "could not replay A's earlier answer"
-          else
-            tasks_in "$home" "done" "$id" --keep 1 >/dev/null || fail "could not complete the released work"
-          fi
-          shown=$(tasks_in "$home" show "$id" --full)
-          assert_contains "$shown" 'Captain hold origin: origin-a' "the subsequent transition changed A's association"
-          if run_captain "$home" complete origin-b "$id" >/dev/null 2> "$home/transition-complete.err"; then
-            fail "$phase certified B after a failed move"
-          fi
-          assert_grep "was held for origin origin-a, not origin-b" "$home/transition-complete.err" \
-            "the transition did not refuse B on origin provenance"
-          if run_captain "$home" verify origin-b >/dev/null 2> "$home/transition-verify.err"; then
-            fail "$phase verified B after a failed move"
-          fi
-          ;;
-      esac
+      if run_captain "$home" complete origin-a "$id" >/dev/null 2> "$home/incomplete.err"; then
+        fail "the verification boundary accepted a released answer beneath an incomplete hold"
+      fi
+      assert_grep "newer hold never completed" "$home/incomplete.err" "the stamp guard did not refuse the incomplete hold"
+      if run_captain "$home" verify origin-a >/dev/null 2> "$home/incomplete-verify.err"; then
+        fail "verify accepted a released answer beneath an incomplete hold"
+      fi
+      if [ "$phase" = released-replay ]; then
+        run_captain "$home" answer "$id" --release --decision-file "$home/answer.txt" >/dev/null \
+          || fail "could not replay A's earlier answer"
+      else
+        tasks_in "$home" "done" "$id" --keep 1 >/dev/null || fail "could not complete the released work"
+      fi
+      shown=$(tasks_in "$home" show "$id" --full)
+      assert_contains "$shown" 'Captain hold origin: origin-a' "the subsequent transition changed A's association"
+      if run_captain "$home" complete origin-b "$id" >/dev/null 2> "$home/transition-complete.err"; then
+        fail "$phase certified B after a failed move"
+      fi
+      assert_grep "was held for origin origin-a, not origin-b" "$home/transition-complete.err" \
+        "the transition did not refuse B on origin provenance"
+      if run_captain "$home" verify origin-b >/dev/null 2> "$home/transition-verify.err"; then
+        fail "$phase verified B after a failed move"
+      fi
       run_captain "$home" complete origin-a "$id" >/dev/null || fail "the surviving call could not complete A"
       run_captain "$home" verify origin-a >/dev/null || fail "the surviving call could not verify A"
       [ "$phase" != released-done ] || continue
@@ -4702,7 +4983,7 @@ SH
         || fail "the genuine answer for B did not verify B"
     done
   done
-  pass "failed and interrupted origin moves cannot inherit active, expired, replayed, or completed calls"
+  pass "failed and interrupted origin moves cannot inherit replayed or completed calls"
 }
 
 test_historical_self_inventory_has_workable_repair() {
@@ -4825,6 +5106,44 @@ SH
   run_captain "$home" verify report-only >/dev/null \
     || fail "an origin with metadata but no backlog row could not verify"
   pass "completion and verification compare backend identities for entries and current or stored origins"
+}
+
+# An open call that stores a legacy alias of its origin, re-held with the
+# canonical spelling, is a same-origin re-hold: it must update the reason and
+# date through the normal path, not be taken for a new origin and skipped.
+test_same_origin_rehold_compares_backend_identities() {
+  local home shown
+  home=$(make_home alias-rehold)
+  tasks_in "$home" add fm-o "Origin" --kind scout --repo sample >/dev/null \
+    || fail "could not create the canonical origin"
+  write_origin_meta "$home" fm-o
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" -ge 2 ]; then
+  case "$2" in
+    o|call) set -- "$1" "fm-$2" "${@:3}" ;;
+  esac
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  run_captain "$home" hold fm-call --title "Shared call" --reason "First wording" --origin fm-o >/dev/null \
+    || fail "could not hold the call for the origin"
+  shown=$(tasks_in "$home" show fm-call --full)
+  printf '%s\n' "$shown" | sed -n 's/^  body: //p' | jq -r . \
+    | sed 's/^Captain hold origin: fm-o$/Captain hold origin: o/' > "$home/legacy-origin.txt"
+  tasks_in "$home" update fm-call --body-file "$home/legacy-origin.txt" >/dev/null \
+    || fail "could not store the legacy origin alias"
+  run_captain "$home" hold fm-call --reason "Second wording" --until 2099-01-01 --origin fm-o >/dev/null \
+    || fail "the same-origin re-hold with the canonical spelling failed"
+  shown=$(tasks_in "$home" show fm-call --full)
+  assert_contains "$shown" 'hold_until: 2099-01-01' \
+    "the same-origin re-hold through an alias was taken for a new origin and left the date unchanged"
+  assert_equals 1 "$(printf '%s\n' "$shown" | grep -o 'Captain hold origin: ' | wc -l | tr -d ' ')" \
+    "the same-origin re-hold through an alias recorded the origin twice"
+  run_captain "$home" complete fm-o fm-call >/dev/null \
+    || fail "the origin could not complete against its re-held call"
+  pass "a same-origin re-hold through a legacy alias updates the call instead of adding the origin again"
 }
 
 # tasks-axi refuses parentheses and line breaks in a hold reason and stores the
@@ -5121,8 +5440,14 @@ test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
 test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
+test_same_origin_rehold_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
+test_one_active_hold_serves_several_origins
+test_same_origin_rehold_retries_and_updates_a_shared_call
+test_origin_added_after_an_interrupted_answer_keeps_the_others
+test_expired_deferral_serves_several_origins
+test_lapsed_deferral_rehold_restarts_its_age
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
