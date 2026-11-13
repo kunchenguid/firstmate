@@ -2998,6 +2998,12 @@ test_dispatch_and_completion_are_structural() {
 
   meta="$home/state/$id.meta"
   printf 'pr=%s\n' "$pr" >> "$meta"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "api graphql") printf '%s\n' 'state=MERGED' 'merged=true' ;;
+esac
+SH
   out=$(run_teardown "$case_dir" "$id") \
     || fail "structural teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
