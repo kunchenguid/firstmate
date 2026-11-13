@@ -381,6 +381,7 @@ test_test_helpers_scope_codex_store_isolation() {
     for mode in unset empty custom; do
       (
         export HOME="$CASE_DIR/user-home"
+        # shellcheck disable=SC2030 # Each case intentionally changes only its subshell's Codex home.
         case "$mode" in
           custom) export CODEX_HOME="$CASE_DIR/ambient-codex" ;;
           empty) export CODEX_HOME='' ;;
@@ -451,6 +452,7 @@ SH
             fm_test_run_spawn "$home" "$target" "$fakebin" "${spawn_args[@]}" --backend tmux >"$CASE_DIR/spawn.out" 2>&1
           exit $?
         fi
+        # shellcheck disable=SC2031 # This subshell sets its own Codex home independently of earlier cases.
         case "$mode" in
           unset) unset CODEX_HOME ;;
           empty) export CODEX_HOME='' ;;
