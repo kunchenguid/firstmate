@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
-# The retention proofs in bin/fm-teardown.sh's header govern cleanup, because
+# The landed-work proofs in bin/fm-teardown.sh's header govern cleanup, because
 # treehouse return hard-resets the worktree. These cases verify both successful
 # cleanup and preservation of work when a proof is missing.
 #
@@ -60,7 +60,6 @@
 #   (z4) scout + ignored file                                -> ignored file survives
 #
 # Landed-work proof from current remote state, not stale tracking refs:
-#   (aa) work on another origin branch, pushed from another clone -> ALLOW (local-only or open PR)
 #   (ab) same, but the refresh fails                              -> REFUSE, names remote
 #   (ac) refresh runs, commits on no remote branch                -> REFUSE
 #   (ad) same landed work plus uncommitted changes                -> REFUSE
@@ -1012,27 +1011,28 @@ SH
   chmod +x "$case_dir/fakebin/git"
 }
 
-test_landed_on_other_origin_branch_with_stale_refs_allows() {
-  local mode case_dir rc
+test_other_origin_branch_requires_default_branch_landing() {
+  local mode case_dir rc expected head
   for mode in local-only direct-PR no-mistakes; do
     case_dir=$(make_case "stale-refs-$mode")
     write_meta "$case_dir" "$mode" ship
     wt_commit_file "$case_dir" feature.txt landed
     land_task_commits_from_other_clone "$case_dir" release
-    if [ "$mode" != local-only ]; then
-      append_pr_meta_url "$case_dir"
-      add_gh_pr_open "$case_dir"
-    fi
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
     set +e
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
     set -e
 
-    expect_code 0 "$rc" "stale-refs-$mode: work on origin should be proven landed"
-    ! grep -q REFUSED "$case_dir/stderr" || fail "stale-refs-$mode: teardown printed a REFUSED line"
+    expected=1
+    [ "$mode" != local-only ] || expected=0
+    expect_code "$expected" "$rc" "stale-refs-$mode: default-branch landing verdict"
+    if [ "$expected" = 1 ]; then
+      assert_refusal_retained_task_state "$case_dir" "stale-refs-$mode" "$head"
+    fi
   done
-  pass "work landed on another origin branch from another clone is proven after a refresh"
+  pass "another origin branch does not prove default-branch landing for PR delivery"
 }
 
 test_refresh_failure_does_not_read_as_landed() {
@@ -1114,11 +1114,7 @@ test_edit_saved_during_refresh_refuses() {
     case_dir=$(make_case "edit-during-refresh-$mode")
     write_meta "$case_dir" "$mode" ship
     wt_commit_file "$case_dir" feature.txt landed
-    land_task_commits_from_other_clone "$case_dir" release
-    if [ "$mode" != local-only ]; then
-      append_pr_meta_url "$case_dir"
-      add_gh_pr_open "$case_dir"
-    fi
+    land_task_commits_from_other_clone "$case_dir" main
     add_fetch_logging_git "$case_dir"
 
     set +e
@@ -1268,123 +1264,7 @@ test_no_mistakes_pushed_unmerged_refuses() {
   pass "no-mistakes worktree with pushed but unmerged work is refused"
 }
 
-test_no_mistakes_pushed_with_open_pr_allowed() {
-  local case_dir rc
-  case_dir=$(make_case nm-pushed-open-pr)
-  write_meta "$case_dir" no-mistakes ship
-  printf 'pr=https://github.com/o/r/pull/7\n' >> "$case_dir/state/task-x1.meta"
-  wt_commit_file "$case_dir" feature.txt hello "contribution work"
-  seed_backlog_in_flight "$case_dir"
-  git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
-  add_gh_pr_open "$case_dir"
 
-  set +e
-  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "nm-pushed-open-pr: teardown should proceed"
-  pass "pushed work with a recorded open PR is not refused"
-}
-
-test_open_pr_requires_current_head_containment() {
-  local provider relation case_dir head pr_head url expected rc test_path path_without_gh tree published_head
-  path_without_gh=$(fm_test_base_path_sans "$PATH" gh)
-  for provider in github github-gh-axi gitlab forgejo gerrit; do
-    for relation in unrelated stale current descendant squashed squashed-stale missing malformed; do
-      case_dir=$(make_case "open-pr-$provider-$relation")
-      write_meta "$case_dir" direct-PR ship
-      wt_commit_file "$case_dir" feature.txt hello "task work"
-      case "$relation" in
-        squashed|squashed-stale) wt_commit_file "$case_dir" followup.txt world "task follow-up" ;;
-      esac
-      head=$(git -C "$case_dir/wt" rev-parse HEAD)
-      seed_backlog_in_flight "$case_dir"
-      expected=1
-      case "$relation" in
-        unrelated) pr_head=$(commit_tree_from_wt_head "$case_dir" origin/main "unrelated review") ;;
-        stale) pr_head=$(git -C "$case_dir/wt" rev-parse HEAD^) ;;
-        current) pr_head=$head; expected=0 ;;
-        descendant) pr_head=$(commit_tree_from_wt_head "$case_dir" "$head" "review follow-up"); expected=0 ;;
-        squashed|squashed-stale)
-          if [ "$relation" = squashed ]; then
-            tree=$(git -C "$case_dir/wt" rev-parse 'HEAD^{tree}')
-            [ "$provider" != gerrit ] || expected=0
-          else
-            tree=$(git -C "$case_dir/wt" rev-parse 'HEAD~1^{tree}')
-          fi
-          pr_head=$(printf '%s\n' "published squash" | git -C "$case_dir/wt" commit-tree "$tree" -p origin/main)
-          git -C "$case_dir/wt" merge-base --is-ancestor "$head" "$pr_head" \
-            && fail "open-pr-$provider-$relation: squash unexpectedly contains task ancestry"
-          ;;
-        missing) pr_head= ;;
-        malformed) pr_head=not-a-commit ;;
-      esac
-      if [ "$provider" = gerrit ]; then
-        published_head=$head
-        case "$relation" in
-          missing|malformed) ;;
-          *) published_head=$pr_head ;;
-        esac
-        git -C "$case_dir/wt" push -q origin "$published_head:refs/for/main"
-        [ -z "$(git -C "$case_dir/wt" for-each-ref --format='%(refname)' --contains "$head" refs/remotes)" ] \
-          || fail "open-pr-gerrit-$relation: task HEAD unexpectedly has a remote-tracking ref"
-        git -C "$case_dir/wt" show-ref --verify --quiet refs/remotes/origin/fm/task-x1 \
-          && fail "open-pr-gerrit-$relation: fixture pushed a branch"
-      else
-        git -C "$case_dir/wt" push -q origin fm/task-x1
-      fi
-      test_path=$PATH
-      case "$provider" in
-        github|github-gh-axi)
-          url=https://github.com/example/repo/pull/7
-          add_gh_pr_open "$case_dir" "$pr_head"
-          if [ "$provider" = github-gh-axi ]; then
-            rm "$case_dir/fakebin/gh"
-            test_path=$path_without_gh
-            PATH="$case_dir/fakebin:$test_path" command -v gh >/dev/null 2>&1 \
-              && fail "open-pr-$provider-$relation: fixture path unexpectedly exposes gh"
-          fi
-          ;;
-        gitlab)
-          url=https://gitlab.example.org/team/repo/-/merge_requests/7
-          add_glab_mr_for_head "$case_dir" opened "$pr_head"
-          ;;
-        forgejo)
-          url=https://git.example.org/team/repo/pulls/7
-          add_tea_pull_for_head "$case_dir" false "$pr_head" open
-          ;;
-        gerrit)
-          url=https://gerrit.example.org/c/project/+/7
-          cat > "$case_dir/fakebin/gerrit-axi" <<SH
-#!/usr/bin/env bash
-[ "\${1:-} \${2:-}" = "show 7" ] || exit 1
-printf '%s\n' '{"ok":true,"changes":[{"change":7,"status":"NEW","revision":"$pr_head"}]}'
-SH
-          chmod +x "$case_dir/fakebin/gerrit-axi"
-          ;;
-      esac
-      # A previously recorded matching head cannot replace the forge's live head.
-      printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
-      rc=0
-      FM_TEARDOWN_TEST_PATH="$test_path" FM_HOME="$case_dir" \
-        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-      expect_code "$expected" "$rc" "open-pr-$provider-$relation: containment verdict: $(cat "$case_dir/stderr")"
-      if [ "$expected" = 1 ]; then
-        assert_refusal_retained_task_state "$case_dir" "open-pr-$provider-$relation" "$head"
-        [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-          || fail "open-pr-$provider-$relation: refusal closed the backlog item"
-      else
-        [ ! -e "$case_dir/state/task-x1.meta" ] \
-          || fail "open-pr-$provider-$relation: cleanup retained the task record"
-        [ "$(backlog_row_state "$case_dir")" = 'done' ] \
-          || fail "open-pr-$provider-$relation: cleanup did not close the backlog item"
-      fi
-    done
-  done
-  pass "open reviews allow cleanup only when their live head contains the task HEAD on every supported forge"
-}
 
 # A forge=external ship never pushes its task branch and records review=, not
 # pr=. A personal backup is not proof that reviewed content reached the default
@@ -1632,6 +1512,89 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
+test_merged_pr_replay_excludes_landed_upstream_commits() {
+  local case_dir rc pr_head local_head base
+  case_dir=$(make_case merged-replay-landed-upstream)
+  write_meta "$case_dir" no-mistakes ship
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt_commit_file "$case_dir" feature.txt hello "task feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin HEAD:refs/pull/7/head
+  land_on_origin_main "$case_dir" upstream.txt upstream
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" rebase -q origin/main
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  [ "$local_head" != "$pr_head" ] || fail "merged-replay-landed-upstream: fixture did not rebase"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  land_on_origin_main "$case_dir" feature.txt hello
+  land_on_origin_main "$case_dir" feature.txt changed
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" merge-tree --write-tree origin/main HEAD >/dev/null 2>&1 \
+    && fail "merged-replay-landed-upstream: fixture did not prevent content proof"
+  git -C "$case_dir/wt" update-ref refs/remotes/origin/main "$base"
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "merged-replay-landed-upstream: teardown should exclude landed upstream work: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "merged-replay-landed-upstream: cleanup retained the task record"
+  [ "$(backlog_row_state "$case_dir")" = done ] \
+    || fail "merged-replay-landed-upstream: cleanup did not close the backlog item"
+  pass "merged PR replay excludes upstream commits proven on the refreshed default branch"
+}
+
+test_open_reviews_refuse_unlanded_work() {
+  local provider case_dir head url rc
+  for provider in github gitlab forgejo gerrit; do
+    case_dir=$(make_case "open-review-unlanded-$provider")
+    write_meta "$case_dir" direct-PR ship
+    wt_commit_file "$case_dir" feature.txt hello "task feature"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    seed_backlog_in_flight "$case_dir"
+    if [ "$provider" = gerrit ]; then
+      git -C "$case_dir/wt" push -q origin HEAD:refs/for/main
+    else
+      git -C "$case_dir/wt" push -q origin fm/task-x1
+    fi
+    case "$provider" in
+      github)
+        url=https://github.com/example/repo/pull/7
+        add_gh_pr_open "$case_dir" "$head"
+        ;;
+      gitlab)
+        url=https://gitlab.example.org/team/repo/-/merge_requests/7
+        add_glab_mr_for_head "$case_dir" opened "$head"
+        ;;
+      forgejo)
+        url=https://git.example.org/team/repo/pulls/7
+        add_tea_pull_for_head "$case_dir" false "$head" open
+        ;;
+      gerrit)
+        url=https://gerrit.example.org/c/project/+/7
+        cat > "$case_dir/fakebin/gerrit-axi" <<SH
+#!/usr/bin/env bash
+[ "\${1:-} \${2:-}" = "show 7" ] || exit 1
+printf '%s\n' '{"ok":true,"changes":[{"change":7,"status":"NEW","revision":"$head"}]}'
+SH
+        chmod +x "$case_dir/fakebin/gerrit-axi"
+        ;;
+    esac
+    printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+    expect_code 1 "$rc" "open-review-unlanded-$provider: head containment must not permit pre-merge cleanup"
+    assert_refusal_retained_task_state "$case_dir" "open-review-unlanded-$provider" "$head"
+    [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+      || fail "open-review-unlanded-$provider: refusal closed the backlog item"
+  done
+  pass "open reviews retain unlanded work even when their heads contain every task commit"
+}
+
 test_squash_merged_pr_refuses_replayed_patch_with_unlanded_parent() {
   local case_dir rc parent_head pr_head local_head
   case_dir=$(make_case squash-replayed-patch)
@@ -1796,27 +1759,6 @@ SH
   chmod +x "$case_dir/fakebin/tea"
 }
 
-test_no_mistakes_pushed_with_open_forgejo_pr_allowed() {
-  local case_dir rc head
-  case_dir=$(make_case nm-pushed-open-forgejo-pr)
-  write_meta "$case_dir" no-mistakes ship
-  printf 'pr=https://git.example.org/team/repo/pulls/7\n' >> "$case_dir/state/task-x1.meta"
-  wt_commit_file "$case_dir" feature.txt hello "contribution work"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  seed_backlog_in_flight "$case_dir"
-  git -C "$case_dir/wt" push -q origin fm/task-x1
-  git -C "$case_dir/project" fetch -q origin
-  add_gh_axi_error "$case_dir"
-  add_tea_pull_for_head "$case_dir" false "$head" open
-
-  set +e
-  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "nm-pushed-open-forgejo-pr: teardown should proceed"
-  pass "pushed work with a recorded open Forgejo PR is not refused"
-}
 
 test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses() {
   local case_dir rc head
@@ -1895,8 +1837,7 @@ SH
 
 # A pushed GitLab task whose default branch moved on after the squash merge,
 # editing the same lines, leaves the content check conflicting, so only the
-# merge request record can prove the work landed. A merged record tears down,
-# an open one keeps the open-PR allowance, and a closed-unmerged one refuses.
+# merge request record can prove the work landed.
 test_pushed_gitlab_task_with_merged_mr_allows_when_main_moved_on() {
   local case_dir rc pr_head tmp state expected
   for state in merged opened closed; do
@@ -1922,8 +1863,8 @@ test_pushed_gitlab_task_with_merged_mr_allows_when_main_moved_on() {
     rc=$?
     set -e
 
-    expected=0
-    [ "$state" != closed ] || expected=1
+    expected=1
+    [ "$state" != merged ] || expected=0
     expect_code "$expected" "$rc" "gitlab-mr-$state: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
     grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/repo -F json' "$case_dir/glab.log" \
       || fail "gitlab-mr-$state: teardown did not read the GitLab merge request through glab"
@@ -1971,8 +1912,8 @@ test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
     rc=$?
     set -e
 
-    expected=0
-    [ "$state" != closed ] || expected=1
+    expected=1
+    [ "$state" != merged ] || expected=0
     expect_code "$expected" "$rc" "gitlab-mr-$scenario: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
     grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/sub/repo -F json' "$case_dir/glab.log" \
       || fail "gitlab-mr-$scenario: teardown did not read the merge request through glab"
@@ -1985,7 +1926,7 @@ test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
       assert_refusal_retained_task_state "$case_dir" "gitlab-mr-$state" "$local_head"
     fi
   done
-  pass "teardown fetches GitLab heads for merged and open reviews and refuses closed unmerged reviews"
+  pass "teardown fetches merged GitLab heads and refuses open or closed unmerged reviews"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
@@ -7017,7 +6958,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
-test_landed_on_other_origin_branch_with_stale_refs_allows
+test_other_origin_branch_requires_default_branch_landing
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits
 test_uncommitted_work_refuses_even_when_commits_landed
@@ -7028,13 +6969,10 @@ test_reachable_work_needs_no_fetch
 test_hung_fetch_is_bounded_and_refuses
 test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_pushed_unmerged_refuses
-test_no_mistakes_pushed_with_open_pr_allowed
-test_open_pr_requires_current_head_containment
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
 test_external_forge_backup_copy_refuses_unmerged_review
 test_external_forge_without_backup_copy_refuses
 test_pushed_followup_after_merged_pr_refuses
-test_no_mistakes_pushed_with_open_forgejo_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_no_mistakes_mirror_only_branch_refuses
@@ -7072,6 +7010,8 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_merged_github_pr_without_gh_requires_head_containment
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_refuses_replayed_patch_with_unlanded_parent
+test_merged_pr_replay_excludes_landed_upstream_commits
+test_open_reviews_refuse_unlanded_work
 test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows

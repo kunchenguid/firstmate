@@ -1071,7 +1071,7 @@ fm_pr_github_read_record_with_gh_axi() {  # <host> <owner> <repo> <number>
   '); then
     return 1
   fi
-  # Missing or ambiguous heads cannot supply a teardown retention proof.
+  # Missing or ambiguous heads cannot supply a teardown landed-work proof.
   FM_PR_RECORD_HEAD=$(printf '%s\n' "$output" | awk '
     $1 == "headRefOid:" { count++; if (NF == 2) value=$2 }
     END { if (count == 1) print value }

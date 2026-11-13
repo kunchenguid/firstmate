@@ -262,7 +262,6 @@ if [ "$MODE" != local-only ] && [ -n "$PROMOTE_PROJECT" ]; then
     ;;
   esac
 fi
-
 PROMOTE_BASE_WORDS='default-branch base'
 [ -z "$BASE_BRANCH" ] || PROMOTE_BASE_WORDS="copy of the base branch \`$BASE_BRANCH\`"
 # A home with config/spawn-base-primary-checkout may have started this scout from
