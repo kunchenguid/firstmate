@@ -2022,6 +2022,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | Profile `model` and `effort`; rule `why` | Optional. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
+| `mid_task_fallback` | Optional file-wide opt-in. Absent means dispatch-time selection only. See Mid-task fallback. |
 
 **Preferred provider**
 
@@ -2099,11 +2100,44 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 
+**Mid-task fallback**
+
+`mid_task_fallback` is an optional file-wide setting on this file.
+Absent and `false` keep dispatch-time selection only.
+`true` opts every array in the file in, and refuses a candidate whose effort is lower than the effort recorded for the task.
+`{"allow_lower_reasoning_class": true}` opts in and allows that lower effort.
+Any other value is invalid: `mid_task_fallback must be true, false, or an object whose only key is allow_lower_reasoning_class set to true`.
+One file-wide key covers rule arrays and the default array.
+A per-rule key cannot attach to `default` without a second field.
+A switch can move the task onto a smaller model, so existing files stay on dispatch-time selection until this key is set.
+
+`bin/fm-midtask-fallback.sh` owns the record, the detection, the relaunch, and the task-record fields.
+Bind the matched array after spawn.
+Bind refuses an array that holds a `pi` or `pi-signed` profile with no `provider`.
+Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the local copy or its uncommitted work.
+No eligible candidate stays on the current profile and is reported for a decision.
+A completed switch is stored on the task record and reported as an outcome.
+Consider switches when a snapshot passed with `--snapshot` marks the current profile `exhausted_now`.
+A profile `quota_scope` matches alongside the model-wide rows, for the current profile and for each candidate.
+A task record with `account=` accepts a snapshot only with a matching `--account`.
+For `pi` and `pi-signed` workers `account=` is a Pi root, and consider refuses every snapshot for that task.
+With `shared_quota` set, consider ignores the snapshot.
+Firstmate writes that snapshot from `quota-axi --json` on a quota wake, or when a bound worker stops on exhausted credits and no quota wake is armed.
+A version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` that matches captured pane text is the other trigger. No adapter ships.
+Status line text is never a signal.
+Consider skips a task whose last status verb is `done`, `failed`, `needs-decision`, or `blocked`, unless that line is its own `midtask-fallback` report.
+It also skips a task with any other open decision.
+A successful switch closes an open `midtask-fallback` decision with a `resolved` line.
+Consider prints the outcome on stdout, and firstmate relays it to the captain.
+This path does not re-rank the array.
+`quota-array-dispatch` remains the dispatch-time ranker.
+Profile `floor` values stay dispatch-time checks.
+
 **Validation and diagnostics**
 
 - When the file exists, bootstrap validates it with `jq`.
 - Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-- Malformed JSON, malformed rules, an empty or malformed profile array, a malformed `preferred_provider`, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+- Malformed JSON, malformed rules, an empty or malformed profile array, a malformed `preferred_provider`, a malformed `mid_task_fallback`, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 - Bootstrap enables resolver-only checks for `approval`, `min_confidence`, `floor`, and present `provider` declarations when `TYPESAFE_API_KEY` is non-empty in the environment or the home's `.env`, or when the home's valid `config/dispatch-credential-sources.json` names a `typesafe` source, regardless of `FM_DISPATCH_PROVIDER`.
   Bootstrap only checks that declaration; it never reads the key or runs the source's tool.
   An OpenRouter key or OpenRouter declaration alone does not enable these bootstrap checks; the resolver validates those declarations itself before any request.
