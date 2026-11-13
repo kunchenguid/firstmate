@@ -3350,8 +3350,26 @@ test_secondmate_launch_failure_prints_the_spawn_recovery_command() {
   pass "fm-control relaunch: a failed secondmate launch prints the spawn recovery command without running it"
 }
 
+test_secondmate_dead_after_stop_failure_prints_the_spawn_recovery_command() {
+  local dir out rc id=smstopdead
+  dir=$(new_case sm-stop-dead "$id")
+  add_secondmate_task "$dir" "$id" claude
+  out=$(FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP=1 \
+    run_control "$dir" "$id" relaunch --harness codex --model some-model); rc=$?
+  expect_code 1 "$rc" "a stop transport failure must keep its failure exit code"$'\n'"$out"
+  [ "$(journal_field "$dir" "$id" rollback)" = prior-record-kept-agent-dead ] \
+    || fail "the rollback must take the stopped-dead path"$'\n'"$out"
+  assert_contains "$out" "no agent is running" "the failure should still say no agent is running"$'\n'"$out"
+  assert_contains "$out" "bin/fm-spawn.sh $id --secondmate --harness codex --model some-model" \
+    "the failure must print the recovery spawn command"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the recovery command must not be run automatically"
+  [ "$(meta_field "$dir" "$id" harness)" = claude ] || fail "an agent-less stop failure must keep the prior record"
+  pass "fm-control relaunch: a secondmate left dead by a failed stop prints the spawn recovery command without running it"
+}
+
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
+test_secondmate_dead_after_stop_failure_prints_the_spawn_recovery_command
 test_model_without_harness_refuses_before_stop
 test_model_without_harness_offers_no_keep_command_for_a_raw_basename
 test_secondmate_launch_failure_prints_the_spawn_recovery_command

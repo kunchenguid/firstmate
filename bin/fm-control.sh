@@ -953,6 +953,9 @@ relaunch_rollback() {
         dead)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
+          if [ "$KIND" = secondmate ]; then
+            echo "recovery: once no agent is running at $ID's endpoint, bring the secondmate back on its intended runtime with: $(relaunch_recovery_command)" >&2
+          fi
           ;;
         *)
           # The old agent was NOT proven stopped, so no replacement is coming
@@ -994,8 +997,8 @@ relaunch_rollback() {
   return 0
 }
 
-# The spawn command an operator runs to bring a secondmate back after its
-# replacement failed to launch. Printed only; never run from here.
+# The spawn command an operator runs to bring a secondmate back once a
+# relaunch left it with no running agent. Printed only; never run from here.
 relaunch_recovery_command() {
   local cmd
   cmd="bin/fm-spawn.sh $(printf '%q' "$ID") --secondmate --harness $(printf '%q' "$TARGET_HARNESS")"
