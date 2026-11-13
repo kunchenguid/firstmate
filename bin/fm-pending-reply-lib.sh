@@ -63,6 +63,12 @@
 #                           lifecycle note below); empty until then
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
+#   reply_child_id=         child task the resolving reply reported on, or "-"
+#   reply_child_state=      that child's fm-crew-state verdict as the reply
+#                           recorded it, or "unknown" (see the child result
+#                           note below)
+#   reply_overall=          finished | unfinished | unknown, derived once from
+#                           reply_child_state at resolve time
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_first_sighting= encoded path:line identity of the first sighting
 #   wrong_home_sightings=   comma-separated encoded path:line identities
@@ -71,6 +77,18 @@
 #                           missed-report escalation, are eligible - measured
 #                           from the relevant turn's completion (request or
 #                           recovery), never from delivery or send time
+#
+# Child result: answering a request is not finishing the work behind it. A mate
+# may report a completed investigation or a passing test while the child task is
+# still unfinished, so the reply verb says only that the request was answered.
+# bin/fm-secondmate-report.sh --task <child> appends the child's bin/fm-crew-state.sh
+# verdict as a trailing marker (fm_pending_reply_child_marker), and the resolve
+# records it beside the request outcome together with the overall label
+# fm_pending_reply_overall_label derives from that verdict alone: a reply with
+# no marker, or a verdict the mate could not read, is "unknown" and never
+# "finished". A routine resolution appends nothing to the parent channel, so
+# the mate's own reply stays its current status line; only an escalation close
+# repeats the recorded result in its resolved: note.
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -378,6 +396,9 @@ recovery_turn_completed_epoch=
 escalated_epoch=
 resolved_epoch=
 resolved_via=
+reply_child_id=
+reply_child_state=
+reply_overall=
 wrong_home_hits=0
 wrong_home_first_sighting=
 wrong_home_sightings=
@@ -660,6 +681,45 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
+# A plain task id the helper may read a verdict for; "-" is the no-child id.
+fm_pending_reply_child_id_valid() {  # <id>
+  case "$1" in ''|-|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
+}
+
+# The marker the helper appends, as "child=<id> child-state=<verdict>". An id
+# that is not a plain task id reads as no child ("-") with an unknown verdict;
+# the verdict word is fm-crew-state.sh's own, and fm_pending_reply_overall_label
+# alone decides what it means.
+fm_pending_reply_child_marker() {  # <child-id> <state>
+  local id=$1 state=$2
+  fm_pending_reply_child_id_valid "$id" || { id=-; state=unknown; }
+  printf 'child=%s child-state=%s' "$id" "$state"
+}
+
+# Prints "<child-id> <state>" from the marker that closes a helper-written
+# line, or "- unknown" when the line carries none. Only the trailing marker
+# counts, so a note that quotes "child-state=done" cannot supply one.
+fm_pending_reply_child_result_of_line() {  # <line>
+  local line=$1 marker_re='[( ]via-helper child=([A-Za-z0-9._-]+) child-state=([a-z]+)\)$'
+  if [[ $line =~ $marker_re ]] \
+    && fm_pending_reply_child_id_valid "${BASH_REMATCH[1]}"; then
+    printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  printf -- '- unknown'
+}
+
+# finished only for a done child; a child nobody could read is unknown; every
+# other verdict is still unfinished.
+fm_pending_reply_overall_label() {  # <child-state>
+  case "$1" in
+    done) printf 'finished' ;;
+    working|parked|blocked|paused|failed) printf 'unfinished' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # Idempotently resolve an expectation from a correlated parent report.
 # Returns 0 when the record is resolved after the call (already or newly).
 fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
@@ -684,7 +744,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now child
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -722,7 +782,11 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     return 1
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
+  child=$(fm_pending_reply_child_result_of_line "$line")
   now=$(fm_pending_reply_now)
+  fm_pending_reply_set "$rec" reply_child_id "${child% *}" || return 1
+  fm_pending_reply_set "$rec" reply_child_state "${child#* }" || return 1
+  fm_pending_reply_set "$rec" reply_overall "$(fm_pending_reply_overall_label "${child#* }")" || return 1
   fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
@@ -1214,7 +1278,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
-  local open_line open_key open_note now close_line close_rc _task _via
+  local open_line open_key open_note now close_line close_rc _task _via _child_id _child_state _overall
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -1242,7 +1306,11 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       # OPEN above stays a plain append because a new blocker must wake.
       _task=$(fm_pending_reply_get "$rec" task_id)
       _via=$(fm_pending_reply_get "$rec" resolved_via)
-      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
+      _child_id=$(fm_pending_reply_get "$rec" reply_child_id)
+      _child_state=$(fm_pending_reply_get "$rec" reply_child_state)
+      _overall=$(fm_pending_reply_get "$rec" reply_overall)
+      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via" \
+        "child=${_child_id:--} child-state=${_child_state:-unknown} overall=${_overall:-unknown}")"
       close_rc=0
       fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
         2>/dev/null || close_rc=$?
