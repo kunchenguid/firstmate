@@ -212,19 +212,34 @@ fm_win_normalize_command() {  # <windows path>
 # Print the normalized executable path of live Windows process $1, or return 1.
 # Presence in `ps -W` is also this bridge's liveness test, because kill -0 cannot
 # answer that question across the namespace boundary.
+#
+# Two properties of the real Cygwin ps shape the read. It cuts every line to a
+# positive COLUMNS, which Claude sets in its hook environment, so the command is
+# read with COLUMNS cleared. Its STIME column is one word (22:24:48) for a
+# process started today and two (Nov  8) for an earlier day, so the command is
+# found after either form rather than at a fixed field.
 fm_win_command() {  # <winpid>
   local winpid=$1 table out
   case "$winpid" in
     ''|*[!0-9]*) return 2 ;;
   esac
   # Return 1 only when a readable table proves the pid absent, and 2 when the
-  # table itself could not be read, so a caller can tell gone from unknown.
-  table=$(ps -W 2>/dev/null) || return 2
+  # table itself could not be read, so a caller can tell gone from unknown. A
+  # listed row whose shape is not understood is also unknown, never absent.
+  table=$(COLUMNS='' ps -W 2>/dev/null) || return 2
   case "$table" in
     *WINPID*) ;;
     *) return 2 ;;
   esac
-  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '$4 == w { for (i = 8; i <= NF; i++) printf "%s%s", (i > 8 ? " " : ""), $i; exit }')
+  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '
+    $4 == w {
+      line = $0
+      if (!sub(/^ *[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +[^ ]+ +[0-9]+ +/, "", line)) exit 3
+      if (!sub(/^[0-9]+:[0-9]+:[0-9]+ +/, "", line) && !sub(/^[A-Z][a-z][a-z] +[0-9]+ +/, "", line)) exit 3
+      if (line == "") exit 3
+      print line
+      exit
+    }') || return 2
   [ -n "$out" ] || return 1
   fm_win_normalize_command "$out"
 }
