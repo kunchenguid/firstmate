@@ -393,7 +393,6 @@ Two bounds of the refusal are known and deliberately not closed here.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
 It states what `--force` authorizes rather than what will have happened, because the later inactive-reconcile delivery gate can still stop it with every record retained.
-It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
 T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
@@ -832,6 +831,7 @@ It does not claim that a managed policy cannot re-enable hooks after launch.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
 
 ### Stop response parsing
+
 Verified 2026-11-03 on Linux x86_64 with codex-cli 0.162.1.
 The existing live hook-layer guard exercises the installed app-server's `hook/completed` notifications against a loopback Responses fixture that returns fixed text and no tool calls.
 Each app-server has isolated config, hook trust, login files, and data; it neither uses a shared daemon nor contacts a model provider.
@@ -1033,11 +1033,6 @@ On 2026-09-20 that guard could not reach its new arm for either installed harnes
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
 ### 2026-09-29 claude 2.1.284 named session through Herdr
-Verified on 2026-09-29 on Linux x86_64 against Claude Code 2.1.284 in Herdr 0.9.1 panes of an isolated lab session, read through `fm_backend_composer_state herdr <session>:<pane>` with the adapter's real capture and identity probe.
-A session started as `claude -n <name>` right-aligns that name in the rule above the composer (`───…─── <name> ─`), while the rule below stays solid.
-Herdr supplies no cursor, and the cursorless scan accepted only solid rules, so it recorded the lower rule alone; a lone rule below the `❯` row made cursorless selection refuse, and the idle composer read `unknown`.
-`inject_msg` in `bin/fm-supervise-daemon.sh` defers on anything but `empty`, so every away-mode escalation to a named Claude primary on Herdr deferred until the captain returned, without typing anything or writing its operational record.
-The same named pane read `empty` on tmux, where the cursor row anchors the bare `❯` composer directly.
 
 Verified on 2026-09-29 on Linux x86_64 against Claude Code 2.1.284 in Herdr 0.9.1 panes of an isolated lab session, read through `fm_backend_composer_state herdr <session>:<pane>` with the adapter's real capture and identity probe.
 A session started as `claude -n <name>` right-aligns that name in the rule above the composer (`───…─── <name> ─`), while the rule below stays solid.
@@ -1046,6 +1041,7 @@ Herdr supplies no cursor, and the cursorless scan accepted only solid rules, so 
 The same named pane read `empty` on tmux, where the cursor row anchors the bare `❯` composer directly.
 
 Before the fix, one variable at a time on idle panes:
+
 ```text
 claude                                                      herdr: empty
 claude -n <name>                                            herdr: unknown
@@ -1068,35 +1064,7 @@ ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is
 ```
 
 ### 2026-10-21 Pi Codex usage-limit banner on pi 1.3.0
-Verified on 2026-10-21 on macOS arm64 against installed pi 1.3.0, using the live guard's isolated tmux server and loopback Codex error endpoint.
-The guard passed against the installed version, exercising the adapter's installed-version lookup and the refreshed default pin set.
-Pi 1.3.0 renders the same usage-limit banner and fixed bug-report hint as the earlier pinned releases.
-The stale `working` and `unknown` identities classify `empty`, while an absent Pi identity remains `unknown`.
 
-Before the fix, one variable at a time on idle panes:
-
-```text
-claude                                                      herdr: empty
-claude -n <name>                                            herdr: unknown
-CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude -n <name> herdr: unknown
-claude -n <name>                                            tmux:  empty (typed text: pending)
-```
-
-The classifier now accepts a bare agent-glyph row sandwiched between a width-proven titled top rule and its solid closing rule (`_fm_composer_titled_rule_row` and `_fm_composer_bare_rule_sandwich` in `bin/fm-composer-lib.sh`, issues #5601 and #5558).
-After the fix the named Herdr pane read `empty`, and the daemon's real injection path wrote the operational record, typed the doorbell, sent Enter, and confirmed the submit on that pane.
-`test_matrix_claude_named_session_titled_rule` in `tests/fm-composer-lib.test.sh` pins idle, ghost-suggestion, typed, and extraction cases on every capability profile, the unnamed ghost case, and the Pi blank-row non-regression.
-The composer-matrix guard's `claude-named` arm requires the cursorless read of a real named Claude pane to be exactly `empty`:
-
-```sh
-FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
-FM_COMPOSER_PI_BANNER_LIVE=1 bash bin/fm-test-run.sh tests/fm-composer-pi-codex-banner-live-e2e.test.sh
-```
-
-```text
-ok - claude-named (2.1.284 (Claude Code)): real idle composer classifies empty
-ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
-
-### 2026-10-21 Pi Codex usage-limit banner on pi 1.3.0
 Verified on 2026-10-21 on macOS arm64 against installed pi 1.3.0, using the live guard's isolated tmux server and loopback Codex error endpoint.
 Before adding 1.3.0 to the default pin set, the candidate-pin command below passed all five live checks.
 The same guard then passed without a pin override, exercising the adapter's installed-version lookup and refreshed default pin set.
@@ -1104,12 +1072,14 @@ Pi 1.3.0 renders the same usage-limit banner and fixed bug-report hint as the ea
 The stale `working` and `unknown` identities classify `empty`, while an absent Pi identity remains `unknown`.
 
 Refresh the pin only after the candidate-pin guard passes, then verify the default:
+
 ```sh
 FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=1.3.0 bash bin/fm-test-run.sh tests/fm-composer-pi-codex-banner-live-e2e.test.sh
 FM_COMPOSER_PI_BANNER_LIVE=1 bash bin/fm-test-run.sh tests/fm-composer-pi-codex-banner-live-e2e.test.sh
 ```
 
 Both commands produced:
+
 ```text
 # pi (1.3.0): rendered banner row: Error: Codex error: The usage limit has been reached
 ok - pi (1.3.0): banner screen classifies empty on the cursorless styled read with a working status
@@ -1124,10 +1094,8 @@ ok - live pi banner guard verified 5 live surface(s)
 
 Verified on 2026-10-02 on macOS arm64 with the same live guard and stub Codex endpoint as the 2026-09-25 entry below, against pi 0.87.1 (installed), and pi 0.99.2 and 1.0.0 installed into isolated npm prefixes from `@earendil-works/pi-coding-agent`.
 All three render the banner as `Error: Codex error: The usage limit has been reached` followed by the fixed bug-report hint row, and each classified the banner screen `empty` on all five live surfaces, so 0.99.2 and 1.0.0 joined the adapter's pin set.
-The guard no longer sets `FM_COMPOSER_PI_ADAPTER_VERSION`, so it exercises the adapter's own `pi --version` read that production callers use.
-On a release outside the pin set it now proves the adapter's refusal instead of failing the build: with the pin set forced to `0.85.1`, pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
+With the pin set forced to `0.85.1`, pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
 The guard exercises the adapter's own `pi --version` read that production callers use.
-On a release outside the immutable pin set, the guard proves the adapter's refusal instead of failing the build; the installed release remains unverified and stale `working` and `unknown` statuses stay `unknown`, while `idle` retains the ordinary `empty` verdict.
 
 ```text
 # pi (1.0.0): rendered banner row: Error: Codex error: The usage limit has been reached
@@ -2735,12 +2703,14 @@ ok - real rex: no state-changing call left the test sessions and every other ses
 Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
 
 ### Remote second mate durability on Linux
+
 Verified on 2026-10-30 against `rex 0.1.0-preview.12` (commit `e6592f7`, API revision 8) installed through the public `install.sh --tarball` inside a disposable Apple `container` VM: Debian GNU/Linux 12, glibc 2.36, aarch64, 2 CPUs, 4 GB.
 The server ran on a private socket `unix:///tmp/rv/rex.sock` with a private `--state-dir /tmp/rv/state`; the container and image were deleted afterwards.
 This run checked Rex server primitives on Linux, not an end-to-end Firstmate remote second-mate lifecycle; the full transcript lives outside the repository.
 The current operator contract is in [remote readiness](../remote-secondmates.md#repair-with---fix), with portable regressions in [`fm-remote-doctor.test.sh`](../../tests/fm-remote-doctor.test.sh) and [`fm-remote-secondmate-lifecycle-e2e.test.sh`](../../tests/fm-remote-secondmate-lifecycle-e2e.test.sh).
 
 Every check passed:
+
 - Foreground tracking follows a nested interactive shell: after typing `bash` into a login-shell block, `block call ... process` reported the inner bash as foreground with the login shell among its ancestors, and typed input reached the innermost shell.
 - The earlier reported nested-shell bug does not reproduce: typing `treehouse` into the nested shell delivered the input, and the outer login shell was never left as a stale foreground.
 - A harder stub case where `treehouse` exec'd another interactive bash behaved the same, with correct process ancestry.
@@ -3630,6 +3600,7 @@ Error: Invalid OMP profile "BAD". Profile names must match ^[a-z0-9][a-z0-9._-]{
 Repeat these commands after an omp upgrade to refresh this record.
 
 ### Remote second mate on Linux
+
 Verified on 2026-10-28 against omp 18.13.3 (a Bun-compiled binary installed through mise) on Linux x86_64 with Herdr 0.9.1, driven from a macOS primary through a scratch home on both sides.
 The agent process reads `comm=omp` with its executable inside the mise install tree, so the anchored name identifies it on Linux as on macOS and no launcher-specific identity rule is needed:
 
@@ -3705,6 +3676,7 @@ On 2.0.22 the brief is submitted on its own, yet the composer still reads pendin
 `tests/fm-spawn-dispatch-profile.test.sh` pins the gate's outcomes portably: an auto-submitted brief gets no extra Enter, a prefilled brief gets exactly one, a composer that reads unknown before it draws gets its one Enter only once it reads pending, a composer that only reads unknown gets its one Enter at the submit deadline, and a turn that never starts fails the spawn.
 
 ## Pi repeated-read containment
+
 Verified on 2026-10-27 UTC on Linux x86_64 with Node 24.22.1 and npm 11.19.1.
 The operator contract, opt-in default and migration procedure are owned by [configuration](../configuration.md#pi-repeated-read-containment).
 The supported SDK matrix is Pi 1.1.0 and 1.2.0, with each release's sibling packages pinned to the same version rather than resolving newer 1.x packages through public dependency ranges.
@@ -3779,16 +3751,19 @@ A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-
 `bin/fm-control.sh <task> exit` then resolved the typed `/exit` from that recorded major and returned both panes to the shell.
 
 ## Native Codex supervision park
+
 Verified on 2026-10-19 with `codex-cli 0.163.0` on macOS arm64 in an isolated named Herdr lab.
 The native TUI fired project SessionStart and asynchronous Stop hooks, and `codex queue --thread` delivered input to the embedded `--no-daemon` session.
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
 This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
 
 ## hc
+
 Measured on 2026-10-29 with `hc 0.1.13` on macOS (Darwin 27.0.0, `/bin/bash` 3.2.57), against private cores only: a unique `HC_SESSION`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under a short `/tmp/fmhc.*` directory, and `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` unset.
 The default socket path under the scratchpad temp directory exceeded the 103-byte unix socket limit, which `hc` reports as a usage error, so the private root must be short.
 
 ### CLI facts the adapter depends on
+
 | Probe | Result |
 | --- | --- |
 | `HC_SESSION=<private>` with an inherited `HC_TERMINAL_SOCKET` naming another core | `hc ls` listed only the private core's terminals. |
@@ -3806,6 +3781,7 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `hc get` of a terminal running the user's `claude` wrapper | `foreground` was `{"name":"hats","argv":["/Users/fran/.cargo/bin/hats","run","--"]}`; the Claude process was another member of that process group. |
 
 ### Adapter lifecycle
+
 `tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
 Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
 
@@ -3823,6 +3799,7 @@ A real Claude Code launch through the user's `claude` wrapper, typed into a task
 Before reading the process group, the same launch read `ambiguous`.
 
 ### Spawn, steer, peek, and teardown
+
 A scout ran end to end in a scratch home with `HOME` and `TREEHOUSE_ROOT` in the scratch root, a private core (`HC_SESSION=fme1`), a local bare-origin project, and a compiled stand-in agent at `<root>/agents/claude/claude` that logs its argv, its `HC_*` and `FM_*` environment, and every input line:
 
 ```sh
@@ -3845,9 +3822,11 @@ bin/fm-teardown.sh e2e1
 | `bin/fm-teardown.sh e2e1` | `teardown e2e1 complete (window fme1:t1, ...)`; `hc ls --all` was empty and the worktree returned to the pool. |
 
 Before the launch-line fix the same spawn could not type `+`, which every launch line carries.
+
 ### Live guard
 
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host inside an `fm-hclab-*` lab session (hc 0.1.14, 2026-10-30):
+
 ```text
 # claude 2.1.314 (Claude Code): foreground={"argv":["/Users/kunchen/.local/bin/claude"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"2.1.314","pid":76277}
 ok - hc liveness: claude 2.1.314 (Claude Code) classifies alive in hc 0.1.14
@@ -3863,9 +3842,11 @@ ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in h
 ```
 
 Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
+
 ### Runtime auto-detection (Herdr app signals)
 
 Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, hc 0.1.14) and against herdr-app 0.1.11 source plus its release binary, never against a running user app or core:
+
 | Probe | Result |
 | --- | --- |
 | `TERM_PROGRAM=herdr hc run` (CLI path) | The child env showed `TERM_PROGRAM=ghostty`: the core's `child_env` rewrites absent-or-`herdr` `TERM_PROGRAM` to `ghostty` for every terminal. |
@@ -3883,6 +3864,7 @@ Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, 
 | `FM_BACKEND=herdr` with app-terminal markers | `herdr` resolves silently - explicit selection always wins. |
 
 Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha256-verified from the release manifest) was launched as `Contents/MacOS/Herdr` against an isolated `HERDR_APP_HOME` bound to a lab hc 0.1.14 session, beside a disposable `fm-herdr-lab-*` classic-herdr session and a private-tmpdir tmux server, all torn down afterward:
+
 | Scenario | Result |
 | --- | --- |
 | `fm_backend_detect` inside a terminal the app itself created (it stamped `herdr.space`/`herdr.tab`; env carried `HC_TERMINAL_ID`/`HC_TERMINAL_SOCKET`/`HC_SESSION`/`HC_SCOPE`) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the opt-out notice. |
@@ -3894,6 +3876,7 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 | Real `default` core file-meta before/after | Byte-identical - the lab never drove the shared core. |
 
 `bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
+
 ### Not verified
 
 - A spawn with a real harness rather than the stand-in.

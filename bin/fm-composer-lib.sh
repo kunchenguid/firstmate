@@ -2612,7 +2612,7 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   case "$agent_status" in
     idle|done) printf 'empty' ;;
     *)
-      if _fm_composer_pi_terminal_banner_above "$screen"; then
+      if [ "$agent" = pi ] && _fm_composer_pi_terminal_banner_above "$screen"; then
         printf 'empty'
       else
         printf 'unknown'

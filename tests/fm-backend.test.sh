@@ -1014,23 +1014,24 @@ test_backend_source_requires_unreadable_adapter_file() {
   _backend_source_adapter_condition unreadable
 }
 
-_backend_source_hermes_helper_condition() {  # missing|unreadable
-  local condition=$1 dir backend helper marker continued rc test_bash
-  dir="$TMP_ROOT/hermes-helper-$condition"
+_backend_source_helper_condition() {
+  local condition=$1 helper_name=$2 dir backend helper marker continued rc test_bash
+  shift 2
+  dir="$TMP_ROOT/$helper_name-$condition"
   test_bash=${FM_TEST_BASH:-${BASH:-bash}}
   mkdir -p "$dir"
   cp -R "$ROOT/bin" "$dir/bin"
-  helper="$dir/bin/fm-hermes-process-lib.sh"
+  helper="$dir/bin/$helper_name"
   if [ "$condition" = missing ]; then
     rm "$helper"
   else
     chmod 000 "$helper"
     if [ -r "$helper" ]; then
-      pass "fm_backend_source: unreadable Hermes helper skipped (mode-000 files remain readable)"
+      pass "fm_backend_source: unreadable $helper_name skipped (mode-000 files remain readable)"
       return 0
     fi
   fi
-  for backend in tmux herdr rex tern hc; do
+  for backend in "$@"; do
     marker="$dir/$backend.loaded"
     continued="$dir/$backend.continued"
     printf ': > "%s"\n' "$marker" > "$dir/bin/backends/$backend.sh"
@@ -1045,26 +1046,34 @@ _backend_source_hermes_helper_condition() {  # missing|unreadable
     ' _ "$ROOT/bin/fm-backend.sh" "$dir/bin" "$backend" "$continued" >/dev/null 2>&1
     rc=$?
     [ "$rc" -ne 0 ] && [ ! -e "$marker" ] && [ ! -e "$continued" ] \
-      || fail "$backend loaded or continued with a $condition Hermes helper"
+      || fail "$backend loaded or continued with a $condition $helper_name"
   done
   rm -f "$helper"
-  cp "$ROOT/bin/fm-hermes-process-lib.sh" "$helper"
-  for backend in tmux herdr rex tern hc; do
+  cp "$ROOT/bin/$helper_name" "$helper"
+  for backend in "$@"; do
     # shellcheck disable=SC2016 # Positional parameters belong to the child.
     "$test_bash" -c '. "$1"; FM_BACKEND_LIB_DIR=$2; fm_backend_source "$3"' \
       _ "$ROOT/bin/fm-backend.sh" "$dir/bin" "$backend" \
-      || fail "$backend did not load with its Hermes helper restored"
+      || fail "$backend did not load with $helper_name restored"
     [ -e "$dir/$backend.loaded" ] || fail "$backend did not reach its sentinel adapter"
   done
-  pass "fm_backend_source: $condition Hermes helper refuses every dependent backend before sourcing"
+  pass "fm_backend_source: $condition $helper_name refuses every dependent backend before sourcing"
 }
 
 test_backend_source_requires_missing_hermes_helper() {
-  _backend_source_hermes_helper_condition missing
+  _backend_source_helper_condition missing fm-hermes-process-lib.sh tmux herdr rex tern hc
 }
 
 test_backend_source_requires_unreadable_hermes_helper() {
-  _backend_source_hermes_helper_condition unreadable
+  _backend_source_helper_condition unreadable fm-hermes-process-lib.sh tmux herdr rex tern hc
+}
+
+test_backend_source_requires_missing_pi_adapter() {
+  _backend_source_helper_condition missing fm-composer-pi-adapter.sh tmux herdr zellij orca cmux paseo rex t3code tern hc
+}
+
+test_backend_source_requires_unreadable_pi_adapter() {
+  _backend_source_helper_condition unreadable fm-composer-pi-adapter.sh tmux herdr zellij orca cmux paseo rex t3code tern hc
 }
 
 test_backend_validate_spawn_accepts_orca() {
@@ -1736,7 +1745,9 @@ if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
     test_backend_source_requires_missing_adapter_file \
     test_backend_source_requires_unreadable_adapter_file \
     test_backend_source_requires_missing_hermes_helper \
-    test_backend_source_requires_unreadable_hermes_helper
+    test_backend_source_requires_unreadable_hermes_helper \
+    test_backend_source_requires_missing_pi_adapter \
+    test_backend_source_requires_unreadable_pi_adapter
   exit 0
 fi
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -1770,6 +1781,8 @@ test_backend_source_requires_missing_adapter_file
 test_backend_source_requires_unreadable_adapter_file
 test_backend_source_requires_missing_hermes_helper
 test_backend_source_requires_unreadable_hermes_helper
+test_backend_source_requires_missing_pi_adapter
+test_backend_source_requires_unreadable_pi_adapter
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

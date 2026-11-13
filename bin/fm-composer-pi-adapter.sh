@@ -110,7 +110,8 @@ fm_composer_pi_adapter_terminal_banner_above() {  # <screen>
   row=$((FM_COMPOSER_SCAN_PI_OPEN - 1))
   while [ "$row" -ge 0 ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
-    trimmed=$(_fm_composer_row_content "$raw" 0)
+    trimmed=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+    fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ]; then
       if fm_composer_idle_matches "$trimmed" \
         "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT" sensitive; then

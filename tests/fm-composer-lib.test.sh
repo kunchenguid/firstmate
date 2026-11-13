@@ -872,13 +872,17 @@ test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
   # read `unknown` on exactly the pane fm-control must reclaim. The banner
   # plus a solid opening rule plus an empty interior is the settled-turn proof
   # the status failed to deliver, so every registered status now reads empty.
-  local banner screen st id out
+  local banner screen st id out border expected
   banner='Error: Codex error: The usage limit has been reached'
   screen=$' hello there\n\n '"$banner"$'\n\n────────────────────────\n\n────────────────────────\n/path/to/worktree\n0.0%/272k (auto)   gpt-5.5 • medium'
   for st in idle 'done' working unknown blocked; do
     id=$(printf 'pi\t%s' "$st")
     assert_screen "banner over an empty pair with pi $st on herdr" empty "$CAPS_STYLED" "$screen" '' "$id"
     assert_screen "banner over an empty pair with pi $st on tmux" empty "$CAPS_TMUX" "$screen" 5 "$id"
+    id=$(printf 'polytoken\t%s' "$st")
+    case "$st" in idle|done) expected=empty ;; *) expected=unknown ;; esac
+    assert_screen "Pi banner with polytoken $st on herdr" "$expected" "$CAPS_STYLED" "$screen" '' "$id"
+    assert_screen "Pi banner with polytoken $st on tmux" "$expected" "$CAPS_TMUX" "$screen" 5 "$id"
   done
   # The styled row pi actually draws: a red truecolor banner. Styling neither
   # hides the banner nor is required for it.
@@ -909,6 +913,15 @@ test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
   # drawn per error, so a second one is real content and keeps refusing.
   assert_screen "two bug-report hints in a row stay unknown" unknown "$CAPS_STYLED" \
     "${screen_hint/$hint/$hint$'\n'  $hint}" '' "$(printf 'pi\tworking')"
+  id=$(printf 'pi\tworking')
+  for border in '|' '│' '┃' '║'; do
+    assert_screen "side-bordered Pi banner stays unknown ($border)" unknown "$CAPS_STYLED" \
+      "${screen/$banner/$border $banner $border}" '' "$id"
+    assert_screen "side-bordered Pi hint stays unknown ($border)" unknown "$CAPS_STYLED" \
+      "${screen_hint/$hint/$border $hint $border}" '' "$id"
+  done
+  assert_screen "styled and whitespace-padded Pi hint remains valid" empty "$CAPS_STYLED" \
+    "${screen_hint/$hint/$'\t\e[38;2;204;102;102m'$hint$'\e[39m\t '}" '' "$id"
   # A stale status is the ONLY thing the banner settles: a different error
   # text, a near-miss spelling, or the banner in a transcript row that is not
   # the last one above the pair keep the strict rule. Every divergence case
