@@ -21,9 +21,9 @@ A running agent holds `AGENTS.md` and every skill it has already loaded frozen f
 A re-read cannot substitute: it appends a second copy of the mate's own job description with no defined precedence, and it cannot reach a skill that is already loaded.
 Replacing the agent is also the only thing that re-resolves the launch-time wiring - turn-end hooks, harness flags, per-harness feature switches - which the mate froze when it started and which nothing on disk describes.
 
-That is why **every live second mate is restarted after a successful update, including one that was already on the target commit.**
+That is why every live second mate is considered for restart after a successful update, including one that was already on the target commit.
 Launch-time wiring is not derivable from a file diff, so an unchanged tracked surface is not evidence the running agent is already on the current behavior.
-The only live mates that do not restart are the ones whose home the update pass had to skip, and the ones whose runtime cannot prove a restart; the updater keeps both cases honest and neither is reported as a reload.
+The updater skips homes it could not update, while [`bin/fm-secondmate-restart.sh`](../../../bin/fm-secondmate-restart.sh) owns the persistence gate and runtime refusals that can leave a mate on the re-read path.
 
 **One-time rollout note:** the update that carries this change is still executed by the previous release, which restarts only the mates whose `AGENTS.md` or `.agents/skills/` moved on that pass. After it completes, run `bin/fm-secondmate-restart.sh <fm-id>...` once with every live second mate ID, not only the ones that release named; later updates follow the normal flow below.
 
@@ -68,10 +68,8 @@ This touches only the firstmate repo and its own worktrees, never anything under
    This is automatic and needs no per-mate confirmation from the captain.
    Local and remote mates go in the same list; the command owns the transport, the profile each replacement runs on, and the wait.
 
-   It asks every listed mate first to write down the open work it holds only in its conversation, and restarts one only after that mate's own answer comes back.
-   A mate that is mid-turn queues the request behind that turn.
-   That is the whole point of the step, so do not work around it: it is what keeps a captain call the mate had formed but never registered from being lost with the conversation.
-   Its header owns the request, the bound, and the two knobs that change them.
+   The [command header](../../../bin/fm-secondmate-restart.sh) owns the persistence request, reply gate, wait bound, and environment knobs.
+   Do not work around that gate: it keeps a captain call the mate had formed but never registered from being lost with the conversation.
 
    Read its per-mate lines and its closing `summary:` line as the outcome:
    - `restarted: <id>` - that mate is now genuinely running the current instructions and launch-time settings.
