@@ -230,7 +230,7 @@ Each key is reported as follows:
 | Key | Result |
 | --- | --- |
 | Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
-| Carries an answer that is only an option selection with an empty label | Reported as `skipped:` naming the missing displayed meaning, and feeds nothing, because the option words are never inferred. |
+| Carries an answer that is only an option selection with an empty or blank label | Reported as `skipped:` naming the missing displayed meaning, and feeds nothing, because the option words are never inferred. |
 | A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
 | A replay with a mode mismatch | Skipped. |
 
@@ -576,7 +576,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
-- `test_option_answers_keep_their_displayed_words` exercises the option-word guard: `answer` refuses a decision file that is only an option selection, the intake skips an option selection with no label and closes it once the label arrives, the record keeps the raw selection with its displayed meaning, each answered fixture exposes one `Selected answer:` field cut at the first newline of a multi-line decision, and a reconciled close exposes none.
+- `test_option_answers_keep_their_displayed_words` exercises the option-word guard: `answer` refuses a decision file that is only an option selection, the intake skips an option selection with an empty or blank label and closes it once the label arrives, a blank label on a free-text answer is not recorded as displayed words, the record keeps the raw selection with its displayed meaning, each answered fixture exposes one `Selected answer:` field cut at the first newline of a multi-line decision, and a reconciled close exposes none.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
