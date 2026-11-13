@@ -54,7 +54,7 @@ check_home() {  # <label> <home>
   ' _ "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "$label: lock shell exited $status: $out"
-  [ "$out" = done ] || fail "$label: owner link misbehaved: $out"
+  [ "$out" = "done" ] || fail "$label: owner link misbehaved: $out"
   pass "$label: owner link is a real link, refuses a second claim, and releases cleanly"
 }
 
