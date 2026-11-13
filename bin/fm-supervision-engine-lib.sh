@@ -225,7 +225,7 @@ fm_supervision_host_session_end_owned() {
 # fm_supervision_host_config first.
 fm_supervision_host_health_key() {
   local key
-  if false; then
+  if [ -n "${FM_SUPERVISION_HOST_SESSION_END_PID:-}" ]; then
     key="session-end:$FM_SUPERVISION_HOST_SESSION_END_PID:${FM_SUPERVISION_HOST_SESSION_END_GEN:-}"
   else
     key=$(fm_supervision_host_main_key "$1") || return 1
