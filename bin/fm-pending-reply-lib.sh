@@ -1583,6 +1583,14 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   for rec in ${selected[@]+"${selected[@]}"}; do
+    # This per-record sweep shells out several readers per record and runs on
+    # every poll, so on a home with a deep backlog one cycle outlasted the guard
+    # grace with the watcher still working. Refresh the owning watcher's beacon
+    # between records; outside a watcher the call is a no-op
+    # (bin/fm-wake-lib.sh fm_watch_beacon_progress owns both halves).
+    if command -v fm_watch_beacon_progress >/dev/null 2>&1; then
+      fm_watch_beacon_progress
+    fi
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)

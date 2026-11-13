@@ -185,13 +185,26 @@ fm_path_age() {
 # derives the same default fm-watch.sh itself would use.
 # docs/turnend-guard.md "Guard grace and the poll cadence" is the single owner
 # of the rationale; every FM_GUARD_GRACE default should derive from this.
-fm_poll_derived_grace() {
-  local poll=${1:-${FM_POLL:-15}} margin=60 derived
+fm_watch_settings_load() {
+  local config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  # shellcheck source=/dev/null
+  [ ! -f "$config/watch.env" ] || . "$config/watch.env" >/dev/null
+  # shellcheck source=/dev/null
+  [ ! -f "$config/x-mode.env" ] || . "$config/x-mode.env" >/dev/null
+  return 0
+}
+
+fm_poll_derived_grace() (
+  local poll=${1:-} margin=60 derived
+  if [ -z "$poll" ]; then
+    fm_watch_settings_load
+    poll=${FM_POLL:-15}
+  fi
   case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
   derived=$((poll + margin))
   [ "$derived" -ge 300 ] || derived=300
   printf '%s\n' "$derived"
-}
+)
 
 # fm_watcher_stall_bound [poll-seconds]
 # Hard bound on a live watcher holder's beacon age: FM_WATCHER_STALL_BOUND,
@@ -199,10 +212,73 @@ fm_poll_derived_grace() {
 # FM_GUARD_GRACE, else fm_poll_derived_grace). Under it a live holder with a
 # stale beacon is a slow cycle; at or past it bin/fm-watch.sh evicts that holder
 # and bin/fm-watch-arm.sh stops following it, so both read this one definition.
-fm_watcher_stall_bound() {
-  local poll=${1:-${FM_POLL:-15}} grace
+fm_watcher_stall_bound() (
+  local poll=${1:-} grace
+  fm_watch_settings_load
+  poll=${poll:-${FM_POLL:-15}}
   grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$poll")}}
   printf '%s\n' "${FM_WATCHER_STALL_BOUND:-$((grace * 3))}"
+)
+
+# fm_beacon_grace
+# The beacon-freshness grace every liveness reader judges against: an explicit
+# FM_GUARD_GRACE, else the poll-derived default above. bin/fm-guard.sh,
+# bin/fm-watch-arm.sh, bin/fm-watch.sh, and the turn-end guards all call this so
+# the warning, the replacement arm, and the watcher's own re-arm agree on what
+# "fresh" means instead of each carrying its own flat constant.
+# docs/turnend-guard.md "Guard grace and the poll cadence" owns the rationale.
+fm_beacon_grace() (
+  fm_watch_settings_load
+  printf '%s\n' "${FM_GUARD_GRACE:-$(fm_poll_derived_grace "${FM_POLL:-15}")}"
+)
+
+# fm_watch_beacon_tick <beat-path>
+# Throttled, fork-free refresh of the watcher liveness beacon, for the sweeps a
+# single supervision cycle runs between its one top-of-cycle touch.
+# bin/fm-watch.sh touches the beacon at the top of each cycle, and one cycle's own
+# work can run far longer than the guard grace on a large home: the per-record
+# pending-reply sweep, the per-window stale loop, the per-status heartbeat scan,
+# and the per-check sweep each shell out per unit, so a home with a deep
+# pending-reply backlog ran a single cycle past 590s with the beacon untouched
+# while the watcher was genuinely working (docs/turnend-guard.md "Cycle progress
+# keeps the beacon fresh"). A reader that had no progress signal called that a
+# dead supervisor and refused its own replacement.
+# Anything walking a per-record, per-window, or per-check list inside the cycle
+# calls this between units, so the beacon age tracks real progress instead of
+# whole-cycle length, while a genuinely wedged watcher - the one this beacon
+# exists to catch - stops making progress and its beacon ages exactly as before.
+# The throttle reads $SECONDS, a bash builtin, so a call costs no fork; the
+# interval only bounds how often a tight loop rewrites the file. A forked
+# subshell inherits the last tick, so it never re-touches ahead of the schedule.
+_FM_BEACON_TICK_AT=
+fm_watch_beacon_tick() {
+  local beat=$1
+  if [ -n "$_FM_BEACON_TICK_AT" ] && [ "$SECONDS" -ge "$_FM_BEACON_TICK_AT" ] \
+    && [ $((SECONDS - _FM_BEACON_TICK_AT)) -lt 1 ]; then
+    return 0
+  fi
+  _FM_BEACON_TICK_AT=$SECONDS
+  # Truncation updates the mtime without a fork; the beacon carries no content.
+  : > "$beat" 2>/dev/null || true
+  return 0
+}
+
+# fm_watch_beacon_progress
+# The call a sweep inside a supervision cycle makes: when invoked by the owning
+# watcher process itself, it refreshes the liveness beacon ($BEAT). When invoked
+# by a child subprocess (e.g. a display sweep or helper command), it updates a
+# separate progress marker ($FM_WATCH_PROGRESS_PATH) instead of the beacon, so a
+# frozen watcher parent (e.g. SIGSTOP) never has its beacon kept fresh by child
+# activity. Outside a watcher, it does nothing so no library invents liveness.
+fm_watch_beacon_progress() {
+  [ -n "${FM_WATCH_BEACON_PATH:-}" ] || return 0
+  if [ -n "${FM_WATCHER_PID:-}" ] && [ "$$" != "$FM_WATCHER_PID" ]; then
+    if [ -n "${FM_WATCH_PROGRESS_PATH:-}" ]; then
+      fm_watch_beacon_tick "$FM_WATCH_PROGRESS_PATH"
+    fi
+    return 0
+  fi
+  fm_watch_beacon_tick "$FM_WATCH_BEACON_PATH"
 }
 
 # fm_watcher_lock_unheld <state>
@@ -237,7 +313,7 @@ fm_watcher_lock_matches_pid() {
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local state=$1 watch_path=$2 grace=${3:-$(fm_beacon_grace)} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
@@ -505,7 +581,7 @@ FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
-  local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
+  local state=$1 watch=$2 grace=${3:-$(fm_beacon_grace)} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
   local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false
@@ -2342,7 +2418,7 @@ fm_pid_descends_from() {  # <pid> <ancestor>
 # Claude session (the Stop payload's session_id) also finds a claim recorded
 # under another session not open.
 fm_autoarm_claim_open() {  # <state-dir> [grace] [claude-session]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session=${3:-} epoch current lock_pid lock_identity recorded
+  local state=$1 grace=${2:-$(fm_beacon_grace)} session=${3:-} epoch current lock_pid lock_identity recorded
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
@@ -2434,7 +2510,7 @@ fm_autoarm_session_matches() {  # <state-dir> <identity> [recorded-session-id]
 # (the ledger holds a claim open to this session), and 1 when the micro-mutex
 # is contended, the mandatory identity cannot be computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace] [claude-session]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} claude_session=${3:-} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
+  local state=$1 grace=${2:-$(fm_beacon_grace)} claude_session=${3:-} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
@@ -2628,7 +2704,7 @@ fm_autoarm_rekey_session() {  # <state-dir> <old-pid> <new-pid>
 #      and the watcher beacon are older than the guard grace (the same stuck
 #      proof as fm_autoarm_claim_open).
 fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  local state=$1 grace=${2:-$(fm_beacon_grace)} epoch lock role pid owner outcome recorded current
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
@@ -2679,7 +2755,7 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # TERM and the ledger graft below, keeping the documented bounded
 # upgrade-window residual instead of the deadlock.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
+  local state=$1 grace=${2:-$(fm_beacon_grace)} lock steal epoch lock_pid recorded current owner line1 tmp i
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"

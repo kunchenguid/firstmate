@@ -4,13 +4,18 @@
 #
 # Reports whether a firstmate home needs supervision (fm_supervision_status
 # below is the single owner of that condition set), and whether its watcher has
-# a fresh liveness beacon (state/.last-watcher-beat, touched every poll cycle,
-# within the grace window).
+# a fresh liveness beacon (state/.last-watcher-beat, touched at the top of every
+# poll cycle and refreshed between its units, within the grace window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
+
+# shellcheck source=bin/fm-wake-lib.sh
+if ! command -v fm_poll_derived_grace >/dev/null 2>&1; then
+  . "${BASH_SOURCE[0]%/*}/fm-wake-lib.sh"
+fi
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -42,10 +47,12 @@ fm_sup_stat_mtime() {
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
-# grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
+# grace-seconds defaults to $FM_GUARD_GRACE, then the poll-derived default
+# (bin/fm-wake-lib.sh fm_beacon_grace owns it, so this matches fm-guard.sh and
+# the arm that replaces a stalled cycle).
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
+  local state=$1 grace=${2:-$(fm_beacon_grace)} meta source check id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false

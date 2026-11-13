@@ -63,7 +63,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
-RETURN_GRACE=${FM_GUARD_GRACE:-300}
 
 # The posture-record owner: path helpers only; every read goes through its
 # subcommands. It sources fm-classify-lib.sh, which has no side effects, so the
@@ -904,6 +903,7 @@ main() {
   # read-only guard is literal.
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  RETURN_GRACE=$(fm_beacon_grace)
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
   # shellcheck source=bin/fm-backlog-transition-lib.sh
