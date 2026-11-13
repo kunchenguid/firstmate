@@ -84,12 +84,17 @@
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
-# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and resolves each named
+# `<task-id>\t<answer>\t<label>[\t<mode>[\t<occurrence>]]` lines on stdin and resolves each named
 # task through the very same `answer` path above, so every guard applies
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A `release` line while the away-posture
+# resumes; anything else is skipped. The optional fifth field is the `<n>` of the
+# `captain-hold-<task>-<n>` call the answer was given to: when present, the line
+# closes only that occurrence of the call (the open hold whose body carries n-1
+# resolution records, or a retry or replay of the record for occurrence n), so an
+# answer to an earlier call never closes a newer re-hold of the same task, and a
+# mismatch is reported as `skipped:`. A `release` line while the away-posture
 # record exists is reported as `refused:` under the same attended-only rule as
 # `answer --release` and feeds nothing. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
@@ -1528,7 +1533,7 @@ sanitize_reconcile_provenance() {
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_digest recorded_mode occurrence want_occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   local resolve_rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1558,7 +1563,9 @@ command_answers() {
     answer=${rest%%"$tab"*}
     case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
     label=${rest%%"$tab"*}
-    case "$rest" in *"$tab"*) mode=${rest#*"$tab"} ;; *) mode='' ;; esac
+    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
+    mode=${rest%%"$tab"*}
+    case "$rest" in *"$tab"*) want_occurrence=${rest#*"$tab"} ;; *) want_occurrence='' ;; esac
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
@@ -1570,6 +1577,14 @@ command_answers() {
       skipped=$((skipped + 1))
       continue
     fi
+    case "$want_occurrence" in
+      '') : ;;
+      *[!0-9]* | 0*)
+        printf 'skipped: %s (unknown call occurrence %s)\n' "$key" "$(sanitize_field "$want_occurrence")"
+        skipped=$((skipped + 1))
+        continue
+        ;;
+    esac
     release_flag=''
     case "${mode:-}" in
       ''|done) : ;;
@@ -1627,7 +1642,10 @@ command_answers() {
     body=$(show_field "$show" body)
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
+    occurrence=''
+    [ -z "$want_occurrence" ] || occurrence=$(resolution_record_count "$body")
     if body_has_resolution_record "$body" \
+      && { [ -z "$want_occurrence" ] || [ "$want_occurrence" = "$occurrence" ]; } \
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
@@ -1653,6 +1671,15 @@ command_answers() {
     fi
     if [ "$hold_kind" != captain ]; then
       printf 'skipped: %s (not held for the captain)\n' "$id"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    # The open hold is occurrence count+1; an interrupted close of this very
+    # answer already carries its record, so it is still occurrence count.
+    if [ -n "$want_occurrence" ] && [ "$want_occurrence" != $((occurrence + 1)) ] \
+      && ! { [ "$want_occurrence" = "$occurrence" ] && [ "$recorded_digest" = "$digest" ]; }; then
+      printf 'skipped: %s (the answer is for call occurrence %s, but the open hold is occurrence %s)\n' \
+        "$id" "$want_occurrence" $((occurrence + 1))
       skipped=$((skipped + 1))
       continue
     fi

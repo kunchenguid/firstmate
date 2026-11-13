@@ -210,7 +210,7 @@ Only `answer` with the captain's words or evidence-backed `reconcile close` reso
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point.
-It reads `<task-id>\t<answer>\t<label>[\t<mode>]` lines and resolves each named task through the same `answer` path.
+It reads `<task-id>\t<answer>\t<label>[\t<mode>[\t<occurrence>]]` lines and resolves each named task through the same `answer` path.
 Every guard therefore applies identically no matter which channel the answer arrived on.
 
 The optional mode column carries a card-declared close:
@@ -228,6 +228,7 @@ Each key is reported as follows:
 | Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
 | A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
 | A replay with a mode mismatch | Skipped. |
+| An occurrence column naming a call other than the open hold's `captain-hold-<task>-<n>` occurrence, or the record that closed it | Skipped, so an answer to an earlier call never closes a newer re-hold. |
 
 The command exits nonzero when any key was skipped.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch.
@@ -247,6 +248,10 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 - For a key the status log still owns, that script's header owns the status-log close.
 - A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
   The script tries the key as a task id first, then the legacy derived identity.
+- A `captain-hold-<task>-<n>` key in a secondmate's ledger copy names a call held in that mate's own backlog, whether the key is still open there or `complete` already transferred it to a captain-held task in this home.
+  After the answer is delivered, the script also feeds `<task>\t<answer>\t\t\t<n>` (empty label and mode, occurrence `<n>`) to that mate home's own intake, directly for a local mate and through `fm-remote-secondmate-control.sh answers` for a remote one, so that exact call closes without waiting for the mate's next turn.
+  That feed is best-effort and never changes the send's exit status.
+  A steer to a mate with such open calls that carries no `--resolve-key` prints one notice naming them.
 
 `bin/fm-procevent.sh` is the captured-result channel:
 

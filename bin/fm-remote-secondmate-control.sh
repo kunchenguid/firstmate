@@ -8,6 +8,7 @@
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh send-stdin <id> [fire-and-forget]  # message on stdin
+#   fm-remote-secondmate-control.sh answers <id>  # keyed lines on stdin
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -41,6 +42,14 @@
 # Retirement closes only this secondmate's panes or workspace and never
 # stops the remote Herdr service or removes a sibling secondmate's workspace or panes.
 #
+# `answers` feeds this host's own bin/fm-captain-hold.sh keyed-answer intake with
+# the keyed lines (read from stdin) the parent's fm-send --resolve-key built
+# for calls the secondmate holds in its own backlog, so a call the captain
+# answered closes in this home at enqueue time instead of waiting for its model
+# turn. It is the same one intake every channel feeds; the leg only runs it with
+# this home's FM_HOME and decides nothing. It exits nonzero when the intake
+# skipped a key, which the parent reports as a notice and never as a failed send.
+#
 # Relaunch is not a second lifecycle implementation: it runs the ORDINARY local
 # control plane here, because from this host the mate is a plain local
 # secondmate. cmd_relaunch below owns why the parent must hand it the profile.
@@ -69,7 +78,7 @@ REMOTE_HERDR_SESSION=
 export FM_BACKEND_REX_NO_AUTOSTART=1
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 # Sourcing fm-wake-lib.sh through the libraries below creates "$FM_HOME/state",
@@ -428,6 +437,19 @@ cmd_send_stdin() {
   cmd_send_body "$id" "$message" "$delivery_mode"
 }
 
+cmd_answers() {
+  local id=$1 lines
+  validate_id "$id"
+  validate_home "$id"
+  IFS= read -r -d '' lines < /dev/stdin || :
+  [ -n "$lines" ] || die "no keyed answer lines were supplied"
+  printf '%s' "$lines" | FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
+    FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" answers \
+    --source "a firstmate answer relayed to $id by its parent"
+}
+
 cmd_key() {
   local id=$1 key=$2
   validate_id "$id"
@@ -563,6 +585,7 @@ case "${1:-}" in
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   send-stdin) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_send_stdin "$@" ;;
+  answers) shift; [ "$#" -eq 1 ] || usage; cmd_answers "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
