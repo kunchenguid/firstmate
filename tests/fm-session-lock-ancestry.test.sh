@@ -357,13 +357,13 @@ JS
       node "$option" "$dir/Agent Tools/preload.cjs" "$script" \
       || fail "auggie: live node $option lost script identity"
   done
-  for option in "--require=$dir/Agent Tools/preload.cjs" "--import=$dir/Agent Tools/preload.cjs" --max-old-space-size=4096; do
+  for option in "--require=$dir/Agent Tools/preload.cjs" "--import=$dir/Agent Tools/preload.cjs" --max-old-space-size=4096 --unhandled_rejections=warn; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
       FM_TEST_AUGGIE_SCRIPT="$script" \
       node "$option" "$script" \
       || fail "auggie: live node $option lost script identity"
   done
-  for option in --disable-warning --unhandled-rejections; do
+  for option in --disable-warning --unhandled-rejections --unhandled_rejections; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
       FM_TEST_AUGGIE_SCRIPT="$script" \
       node "$option" warn "$script" \

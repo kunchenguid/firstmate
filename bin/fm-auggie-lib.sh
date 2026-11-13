@@ -73,7 +73,7 @@ fm_auggie_path_is_auggie() {  # <path>
 # recovered from flattened args.
 fm_auggie_script_arg() {  # <args> [pid]
   local args=$1 pid=${2:-} token index=1 candidate='' script=''
-  local live_argv=0 options=1 operand joined probe
+  local live_argv=0 options=1 option operand joined probe
   local -a words=()
   if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
     live_argv=1
@@ -88,7 +88,13 @@ fm_auggie_script_arg() {  # <args> [pid]
     index=$((index + 1))
     if [ -z "$candidate" ]; then
       if [ "$options" -eq 1 ]; then
-        case "$token" in
+        option=$token
+        if [[ "$token" = -* ]]; then
+          option=${token%%=*}
+          option=${option//_/-}
+          case "$token" in *=*) option="$option=${token#*=}" ;; esac
+        fi
+        case "$option" in
           -e|--eval|-p|--print|--run|--eval=*|--print=*|--run=*|-e?*|-p?*) return 1 ;;
           --) options=0; continue ;;
           -*=*) operand=${token#*=} ;;
