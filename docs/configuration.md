@@ -7,7 +7,7 @@ Start with the directory layout, then use the setting reference for the behavior
 
 | What you want to configure | Start here |
 | --- | --- |
-| Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
+| Firstmate's code, private files, or project location | [FM_HOME](#fm_home), [operational home layout](#operational-home-layout-and-state), and [Claude and cloned projects' instructions](#claude-and-cloned-projects-instructions) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
@@ -1532,11 +1532,11 @@ Pi-family secondmates can start unattended in Firstmate-seeded homes without acc
 For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<id>.omp-ext.ts` busy extension with `-e`: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch also carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
 For a Claude secondmate, `fm-spawn.sh` writes the busy hooks into the parent home's `state/<id>.claude-settings.json` and passes that file as Claude Code's one `--settings` value.
-The same file carries `feedbackDrafts` and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON.
+The same file carries `feedbackDrafts` and, unless `config/keep-ai-trailers` is present, the attribution policy every other Claude launch puts in its inline `--settings` JSON, plus the secondmate-only [`claudeMdExcludes` patterns](#claude-and-cloned-projects-instructions).
 Claude Code applies `--settings` for that session and does not write the file into the mate home.
 A key the file sets overrides the same key in user, project, and local settings.
 A key it omits keeps the file-based value, so a `.claude/settings.local.json` already in the home is left untouched.
-Hook entries merge across settings files rather than replacing each other, so the home's tracked Stop guard still runs beside these hooks.
+Hook entries and `claudeMdExcludes` patterns merge across settings files rather than replacing each other, so the home's tracked Stop guard still runs beside these hooks and patterns the home's own settings add still apply.
 The CLI reference documents the one file-or-JSON flag, the settings page documents session precedence, and the hooks page documents the hooks merge: <https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/settings>, <https://code.claude.com/docs/en/hooks>.
 [`fm-spawn.sh`](../bin/fm-spawn.sh) owns the file and the flag.
 
@@ -1552,6 +1552,40 @@ Firstmate targets current CLIs rather than detecting versions or emulating older
 Crew and scout launches still request hook disablement and retain their notification wiring, while secondmates retain their primary-session hooks.
 A managed policy can override the requested hook disablement, so it may still require an operator's hook review.
 See the [current verification and limits](verification/runtime-backends.md#codex-automatic-approval-review) for observed task-channel and network access.
+
+## Claude and cloned projects' instructions
+
+A home keeps its project clones in `projects/`, inside the directory a Claude primary or secondmate runs in.
+Claude Code treats a read of a file there as a reason to add that project's `CLAUDE.md`, the files it imports, and its `.claude/rules` to the session, although the supervisor never changes a project and those instructions are written for the project's own workers.
+The [Claude harness reference](../.agents/skills/harness-adapters/references/harness/claude.md#nested-project-memory) owns what triggers that load and how Claude Code matches `claudeMdExcludes`.
+
+A Claude secondmate needs no configuration: the settings file `bin/fm-spawn.sh` passes it with `--settings` excludes the instruction files under that home's `projects/`, and `bin/fm-claude-project-memory-lib.sh` owns the patterns.
+Three cases get no exclusion.
+T3 Code [owns the Claude provider command](t3code-backend.md#active-limits), so Firstmate cannot add the patterns to a T3 secondmate.
+A raw launch command carries no `--settings`, so protect a secondmate started with one through its home's `.claude/settings.local.json`, as for the primary below.
+A home whose physical path holds a control character or one of `*?[]{}()\` cannot be written as a pattern, because picomatch would read those characters as one, so `bin/fm-spawn.sh` warns at launch instead; move that home to a path without them.
+Ship and scout workers keep loading their project's instructions, because those are written for them.
+
+Firstmate passes no settings file to the primary, because the captain launches it.
+To protect a primary, add the same patterns to the home's untracked `.claude/settings.local.json`, keeping the keys already there:
+
+```json
+{
+  "claudeMdExcludes": [
+    "/physical/path/of/the/home/projects/**/CLAUDE*.md",
+    "/physical/path/of/the/home/projects/**/AGENTS.md",
+    "/physical/path/of/the/home/projects/**/.claude/rules/**"
+  ]
+}
+```
+
+Use the physical path that `pwd -P` prints for the home's projects directory.
+When that directory is outside the directory the primary runs in, Claude Code loads nothing from it and no exclusion is needed.
+The patterns must be absolute, because Claude Code resolves no relative path, `./`, `~`, or `$CLAUDE_PROJECT_DIR` in them.
+Do not shorten them to `**/projects/**`, which also excludes the primary's own `CLAUDE.md` when the home itself sits under a directory named `projects`.
+Keep them out of the tracked `.claude/settings.json`, where the path would be wrong for every other home, and out of user settings, where they would also reach a worker whose worktree lives under that directory.
+A session started after the edit reads them.
+User rules under `~/.claude/rules` with matching `paths:` also load on such a read; excluding one is a personal choice that goes in the same list.
 
 ## Claude permission mode (config/claude-permission-mode)
 

@@ -538,7 +538,8 @@
 #                  supplies its own trailing space, empty never used)
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
-#                  state/<task-id>.claude-settings.json for a secondmate
+#                  state/<task-id>.claude-settings.json for a secondmate, which
+#                  also excludes the home's projects/ instruction files
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -781,6 +782,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-claude-project-memory-lib.sh
+. "$SCRIPT_DIR/fm-claude-project-memory-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -3956,6 +3959,19 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# The claudeMdExcludes member, trailing comma included, a Claude secondmate's
+# --settings file carries for its home, or nothing with a warning when the
+# home's path cannot be written as a safe pattern. The secondmate launch
+# clears FM_PROJECTS_OVERRIDE, so its clones are always <home>/projects.
+claude_project_memory_member() {  # <home>
+  local excludes
+  if excludes=$(fm_claude_project_memory_excludes "$1"); then
+    printf '"claudeMdExcludes":%s,' "$excludes"
+  else
+    echo "warning: $ID's Claude session will load the instructions of the projects cloned under $1/projects, because that path cannot be written as a claudeMdExcludes pattern" >&2
+  fi
+}
+
 # rovo confines every file-tool operation (open_files, create_file, grep, ...)
 # to its worktree by default; toolPermissions.allowedExternalPaths
 # (~/.rovo/config.yml) is the only lift, and it must be granted at launch
@@ -6555,6 +6571,9 @@ BUSY_GEN=
     # (https://code.claude.com/docs/en/hooks) and keeps any key
     # the flag omits (https://code.claude.com/docs/en/cli-reference), so the
     # home's tracked Stop guard and its settings.local.json both stay.
+    # The same file keeps the home's cloned projects' instruction files out of
+    # the secondmate (bin/fm-claude-project-memory-lib.sh); a crewmate gets no
+    # such key, because it needs its own project's instructions.
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
@@ -6579,9 +6598,9 @@ BUSY_GEN=
     fi
     hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
     if [ "$KIND" = secondmate ]; then
-      session_keys='"feedbackDrafts":"off",'
+      session_keys="$(claude_project_memory_member "$WT")"'"feedbackDrafts":"off",'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then
-        session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
+        session_keys="$session_keys"'"attribution":{"commit":"","pr":"","sessionUrl":false},'
       fi
       printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
     else

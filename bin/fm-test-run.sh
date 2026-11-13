@@ -392,7 +392,7 @@ family_for_basename() {
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
-    fm-claude-tool-exclude-live.test.sh)
+    fm-claude-tool-exclude-live.test.sh|fm-claude-project-memory-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -778,6 +778,7 @@ tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
 tests/fm-classify-decision-key.test.sh 4362
 tests/fm-claude-account-quota.test.sh 2492
+tests/fm-claude-project-memory-live.test.sh 250
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
 tests/fm-claude-stop-autoarm.test.sh 61189
 tests/fm-claude-tool-exclude-live.test.sh 75
@@ -1698,6 +1699,9 @@ families_for_changed_path() {
       ;;
     tests/fixtures/fm-claude-request-capture.py)
       printf '%s\n' __script__:fm-claude-tool-exclude-live.test.sh
+      ;;
+    tests/fixtures/fm-claude-read-replay.py)
+      printf '%s\n' __script__:fm-claude-project-memory-live.test.sh
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
