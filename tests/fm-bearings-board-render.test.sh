@@ -295,6 +295,29 @@ EOF
   pass "the complete snapshot question and options reach rendered decision text"
 }
 
+test_later_option_carries_its_date_only_when_selected() {
+  local home out calls
+  home=$(make_home later-option)
+  calls='[{"key":"route-call","type":"decision","repo":"sample","title":"Choose a route",
+    "allow_freeform":true,"close":"release","options":[
+      {"value":"go","label":"Proceed"},
+      {"value":"later","label":"Revisit after the release","defer_until":"2099-07-20"}]}]'
+  render_board "$home" '[]' '[]' 0 0 "$calls" >/dev/null
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html" '[
+    {"index":0,"selection":"later","note":"after the release"},
+    {"index":0,"selection":"go"},
+    {"index":0,"selection":"","note":"later in my own words"}]') \
+    || fail "could not submit the rendered later option"
+  printf '%s' "$out" | jq -e '
+    .queued[0].data == {schema:"fm-bearings-answer.v1",question:"route-call",
+      selection:"later",note:"after the release",close:"release",defer_until:"2099-07-20"}
+    and (.queued[1].data | has("defer_until") | not)
+    and (.queued[2].data | has("defer_until") | not)
+  ' >/dev/null || fail "the selected later option did not carry its structural date exclusively: $out"
+  pass "only selecting the dated option queues a deferral marker"
+}
+
+test_later_option_carries_its_date_only_when_selected
 test_full_snapshot_question_reaches_the_rendered_decision
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

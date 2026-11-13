@@ -576,6 +576,8 @@ __FM_BEARINGS_BOARD_DATA__
           note: note
         };
         if (item.close) ctxData.close = item.close;
+        var selectedOption = item.options.find(function (o) { return o.value === value; });
+        if (selectedOption && selectedOption.defer_until) ctxData.defer_until = selectedOption.defer_until;
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + displayAnswer,
           { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
