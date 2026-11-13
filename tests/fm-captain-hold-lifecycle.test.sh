@@ -2563,8 +2563,64 @@ SH
   pass "a bound board later answer keeps the original captain hold with its date"
 }
 
+test_board_deferral_invalidates_pr_policy() {
+  local home action before show reason url=https://github.com/sample/sample/pull/42
+  for action in close release; do
+    home=$(make_home "board-later-policy-$action")
+    : > "$home/config/hold-pr-settle"
+    run_captain "$home" hold sample-later-policy --title "Deployment route" \
+      --reason "Staged rollout or direct rollout?" --repo sample >/dev/null \
+      || fail "could not create the policy-backed decision"
+    run_captain "$home" pr-policy sample-later-policy "$url" merged "$action" >/dev/null \
+      || fail "could not declare the $action policy"
+    reason=$(tasks_in "$home" show sample-later-policy --full | sed -n 's/^  hold_reason: //p')
+    cat > "$home/board.result" <<'EOF'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Revisit after the release","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-later-policy\",\"selection\":\"later\",\"note\":\"\",\"defer_until\":\"2099-07-20\"}"
+EOF
+    run_lavish "$home" answers "$home/board.result" \
+      | run_captain "$home" answers --source "captured board deferral" >/dev/null \
+      || fail "could not defer the policy-backed decision"
+    before=$(tasks_in "$home" show sample-later-policy --full)
+    assert_contains "$before" "hold_until: 2099-07-20" "the policy-backed call was not deferred"
+    [ "$(printf '%s\n' "$before" | sed -n 's/^  hold_reason: //p')" = "$reason" ] \
+      || fail "deferring the policy-backed call changed its question"
+    jq -n --arg url "$url" '{
+      schema:"fm-contributions.v1",task:"sample-later-policy",records:[{
+        url:$url,kind:"pr",checked_at:"2026-07-14T12:00:00Z",error:null,
+        pending:[],seen:[],verdict:null,
+        observation:{head:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",state:"merged",
+          draft:false,mergeable:"mergeable",review_decision:"APPROVED",can_merge:false,
+          checks:[],reviews:[],events:[]}
+      }]}' > "$home/data/sample-later-policy/contributions.json" \
+      || fail "could not record the observed merge"
+    run_captain "$home" settle-pr sample-later-policy "$url" >/dev/null \
+      || fail "could not process the merge after deferral"
+    show=$(tasks_in "$home" show sample-later-policy --full)
+    [ "$show" = "$before" ] || fail "the stale $action policy overrode the board deferral"
+    assert_absent "$home/data/sample-later-policy/hold-pr-policy.json" \
+      "the board deferral retained the stale $action policy"
+    run_captain "$home" pr-policy sample-later-policy "$url" merged "$action" >/dev/null \
+      || fail "could not declare a new $action policy"
+    run_captain "$home" settle-pr sample-later-policy "$url" >/dev/null \
+      || fail "the same merge evidence could not settle a new $action policy"
+    show=$(tasks_in "$home" show sample-later-policy --full)
+    if [ "$action" = close ]; then
+      assert_contains "$show" "state: done" "the new close policy did not consume the merge evidence"
+    else
+      assert_contains "$show" "held: no" "the new release policy did not consume the merge evidence"
+      assert_not_contains "$show" "state: done" "the new release policy closed unfinished work"
+    fi
+  done
+  pass "board deferrals invalidate prior PR close and release policies without changing the question"
+}
+
 test_board_deferral_rechecks_hold_after_concurrent_release() {
-  local home release_pid defer_pid before show rc=0
+  local home release_pid defer_pid before show real_sleep rc=0
+  real_sleep=$(command -v sleep) || fail "sleep is required for the concurrent decision test"
   home=$(make_home board-later-race)
   run_captain "$home" hold sample-later-race --title "Deployment route" \
     --reason "Staged rollout or direct rollout?" --repo sample >/dev/null \
@@ -2585,7 +2641,7 @@ if [ "${1:-}" = unhold ] && [ "${2:-}" = sample-later-race ]; then
   : > "$FM_HOME/release-ready"
   for ((i=0; i<3000; i++)); do
     [ ! -e "$FM_HOME/release-go" ] || break
-    /bin/sleep 0.01
+    "$FM_TEST_REAL_SLEEP" 0.01
   done
   [ -e "$FM_HOME/release-go" ] || exit 91
 fi
@@ -2597,20 +2653,22 @@ if [ "${FM_TEST_DEFER_WAIT:-}" = 1 ] && [ "${1:-}" = 0.1 ]; then
   : > "$FM_HOME/defer-waiting"
   for ((i=0; i<3000; i++)); do
     [ ! -e "$FM_HOME/defer-go" ] || break
-    /bin/sleep 0.01
+    "$FM_TEST_REAL_SLEEP" 0.01
   done
   [ -e "$FM_HOME/defer-go" ] || exit 92
 fi
-exec /bin/sleep "$@"
+exec "$FM_TEST_REAL_SLEEP" "$@"
 SH
   chmod +x "$home/fakebin/tasks-axi" "$home/fakebin/sleep"
   printf 'Use the staged rollout.\n' > "$home/release.txt"
-  run_captain "$home" answer sample-later-race --release --decision-file "$home/release.txt" \
+  FM_TEST_REAL_SLEEP="$real_sleep" run_captain "$home" answer sample-later-race \
+    --release --decision-file "$home/release.txt" \
     > "$home/release.out" 2> "$home/release.err" &
   release_pid=$!
   wait_for_test_file "$home/release-ready" "$release_pid" \
     || fail "the chat release did not reach the locked backend transition"
-  FM_TEST_DEFER_WAIT=1 run_captain "$home" answers --source "captured board deferral" \
+  FM_TEST_REAL_SLEEP="$real_sleep" FM_TEST_DEFER_WAIT=1 \
+    run_captain "$home" answers --source "captured board deferral" \
     < "$home/answers.tsv" > "$home/defer.out" 2> "$home/defer.err" &
   defer_pid=$!
   wait_for_test_file "$home/defer-waiting" "$defer_pid" \
@@ -5311,6 +5369,7 @@ test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
 test_board_later_answer_keeps_the_original_hold
+test_board_deferral_invalidates_pr_policy
 test_board_deferral_rechecks_hold_after_concurrent_release
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
