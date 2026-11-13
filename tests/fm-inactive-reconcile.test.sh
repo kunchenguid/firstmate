@@ -892,6 +892,9 @@ SH
   esac
   printf 'floor-measure mode=%s start=%s deadline=%s budget_ms=%s elapsed_ms=%s rc=%s outer_expiry=%s reader_expiry=%s\n' \
     "$mode" "$started" "$deadline" "$((deadline - started))" "$elapsed" "$rc" "$outer_expiry" "$reader_expiry"
+  [ "$reader_expiry" -lt "$((outer_expiry - 500))" ] \
+    && [ "$deadline" -lt "$((reader_expiry - 500))" ] \
+    || fail 'a child deadline did not leave its parent the explicit cleanup reserve'
   [ "$deadline" -le "$outer_expiry" ] && [ "$deadline" -le "$reader_expiry" ] \
     || fail 'the reader promised time beyond an enclosing watchdog'
   [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
