@@ -1143,7 +1143,7 @@ test_forge_custom_ssh_wrapper_fails_closed() {
   marker="$case_dir/wrapper-ran"
   mkdir -p "$project" "$case_dir/home/config" "${wrapper%/*}"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf wrapper-ran > "$WRAPPER_MARKER"' > "$wrapper"
+  printf '%s\n' '#!/usr/bin/env bash' "printf wrapper-ran > \"\$WRAPPER_MARKER\"" > "$wrapper"
   chmod +x "$wrapper"
   git -C "$project" init -q
   git -C "$project" remote add origin git@github.com:example/project.git
@@ -1175,7 +1175,7 @@ test_forge_path_ssh_wrapper_fails_closed() {
   marker="$case_dir/path-wrapper-ran"
   mkdir -p "$project" "$case_dir/home/config" "${wrapper%/*}"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf wrapper-ran > "$PATH_WRAPPER_MARKER"' \
+  printf '%s\n' '#!/usr/bin/env bash' "printf wrapper-ran > \"\$PATH_WRAPPER_MARKER\"" \
     > "$wrapper"
   chmod +x "$wrapper"
   git -C "$project" init -q

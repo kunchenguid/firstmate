@@ -79,7 +79,7 @@ fm_forge_safe_ssh_config() {
 # HostName directives. Passing the original config to ssh would also evaluate
 # Match exec commands while resolving a remote's provider alias.
 fm_forge_safe_ssh_include_patterns() {
-  local input=${1:-} token= quote= escaped=0 i char
+  local input=${1:-} token='' quote='' escaped=0 i char
 
   for ((i = 0; i < ${#input}; i++)); do
     char=${input:i:1}
@@ -89,7 +89,7 @@ fm_forge_safe_ssh_include_patterns() {
       continue
     fi
     case "$char" in
-      '\\') escaped=1 ;;
+      \\) escaped=1 ;;
       "'"|'"')
         if [ -z "$quote" ]; then
           quote=$char
@@ -171,7 +171,7 @@ fm_forge_safe_ssh_config_file() {
         while IFS= read -r pattern; do
           [ -n "$pattern" ] || continue
           case "$pattern" in
-            "~/"*) candidate="${HOME:-}/${pattern:2}" ;;
+            ~/*) candidate="${HOME:-}/${pattern:2}" ;;
             "~"*|*\$*|*%*) return 1 ;;
             /*) candidate=$pattern ;;
             *) candidate="$dir/$pattern" ;;
@@ -248,7 +248,7 @@ fm_forge_ssh_command_executable() {
 }
 
 fm_forge_ssh_command_config() {
-  local command=${1:-} token first config= i
+  local command=${1:-} token first config='' i
   local -a argv
 
   case "$command" in
@@ -293,7 +293,7 @@ fm_forge_safe_ssh_config_for_checkout() {
     return 0
   fi
   case "$config" in
-    "~/"*) config="${HOME:-}/${config:2}" ;;
+    ~/*) config="${HOME:-}/${config:2}" ;;
     /*) ;;
     *)
       checkout_root=$(cd "$checkout" 2>/dev/null && pwd -P) || return 1
