@@ -143,8 +143,8 @@
 # FM_SUPERVISION_HOST_OWNER_PID) is still current. A host the session-end
 # keeper runs (bin/fm-supervision-session-end.sh) has no session left to hold
 # the lock, so it proves fm_supervision_host_session_end_owned instead, with the
-# FM_SUPERVISION_HOST_SESSION_END_GEN and FM_SUPERVISION_HOST_SESSION_END_RECORD
-# the keeper passes, and never starts an acknowledged hand-back. Otherwise it
+# FM_SUPERVISION_HOST_SESSION_END_GEN and FM_SUPERVISION_HOST_SESSION_END_PID
+# the keeper passes, reads no dialog mirror (the main session is gone), and never starts an acknowledged hand-back. Otherwise it
 # stands down with a "supervision-host:" line and leaves the decision to its owner; a
 # host that stands down before activation leaves the owner's host record,
 # processes, arms, and leases alone. The engine runs with
@@ -252,7 +252,7 @@ COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
 SESSION_END_GEN=${FM_SUPERVISION_HOST_SESSION_END_GEN:-}
-SESSION_END_RECORD=${FM_SUPERVISION_HOST_SESSION_END_RECORD:-}
+SESSION_END_PID=${FM_SUPERVISION_HOST_SESSION_END_PID:-}
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
 [ -n "$PRIMARY" ] || PRIMARY=$(fm_supervision_host_primary)
 # The owner's predecessor arm belongs to the first cycle only.
@@ -493,8 +493,8 @@ retire_arm() {  # <pid> <output-file>
 }
 
 host_still_owner() {
-  if [ -n "$SESSION_END_RECORD" ]; then
-    fm_supervision_host_session_end_owned "$STATE" "$SESSION_END_GEN" "$SESSION_END_RECORD"
+  if [ -n "$SESSION_END_PID" ]; then
+    fm_supervision_host_session_end_owned "$STATE" "$SESSION_END_GEN" "$SESSION_END_PID"
     return
   fi
   fm_session_lock_owned_by_self "$STATE" || return 1
@@ -740,7 +740,7 @@ exit_to_main() {  # <why> [further lines]
 # The opt-in path never changes the default hand-back paths. It must verify
 # protection before emitting the close, not assume a detached process started.
 acknowledged_handback() {  # [extra output lines]; returns only when disabled
-  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] && [ -z "$SESSION_END_RECORD" ] || return 1
+  [ "$PRIMARY" = claude ] && [ -e "$CONFIG/supervision-handoff-ack" ] && [ -z "$SESSION_END_PID" ] || return 1
   host_still_owner || stand_down "this session no longer owns supervision"
   local predecessor=${SUCCESSOR_PID:-${ARM_PID:-${CLOSED_ARM_PID:-$HOST_PID}}} pid out deadline tmp
   retire_arm "$ARM_PID" "$ARM_OUT"
@@ -1110,7 +1110,7 @@ handle_wake() {  # <reason-lines>
   # away wake never reads the mirror or moves its cursor.
   mirror=$MIRROR_FEED
   rm -f "$mirror"
-  if [ "$TURN_POSTURE" = attended ] \
+  if [ "$TURN_POSTURE" = attended ] && [ -z "$SESSION_END_PID" ] \
     && ! (umask 077; exec "$SCRIPT_DIR/fm-host-mirror.sh" feed "$ENGINE_SESSION" "$ENGINE_MODE" > "$mirror" 2>/dev/null); then
     rm -f "$TURN_FILE" "$mirror"
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
@@ -1120,7 +1120,7 @@ handle_wake() {  # <reason-lines>
   set -- --report "the bin/fm-branch-report.sh command"
   if [ "$TURN_POSTURE" = away ]; then
     set -- "$@" --away ${readback:+--readback-file "$readback"}
-  else
+  elif [ -z "$SESSION_END_PID" ]; then
     set -- "$@" --mirror-file "$mirror"
   fi
   rm -f "$WAKE_FILE"
@@ -1226,11 +1226,11 @@ attended_acceptor() {  # <first-reason-line>
   ATTENDED_OFFER=
   if ! fm_supervision_host_attended_ready "$CONFIG" "$PRIMARY"; then
     ATTENDED_WHY=$FM_SUPERVISION_HOST_UNREADY
-  elif ! fm_supervision_host_main_key "$STATE" >/dev/null; then
+  elif [ -z "$SESSION_END_PID" ] && ! fm_supervision_host_main_key "$STATE" >/dev/null; then
     ATTENDED_WHY="the main session could not be identified"
   elif health_cooling; then
     ATTENDED_WHY="the supervision session is cooling down after engine errors"
-  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer 2>/dev/null); then
+  elif ! offer=$(printf '%s\n' "$1" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer ${SESSION_END_PID:+--afk} 2>/dev/null); then
     ATTENDED_WHY="branch eligibility could not be computed"
   elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
     ATTENDED_WHY="main-only"

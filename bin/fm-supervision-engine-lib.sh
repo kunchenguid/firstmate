@@ -201,19 +201,19 @@ fm_supervision_host_main_key() {
     "$(sed -n '1p' "$1/.lock-session" 2>/dev/null | cksum | awk '{ print $1 }')"
 }
 
-# fm_supervision_host_session_end_owned <state-dir> <autoarm-gen> <confirmed-epoch>:
-# 0 while a host started after the Claude main session ended
+# fm_supervision_host_session_end_owned <state-dir> <autoarm-gen> <session-pid>:
+# 0 while a host started after the Claude main session <session-pid> ended
 # (bin/fm-supervision-session-end.sh) still owns supervision: no later Stop has
 # claimed an auto-arm generation past <autoarm-gen> (empty when no ledger
-# existed), and the away record whose confirmed_epoch is <confirmed-epoch>
-# still stands. Needs bin/fm-wake-lib.sh and bin/fm-afk-contract.sh sourced
-# first.
+# existed), and no later session has taken the session lock from <session-pid>.
+# Needs bin/fm-wake-lib.sh sourced first.
 fm_supervision_host_session_end_owned() {
-  local gen=
+  local gen="" holder
   ! fm_autoarm_ledger_read "$1" || gen=$FM_AUTOARM_GEN
   [ "$gen" = "$2" ] || return 1
-  [ -n "$3" ] && fm_afk_contract_present "$1" \
-    && [ "$(fm_afk_contract_read_field "$(fm_afk_contract_path "$1")" confirmed_epoch 2>/dev/null)" = "$3" ]
+  [ -n "$3" ] || return 1
+  holder=$(sed -n '1p' "$1/.lock" 2>/dev/null)
+  [ -z "$holder" ] || [ "$holder" = "$3" ]
 }
 
 # fm_supervision_host_health_key <state-dir>: the key the host's

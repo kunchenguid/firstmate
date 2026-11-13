@@ -428,10 +428,11 @@ Removing it stops further retries and leaves the current watcher for the ordinar
 
 ### Supervision after the main session ends (config/supervision-host-session-end)
 
-Create the empty, home-local `config/supervision-host-session-end` file to keep a Claude primary's supervision host running after the main session ends without `/afk`.
+Create the empty, home-local `config/supervision-host-session-end` file to keep a Claude primary's supervision host running after the main session ends.
 The flag is off when absent, is not inherited, and has no effect on other primaries or on a home that does not run the host with an engine.
 The `SessionEnd` hook reads it when the session ends, so enabling it needs no session restart.
-With it present, a session end other than `/clear` enters the away posture with no words, and the host keeps taking wakes until the next session's first turn ends or the captain returns.
+With it present, a session end other than `/clear` leaves a host running in the attended posture: it writes no away record and grants no away merge authority.
+The host keeps taking wakes until the next session starts or its first turn ends.
 [Supervision host](supervision-host.md#after-the-main-session-ends) owns the design and its limits.
 
 ## Codex native Stop park (config/codex-stop-park)

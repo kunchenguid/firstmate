@@ -267,16 +267,17 @@ So by default nothing supervises the home from that exit until the next session'
 A `/clear` is not such an end: the same process runs on, and the parked host survives it and delivers its next close to the new session.
 The opt-in [configuration flag](configuration.md#supervision-after-the-main-session-ends-configsupervision-host-session-end) closes that gap with a Claude `SessionEnd` hook, `bin/fm-supervision-session-end.sh`, whose header owns the gates and the keeper.
 
-When a session that holds the lock ends any other way, and no away record, quiet record, or away daemon exists, the hook does two things:
+When a session that holds the lock ends any other way and no away daemon exists, the hook starts a detached keeper that runs the host and starts it again after each exit.
+It enters no away posture and writes no away record, so it grants no away merge authority.
+The host runs attended, as with the captain at the terminal, except that the main session is gone: it takes the check wakes that are normally main-only, so due work such as the daily runs starts.
+Merges and captain decisions wait for the return, and the engine records them as captain outcomes for the next drain.
+A session that ends under an `/afk` or `/quiet` record keeps that record exactly as it is, and the host runs under it.
 
-- It enters the away posture with no words, because the captain is gone; the engine then takes every wake, check wakes included, on standing authority only (see [Away](#away)).
-- It starts a detached keeper that runs the host and starts it again after each exit.
-
-That host proves ownership without the session: it owns supervision while no later Stop has claimed an auto-arm generation and the away record the hook entered still stands.
-So the next session's first Stop or the captain's return ends the keeper, and the return brief reports the window like any away window.
+That host proves ownership without the session: it owns supervision while no later Stop has claimed an auto-arm generation and no later session has taken the session lock.
+So the next session's start or first Stop ends the keeper.
 A wake the host hands back has no main to reach, so it stays durable in the queue for the next drain, and the keeper starts the host again.
 Each wake in the window starts a fresh engine conversation, and the broken-session latch does not trip, because both are keyed to a main session whose process is gone.
-`/afk` and `/quiet` are unchanged: a session that ends under either keeps its current behavior, and other primaries have no such hook.
+Other primaries have no such hook.
 
 ## Failure direction
 
@@ -476,7 +477,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-supervision-host-park.test.sh` | Latch, park boundary, compaction, and lock ownership against the same stub-engine fixtures. |
 | `tests/fm-supervision-host-hook.test.sh` | Claude Stop-hook re-arm, successor take-over, lost hand-back continuations, and guarded retry submission. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
-| `tests/fm-supervision-session-end.test.sh` | The Claude `SessionEnd` hook through its tracked registration with the opt-in on and off: a check wake the away engine takes after the session ended, the keeper's end at the return and at the next Stop, and no change on `/clear` or under `/afk`. |
+| `tests/fm-supervision-session-end.test.sh` | The Claude `SessionEnd` hook through its tracked registration with the opt-in on and off: a check wake the attended engine takes after the session ended with no away record written, the keeper's end at the next session and at the next Stop, and no change on `/clear` or to a standing `/afk` record. |
 | `tests/fm-supervision-session-end-live-e2e.test.sh` | Token-free guard that the installed Claude reports `clear` for `/clear` and another reason for `/exit` and a closed terminal, and that a hook's detached child outlives the process. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |

@@ -58,7 +58,9 @@ end_session() {  # <home> <reason>
 keeper_pid() { cut -f1 "$1/state/.supervision-session-end" 2>/dev/null; }
 keeper_live() { local pid; pid=$(keeper_pid "$1") && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }
 keeper_gone() { ! keeper_live "$1" && ! watcher_live "$1"; }
-check_handled_away() { grep -Eq '	handled	.*posture=away.*check: .*daily runs due' "$1/state/.supervision-host.log" 2>/dev/null; }
+check_handled() {  # <home> <posture>
+  grep -Eq "	handled	.*posture=$2.*check: .*daily runs due" "$1/state/.supervision-host.log" 2>/dev/null
+}
 
 assert_inert() {  # <home> <label>
   [ ! -e "$1/state/.afk-contract" ] || fail "$2: the session end entered the away posture"
@@ -85,18 +87,18 @@ test_on_keeps_supervision_after_exit() {
   : > "$home/config/supervision-host-session-end"
   register_daily_check "$home"
   end_session "$home" prompt_input_exit
-  [ "$(FM_HOME="$home" "$CONTRACT" mode 2>/dev/null)" = away ] || fail "the session end did not enter the away posture"
-  [ -z "$(FM_HOME="$home" "$CONTRACT" words 2>/dev/null)" ] || fail "the session end recorded words the captain never said"
+  [ ! -e "$home/state/.afk-contract" ] || fail "the session end wrote an away record"
   wait_until 100 keeper_live "$home" || fail "no keeper runs after the session ended"
   lock=$(cat "$home/ended-session-pid")
   kill -0 "$lock" 2>/dev/null && fail "fixture: the ended session is still alive"
   wait_until 300 watcher_live "$home" || fail "the keeper's host armed no watcher"
   touch "$home/check.go"
-  wait_until_deadline 60 check_handled_away "$home" \
+  wait_until_deadline 60 check_handled "$home" attended \
     || { cat "$home/state/.supervision-host.log" >&2 2>/dev/null; fail "the check wake was not handled after the session ended"; }
-  FM_HOME="$home" "$CONTRACT" archive >/dev/null || fail "fixture: the return could not archive the record"
-  wait_until_deadline 30 keeper_gone "$home" || fail "the keeper or its watcher outlived the captain's return"
-  pass "with the opt-in a session end keeps supervision, an away engine takes the check wake, and the return ends it"
+  [ ! -e "$home/state/.afk-contract" ] || fail "the host entered the away posture"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  wait_until_deadline 30 keeper_gone "$home" || fail "the keeper or its watcher outlived the next session's start"
+  pass "with the opt-in a session end keeps an attended host that takes the check wake with no away record, and the next session ends it"
 }
 
 test_later_stop_ends_keeper() {
@@ -109,8 +111,8 @@ test_later_stop_ends_keeper() {
   wait_until 300 watcher_live "$home" || fail "the keeper's host armed no watcher"
   printf 'epoch=8 owner_pid=1 outcome=arming\n' > "$home/state/.claude-autoarm-epoch"
   wait_until_deadline 30 keeper_gone "$home" || fail "the keeper outlived the next session's Stop claim"
-  [ "$(FM_HOME="$home" "$CONTRACT" mode 2>/dev/null)" = away ] || fail "the keeper archived the away record itself"
-  pass "the next session's Stop claim ends the keeper and leaves the return to main"
+  [ ! -e "$home/state/.afk-contract" ] || fail "the keeper wrote an away record"
+  pass "the next session's Stop claim ends the keeper"
 }
 
 test_clear_is_inert() {
@@ -127,11 +129,16 @@ test_standing_away_record_is_untouched() {
   local home before
   home=$(make_home session-end-afk away)
   : > "$home/config/supervision-host-session-end"
+  register_daily_check "$home"
   before=$(cat "$home/state/.afk-contract")
   end_session "$home" prompt_input_exit
+  wait_until 100 keeper_live "$home" || fail "no keeper runs after the session ended under /afk"
+  wait_until 300 watcher_live "$home" || fail "the keeper's host armed no watcher under /afk"
+  touch "$home/check.go"
+  wait_until_deadline 60 check_handled "$home" away \
+    || { cat "$home/state/.supervision-host.log" >&2 2>/dev/null; fail "the check wake was not handled under the standing /afk record"; }
   [ "$(cat "$home/state/.afk-contract")" = "$before" ] || fail "the session end changed the /afk record"
-  [ ! -e "$home/state/.supervision-session-end" ] || fail "the session end started a keeper beside /afk"
-  pass "a standing /afk record is left exactly as /afk wrote it"
+  pass "a session ending under /afk keeps the record exactly as /afk wrote it and keeps a host running under it"
 }
 
 fm_test_run \

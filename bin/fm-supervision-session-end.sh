@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-supervision-session-end.sh - keep the supervision host running after a
-# Claude main session ends without /afk (opt-in: config/supervision-host-session-end).
+# Claude main session ends (opt-in: config/supervision-host-session-end).
 #
 # Registered in tracked .claude/settings.json as the SessionEnd command hook.
 # The Claude primary's supervision host runs inside its Stop hook
@@ -19,26 +19,25 @@
 #     Claude primary, and the host has an engine
 #     (bin/fm-supervision-engine-lib.sh);
 #   - this session holds the session lock (bin/fm-session-lock-lib.sh);
-#   - no away-posture record (state/.afk-contract, away or quiet) and no away
-#     daemon flag (state/.afk) exist, so /afk and /quiet are never changed;
+#   - no away daemon flag (state/.afk) exists;
 #   - the home needs supervision (bin/fm-supervision-lib.sh).
-# Then it enters the away posture with no words through bin/fm-afk-launch.sh
-# enter, because the captain is gone and only the away posture lets the
-# host's engine take every wake, check wakes included, on standing authority.
-# Last, it starts the keeper below detached: nohup, stdio closed, in a process
+# Then it starts the keeper below detached. It enters no away posture and
+# writes no away record, so no away merge authority exists: the host runs
+# attended, takes the check wakes main can no longer reach so due work such as
+# the daily runs starts, and leaves merges and captain decisions for the return.
+# An /afk or /quiet record already in place stays exactly as it is and the host
+# runs under it. The keeper starts: nohup, stdio closed, in a process
 # group of its own, the one way a process outlives a Claude hook
 # (docs/verification/supervision.md). The hook prints nothing and exits 0.
 #
-# KEEPER MODE (keep <autoarm-gen> <confirmed-epoch> <session-pid>; private to
-# the hook). It waits up to 30 seconds for the ended session's process to
-# exit, then runs bin/fm-supervision-host.sh park with
-# FM_SUPERVISION_HOST_SESSION_END_GEN and FM_SUPERVISION_HOST_SESSION_END_RECORD,
-# and starts it again whenever it exits, while
-# fm_supervision_host_session_end_owned holds: no Stop hook has claimed a later
-# auto-arm generation, and the away record this hook entered still stands. The
-# next session's first Stop and the captain's return (which archives that
-# record) each end it; the keeper then stops its host, whose cleanup stops its
-# watcher cycle. A host run shorter than
+# KEEPER MODE (keep <autoarm-gen> <session-pid>; private to the hook). It
+# waits up to 30 seconds for the ended session's process to exit, then runs
+# bin/fm-supervision-host.sh park with FM_SUPERVISION_HOST_SESSION_END_GEN and
+# FM_SUPERVISION_HOST_SESSION_END_PID, and starts it again whenever it exits,
+# while fm_supervision_host_session_end_owned holds: no Stop hook has claimed a
+# later auto-arm generation, and no later session has taken the session lock.
+# The next session's start and its first Stop each end it; the keeper then
+# stops its host, whose cleanup stops its watcher cycle. A host run shorter than
 # FM_SUPERVISION_SESSION_END_RESTART_SECONDS (default 60) waits out the rest of
 # that interval before the next start. The host's own output has no reader: every
 # wake it hands back stays durable in the wake queue for the next drain.
@@ -55,7 +54,7 @@ case "${1:-}" in
   '') ;;
   -h|--help) usage; exit 0 ;;
   keep)
-    [ "$#" -eq 4 ] || { usage >&2; exit 2; }
+    [ "$#" -eq 3 ] || { usage >&2; exit 2; }
     MODE=keep
     ;;
   *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -73,19 +72,16 @@ KEEPER_RECORD="$STATE/.supervision-session-end"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
-# shellcheck source=bin/fm-afk-contract.sh
-. "$SCRIPT_DIR/fm-afk-contract.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
 if [ "$MODE" = keep ]; then
   GEN=$2
-  RECORD=$3
-  SESSION_PID=$4
+  SESSION_PID=$3
   RESTART=${FM_SUPERVISION_SESSION_END_RESTART_SECONDS:-60}
   case "$RESTART" in ''|*[!0-9]*) RESTART=60 ;; esac
   HOST=
-  owned() { fm_supervision_host_session_end_owned "$STATE" "$GEN" "$RECORD"; }
+  owned() { fm_supervision_host_session_end_owned "$STATE" "$GEN" "$SESSION_PID"; }
   # shellcheck disable=SC2329 # EXIT trap.
   cleanup() {
     if [ -n "$HOST" ] && fm_pid_alive "$HOST"; then
@@ -107,7 +103,7 @@ if [ "$MODE" = keep ]; then
   while owned; do
     started=$SECONDS
     FM_SUPERVISION_HOST_PRIMARY=claude \
-      FM_SUPERVISION_HOST_SESSION_END_GEN="$GEN" FM_SUPERVISION_HOST_SESSION_END_RECORD="$RECORD" \
+      FM_SUPERVISION_HOST_SESSION_END_GEN="$GEN" FM_SUPERVISION_HOST_SESSION_END_PID="$SESSION_PID" \
       "$SCRIPT_DIR/fm-supervision-host.sh" park >/dev/null 2>&1 </dev/null &
     HOST=$!
     while fm_pid_alive "$HOST"; do
@@ -141,16 +137,14 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 [ -e "$CONFIG/supervision-host-session-end" ] || exit 0
 fm_supervision_host_config "$CONFIG" claude && [ -n "$FM_SUPERVISION_ENGINE" ] || exit 0
 fm_session_lock_owned_by_self "$STATE" || exit 0
-[ ! -e "$STATE/.afk" ] && ! fm_afk_contract_present "$STATE" || exit 0
+[ ! -e "$STATE/.afk" ] || exit 0
 fm_supervision_needed "$STATE" "${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}" || exit 0
 
 SESSION_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null)
-FM_AFK_MODE=away "$SCRIPT_DIR/fm-afk-launch.sh" enter >/dev/null 2>&1 || exit 0
-RECORD=$(fm_afk_contract_read_field "$(fm_afk_contract_path "$STATE")" confirmed_epoch 2>/dev/null)
-[ -n "$RECORD" ] || exit 0
+[ -n "$SESSION_PID" ] || exit 0
 GEN=
 ! fm_autoarm_ledger_read "$STATE" || GEN=$FM_AUTOARM_GEN
 set -m
-nohup "$SCRIPT_DIR/fm-supervision-session-end.sh" keep "$GEN" "$RECORD" "$SESSION_PID" >/dev/null 2>&1 </dev/null &
+nohup "$SCRIPT_DIR/fm-supervision-session-end.sh" keep "$GEN" "$SESSION_PID" >/dev/null 2>&1 </dev/null &
 set +m
 exit 0
