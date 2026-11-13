@@ -685,7 +685,7 @@ prefetch_task_observations() {  # <meta> <id>
   # The whole-stream open-decision fold costs time proportional to the task's
   # status history, so it runs here while the bounded current-state read is
   # still outstanding rather than after every read has finished.
-  status_open_decisions "$status_capture" "$kind" > "$open_file" || current_rc=1
+  status_open_decisions "$status_capture" "$kind" "$status_log" > "$open_file" || current_rc=1
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.

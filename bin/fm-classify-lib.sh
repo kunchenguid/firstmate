@@ -1029,15 +1029,16 @@ EOF
 # use instead of trusting the last status line. A raw-epoch line
 # (_fm_status_raw_epoch_verb) folds as nothing and is reported on stderr as
 # "<file>:<line>: malformed status line ..." so the declaration it carries can
-# be repaired instead of vanishing.
+# be repaired instead of vanishing. A caller folding a copy passes
+# <report-path>, the file a reader would repair.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' folded verb number=0
+status_open_decisions() {  # <status-file> [<kind>] [<report-path>]
+  local f=$1 kind=${2:-} report_path=${3:-$1} line resolve held open='' folded verb number=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
@@ -1053,7 +1054,7 @@ status_open_decisions() {  # <status-file> [<kind>]
       *)
         if _fm_status_raw_epoch_verb "$verb"; then
           printf '%s:%s: malformed status line; repair the timestamp to [at=<epoch>] after the verb: %s\n' \
-            "$f" "$number" "$line" >&2
+            "$report_path" "$number" "$line" >&2
         fi
         ;;
     esac
