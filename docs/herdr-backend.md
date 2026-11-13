@@ -456,7 +456,8 @@ Any foreground command, child process, active shell job, unknown shell, unreadab
 
 Unconfirmed deletion retains the journal.
 A confirmed pane close may retire it even when focus restoration reported an error after the close.
-An empty-tab close retains the journal while focus restoration is unresolved, even if a later read confirms deletion.
+An empty-tab close retains the journal while deletion is unconfirmed.
+If the exact bound tab is confirmed gone but focus restoration remains unresolved, cleanup retires its journal without issuing another focus mutation, so the next task spawn can create a fresh projection.
 A second run finds no matching title or journal and is a no-op.
 
 Before closure, any of these preserves the candidate and lets session startup continue with at most a concise warning:

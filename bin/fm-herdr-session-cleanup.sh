@@ -299,9 +299,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
     close_kind='pane'
   fi
-  if [ "$empty_tab" = 1 ] && [ "$close_status" -eq 2 ]; then
-    fm_herdr_cleanup_warn "$id journal preserved because empty tab closure left focus unresolved"
-  elif [ "$state" = dead ]; then
+  if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \
       && { [ "$empty_tab" = 1 ] \
         && fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
@@ -321,10 +319,18 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
         && [ "$FM_HERDR_CLEANUP_BOUND_TAB" = "$bound_tab" ] \
         && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ]; } \
       && [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
-      rm -f -- "$journal" || fm_herdr_cleanup_warn "$id $close_kind closed but its journal could not be retired"
+      if rm -f -- "$journal"; then
+        if [ "$empty_tab" = 1 ] && [ "$close_status" -eq 2 ]; then
+          fm_herdr_cleanup_warn "$id empty tab is gone but focus restoration is unresolved; retired its journal without changing focus"
+        fi
+      else
+        fm_herdr_cleanup_warn "$id $close_kind closed but its journal could not be retired"
+      fi
     else
       fm_herdr_cleanup_warn "$id $close_kind closed but its journal changed and was preserved"
     fi
+  elif [ "$empty_tab" = 1 ] && [ "$close_status" -eq 2 ]; then
+    fm_herdr_cleanup_warn "$id journal preserved because empty tab closure is not confirmed gone and focus is unresolved"
   elif [ "$close_status" -ne 0 ]; then
     fm_herdr_cleanup_warn "$id preserved because exact focus-safe $close_kind closure was refused or unconfirmed"
   else

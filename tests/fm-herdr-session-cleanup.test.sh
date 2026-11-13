@@ -424,18 +424,22 @@ for uncertainty in workspace-presence-unreadable pre-close-list-unreadable pre-c
     fi
     write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
     fm_herdr_session_cleanup >/dev/null 2>&1
-    [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$close_failure with $uncertainty retired the journal before resolving focus"
     if [[ "$uncertainty" = pre-close-list-* ]]; then
+      [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "unreadable pre-close workspace list retired the journal"
       [ ! -s "$CLOSE_LOG" ] || fail "unreadable pre-close workspace list allowed a close"
       [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t1' ] || fail "refused close displaced focus"
+      pass "$close_failure with $uncertainty refuses closure and keeps its journal"
     else
       [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "$uncertainty did not attempt the exact close"
       [ "$(fm_backend_herdr_tab_presence_state test "$TAB")" = dead ] || fail "$uncertainty did not reproduce deletion despite the uncertain close"
-      [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w3\tw3:t1' ] || fail "$uncertainty did not reproduce unresolved focus"
+      focus_after_close=$(fm_backend_herdr_projection_focus_snapshot test)
+      [ "$focus_after_close" = $'w3\tw3:t1' ] || fail "$uncertainty did not reproduce unresolved focus"
+      [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$close_failure with $uncertainty retained a journal for a confirmed-deleted tab"
       fm_herdr_session_cleanup >/dev/null 2>&1
-      [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "repeat cleanup retired an unresolved journal"
+      [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "repeat cleanup recreated a deleted tab journal"
+      [ "$(fm_backend_herdr_projection_focus_snapshot test)" = "$focus_after_close" ] || fail "journal retirement displaced the unresolved focus"
+      pass "$close_failure with $uncertainty retires the deleted tab journal without changing focus"
     fi
-    pass "$close_failure with $uncertainty preserves the journal until focus is resolved"
   done
 done
 reset_fixture
