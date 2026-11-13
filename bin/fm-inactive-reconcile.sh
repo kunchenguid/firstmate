@@ -666,13 +666,13 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
-task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the verdict must be withheld, 3 on timeout
-  local id=$1 meta=$2 timeout=$3 last=$4 backend target verdict rc=0 spawn_epoch status_epoch
+task_holds_live_work() { # <id> <meta> <deadline> <last-status-line>; 0 when the verdict must be withheld, 3 on timeout
+  local id=$1 meta=$2 deadline=$3 last=$4 backend target verdict rc=0 spawn_epoch status_epoch
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || return 1
   # shellcheck disable=SC2016
-  verdict=$(fm_run_timed "$timeout" bash -c '
+  verdict=$(fm_run_until "$deadline" fm_nm_now_ms bash -c '
     . "$1"; . "$2"
     [ "$(fm_backend_agent_state "$3" "$4" 2>/dev/null)" = alive ] || exit 0
     printf "alive "
@@ -694,7 +694,8 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
-  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left floor_ms='' budget_line reported_watchdog reported_parent reported_reserve extra
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left floor_ms='' budget_line read_deadline reported_watchdog reported_parent reported_reserve extra
+  local publication_deadline=$SCAN_PUBLICATION_DEADLINE
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -716,7 +717,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
     [ "$left" -ge "$floor_ms" ] || left=$floor_ms
   fi
   [ "$left" -gt 0 ] || return 3
-  local FM_READ_DEADLINE=$deadline
+  # Child reads and their completed promises never replace the parent's own
+  # corroboration/publication window. Liveness is a sibling under that window.
+  local FM_READ_DEADLINE=$publication_deadline
   state_line=$(fm_run_until "$SCAN_READER_WATCHDOG_DEADLINE" fm_nm_now_ms env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     FM_READ_DEADLINE="$deadline" FM_READ_BUDGET_MS="$floor_ms" FM_READ_BUDGET_REPORT=1 \
     FM_READ_PARENT_DEADLINE="$SCAN_OUTER_DEADLINE" FM_READ_WATCHDOG_DEADLINE="$SCAN_READER_WATCHDOG_DEADLINE" \
@@ -726,16 +729,15 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   case "$state_line" in
     'read-budget: '*)
       budget_line=${state_line%%$'\n'*}
-      read -r started deadline reported_watchdog reported_parent reported_reserve extra <<< "${budget_line#read-budget: }"
-      [ -n "$started" ] && [ -n "$deadline" ] && [ -z "$extra" ] || return 3
-      case "$started$deadline" in *[!0-9]*) return 3 ;; esac
-      [ "${#started}" -le 18 ] && [ "${#deadline}" -le 18 ] || return 3
-      [ "$deadline" -ge "$started" ] || return 3
+      read -r started read_deadline reported_watchdog reported_parent reported_reserve extra <<< "${budget_line#read-budget: }"
+      [ -n "$started" ] && [ -n "$read_deadline" ] && [ -z "$extra" ] || return 3
+      case "$started$read_deadline" in *[!0-9]*) return 3 ;; esac
+      [ "${#started}" -le 18 ] && [ "${#read_deadline}" -le 18 ] || return 3
+      [ "$read_deadline" -ge "$started" ] || return 3
       [ "$reported_watchdog" = "$SCAN_READER_WATCHDOG_DEADLINE" ] \
         && [ "$reported_parent" = "$SCAN_OUTER_DEADLINE" ] \
         && [ "$reported_reserve" = "$SCAN_CHILD_CLEANUP_RESERVE_MS" ] || return 3
-      [ "$deadline" -lt "$((reported_watchdog - reported_reserve))" ] || return 3
-      FM_READ_DEADLINE=$deadline
+      [ "$read_deadline" -lt "$((reported_watchdog - reported_reserve))" ] || return 3
       case "$state_line" in
         *$'\n'*) state_line=${state_line#*$'\n'} ;;
         *) state_line='' ;;
@@ -753,8 +755,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  left=$(fm_nm_read_timeout 30) || return 3
-  task_holds_live_work "$id" "$meta" "$left" "$last" && return 0
+  task_holds_live_work "$id" "$meta" "$publication_deadline" "$last" && return 0
   [ "$?" -ne 3 ] || return 3
   fm_nm_read_timeout 1 >/dev/null || return 3
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
@@ -772,6 +773,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  fm_nm_read_timeout 1 >/dev/null || return 3
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
@@ -827,7 +829,8 @@ scan() {
   local startup=${1:-0} self='' cursor deadline ledger_deadline due=1 rc=0 marker_rc=0
   local SCAN_OUTER_DEADLINE=$2
   local SCAN_CHILD_CLEANUP_RESERVE_MS=$((SCAN_CLEANUP_RESERVE_MS / 2))
-  local SCAN_READER_WATCHDOG_DEADLINE=$((SCAN_OUTER_DEADLINE - SCAN_CHILD_CLEANUP_RESERVE_MS - 1))
+  local SCAN_PUBLICATION_DEADLINE=$((SCAN_OUTER_DEADLINE - SCAN_CHILD_CLEANUP_RESERVE_MS - 1))
+  local SCAN_READER_WATCHDOG_DEADLINE=$SCAN_PUBLICATION_DEADLINE
   local FM_READ_DEADLINE
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
@@ -837,7 +840,8 @@ scan() {
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     due=0
   else
-    # Reserve startup, the 1000-ms reader floor, and cleanup before ledger work.
+    # Reserve startup and the 1000-ms floor before ledger work. The remaining
+    # read-to-parent slot serves completed-child publication or timeout cleanup.
     ledger_deadline=$((deadline - 1000 - SCAN_CLEANUP_RESERVE_MS))
   fi
   if self=$(home_secondmate_id); then
