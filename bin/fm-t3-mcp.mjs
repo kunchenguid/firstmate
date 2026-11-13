@@ -44,7 +44,7 @@
 //       [--worktree <abs-path>] [--branch <name>] [--message-file <file>]
 //     t3_thread_launch at runtimeMode full-access. With --worktree the
 //     workspace strategy is existing_worktree; without it, root (the project's
-//     own checkout). Reads the thread and its t3_thread_configuration back and
+//     own checkout). Reads the thread and its configuration back and
 //     archives and refuses it unless T3 bound exactly that workspace, full
 //     access, instance, model, and every requested option value; a refused
 //     thread that does not then read back archived with no active run exits
@@ -91,13 +91,13 @@
 //     different run). T3 ends the run asynchronously after the request.
 //   fm-t3-mcp.mjs requests --thread <id>
 //     The thread's pending runtime requests: questions (each user-input
-//     request id with its questions, from t3_pending_request_list/read) and
+//     request id with its questions, from T3's pending-request list/read) and
 //     approvals, the count of pending requests those tools cannot see or
 //     answer (permission approvals, answered only in T3 Code itself). The
 //     signature names the question ids, the approval count, and the activity
 //     item id of each approval T3 shows among the thread's last 100 items.
 //   fm-t3-mcp.mjs respond --thread <id> --request <request-id> --answers-file <file>
-//     t3_pending_request_respond with the JSON object in <file>, keyed by
+//     T3's pending-request respond with the JSON object in <file>, keyed by
 //     question id. It cannot approve a permission request.
 //   fm-t3-mcp.mjs watch --thread <id>... --timeout-ms <n> [--escalated <id>=<signature>]...
 //     The T3 event wait for the watcher. It first reads every thread: one
@@ -127,7 +127,8 @@
 // with FM_HOME defaulting to this repository.
 //
 // The capability gate (every verb, login included) runs tools/list and refuses
-// unless all of REQUIRED_TOOLS and t3_environment_read are present, then reads
+// unless all of REQUIRED_TOOLS and t3_environment_read are present and each
+// TOOL_FAMILIES capability is met by its current or earlier tools, then reads
 // t3_environment_read and refuses unless its environmentId equals the one
 // recorded at sign-in, so a different T3 on the same origin is never driven
 // with this credential.
@@ -167,14 +168,29 @@ export const REQUIRED_TOOLS = [
   "t3_thread_interrupt",
   "t3_thread_organize",
   "t3_thread_list",
-  "t3_thread_configuration",
   "t3_project_list",
   "t3_project_create",
-  "t3_pending_request_list",
-  "t3_pending_request_read",
-  "t3_pending_request_respond",
   "orchestrator_capabilities",
 ];
+// T3 0.1.3 merged two tool families. Each capability below is met by one
+// complete family, tried in `prefer` order, so one helper drives T3 before
+// and after the merge. The gate records the family it found on the session,
+// and the call sites go through threadConfiguration and pendingRequest.
+//   configuration: earlier T3 reads a thread's binding with
+//     t3_thread_configuration and also lists t3_thread_configure, which there
+//     requires modelSelection and only writes, so the dedicated read wins
+//     whenever T3 lists it. From 0.1.3, t3_thread_configure called with only
+//     threadId is the read (this helper never sends modelSelection).
+//   pendingRequests: t3_pending_request with action list|read|respond;
+//     earlier T3 served t3_pending_request_list|read|respond.
+export const TOOL_FAMILIES = {
+  configuration: { prefer: ["earlier", "current"], current: ["t3_thread_configure"], earlier: ["t3_thread_configuration"] },
+  pendingRequests: {
+    prefer: ["current", "earlier"],
+    current: ["t3_pending_request"],
+    earlier: ["t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"],
+  },
+};
 const ENVIRONMENT_TOOL = "t3_environment_read";
 const EXPIRY_WARN_DAYS = 5;
 const DAY_MS = 86_400_000;
@@ -493,6 +509,12 @@ export async function gate(session, cred) {
   const names = new Set((listed?.tools ?? []).map((t) => t.name));
   const version = server?.serverInfo?.version ?? null;
   const missing = REQUIRED_TOOLS.filter((t) => !names.has(t));
+  const families = {};
+  for (const [capability, family] of Object.entries(TOOL_FAMILIES)) {
+    const found = family.prefer.find((generation) => family[generation].every((t) => names.has(t)));
+    if (found) families[capability] = found;
+    else missing.push(`${family.current.join(", ")} (or ${family.earlier.join(", ")})`);
+  }
   if (missing.length) {
     throw new Refusal(
       "capability_gate",
@@ -515,7 +537,22 @@ export async function gate(session, cred) {
       { environmentId, expected: cred.environment_id },
     );
   }
-  return { serverVersion: version, environmentId, serverVersionReported: envRead?.serverVersion ?? null, tools: [...names].sort() };
+  session.toolFamilies = families;
+  return { serverVersion: version, environmentId, serverVersionReported: envRead?.serverVersion ?? null, tools: [...names].sort(), toolFamilies: families };
+}
+
+// A thread's recorded binding (modelSelection, runtimeMode), read through the
+// configuration family the gate found.
+function threadConfiguration(session, threadId) {
+  if (session.toolFamilies?.configuration === "earlier") return session.call("t3_thread_configuration", { threadId });
+  return session.call("t3_thread_configure", { threadId });
+}
+
+// One pending-request action (list, read, or respond), through the family
+// the gate found.
+function pendingRequest(session, action, args) {
+  if (session.toolFamilies?.pendingRequests === "earlier") return session.call(`t3_pending_request_${action}`, args);
+  return session.call("t3_pending_request", { action, ...args });
 }
 
 async function verifiedSession(flags) {
@@ -874,7 +911,7 @@ async function launch(flags) {
   let config;
   try {
     t = threadOf(await session.call("t3_thread_read", { threadId: out.threadId, limit: 1, runLimit: 1 }));
-    config = await session.call("t3_thread_configuration", { threadId: out.threadId });
+    config = await threadConfiguration(session, out.threadId);
   } catch (e) {
     const archived = await archiveLaunched();
     throw new Refusal(
@@ -1045,7 +1082,7 @@ function threadOf(out) {
 async function pendingOf(session, threadId, t) {
   const count = t.pendingRequestCount ?? 0;
   if (!count) return { questions: [], approvals: 0, approvalIds: [] };
-  const listed = await session.call("t3_pending_request_list", { threadId });
+  const listed = await pendingRequest(session, "list", { threadId });
   const ids = [...new Set(listed?.requestIds ?? [])].sort();
   const approvals = Math.max(0, count - ids.length);
   if (!approvals) return { questions: ids, approvals, approvalIds: [] };
@@ -1066,7 +1103,7 @@ async function requests(flags) {
   const pending = await pendingOf(session, threadId, t);
   const questions = [];
   for (const requestId of pending.questions) {
-    const q = await session.call("t3_pending_request_read", { threadId, requestId });
+    const q = await pendingRequest(session, "read", { threadId, requestId });
     questions.push({ requestId, questions: q?.questions ?? [] });
   }
   return { ok: true, threadId, pendingRequestCount: t.pendingRequestCount ?? 0, questions, approvals: pending.approvals, signature: pendingSignature(pending) };
@@ -1084,7 +1121,7 @@ async function respond(flags) {
   }
   if (!answers || typeof answers !== "object" || Array.isArray(answers)) usage("--answers-file must hold a JSON object keyed by question id");
   const { session } = await verifiedSession(flags);
-  await session.call("t3_pending_request_respond", { threadId, requestId, answers });
+  await pendingRequest(session, "respond", { threadId, requestId, answers });
   return { ok: true, threadId, requestId };
 }
 
