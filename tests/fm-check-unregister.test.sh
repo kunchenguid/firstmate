@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-check-unregister.sh: refuse empty-variable retirement,
-# and remove only the two named custom-check files on the happy path.
+# and remove only the two named custom-check files on the happy path. Also
+# pins fm-check-register.sh's private-mode test on a mount that cannot store
+# modes (Git for Windows noacl).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -193,6 +195,108 @@ test_unsafe_hardlink_or_symlink_is_refused() {
   pass "hard-linked or symlinked artifacts are refused and left in place"
 }
 
+# A fakebin that reproduces a Git for Windows noacl mount, measured on
+# 2026-11-13: chmod succeeds without changing any mode, and `uname -s` reports
+# the given kernel. A bare `uname` stays real, so the stat flavor the library
+# picks still matches the host.
+modeless_fakebin() {  # <home> <kernel>
+  local home=$1 kernel=$2 fakebin real_uname
+  fakebin=$(fm_fakebin "$home")
+  real_uname=$(command -v uname)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/chmod"
+  cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = -s ] && { printf '%s\n' '$kernel'; exit 0; }
+exec '$real_uname' "\$@"
+SH
+  "$(command -v chmod)" +x "$fakebin/chmod" "$fakebin/uname"
+  printf '%s\n' "$fakebin"
+}
+
+test_registration_on_a_mount_that_cannot_store_modes() {
+  local home fakebin status mode probe_mode
+  home=$(make_home modeless)
+  printf '#!/usr/bin/env bash\nprintf custom-ready\n' > "$home/state/demo.check.sh"
+  chmod 0644 "$home/state/demo.check.sh"
+  mode=$(stat -c %a "$home/state/demo.check.sh" 2>/dev/null || /usr/bin/stat -f %Lp "$home/state/demo.check.sh")
+  [ "$mode" != 700 ] || fail "fixture is vacuous: the check already has mode 700"
+
+  # Off Windows an exact private mode stays required, whatever chmod does.
+  fakebin=$(modeless_fakebin "$home" Linux)
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" demo >/dev/null 2>"$home/err" || status=$?
+  expect_code 1 "$status" "register a mode-$mode check on a Linux kernel"
+  assert_absent "$home/state/demo.check-trust" "a Linux kernel bound a check that is not mode 700"
+
+  # A Cygwin-family kernel whose mount cannot store a mode accepts the same
+  # file, and the watcher-side verdict agrees with the registration.
+  fakebin=$(modeless_fakebin "$home" MINGW64_NT-10.0-26200)
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" demo >/dev/null 2>"$home/err" || status=$?
+  expect_code 0 "$status" "register a mode-$mode check on a modeless Windows mount ($(cat "$home/err"))"
+  PATH="$fakebin:$PATH" bash -c '. "$1/bin/fm-pr-lib.sh"; . "$1/bin/fm-check-lib.sh"; fm_custom_check_registered "$2" demo' _ "$ROOT" "$home/state" \
+    || fail "the watcher did not trust a check registered on a modeless Windows mount"
+
+  # A probe that cannot be changed or read proves nothing about the mount, so
+  # a Windows kernel keeps the strict test and refuses the check itself.
+  expect_strict_probe() {  # <case>
+    rm -f "$home/state/demo.check-trust"
+    status=0
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" demo >/dev/null 2>"$home/err" || status=$?
+    expect_code 1 "$status" "register a mode-$mode check on a Windows kernel whose $1"
+    grep -q 'custom check is unavailable' "$home/err" \
+      || fail "a mode probe whose $1 did not keep the strict test: $(cat "$home/err")"
+    assert_absent "$home/state/demo.check-trust" "a mode probe whose $1 bound a check that is not mode 700"
+  }
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/chmod"
+  expect_strict_probe "first probe chmod fails"
+  # shellcheck disable=SC2016 # The fake chmod, not this shell, expands $1.
+  printf '#!/usr/bin/env bash\n[ "$1" = 600 ] && exit 1\nexit 0\n' > "$fakebin/chmod"
+  expect_strict_probe "second probe chmod fails"
+
+  # The library reads modes through a PATH stat everywhere but Darwin, so only
+  # there can a fake stat garble the probe's read while the check reads true.
+  if [ "$(uname)" != Darwin ]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/chmod"
+    for probe_mode in '' '-rw-------'; do
+      cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case \$a in */.fm-mode-probe.*) printf '%s' '$probe_mode'; exit 0 ;; esac
+done
+exec '$(command -v stat)' "\$@"
+SH
+      "$(command -v chmod)" +x "$fakebin/stat"
+      expect_strict_probe "mode read prints '$probe_mode'"
+    done
+    rm -f "$fakebin/stat"
+  else
+    printf 'note: Darwin reads modes through /usr/bin/stat; the unreadable-probe cases need a PATH stat\n' >&2
+  fi
+
+  # Where this host's own mount does store modes, a Windows kernel still gets
+  # the strict test: a real chmod that takes effect leaves no excuse.
+  chmod 0600 "$home/state/demo.check.sh"
+  if [ "$(stat -c %a "$home/state/demo.check.sh" 2>/dev/null || /usr/bin/stat -f %Lp "$home/state/demo.check.sh")" = 600 ]; then
+    rm -f "$home/state/demo.check-trust"
+    status=0
+    fakebin="$home/strict-bin"
+    mkdir -p "$fakebin"
+    cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = -s ] && { printf '%s\n' MINGW64_NT-10.0-26200; exit 0; }
+exec '$(command -v uname)' "\$@"
+SH
+    chmod +x "$fakebin/uname"
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$REGISTER" demo >/dev/null 2>"$home/err" || status=$?
+    expect_code 1 "$status" "register a mode-600 check on a Windows kernel whose mount stores modes"
+  else
+    printf 'note: this host mount cannot store modes; the strict-Windows case ran only through the fakes\n' >&2
+  fi
+  pass "custom check registration accepts a modeless Windows mount and stays strict everywhere else"
+}
+
 test_empty_id_and_empty_state_refuse_without_stray_rm
 test_happy_path_removes_only_check_and_trust
+test_registration_on_a_mount_that_cannot_store_modes
 test_unsafe_hardlink_or_symlink_is_refused
