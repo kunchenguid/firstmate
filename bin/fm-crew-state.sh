@@ -211,7 +211,10 @@
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail: a crew whose newest line
+#      is a `resolved` event reads unknown · none with a decision-closing detail,
+#      distinct from the no-source detail. There is no `idle` token in the state
+#      vocabulary above.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux, herdr, and rex, which own a
@@ -1620,11 +1623,13 @@ fi
 # FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
 # it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
 # resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
-# the verb->state mapping (including the configurable paused verb), so reusing its
-# `unknown` verdict as the "not a state" test needs no second verb list here.
+# detail. A decision-closing event is not a run state, so a crew whose newest line
+# is one (typically a secondmate, which has no busy check above) reads `unknown none`
+# rather than a guessed state, with a detail that tells it apart from the genuine
+# no-source case below. There is deliberately no `idle` token: the header vocabulary
+# is the contract that downstream readers match. map_log_state is the single owner
+# of the verb->state mapping (including the configurable paused verb), so reusing
+# its `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_VERB" = "done" ]; then
     emit_ship_status_done
@@ -1632,6 +1637,9 @@ if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+  fi
+  if [ "$LOG_VERB" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ]; then
+    emit unknown none "newest status event is decision-closing; no current-state source"
   fi
 fi
 
