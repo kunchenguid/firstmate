@@ -3255,7 +3255,7 @@ test_no_run_idle_pane_custom_paused_verb() {
 # A trailing keyed resolved: event is a decision-CLOSING event, not a run-state
 # verb. It must never become the current state or leak its resolution prose as the
 # detail: a healthy idle secondmate that just closed a keyed decision reads the
-# deliberate final `unknown none` ("no current-state source available"), never
+# `unknown none` with a decision-closing detail, never
 # `unknown` with the resolution note as its `doing`, and never an invented token.
 # The log tail is not a state source by design, so this pins that result exactly.
 # The one-owner keyed fold in fm-classify-lib.sh is untouched.
@@ -3273,7 +3273,7 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   assert_contains "$out" "state: unknown" "resolved-then-idle secondmate is not a spurious run-state"
   assert_contains "$out" "source: none" "a resolved event is not treated as a status-log state source"
   assert_not_contains "$out" "subscribe-before-write" "resolution prose must not leak into the detail"
-  assert_contains "$out" "state: unknown · source: none · no current-state source available" "decision-closing tail reads the deliberate unknown, no idle token"
+  assert_contains "$out" "state: unknown · source: none · newest status event is decision-closing; no current-state source" "decision-closing tail reads unknown with a distinguishing detail, no idle token"
   assert_not_contains "$out" "idle" "no idle state token is emitted"
   assert_not_contains "$out" "state: parked" "a resolved tail is not read as a parked wait"
   # A bare (non-keyed) resolved: closes the default key and behaves the same.
@@ -3281,11 +3281,15 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   out=$(run_crew_state "$d" mate)
   assert_contains "$out" "source: none" "a bare resolved: is not a state source either"
   assert_not_contains "$out" "infra access granted" "bare resolution prose must not leak into the detail"
+  assert_contains "$out" "newest status event is decision-closing; no current-state source" "bare resolved: gets the distinguishing detail"
   # Control: a genuine trailing state verb still renders from the log.
   printf 'working: reconciling routed items\n' > "$d/state/mate.status"
   out=$(run_crew_state "$d" mate)
   assert_contains "$out" "state: working" "a real trailing state verb still renders"
   assert_contains "$out" "reconciling routed items" "a real state line still carries its detail"
+  rm -f "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: unknown · source: none · no current-state source available" "no status log at all keeps the genuine no-source detail"
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
