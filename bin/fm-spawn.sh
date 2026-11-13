@@ -532,6 +532,10 @@
 #   relaunch, and recovery re-reads the file; an absent file changes nothing.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CLAUDERESUME__ optional relaunch-only `--resume <session-id> ` that keeps a
+#                  Claude replacement on the conversation recorded in the task
+#                  record's claude_session_id (relaunch_claude_resume_args below
+#                  owns it; empty on every fresh spawn and every other harness)
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
@@ -2459,6 +2463,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_CLAUDE_SESSION=
 # 1 when the recorded endpoint is authoritatively gone and this relaunch must
 # create a fresh one for the task rather than adopt its recorded address.
 RELAUNCH_REBIND=0
@@ -2559,6 +2564,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ;;
   esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_CLAUDE_SESSION=$(fm_meta_get "$RELAUNCH_META" claude_session_id)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that
@@ -2924,7 +2930,7 @@ launch_template() {
   # project and fetched content. A persistent secondmate receives its own
   # supervisor contract instead, so this task-worker statement does not apply.
   claude)
-    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
+    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDERESUME____CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
       printf '%s' '__CLAUDEEXCLUDE__'
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
@@ -3736,6 +3742,82 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
   [ -n "$flag" ] && [ -n "$ref" ] || return 0
   printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
+}
+
+# rex_claude_resume_enabled: whether this home opted in to Claude session resume
+# on Rex (config/rex-claude-resume holding `on`); absent or any other word is
+# off, so spawn and relaunch behave exactly as without the feature.
+rex_claude_resume_enabled() {
+  [ -f "$CONFIG/rex-claude-resume" ] || return 1
+  [ "$(tr -d '[:space:]' <"$CONFIG/rex-claude-resume" 2>/dev/null)" = on ]
+}
+
+# claude_config_root: the Claude store the launch line points the worker at,
+# which is where its sessions/<pid>.json and projects/*/<session>.jsonl live.
+claude_config_root() {
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    printf '%s' "${WORKER_ACCOUNT_ROOT:-$HOME/.claude}"
+  else
+    printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  fi
+}
+
+# relaunch_claude_resume_args: `--resume <session-id> ` for a Claude worker
+# relaunched on Rex, so the replacement keeps its conversation across a Rex
+# Server stop (bin/fm-control-lib.sh's fm_control_claude_resumable_session owns
+# the rule). Anything else prints nothing and keeps the fresh-session relaunch.
+relaunch_claude_resume_args() {  # <harness> <backend> <prior-harness> <prior-session-id>
+  local harness=${1-} backend=${2-} prior=${3-} id
+  [ "$harness" = claude ] && [ "$backend" = rex ] || return 0
+  rex_claude_resume_enabled || return 0
+  id=$(fm_control_claude_resumable_session "$(claude_config_root)" "$prior" "${4-}") || return 0
+  printf -- '--resume %s ' "$(shell_quote "$id")"
+}
+
+# record_claude_session_id: store the session id of the Claude worker now
+# running in Rex block <target> as claude_session_id= in the task record, read
+# from Claude's own sessions/<pid>.json by fm_control_claude_session_id. Best
+# effort: a worker that has not written its file within the wait leaves the
+# record as it was, and a later relaunch then starts fresh.
+record_claude_session_id() {  # <target> <worktree> <meta-file>
+  local target=$1 wt=$2 meta=$3 root attempt pids id=
+  root=$(claude_config_root)
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    pids=$(fm_backend_rex_live_pids "$target" | jq -r '.[]' 2>/dev/null) || pids=
+    # shellcheck disable=SC2086
+    id=$(fm_control_claude_session_id "$root" "$wt" $pids) && break
+    id=
+    sleep 1
+  done
+  [ -n "$id" ] || return 1
+  store_claude_session_id "$meta" "$id"
+}
+
+store_claude_session_id() {  # <meta-file> <session-id>
+  local meta=$1 id=$2 lock tmp line status
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$lock" || true
+    return 1
+  fi
+  tmp=$(mktemp "$STATE/.$ID.meta.claude-session.XXXXXX") || {
+    fm_lock_release "$lock" || true
+    return 1
+  }
+  status=0
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        claude_session_id=*) ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done <"$meta"
+    printf 'claude_session_id=%s\n' "$id"
+  } >"$tmp" && fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE" || status=1
+  rm -f "$tmp"
+  fm_lock_release "$lock" || true
+  return "$status"
 }
 
 model_flag_for_harness() {
@@ -7326,7 +7408,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential claude_session_id", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7555,6 +7637,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
+CLAUDE_RESUME_ARGS=
+if [ "$RELAUNCH" -eq 1 ]; then
+  CLAUDE_RESUME_ARGS=$(relaunch_claude_resume_args "$HARNESS" "$BACKEND" "$RELAUNCH_PRIOR_HARNESS" "$RELAUNCH_PRIOR_CLAUDE_SESSION") || CLAUDE_RESUME_ARGS=
+fi
+LAUNCH=${LAUNCH//__CLAUDERESUME__/$CLAUDE_RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 CLAUDE_EXCLUDE=
 [ -z "$EXCLUDE_TOOLS" ] || [ "$HARNESS" != claude ] || CLAUDE_EXCLUDE="--disallowedTools $(shell_quote "$EXCLUDE_TOOLS") "
@@ -8315,4 +8402,7 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+if [ "$BACKEND" = rex ] && [ "$HARNESS" = claude ] && rex_claude_resume_enabled; then
+  record_claude_session_id "$T" "$WT" "$STATE/$ID.meta" || true
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
