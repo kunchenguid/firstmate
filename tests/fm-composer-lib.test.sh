@@ -1023,7 +1023,10 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     [ "$n" = 0 ] \
       || { rm -rf "$fakebin"; fail "pi=$pi_v pi-signed=$signed_v: each Pi executable must run at most once per process"; }
   done
-  printf '#!/bin/sh\nprintf "%%s\\n1.3.0\\n" "$FM_PI_TEST_VERSION_OUTPUT"\n' > "$fakebin/pi"
+  cat > "$fakebin/pi" <<'EOF'
+#!/bin/sh
+printf '%s\n1.3.0\n' "$FM_PI_TEST_VERSION_OUTPUT"
+EOF
   chmod +x "$fakebin/pi"
   for case_ in 'empty:0.85.1' 'empty:0.87.1' 'empty:0.99.2' 'empty:1.0.0' \
     'empty:1.3.0' $'empty: \t1.3.0\r ' 'unknown:pi 1.3.0' 'unknown:Pi 1.3.0' \
@@ -1033,9 +1036,8 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     pi_v=${case_#*:}
     out=$(
       unset _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
-      export FM_PI_TEST_VERSION_OUTPUT="$pi_v" FM_COMPOSER_PI_EXECUTABLE=pi
-      PATH="$fakebin"
-      fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
+      FM_PI_TEST_VERSION_OUTPUT="$pi_v" FM_COMPOSER_PI_EXECUTABLE=pi PATH="$fakebin" \
+        fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
     )
     [ "$out" = "$want" ] \
       || { rm -rf "$fakebin"; fail "Pi version first line '$pi_v' must read '$want', got '$out'"; }
