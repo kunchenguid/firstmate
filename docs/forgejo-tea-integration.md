@@ -3,7 +3,7 @@
 Empirical record for the merge watch and the merge path on Forgejo, alongside the existing GitHub and GitLab ones (`docs/gitlab-merge-watch.md`).
 Every finding here was verified against a real, disposable Forgejo instance rather than assumed from `tea --help`, because several of them contradict what the help text alone would suggest.
 All evidence below was collected on 2026-09-13.
-A project opts in with the `forge=forgejo` registry binding, which `bin/fm-project-mode.sh` owns; the watch and merge paths recorded here key off the pull request URL itself, and the binding decides which Forgejo CLI a generated ship brief names - `tea` unless the binding names another, resolved against the project's own host - rather than `gh-axi`.
+A project opts in with the `forge=forgejo` registry binding, which `bin/fm-project-mode.sh` owns; the watch and merge paths recorded here key off the pull request URL itself, and the binding decides which Forgejo CLI a generated ship brief names (the selection [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns) rather than `gh-axi`.
 `tea` is the documented default and one of several Forgejo CLIs firstmate can drive: [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) records what `forgejo-cli` (`fj`) and `fgj` offer, and which of them can serve the REST calls and the `head_commit_id` binding this record owns.
 
 ## Versions
@@ -57,7 +57,7 @@ index,state
 ```
 
 A list read is bounded by `--limit`, so a watched pull request older than that window would never be seen merged.
-The merge watch (`bin/fm-pr-poll.sh`), the terminal-run PR detail (`bin/fm-crew-state.sh`), and teardown's merged-PR proof (`bin/fm-teardown.sh`) therefore read the one pull request by number through `tea api ... /repos/{owner}/{repo}/pulls/{n}`, the same REST record the merge path below reads, and accept only a record whose `merged` field is a boolean (`fm_pr_forgejo_read_record` in `bin/fm-pr-lib.sh`).
+The merge watch (`bin/fm-pr-poll.sh`), the terminal-run PR detail (`bin/fm-crew-state.sh`), and teardown's merged-PR proof (`bin/fm-teardown.sh`) therefore read the one pull request by number through the resolved CLI's authenticated REST request (`fm_pr_forgejo_read_record` in `bin/fm-pr-lib.sh`, whose CLI and login selection [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns; `tea api ... /repos/{owner}/{repo}/pulls/{n}` is tea's form of it), the same REST record the merge path below reads, and accept only a record whose `merged` field is a boolean.
 **Not verified here:** that by-number read was not re-run against the evidence instance; it relies on the same `tea api` pull request record whose `state`, `merged`, and `head.sha` fields the merge path's read-back below did verify.
 
 ## Why the login is resolved fresh, and how
@@ -101,7 +101,7 @@ $ tea login list --output json
 
 Every Forgejo read parses this list as JSON with `jq`, matches the validated PR host against each login's bare hostname (stripping scheme, userinfo, port, and path), and refuses when zero or more than one login matches, rather than guessing.
 It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
-`fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
+`fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy of the tea and fgj matches and re-derives the login on every poll rather than trusting it from anywhere durable, though the CLI choice itself comes from the poll sidecar's recorded preference ([`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns both).
 
 ## URL shape
 
@@ -141,20 +141,22 @@ merged
 
 The `localhost:3980` login's actual port never appears in the canonical PR URL or the poll's host comparison - login matching only ever compares bare hostnames - so this reproduces correctly for an instance reachable on the standard port with no explicit port in its URL, which is the realistic self-hosted shape.
 
-## A missing tea produces no wake, never a false merge
+## A missing Forgejo CLI produces no wake, never a false merge
 
 ```
 $ PATH="$notea" bin/fm-pr-poll.sh --validated forgejo https://localhost/fixture/fixture-repo/pulls/1 localhost fixture/fixture-repo 1
 (nothing)
 
 $ PATH="$notea" bin/fm-pr-check.sh task-x https://localhost/fixture/fixture-repo/pulls/1
-error: watching a Forgejo pull request requires tea on PATH
+error: watching a Forgejo pull request at localhost requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth status'), or fj (see 'fj auth list')
 ```
+
+A home that has `fgj` logged in for the host instead arms through that CLI, whose own login store is read the same way; [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns that selection.
 
 ## Merging: tea's merge subcommand cannot bind a head, but the API can
 
 `tea pulls merge --help` documents no `--sha`/head-commit flag, unlike `gh pr merge --match-head-commit` and `glab mr merge --sha`.
-Forgejo/Gitea's underlying REST API does support one, as an undocumented-by-tea `head_commit_id` field on the merge request body (confirmed against the instance's own served Swagger definition, `MergePullRequestOption`), so `bin/fm-pr-merge.sh` calls that API directly through `tea api` instead of `tea pulls merge`:
+Forgejo/Gitea's underlying REST API does support one, as an undocumented-by-tea `head_commit_id` field on the merge request body (confirmed against the instance's own served Swagger definition, `MergePullRequestOption`), so `bin/fm-pr-merge.sh` calls that API directly through the resolved CLI's `api` passthrough (tea's is `tea api`, shown here) instead of a `pulls merge` subcommand:
 
 ```
 $ tea api --login fm-fixture --repo fixture/fixture-repo -X POST '/repos/{owner}/{repo}/pulls/2/merge' \
