@@ -3254,11 +3254,11 @@ test_no_run_idle_pane_custom_paused_verb() {
 
 # A trailing keyed resolved: event is a decision-CLOSING event, not a run-state
 # verb. It must never become the current state or leak its resolution prose as the
-# detail: a healthy idle secondmate that just closed a keyed decision falls through
-# to the idle default (unknown/none), not `unknown` with the resolution note as its
-# `doing`. Regression for the bearings render bug where such a secondmate showed
-# state=unknown with resolution prose. The one-owner keyed fold in fm-classify-lib.sh
-# is untouched; this only stops the deriver from reading a non-state event as state.
+# detail: a healthy idle secondmate that just closed a keyed decision reads the
+# deliberate final `unknown none` ("no current-state source available"), never
+# `unknown` with the resolution note as its `doing`, and never an invented token.
+# The log tail is not a state source by design, so this pins that result exactly.
+# The one-owner keyed fold in fm-classify-lib.sh is untouched.
 test_no_run_idle_secondmate_resolved_event_not_state() {
   reset_fakes
   local d; d=$(new_case resolved-idle)
@@ -3273,6 +3273,9 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   assert_contains "$out" "state: unknown" "resolved-then-idle secondmate is not a spurious run-state"
   assert_contains "$out" "source: none" "a resolved event is not treated as a status-log state source"
   assert_not_contains "$out" "subscribe-before-write" "resolution prose must not leak into the detail"
+  assert_contains "$out" "state: unknown · source: none · no current-state source available" "decision-closing tail reads the deliberate unknown, no idle token"
+  assert_not_contains "$out" "idle" "no idle state token is emitted"
+  assert_not_contains "$out" "state: parked" "a resolved tail is not read as a parked wait"
   # A bare (non-keyed) resolved: closes the default key and behaves the same.
   printf 'blocked: waiting on infra\nresolved: infra access granted\n' > "$d/state/mate.status"
   out=$(run_crew_state "$d" mate)
