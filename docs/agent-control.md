@@ -76,7 +76,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
-   `--model` without `--harness` refuses before the checkpoint, naming the recorded harness and the exact command that keeps it, because a model names no runtime and a secondmate's implicit harness is its configured pin.
+   `--model` without `--harness` refuses before the checkpoint, naming the recorded harness and the exact command that keeps it (or, for a recorded raw-command basename whose launch command cannot be reconstructed, asking for a deliberately chosen `--harness` instead of offering one), because a model names no runtime and a secondmate's implicit harness is its configured pin.
    Without an explicit harness, a `kind=secondmate` task re-resolves its [configured runtime pin for that mate](configuration.md#choose-the-secondmate-harness) before the checkpoint.
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.

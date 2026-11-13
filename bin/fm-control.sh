@@ -76,7 +76,9 @@
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. --model without --harness refuses
 #              before anything stops, naming the harness the task record
-#              names and the exact command that keeps it: a model alone never
+#              names and the exact command that keeps it, or, for a recorded
+#              raw-command basename that cannot be reconstructed, asking for a
+#              deliberately chosen --harness instead: a model alone never
 #              says which runtime it belongs to, and for a secondmate the
 #              implicit harness is its configured pin, which may resolve to
 #              this home's own runtime. With no explicit axis, a secondmate
@@ -1259,6 +1261,9 @@ do_relaunch() {
   # one running: a secondmate re-resolves its configured pin, which can fall
   # back to this home's own runtime. Refuse before anything is touched.
   if [ "$MODEL_SET" = 1 ] && [ "$HARNESS_SET" = 0 ]; then
+    if [ "$RECORDED_HARNESS" != "$HARNESS" ]; then
+      die "relaunch of $ID was given --model without --harness, so the replacement runtime would be implied rather than chosen; nothing was stopped. Task $ID records harness '$RECORDED_HARNESS' in state/$ID.meta, whose original launch command cannot be reconstructed from its recorded basename, so no command can keep it. Pass an explicit --harness to choose the replacement runtime deliberately"
+    fi
     die "relaunch of $ID was given --model without --harness, so the replacement runtime would be implied rather than chosen; nothing was stopped. Task $ID records harness '$RECORDED_HARNESS' in state/$ID.meta. To keep it, run: $(relaunch_keep_harness_command)"
   fi
   require_state_verified_backend relaunch

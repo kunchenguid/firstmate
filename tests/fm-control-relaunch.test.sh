@@ -3309,6 +3309,28 @@ test_model_without_harness_refuses_before_stop() {
   pass "fm-control relaunch: --model without --harness refuses before stopping and names the command that keeps the harness"
 }
 
+test_model_without_harness_offers_no_keep_command_for_a_raw_basename() {
+  local dir out rc before id=mh-raw
+  dir=$(new_case model-no-harness-raw "$id")
+  add_ship_task "$dir" "$id" claude-wrapper
+  printf 'claude-wrapper' > "$dir/fake/command"
+  before=$(cat "$dir/home/state/$id.meta")
+  out=$(run_control "$dir" "$id" relaunch --model sonnet --note "carry on"); rc=$?
+  expect_code 1 "$rc" "--model without --harness on a raw basename must refuse"$'\n'"$out"
+  assert_contains "$out" "records harness 'claude-wrapper' in state/$id.meta" \
+    "the refusal must name the recorded value"$'\n'"$out"
+  assert_contains "$out" "cannot be reconstructed from its recorded basename" \
+    "the refusal must say the recorded launch command cannot be reproduced"$'\n'"$out"
+  assert_contains "$out" "Pass an explicit --harness" \
+    "the refusal must ask for a deliberate --harness"$'\n'"$out"
+  assert_not_contains "$out" "To keep it" "no keep command may be offered for a raw basename"$'\n'"$out"
+  assert_not_contains "$out" "relaunch --harness claude" "the canonical adapter must not be offered as keeping it"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude-wrapper ] || fail "a refused relaunch must not stop the agent"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] || fail "a refused relaunch must leave the record untouched"
+  [ ! -e "$dir/home/state/$id.control-relaunch" ] || fail "a refused relaunch must not open a transaction"
+  pass "fm-control relaunch: --model without --harness offers no keep command for a raw basename"
+}
+
 # A secondmate whose replacement fails to launch is left with no agent, so the
 # failure names the spawn command the operator runs next - and does not run it.
 test_secondmate_launch_failure_prints_the_spawn_recovery_command() {
@@ -3331,6 +3353,7 @@ test_secondmate_launch_failure_prints_the_spawn_recovery_command() {
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_model_without_harness_refuses_before_stop
+test_model_without_harness_offers_no_keep_command_for_a_raw_basename
 test_secondmate_launch_failure_prints_the_spawn_recovery_command
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
