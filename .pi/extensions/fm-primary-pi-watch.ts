@@ -672,7 +672,9 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
 
 function displaceActiveGeneration(successor: SessionGeneration): void {
   const displaced = replacementCoordinator.active;
-  if (displaced && displaced !== successor && !displaced.stopping) void stopSessionGeneration(displaced, true);
+  if (displaced && displaced !== successor && !displaced.stopping) {
+    void stopSessionGeneration(displaced, true).catch(() => relinquishGeneration(displaced));
+  }
 }
 
 const cleanupOnProcessExit = () => {
