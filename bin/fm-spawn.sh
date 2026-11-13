@@ -5591,7 +5591,7 @@ spawn_enter_recorded_worktree() {
 # starts. Zellij and cmux implement this read with a shell probe, so keeping it
 # before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
-  local expected seen i last_poll=19 agent_status
+  local expected seen i last_poll=19 agent_status probe_status posix_answer=0
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
@@ -5602,6 +5602,17 @@ spawn_assert_agent_worktree() {
   for i in $(seq 0 "$last_poll"); do
     [ "$i" -eq 0 ] || sleep 0.5
     seen=$(spawn_current_path "$WT_TARGET" || true)
+    # Native Windows Herdr has no passive folder read, so every tenth poll asks
+    # the pane's shell instead. That probe types into the pane, which is safe
+    # only here, before any harness starts; relaunch keeps the passive read
+    # and refuses at its own worktree check before reaching this one.
+    # A non-POSIX answer proves the pane runs another shell, so stop waiting.
+    if [ -z "$seen" ] && [ "$BACKEND" = herdr ] && [ $((i % 10)) -eq 0 ]; then
+      probe_status=0
+      seen=$(fm_backend_herdr_probe_path "$WT_TARGET") || probe_status=$?
+      [ "$probe_status" -ne 2 ] || break
+      [ -z "$seen" ] || posix_answer=1
+    fi
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
@@ -5613,6 +5624,9 @@ spawn_assert_agent_worktree() {
   if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$WT_TARGET"; then
     agent_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
     echo "error: Herdr pane '$WT_TARGET': last foreground_cwd='${seen:-unknown}', agent_status='${agent_status:-unknown}'" >&2
+    if [ "$posix_answer" -eq 0 ] && fm_backend_herdr_windows_host; then
+      echo "error: on native Windows a Herdr task pane must run Git Bash, set as [terminal] default_shell in Herdr's config; a PowerShell or cmd.exe pane cannot answer the folder probe" >&2
+    fi
   fi
   exit 1
 }
