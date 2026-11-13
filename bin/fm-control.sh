@@ -518,9 +518,6 @@ dismiss_exit_picker() {
     sleep "$POLL"
     elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
   done
-  # Keep a later interrupt Escape from landing as a double press, which on an
-  # idle Claude composer opens its rewind menu.
-  sleep 1
 }
 
 # rendered_matches <ere>: whether any row of the visible viewport matches.

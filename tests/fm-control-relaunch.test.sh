@@ -83,6 +83,7 @@ case "${1:-}" in
           # With a background job modelled, the exit command waits for its
           # submitting Enter, which is where Claude decides on the picker.
           if [ -f "$D/bgjob" ]; then
+            rm -f "$D/notice-released"
             : > "$D/pending-exit"
             exit 0
           fi
@@ -124,7 +125,7 @@ case "${1:-}" in
             if [ -f "$D/bgjob-finish-after" ]; then
               n=$(( $(cat "$D/bgjob-finish-after") - 1 ))
               printf '%s' "$n" > "$D/bgjob-finish-after"
-              [ "$n" -gt 0 ] || printf 'finished' > "$D/bgjob"
+              [ "$n" -gt 0 ] || { printf 'finished' > "$D/bgjob"; : > "$D/notice-released"; }
             fi
           fi
           ;;
@@ -230,6 +231,9 @@ SH
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_LOCK_WAITING:-}" ] || : > "$FM_FAKE_LOCK_WAITING"
+# A released background-job completion notice starts a turn in the old
+# session. Any time that passes before /exit is typed lets that turn run.
+[ ! -f "${FM_FAKE_DIR:-/nonexistent}/notice-released" ] || : > "$FM_FAKE_DIR/old-turn-ran"
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -559,6 +563,8 @@ test_relaunch_waits_for_a_running_background_job_then_completes() {
   expect_code 0 "$rc" "relaunch should complete once the background job finishes"$'\n'"$out"
   assert_contains "$out" "relaunched rl81 harness=claude" "the outcome should name the relaunch"
   [ ! -e "$dir/fake/job-killed" ] || fail "a running background job must never be killed through the picker"
+  [ ! -e "$dir/fake/old-turn-ran" ] \
+    || fail "the released completion notice ran a turn in the old session before /exit was typed"
   [ "$(cat "$dir/fake/picker-dismissals")" = xxx ] \
     || fail "the picker should be dismissed once per wait cycle, got '$(cat "$dir/fake/picker-dismissals")'"
   enters_on_picker=$(grep -c '^Enter$' "$dir/fake/keys" || true)
