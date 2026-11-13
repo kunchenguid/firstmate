@@ -563,6 +563,16 @@ test_windows_session_started_on_an_earlier_day_is_identified_under_a_narrow_widt
   row='  4224372       0       0       7204  ?              0 sometime C:\Users\u\.local\bin\claude.exe'
   FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_win_command 7204 >/dev/null; echo "rc=$?"' > "$dir/rc"
   [ "$(cat "$dir/rc")" = rc=2 ] || fail "an unrecognized STIME row returned $(cat "$dir/rc"), expected rc=2 (unknown)"
+  # A listed row with a valid time but no command is unknown too, so the lock
+  # its pid holds is still refused to another session rather than reclaimed.
+  for row in '  4224372       0       0       7204  ?              0 22:24:48' \
+             '  4224372       0       0       7204  ?              0 22:24:48 ' \
+             '  4224372       0       0       7204  ?              0   Nov  8 '; do
+    FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_win_command 7204 >/dev/null; echo "rc=$?"' > "$dir/rc"
+    [ "$(cat "$dir/rc")" = rc=2 ] || fail "a row with no command ('$row') returned $(cat "$dir/rc"), expected rc=2 (unknown)"
+    FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_session_lock_pid_blocks_reclaim win:7204' \
+      || fail "a row with no command ('$row') left the lock of win:7204 reclaimable"
+  done
   pass "session-lock: a Windows session started on an earlier day is identified under a narrow COLUMNS"
 }
 
