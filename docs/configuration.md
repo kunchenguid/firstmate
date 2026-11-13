@@ -821,6 +821,20 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## PR hold settlement (config/hold-pr-settle)
+
+The optional local, gitignored `config/hold-pr-settle` presence flag enables settlement of explicitly declared PR-dependent captain holds.
+Create the empty flag in the owning home and use `bin/fm-captain-hold.sh pr-policy` to declare each hold's settlement policy.
+The command's `--help` owns its arguments and durable record format.
+The existing contribution observer applies matching GitHub merge or closure evidence, including observations retained after the worker stops.
+It also reports an unmerged closure through the contribution notification channel, once for each owning task that is still an open captain hold after settlement.
+A task without a captain hold gets no closure notification, so enabling the flag does not replay historical closed PRs.
+No captain answer is invented, and unrelated holds remain open.
+With the flag absent, no settlement or new closure notification occurs.
+The flag takes effect on the next contribution poll and is not inherited by secondmate homes.
+The observer's existing `bin/fm-contributions.sh arm` command enables polling when it is not already armed.
+The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) owns when a forge event may settle a question.
+
 ## Park on review
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
