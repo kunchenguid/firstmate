@@ -284,6 +284,63 @@ SH
     "fm-spawn must embed DISABLE_AUTOUPDATER in the launch command so a daemon-built pane that never inherited it still runs Claude with the updater off"
 }
 
+test_liveness_guard_launches_grok_only_on_request() {
+  # Grok opens a browser sign-in on a bare launch without a usable login, so the
+  # default-on liveness guard must not launch it unasked. The fake grok records
+  # every invocation, then runs as a process named grok so an opted-in run is
+  # classified at once instead of waiting out the guard's poll. The case PATH
+  # holds only it, tmux and a mirror of the system directories with every name
+  # in the guard's harness list removed, so the guard can launch no real harness.
+  local case_dir casebin marker other guard_path out case_path sysbin d
+  if ! command -v tmux >/dev/null 2>&1; then
+    printf '# skip: tmux not found, so the liveness guard cannot reach its harness loop\n'
+    return 0
+  fi
+  case_dir="$TMP_ROOT/liveness-grok"
+  casebin="$case_dir/bin"; marker="$case_dir/grok-launched"; other="$case_dir/other-launched"
+  mkdir -p "$casebin" "$case_dir/real" "$case_dir/home" "$case_dir/hostbin"
+  # A decoy for a real harness that a host installs into a system directory.
+  # shellcheck disable=SC2016 # the decoy expands $0 at its own runtime, not here
+  printf '#!/bin/sh\necho "$0" >> "%s"\n' "$other" > "$case_dir/hostbin/claude"
+  chmod +x "$case_dir/hostbin/claude"
+  sysbin="$case_dir/sysbin"
+  mkdir -p "$sysbin"
+  # Lowest-precedence directory first, so a later one overrides it as on PATH.
+  for d in /bin /usr/bin "$case_dir/hostbin"; do
+    ln -sf "$d"/* "$sysbin"/ 2>/dev/null || true
+  done
+  rm -f "$sysbin"/claude "$sysbin"/codex "$sysbin"/opencode "$sysbin"/pi "$sysbin"/pi-signed \
+    "$sysbin"/grok "$sysbin"/kimi "$sysbin"/cursor-agent "$sysbin"/agent "$sysbin"/muse
+  case_path="$casebin:$sysbin"
+  ln -s "$(command -v tmux)" "$casebin/tmux"
+  ln -s "$(command -v sleep)" "$case_dir/real/grok"
+  cat > "$casebin/grok" <<SH
+#!/usr/bin/env bash
+printf 'launch:%s\n' "\$*" >> "$marker"
+[ "\${1:-}" = --version ] && { printf 'grok 0.0.0-fake\n'; exit 0; }
+exec "$case_dir/real/grok" 600
+SH
+  chmod +x "$casebin/grok"
+  guard_path="$ROOT/tests/fm-harness-liveness-drift-live-e2e.test.sh"
+
+  out=$(clean_env HOME="$case_dir/home" PATH="$case_path" bash "$guard_path" 2>&1 || true)
+  [ ! -e "$marker" ] || fail "the liveness guard must not launch grok without an opt-in: $(cat "$marker")"
+  assert_contains "$out" "skip: grok" "the guard must report grok as skipped: $out"
+  assert_contains "$out" "FM_GROK_LIVE_E2E=1" "the grok skip must name the variable that turns it on: $out"
+
+  clean_env HOME="$case_dir/home" PATH="$case_path" FM_GROK_LIVE_E2E=1 bash "$guard_path" >/dev/null 2>&1 || true
+  [ -e "$marker" ] || fail "FM_GROK_LIVE_E2E=1 must let the liveness guard launch grok"
+  grep -qx 'launch:' "$marker" || fail "FM_GROK_LIVE_E2E=1 must launch grok bare in the probe window: $(cat "$marker")"
+
+  rm -f "$marker"
+  clean_env HOME="$case_dir/home" PATH="$case_path" FM_LIVE=1 FM_GROK_LIVE_E2E=0 bash "$guard_path" >/dev/null 2>&1 || true
+  [ ! -e "$marker" ] || fail "FM_GROK_LIVE_E2E=0 must keep grok off even under FM_LIVE=1"
+
+  clean_env HOME="$case_dir/home" PATH="$case_path" FM_LIVE=1 bash "$guard_path" >/dev/null 2>&1 || true
+  grep -qx 'launch:' "$marker" 2>/dev/null || fail "FM_LIVE=1 must let the liveness guard launch grok"
+  [ ! -e "$other" ] || fail "the case must never launch a real harness found on the host's system PATH: $(cat "$other")"
+}
+
 test_every_live_guard_is_wired_to_the_shared_gate() {
   local script out listing checked=0
   listing=$("$ROOT/bin/fm-test-run.sh" --family live-harness-optin --list) \
@@ -328,4 +385,6 @@ test_disable_autoupdater_reaches_the_claude_pane_on_the_fm_spawn_launch_path
 pass "DISABLE_AUTOUPDATER rides fm-spawn's claude launch through to the harness pane"
 test_disable_autoupdater_survives_a_daemon_pane_that_never_inherited_it
 pass "DISABLE_AUTOUPDATER is embedded in the launch so a daemon-built pane keeps it"
+test_liveness_guard_launches_grok_only_on_request
+pass "the default-on liveness guard launches grok only on request"
 test_every_live_guard_is_wired_to_the_shared_gate

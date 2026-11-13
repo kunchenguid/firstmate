@@ -22,7 +22,9 @@
 # Each harness is launched bare, with no prompt, so this consumes no model
 # tokens. The launch uses whatever credentials the harness already has; an
 # unauthenticated harness still starts its process, which is all the liveness
-# probe reads.
+# probe reads. Grok is the exception: without a usable sign-in its first launch
+# opens a browser to authenticate, so this guard launches it only when
+# FM_GROK_LIVE_E2E=1 or FM_LIVE=1 is set and otherwise reports it as skipped.
 #
 # Portable serial CI installs the public Pi package but no credentials, so this
 # guard checks that available token-free surface there and runs against every installed
@@ -115,6 +117,13 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
+    continue
+  fi
+  # Grok's own variable wins over FM_LIVE, as it does in fm_live_gate.
+  if [ "$harness" = grok ] && [ "${FM_GROK_LIVE_E2E:-}" != 1 ] \
+    && { [ "${FM_LIVE:-}" != 1 ] || [ "${FM_GROK_LIVE_E2E:-}" = 0 ]; }; then
+    SKIPPED="$SKIPPED $harness"
+    note "skip: grok can open a browser sign-in when launched, so set FM_GROK_LIVE_E2E=1 to check its classification"
     continue
   fi
 
@@ -230,7 +239,7 @@ done
   "no verified harness is installed here, so this run proved nothing; install at least one harness before trusting a pass"
 
 if [ -n "$SKIPPED" ]; then
-  note "unverified on this machine (not installed):$SKIPPED"
+  note "unverified on this machine (not installed or not opted in):$SKIPPED"
 fi
 note "checked $CHECKED installed harness(es)"
 
