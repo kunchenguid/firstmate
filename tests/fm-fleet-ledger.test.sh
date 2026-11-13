@@ -157,7 +157,10 @@ test_flag_on_records_a_pr_registration() {
   # An unreadable forge answer: no draft refusal and no recorded head.
   printf '#!/usr/bin/env bash\nexit 1\n' > "$FAKEBIN/gh"
   chmod +x "$FAKEBIN/gh"
-  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1) \
+  # local-only: this case records PR registration after spawn, not a publishing
+  # contract. A publishing mode fail-closes when the code root is a shallow
+  # clone (fm_role_gate_self_publish), including CI fetch-depth 1 checkouts.
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off 2>&1) \
     || fail "spawn failed: $out"
   printf 'done: PR %s\n' "$pr_url" >> "$HOME_DIR/state/$TASK.status"
   out=$(in_home "$ROOT/bin/fm-pr-check.sh" "$TASK" "$pr_url" 2>&1) || fail "PR registration failed: $out"

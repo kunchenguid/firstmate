@@ -34,7 +34,30 @@ test_quiet_checkpoint_exits_124_cleanly() {
   out="$home/out.txt"
   err="$home/err.txt"
   status=0
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+  # uutils sleep ignores SIGINT. A quiet checkpoint must still drop its lock
+  # when the poll wait is an external sleep that does not die on INT.
+  mkdir -p "$home/stub-bin"
+  cat > "$home/stub-bin/sleep" <<'SH'
+#!/usr/bin/env bash
+trap '' INT
+secs=${1:-1}
+fifo=$(mktemp -d "${TMPDIR:-/tmp}/fm-stub-sleep.XXXXXX")/w
+mkfifo "$fifo" || exit 1
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+  read -r -t "$secs" _ <>"$fifo" || true
+else
+  i=0
+  while [ "$i" -lt "$secs" ]; do
+    read -r -t 1 _ <>"$fifo" || true
+    i=$((i + 1))
+  done
+fi
+rm -f "$fifo"
+rmdir "$(dirname "$fifo")"
+SH
+  chmod +x "$home/stub-bin/sleep"
+  PATH="$home/stub-bin:$PATH" FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
   expect_code 124 "$status" "quiet checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "quiet checkpoint line missing"
   assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived quiet checkpoint timeout"

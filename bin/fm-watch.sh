@@ -3591,13 +3591,35 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# watcher_poll_sleep: wait POLL seconds in this bash, not in sleep(1).
+# Bash defers SIGINT while a child runs (watcher_stop_signals). GNU sleep dies
+# on INT so the trap still runs; uutils sleep ignores INT, so a checkpoint's
+# INT plus kill-after SIGKILLs the watcher before watcher_cleanup can drop the
+# lock. A timed read on a dummy fifo is a builtin wait, so the INT trap runs.
+watcher_poll_sleep() {
+  local fifo
+  fifo="$STATE/.watch.poll.fifo"
+  rm -f -- "$fifo"
+  if mkfifo -m 600 "$fifo" 2>/dev/null; then
+    # Open read-write so read does not block on a writer; unlink so a stop
+    # cannot leak the path. Fixed fd 8: bash 3.2 has no {var}<> redirection.
+    exec 8<>"$fifo"
+    rm -f -- "$fifo"
+    read -r -t "$POLL" _ <&8 || true
+    exec 8>&-
+    exec 8<&-
+    return
+  fi
+  sleep "$POLL"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
-# with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
+# with push-capable windows (herdr, rex), it replaces the blind poll wait with a
 # bounded wait on the backend's native transition stream, so a crew going
 # `blocked` wakes the supervisor sub-second instead of after the stale-pane
 # wedge timer. For every other home - no push-capable window, backend not
-# capable, or the event path proven unreliable this process - it sleeps POLL,
-# byte-for-byte today's behavior. The poll loop above still runs every cycle, so
+# capable, or the event path proven unreliable this process - it waits POLL,
+# byte-for-byte today's duration. The poll loop above still runs every cycle, so
 # this only ever SHORTENS latency; it can never drop an escalation (the poll
 # loop is the permanent fail-closed backstop). This preserves the single live
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
@@ -3636,7 +3658,7 @@ event_wait_or_sleep() {
   fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    watcher_poll_sleep
     return
   fi
 
@@ -3652,7 +3674,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    watcher_poll_sleep
     return
   fi
 
@@ -3676,7 +3698,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      watcher_poll_sleep
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -3860,6 +3882,8 @@ watcher_cleanup() {
   fm_capture_output_cleanup
   fm_wait_tmp_cleanup
   fm_custom_check_snapshot_cleanup
+  { exec 8>&-; exec 8<&-; } 2>/dev/null || true
+  rm -f -- "$STATE/.watch.poll.fifo"
   # A stop can land inside a marker or queue critical section, leaving locks
   # recorded against this very pid with no frame left to release them. Drop
   # ours outright - identity-aware no-ops for any lock not ours - so the
