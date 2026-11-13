@@ -34,14 +34,14 @@ unknown=0
 degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
-if [ "$#" -eq 7 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
+if { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
   [ "$1" != --baseline ] || unknown=3
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
-  preference=$7
+  preference=${7:-auto}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;

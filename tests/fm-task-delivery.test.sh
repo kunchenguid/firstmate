@@ -1870,6 +1870,34 @@ STUB
   pass "forge=forgejo: spawn agreement and promotion carry the binding, name tea, and keep yolo"
 }
 
+# A project registered forge=forgejo:fj cannot ship: forgejo-cli cannot read the
+# pull request record or bind a merge to a verified head. Promotion carries the
+# recorded binding through instead of rewriting it to auto, so the same refusal
+# the brief renders stops the promoted ship rather than emitting a tea contract
+# for a task whose ready report arming will refuse.
+test_forge_forgejo_fj_binding_refuses_promotion() {
+  local rec home proj fakebin id meta out status
+  rec=$(make_home forge-forgejo-fj "- proj [direct-PR +yolo forge=forgejo:fj] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  id="forge-forgejo-fj-p1"
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
+  set +e
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a forge=forgejo:fj project was promoted"
+  assert_contains "$out" "fj" "the promotion refusal did not name the refused CLI"
+  [ ! -e "$home/data/$id/ship-instructions.md" ] || fail "the refused promotion published ship instructions"
+  assert_grep 'kind=scout' "$meta" "the refused promotion rewrote the task metadata"
+  pass "forge=forgejo:fj is refused at promotion rather than downgraded to tea"
+}
+
 # direct-PR composes with the forge: the mode still means "publish without the
 # pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
 # plus a pull request. The worker reports the published change, never submits or
@@ -2000,6 +2028,7 @@ test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_forge_forgejo_rides_the_same_binding
+test_forge_forgejo_fj_binding_refuses_promotion
 test_pr_manual_brief_hands_the_pr_text_to_the_worker
 test_pr_manual_is_refused_where_it_cannot_apply
 test_spawn_requires_the_brief_to_carry_the_registered_pr_text

@@ -3855,6 +3855,14 @@ SH
     ' _ "$ROOT/bin/fm-pr-lib.sh" forgejo.example o/r 7 fgj)
   [ "$out" = true ] || fail "the terminal read did not resolve the recorded fgj preference: '$out'"
   [ ! -s "$dir/tea.log" ] || fail "the terminal read used tea despite the recorded fgj preference"
+
+  : > "$dir/tea.log"
+  : > "$dir/fgj.log"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_FGJ_LOG="$dir/fgj.log" \
+    PATH="$dir/fakebin:$BASE_PATH" bash "$POLL" --validated forgejo "$url" forgejo.example o/r 7)
+  [ "$out" = merged ] || fail "the documented six-argument --validated form stopped working: '$out'"
+  grep -qF -- "api --login main --repo o/r" "$dir/tea.log" \
+    || fail "the six-argument --validated form did not resolve the auto default through tea"
   pass "Forgejo poll and terminal read honor the project's recorded CLI preference"
 }
 

@@ -154,6 +154,8 @@ Both are matched to the pull request's parsed host exactly, and a store with zer
 
 `bin/fm-pr-lib.sh` owns the selection in one place.
 `fm_pr_forgejo_cli_api_capable` declares which CLIs can make an authenticated request, `fm_pr_forgejo_resolve` picks a CLI and its own host login, and `fm_pr_forgejo_api` turns that into one request, so the merge watch (`bin/fm-pr-poll.sh`, which duplicates the selection because its body sources nothing), the merge path (`bin/fm-pr-merge.sh`), the terminal read (`bin/fm-crew-state.sh`), teardown's merged proof (`bin/fm-teardown.sh`), and arming (`bin/fm-pr-check.sh`) all agree.
+The merge watch is handed the project's recorded preference through the registered poll sidecar, whose optional sixth line names it; a project that named none records no line and the watch resolves `auto`, exactly as before.
+The watch's manual `--validated`/`--baseline` form keeps the six-argument shape `--validated <provider> <url> <host> <path> <number>` (preference `auto`) recorded for the other forges; the watcher's own invocation passes the recorded preference as an optional seventh argument.
 
 A project names its CLI through the registry forge binding, `forge=forgejo:tea`, `forge=forgejo:fgj`, or `forge=forgejo:fj`, queried with `bin/fm-project-mode.sh --forge-cli`; `--forge` still answers `forgejo` for every spelling, so no existing consumer changes.
 `forge=forgejo` alone, the spelling every registered project already has, means `auto`: `tea` first, then `fgj`, then `fj`, taking the first one that is installed and holds exactly one login for the host. A home that has `tea` therefore behaves exactly as it did before, and a home that has only the others stops failing with "tea not found".
