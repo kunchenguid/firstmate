@@ -56,10 +56,14 @@ case "${1:-}" in
 esac
 SH
   local tool
-  for tool in gh gh-axi curl; do
+  for tool in gh gh-axi glab curl; do
     cat > "$fake/$tool" <<'SH'
 #!/usr/bin/env bash
 printf '%s %s\n' "$(basename "$0")" "$*" >> "${FM_FORGE_LOG:?}"
+if [ "$(basename "$0")" = glab ] && [ "${1:-} ${2:-}" = 'mr view' ]; then
+  printf '%s\n' '{"target_branch":"main"}'
+  exit 0
+fi
 if [ "$(basename "$0")" = gh ] && [ "${GH_HOST:-}" = example.test ]; then
   case " $* " in
     *' --json baseRefName '*)

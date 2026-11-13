@@ -25,9 +25,26 @@ case " $* " in
 esac
 SH
 chmod +x "$DOD_FAKEBIN/gh"
+cat > "$DOD_FAKEBIN/glab" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" = 'mr view' ] || exit 1
+printf '%s\n' '{"target_branch":"main"}'
+SH
+chmod +x "$DOD_FAKEBIN/glab"
+DOD_CONFIG="$TMP_ROOT/destination-config"
+mkdir -p "$DOD_CONFIG"
+printf 'example.test\n' > "$DOD_CONFIG/github-hosts"
+DOD_HEAD_META="$TMP_ROOT/head-reachability.meta"
+printf 'expected_base=main\n' > "$DOD_HEAD_META"
 
 accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   PATH="$DOD_FAKEBIN:$PATH" fm_dod_accept_ship_done "$@"
+}
+
+# Reachability cases supply an independent matching destination fixture, so
+# they reach the head guard while missing-metadata cases keep using accept_done.
+accept_head_done() {  # <kind> <mode> <worktree> <project> <line>
+  FM_CONFIG_OVERRIDE="$DOD_CONFIG" accept_done "$@" "$TMP_ROOT" head-reachability "$DOD_HEAD_META"
 }
 
 write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
@@ -200,7 +217,7 @@ test_gate_mirror_only_named_head_is_refused() {
   # The local no-mistakes gate mirror lives on this machine, so a head that
   # only reached it has not left the machine.
   git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror "$sha"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  reason=$(accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "named head only on the no-mistakes gate mirror was accepted (exit $rc)"
   case "$reason" in
@@ -209,7 +226,7 @@ test_gate_mirror_only_named_head_is_refused() {
   esac
   # A refresh fetches origin, which does not hold the head, and never counts
   # the mirror, so the refusal stands with no refresh failure to report.
-  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "named head only on the gate mirror was accepted after a refresh (exit $rc)"
   case "$reason" in
@@ -217,7 +234,7 @@ test_gate_mirror_only_named_head_is_refused() {
     *) fail "gate-mirror refusal after a refresh changed its reason: $reason" ;;
   esac
   git -C "$wt" update-ref refs/remotes/origin/fm/mirror "$sha"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green" >/dev/null \
+  accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green" >/dev/null \
     || fail "named head on origin beside the gate mirror was refused"
   pass "named head only on the no-mistakes gate mirror is refused, even after a refresh; on origin it is accepted"
 }
@@ -238,7 +255,7 @@ test_head_pushed_from_gate_clone_is_accepted_after_refresh() {
     || fail "fixture: origin does not hold the gate clone's push"
   ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/gate-push >/dev/null \
     || fail "fixture: the copy already tracks origin's branch"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green")
+  reason=$(accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
   case "$reason" in
@@ -247,11 +264,11 @@ test_head_pushed_from_gate_clone_is_accepted_after_refresh() {
   esac
   ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/gate-push >/dev/null \
     || fail "a caller that does not refresh fetched anyway"
-  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
+  FM_DOD_REFRESH_REMOTES=1 accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
     || fail "head origin holds through the gate clone was refused after a refresh"
   [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/gate-push)" = "$sha" ] \
     || fail "the refresh did not leave origin's head in the copy's refs"
-  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
+  accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
     || fail "a caller that does not refresh refused the head a refresh already fetched"
   pass "head origin holds through the gate clone is accepted after a refresh, and later reads see it"
 }
@@ -265,7 +282,7 @@ test_passed_refresh_deadline_refuses_with_last_known_refs() {
   git -C "$wt" commit -q --allow-empty -m 'fix origin holds while the copy has not fetched it'
   sha=$(git -C "$wt" rev-parse HEAD)
   git -C "$origin" fetch -q "$wt" "fm/deadline-passed:refs/heads/fm/deadline-passed"
-  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/8 checks green")
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/8 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
   case "$reason" in
@@ -294,14 +311,14 @@ test_separate_project_clone_is_refreshed() {
   [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
     "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
     || fail "fixture: the copy shares the project clone's git directory"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green")
+  reason=$(accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
   case "$reason" in
     *"named head $sha is unreachable outside the worker copy") ;;
     *) fail "unfetched refusal without a refresh did not name the commit: $reason" ;;
   esac
-  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green" >/dev/null \
+  FM_DOD_REFRESH_REMOTES=1 accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green" >/dev/null \
     || fail "head the project clone's origin holds was refused after a refresh"
   [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/separate)" = "$sha" ] \
     || fail "the refresh did not fetch the project clone's origin"
@@ -318,7 +335,7 @@ test_failed_refresh_refuses_with_last_known_refs() {
   git -C "$wt" commit -q --allow-empty -m 'fix behind an unreachable remote'
   sha=$(git -C "$wt" rev-parse HEAD)
   git -C "$repo" remote set-url origin "file://$TMP_ROOT/refresh-fail-missing.git"
-  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/6 checks green")
+  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/6 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "named head was accepted although the refresh failed (exit $rc)"
   case "$reason" in
@@ -350,7 +367,7 @@ test_remote_hanging_before_origin_leaves_origin_its_refresh() {
   FM_DOD_REFRESH_FAILED=
   start=$(date +%s)
   PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 4)) \
-    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/9 checks green" >/dev/null \
+    accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/9 checks green" >/dev/null \
     || fail "a remote hanging before origin under a short refresh deadline kept origin's head from being accepted"
   [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/hang-first)" = "$sha" ] \
     || fail "origin was not fetched behind a remote that hangs"
@@ -382,7 +399,7 @@ test_hanging_copy_remote_leaves_the_project_clone_its_refresh() {
   [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
     "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
     || fail "fixture: the copy shares the project clone's git directory"
-  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green")
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
   case "$reason" in
@@ -392,7 +409,7 @@ test_hanging_copy_remote_leaves_the_project_clone_its_refresh() {
   FM_DOD_REFRESH_FAILED=
   start=$(date +%s)
   PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 6)) \
-    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green" >/dev/null \
+    accept_head_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green" >/dev/null \
     || fail "a hanging remote in the copy kept the project clone's origin head from being accepted"
   [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/copy-hang)" = "$sha" ] \
     || fail "the project clone's origin was not fetched behind the copy's hanging remote"

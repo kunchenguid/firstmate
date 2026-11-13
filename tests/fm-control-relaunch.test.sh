@@ -425,9 +425,11 @@ test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
   local dir out rc url=https://github.com/example/repo/pull/7 check
   dir=$(new_case keeps-pr rl44)
   add_ship_task "$dir" rl44 claude
+  printf 'expected_base=main\n' >> "$dir/home/state/rl44.meta"
   cat > "$dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  *baseRefName*) printf 'main\n' ;;
   *headRefOid*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
   *isDraft*) printf '%s\n' '{"isDraft":false}' ;;
   *state*) printf '%s\n' MERGED ;;

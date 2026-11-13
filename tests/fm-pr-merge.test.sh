@@ -3586,7 +3586,7 @@ test_github_updated_head_other_refusals_stop_waiting() {
         rc=$?
         set -e
         expect_code 1 "$rc" "$visibility-$blocker-$waiting: the updated head must refuse"
-        assert_grep "$reason" "$case_dir/stderr" "$visibility-$blocker-$waiting: missing the actual refusal reason"
+        assert_grep "$reason" "$case_dir/stderr" "$visibility-$blocker-$waiting: missing the actual refusal reason"$'\n'"$(cat "$case_dir/stderr")"
         assert_no_grep 'pr merge' "$case_dir/gh.log" "$visibility-$blocker-$waiting: merged despite a blocker"
         assert_absent "$case_dir/state/.control-task-x1.lock" "$visibility-$blocker-$waiting: task control lock remained held"
         assert_absent "$case_dir/state/.afk-contract.lock" "$visibility-$blocker-$waiting: away-authority lock remained held"
