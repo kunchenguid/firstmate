@@ -1635,7 +1635,9 @@ if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
-  emit unknown none "newest status event is decision-closing; no current-state source"
+  if [ "$LOG_VERB" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ]; then
+    emit unknown none "newest status event is decision-closing; no current-state source"
+  fi
 fi
 
 emit unknown none "no current-state source available"

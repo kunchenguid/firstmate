@@ -3257,7 +3257,7 @@ test_no_run_idle_pane_custom_paused_verb() {
 # detail: a healthy idle secondmate that just closed a keyed decision reads the
 # `unknown none` with a decision-closing detail, never
 # `unknown` with the resolution note as its `doing`, and never an invented token.
-# The log tail is not a state source by design, so this pins that result exactly.
+# A decision-closing event is not a run state, so this pins that result exactly.
 # The one-owner keyed fold in fm-classify-lib.sh is untouched.
 test_no_run_idle_secondmate_resolved_event_not_state() {
   reset_fakes
@@ -3287,6 +3287,10 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   out=$(run_crew_state "$d" mate)
   assert_contains "$out" "state: working" "a real trailing state verb still renders"
   assert_contains "$out" "reconciling routed items" "a real state line still carries its detail"
+  printf 'note: just a remark\n' > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: unknown · source: none · no current-state source available" "a non-resolve unknown verb keeps the genuine no-source detail"
+  assert_not_contains "$out" "decision-closing" "a non-resolve verb is not labelled decision-closing"
   rm -f "$d/state/mate.status"
   out=$(run_crew_state "$d" mate)
   assert_contains "$out" "state: unknown · source: none · no current-state source available" "no status log at all keeps the genuine no-source detail"
