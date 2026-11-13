@@ -429,6 +429,7 @@ test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
   cat > "$dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  *'--json state,baseRefName'*) printf 'main\tMERGED\n' ;;
   *baseRefName*) printf 'main\n' ;;
   *headRefOid*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
   *isDraft*) printf '%s\n' '{"isDraft":false}' ;;
