@@ -7,6 +7,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$ROOT/bin/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -757,7 +759,23 @@ SH
 # crew-state command. A clock frozen at a whole-second boundary cannot prove
 # that the forced visit gets a full second rather than the next clock tick.
 test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
-  local branch head out mode started elapsed deadline rc tool real_tool outer_expiry reader_expiry
+  local branch head out mode started elapsed deadline rc outer_expiry reader_expiry
+  # Arm a real absolute watchdog after setup has already spent most of its
+  # window. A relative timer restarted here would consume the parent's reserve.
+  started=$(fm_nm_now_ms)
+  deadline=$((started + 1000))
+  outer_expiry=$((deadline + 1001))
+  sleep 0.6
+  rc=0
+  # shellcheck disable=SC2016 # The bounded child expands its own positional argument.
+  fm_run_until "$deadline" fm_nm_now_ms bash -c 'printf started > "$1.started"; sleep 30; printf escaped > "$1"' _ \
+    "$TMP_ROOT/absolute-timer-escaped" || rc=$?
+  elapsed=$(( $(fm_nm_now_ms) - started ))
+  printf 'absolute-watchdog deadline=%s elapsed_ms=%s rc=%s\n' "$deadline" "$elapsed" "$rc"
+  [ "$rc" = 124 ] && [ -s "$TMP_ROOT/absolute-timer-escaped.started" ] \
+    && [ ! -e "$TMP_ROOT/absolute-timer-escaped" ] \
+    && [ "$((started + elapsed))" -lt "$((outer_expiry - 500))" ] \
+    || fail 'watchdog setup restarted an absolute deadline inside its parent reserve'
   for mode in failed stalled; do
   make_world "forced-cadence-floor-$mode"; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
@@ -795,6 +813,9 @@ SH
   cat > "$WORLD/fakebin/measured-crew-state" <<'SH'
 #!/usr/bin/env bash
 . "$FM_FLOOR_LIB"
+printf 'outer %s\nreader %s\n' "$FM_READ_PARENT_DEADLINE" "$FM_READ_WATCHDOG_DEADLINE" > "$FM_FLOOR_WATCHDOGS"
+printf 'reader-setup\n' >> "$FM_FLOOR_SETUP_LOG"
+sleep 0.2
 rc=0
 result=$("${FM_FLOOR_LIB%/*}/fm-crew-state.sh" "$@") || rc=$?
 started=unreported
@@ -802,55 +823,25 @@ deadline=0
 case "$result" in
   'read-budget: '*)
     budget=${result%%$'\n'*}
-    read -r started deadline extra <<< "${budget#read-budget: }"
-    [ -z "$extra" ] || started=unreported
+    read -r started deadline watchdog parent reserve extra <<< "${budget#read-budget: }"
+    [ -z "$extra" ] && [ "$watchdog" = "$FM_READ_WATCHDOG_DEADLINE" ] \
+      && [ "$parent" = "$FM_READ_PARENT_DEADLINE" ] \
+      && [ "$reserve" = "$FM_READ_CLEANUP_RESERVE_MS" ] || started=unreported
     ;;
 esac
 printf '%s %s %s %s\n' "$started" "$(fm_nm_now_ms)" "$deadline" "$rc" > "$FM_FLOOR_MEASURE"
 printf '%s\n' "$result"
 exit "$rc"
 SH
-  # Startup of the timeout runner must not consume the reader's promised floor.
-  # Delay only the runner invocation that carries this measured reader, keeping
-  # the scan backstop and all clocks real on each supported timeout mechanism.
-  for tool in timeout gtimeout perl; do
-    real_tool=$(command -v "$tool") || continue
-    cat > "$WORLD/fakebin/$tool" <<'SH'
-#!/usr/bin/env bash
-kind='' previous='' seconds=''
-for arg in "$@"; do
-  case "$arg" in
-    bash|env) [ -n "$seconds" ] || seconds=$previous ;;
-    _scan-locked) kind=outer ;;
-  esac
-  if [ -n "${FM_FLOOR_SCAN_BIN:-}" ] && [ "$arg" = "$FM_FLOOR_SCAN_BIN" ]; then
-    [ -n "$seconds" ] || seconds=$previous
-  fi
-  if [ -n "${FM_FLOOR_READER:-}" ] && [ "$arg" = "$FM_FLOOR_READER" ]; then
-    kind=reader
-    printf 'reader-setup\n' >> "$FM_FLOOR_SETUP_LOG"
-    sleep 0.2
-    break
-  fi
-  previous=$arg
-done
-if [ -n "$kind" ]; then
-  . "$FM_FLOOR_LIB"
-  whole=${seconds%%.*}
-  fraction=${seconds#*.}
-  [ "$fraction" != "$seconds" ] || fraction=0
-  fraction="${fraction}000"
-  fraction=${fraction:0:3}
-  printf '%s %s\n' "$kind" "$(( $(fm_nm_now_ms) + whole * 1000 + 10#$fraction ))" >> "$FM_FLOOR_WATCHDOGS"
-fi
-SH
-    printf 'exec %q "$@"\n' "$real_tool" >> "$WORLD/fakebin/$tool"
-  done
   chmod +x "$WORLD/fakebin/"*
+  started=$(fm_nm_now_ms)
+  outer_expiry=$((started + 2000))
+  reader_expiry=$((started + 1000))
   rc=0
   out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
     FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' \
-    FM_READ_BUDGET_MS=1000 FM_READ_BUDGET_REPORT=1 FM_READ_CEILING="$(fm_nm_now_ms)" \
+    FM_READ_BUDGET_MS=1000 FM_READ_BUDGET_REPORT=1 FM_READ_PARENT_DEADLINE="$outer_expiry" \
+    FM_READ_WATCHDOG_DEADLINE="$reader_expiry" FM_READ_CLEANUP_RESERVE_MS=500 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" \
     "$ROOT/bin/fm-crew-state.sh" 0-cadence) || rc=$?
   [ "$rc" = 124 ] || fail 'the reader accepted a floor outside its enclosing deadline'
@@ -871,9 +862,8 @@ SH
   done
   FM_TEST_CREW_STATE_BIN="$WORLD/fakebin/measured-crew-state" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
     FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
-    FM_FLOOR_READER="$WORLD/fakebin/measured-crew-state" FM_FLOOR_SETUP_LOG="$WORLD/setup.log" \
+    FM_FLOOR_SETUP_LOG="$WORLD/setup.log" \
     FM_FLOOR_WATCHDOGS="$WORLD/watchdogs" \
-    FM_FLOOR_SCAN_BIN="$RECON" \
     FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
     FM_FLOOR_DELAY=0.6 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup

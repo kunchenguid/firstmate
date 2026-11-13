@@ -73,6 +73,17 @@
 #       than run unbounded: there is no bash fallback, because a monitor-mode
 #       watchdog cannot replace the caller.
 #
+#   fm_run_until <deadline-ms> <clock-function> <command> [args...]
+#       Runs with an absolute deadline from the caller's millisecond clock.
+#       The clock function must be defined in the calling shell and return an
+#       integer Unix timestamp in milliseconds. The watchdog subtracts startup
+#       from that deadline when it arms, so nested timers cannot restart a
+#       parent's budget. Uses the bash process-group runner on every platform.
+#       The existing 0.2-second TERM-to-KILL grace ends at the absolute deadline
+#       rather than extending it. Exit-status handling matches fm_run_timed.
+#       An expired deadline returns 124 without starting the command; invalid
+#       deadlines or a missing clock function return 125.
+#
 #   fm_timed_out <status>
 #       0 iff <status> is how fm_run_timed or fm_exec_timed reports the bound.
 #
@@ -144,8 +155,23 @@ fm_bash_timeout_child() {
 }
 
 fm_run_bash_timeout() {
-  local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
-  shift
+  fm_run_bash_timeout_impl '' '' "$@"
+}
+
+fm_run_until() {
+  local deadline=$1 clock=$2 now
+  shift 2
+  case "$deadline" in ''|0*|*[!0-9]*) return 125 ;; esac
+  [ "${#deadline}" -le 18 ] && declare -F "$clock" >/dev/null || return 125
+  now=$("$clock") || return 124
+  case "$now" in ''|*[!0-9]*) return 124 ;; esac
+  [ "${#now}" -le 18 ] && [ "$now" -lt "$deadline" ] || return 124
+  fm_run_bash_timeout_impl "$deadline" "$clock" '' "$@"
+}
+
+fm_run_bash_timeout_impl() { # <absolute-deadline-or-empty> <clock> <seconds> <command...>
+  local absolute=$1 clock=$2 seconds=$3 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0 now remaining
+  shift 3
   command_status=$(mktemp "${TMPDIR:-/tmp}/fm-bash-timeout-command.XXXXXX" 2>/dev/null) || return 124
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
@@ -154,10 +180,31 @@ fm_run_bash_timeout() {
   child_pid=$!
   (
     set +m
-    sleep "$seconds"
+    if [ -n "$absolute" ]; then
+      now=$("$clock") || now=$absolute
+      case "$now" in ''|*[!0-9]*) now=$absolute ;; esac
+      [ "${#now}" -le 18 ] || now=$absolute
+      remaining=$((absolute - now - 200))
+      if [ "$remaining" -gt 0 ]; then
+        sleep "$(printf '%d.%03d' "$((remaining / 1000))" "$((remaining % 1000))")"
+      fi
+    else
+      sleep "$seconds"
+    fi
     printf 'expired\n' > "$deadline_status"
     kill -TERM -- "-$child_pid" 2>/dev/null || true
-    sleep 0.2
+    if [ -n "$absolute" ]; then
+      now=$("$clock") || now=$absolute
+      case "$now" in ''|*[!0-9]*) now=$absolute ;; esac
+      [ "${#now}" -le 18 ] || now=$absolute
+      remaining=$((absolute - now))
+      [ "$remaining" -le 200 ] || remaining=200
+      if [ "$remaining" -gt 0 ]; then
+        sleep "$(printf '%d.%03d' "$((remaining / 1000))" "$((remaining % 1000))")"
+      fi
+    else
+      sleep 0.2
+    fi
     kill -KILL -- "-$child_pid" 2>/dev/null || true
     exit 124
   ) &

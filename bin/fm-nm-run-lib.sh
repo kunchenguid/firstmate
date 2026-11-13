@@ -40,14 +40,17 @@ fm_nm_now_ms() {
 
 # A reader may consume a one-shot FM_READ_BUDGET_MS floor (1..1000 ms) after
 # startup, before reading task state. Descendants inherit only the resulting
-# FM_READ_DEADLINE. FM_READ_CEILING bounds that promise by the enclosing
-# watchdog; an impossible floor returns 124 before reading state.
+# FM_READ_DEADLINE. The parent and watchdog deadlines and cleanup reserve form
+# a strict hierarchy: the watchdog leaves the parent its reserve, and the read
+# leaves the watchdog another reserve. Missing proof or an impossible floor
+# returns 124 before reading state.
 # FM_READ_BUDGET_REPORT=1 prefixes its captured output with
 # the reader's own start and deadline; ordinary state reads keep their output.
 fm_nm_read_budget_start() {
   local budget=${FM_READ_BUDGET_MS:-} report=${FM_READ_BUDGET_REPORT:-0}
-  local deadline=${FM_READ_DEADLINE:-} ceiling=${FM_READ_CEILING:-} started floor
-  unset FM_READ_BUDGET_MS FM_READ_BUDGET_REPORT FM_READ_CEILING
+  local deadline=${FM_READ_DEADLINE:-} parent=${FM_READ_PARENT_DEADLINE:-}
+  local watchdog=${FM_READ_WATCHDOG_DEADLINE:-} reserve=${FM_READ_CLEANUP_RESERVE_MS:-} value ceiling started floor
+  unset FM_READ_BUDGET_MS FM_READ_BUDGET_REPORT FM_READ_PARENT_DEADLINE FM_READ_WATCHDOG_DEADLINE FM_READ_CLEANUP_RESERVE_MS
   [ -n "$budget" ] || return 0
   case "$budget" in 0*|*[!0-9]*) return 124 ;; esac
   [ "${#budget}" -le 4 ] && [ "$budget" -le 1000 ] || return 124
@@ -57,18 +60,21 @@ fm_nm_read_budget_start() {
     0*|*[!0-9]*) return 124 ;;
   esac
   [ "${#deadline}" -le 18 ] || return 124
+  for value in "$parent" "$watchdog" "$reserve"; do
+    case "$value" in ''|0*|*[!0-9]*) return 124 ;; esac
+    [ "${#value}" -le 18 ] || return 124
+  done
+  [ "$watchdog" -lt "$((parent - reserve))" ] || return 124
+  ceiling=$((watchdog - reserve - 1))
   started=$(fm_nm_now_ms) || return 124
   floor=$((started + budget))
-  if [ -n "$ceiling" ]; then
-    case "$ceiling" in 0*|*[!0-9]*) return 124 ;; esac
-    [ "${#ceiling}" -le 18 ] && [ "$floor" -le "$ceiling" ] || return 124
-    [ -z "$deadline" ] || [ "$deadline" -le "$ceiling" ] || deadline=$ceiling
-  fi
+  [ "$floor" -le "$ceiling" ] || return 124
+  [ -z "$deadline" ] || [ "$deadline" -le "$ceiling" ] || deadline=$ceiling
   if [ -z "$deadline" ] || [ "$deadline" -lt "$floor" ]; then
     deadline=$floor
   fi
   export FM_READ_DEADLINE=$deadline
-  [ "$report" != 1 ] || printf 'read-budget: %s %s\n' "$started" "$deadline"
+  [ "$report" != 1 ] || printf 'read-budget: %s %s %s %s %s\n' "$started" "$deadline" "$watchdog" "$parent" "$reserve"
 }
 
 fm_nm_read_timeout() {

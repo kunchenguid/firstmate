@@ -694,7 +694,7 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
-  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left floor_ms='' watchdog_ms ceiling budget_line extra
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left floor_ms='' budget_line reported_watchdog reported_parent reported_reserve extra
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -717,24 +717,24 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   fi
   [ "$left" -gt 0 ] || return 3
   local FM_READ_DEADLINE=$deadline
-  # Initialization spends the reserved startup time, never the reader's floor.
-  # Every bound is derived from the outer watchdog's original deadline.
-  ceiling=$((SCAN_OUTER_DEADLINE - SCAN_CLEANUP_RESERVE_MS / 2))
-  watchdog_ms=$((SCAN_OUTER_DEADLINE - started))
-  [ "$watchdog_ms" -gt 0 ] || return 3
-  left=$(printf '%d.%03d\n' "$((watchdog_ms / 1000))" "$((watchdog_ms % 1000))")
-  state_line=$(fm_run_timed "$left" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
-    FM_READ_DEADLINE="$deadline" FM_READ_BUDGET_MS="$floor_ms" FM_READ_BUDGET_REPORT=1 FM_READ_CEILING="$ceiling" \
+  state_line=$(fm_run_until "$SCAN_READER_WATCHDOG_DEADLINE" fm_nm_now_ms env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+    FM_READ_DEADLINE="$deadline" FM_READ_BUDGET_MS="$floor_ms" FM_READ_BUDGET_REPORT=1 \
+    FM_READ_PARENT_DEADLINE="$SCAN_OUTER_DEADLINE" FM_READ_WATCHDOG_DEADLINE="$SCAN_READER_WATCHDOG_DEADLINE" \
+    FM_READ_CLEANUP_RESERVE_MS="$SCAN_CHILD_CLEANUP_RESERVE_MS" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   case "$state_line" in
     'read-budget: '*)
       budget_line=${state_line%%$'\n'*}
-      read -r started deadline extra <<< "${budget_line#read-budget: }"
+      read -r started deadline reported_watchdog reported_parent reported_reserve extra <<< "${budget_line#read-budget: }"
       [ -n "$started" ] && [ -n "$deadline" ] && [ -z "$extra" ] || return 3
       case "$started$deadline" in *[!0-9]*) return 3 ;; esac
       [ "${#started}" -le 18 ] && [ "${#deadline}" -le 18 ] || return 3
       [ "$deadline" -ge "$started" ] || return 3
+      [ "$reported_watchdog" = "$SCAN_READER_WATCHDOG_DEADLINE" ] \
+        && [ "$reported_parent" = "$SCAN_OUTER_DEADLINE" ] \
+        && [ "$reported_reserve" = "$SCAN_CHILD_CLEANUP_RESERVE_MS" ] || return 3
+      [ "$deadline" -lt "$((reported_watchdog - reported_reserve))" ] || return 3
       FM_READ_DEADLINE=$deadline
       case "$state_line" in
         *$'\n'*) state_line=${state_line#*$'\n'} ;;
@@ -826,17 +826,19 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 scan() {
   local startup=${1:-0} self='' cursor deadline ledger_deadline due=1 rc=0 marker_rc=0
   local SCAN_OUTER_DEADLINE=$2
+  local SCAN_CHILD_CLEANUP_RESERVE_MS=$((SCAN_CLEANUP_RESERVE_MS / 2))
+  local SCAN_READER_WATCHDOG_DEADLINE=$((SCAN_OUTER_DEADLINE - SCAN_CHILD_CLEANUP_RESERVE_MS - 1))
   local FM_READ_DEADLINE
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
-  deadline=$((SCAN_OUTER_DEADLINE - SCAN_CLEANUP_RESERVE_MS))
+  deadline=$((SCAN_READER_WATCHDOG_DEADLINE - SCAN_CHILD_CLEANUP_RESERVE_MS - 1))
   export FM_READ_DEADLINE=$deadline
   ledger_deadline=$deadline
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     due=0
   else
     # Reserve startup, the 1000-ms reader floor, and cleanup before ledger work.
-    ledger_deadline=$((SCAN_OUTER_DEADLINE - 1000 - SCAN_CLEANUP_RESERVE_MS - SCAN_CLEANUP_RESERVE_MS / 2))
+    ledger_deadline=$((deadline - 1000 - SCAN_CLEANUP_RESERVE_MS))
   fi
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
@@ -901,7 +903,7 @@ case "$mode" in
     # Stamp the shared deadline before starting the watchdog: child startup and
     # lock acquisition must not create a later budget than their enclosing timer.
     scan_outer_deadline=$(( $(fm_nm_now_ms) + FM_INACTIVE_RECONCILE_BUDGET_SECS * 1000 + SCAN_CLEANUP_RESERVE_MS ))
-    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000)) "$0" _scan-locked "$startup" "$scan_outer_deadline"; then
+    if fm_run_until "$scan_outer_deadline" fm_nm_now_ms "$0" _scan-locked "$startup" "$scan_outer_deadline"; then
       :
     elif [ "$?" -ne 124 ]; then
       exit 1
