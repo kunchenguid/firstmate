@@ -30,7 +30,6 @@
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
 #   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
@@ -38,9 +37,6 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
-#   (q6) GitLab MR merged by squash or train, main moved on, MR head unfetched,
-#        config/park-on-review or config/auto-land present -> ALLOW; open MR -> REFUSE;
-#        neither flag -> REFUSE without a glab read, as before the opt-in
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -282,19 +278,21 @@ land_on_origin_main() {
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
-case "${1:-} ${2:-}" in
+case "\${1:-} \${2:-}" in
   "pr list")
     printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,merged" ; exit 0 ;;
   "pr view")
-    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' ; exit 0 ;;
+    printf '%s\n' "pull_request:" "  number: 7" "  state: merged" '  merged: "2026-06-26T00:00:00Z"' "  headRefOid: $head" ; exit 0 ;;
 esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
+  "api graphql")
+    printf '%s\n' 'state=MERGED' 'merged=true' 'head=$head' ; exit 0 ;;
   "pr view")
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
@@ -1291,33 +1289,52 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
 }
 
 test_open_pr_requires_current_head_containment() {
-  local provider relation case_dir head pr_head url expected rc test_path path_without_gh
+  local provider relation case_dir head pr_head url expected rc test_path path_without_gh tree published_head
   path_without_gh=$(fm_test_base_path_sans "$PATH" gh)
   for provider in github github-gh-axi gitlab forgejo gerrit; do
-    for relation in unrelated stale current descendant missing malformed; do
+    for relation in unrelated stale current descendant squashed squashed-stale missing malformed; do
       case_dir=$(make_case "open-pr-$provider-$relation")
       write_meta "$case_dir" direct-PR ship
       wt_commit_file "$case_dir" feature.txt hello "task work"
+      case "$relation" in
+        squashed|squashed-stale) wt_commit_file "$case_dir" followup.txt world "task follow-up" ;;
+      esac
       head=$(git -C "$case_dir/wt" rev-parse HEAD)
       seed_backlog_in_flight "$case_dir"
-      if [ "$provider" = gerrit ]; then
-        git -C "$case_dir/wt" push -q origin HEAD:refs/for/main
-        [ "$(git -C "$case_dir/wt" log --format=%H HEAD --not --remotes --)" = "$head" ] \
-          || fail "open-pr-gerrit-$relation: task HEAD unexpectedly has a remote-tracking ref"
-        git -C "$case_dir/wt" show-ref --verify --quiet refs/remotes/origin/fm/task-x1 \
-          && fail "open-pr-gerrit-$relation: fixture pushed a branch"
-      else
-        git -C "$case_dir/wt" push -q origin fm/task-x1
-      fi
       expected=1
       case "$relation" in
         unrelated) pr_head=$(commit_tree_from_wt_head "$case_dir" origin/main "unrelated review") ;;
         stale) pr_head=$(git -C "$case_dir/wt" rev-parse HEAD^) ;;
         current) pr_head=$head; expected=0 ;;
         descendant) pr_head=$(commit_tree_from_wt_head "$case_dir" "$head" "review follow-up"); expected=0 ;;
+        squashed|squashed-stale)
+          if [ "$relation" = squashed ]; then
+            tree=$(git -C "$case_dir/wt" rev-parse 'HEAD^{tree}')
+            [ "$provider" != gerrit ] || expected=0
+          else
+            tree=$(git -C "$case_dir/wt" rev-parse 'HEAD~1^{tree}')
+          fi
+          pr_head=$(printf '%s\n' "published squash" | git -C "$case_dir/wt" commit-tree "$tree" -p origin/main)
+          git -C "$case_dir/wt" merge-base --is-ancestor "$head" "$pr_head" \
+            && fail "open-pr-$provider-$relation: squash unexpectedly contains task ancestry"
+          ;;
         missing) pr_head= ;;
         malformed) pr_head=not-a-commit ;;
       esac
+      if [ "$provider" = gerrit ]; then
+        published_head=$head
+        case "$relation" in
+          missing|malformed) ;;
+          *) published_head=$pr_head ;;
+        esac
+        git -C "$case_dir/wt" push -q origin "$published_head:refs/for/main"
+        [ -z "$(git -C "$case_dir/wt" for-each-ref --format='%(refname)' --contains "$head" refs/remotes)" ] \
+          || fail "open-pr-gerrit-$relation: task HEAD unexpectedly has a remote-tracking ref"
+        git -C "$case_dir/wt" show-ref --verify --quiet refs/remotes/origin/fm/task-x1 \
+          && fail "open-pr-gerrit-$relation: fixture pushed a branch"
+      else
+        git -C "$case_dir/wt" push -q origin fm/task-x1
+      fi
       test_path=$PATH
       case "$provider" in
         github|github-gh-axi)
@@ -1532,6 +1549,54 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   pass "squash-merged PR accepts a local HEAD that is an ancestor of the final PR head"
 }
 
+test_merged_github_pr_without_gh_requires_head_containment() {
+  local case_dir relation head pr_head expected rc path_without_gh
+  path_without_gh=$(fm_test_base_path_sans "$PATH" gh)
+  for relation in current descendant unrelated missing malformed; do
+    case_dir=$(make_case "merged-github-gh-axi-$relation")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "task feature"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    land_on_origin_main "$case_dir" feature.txt hello
+    land_on_origin_main "$case_dir" feature.txt changed
+    git -C "$case_dir/wt" fetch -q origin main
+    git -C "$case_dir/wt" merge-tree --write-tree origin/main HEAD >/dev/null 2>&1 \
+      && fail "merged-github-gh-axi-$relation: fixture did not prevent content proof"
+    expected=1
+    case "$relation" in
+      current) pr_head=$head; expected=0 ;;
+      descendant) pr_head=$(commit_tree_from_wt_head "$case_dir" "$head" "review follow-up"); expected=0 ;;
+      unrelated) pr_head=$(git -C "$case_dir/wt" rev-parse HEAD^) ;;
+      missing) pr_head= ;;
+      malformed) pr_head=not-a-commit ;;
+    esac
+    append_pr_meta_for_current_head "$case_dir"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+    rm "$case_dir/fakebin/gh"
+    PATH="$case_dir/fakebin:$path_without_gh" command -v gh >/dev/null 2>&1 \
+      && fail "merged-github-gh-axi-$relation: fixture path unexpectedly exposes gh"
+    seed_backlog_in_flight "$case_dir"
+
+    rc=0
+    FM_TEARDOWN_TEST_PATH="$path_without_gh" FM_HOME="$case_dir" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+    expect_code "$expected" "$rc" "merged-github-gh-axi-$relation: containment verdict: $(cat "$case_dir/stderr")"
+    if [ "$expected" = 1 ]; then
+      assert_refusal_retained_task_state "$case_dir" "merged-github-gh-axi-$relation" "$head"
+      [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+        || fail "merged-github-gh-axi-$relation: refusal closed the backlog item"
+    else
+      [ ! -e "$case_dir/state/task-x1.meta" ] \
+        || fail "merged-github-gh-axi-$relation: cleanup retained the task record"
+      [ "$(backlog_row_state "$case_dir")" = done ] \
+        || fail "merged-github-gh-axi-$relation: cleanup did not close the backlog item"
+    fi
+  done
+  pass "merged GitHub PRs prove head containment without gh after main changes the landed content"
+}
+
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case no-pr-branch-discovery)
@@ -1567,8 +1632,8 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
-test_squash_merged_pr_allows_replayed_unpushed_patch() {
-  local case_dir rc parent_head pr_head
+test_squash_merged_pr_refuses_replayed_patch_with_unlanded_parent() {
+  local case_dir rc parent_head pr_head local_head
   case_dir=$(make_case squash-replayed-patch)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" local-parent.txt parent "local parent"
@@ -1579,15 +1644,20 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
-  pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+  expect_code 1 "$rc" "squash-replayed-patch: teardown should refuse the unlanded pushed parent"
+  assert_grep REFUSED "$case_dir/stderr" "squash-replayed-patch: no refusal diagnostic"
+  assert_refusal_retained_task_state "$case_dir" squash-replayed-patch "$local_head"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "squash-replayed-patch: teardown closed the backlog item"
+  pass "squash-merged PR refuses a replayed patch with a pushed but unlanded parent"
 }
 
 test_merged_pr_patch_matching_preserves_indentation() {
@@ -1595,14 +1665,12 @@ test_merged_pr_patch_matching_preserves_indentation() {
   for mode in exact amended old-git; do
     case_dir=$(make_case "pr-indentation-$mode")
     write_meta "$case_dir" no-mistakes ship
-    # A pushed parent makes the YAML patch the only unpushed commit, while
-    # giving the local replay a different parent from the recorded PR head.
     wt_commit_file "$case_dir" local-parent.txt parent "local parent"
-    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
-    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/main
+    git -C "$case_dir/project" fetch -q origin main
     wt_commit_file "$case_dir" config.yml $'a:\n  b: 1' "add YAML"
     append_pr_meta_url "$case_dir"
-    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "add YAML")
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "published YAML")
     printf 'pr_head=%s\n' "$pr_head" >> "$case_dir/state/task-x1.meta"
     add_gh_pr_merged_for_head "$case_dir" "$pr_head"
     if [ "$mode" = amended ]; then
@@ -1867,12 +1935,9 @@ test_pushed_gitlab_task_with_merged_mr_allows_when_main_moved_on() {
   pass "teardown proves a pushed GitLab task landed from the merged merge request when the content check conflicts"
 }
 
-# A merged GitLab MR can prove landing through its own remote head when
-# later default-branch edits make content comparison inconclusive. This proof
-# applies with or without review-parking flags; an unpushed open MR refuses.
 test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
   local case_dir rc local_head pr_head tmp scenario state expected
-  for scenario in merged:park-on-review merged:auto-land opened:park-on-review merged:; do
+  for scenario in merged:park-on-review merged:auto-land opened:park-on-review closed:park-on-review merged:; do
     state=${scenario%%:*}
     case_dir=$(make_case "gitlab-mr-$state-${scenario#*:}")
     write_meta "$case_dir" no-mistakes ship
@@ -1906,19 +1971,21 @@ test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
     rc=$?
     set -e
 
-    expected=1
-    [ "$state" != merged ] || expected=0
+    expected=0
+    [ "$state" != closed ] || expected=1
     expect_code "$expected" "$rc" "gitlab-mr-$scenario: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
     grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/sub/repo -F json' "$case_dir/glab.log" \
       || fail "gitlab-mr-$scenario: teardown did not read the merge request through glab"
-    if [ "$state" = merged ]; then
-      ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
+    if [ "$expected" = 0 ]; then
+      ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-$state: teardown printed a REFUSED line"
+      [ ! -e "$case_dir/state/task-x1.meta" ] \
+        || fail "gitlab-mr-$state: cleanup retained the task record"
     else
-      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-opened: no REFUSED line in stderr"
-      assert_refusal_retained_task_state "$case_dir" gitlab-mr-opened "$local_head"
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-$state: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" "gitlab-mr-$state" "$local_head"
     fi
   done
-  pass "teardown proves a squash- or train-merged GitLab MR landed from the MR head with or without an opt-in flag, and refuses an unpushed open one"
+  pass "teardown fetches GitLab heads for merged and open reviews and refuses closed unmerged reviews"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
@@ -7002,8 +7069,9 @@ test_teardown_retains_v1_journal_when_projected_workspace_present
 test_teardown_retains_v1_journal_when_workspace_query_ambiguous
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_merged_github_pr_without_gh_requires_head_containment
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
-test_squash_merged_pr_allows_replayed_unpushed_patch
+test_squash_merged_pr_refuses_replayed_patch_with_unlanded_parent
 test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows

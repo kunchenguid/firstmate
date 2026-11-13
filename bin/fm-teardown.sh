@@ -1711,8 +1711,8 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
+local_patches_are_in_pr_head() {
+  local pr_head=$1 current base pr_patch_ids commit patch_id local_commits
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
@@ -1724,15 +1724,15 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
+  local_commits=$(git -C "$WT" log --format=%H "$base..$current" -- 2>/dev/null) || return 1
+  [ -n "$local_commits" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
     printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
   done <<EOF
-$unpushed
+$local_commits
 EOF
 }
 
@@ -1756,6 +1756,10 @@ pr_is_merged() {
     provider=$FM_PR_PROVIDER
   fi
   case "$provider" in
+    github)
+      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
+      ;;
     forgejo)
       fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
       head=$FM_PR_RECORD_HEAD
@@ -1784,18 +1788,17 @@ pr_is_merged() {
       ;;
   esac
   case "$provider" in
-    forgejo|gitlab|gerrit)
+    github|forgejo|gitlab|gerrit)
       [ "$FM_PR_RECORD_MERGED" = true ] || return 1
-      fm_pr_head_valid "$head" || return 1
       resolved_url=$FM_PR_URL
       ;;
   esac
-  [ -n "$head" ] || return 1
+  fm_pr_head_valid "$head" || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif local_patches_are_in_pr_head "$head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1871,8 +1874,6 @@ pr_is_open_and_contains_head() {
       ;;
     gerrit)
       fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
-      fm_pr_gerrit_read_revision "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
-      head=$FM_PR_RECORD_REVISION
       ;;
     forgejo)
       fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
@@ -1889,6 +1890,10 @@ pr_is_open_and_contains_head() {
       return 1
       ;;
   esac
+  if [ "$provider" = gerrit ]; then
+    fm_dod_gerrit_change_carries_head "$WT" "$target"
+    return $?
+  fi
   fm_pr_head_valid "$head" || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
