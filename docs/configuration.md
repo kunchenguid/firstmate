@@ -1560,7 +1560,10 @@ Claude Code treats a read of a file there as a reason to add that project's `CLA
 The [Claude harness reference](../.agents/skills/harness-adapters/references/harness/claude.md#nested-project-memory) owns what triggers that load and how Claude Code matches `claudeMdExcludes`.
 
 A Claude secondmate needs no configuration: the settings file `bin/fm-spawn.sh` passes it with `--settings` excludes the instruction files under that home's `projects/`, and `bin/fm-claude-project-memory-lib.sh` owns the patterns.
-T3 Code is the exception, because it [owns the Claude provider command](t3code-backend.md#active-limits).
+Three cases get no exclusion.
+T3 Code [owns the Claude provider command](t3code-backend.md#active-limits), so Firstmate cannot add the patterns to a T3 secondmate.
+A raw launch command carries no `--settings`, so protect a secondmate started with one through its home's `.claude/settings.local.json`, as for the primary below.
+A home whose physical path holds a control character or one of `*?[]{}()\` cannot be written as a pattern, because picomatch would read those characters as one, so `bin/fm-spawn.sh` warns at launch instead; move that home to a path without them.
 Ship and scout workers keep loading their project's instructions, because those are written for them.
 
 Firstmate passes no settings file to the primary, because the captain launches it.

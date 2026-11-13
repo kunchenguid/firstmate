@@ -68,8 +68,10 @@ excludes=$(fm_claude_project_memory_excludes "$home_dir") \
 jq -n --argjson excludes "$excludes" '{claudeMdExcludes: $excludes}' > "$TMP_ROOT/excludes.json"
 
 # run_arm <label> [claude args...]: let the scripted server ask for one Read inside the
-# clone, and print which markers reached the session as "home clone rule" flags (1 or 0):
-# the home marker in any request, the clone markers in the request carrying the Read result.
+# clone, and write which markers reached the session to $TMP_ROOT/<label>.flags as
+# "home clone rule" flags (1 or 0): the home marker in any request, the clone markers in
+# the request carrying the Read result. Runs in the main shell so unusable can end the
+# script and the EXIT trap can stop the server.
 run_arm() {
   local label=$1 port_file capture port
   shift
@@ -94,7 +96,7 @@ run_arm() {
   )
   stop_server
   [ -s "$capture" ] || unusable "claude $CLAUDE_VERSION sent no model request for $label"
-  python3 -I - "$capture" "$HOME_MARKER" "$CLONE_MARKER" "$RULE_MARKER" <<'PY'
+  python3 -I - "$capture" "$HOME_MARKER" "$CLONE_MARKER" "$RULE_MARKER" >"$TMP_ROOT/$label.flags" <<'PY'
 import json, sys
 capture, home, clone, rule = sys.argv[1:5]
 seen_home = seen_result = seen_clone = seen_rule = False
@@ -115,13 +117,17 @@ else:
 PY
 }
 
-baseline=$(run_arm baseline)
-excluded=$(run_arm excluded --settings "$TMP_ROOT/excludes.json")
-
-[ "$baseline" != no-read ] && [ "$excluded" != no-read ] \
-  || unusable "claude $CLAUDE_VERSION did not run the scripted Read (baseline: $baseline, excluded: $excluded)"
+run_arm baseline
+baseline=$(cat "$TMP_ROOT/baseline.flags")
+[ "$baseline" != no-read ] \
+  || unusable "claude $CLAUDE_VERSION did not run the scripted Read without the patterns"
 [ "$baseline" = "1 1 1" ] \
   || unusable "claude $CLAUDE_VERSION loaded no clone instructions on a read without the patterns (home clone rule: $baseline), so the comparison proves nothing"
+
+run_arm excluded --settings "$TMP_ROOT/excludes.json"
+excluded=$(cat "$TMP_ROOT/excluded.flags")
+[ "$excluded" != no-read ] \
+  || unusable "claude $CLAUDE_VERSION did not run the scripted Read under the patterns"
 case $excluded in
 1\ 0\ 0) ;;
 0\ *) fail "claude $CLAUDE_VERSION lost the home's own CLAUDE.md under the project-memory patterns (home clone rule: $excluded)" ;;
