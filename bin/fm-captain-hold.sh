@@ -86,12 +86,16 @@
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
-# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and resolves each named
-# task through the very same `answer` path above, so every guard applies
-# identically no matter which channel the answer arrived on. The key IS the
+# `<task-id>\t<answer>\t<label>[\t<mode>[\t<defer-until>]]` lines on stdin and resolves each named
+# task through `answer` or, for a dated deferral, `hold --until`, so the same
+# guards apply no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A `release` line while the away-posture
+# resumes; anything else is skipped. A non-empty fifth field is a future UTC
+# YYYY-MM-DD deferral date: it overrides the close mode and re-holds the original
+# captain-held task through `hold --until`, recording the answer as its reason.
+# Invalid dates are skipped, never downgraded to closing answers.
+# A `release` line without a deferral date while the away-posture
 # record exists is reported as `refused:` under the same attended-only rule as
 # `answer --release` and feeds nothing. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
@@ -1557,7 +1561,7 @@ sanitize_reconcile_provenance() {
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
-  local resolve_rc
+  local resolve_rc until deferred=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -1586,7 +1590,9 @@ command_answers() {
     answer=${rest%%"$tab"*}
     case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
     label=${rest%%"$tab"*}
-    case "$rest" in *"$tab"*) mode=${rest#*"$tab"} ;; *) mode='' ;; esac
+    case "$rest" in *"$tab"*) rest=${rest#*"$tab"} ;; *) rest='' ;; esac
+    mode=${rest%%"$tab"*}
+    case "$rest" in *"$tab"*) until=${rest#*"$tab"} ;; *) until='' ;; esac
     [ -n "${key:-}" ] || continue
     case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
     [ "${#key}" -le 128 ] || continue
@@ -1608,7 +1614,16 @@ command_answers() {
         continue
         ;;
     esac
-    if [ "$release_flag" = --release ] && ! release_attended; then
+    if [ -n "$until" ] && ! jq -en --arg date "$until" '
+      $date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+        and (try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $date) catch false)
+        and (. > (now | strftime("%Y-%m-%d")))
+    ' >/dev/null; then
+      printf 'skipped: %s (deferral must be a future YYYY-MM-DD date)\n' "$key"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [ -z "$until" ] && [ "$release_flag" = --release ] && ! release_attended; then
       printf 'refused: %s (%s)\n' "$key" "$RELEASE_AWAY_REASON"
       skipped=$((skipped + 1))
       continue
@@ -1655,7 +1670,7 @@ command_answers() {
     body=$(show_field "$show" body)
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
-    if body_has_resolution_record "$body" \
+    if [ -z "$until" ] && body_has_resolution_record "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
@@ -1684,6 +1699,19 @@ command_answers() {
       skipped=$((skipped + 1))
       continue
     fi
+    if [ -n "$until" ]; then
+      if "$0" hold "$id" --reason "Deferred until $until. $(<"$tmp")" --until "$until" \
+        </dev/null >/dev/null 2>"$err"; then
+        [ ! -s "$err" ] || cat "$err" >&2
+        printf 'deferred: %s until %s\n' "$id" "$until"
+        deferred=$((deferred + 1))
+      else
+        reason=$(tr -d '\n' < "$err" | sed 's/^fm-captain-hold: //')
+        printf 'skipped: %s (%s)\n' "$id" "$reason"
+        skipped=$((skipped + 1))
+      fi
+      continue
+    fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
     if "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
       # A parent-channel delivery problem is reported on stderr by the answer
@@ -1698,6 +1726,7 @@ command_answers() {
     fi
   done
   rm -f -- "$tmp" "$err"
+  [ "$deferred" -eq 0 ] || printf 'answers: deferred=%s\n' "$deferred"
   printf 'answers: closed=%s skipped=%s\n' "$closed" "$skipped"
   [ "$skipped" -eq 0 ]
 }

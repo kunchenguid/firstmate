@@ -211,7 +211,7 @@ The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy)
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point.
-It reads `<task-id>\t<answer>\t<label>[\t<mode>]` lines and resolves each named task through the same `answer` path.
+Its keyed-line format is owned by `bin/fm-captain-hold.sh`'s header: ordinary choices use `answer`, while a structured dated deferral uses `hold --until` on the original task.
 Every guard therefore applies identically no matter which channel the answer arrived on.
 
 The optional mode column carries a card-declared close:
@@ -257,7 +257,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 - The runner names no adapter, parses no result, and carries no decision rule.
 
 `bin/fm-procevent-lavish.sh answers` is one such built-in adapter command.
-It reads only rows tagged `choice` and relays a card's declared close mode.
+It reads only rows tagged `choice` and relays the selected option's structured deferral date or the card's declared close mode.
 It can never let freeform captain prose forge a task id or a mode.
 
 Trusted external process-event adapters intentionally expose no answer operation and cannot feed this authority-bearing intake; [`extension-bindings.md`](extension-bindings.md#trust-boundary) owns that boundary.

@@ -2469,6 +2469,80 @@ SH
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
+test_board_later_answer_keeps_the_original_hold() {
+  local home sid stub out show snapshot invalid
+  home=$(make_home board-later)
+  sid=lavish-b0a4d0000000defe
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+  run_captain "$home" hold sample-later-call --title "Choose the route later" \
+    --reason "route choice pending" --repo sample >/dev/null \
+    || fail "could not register the later call"
+  stub="$home/board-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Revisit after the release","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-later-call\",\"selection\":\"later\",\"note\":\"after the release\",\"defer_until\":\"2099-07-20\"}"
+OUT
+SH
+  chmod +x "$stub"
+  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+    || fail "could not register the later source"
+  run_captain "$home" bind "$sid" >/dev/null || fail "could not bind the later source"
+  out=$(run_procevent "$home" start "$sid" 2>&1) \
+    || fail "the later source runner did not complete: $out"
+  assert_contains "$out" "answers-fed: $sid" "the later answer did not reach intake: $out"
+  show=$(tasks_in "$home" show sample-later-call --full)
+  assert_contains "$show" "state: queued" "later closed the original task"
+  assert_contains "$show" "hold_kind: captain" "later removed the captain hold"
+  assert_contains "$show" "hold_until: 2099-07-20" "later lost the selected date"
+  # Decode the stored reason through its public reader before checking words.
+  # shellcheck source=bin/fm-hold-reason-lib.sh
+  . "$ROOT/bin/fm-hold-reason-lib.sh"
+  show=$(printf '%s\n' "$show" | fm_hold_reason_decode_stream toon)
+  assert_contains "$show" "after the release" "later lost the displayed answer"
+  snapshot=$(run_bearings "$home")
+  printf '%s' "$snapshot" | jq -e '
+    ([.decisions_open[] | select(.id == "sample-later-call")] | length) == 0
+    and ([.gates[] | select(.id == "sample-later-call" and (.reason | startswith("until 2099-07-20")))] | length) == 1
+  ' >/dev/null || fail "the deferred call disappeared instead of moving to Charted Next: $snapshot"
+  # Re-delivery must remain a hold, never fall through to the card close mode.
+  run_lavish "$home" answers "$home/state/procevent-inbox/$sid.1.result" \
+    | run_captain "$home" answers --source "later replay" >/dev/null \
+    || fail "later replay failed"
+  show=$(tasks_in "$home" show sample-later-call --full)
+  assert_contains "$show" "hold_until: 2099-07-20" "later replay lost the hold date"
+  assert_contains "$show" "state: queued" "later replay closed the task"
+  # A dated option overrides a work card's release mode too, including away.
+  : > "$home/state/.afk"
+  printf 'sample-later-call\tlater\tRevisit after the release\trelease\t2099-07-20\n' \
+    | run_captain "$home" answers --source "release deferral" >/dev/null \
+    || fail "a deferral was treated as a release while away"
+  for invalid in 2099-02-29 2000-01-01 2099-7-20 nonsense; do
+    if printf 'sample-later-call\tlater\tLater\t\t%s\n' "$invalid" \
+      | run_captain "$home" answers --source "invalid deferral" >/dev/null; then
+      fail "invalid deferral date was accepted: $invalid"
+    fi
+  done
+  show=$(tasks_in "$home" show sample-later-call --full)
+  assert_contains "$show" "hold_until: 2099-07-20" "a refused deferral changed the hold"
+  run_captain "$home" hold sample-prose-later --title "Unmarked option" \
+    --reason "decide" --repo sample >/dev/null || fail "could not create the unmarked call"
+  printf 'sample-prose-later\tlater\tLater\n' \
+    | run_captain "$home" answers --source "unmarked option" >/dev/null \
+    || fail "an unmarked option changed behavior"
+  show=$(tasks_in "$home" show sample-prose-later --full)
+  assert_contains "$show" "state: done" "the word later was parsed as a deferral"
+  if printf 'sample-prose-later\tlater\tLater\t\t2099-07-20\n' \
+    | run_captain "$home" answers --source "closed call" >/dev/null; then
+    fail "a dated option reopened a closed task"
+  fi
+  pass "a bound board later answer keeps the original captain hold with its date"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -5151,6 +5225,7 @@ test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
+test_board_later_answer_keeps_the_original_hold
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled

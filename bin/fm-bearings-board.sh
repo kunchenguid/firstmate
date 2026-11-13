@@ -72,6 +72,10 @@
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
 #
+# A decision-card option MAY carry `defer_until`, a future UTC YYYY-MM-DD
+# calendar date. Selecting it preserves the original captain hold until that
+# date instead of applying the card close mode. Other card types cannot defer.
+#
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
@@ -153,7 +157,10 @@ validate_payload() {  # <data.json>
         | type == "object"
           and (.value | slug(128))
           and (.label | nonempty_string)
-          and optional_string("hint")] | all)
+          and optional_string("hint")
+          and ((has("defer_until") | not) or (.defer_until
+            | valid_filed and (length == 10) and (. > (now | strftime("%Y-%m-%d")))))] | all)
+      and (if .type != "decision" then all(.options[]; has("defer_until") | not) else true end)
       and (optional_string("about"))
       and (optional_string("decide"))
       and (optional_string("detail"))
