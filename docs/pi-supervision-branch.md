@@ -314,12 +314,12 @@ A session replaced mid-delivery fails the next recheck rather than acting into t
 
 ### Reads that stay synchronous
 
-Two reads stay synchronous because Pi's own API is synchronous there, not as an optimization:
+Pi requires an immediate ownership verdict at two synchronous API boundaries:
 
 - Pi types its bash spawn hook as a plain function, so the guard on the branch's own shell commands cannot await.
 - The watcher reads `offer.accepted` the moment its dispatch event returns, so a session that does not own the fleet lock must still refuse a wake without waiting.
 
-Both read the same uncached ownership authority.
+These boundaries and the asynchronous call sites share one synchronous ownership read.
 `state/.lock` is re-read every time it is asked, never cached, because this answer decides ownership rather than hinting at it.
 The branch owns the lock only when it names this Pi process's own pid, the same exact-pid rule as the watcher and turn-end guard extensions.
 No ancestry is walked or accepted, so a launcher or an enclosing session holding the lock is another session.
