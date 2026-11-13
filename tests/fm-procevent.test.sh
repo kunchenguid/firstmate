@@ -1064,6 +1064,80 @@ PATH="$MULTI_BIN:$PATH" pe "$HMULTI" reconcile >/dev/null 2>&1 || true
   || fail "worker-owned rounds produced a firstmate wake: $(wake_payloads "$HMULTI")"
 pass "worker-owned Lavish rounds deliver to the worker, acknowledge on re-arm, and stop at session end"
 
+# --- end-user-aligned regression: a scout's board outlives its worktree ------
+# Cleanup discards a scout's worktree, and reviewed boards served from one were
+# lost with it. A scout's first arm takes only an artifact inside the task's
+# data directory, which cleanup keeps, while a board registered before that
+# rule keeps its review loop.
+HSCOUT="$TMP_ROOT/hscout"; new_home "$HSCOUT"
+SCOUT_BIN=$(fm_fakebin "$TMP_ROOT/lavish-scout-stub")
+SCOUT_ROOT="$TMP_ROOT/lavish-scout-root"
+mkdir -p "$SCOUT_ROOT"
+export SCOUT_ROOT
+cat > "$SCOUT_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1-}" != --version ] || { printf '0.1.79\n'; exit 0; }
+n=$(cat "$SCOUT_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$SCOUT_ROOT/count"
+while [ ! -e "$SCOUT_ROOT/trigger$n" ]; do sleep 0.02; done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+SH
+chmod +x "$SCOUT_BIN/lavish-axi"
+fm_test_track_procevent_home "$HSCOUT"
+for scout in scout-1 scout-2; do
+  new_task_endpoint "$HSCOUT" "$scout"
+  printf 'kind=scout\n' >> "$HSCOUT/state/$scout.meta"
+  mkdir -p "$HSCOUT/worktree-$scout/.lavish" "$HSCOUT/data/$scout"
+  printf '<h1>%s</h1>\n' "$scout" > "$HSCOUT/worktree-$scout/.lavish/board.html"
+  lavish_session "$HSCOUT/worktree-$scout/.lavish/board.html"
+done
+SCRATCH_ART="$HSCOUT/worktree-scout-1/.lavish/board.html"
+scratch_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$SCRATCH_ART")
+if PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$SCRATCH_ART" --for scout-1 \
+  >/dev/null 2>"$SCOUT_ROOT/scratch-arm.err"; then
+  fail "a scout armed a board inside the worktree that cleanup discards"
+fi
+assert_contains "$(cat "$SCOUT_ROOT/scratch-arm.err")" "$HSCOUT/data/scout-1/board/" \
+  "the refused scout arm did not name the folder cleanup keeps"
+assert_absent "$HSCOUT/state/procevent/$scratch_id.source" \
+  "a refused scout arm still registered the board"
+[ ! -e "$SCOUT_ROOT/count" ] || fail "a refused scout arm still polled the board"
+
+mkdir -p "$HSCOUT/data/scout-1/board"
+KEPT_ART="$HSCOUT/data/scout-1/board/board.html"
+cp "$SCRATCH_ART" "$KEPT_ART"
+lavish_session "$KEPT_ART"
+PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$KEPT_ART" --for scout-1 >/dev/null \
+  || fail "a scout could not arm a board inside its task data directory"
+assert_contains "$(FM_HOME="$HSCOUT" "$ROOT/bin/fm-procevent.sh" list)" "task:scout-1/listening" \
+  "the board in the task data directory has no live listener"
+PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$KEPT_ART" >/dev/null
+rm -f "$SCOUT_ROOT/count"
+
+OLD_ART="$HSCOUT/worktree-scout-2/.lavish/board.html"
+old_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OLD_ART")
+pe "$HSCOUT" register-task lavish "$old_id" scout-2 -- \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$OLD_ART" >/dev/null
+PATH="$SCOUT_BIN:$PATH" pe "$HSCOUT" start "$old_id" > "$SCOUT_ROOT/old-run" 2>&1 &
+OLD_RUN=$!
+for _ in $(seq 1 100); do [ "$(cat "$SCOUT_ROOT/count" 2>/dev/null || true)" = 1 ] && break; sleep 0.02; done
+touch "$SCOUT_ROOT/trigger1"
+for _ in $(seq 1 100); do [ -f "$HSCOUT/state/scout-2.inbox/001.msg" ] && break; sleep 0.02; done
+[ -f "$HSCOUT/state/scout-2.inbox/001.msg" ] \
+  || fail "the already registered scout board did not deliver its round"
+PATH="$SCOUT_BIN:$PATH" FM_HOME="$HSCOUT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OLD_ART" --for scout-2 >/dev/null \
+  || fail "a scout board registered before the rule could not be re-armed"
+wait "$OLD_RUN" || true
+[ -f "$HSCOUT/state/procevent-inbox/$old_id.1.handled" ] \
+  || fail "re-arming the already registered scout board did not acknowledge its round"
+pass "a scout's first arm requires a board inside its task data directory, and a registered board keeps its review loop"
+
 # --- end-user-aligned regression: a half-written capture does not wedge -----
 # The result file is a capture's commit marker, so an owner sidecar left behind
 # at a sequence with no result - a crash between publishing that sidecar and

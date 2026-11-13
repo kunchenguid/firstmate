@@ -3111,6 +3111,8 @@ After opening the artifact as required above, the worker arms it with `bin/fm-pr
 - An earlier registration's listener that releases the board inside the confirm window lets the new registration start, and `arm` then reports `armed` as usual.
 - When a live listener from an earlier registration of the same board still holds it when the window ends, `arm` exits zero with `still-listening` instead of `armed`, because that earlier listener keeps serving the board and the new registration takes effect only after the source is retired and armed again.
 - The arm is refused unless that task id has valid, identity-matching endpoint metadata, because a board whose owner has no endpoint would collect feedback nobody can be told about.
+- The first arm of a scout's board is refused unless the artifact is inside that task's `data/<task-id>/` directory, because cleanup discards a scout's worktree and keeps that directory; the generated scout brief names `data/<task-id>/board/`.
+  A board registered before this rule keeps its registration until its owner concludes it.
 
 **Acknowledge a round by re-arming**
 
