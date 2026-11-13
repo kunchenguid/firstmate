@@ -798,25 +798,31 @@ arm() {
 }
 
 ack_handoff_record() { # task source-url: basename of a steering-inbox record naming the exact source
-  local inbox record body
+  local inbox scan_dir record body
   # shellcheck source=bin/fm-task-inbox-lib.sh
   . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
   inbox=$(fm_task_inbox_dir "$STATE" "$1")
-  for record in "$inbox"/*.msg "$inbox/handled"/*.msg; do
-    [ -e "$record" ] || continue
-    body=$(fm_task_inbox_body "$record") || continue
-    # A source that is a prefix of another (review-12 inside review-123) is not a match.
-    if printf '%s\n' "$body" | awk -v s="$2" 'BEGIN { n = length(s) } {
-        line = $0
-        while ((i = index(line, s)) > 0) {
-          c = substr(line, i + n, 1)
-          if (c == "" || c !~ /[0-9A-Za-z_-]/) { found = 1; exit }
-          line = substr(line, i + 1)
-        }
-      } END { exit !found }'; then
-      printf '%s\n' "${record##*/}"
-      return 0
-    fi
+  for scan_dir in "$inbox" "$inbox/handled"; do
+    for record in "$scan_dir"/*.msg; do
+      if ! body=$(fm_task_inbox_body "$record" 2>/dev/null); then
+        # The worker may acknowledge the listed record before the reader opens it.
+        [ "$scan_dir" = "$inbox" ] || continue
+        record="$inbox/handled/${record##*/}"
+        body=$(fm_task_inbox_body "$record" 2>/dev/null) || continue
+      fi
+      # A source that is a prefix of another (review-12 inside review-123) is not a match.
+      if printf '%s\n' "$body" | awk -v s="$2" 'BEGIN { n = length(s) } {
+          line = $0
+          while ((i = index(line, s)) > 0) {
+            c = substr(line, i + n, 1)
+            if (c == "" || c !~ /[0-9A-Za-z_-]/) { found = 1; exit }
+            line = substr(line, i + 1)
+          }
+        } END { exit !found }'; then
+        printf '%s\n' "${record##*/}"
+        return 0
+      fi
+    done
   done
   return 1
 }
