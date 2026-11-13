@@ -22,11 +22,16 @@
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
-#   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
-#     merge-base against origin/main (or local main) can be found, it lints
-#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, with
-#     --external-sources and full dataflow first. CI coverage never depends
-#     on a local diff; memory failures may take the narrower retry below.
+#   - In CI without --changed, on the main branch, or when no merge-base
+#     against origin/main (or local main) can be found, it lints the full
+#     canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, with
+#     --external-sources and full dataflow first. Main-push CI and any run
+#     that changes lint tooling keep this full gate; memory failures may take
+#     the narrower retry below.
+#   - --changed (CI pull requests) lints only the canonical-set files changed
+#     since the merge-base, still with --external-sources and full dataflow, so
+#     the PR gate stays source-aware on the files it checks. If a lint-definition
+#     file changed, selection upgrades to the full canonical set.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -46,13 +51,14 @@
 # run holds at most JOBS concurrent ShellCheck processes. Diagnostics replay
 # in stable shard/root order. FM_LINT_JOBS=1 changes concurrency, not diagnostics
 # or exit selection.
-# --partition 1of2/2of2 splits the entire canonical inventory across
-# two CI runners, each with those same concurrency-limited workers.
-# Partitions are complete, disjoint, and byte-weight balanced; --list-files
-# exposes their actual roots.
-# Partition mode starts with full source-aware analysis, never changed-only
-# or --fast, and does not accept explicit paths. Each partition also runs
-# workflow lint and backend-purity checks, keeping either invocation
+# --partition <k>of<n> splits the selected inventory across n CI runners,
+# each with those same concurrency-limited workers. Partitions of the full
+# canonical set are complete, disjoint, and byte-weight balanced; --list-files
+# exposes their actual roots. --changed --partition splits only the changed
+# roots the same way, and an empty partition is a successful no-op for
+# ShellCheck while still running workflow lint and backend-purity checks.
+# Partition mode does not accept --fast or explicit paths. Each partition also
+# runs workflow lint and backend-purity checks, keeping either invocation
 # independently useful.
 #
 # With FM_LINT_REQUIRE_BOUNDS=1, which CI sets, every per-root ShellCheck
@@ -107,7 +113,9 @@
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override concurrent worker count
-#   fm-lint.sh --partition <1of2|2of2> lint one canonical CI partition (see fallback above)
+#   fm-lint.sh --partition <k>of<n>     lint one canonical CI partition (see fallback above)
+#   fm-lint.sh --changed ...            lint changed canonical roots (CI pull requests keep source-aware analysis)
+#   fm-lint.sh --full ...               force the full canonical set
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -715,6 +723,8 @@ FAST=0
 ANALYSIS_MODE=full
 PARTITION=
 PARTITION_REQUESTED=0
+FORCE_CHANGED=0
+FORCE_FULL=0
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -737,7 +747,7 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --partition)
-      [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --partition requires 1of2 or 2of2.\n' >&2; exit 2; }
+      [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --partition requires <k>of<n>.\n' >&2; exit 2; }
       PARTITION=$2
       PARTITION_REQUESTED=1
       shift 2
@@ -745,6 +755,14 @@ while [ "$#" -gt 0 ]; do
     --partition=*)
       PARTITION=${1#*=}
       PARTITION_REQUESTED=1
+      shift
+      ;;
+    --changed)
+      FORCE_CHANGED=1
+      shift
+      ;;
+    --full)
+      FORCE_FULL=1
       shift
       ;;
     --fast)
@@ -773,21 +791,36 @@ case "$JOBS" in
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
 
+PARTITION_INDEX=
+PARTITION_COUNT=
 case "$PARTITION" in
   '')
     if [ "$PARTITION_REQUESTED" -eq 1 ]; then
-      printf 'fm-lint.sh: --partition requires 1of2 or 2of2.\n' >&2
+      printf 'fm-lint.sh: --partition requires <k>of<n>.\n' >&2
       exit 2
     fi
     ;;
-  1of2|2of2)
+  *of*)
+    PARTITION_INDEX=${PARTITION%%of*}
+    PARTITION_COUNT=${PARTITION#*of}
+    case "$PARTITION_INDEX" in ''|*[!0-9]*|0) PARTITION_INDEX=invalid ;; esac
+    case "$PARTITION_COUNT" in ''|*[!0-9]*|0) PARTITION_COUNT=invalid ;; esac
+    if [ "$PARTITION_INDEX" = invalid ] || [ "$PARTITION_COUNT" = invalid ] \
+      || [ "$PARTITION_INDEX" -gt "$PARTITION_COUNT" ]; then
+      printf 'fm-lint.sh: --partition must be <k>of<n> with 1 <= k <= n, got %s.\n' "$PARTITION" >&2
+      exit 2
+    fi
     if [ "$FAST" -eq 1 ] || [ "$#" -gt 0 ]; then
-      printf 'fm-lint.sh: --partition requires full canonical lint; omit --fast and explicit paths.\n' >&2
+      printf 'fm-lint.sh: --partition cannot combine with --fast or explicit paths.\n' >&2
       exit 2
     fi
     ;;
-  *) printf 'fm-lint.sh: --partition must be 1of2 or 2of2, got %s.\n' "$PARTITION" >&2; exit 2 ;;
+  *) printf 'fm-lint.sh: --partition must be <k>of<n>, got %s.\n' "$PARTITION" >&2; exit 2 ;;
 esac
+if [ "$FORCE_CHANGED" -eq 1 ] && [ "$FORCE_FULL" -eq 1 ]; then
+  printf 'fm-lint.sh: --changed and --full cannot be combined.\n' >&2
+  exit 2
+fi
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
@@ -833,34 +866,68 @@ CHANGED_MODE=0
 EXPLICIT_PATHS=0
 FOLLOW_SOURCES=1
 EXCLUDE_CODES=
+fm_lint_collect_changed_roots() {  # <merge-base>
+  local merge_base=$1 changed_path
+  ROOTS=()
+  while IFS= read -r -d '' changed_path; do
+    fm_lint_is_canonical_root "$changed_path" || continue
+    [ -f "$changed_path" ] || continue
+    ROOTS+=("$changed_path")
+  done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
+}
+
+# Changing the lint owner, its pinned installers, or the bounds watchdog is a
+# definition change: a PR that only lists those files still needs the full
+# canonical, source-aware gate rather than a changed-file subset.
+fm_lint_definition_changed() {  # <merge-base>
+  local merge_base=$1
+  git diff --name-only --diff-filter=ACMR "$merge_base" -- \
+    bin/fm-lint.sh bin/fm-lint-workflows.sh \
+    bin/fm-install-shellcheck.sh bin/fm-install-actionlint.sh \
+    bin/fm-timeout-lib.sh 2>/dev/null | grep -q .
+}
+
 if [ "$#" -gt 0 ]; then
   EXPLICIT_PATHS=1
   ROOTS=("$@")
 else
   full_lint=1
-  if [ -z "$PARTITION" ] && [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
-    && command -v git >/dev/null 2>&1 \
-    && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-    && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
-    base_ref=$(fm_lint_changed_base_ref) || base_ref=
-    merge_base=
-    [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
-    [ -z "$merge_base" ] || full_lint=0
+  merge_base=
+  if [ "$FORCE_FULL" -eq 0 ]; then
+    want_changed=0
+    if [ "$FORCE_CHANGED" -eq 1 ]; then
+      want_changed=1
+    elif [ -z "$PARTITION" ] && [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+      && command -v git >/dev/null 2>&1 \
+      && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
+      want_changed=1
+    fi
+    if [ "$want_changed" -eq 1 ]; then
+      base_ref=$(fm_lint_changed_base_ref) || base_ref=
+      [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
+      if [ -n "$merge_base" ]; then
+        if fm_lint_definition_changed "$merge_base"; then
+          printf 'fm-lint.sh: lint definition files changed; using full canonical lint\n' >&2
+          full_lint=1
+        else
+          full_lint=0
+        fi
+      elif [ "$FORCE_CHANGED" -eq 1 ]; then
+        printf 'fm-lint.sh: --changed needs a merge-base against origin/main or main.\n' >&2
+        exit 2
+      fi
+    fi
   fi
 
   if [ "$full_lint" -eq 1 ]; then
     ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
   else
     CHANGED_MODE=1
-    ROOTS=()
-    while IFS= read -r -d '' changed_path; do
-      fm_lint_is_canonical_root "$changed_path" || continue
-      [ -f "$changed_path" ] || continue
-      ROOTS+=("$changed_path")
-    done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
+    fm_lint_collect_changed_roots "$merge_base"
   fi
 fi
-if [ "$CHANGED_MODE" -eq 1 ] && [ "$FAST" -eq 0 ]; then
+if [ "$CHANGED_MODE" -eq 1 ] && [ "$FAST" -eq 0 ] && [ "$FORCE_CHANGED" -eq 0 ]; then
   FOLLOW_SOURCES=0
   EXCLUDE_CODES=$LOCAL_NOX_EXCLUDE
   ANALYSIS_MODE=local
@@ -887,15 +954,26 @@ fm_lint_root_weights() {
   done
 }
 
-if [ -n "$PARTITION" ]; then
+if [ -n "$PARTITION" ] && [ "${#ROOTS[@]}" -gt 0 ]; then
   PARTITION_ROOTS=()
   partition_weights=$(fm_lint_root_weights) || exit $?
   while IFS="$TAB" read -r index path; do
     PARTITION_ROOTS+=("$path")
-  done < <(printf '%s\n' "$partition_weights" | LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n | awk -F '\t' -v want="${PARTITION%%of*}" '
-    { shard=(load[2] < load[1]) ? 2 : 1; load[shard]+=$1; if (shard == want) print $2 "\t" $3 }
+  done < <(printf '%s\n' "$partition_weights" | LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n | awk -F '\t' -v want="$PARTITION_INDEX" -v n="$PARTITION_COUNT" '
+    {
+      best = 1
+      for (i = 2; i <= n; i++) {
+        if (load[i] + 0 < load[best] + 0) best = i
+      }
+      load[best] += $1
+      if (best == want) print $2 "\t" $3
+    }
   ' | LC_ALL=C sort -t "$TAB" -k1,1n)
-  ROOTS=("${PARTITION_ROOTS[@]}")
+  if [ "${#PARTITION_ROOTS[@]}" -gt 0 ]; then
+    ROOTS=("${PARTITION_ROOTS[@]}")
+  else
+    ROOTS=()
+  fi
 fi
 ROOT_COUNT=${#ROOTS[@]}
 
@@ -934,8 +1012,14 @@ else
   printf 'fm-lint.sh: full ShellCheck extended analysis enabled\n' >&2
 fi
 
-if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
-  printf 'fm-lint.sh: no changed lint targets\n'
+if [ "$ROOT_COUNT" -eq 0 ]; then
+  if [ -n "$PARTITION" ]; then
+    printf 'fm-lint.sh: no lint targets in this partition\n'
+  elif [ "$CHANGED_MODE" -eq 1 ]; then
+    printf 'fm-lint.sh: no changed lint targets\n'
+  else
+    printf 'fm-lint.sh: no lint targets\n'
+  fi
   overall_rc=0
   fm_lint_run_backend_purity || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?

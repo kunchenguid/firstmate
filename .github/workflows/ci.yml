@@ -63,34 +63,48 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2]
+        partition: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/fm-ci-tools
+          key: fm-ci-tools-${{ runner.os }}-${{ runner.arch }}-shellcheck-0.11.0-actionlint-1.7.12
       - name: Install pinned ShellCheck
         run: |
           set -eu
-          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/fm-ci-tools"
+          echo "$RUNNER_TEMP/fm-ci-tools" >> "$GITHUB_PATH"
       - name: Install pinned actionlint
         run: |
           set -eu
-          bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          bin/fm-install-actionlint.sh "$RUNNER_TEMP/fm-ci-tools"
+          echo "$RUNNER_TEMP/fm-ci-tools" >> "$GITHUB_PATH"
       # Single owner of the lint definition (shell file set, config, version,
       # and GitHub workflow lint). Do not re-spell the checks here; keep CI
       # and the pre-push gate on this script so a self-broken ci.yml still
-      # fails locally before merge.
+      # fails locally before merge. Pull requests lint changed files (full
+      # source-aware analysis); main pushes and lint-tooling diffs keep the
+      # full canonical gate.
       - name: Lint canonical partition
         env:
           # Fail closed rather than lint uncapped when a configured per-root
           # bound (wall deadline or memory rlimit) cannot be enforced here.
           FM_LINT_REQUIRE_BOUNDS: '1'
           FM_LINT_JOBS: '1'
+          FM_LINT_CHANGED: ${{ github.event_name == 'pull_request' && '1' || '0' }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-lint"
+          extra=()
+          if [ "$FM_LINT_CHANGED" = 1 ]; then
+            extra+=(--changed)
+          fi
           bin/fm-lint.sh --partition "${{ matrix.partition }}of${{ strategy.job-total }}" \
-            --telemetry "$RUNNER_TEMP/fm-lint/partition-${{ matrix.partition }}.tsv"
+            --telemetry "$RUNNER_TEMP/fm-lint/partition-${{ matrix.partition }}.tsv" \
+            "${extra[@]}"
       - name: Upload lint telemetry
         if: always()
         uses: actions/upload-artifact@v4
@@ -151,7 +165,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          bin/fm-test-run.sh --lane portable-parallel-1 --jobs 2 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
@@ -187,11 +201,17 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      - name: Install the Pi package for the Pi extension tests
+        run: |
+          set -eu
+          npm install -g @earendil-works/pi-coding-agent
+          npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 2
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-2 \
+          bin/fm-test-run.sh --lane portable-parallel-2 --jobs 2 \
+            --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
@@ -217,7 +237,7 @@ jobs:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -494,6 +514,7 @@ jobs:
     # Fast tier: aggregation is seconds of work over lane artifacts.
     timeout-minutes: 5
     needs:
+      - lint
       - tests-portable-parallel-1
       - tests-portable-parallel-2
       - tests-portable-serial
@@ -508,6 +529,12 @@ jobs:
           pattern: fm-test-timing-*
           path: ${{ runner.temp }}/fm-test-aggregate
           merge-multiple: true
+      - name: Download lint telemetry
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fm-lint-telemetry-*
+          path: ${{ runner.temp }}/fm-lint-aggregate
+          merge-multiple: true
       - name: Build aggregate timing summary
         run: |
           set -eu
@@ -521,6 +548,13 @@ jobs:
           bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
+      - name: Warn when a lane exceeds the healthy 20-minute budget
+        if: always()
+        run: |
+          set -eu
+          bin/fm-ci-budget-warn.sh \
+            "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
+            "$RUNNER_TEMP/fm-lint-aggregate"
       - name: Upload aggregate timing artifact
         if: always()
         uses: actions/upload-artifact@v4

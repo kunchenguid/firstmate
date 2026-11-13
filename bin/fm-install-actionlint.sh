@@ -3,7 +3,9 @@
 #
 # Downloads the official GitHub release archive for the host OS/arch, verifies
 # its per-archive SHA-256 pin, and installs the binary into the destination
-# directory. Supported platforms: linux amd64/x86_64, linux arm64/aarch64,
+# directory. If that destination already holds the pinned version, the
+# installer prints the version and exits without downloading.
+# Supported platforms: linux amd64/x86_64, linux arm64/aarch64,
 # darwin amd64/x86_64, darwin arm64/aarch64. Pins come from the official
 # actionlint release checksums file. Verification uses sha256sum when present,
 # otherwise shasum -a 256. An unsupported OS/arch or a missing pin fails
@@ -49,6 +51,16 @@ case "${os}-${arch}" in
     ;;
 esac
 [ -n "$SHA256" ] || die "no pinned checksum for ${os}-${arch}"
+
+if [ -x "$DESTINATION/actionlint" ]; then
+  got=$("$DESTINATION/actionlint" -version 2>/dev/null | awk '{ print $1; exit }') || got=
+  got=${got#v}
+  if [ "$got" = "$VERSION" ]; then
+    printf 'fm-install-actionlint.sh: actionlint %s already at %s\n' "$VERSION" "$DESTINATION" >&2
+    "$DESTINATION/actionlint" -version
+    exit 0
+  fi
+fi
 
 URL="https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${ARCHIVE}"
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-actionlint.XXXXXX")

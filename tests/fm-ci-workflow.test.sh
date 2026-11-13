@@ -723,7 +723,55 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+test_ci_keeps_the_timecap_safeguards() {
+  ruby -ryaml - "$CI_WORKFLOW" <<'RUBY' || fail "CI timecap safeguards"
+doc = YAML.load_file(ARGV[0])
+jobs = doc.fetch("jobs")
+lint = jobs.fetch("lint")
+raise "lint timeout-minutes must stay 30" unless lint.fetch("timeout-minutes") == 30
+raise "lint runs-on must stay ubuntu-24.04" unless lint.fetch("runs-on") == "ubuntu-24.04"
+raise "lint matrix must be four partitions" unless lint.fetch("strategy").fetch("matrix").fetch("partition") == [1, 2, 3, 4]
+steps = lint.fetch("steps")
+raise "lint must cache pinned tools" unless steps.any? { |s| s["uses"].to_s.start_with?("actions/cache@") }
+raise "lint checkout must fetch full history for --changed" unless steps.any? { |s|
+  s["uses"].to_s.include?("actions/checkout@") && s.dig("with", "fetch-depth") == 0
+}
+lint_run = steps.find { |s| s["name"] == "Lint canonical partition" } or raise "lint step missing"
+raise "PR lint must pass --changed" unless lint_run.fetch("run").include?("--changed")
+raise "lint must keep FM_LINT_JOBS=1" unless lint_run.dig("env", "FM_LINT_JOBS") == "1"
+
+serial = jobs.fetch("tests-portable-serial")
+raise "serial timeout-minutes must stay 30" unless serial.fetch("timeout-minutes") == 30
+raise "serial runs-on must stay ubuntu-24.04" unless serial.fetch("runs-on") == "ubuntu-24.04"
+shards = serial.fetch("strategy").fetch("matrix").fetch("shard")
+raise "serial matrix must be 18 shards" unless shards == (1..18).to_a
+
+%w[tests-portable-parallel-1 tests-portable-parallel-2].each do |name|
+  job = jobs.fetch(name)
+  raise "#{name} timeout-minutes must stay 30" unless job.fetch("timeout-minutes") == 30
+  raise "#{name} runs-on must stay ubuntu-24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
+  run = job.fetch("steps").find { |s| s["run"].to_s.include?("fm-test-run.sh --lane") } or raise "#{name} run step missing"
+  raise "#{name} must run with --jobs 2" unless run.fetch("run").include?("--jobs 2")
+end
+
+agg = jobs.fetch("tests-timing-aggregate")
+raise "timing aggregate must depend on lint" unless Array(agg["needs"]).include?("lint")
+agg_run = agg.fetch("steps").find { |s| s["run"].to_s.include?("fm-ci-budget-warn.sh") } or raise "budget warn step missing"
+raise "budget warn must stay a warning, not a failing gate" if agg_run["continue-on-error"]
+
+jobs.each do |name, job|
+  next unless job.is_a?(Hash)
+  raise "#{name} must not set continue-on-error" if job["continue-on-error"]
+  Array(job["steps"]).each do |step|
+    raise "#{name} step must not set continue-on-error" if step.is_a?(Hash) && step["continue-on-error"]
+  end
+end
+RUBY
+  pass "CI keeps the 15-minute packing layout, 30-minute caps, lint cache, and warning-only budget check"
+}
+
 test_ci_matrices_match_executable_partitions
+test_ci_keeps_the_timecap_safeguards
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_keep_only_the_newest_run

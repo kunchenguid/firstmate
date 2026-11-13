@@ -158,6 +158,8 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  assert_contains "$help" "--changed" "fm-lint.sh --help omitted --changed"
+  assert_contains "$help" "--full" "fm-lint.sh --help omitted --full"
   assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
   assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
   assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
@@ -214,7 +216,16 @@ test_canonical_partitions_preserve_full_lint() {
       || fail "partition $part did not stream an end record per root"
   done
   [ "$(LC_ALL=C sort "$tmp/union")" = "$all" ] || fail "lint partitions lose or duplicate canonical roots"
-  for option in 0of2 3of2 1of3; do
+  : > "$tmp/union4"
+  for part in 1of4 2of4 3of4 4of4; do
+    selected=$(CI=false GITHUB_ACTIONS=false "$LINT" --partition "$part" --list-files) \
+      || fail "partition $part must list canonical roots"
+    printf '%s\n' "$selected" >> "$tmp/union4"
+  done
+  [ "$(LC_ALL=C sort "$tmp/union4")" = "$all" ] || fail "four lint partitions lose or duplicate canonical roots"
+  CI=false GITHUB_ACTIONS=false "$LINT" --partition 1of3 --list-files >/dev/null \
+    || fail "generic <k>of<n> must accept 1of3"
+  for option in 0of2 3of2 1of0; do
     rc=0
     "$LINT" --partition "$option" --list-files > "$tmp/refused" 2>&1 || rc=$?
     [ "$rc" = 2 ] || fail "invalid partition $option was not refused"
@@ -225,7 +236,7 @@ test_canonical_partitions_preserve_full_lint() {
   rc=0
   "$LINT" --partition 1of2 bin/fm-lint.sh > "$tmp/refused" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "partition accepted an explicit subset"
-  pass "two canonical lint partitions preserve complete source-aware coverage and reject weakened modes"
+  pass "canonical lint partitions preserve complete source-aware coverage and reject weakened modes"
 }
 
 # fm_lint_stub_git <fakebin-dir>: install a git stub for the changed-file mode
@@ -269,6 +280,33 @@ case "$*" in
   "diff --name-only --diff-filter=ACMR -z "*)
     if [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
       cat "$FM_TEST_GIT_DIFF_FILE"
+    fi
+    exit 0
+    ;;
+  "diff --name-only --diff-filter=ACMR "*)
+    if [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
+      after=0
+      specs=
+      for arg in $*; do
+        if [ "$after" = 1 ]; then
+          specs="$specs $arg"
+        elif [ "$arg" = -- ]; then
+          after=1
+        fi
+      done
+      tr '\0' '\n' < "$FM_TEST_GIT_DIFF_FILE" | while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if [ -z "${specs# }" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        for spec in $specs; do
+          if [ "$path" = "$spec" ]; then
+            printf '%s\n' "$path"
+            break
+          fi
+        done
+      done
     fi
     exit 0
     ;;
@@ -510,7 +548,7 @@ test_changed_mode_lints_only_the_changed_file() {
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
   diff_file="$tmp/diff.nul"
-  target="bin/fm-install-shellcheck.sh"
+  target="bin/fm-afk-launch.sh"
   fm_lint_write_diff_file "$diff_file" "$target" "README.md"
 
   # Clear the ambient CI/GITHUB_ACTIONS signals so changed-file mode is actually
@@ -670,8 +708,8 @@ test_changed_mode_invokes_shellcheck_once_per_root() {
   flag_log="$tmp/flags.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
   diff_file="$tmp/diff.nul"
-  first="bin/fm-install-shellcheck.sh"
-  second="bin/fm-lint-workflows.sh"
+  first="bin/fm-afk-launch.sh"
+  second="bin/fm-watch.sh"
   fm_lint_write_diff_file "$diff_file" "$first" "$second"
 
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
@@ -773,7 +811,7 @@ test_fast_mode_on_a_local_branch_keeps_source_following() {
   mode_log="$tmp/mode.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
   diff_file="$tmp/diff.nul"
-  target="bin/fm-install-shellcheck.sh"
+  target="bin/fm-afk-launch.sh"
   fm_lint_write_diff_file "$diff_file" "$target"
 
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
@@ -846,6 +884,109 @@ SH
 fm_lint_nox_one_root() {
   local index=$1 path=$2 outdir=$3
   shellcheck --norc --format gcc -- "$path" > "$outdir/$index" || true
+}
+
+test_changed_flag_keeps_source_following_in_ci() {
+  local tmp fakebin log flag_log mode_log diff_file out target
+  tmp=$(fm_test_tmproot fm-lint-changed-flag)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  mode_log="$tmp/mode.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-afk-launch.sh"
+  fm_lint_write_diff_file "$diff_file" "$target" "README.md"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    FM_TEST_FLAG_LOG="$flag_log" FM_TEST_MODE_LOG="$mode_log" \
+    "$LINT" --changed --partition 1of4 2>&1) \
+    || fail "CI --changed lint failed"$'\n'"$out"
+  [ "$(cat "$log")" = "$target" ] \
+    || fail "CI --changed did not lint exactly the changed canonical file"$'\n'"logged: $(cat "$log")"
+  [ "$(cat "$mode_log")" = on ] \
+    || fail "CI --changed disabled dataflow analysis"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh --changed in CI keeps source-aware analysis on the changed set"
+}
+
+test_changed_flag_upgrades_when_lint_definition_changes() {
+  local tmp fakebin listed expected diff_file out
+  tmp=$(fm_test_tmproot fm-lint-changed-upgrade)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  fm_lint_write_diff_file "$diff_file" "bin/fm-lint.sh" "README.md"
+  expected=$(find bin bin/backends tests -maxdepth 1 -type f -name '*.sh' ! -name '.*' -print | LC_ALL=C sort)
+
+  listed=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    "$LINT" --changed --list-files 2>"$tmp/err")
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
+    || fail "--changed did not upgrade to the full canonical set when lint tooling changed"
+  assert_contains "$(cat "$tmp/err")" "lint definition files changed" \
+    "--changed upgrade did not explain why it used the full set"
+  pass "fm-lint.sh --changed upgrades to full lint when lint definition files change"
+}
+
+test_changed_and_full_cannot_combine() {
+  local out rc
+  rc=0
+  out=$("$LINT" --changed --full --list-files 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "--changed --full must refuse, got $rc"$'\n'"$out"
+  assert_contains "$out" "--changed and --full cannot be combined" \
+    "combined-mode refusal did not name both flags"
+  pass "fm-lint.sh refuses combining --changed and --full"
+}
+
+test_empty_changed_partition_is_a_successful_noop() {
+  local tmp fakebin diff_file out rc
+  tmp=$(fm_test_tmproot fm-lint-empty-partition)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
+  diff_file="$tmp/diff.nul"
+  fm_lint_write_diff_file "$diff_file" "bin/fm-afk-launch.sh"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    "$LINT" --changed --partition 2of4 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an empty changed partition must exit 0, got $rc"$'\n'"$out"
+  assert_contains "$out" "no lint targets in this partition" \
+    "empty changed partition did not note the empty target set"
+  [ ! -s "$tmp/shellcheck.log" ] || fail "empty partition invoked ShellCheck"
+  pass "fm-lint.sh treats an empty --changed partition as a successful no-op"
+}
+
+test_installer_skips_download_when_pinned_binary_is_present() {
+  local tmp fakebin destination out
+  tmp=$(fm_test_tmproot fm-shellcheck-cached)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  mkdir -p "$destination"
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  cat > "$destination/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: ${REQUIRED}\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$destination/shellcheck"
+
+  out=$(CURL_COUNT="$tmp/curl-count" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+    || fail "installer failed to reuse a pinned ShellCheck"$'\n'"$out"
+  assert_contains "$out" "already at" "installer did not skip a present pinned binary"
+  [ ! -f "$tmp/curl-count" ] || fail "installer downloaded ShellCheck even though the pin was already present"
+  pass "ShellCheck installer skips download when the pinned binary is already present"
 }
 
 test_local_exclusion_list_covers_every_no_external_sources_code() {
@@ -2036,6 +2177,7 @@ test_ci_rejects_explicit_fast_mode
 test_fast_mode_catches_a_real_lint_defect
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
+test_installer_skips_download_when_pinned_binary_is_present
 test_installer_selects_platform_archive_url_and_checksum
 test_installer_rejects_wrong_checksum
 test_installer_falls_back_to_shasum
@@ -2075,4 +2217,8 @@ test_merge_base_less_keeps_external_sources
 test_explicit_path_keeps_external_sources
 test_fast_mode_on_a_local_branch_keeps_source_following
 test_changed_mode_hides_cross_file_codes_that_ci_still_sees
+test_changed_flag_keeps_source_following_in_ci
+test_changed_flag_upgrades_when_lint_definition_changes
+test_changed_and_full_cannot_combine
+test_empty_changed_partition_is_a_successful_noop
 test_local_exclusion_list_covers_every_no_external_sources_code
