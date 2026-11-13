@@ -12,10 +12,13 @@
 # The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, and so does the GitLab degraded read (its
-# rendered view carries no head pipeline state); without jq a GitLab poll
+# GitLab, gerrit-axi for Gerrit, and a Forgejo CLI for Forgejo, so an upstream
+# checkout needs no extra tooling to follow GitHub or GitLab. The Forgejo CLI
+# is chosen from the sidecar's recorded preference (auto|tea|fgj) and that
+# CLI's own login for the host, duplicating bin/fm-pr-lib.sh's
+# fm_pr_forgejo_resolve because this body sources nothing. The Gerrit and
+# Forgejo branches additionally need jq, and so does the GitLab degraded read
+# (its rendered view carries no head pipeline state); without jq a GitLab poll
 # still wakes on a merge from the plain state field. A GitLab poll also emits
 # "ontrain" while the merge request has a merge-train car, and a degraded
 # train=dropped line once the car is gone from a still-open merge request; the
@@ -31,13 +34,14 @@ unknown=0
 degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
-if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
+if { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
   [ "$1" != --baseline ] || unknown=3
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  preference=${7:-auto}
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -51,13 +55,22 @@ elif [ "$#" -eq 0 ]; then
   IFS= read -r host <&3 || exit 0
   IFS= read -r path <&3 || exit 0
   IFS= read -r number <&3 || exit 0
-  if IFS= read -r _extra <&3; then
-    exit 0
+  preference=auto
+  if IFS= read -r optional <&3; then
+    preference=$optional
+    if IFS= read -r _extra <&3; then
+      exit 0
+    fi
   fi
   exec 3<&-
 else
   exit 0
 fi
+case "$preference" in
+  ''|auto) preference=auto ;;
+  tea|fgj|fj) ;;
+  *) exit 0 ;;
+esac
 
 case "$number" in
   [1-9]*) ;;
@@ -510,45 +523,100 @@ case "$provider" in
       esac
     done
     [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
-    command -v tea >/dev/null 2>&1 || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
-    # tea addresses a repo by slug only; the host comes from a named login
-    # rather than a URL the way gh and glab take one, so the login registered
-    # for this exact host is resolved fresh on every poll rather than trusted
-    # from anywhere durable. Refuse to guess when zero or more than one
-    # registered login matches, rather than picking one arbitrarily.
-    # The list is parsed as JSON, never split on quotes per line, so a login
-    # printed as one compact object still matches; this is the same filter
-    # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
-    login=$(
-      tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
-        if type == "array" then
-          [ .[]
-            | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
-                     and (.url | type) == "string")
-            | select((.url
-                      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                      | sub("[/?#].*$"; "")
-                      | sub("^.*@"; "")
-                      | sub(":[0-9]+$"; "")) == $h)
-            | .name ]
-          | if length == 1 then .[0] else error("not exactly one matching login") end
-        else
-          error("login list is not an array")
-        end' 2>/dev/null
-    ) || exit $unknown
+    # A repo is addressed by owner/repository slug only, and the host comes
+    # from the CLI's own login rather than from a URL the way gh and glab take
+    # one, so both the CLI and its login for this exact host are resolved fresh
+    # on every poll rather than trusted from anywhere durable. The CLI comes
+    # from the sidecar preference the arming write recorded
+    # (bin/fm-pr-lib.sh's fm_pr_poll_prepare): `tea` or `fgj` uses only that
+    # CLI, and `auto` is the same order bin/fm-pr-lib.sh's
+    # fm_pr_forgejo_resolve walks - tea, then fgj - taking the first installed
+    # CLI holding exactly ONE login for $host; zero or several logins for the
+    # host refuse rather than guess. `fj` is deliberately absent: forgejo-cli
+    # has no authenticated request passthrough, so it cannot read this record
+    # at all. Arming refuses such a host (bin/fm-pr-check.sh), so a poll that
+    # reaches here without tea or fgj is unknown rather than
+    # silent-by-accident, and --baseline reports that.
+    # tea's login list is parsed as JSON, never split on quotes per line, so a
+    # login printed as one compact object still matches; that is the same
+    # filter bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
+    cli=
+    login=
+    case "$preference" in
+      tea) try_tea=1; try_fgj=0 ;;
+      fgj) try_tea=0; try_fgj=1 ;;
+      fj) try_tea=0; try_fgj=0 ;;
+      *) try_tea=1; try_fgj=1 ;;
+    esac
+    if [ "$try_tea" = 1 ] && command -v tea >/dev/null 2>&1; then
+      login=$(
+        tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
+          if type == "array" then
+            [ .[]
+              | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
+                       and (.url | type) == "string")
+              | select((.url
+                        | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+                        | sub("[/?#].*$"; "")
+                        | sub("^.*@"; "")
+                        | sub(":[0-9]+$"; "")) == $h)
+              | .name ]
+            | if length == 1 then .[0] else error("not exactly one matching login") end
+          else
+            error("login list is not an array")
+          end' 2>/dev/null
+      ) || login=
+      [ -z "$login" ] || cli=tea
+    fi
+    if [ -z "$cli" ] && [ "$try_fgj" = 1 ] && command -v fgj >/dev/null 2>&1; then
+      # fgj selects the instance with --hostname and keeps one login per
+      # hostname, reported as "  <bullet> <host> (user: <name>)" lines. The
+      # hostname is read from that report, never from fgj's config file, which
+      # also holds the token. The not-authenticated notice is on stdout too (as
+      # docs/forgejo-cli-alternatives.md records); it carries no `(user: ...)`
+      # line, so the awk ignores it.
+      login=$(
+        fgj auth status 2>/dev/null | awk -v h="$host" '
+          /\(user: [^)]*\)[[:space:]]*$/ {
+            line = $0
+            sub(/[[:space:]]*\(user: [^)]*\)[[:space:]]*$/, "", line)
+            n = split(line, field, /[[:space:]]+/)
+            if (n >= 1 && field[n] == h) matched++
+          }
+          END { if (matched != 1) exit 1; print h }
+        '
+      ) || login=
+      [ -z "$login" ] || cli=fgj
+    fi
+    [ -n "$cli" ] || exit $unknown
     [ -n "$login" ] || exit $unknown
-    # tea's single-PR view ignores field selection, so the one pull request
-    # is read by number from the REST record through "tea api", which keeps
-    # the credential inside tea. "tea api" exits 0 on an HTTP error with the
-    # error body as output, so only a boolean merged field of true wakes this
-    # poll and every other reading stays silent.
-    merged=$(tea api --login "$login" --repo "$owner/$repo" \
-      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
-        if type == "object" and (.merged | type) == "boolean"
-        then .merged | tostring
-        else error("invalid pull request record")
-        end' 2>/dev/null) || exit $unknown
+    # A native single-PR view ignores field selection entirely (verified
+    # against a real instance for tea), so the one pull request is read by
+    # number from the REST record through the CLI's authenticated request
+    # passthrough, which keeps the credential inside that CLI. Only a boolean
+    # merged field of true wakes this poll and every other reading stays
+    # silent: "tea api" exits 0 on an HTTP error with the error body as output,
+    # and "fgj api" exits non-zero with the body on stderr, so neither exit
+    # status is evidence either way.
+    case "$cli" in
+      tea)
+        merged=$(tea api --login "$login" --repo "$owner/$repo" \
+          "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
+            if type == "object" and (.merged | type) == "boolean"
+            then .merged | tostring
+            else error("invalid pull request record")
+            end' 2>/dev/null) || exit $unknown
+        ;;
+      fgj)
+        merged=$(fgj api "repos/$owner/$repo/pulls/$number" --hostname "$login" 2>/dev/null | jq -r '
+            if type == "object" and (.merged | type) == "boolean"
+            then .merged | tostring
+            else error("invalid pull request record")
+            end' 2>/dev/null) || exit $unknown
+        ;;
+      *) exit $unknown ;;
+    esac
     [ "$merged" = true ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;

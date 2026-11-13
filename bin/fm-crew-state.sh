@@ -505,12 +505,13 @@ mr_read_record_bounded() {  # <host> <path> <number>
 
 forgejo_read_record_bounded() {  # <host> <path> <number>
   local record state merged
+  fm_pr_forgejo_cli_preference "$META"
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
   if ! record=$(fm_run_timed 5 bash -c '
     . "$1"
-    fm_pr_forgejo_read_record "$2" "$3" "$4" || exit 1
+    fm_pr_forgejo_read_record "$2" "$3" "$4" "$5" || exit 1
     printf "state=%s\nmerged=%s\n" "$FM_PR_RECORD_STATE" "$FM_PR_RECORD_MERGED"
-  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" 2>/dev/null); then
+  ' _ "$SCRIPT_DIR/fm-pr-lib.sh" "$1" "$2" "$3" "$FM_PR_FORGEJO_CLI_PREFERENCE" 2>/dev/null); then
     return 1
   fi
   state=$(printf '%s\n' "$record" | sed -n 's/^state=//p' | head -1)

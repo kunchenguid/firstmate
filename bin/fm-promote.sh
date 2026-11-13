@@ -231,6 +231,7 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # captain's project binding, so promotion takes it from the registry rather than
 # from a flag firstmate must remember.
 PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
+PROMOTE_FORGEJO_CLI=auto
 if [ -n "$PROMOTE_PROJECT" ]; then
   PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
   if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
@@ -238,6 +239,23 @@ if [ -n "$PROMOTE_PROJECT" ]; then
     exit 1
   fi
   FORGE=${PROMOTE_STANDING_FORGE:-none}
+  if [ "$FORGE" = forgejo ]; then
+    if ! PROMOTE_FORGEJO_CLI=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" --forge-cli "$PROMOTE_PROJECT_NAME"); then
+      echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a Forgejo CLI (see the refusal above); correct data/projects.md and promote again" >&2
+      exit 1
+    fi
+    case "$PROMOTE_FORGEJO_CLI" in
+      tea|fgj|fj) ;;
+      *) PROMOTE_FORGEJO_CLI=auto ;;
+    esac
+    if [ "$PROMOTE_FORGEJO_CLI" = auto ]; then
+      if fm_pr_forgejo_resolve_project "$PROMOTE_PROJECT" auto; then
+        PROMOTE_FORGEJO_CLI=$FM_PR_FORGEJO_CLI
+      else
+        PROMOTE_FORGEJO_CLI=tea
+      fi
+    fi
+  fi
   refuse_impossible_forge_posture || exit 1
   if ! PROMOTE_STANDING_PR=$("$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROMOTE_PROJECT_NAME"); then
     echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and promote again" >&2
@@ -346,7 +364,7 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$PROMOTE_FORGEJO_CLI"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }

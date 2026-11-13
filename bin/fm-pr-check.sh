@@ -269,24 +269,37 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
-# Refuse to arm a Forgejo watch with no tea or jq on PATH, for the same reason
-# as the GitLab and Gerrit cases above. tea also addresses a repo by slug only, resolving the
-# host from a named "tea login" rather than from the URL the way gh and glab
-# do, so a poll can only ever succeed when exactly one registered login
-# matches this host; refuse now rather than watch something that can never
-# resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
-# that script is a static, standalone watcher body with no sourced
-# dependency, so it re-derives the same match at every poll instead of
-# trusting a name recorded here.
+# Refuse to arm a Forgejo watch with no jq on PATH, with no Forgejo CLI
+# holding a login for this host, or with one that cannot read the record, for
+# the same reason as the GitLab and Gerrit cases above: the poll is silent on
+# every error, so arming is the one point where a watch that could never
+# resolve can be reported instead of watching nothing. A Forgejo CLI addresses
+# a repository by owner/repository slug only, resolving the host from its own
+# login rather than from the URL the way gh and glab do, so the CLI and that
+# login are resolved through the same single owner the merge path and the
+# reads use (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve), honoring the project's
+# registered CLI first and what is installed second. `fj` resolves but cannot
+# serve this contract, so it is refused here by name rather than armed into a
+# poll that stays silent forever. The resolved preference is recorded in the
+# registered poll sidecar (bin/fm-pr-lib.sh's fm_pr_poll_prepare), so
+# bin/fm-pr-poll.sh, a static body with no sourced dependency, resolves the
+# CLI and login through the same recorded preference the merge path uses;
+# both read the same REST record, so the watch cannot disagree with the merge
+# path about the pull request's own state.
 if [ "$PROVIDER" = forgejo ]; then
-  if ! command -v tea >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-    echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
-    exit 1
-  fi
-  fm_pr_forgejo_login "$HOST" >/dev/null || {
-    echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: watching a Forgejo pull request requires jq on PATH" >&2
     exit 1
   }
+  fm_pr_forgejo_cli_preference "$META"
+  fm_pr_forgejo_resolve "$HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
+    echo "error: watching a Forgejo pull request at $HOST requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth status'), or fj (see 'fj auth list')" >&2
+    exit 1
+  }
+  if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then
+    echo "error: watching a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough and prints only localized prose, so it cannot report whether this pull request merged, and firstmate will not watch an event it cannot read (docs/forgejo-cli-alternatives.md); install tea or fgj, log one in for $HOST, and re-run" >&2
+    exit 1
+  fi
 fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
@@ -385,6 +398,7 @@ pr_check_cleanup() {
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+  "$FM_PR_FORGEJO_CLI_PREFERENCE" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 # The degraded dedupe baseline is the poll's own reading at the ready report:
@@ -406,7 +420,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   # The read runs under the control lock the watcher waits on, so it is
   # bounded by the watcher's own check bound.
   BASELINE_RC=0
-  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$FM_PR_FORGEJO_CLI_PREFERENCE" 2>/dev/null) || BASELINE_RC=$?
   if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
     if [ "$BASELINE_RC" = 124 ]; then
       echo "error: baseline read of the PR poll timed out" >&2

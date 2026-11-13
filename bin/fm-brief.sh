@@ -70,13 +70,20 @@
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
-# script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
-# refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
-# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
-# `forgejo`, and `external` change in the Definition of done. On `forgejo` this
-# script also names tea instead of gh-axi in the ship brief's forge-CLI rule, and
-# on `external` that rule names no forge CLI, because the home's review tool is
-# the only publishing tool. A forge on --mode local-only is refused, because that
+# script never infers a forge and never looks the provider binding up, and
+# bin/fm-spawn.sh refuses a brief whose forge disagrees with the registry.
+# bin/fm-project-mode.sh's header owns what the binding means, and
+# bin/fm-dod-lib.sh owns what `gerrit`, `forgejo`, and `external` change in the
+# Definition of done. On `forgejo` this script reads the binding's optional CLI
+# annotation (bin/fm-project-mode.sh --forge-cli) and resolves `auto` against the
+# project clone's own host through the same resolver the merge path uses
+# (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project), so the ship brief's
+# forge-CLI rule and Definition of done name the CLI that will actually be used,
+# falling back to tea only when the clone cannot name a host, and it refuses a
+# binding that resolves to forgejo-cli (`fj`), which cannot read the pull request
+# record or bind a merge to a verified head. On
+# `external` that rule names no forge CLI, because the home's review tool is the
+# only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.
 # --pr names who writes the pull request's title and body, defaults to auto, and
 # is the explicit task-side form of the registry's `pr=manual` token exactly as
@@ -176,6 +183,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -227,6 +236,7 @@ BASE_BRANCH=
 BASE_BRANCH_SET=0
 FORGE=none
 FORGE_SET=0
+FORGEJO_CLI=auto
 SHAPE=
 SHAPE_SET=0
 PR_TEXT=auto
@@ -333,11 +343,43 @@ if [ "$KIND" = ship ]; then
     echo "error: --shape applies only with --forge gerrit, where the worker publishes the change itself" >&2
     exit 1
   fi
-  # A Forgejo project's pull requests are handled with tea, so the ship brief's
-  # forge-CLI rule names it instead of gh-axi; an external review tool has no
-  # forge CLI at all; every other forge keeps gh-axi.
+  # A Forgejo project's pull requests are handled with the CLI its registry
+  # binding names (bin/fm-project-mode.sh --forge-cli); a binding that names
+  # none (`auto`) is resolved against the project clone's own host through the
+  # same resolver arming and the merge path use, so the ship brief's forge-CLI
+  # rule and Definition of done name a CLI the project actually uses; an
+  # external review tool has no forge CLI at all; every other forge keeps
+  # gh-axi.
   if [ "$FORGE" = forgejo ]; then
-    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+    FORGEJO_CLI=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge-cli "${POS[1]:-}" 2>/dev/null) || {
+      echo "error: could not read the registered Forgejo CLI for project '${POS[1]:-}' (bin/fm-project-mode.sh --forge-cli); correct the registry entry in data/projects.md" >&2
+      exit 1
+    }
+    case "$FORGEJO_CLI" in
+      tea|fgj|fj) ;;
+      *) FORGEJO_CLI=auto ;;
+    esac
+    if [ "$FORGEJO_CLI" = auto ]; then
+      if [ "$PROJECT_DIR_SET" -eq 1 ] && [ -n "$PROJECT_DIR" ]; then
+        forgejo_clone=$PROJECT_DIR
+      else
+        forgejo_clone="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/${POS[1]:-}"
+      fi
+      if fm_pr_forgejo_resolve_project "$forgejo_clone" auto; then
+        FORGEJO_CLI=$FM_PR_FORGEJO_CLI
+      else
+        FORGEJO_CLI=tea
+      fi
+    fi
+    case "$FORGEJO_CLI" in
+      fj)
+        echo "error: project '${POS[1]:-}' resolves to forgejo-cli (fj), but fj exposes no authenticated request passthrough and cannot bind a merge to a verified head, so firstmate cannot ship this task; register forge=forgejo:tea or forge=forgejo:fgj, or install and log in a supported Forgejo CLI for this project's host (docs/forgejo-cli-alternatives.md)" >&2
+        exit 1 ;;
+      fgj)
+        FORGE_RULE_LINE="Use fgj for Forgejo operations and chrome-devtools-axi for browser operations." ;;
+      *)
+        FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations." ;;
+    esac
   elif [ "$FORGE" = external ]; then
     FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
   else
@@ -775,7 +817,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$FORGEJO_CLI") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

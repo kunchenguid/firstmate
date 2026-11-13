@@ -6,10 +6,15 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<forge-cli>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
-# contract.
+# contract. The optional eighth argument is the Forgejo CLI the project resolves
+# to (tea|fgj), never `auto`: the callers resolve `auto` the way the merge path
+# does (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project) before rendering, so
+# `tea` renders the tea contract, `fgj` renders the fgj api read-back, and any
+# other value, forgejo-cli's `fj` included, is refused because it cannot read
+# the pull request record the contract needs.
 # For local-only tasks, the first accepted done head is latched as exactly one
 # local_done_head= full commit id in the live task metadata. Observing done again
 # never changes that identity. Revised work needs a new task/approval record.
@@ -539,8 +544,8 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<forge-cli>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto} forgejo_cli=${8:-auto}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
@@ -555,8 +560,19 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   if [ "$forge" = forgejo ]; then
     contract_forge=' forge=forgejo'
-    forge_cli=tea
-    draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+    case "$forgejo_cli" in
+      tea)
+        forge_cli=tea
+        draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+        ;;
+      fgj)
+        forge_cli=fgj
+        draft_check="(\`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host>\` must show \`draft\` as false, where <owner>/<repo>, <number>, and <host> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host> -X PATCH -f title='<title without the prefix>'\`."
+        ;;
+      *)
+        echo "error: fm_dod_block: unknown Forgejo CLI '$forgejo_cli' (expected tea or fgj; resolve auto with bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project first, and forgejo-cli's fj cannot read the pull request record and is refused by bin/fm-pr-check.sh and bin/fm-pr-merge.sh)" >&2
+        return 1 ;;
+    esac
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"

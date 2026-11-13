@@ -9,6 +9,11 @@
 # With --forge it prints one word instead: the project's registered forge,
 # none|gerrit|forgejo|external. The forge is asked for explicitly, so the
 # default output stays the same two words for every project, bound or not.
+# With --forge-cli it prints one word: the Forgejo CLI the project registered,
+# auto|tea|fgj|fj. `auto` (the default, and the answer for every non-Forgejo
+# binding) means "whatever is installed and holds a login for the host"; the
+# provider word --forge prints is unchanged either way, so no existing
+# consumer sees a different value.
 # With --pr it prints one word: the project's registered PR-text posture,
 # auto|manual, "auto" when the project registers none.
 #
@@ -32,12 +37,16 @@
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
+#   - <name> [<mode> forge=forgejo:fgj] - <desc> (added <date>)      -> <mode> <yolo>, --forge forgejo, --forge-cli fgj
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
 #   - <name> [no-mistakes pr=manual] - <desc> (added <date>)         -> no-mistakes off, --pr manual
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
 #   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
 #   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
+#   A Forgejo binding may name its CLI: forge=forgejo:tea, forge=forgejo:fgj, or
+#   forge=forgejo:fj. --forge answers `forgejo` for every spelling, and
+#   --forge-cli answers the named CLI or `auto` when none is named.
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
 #   legacy "fm/<task-id>".
 #
@@ -63,15 +72,21 @@
 #   `none` means a forge whose pull requests and checks no-mistakes already
 #   drives, `gerrit` means a Gerrit server: no pull requests, so the worker
 #   publishes a change with gerrit-axi instead, and `forgejo` means a Forgejo or
-#   Gitea server, whose pull requests the worker handles with tea rather than
-#   gh-axi, and `external` means the project's reviews are created by a review
+#   Gitea server, whose pull requests the worker handles with the Forgejo CLI
+#   the binding selects (auto when it names none) rather than gh-axi, and
+#   `external` means the project's reviews are created by a review
 #   tool that uploads its own snapshot of the worker's local commits: the
 #   worker never needs to push a branch, and must never push a task branch to
 #   the project's shared origin. Firstmate cannot observe, approve, or merge
 #   such a review, so that rail always escalates (bin/fm-dod-lib.sh owns what
 #   each changes for a worker in each publishing mode;
-#   docs/forgejo-tea-integration.md holds the tea evidence and
+#   docs/forgejo-tea-integration.md holds the tea evidence,
+#   docs/forgejo-cli-alternatives.md the fj and fgj evidence, and
 #   docs/external-review-forge.md the external design).
+#   A forgejo binding alone names the provider; it may also name the CLI that
+#   drives its pull requests (forge=forgejo:tea|fgj|fj, queried with
+#   --forge-cli), because which of the supported Forgejo CLIs a project uses is
+#   the captain's choice rather than something to infer from PATH alone.
 #   The binding is EXPLICIT because a provider family must never be guessed;
 #   bin/fm-forge-detect.sh proposes gerrit from a protocol fact at project-add
 #   intake, forgejo has no such fact and is proposed from the captain's own
@@ -126,9 +141,9 @@
 # local-only with a forge is refused the same way. --branch-prefix does not make
 # that check: it answers only the registered prefix, and a prefix is orthogonal
 # to the forge binding, so it prints even when the forge token is malformed;
-# every path that reads the forge binding (default, --forge, and spawn's
-# forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>
+# every path that reads the forge binding (default, --forge, --forge-cli, and
+# spawn's forge-agreement check) still refuses.
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--forge-cli|--pr] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,19 +154,22 @@ REG="$DATA/projects.md"
 RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
+WANT_FORGE_CLI=0
 WANT_PR=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
+  --forge-cli) WANT_FORGE_CLI=1; shift ;;
   --pr) WANT_PR=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--forge-cli|--pr] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
+  elif [ "$WANT_FORGE_CLI" -eq 1 ]; then echo auto
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
   exit 0
@@ -225,6 +243,7 @@ if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
+  elif [ "$WANT_FORGE_CLI" -eq 1 ]; then echo auto
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
   exit 0
@@ -233,7 +252,7 @@ fi
 posture=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
-    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external" >&2 ;;
+    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external (a Forgejo binding may name its CLI: forge=forgejo:tea, forge=forgejo:fgj, or forge=forgejo:fj)" >&2 ;;
     posture) posture=$rest ;;
   esac
 done <<EOF
@@ -256,8 +275,26 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   exit 0
 fi
 
+# A Forgejo binding may name the CLI that drives its pull requests,
+# forge=forgejo:<cli>, because a host can be logged into more than one Forgejo
+# CLI (the documented default tea, fgj, or forgejo-cli's fj) and which one a
+# project uses is the captain's choice rather than something to infer from
+# PATH alone. --forge still answers the provider word `forgejo` for every
+# spelling, so no existing consumer changes; --forge-cli answers the CLI and
+# every other binding answers `auto`, which keeps a project that names no CLI
+# on the installed-and-logged-in order it has always had.
+forge_cli=auto
 case "$forge" in
-  none|forge=gerrit|forge=forgejo|forge=external) forge=${forge#forge=} ;;
+  none|forge=gerrit|forge=external) forge=${forge#forge=} ;;
+  forge=forgejo) forge=forgejo ;;
+  forge=forgejo:*)
+    forge_cli=${forge#forge=forgejo:}
+    case "$forge_cli" in
+      tea|fgj|fj) forge=forgejo ;;
+      *)
+        echo "refused: unknown Forgejo CLI \"$forge_cli\" in the binding \"$forge\" registered for $NAME in $REG; the accepted Forgejo CLIs are forge=forgejo:tea, forge=forgejo:fgj, and forge=forgejo:fj, or forge=forgejo alone to follow what is installed; correct the registry entry" >&2
+        exit 3 ;;
+    esac ;;
   forge=)
     echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
@@ -271,6 +308,10 @@ if [ "$forge" != none ] && [ "$mode" = local-only ]; then
 fi
 if [ "$WANT_FORGE" -eq 1 ]; then
   echo "$forge"
+  exit 0
+fi
+if [ "$WANT_FORGE_CLI" -eq 1 ]; then
+  echo "$forge_cli"
   exit 0
 fi
 
