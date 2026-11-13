@@ -1400,8 +1400,6 @@ gemini is likewise refused for secondmates because it has no primary supervision
 rovo is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no turn-end hook and no primary supervision protocol; [`docs/verification/rovo.md`](verification/rovo.md) owns that evidence, including the OAuth token's silent background refresh from a stored refresh token and both tmux and herdr pane liveness (herdr placement is verified live, with a Herdr-side agent-detection gap left open for recovery classification).
 
 An agy secondmate or primary runs the tracked project-scope `.agents/hooks.json` in its own home, and `bin/fm-spawn.sh` pre-registers a secondmate home in agy's workspace trust store through `bin/fm-agy-trust.sh`; [`docs/supervision-protocols/agy.md`](supervision-protocols/agy.md) owns its supervision protocol and [`docs/verification/agy.md`](verification/agy.md) owns the evidence.
-Pane-backed Codex worker launches pre-register the exact linked worktree or seeded secondmate home in Codex's `config.toml` before launch, so the directory trust dialog cannot wedge an unattended worker; [`bin/fm-codex-trust.sh`](../bin/fm-codex-trust.sh) owns the scope validation, full TOML validation, and atomic TOML update. That helper requires Python 3.11 or newer because it uses the standard-library `tomllib` parser, and refuses malformed or concurrently changed configuration without replacing it. Trust is recorded per exact worker copy rather than for a parent directory, so an unattended worker gets only the narrow workspace access required for its isolated launch.
-When `CODEX_HOME` is set for a pane-backed Codex worker, it must be an absolute path so the launch uses the same trust store that pre-registration updated; T3 Code launches keep their own trust model in [`docs/t3code-backend.md`](t3code-backend.md).
 kiro (Kiro CLI, V2 engine only) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate because it has no primary supervision protocol; it is claude-shaped, so its per-task turn-end and busy hooks live in a firstmate-owned agent config the spawn writes under `state/<id>.kiro-home` and reaches by relocating `KIRO_HOME` (never the worktree's own `.kiro/`), with the `--trust-all-tools` modal suppressed by a seeded `chat.disableTrustAllConfirmation` setting; [`docs/verification/kiro.md`](verification/kiro.md) owns that evidence, and the v3/KAS engine is out of scope and unsupported on Amazon Linux 2.
 A kiro hook command must be one unquoted token, so a kiro spawn refuses before launch when that per-task home path contains whitespace or a shell-special character (such as a quote or `$`) and asks for an `FM_HOME` or `FM_STATE_OVERRIDE` free of them.
 devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
@@ -1426,6 +1424,19 @@ Polytoken is verified for crewmate and scout launches only; [its adapter referen
 It has no primary or secondmate supervision protocol.
 The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
 The first-start license dialog requires an operator decision and is never accepted automatically.
+
+### Codex workspace trust
+
+Pane-backed Codex worker launches pre-register the exact linked worktree or seeded secondmate home in Codex's `config.toml` before launch, so the directory trust dialog cannot wedge an unattended worker; [`bin/fm-codex-trust.sh`](../bin/fm-codex-trust.sh) owns the scope validation, full TOML validation, and atomic TOML update.
+That helper requires Python 3.11 or newer because it uses the standard-library `tomllib` parser, and refuses malformed or concurrently changed configuration without replacing it.
+It preserves unrelated configuration values and registers only the exact worker directory, never a parent directory.
+A registration failure stops the launch.
+
+Firstmate resolves the store from the spawning process's nonempty `CODEX_HOME`, falling back to `$HOME/.codex`, and explicitly passes that same location to the worker so a destination pane's inherited store cannot override it.
+With an [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session), the source's selected `CODEX_HOME` takes precedence; if it is empty, unset, or not selected, the store is `.codex` under the source-selected `HOME`, or the spawning process's `HOME` when that name is not selected.
+The resolved store must be an absolute path.
+T3 Code launches keep their own [trust model](t3code-backend.md#setup) and do not run this registration.
+Workspace registration does not approve the separate [Codex hook-review dialog](../.agents/skills/harness-adapters/references/harness/codex.md#hook-trust).
 
 ### Verification and primary supervision
 
@@ -1882,7 +1893,7 @@ It retains `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
 
-Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
+Except for explicit launch assignments such as the [Codex store selection](#codex-workspace-trust), allowed values come from the destination pane at execution time unless the Orca environment source below is configured; they are neither copied from the invoking Firstmate process nor written into the launch command.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
 
 On the Orca backend the destination is an Orca terminal whose environment comes from the Orca app and your shell startup files, not from Firstmate or its tmux session.
@@ -1910,7 +1921,7 @@ Choose the minimum additions for the authentication method actually in use:
 | --- | --- |
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
 | Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
-| Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
+| Custom provider store | Its configured location variables, such as `GROK_HOME` or `XDG_CONFIG_HOME`; Firstmate's explicit Claude and Muse store assignments and [Codex store selection](#codex-workspace-trust) still apply. |
 | Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
 | Git over SSH with a key file | No credential variable when normal SSH configuration selects the key; file permissions and any passphrase handling still apply. |
