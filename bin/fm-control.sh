@@ -114,8 +114,10 @@
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
-#              running. When a secondmate's replacement does not come up, the
-#              failure also prints the bin/fm-spawn.sh <id> --secondmate
+#              running. When a secondmate relaunch leaves no agent running
+#              (its replacement does not come up, or the stop left the old
+#              agent dead), the failure also prints the
+#              bin/fm-spawn.sh <id> --secondmate
 #              command, with the target harness and model, that the operator
 #              runs next; it is never run automatically.
 #
