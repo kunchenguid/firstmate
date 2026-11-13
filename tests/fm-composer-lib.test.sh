@@ -1838,6 +1838,28 @@ test_background_exit_picker_stays_pending_and_blocks_retry() {
   pass "the Claude background-task exit picker stays pending and receives no confirming Enter"
 }
 
+# The work rows the picker lists, in both recorded layouts: Claude Code
+# 2.1.289 drew them below the selected row, and 2.1.322 above the options.
+test_exit_picker_tasks_names_the_listed_work() {
+  local out
+  out=$(fm_composer_exit_picker_tasks "$(exit_picker_screen)")
+  [ "$out" = 'shell · sleep 300' ] || fail "2.1.289 layout should name the work, got '$out'"
+  out=$(fm_composer_exit_picker_tasks "$(printf '%s\n' \
+    '   Background work is running' \
+    '   The following will stop when you exit:' \
+    '   shell · npm test' \
+    '   shell · tail -f build.log' \
+    '   ❯ 1. Exit and stop tasks' \
+    '     2. Move to background and exit' \
+    '     3. Stay' \
+    '   Enter to confirm · Esc to cancel')")
+  [ "$out" = 'shell · npm test; shell · tail -f build.log' ] \
+    || fail "2.1.322 layout should name every listed job, got '$out'"
+  out=$(fm_composer_exit_picker_tasks 'a normal composer')
+  [ -z "$out" ] || fail "a screen with no listing should name nothing, got '$out'"
+  pass "fm_composer_exit_picker_tasks: names the work the exit picker lists"
+}
+
 # The picker's own text, shown the way a worker pane shows it when it prints
 # this repository's diff, verification note, or a test fixture: quoted above a
 # normal composer. No picker is open, so the next Enter confirms nothing.
@@ -1929,6 +1951,7 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 }
 
 test_background_exit_picker_stays_pending_and_blocks_retry
+test_exit_picker_tasks_names_the_listed_work
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog

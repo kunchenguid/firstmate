@@ -2243,6 +2243,26 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   return 1
 }
 
+# fm_composer_exit_picker_tasks: the work rows the Claude background-task exit
+# picker lists under "The following will stop when you exit:", joined by "; ".
+# For naming the work in a message only; the picker verdict stays with
+# fm_composer_blocking_dialog. Prints nothing when no row is found.
+# Recorded 2026-11-12 on Claude Code 2.1.322: rows read like
+# "shell · npm test" and sit between that line and the numbered options.
+fm_composer_exit_picker_tasks() {  # <screen> -> task rows
+  printf '%s\n' "${1-}" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*The following will stop when you exit:[ \t\r]*$/ { listing = 1; next }
+    !listing { next }
+    /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/ { exit }
+    /^[ \t]*(❯[ \t]*)?[0-9]+\.[ \t]/ { next }
+    /[^ \t\r]/ {
+      row = $0; sub(/^[ \t]+/, "", row); sub(/[ \t\r]+$/, "", row)
+      out = out (out == "" ? "" : "; ") row
+    }
+    END { printf "%s", out }
+  '
+}
+
 # A command substitution drops a shell variable, and every composer read runs
 # inside one. The name is therefore written to FM_COMPOSER_DIALOG_SINK when
 # that path is set. The classifier verdict is unchanged. When the sink is

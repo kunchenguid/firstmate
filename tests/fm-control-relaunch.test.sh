@@ -80,6 +80,13 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
+          # With a background job modelled, the exit command waits for its
+          # submitting Enter, which is where Claude decides on the picker.
+          if [ -f "$D/bgjob" ]; then
+            rm -f "$D/notice-released"
+            : > "$D/pending-exit"
+            exit 0
+          fi
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
@@ -91,6 +98,37 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       case "$payload" in
+        Enter)
+          # The Claude background-task exit picker, as recorded live: an Enter
+          # on the open picker confirms "Exit and stop tasks", which kills the
+          # job; the Enter that submits /exit opens the picker only while the
+          # job still runs, and otherwise exits.
+          if [ -f "$D/picker-open" ]; then
+            rm -f "$D/picker-open"
+            : > "$D/job-killed"
+            printf 'zsh' > "$D/command"
+          elif [ -f "$D/pending-exit" ]; then
+            rm -f "$D/pending-exit"
+            if [ "$(cat "$D/bgjob")" = running ]; then
+              : > "$D/picker-open"
+            else
+              printf 'zsh' > "$D/command"
+            fi
+          fi
+          ;;
+        Escape)
+          # Escape cancels the picker and stops nothing. bgjob-finish-after
+          # counts how many dismissals the job outlives.
+          if [ -f "$D/picker-open" ]; then
+            rm -f "$D/picker-open"
+            printf 'x' >> "$D/picker-dismissals"
+            if [ -f "$D/bgjob-finish-after" ]; then
+              n=$(( $(cat "$D/bgjob-finish-after") - 1 ))
+              printf '%s' "$n" > "$D/bgjob-finish-after"
+              [ "$n" -gt 0 ] || { printf 'finished' > "$D/bgjob"; : > "$D/notice-released"; }
+            fi
+          fi
+          ;;
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
@@ -119,6 +157,20 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
+    if [ -f "$D/picker-open" ]; then
+      # Claude Code 2.1.322's picker rows, captured live in an isolated lab.
+      printf '%s\n' \
+        ' ✻ Baked for 2s · done 1:31 PTG' \
+        '▔▔▔▔▔▔▔▔▔▔▔▔' \
+        '   Background work is running' \
+        '   The following will stop when you exit:' \
+        '   shell · npm test -- --runInBand' \
+        '   ❯ 1. Exit and stop tasks' \
+        '     2. Move to background and exit' \
+        '     3. Stay' \
+        '   Enter to confirm · Esc to cancel'
+      exit 0
+    fi
     if [ -s "$D/composer" ]; then
       printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
     else
@@ -179,6 +231,9 @@ SH
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_LOCK_WAITING:-}" ] || : > "$FM_FAKE_LOCK_WAITING"
+# A released background-job completion notice starts a turn in the old
+# session. Any time that passes before /exit is typed lets that turn run.
+[ ! -f "${FM_FAKE_DIR:-/nonexistent}/notice-released" ] || : > "$FM_FAKE_DIR/old-turn-ran"
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -458,6 +513,93 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be typed when the composer state is not proven empty"
   pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
+# The Claude background-task exit picker. A worker with a background job open
+# answers /exit with the picker, and its selected row kills the job on Enter.
+# Escape cancels the picker and stops nothing; while the picker is open it
+# holds the job's completion notification, which would otherwise wake the old
+# session. Relaunch must replace the old session in both cases below without
+# ever confirming the picker.
+picker_case() {  # <name> <id> <job-state> -> case dir
+  local dir
+  dir=$(new_case "$1" "$2")
+  add_ship_task "$dir" "$2" claude
+  printf '%s' "$3" > "$dir/fake/bgjob"
+  printf '%s\n' "$dir"
+}
+
+# The picker is already open from an earlier exit attempt and its job has
+# since finished, so it is stale: dismiss it, then exit and relaunch.
+test_relaunch_dismisses_a_stale_exit_picker_and_completes() {
+  local dir out rc
+  dir=$(picker_case stale-picker rl80 finished)
+  : > "$dir/fake/picker-open"
+  out=$(run_control "$dir" rl80 relaunch --note "handoff: continue from the note"); rc=$?
+  expect_code 0 "$rc" "relaunch over a stale exit picker should complete"$'\n'"$out"
+  assert_contains "$out" "relaunched rl80 harness=claude" "the outcome should name the relaunch"
+  [ ! -e "$dir/fake/job-killed" ] || fail "the picker's stop-tasks row must never be confirmed"
+  [ "$(head -n 1 "$dir/fake/keys")" = Escape ] \
+    || fail "the first key into an open picker must be Escape, got: $(head -n 1 "$dir/fake/keys")"
+  [ "$(cat "$dir/fake/picker-dismissals")" = x ] || fail "the picker should be dismissed exactly once"
+  assert_grep "/exit" "$dir/fake/literal" "the exit command should follow the dismissal"
+  assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "the fresh session should be launched"
+  assert_grep "handoff: continue from the note" "$dir/home/data/rl80/brief.md" \
+    "the fresh session's instructions should carry the handoff note"
+  [ "$(journal_field "$dir" rl80 phase)" = complete ] || fail "the transaction journal should end complete"
+  pass "fm-control relaunch: a stale exit picker is dismissed with Escape and the relaunch completes"
+}
+
+# Relaunch's own /exit opens the picker because the job still runs. Relaunch
+# leaves the picker open while it waits, then dismisses it and exits once the
+# job is done.
+test_relaunch_waits_for_a_running_background_job_then_completes() {
+  local dir out rc enters_on_picker
+  dir=$(picker_case running-picker rl81 running)
+  printf '3' > "$dir/fake/bgjob-finish-after"
+  out=$(FM_CONTROL_PICKER_WAIT=30 FM_CONTROL_PICKER_POLL=1 \
+    run_control "$dir" rl81 relaunch --note "handoff: resume the refactor"); rc=$?
+  expect_code 0 "$rc" "relaunch should complete once the background job finishes"$'\n'"$out"
+  assert_contains "$out" "relaunched rl81 harness=claude" "the outcome should name the relaunch"
+  [ ! -e "$dir/fake/job-killed" ] || fail "a running background job must never be killed through the picker"
+  [ ! -e "$dir/fake/old-turn-ran" ] \
+    || fail "the released completion notice ran a turn in the old session before /exit was typed"
+  [ "$(cat "$dir/fake/picker-dismissals")" = xxx ] \
+    || fail "the picker should be dismissed once per wait cycle, got '$(cat "$dir/fake/picker-dismissals")'"
+  enters_on_picker=$(grep -c '^Enter$' "$dir/fake/keys" || true)
+  [ "$(grep -c '^/exit$' "$dir/fake/literal")" -eq 4 ] \
+    || fail "each exit attempt should type /exit into a dismissed picker's composer once"
+  [ "$enters_on_picker" -ge 4 ] || fail "each /exit should be submitted"
+  assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "the fresh session should be launched"
+  pass "fm-control relaunch: a running background job is waited out, never killed, and the relaunch completes"
+}
+
+# The job outlives the bounded wait. Relaunch refuses, names the job, keeps the
+# old agent running, and leaves the picker open so the job's completion cannot
+# wake the old session before a retry.
+test_relaunch_refuses_naming_a_job_that_outlives_the_wait() {
+  local dir out rc
+  dir=$(picker_case stuck-picker rl82 running)
+  cp "$dir/home/state/rl82.meta" "$dir/meta.before"
+  cp "$dir/home/data/rl82/brief.md" "$dir/brief.before"
+  out=$(FM_CONTROL_PICKER_WAIT=3 FM_CONTROL_PICKER_POLL=1 \
+    run_control "$dir" rl82 relaunch --note "handoff: never delivered"); rc=$?
+  expect_code 1 "$rc" "relaunch should refuse when the job outlives the wait"$'\n'"$out"
+  assert_contains "$out" "background work still running after 3s" "the refusal should name the wait"
+  assert_contains "$out" "shell · npm test -- --runInBand" "the refusal should name the running job"
+  assert_contains "$out" "left open" "the refusal should say the picker stays open"
+  [ ! -e "$dir/fake/job-killed" ] || fail "a running background job must never be killed through the picker"
+  [ -e "$dir/fake/picker-open" ] || fail "the picker should be left open to hold the job's completion"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the old agent should still be running"
+  cmp -s "$dir/brief.before" "$dir/home/data/rl82/brief.md" \
+    || fail "a refused relaunch should restore the original instructions"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl82.meta" \
+    || fail "a refused relaunch should leave the task record unchanged"
+  assert_no_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "no replacement should be launched while the old agent runs"
+  pass "fm-control relaunch: a job that outlives the wait is named, kept running, and held behind the open picker"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -3257,6 +3399,9 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
+test_relaunch_dismisses_a_stale_exit_picker_and_completes
+test_relaunch_waits_for_a_running_background_job_then_completes
+test_relaunch_refuses_naming_a_job_that_outlives_the_wait
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_accepts_a_standalone_clone_worktree
 test_relaunch_refusal_of_the_project_primary_checkout_still_leaves_no_replacement
