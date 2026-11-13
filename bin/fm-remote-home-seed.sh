@@ -202,6 +202,7 @@ EOF
   PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
 done
 
+PARENT_DATA=$(CDPATH='' cd -- "$DATA" && pwd -P) || die "parent data directory is unavailable"
 {
   printf 'schema=fm-remote-home-provision.v1\n'
   printf 'id_b64=%s\n' "$(printf '%s' "$ID" | encode)"
@@ -210,9 +211,10 @@ done
   # only so the remote-provisioned home can record durably that its parent
   # lives on another machine (bin/fm-teardown.sh's cleanup gate). It is
   # diagnostic identity, never a route the remote host could use to reach
-  # back; the parent's real filesystem path is never sent, since it names
-  # nothing on the remote filesystem.
+  # back; parent_data is a diagnostic archive destination on the parent's
+  # filesystem, never a path to open on the remote filesystem.
   printf 'parent_host_b64=%s\n' "$(printf '%s' "$HOST" | encode)"
+  printf 'parent_data_b64=%s\n' "$(printf '%s' "$PARENT_DATA" | encode)"
   printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
   cat "$TMP/project.records"
 } > "$TMP/manifest"

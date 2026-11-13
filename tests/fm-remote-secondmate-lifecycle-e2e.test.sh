@@ -1932,16 +1932,113 @@ remote_control_retire() { # <args...>
   FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
     "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" retire "$@"
 }
-retired_rc=0
-remote_control_retire ios --force > "$TMP_ROOT/retired-force.out" 2>&1 || retired_rc=$?
-[ "$retired_rc" -eq 0 ] || fail "forced retirement of an absent home failed ($retired_rc): $(cat "$TMP_ROOT/retired-force.out")"
-assert_grep 'already-retired: ios' "$TMP_ROOT/retired-force.out" "forced retirement of an absent home was not a no-op"
-bogus_rc=0
-remote_control_retire ios --bogus > "$TMP_ROOT/retired-bogus.out" 2>&1 || bogus_rc=$?
-[ "$bogus_rc" -eq 2 ] || fail "an invalid retire option on an absent home did not fail with usage (exit $bogus_rc)"
-assert_grep 'fm-remote-secondmate-control.sh retire <id> [--force]' "$TMP_ROOT/retired-bogus.out" "an invalid retire option did not print usage"
-assert_no_grep 'already-retired' "$TMP_ROOT/retired-bogus.out" "an invalid retire option reported a retirement"
-assert_absent "$REMOTE_HOME" "retiring an absent home recreated it"
+for retire_mode in ordinary force discard; do
+  case "$retire_mode" in
+    ordinary) set -- ios ;;
+    force) set -- ios --force ;;
+    discard) set -- ios --force --discard-scout-artifacts ;;
+  esac
+  retired_rc=0
+  remote_control_retire "$@" > "$TMP_ROOT/retired-$retire_mode.out" 2>&1 || retired_rc=$?
+  [ "$retired_rc" -eq 0 ] || fail "$retire_mode retirement of an absent home failed ($retired_rc): $(cat "$TMP_ROOT/retired-$retire_mode.out")"
+  assert_grep 'already-retired: ios' "$TMP_ROOT/retired-$retire_mode.out" "$retire_mode retirement of an absent home was not a no-op"
+  assert_absent "$REMOTE_HOME" "retiring an absent home recreated it"
+done
+for retire_mode in bogus unforced reversed extra; do
+  case "$retire_mode" in
+    bogus) set -- ios --bogus ;;
+    unforced) set -- ios --discard-scout-artifacts ;;
+    reversed) set -- ios --discard-scout-artifacts --force ;;
+    extra) set -- ios --force --discard-scout-artifacts --bogus ;;
+  esac
+  bogus_rc=0
+  remote_control_retire "$@" > "$TMP_ROOT/retired-$retire_mode.out" 2>&1 || bogus_rc=$?
+  [ "$bogus_rc" -eq 2 ] || fail "$retire_mode retire arguments on an absent home did not fail with usage (exit $bogus_rc)"
+  assert_grep 'fm-remote-secondmate-control.sh retire <id>' "$TMP_ROOT/retired-$retire_mode.out" "$retire_mode retire arguments did not print usage"
+  assert_no_grep 'already-retired' "$TMP_ROOT/retired-$retire_mode.out" "$retire_mode retire arguments reported a retirement"
+  assert_absent "$REMOTE_HOME" "invalid retirement arguments recreated an absent home"
+done
 pass "an absent remote home retires only with the dispatcher's arguments and is never recreated"
+
+for artifact_outcome in preserve discard; do
+  ARTIFACT_HOME="$TMP_ROOT/artifact-$artifact_outcome-home"
+  ARTIFACT_COPY="$TMP_ROOT/artifact-$artifact_outcome-copy"
+  ARTIFACT_DESTINATION="$PARENT/data/artifact-sm/children/artifact-child"
+  FM_SECONDMATE_CHARTER='Exercise explicitly authorized scout artifact discard.' \
+    FM_SECONDMATE_SCOPE='Synthetic artifact retirement fixture' \
+    remote_env "$ROOT/bin/fm-remote-home-seed.sh" artifact-sm remote-mac "$REMOTE_ROOT" "$ARTIFACT_HOME" --no-projects \
+    > "$TMP_ROOT/artifact-seed.out" 2>&1 \
+    || fail "could not seed the artifact retirement fixture: $(cat "$TMP_ROOT/artifact-seed.out")"
+  remote_env "$ROOT/bin/fm-spawn.sh" artifact-sm --secondmate --harness codex \
+    > "$TMP_ROOT/artifact-launch.out" 2>&1 \
+    || fail "could not launch the artifact retirement fixture: $(cat "$TMP_ROOT/artifact-launch.out")"
+  # Pin this fixture's parent generation after spawn publishes its metadata.
+  awk -F= '$1 != "spawn_gen"' "$PARENT/state/artifact-sm.meta" > "$TMP_ROOT/artifact-parent-meta.tmp"
+  printf 'spawn_gen=artifact-retirement-%s\n' "$artifact_outcome" >> "$TMP_ROOT/artifact-parent-meta.tmp"
+  mv -- "$TMP_ROOT/artifact-parent-meta.tmp" "$PARENT/state/artifact-sm.meta"
+  cat > "$REMOTE_ROOT/bin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$REMOTE_ROOT/bin/treehouse"
+  git -C "$PARENT/projects/alpha" worktree add --detach "$ARTIFACT_COPY" HEAD >/dev/null 2>&1 \
+    || fail "could not create the synthetic scout copy"
+  mkdir -p "$ARTIFACT_COPY/data/artifact-child"
+  printf 'labelled remote answer\n' > "$ARTIFACT_COPY/data/artifact-child/labels.txt"
+  fm_write_meta "$ARTIFACT_HOME/state/artifact-child.meta" \
+    'window=firstmate:fm-artifact-child' 'endpoint_task_id=artifact-child' \
+    "worktree=$ARTIFACT_COPY" "project=$PARENT/projects/alpha" 'kind=scout' 'mode=local-only' \
+    'spawn_gen=child-generation'
+  artifact_rc=0
+  remote_env "$ROOT/bin/fm-on.sh" artifact-sm fm-remote-secondmate-control.sh retire artifact-sm --force \
+    > "$TMP_ROOT/artifact-force.out" 2>&1 || artifact_rc=$?
+  expect_code 1 "$artifact_rc" "plain remote --force must refuse scout artifacts"
+  assert_grep "$ARTIFACT_COPY/data/artifact-child" "$TMP_ROOT/artifact-force.out" \
+    "remote refusal did not identify the retained scout material"
+  assert_grep "to $ARTIFACT_DESTINATION on the parent host" "$TMP_ROOT/artifact-force.out" \
+    "remote refusal did not name the surviving parent archive"
+  assert_grep "from the remote host remote-mac" "$TMP_ROOT/artifact-force.out" \
+    "remote refusal did not explain the cross-host copy"
+  assert_no_grep "to $ARTIFACT_HOME/" "$TMP_ROOT/artifact-force.out" \
+    "remote refusal named a destination inside the retiring home"
+  [ "$(cat "$ARTIFACT_COPY/data/artifact-child/labels.txt")" = 'labelled remote answer' ] \
+    || fail "plain remote --force changed labelled answers"
+  assert_present "$ARTIFACT_HOME/state/artifact-child.meta" "refusal removed the child identity"
+  artifact_rc=0
+  remote_env "$ROOT/bin/fm-on.sh" artifact-sm fm-remote-secondmate-control.sh retire artifact-sm --discard-scout-artifacts \
+    > "$TMP_ROOT/artifact-unforced.out" 2>&1 || artifact_rc=$?
+  expect_code 2 "$artifact_rc" "remote scout discard without --force must be a usage error"
+  assert_present "$ARTIFACT_COPY/data/artifact-child/labels.txt" "unforced discard removed scout material"
+  if [ "$artifact_outcome" = preserve ]; then
+    cp "$ARTIFACT_HOME/.fm-secondmate-parent" "$TMP_ROOT/artifact-parent.binding"
+    sed '/^parent_data=/d' "$TMP_ROOT/artifact-parent.binding" > "$ARTIFACT_HOME/.fm-secondmate-parent"
+    artifact_rc=0
+    remote_env "$ROOT/bin/fm-on.sh" artifact-sm fm-remote-secondmate-control.sh retire artifact-sm --force \
+      > "$TMP_ROOT/artifact-legacy.out" 2>&1 || artifact_rc=$?
+    expect_code 1 "$artifact_rc" "a legacy parent binding must retain scout artifacts"
+    assert_grep "Cannot resolve the surviving parent's archive" "$TMP_ROOT/artifact-legacy.out" \
+      "a legacy parent binding did not explain how to recover the archive destination"
+    assert_no_grep "under $ARTIFACT_HOME/" "$TMP_ROOT/artifact-legacy.out" \
+      "a legacy parent binding suggested preserving artifacts inside the retiring home"
+    cp "$TMP_ROOT/artifact-parent.binding" "$ARTIFACT_HOME/.fm-secondmate-parent"
+    mkdir -p "$ARTIFACT_DESTINATION"
+    cp "$ARTIFACT_COPY/data/artifact-child/labels.txt" "$ARTIFACT_DESTINATION/labels.txt"
+    rm -f -- "$ARTIFACT_COPY/data/artifact-child/labels.txt"
+    rmdir "$ARTIFACT_COPY/data/artifact-child"
+    remote_env "$ROOT/bin/fm-teardown.sh" artifact-sm --force \
+      > "$TMP_ROOT/artifact-preserved.out" 2>&1 \
+      || fail "remote retirement after preservation failed: $(cat "$TMP_ROOT/artifact-preserved.out")"
+  else
+    remote_env "$ROOT/bin/fm-teardown.sh" artifact-sm --force --discard-scout-artifacts \
+      > "$TMP_ROOT/artifact-discard.out" 2>&1 \
+      || fail "explicit discard did not reach remote teardown: $(cat "$TMP_ROOT/artifact-discard.out")"
+  fi
+  assert_absent "$ARTIFACT_HOME" "$artifact_outcome retirement left the secondmate home"
+  assert_absent "$ARTIFACT_COPY" "$artifact_outcome retirement left the disposable scout copy"
+  assert_absent "$PARENT/state/artifact-sm.meta" "$artifact_outcome retirement left the parent route record"
+  [ "$(cat "$ARTIFACT_DESTINATION/labels.txt")" = 'labelled remote answer' ] \
+    || fail "$artifact_outcome retirement lost the answers preserved on the parent host"
+  pass "$artifact_outcome remote retirement preserves the surviving parent archive"
+done
 
 echo "ALL TESTS PASSED"

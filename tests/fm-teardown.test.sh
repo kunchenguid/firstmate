@@ -2074,6 +2074,146 @@ prepare_scout_teardown() {
   printf '%s\n' 'decisions_reviewed=1' >> "$case_dir/state/task-x1.meta"
 }
 
+test_scout_task_artifacts_refuse_cleanup() {
+  local case_dir shape flag rc source destination head
+  for shape in directory conflict file task-link dangling-link data-link dangling-data; do
+    case_dir=$(make_case "scout-artifacts-$shape")
+    write_meta "$case_dir" no-mistakes scout
+    prepare_scout_teardown "$case_dir"
+    source="$case_dir/wt/data/task-x1"
+    destination="$case_dir/data/task-x1"
+    mkdir -p "$case_dir/answers" "$case_dir/wt/data"
+    printf 'labelled answer: keep\n' > "$case_dir/answers/labels.txt"
+    case "$shape" in
+      directory|conflict) cp -R "$case_dir/answers" "$source" ;;
+      file) cp "$case_dir/answers/labels.txt" "$source" ;;
+      task-link) ln -s "$case_dir/answers" "$source" ;;
+      dangling-link) ln -s "$case_dir/missing" "$source" ;;
+      data-link) mv "$case_dir/wt/data" "$case_dir/linked-data";
+        ln -s "$case_dir/linked-data" "$case_dir/wt/data";
+        cp -R "$case_dir/answers" "$source" ;;
+      dangling-data) mv "$case_dir/wt/data" "$case_dir/linked-data";
+        ln -s "$case_dir/missing" "$case_dir/wt/data" ;;
+    esac
+    [ "$shape" != conflict ] || printf 'canonical answer\n' > "$destination/labels.txt"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    cp "$case_dir/state/task-x1.meta" "$case_dir/meta-before"
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "$FM_STATE_OVERRIDE/returned"
+exit 0
+SH
+    for flag in ordinary --force; do
+      rc=0
+      if [ "$flag" = ordinary ]; then
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      else
+        run_teardown "$case_dir" "$flag" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      fi
+      expect_code 1 "$rc" "$shape/$flag: scout task artifacts must block cleanup"
+      assert_grep "$source" "$case_dir/stderr" "$shape/$flag: source not named"
+      assert_grep "$destination" "$case_dir/stderr" "$shape/$flag: durable destination not named"
+      assert_absent "$case_dir/state/returned" "$shape/$flag: pool return ran"
+      cmp -s "$case_dir/meta-before" "$case_dir/state/task-x1.meta" || fail "$shape/$flag: task metadata changed"
+      [ "$head" = "$(git -C "$case_dir/wt" rev-parse HEAD)" ] || fail "$shape/$flag: HEAD changed"
+      [ "$(cat "$case_dir/answers/labels.txt")" = 'labelled answer: keep' ] || fail "$shape/$flag: linked bytes changed"
+      case "$shape" in
+        directory|conflict|data-link)
+          cmp -s "$source/labels.txt" "$case_dir/answers/labels.txt" || fail "$shape/$flag: source bytes changed" ;;
+        file) cmp -s "$source" "$case_dir/answers/labels.txt" || fail "$shape/$flag: source bytes changed" ;;
+        task-link|dangling-link) [ -L "$source" ] || fail "$shape/$flag: task link removed" ;;
+        dangling-data) [ -L "$case_dir/wt/data" ] || fail "$shape/$flag: data link removed" ;;
+      esac
+      [ "$shape" != conflict ] || [ "$(cat "$destination/labels.txt")" = 'canonical answer' ] \
+        || fail "$shape/$flag: destination overwritten"
+    done
+    if [ "$shape" = directory ]; then
+      # The worker, not teardown, preserves its material before normal cleanup.
+      mv "$source" "$destination/artifacts"
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code 0 "$rc" 'preserved scout artifacts should permit normal cleanup'
+      cmp -s "$destination/artifacts/labels.txt" "$case_dir/answers/labels.txt" || fail 'preserved bytes changed'
+      assert_absent "$case_dir/state/task-x1.meta" 'normal cleanup retained metadata'
+    fi
+  done
+  pass 'scout artifacts survive ordinary and forced cleanup, conflicts and unsafe paths'
+}
+
+test_scout_tracked_data_is_project_content() {
+  local shape material case_dir rc source
+  for shape in file symlink dangling-symlink directory; do
+    for material in absent directory symlink; do
+      case_dir=$(make_case "scout-tracked-data-$shape-$material")
+      write_meta "$case_dir" no-mistakes scout
+      prepare_scout_teardown "$case_dir"
+      case "$shape" in
+        file) printf 'project data\n' > "$case_dir/wt/data" ;;
+        symlink)
+          mkdir -p "$case_dir/wt/project-data"
+          printf 'project data\n' > "$case_dir/wt/project-data/fixture"
+          ln -s project-data "$case_dir/wt/data" ;;
+        dangling-symlink) ln -s project-data "$case_dir/wt/data" ;;
+        directory)
+          mkdir -p "$case_dir/wt/data"
+          printf 'project data\n' > "$case_dir/wt/data/fixture" ;;
+      esac
+      git -C "$case_dir/wt" add data
+      [ "$shape" != symlink ] || git -C "$case_dir/wt" add project-data
+      git -C "$case_dir/wt" commit -qm 'project-owned data entry'
+      if [ "$material" != absent ]; then
+        [ "$shape" != file ] || rm "$case_dir/wt/data"
+        case "$shape" in
+          symlink|dangling-symlink) mkdir -p "$case_dir/wt/project-data" ;;
+          *) mkdir -p "$case_dir/wt/data" ;;
+        esac
+        source="$case_dir/wt/data/task-x1"
+        if [ "$material" = directory ]; then
+          mkdir -p "$source"
+          printf 'labelled answer\n' > "$source/labels.txt"
+        else
+          ln -s "$case_dir/missing-answers" "$source"
+        fi
+      fi
+      rc=0
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      if [ "$material" = absent ]; then
+        expect_code 0 "$rc" "$shape: project-owned data blocked cleanup: $(cat "$case_dir/stderr")"
+        assert_absent "$case_dir/state/task-x1.meta" "$shape: cleanup retained metadata"
+      else
+        expect_code 1 "$rc" "$shape/$material: task material did not block cleanup"
+        assert_grep "$source" "$case_dir/stderr" "$shape/$material: refusal did not name task material"
+        assert_present "$case_dir/state/task-x1.meta" "$shape/$material: refusal removed metadata"
+        if [ "$material" = directory ]; then
+          [ "$(cat "$source/labels.txt")" = 'labelled answer' ] || fail "$shape: task bytes changed"
+        else
+          [ -L "$source" ] || fail "$shape: task symlink removed"
+        fi
+      fi
+    done
+  done
+  pass 'tracked data entries permit cleanup while untracked scout task material blocks it'
+}
+
+test_scout_artifact_discard_requires_force() {
+  local case_dir rc
+  case_dir=$(make_case scout-artifact-discard)
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  mkdir -p "$case_dir/wt/data/task-x1"
+  printf 'explicitly disposable\n' > "$case_dir/wt/data/task-x1/labels.txt"
+  rc=0
+  run_teardown "$case_dir" --discard-scout-artifacts > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 2 "$rc" 'artifact discard must also require explicit --force authority'
+  assert_present "$case_dir/wt/data/task-x1/labels.txt" 'invalid discard removed artifacts'
+  rc=0
+  run_teardown "$case_dir" --force --discard-scout-artifacts > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" 'explicit authorized artifact discard should succeed'
+  assert_absent "$case_dir/wt/data/task-x1" 'explicit discard left artifacts'
+  assert_absent "$case_dir/state/task-x1.meta" 'explicit discard retained task metadata'
+  pass 'scout artifact discard requires the dedicated option together with --force'
+}
+
 # Clone a nested repository into the copy and add one plain scratch file.
 seed_nested_clone_and_scratch() {
   local case_dir=$1 wt=$2
@@ -3995,6 +4135,154 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "mode=local-only"
     : > "$home/state/$child.status"
   done
+}
+
+test_forced_secondmate_child_scout_artifacts() {
+  local backend state case_dir home child_wt child_window destination rc
+  for backend in tmux pool orca; do
+    for state in present late missing clean reassigned; do
+      [ "$state" != reassigned ] || [ "$backend" = pool ] || continue
+      case_dir=$(make_case "child-scout-artifacts-$backend-$state")
+      mkdir -p "$case_dir/active-home/state"
+      write_meta "$case_dir" local-only secondmate
+      configure_secondmate_with_tmux_children "$case_dir"
+      home="$case_dir/secondmate-home"
+      destination="$case_dir/data/task-x1/children/child-a"
+      child_wt="$case_dir/child-a-wt"
+      if [ "$backend" = pool ]; then
+        mkdir -p "$case_dir/pool/1"
+        git -C "$case_dir/project" worktree move "$child_wt" "$case_dir/pool/1/repo"
+        child_wt="$case_dir/pool/1/repo"
+        printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$child_wt" > "$case_dir/pool/treehouse-state.json"
+        if [ "$state" = reassigned ]; then
+          printf 'task=other-task\nhome=%s\n' "$home" > "$case_dir/pool/1/.fm-slot-owner"
+        else
+          printf 'task=child-a\nhome=%s\n' "$home" > "$case_dir/pool/1/.fm-slot-owner"
+        fi
+      fi
+      child_window=firstmate:fm-child-a
+      [ "$backend" != orca ] || child_window=fm-child-a
+      fm_write_meta "$home/state/child-a.meta" \
+        "window=$child_window" "endpoint_task_id=child-a" \
+        "worktree=$child_wt" "project=$case_dir/project" "kind=scout" "mode=local-only"
+      if [ "$backend" = orca ]; then
+        printf 'backend=orca\nterminal=child-terminal\norca_worktree_id=child-wt::/orca/child\n' >> "$home/state/child-a.meta"
+      fi
+      case "$state" in
+        present|reassigned)
+          mkdir -p "$child_wt/data/child-a"
+          printf 'labelled child answer\n' > "$child_wt/data/child-a/labels.txt" ;;
+        missing) git -C "$case_dir/project" worktree remove --force "$child_wt" ;;
+      esac
+      cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = kill-window ] && [[ "$*" = *fm-child-a* ]]; then
+  : > "$FM_SCOUT_CHILD_CASE/stopped"
+  if [ "$FM_SCOUT_CHILD_STATE" = late ]; then
+    mkdir -p "$FM_SCOUT_CHILD_WT/data/child-a"
+    printf 'labelled child answer\n' > "$FM_SCOUT_CHILD_WT/data/child-a/labels.txt"
+  fi
+fi
+exit 0
+SH
+      cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"child-wt::/orca/child","path":"%s"}}}\n' "$FM_SCOUT_CHILD_WT" ;;
+  'terminal close')
+    : > "$FM_SCOUT_CHILD_CASE/stopped"
+    if [ "$FM_SCOUT_CHILD_STATE" = late ]; then
+      mkdir -p "$FM_SCOUT_CHILD_WT/data/child-a"
+      printf 'labelled child answer\n' > "$FM_SCOUT_CHILD_WT/data/child-a/labels.txt"
+    fi
+    printf '{"ok":true,"result":{}}\n' ;;
+  'worktree rm')
+    : > "$FM_SCOUT_CHILD_CASE/removed"
+    printf '{"ok":true,"result":{}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_SCOUT_CHILD_CASE/returned"
+exit 0
+SH
+      chmod +x "$case_dir/fakebin/orca"
+      rc=0
+      FM_HOME="$case_dir/active-home" FM_SCOUT_CHILD_CASE="$case_dir" FM_SCOUT_CHILD_STATE="$state" FM_SCOUT_CHILD_WT="$child_wt" \
+        run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      case "$state" in
+        present|late)
+          expect_code 1 "$rc" "$backend/$state: child artifact cleanup was allowed"
+          assert_grep "$child_wt/data/child-a" "$case_dir/stderr" "$backend/$state: source missing: $(cat "$case_dir/stderr")"
+          assert_grep "$destination" "$case_dir/stderr" "$backend/$state: destination missing"
+          assert_no_grep "under $home/" "$case_dir/stderr" "$backend/$state: destination is inside the retiring home"
+          [ "$(cat "$child_wt/data/child-a/labels.txt")" = 'labelled child answer' ] || fail "$backend/$state: bytes lost"
+          assert_present "$home/state/child-a.meta" "$backend/$state: child identity lost"
+          assert_absent "$case_dir/removed" "$backend/$state: Orca removal ran"
+          assert_absent "$case_dir/returned" "$backend/$state: pool return ran"
+          if [ "$state" = late ]; then
+            assert_present "$case_dir/stopped" "$backend: late-write boundary not reached"
+          else
+            assert_absent "$case_dir/stopped" "$backend: preflight stopped endpoint"
+          fi
+          mkdir -p "$destination"
+          mv "$child_wt/data/child-a/labels.txt" "$destination/labels.txt"
+          rmdir "$child_wt/data/child-a"
+          rc=0
+          FM_HOME="$case_dir/active-home" FM_SCOUT_CHILD_CASE="$case_dir" FM_SCOUT_CHILD_STATE=clean FM_SCOUT_CHILD_WT="$child_wt" \
+            run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+          expect_code 0 "$rc" "$backend/$state: retirement after preservation failed: $(cat "$case_dir/retry.stderr")"
+          assert_absent "$home" "$backend/$state: retirement retained home"
+          [ "$(cat "$destination/labels.txt")" = 'labelled child answer' ] || fail "$backend/$state: preserved bytes lost"
+          ;;
+        *)
+          expect_code 0 "$rc" "$backend/$state: retirement failed: $(cat "$case_dir/stderr")"
+          assert_absent "$home" "$backend/$state: retirement retained home"
+          if [ "$state" = reassigned ]; then
+            assert_present "$child_wt/data/child-a/labels.txt" 'reassigned copy lost artifacts'
+          fi
+          ;;
+      esac
+    done
+  done
+  pass 'forced retirement preserves child scout artifacts before and after endpoint close'
+}
+
+test_forced_secondmate_grandchild_scout_destination_survives() {
+  local case_dir home nested_home child_wt destination rc
+  case_dir=$(make_case grandchild-scout-artifacts)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  nested_home="$home/nested-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  printf 'nested-sm\n' > "$nested_home/.fm-secondmate-home"
+  printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/nested-sm.meta" "window=firstmate:fm-nested-sm" \
+    "kind=secondmate" "mode=local-only" "home=$nested_home" "project=$case_dir/project" "worktree=$case_dir/wt"
+  child_wt="$case_dir/grandchild-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/grandchild "$child_wt" main
+  fm_write_meta "$nested_home/state/grandchild.meta" "window=firstmate:fm-grandchild" \
+    "endpoint_task_id=grandchild" "kind=scout" "mode=local-only" "project=$case_dir/project" "worktree=$child_wt"
+  mkdir -p "$child_wt/data/grandchild"
+  printf 'labelled grandchild answer\n' > "$child_wt/data/grandchild/labels.txt"
+  destination="$case_dir/data/task-x1/children/nested-sm/children/grandchild"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'nested scout artifacts must block retirement'
+  assert_grep "$destination" "$case_dir/stderr" 'nested scout destination must survive both homes'
+  mkdir -p "$destination"
+  mv "$child_wt/data/grandchild/labels.txt" "$destination/labels.txt"
+  rmdir "$child_wt/data/grandchild"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "nested retirement after preservation failed: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$home" 'nested retirement retained homes'
+  [ "$(cat "$destination/labels.txt")" = 'labelled grandchild answer' ] || fail 'preserved grandchild bytes lost'
+  pass 'nested scout artifact destination survives retirement of both ancestor homes'
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
@@ -6567,6 +6855,11 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_scout_task_artifacts_refuse_cleanup
+test_scout_tracked_data_is_project_content
+test_forced_secondmate_child_scout_artifacts
+test_forced_secondmate_grandchild_scout_destination_survives
+test_scout_artifact_discard_requires_force
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
