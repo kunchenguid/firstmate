@@ -278,6 +278,19 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
     [ "$rc" -ne 0 ] || fail "an invalid filed date was accepted: $invalid_filed"
   done
 
+  for invalid_until in '"yesterday"' '"2099-02-29"' '"2000-01-01"' '"2099-07-20T00:00:00Z"' 'null' '2099'; do
+    write_valid_payload "$data"
+    jq --argjson until "$invalid_until" '.captains_call[0].options[0].defer_until = $until' \
+      "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid option deferral date was accepted: $invalid_until"
+  done
+  write_valid_payload "$data"
+  jq '.captains_call[1].options[0].defer_until = "2099-07-20"' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a merge-card deferral was accepted"
+
   write_valid_payload "$data"
   jq '.captains_call[0].allow_freeform = "yes"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
