@@ -31,9 +31,12 @@
 # sshd answers keepalive probes independently of whatever the remote command
 # is doing, so a legitimately long-but-alive remote command is never falsely
 # killed. FM_SSH_ALIVE_INTERVAL and FM_SSH_ALIVE_COUNT_MAX override the
-# defaults; the worst-case detection window is roughly interval * count.
+# defaults (15 seconds and 3, respectively); the worst-case detection window
+# is roughly interval * count.
 # ConnectTimeout (default 15 s, overridden by FM_SSH_CONNECT_TIMEOUT) bounds
 # TCP connect and banner exchange so an unreachable or offline host fails fast.
+# Nonempty overrides must be positive integers; unset or empty values use the
+# defaults.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

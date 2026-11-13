@@ -3498,6 +3498,8 @@ The two read files use different parsing rules:
 
 Runtime tuning via environment variables (defaults shown):
 
+The [SSH transport header](../bin/fm-on.sh) owns the defaults and accepted values for `FM_SSH_CONNECT_TIMEOUT`, `FM_SSH_ALIVE_INTERVAL`, and `FM_SSH_ALIVE_COUNT_MAX`.
+
 Pi worker model-stream observation is optional.
 Set `FM_STREAM_SILENT_MAX_SECS=300` before launching workers and their watcher to inspect a foreground request that stops producing substantive content for five minutes.
 It must be present in the environment that launches both the worker and its watcher: a value only the watcher sees, such as one added only to `config/watch.env`, instruments no worker, so a worker spawned without it records no stream evidence and keeps the general busy bound.
@@ -3540,9 +3542,6 @@ FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (loca
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks, including the lock waits the worker makes before them; hitting it prints an actionable NETWORK_CHECKS line, and a lock a live process still holds at the deadline ends the worker with a failed-rerun record (publication and delivery are bounded by FM_SESSION_START_TIMEOUT the same way)
 FM_SECONDMATE_CONVERGENCE_TIMEOUT=75   # shared per-mate deadline in seconds for remote startup tracked-file sync and inheritance push; bin/fm-bootstrap.sh owns its scope and timeout handling
 FM_REMOTE_INHERIT_PUSH_JOBS=4   # inherited items one remote inheritance push sends at a time, 1 for strictly one after another; capped at 16 (bin/fm-remote-inherit-push.sh)
-FM_SSH_CONNECT_TIMEOUT=15       # seconds bounding ssh TCP connect and banner exchange on remote secondmate transport (bin/fm-on.sh)
-FM_SSH_ALIVE_INTERVAL=15        # seconds between ssh keepalive probes on remote secondmate transport (bin/fm-on.sh)
-FM_SSH_ALIVE_COUNT_MAX=3        # missed ssh keepalive probes before declaring remote peer dead (bin/fm-on.sh)
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced
 FM_TASKS_AXI_CHECK_REASON=   # internal one-hop handoff of the reason behind that verdict (compatible, version, or the capability probes the build fails); consumed when bin/fm-tasks-axi-lib.sh is sourced, and it keeps the OUTDATED requirement text from repeating the probes
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
