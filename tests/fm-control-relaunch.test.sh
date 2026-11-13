@@ -1018,7 +1018,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   sed 's|^model=default$|model=codex-native/gpt-6-astra|; s/^effort=default$/effort=ultra/' \
     "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
   mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
-  out=$(run_control "$dir" "$id" relaunch --model openai-codex/gpt-6-astra --note "invalid native effort transfer"); rc=$?
+  out=$(run_control "$dir" "$id" relaunch --harness pi --model openai-codex/gpt-6-astra --note "invalid native effort transfer"); rc=$?
   expect_code 1 "$rc" "Ultra transferred to ordinary Pi"
   assert_contains "$out" "ultra effort requires pi or pi-signed" "model-aware relaunch refusal missing"
   [ "$(cat "$dir/fake/command")" = pi ] || fail "invalid Ultra relaunch stopped the running agent"
@@ -1317,7 +1317,7 @@ test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
   add_ship_task "$dir" rl7 claude
-  out=$(run_control "$dir" rl7 relaunch --model sonnet --effort low --note "dialling down"); rc=$?
+  out=$(run_control "$dir" rl7 relaunch --harness claude --model sonnet --effort low --note "dialling down"); rc=$?
   expect_code 0 "$rc" "relaunch with explicit axes should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl7 model)" = sonnet ] || fail "an explicit model should be recorded"
   [ "$(meta_field "$dir" rl7 effort)" = low ] || fail "an explicit effort should be recorded"
@@ -3250,8 +3250,130 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+# add_secondmate_task <case-dir> <id> <harness>: a live secondmate whose home
+# is its own seeded worktree and whose home has no configured runtime pin.
+add_secondmate_task() {
+  local dir=$1 id=$2 harness=$3 home="$1/home"
+  mkdir -p "$home/data/$id"
+  printf '# secondmate brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" "sm-$id"
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=$harness"
+    echo "backend=tmux"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf '%s' "$harness" > "$dir/fake/command"
+  printf '%s' "$harness" > "$dir/fake/becomes"
+}
+
+# A model names no runtime. Without --harness, a secondmate's implicit runtime
+# is its configured pin, which in a home with none falls back to this home's
+# own runtime - so --model alone must refuse before anything stops, for every
+# kind, and say which command keeps the recorded harness.
+test_model_without_harness_refuses_before_stop() {
+  local dir out rc before kind id
+  for kind in secondmate ship; do
+    id=mh-$kind
+    dir=$(new_case model-no-harness-$kind "$id")
+    if [ "$kind" = secondmate ]; then
+      add_secondmate_task "$dir" "$id" codex
+    else
+      add_ship_task "$dir" "$id" codex
+      printf codex > "$dir/fake/command"
+    fi
+    before=$(cat "$dir/home/state/$id.meta")
+    out=$(run_control "$dir" "$id" relaunch --model cheap-model --note "carry on"); rc=$?
+    expect_code 1 "$rc" "$kind: --model without --harness must refuse"$'\n'"$out"
+    assert_contains "$out" "records harness 'codex' in state/$id.meta" \
+      "$kind: the refusal must name the recorded harness"$'\n'"$out"
+    assert_contains "$out" "bin/fm-control.sh $id relaunch --harness codex --model cheap-model --note carry\\ on" \
+      "$kind: the refusal must give the exact command that keeps the harness"$'\n'"$out"
+    [ "$(cat "$dir/fake/command")" = codex ] || fail "$kind: a refused relaunch must not stop the agent"
+    [ ! -s "$dir/fake/literal" ] || fail "$kind: a refused relaunch must send no lifecycle input"
+    [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] || fail "$kind: a refused relaunch must leave the record untouched"
+    [ ! -e "$dir/home/state/$id.control-relaunch" ] || fail "$kind: a refused relaunch must not open a transaction"
+  done
+  pass "fm-control relaunch: --model without --harness refuses before stopping and names the command that keeps the harness"
+}
+
+test_model_without_harness_offers_no_keep_command_for_a_raw_basename() {
+  local dir out rc before id=mh-raw
+  dir=$(new_case model-no-harness-raw "$id")
+  add_ship_task "$dir" "$id" claude-wrapper
+  printf 'claude-wrapper' > "$dir/fake/command"
+  before=$(cat "$dir/home/state/$id.meta")
+  out=$(run_control "$dir" "$id" relaunch --model sonnet --note "carry on"); rc=$?
+  expect_code 1 "$rc" "--model without --harness on a raw basename must refuse"$'\n'"$out"
+  assert_contains "$out" "records harness 'claude-wrapper' in state/$id.meta" \
+    "the refusal must name the recorded value"$'\n'"$out"
+  assert_contains "$out" "cannot be reconstructed from its recorded basename" \
+    "the refusal must say the recorded launch command cannot be reproduced"$'\n'"$out"
+  assert_contains "$out" "Pass an explicit --harness" \
+    "the refusal must ask for a deliberate --harness"$'\n'"$out"
+  assert_not_contains "$out" "To keep it" "no keep command may be offered for a raw basename"$'\n'"$out"
+  assert_not_contains "$out" "relaunch --harness claude" "the canonical adapter must not be offered as keeping it"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude-wrapper ] || fail "a refused relaunch must not stop the agent"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] || fail "a refused relaunch must leave the record untouched"
+  [ ! -e "$dir/home/state/$id.control-relaunch" ] || fail "a refused relaunch must not open a transaction"
+  pass "fm-control relaunch: --model without --harness offers no keep command for a raw basename"
+}
+
+# A secondmate whose replacement fails to launch is left with no agent, so the
+# failure names the spawn command the operator runs next - and does not run it.
+test_secondmate_launch_failure_prints_the_spawn_recovery_command() {
+  local dir out rc id=smfail
+  dir=$(new_case sm-launch-fail "$id")
+  add_secondmate_task "$dir" "$id" claude
+  # The endpoint's shell is not in the recorded home, so the launch owner
+  # refuses AFTER the previous agent has already been stopped.
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  out=$(run_control "$dir" "$id" relaunch --harness codex --model some-model); rc=$?
+  expect_code 1 "$rc" "a failed secondmate launch must keep its failure exit code"$'\n'"$out"
+  assert_contains "$out" "no agent is running" "the failure should still say no agent is running"$'\n'"$out"
+  assert_contains "$out" "bin/fm-spawn.sh $id --secondmate --backend tmux --harness codex --model some-model" \
+    "the failure must print the recovery spawn command"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the recovery command must not be run automatically"
+  [ "$(meta_field "$dir" "$id" harness)" = claude ] || fail "an unpublished failure must keep the prior record"
+  pass "fm-control relaunch: a failed secondmate launch prints the spawn recovery command without running it"
+}
+
+test_secondmate_dead_after_stop_failure_prints_the_spawn_recovery_command() {
+  local dir out rc id=smstopdead
+  dir=$(new_case sm-stop-dead "$id")
+  add_secondmate_task "$dir" "$id" claude
+  out=$(FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP=1 \
+    run_control "$dir" "$id" relaunch --harness codex --model some-model); rc=$?
+  expect_code 1 "$rc" "a stop transport failure must keep its failure exit code"$'\n'"$out"
+  [ "$(journal_field "$dir" "$id" rollback)" = prior-record-kept-agent-dead ] \
+    || fail "the rollback must take the stopped-dead path"$'\n'"$out"
+  assert_contains "$out" "no agent is running" "the failure should still say no agent is running"$'\n'"$out"
+  assert_contains "$out" "bin/fm-spawn.sh $id --secondmate --backend tmux --harness codex --model some-model" \
+    "the failure must print the recovery spawn command"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the recovery command must not be run automatically"
+  [ "$(meta_field "$dir" "$id" harness)" = claude ] || fail "an agent-less stop failure must keep the prior record"
+  pass "fm-control relaunch: a secondmate left dead by a failed stop prints the spawn recovery command without running it"
+}
+
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
+test_secondmate_dead_after_stop_failure_prints_the_spawn_recovery_command
+test_model_without_harness_refuses_before_stop
+test_model_without_harness_offers_no_keep_command_for_a_raw_basename
+test_secondmate_launch_failure_prints_the_spawn_recovery_command
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
