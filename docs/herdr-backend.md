@@ -774,7 +774,7 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 An empty separator region normally requires exact native Pi identity with an idle or done state.
 A blocked Pi may be waiting on an interactive prompt above that region, so a blank composer alone cannot prove it is free.
 The [version-pinned Pi banner adapter](../bin/fm-composer-pi-adapter.sh) owns the sole status exception after a Codex usage-limit error, including its exact banner and optional hint bounds.
-That exception can settle a stale working or blocked state, but pending input, missing or foreign identity, an incomplete separator pair, and an over-tall candidate still prevent an empty verdict.
+That exception can settle a stale working, blocked, or unknown state, but pending input, missing or foreign identity, an incomplete separator pair, and an over-tall candidate still prevent an empty verdict.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ### Placeholder and ghost text
@@ -839,7 +839,8 @@ In that case `agent get` still reports `agent=pi` with its last status.
 That nested shell is the shape the interactive `treehouse get` leaves behind; fresh Herdr spawns lease durably instead (see [Restart recovery](#restart-recovery)), but older or hand-driven panes can still have it (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
-It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
+It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with.
+For a registration reporting `working`, `idle`, `done`, or `blocked`, the verdicts are:
 
 | What the process view shows | Verdict |
 | --- | --- |
