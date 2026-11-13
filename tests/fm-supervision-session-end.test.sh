@@ -149,6 +149,42 @@ branch_merge() {  # <home>
   FM_HOME="$1" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1
 }
 
+test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
+  local home log
+  SPAWN_ROOT="$TMP_ROOT/spawn-root-2"
+  mkdir -p "$SPAWN_ROOT"
+  git init -q -b main "$SPAWN_ROOT"
+  git -C "$SPAWN_ROOT" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$SPAWN_ROOT/bin"
+  home=$(make_home session-end-daily attended)
+  : > "$home/config/supervision-host-session-end"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  mkdir -p "$home/data"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  fm_test_tasks_toml "$home/.tasks.toml"
+  for id in daily-runs held-item blocked-item blocker; do
+    tasks-axi add "$id" "item $id" --kind ship --file "$home/data/backlog.md" >/dev/null || fail "fixture: could not add $id"
+  done
+  tasks-axi hold held-item --reason "captain decision pending" --kind captain --file "$home/data/backlog.md" >/dev/null || fail "fixture: could not hold"
+  tasks-axi block blocked-item --by blocker --file "$home/data/backlog.md" >/dev/null || fail "fixture: could not block"
+  printf '%s\n' daily-runs held-item blocked-item > "$home/stub-spawn-ids"
+  echo spawn > "$home/stub-mode"
+  register_daily_check "$home"
+  end_session "$home" prompt_input_exit
+  wait_until 100 keeper_live "$home" || fail "no keeper runs after the session ended"
+  wait_until 300 watcher_live "$home" || fail "the keeper's host armed no watcher"
+  touch "$home/check.go"
+  wait_until_deadline 60 test -s "$home/engine-spawn.log" || fail "the session-end engine ran no spawn"
+  wait_until_deadline 60 grep -q '== blocked-item' "$home/engine-spawn.log" || fail "the engine did not reach its last spawn"
+  sleep 2
+  log=$(cat "$home/engine-spawn.log")
+  assert_not_contains "$(printf '%s\n' "$log" | sed -n '/== daily-runs/,/== held-item/p')" "never a held item" "the queued daily-runs item was refused"
+  assert_contains "$(printf '%s\n' "$log" | sed -n '/== daily-runs/,/== held-item/p')" "queued work may start" "the daily-runs spawn did not pass the session-end guard"
+  assert_contains "$(printf '%s\n' "$log" | sed -n '/== held-item/,/== blocked-item/p')" "never a held item" "a held item was dispatched"
+  assert_contains "$(printf '%s\n' "$log" | sed -n '/== blocked-item/,$p')" "never a held item" "a blocked item was dispatched"
+  pass "the daily-runs check through the session-end host spawns the queued item and refuses a held or blocked one"
+}
+
 test_session_end_allows_only_queued_spawn() {
   local home out status
   SPAWN_ROOT="$TMP_ROOT/spawn-root"
@@ -182,4 +218,5 @@ fm_test_run \
   test_later_stop_ends_keeper \
   test_clear_is_inert \
   test_standing_away_record_is_untouched \
-  test_session_end_allows_only_queued_spawn
+  test_session_end_allows_only_queued_spawn \
+  test_daily_check_spawns_queued_and_refuses_held_or_blocked
