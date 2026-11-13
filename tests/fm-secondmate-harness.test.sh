@@ -797,15 +797,16 @@ test_spawn_unverified_secondmate_harness_refused() {
 # auggie is verified as a primary only: an auggie worker, whether resolved from
 # config, passed explicitly, or run by a raw launch command is refused with that
 # reason before any meta. Each guaranteed raw form has a case: bare, behind the
-# env, command, exec, nohup, sudo, and timeout wrappers, with assignments,
-# quoting, redirections, wrapper options, and env -S split strings. The
-# compound, pipeline, group, and substitution cases pin the best-effort checks.
+# env, command, exec, nohup, sudo, and timeout wrappers, with assignments
+# (including sudo's), quoting, redirections, and wrapper options. The
+# whole-payload env -S, compound, pipeline, group, and substitution cases pin
+# the best-effort checks.
 # A wrapped raw launch of another program that merely mentions auggie is not
 # refused for that reason.
 test_spawn_auggie_secondmate_refused_as_primary_only() {
   local w sm fakebin err rc how kind
   for kind in secondmate ship scout; do
-    for how in config explicit raw env env-flags nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other; do
+    for how in config explicit raw env env-flags nested quoted quoted-path double-quoted escaped assignment operand exec-name substitution redirect leading-redirect split split-attached split-long search-path sudo sudo-assignment timeout compound pipeline group nested-substitution other quoted-other redirect-other compound-other split-other search-path-other; do
       w="$TMP_ROOT/spawn-auggie-$kind-$how"
       sm="$w/sm"
       mkdir -p "$w/home/config" "$w/home/state"
@@ -842,6 +843,7 @@ test_spawn_auggie_secondmate_refused_as_primary_only() {
         split-long) set -- "$@" "env --split-string='auggie --model test-model'" ;;
         search-path) set -- "$@" 'env -P /usr/bin auggie --model test-model' ;;
         sudo) set -- "$@" 'sudo -n -u worker auggie --model test-model' ;;
+        sudo-assignment) set -- "$@" 'sudo -n FOO=1 BAR=2 auggie --model test-model' ;;
         timeout) set -- "$@" 'timeout -s TERM 1h env auggie --model test-model' ;;
         compound) set -- "$@" 'cd /tmp && env auggie --model test-model' ;;
         pipeline) set -- "$@" 'true | env auggie --model test-model' ;;

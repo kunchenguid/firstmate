@@ -559,6 +559,7 @@ export function commandPosition(tokens) {
       unresolvedWrapperOption ||= options.unresolved;
       wrapperPayloads.push(...options.embeddedPayloads);
       index = options.index;
+      if (name === "sudo") while (words[index] && isAssignment(words[index].value)) index += 1;
       command = words[index];
       continue;
     }

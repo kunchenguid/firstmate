@@ -266,11 +266,14 @@
 #   auggie worker from config, an explicit harness arg, or a raw launch command.
 #   For a raw launch the refusal is guaranteed for a simple command that runs
 #   auggie directly or behind the env, command, exec, nohup, sudo, or timeout
-#   wrappers (for example `env auggie`), with leading assignments, quoted words,
-#   redirections, wrapper options, and an env -S split string. Compound commands,
-#   subshell groups, and command substitutions are checked best-effort only. A
-#   shell -c string, heredoc or here-string stdin, and eval are not inspected,
-#   so a launch that reaches auggie through them is not guaranteed refused.
+#   wrappers (for example `env auggie`), with leading assignments, sudo
+#   assignments, quoted words, redirections, and wrapper options. An env -S
+#   split string, compound commands, subshell groups, and command substitutions
+#   are checked best-effort only: an env -S string that holds the whole command
+#   is inspected, but one split across -S and the remaining argv is not
+#   guaranteed. A shell -c string, heredoc or here-string stdin, and eval are
+#   not inspected, so a launch that reaches auggie through them is not
+#   guaranteed refused.
 #   For pi and pi-signed, fm-spawn resolves the selected executable name from
 #   PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
