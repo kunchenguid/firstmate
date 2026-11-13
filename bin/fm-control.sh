@@ -793,7 +793,7 @@ retire_busy_incarnation() {
 # then dismissed for the next attempt. After FM_CONTROL_PICKER_WAIT seconds of
 # reopened pickers, exit refuses naming the work and leaves the picker open.
 do_exit() {
-  local rc out waited=0 attempts=0 tasks
+  local rc out waited=0 attempts=0 tasks started=$SECONDS elapsed
   if [ "$PICKER_RESOLVE" != 1 ]; then
     do_exit_attempt
     return
@@ -809,7 +809,8 @@ do_exit() {
         ;;
       3|4)
         if [ "$rc" = 4 ] || [ "$attempts" -gt 1 ]; then
-          if ! awk -v e="$waited" -v t="$PICKER_WAIT" 'BEGIN{exit !(e < t)}'; then
+          elapsed=$((SECONDS - started))
+          if ! awk -v e="$waited" -v w="$elapsed" -v t="$PICKER_WAIT" 'BEGIN{if (w > e) e = w; exit !(e < t)}'; then
             tasks=$(fm_composer_exit_picker_tasks \
               "$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null || true)")
             die "task $ID has background work still running after ${PICKER_WAIT}s (${tasks:-the picker named no work}); the $EXIT_PICKER_DIALOG is left open, which holds that work's completion so it cannot wake the old session. Nothing was stopped and no picker option was chosen. Retry once the work finishes, or allow a longer wait with FM_CONTROL_PICKER_WAIT"
