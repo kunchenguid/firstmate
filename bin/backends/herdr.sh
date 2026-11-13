@@ -2420,6 +2420,15 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
     working|idle|done|blocked) ;;
+    unknown)
+      if printf '%s' "$out" | jq -e '.result.agent.agent == "pi"' >/dev/null 2>&1 \
+        && [ "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" = agent ]; then
+        printf 'live'
+      else
+        printf 'unknown'
+      fi
+      return 0
+      ;;
     *) printf 'unknown'; return 0 ;;
   esac
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in

@@ -45,18 +45,18 @@ WIN="pi"
 CHECKED=0
 STUB_PID=
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
   [ -z "$STUB_PID" ] || kill "$STUB_PID" 2>/dev/null || true
-  rm -rf "$WORK"
+  fm_test_cleanup
 }
 trap cleanup EXIT
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-banner-live.XXXXXX")
+WORK=$(fm_test_tmproot fm-pi-banner-live)
 mkdir -p "$WORK/pi"
 
 # The library under test, driven against the private socket through a PATH

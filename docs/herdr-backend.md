@@ -848,6 +848,9 @@ It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, 
 | A foreground holding anything else | The registration stays live, but only after the same bounded settle window the idle-shell proof uses. |
 | An unreadable process view | The pane is `unknown`, trusting neither the registration nor its absence. |
 
+A Pi registration with `agent_status=unknown` counts as live only when the process view positively identifies a harness.
+A shell-only view, an unrelated foreground tool, or an unreadable process view keeps that registration `unknown`.
+
 The settle window exists because an idle shell transiently hosts prompt helpers such as starship in its foreground group.
 The first agent or shell sample in that window decides.
 
