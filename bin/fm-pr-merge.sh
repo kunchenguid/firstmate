@@ -736,7 +736,7 @@ if [ "$PROVIDER" = forgejo ]; then
     exit 1
   }
   if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then
-    echo "error: merging a Forgejo pull request through 'fj' is refused: forgejo-cli 0.7.0 exposes no authenticated request passthrough, its pull request views print no commit id, and its own merge request is built with head_commit_id fixed to null, so it can neither read this pull request's head nor bind a merge to it; install tea or fgj, log one in for $PR_HOST, and re-run (docs/forgejo-cli-alternatives.md)" >&2
+    echo "error: merging a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough, its pull request views print no commit id, and its own merge request is built with head_commit_id fixed to null, so it can neither read this pull request's head nor bind a merge to it; install tea or fgj, log one in for $PR_HOST, and re-run (docs/forgejo-cli-alternatives.md)" >&2
     exit 1
   fi
 fi

@@ -72,8 +72,9 @@
 #   `none` means a forge whose pull requests and checks no-mistakes already
 #   drives, `gerrit` means a Gerrit server: no pull requests, so the worker
 #   publishes a change with gerrit-axi instead, and `forgejo` means a Forgejo or
-#   Gitea server, whose pull requests the worker handles with tea rather than
-#   gh-axi, and `external` means the project's reviews are created by a review
+#   Gitea server, whose pull requests the worker handles with the Forgejo CLI
+#   the binding selects (auto when it names none) rather than gh-axi, and
+#   `external` means the project's reviews are created by a review
 #   tool that uploads its own snapshot of the worker's local commits: the
 #   worker never needs to push a branch, and must never push a task branch to
 #   the project's shared origin. Firstmate cannot observe, approve, or merge
@@ -162,7 +163,7 @@ case "${1:-}" in
   --forge-cli) WANT_FORGE_CLI=1; shift ;;
   --pr) WANT_PR=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--forge-cli|--pr] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2

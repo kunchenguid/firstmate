@@ -297,7 +297,7 @@ if [ "$PROVIDER" = forgejo ]; then
     exit 1
   }
   if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then
-    echo "error: watching a Forgejo pull request through 'fj' is refused: forgejo-cli 0.7.0 exposes no authenticated request passthrough and prints only localized prose, so it cannot report whether this pull request merged, and firstmate will not watch an event it cannot read (docs/forgejo-cli-alternatives.md); install tea or fgj, log one in for $HOST, and re-run" >&2
+    echo "error: watching a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough and prints only localized prose, so it cannot report whether this pull request merged, and firstmate will not watch an event it cannot read (docs/forgejo-cli-alternatives.md); install tea or fgj, log one in for $HOST, and re-run" >&2
     exit 1
   fi
 fi
