@@ -3707,14 +3707,14 @@ marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
 cleanup() { rm -f "$marker"; }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
-printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=superseded-fixture\n' "$$"
 previous=$(sed -n '1p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
 previous_marker=$(sed -n '2p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
 printf '%s\n%s\n' "$$" "$marker" > "$FM_ARM_LOG.pid"
 if [ -n "$previous" ] && [ -f "$previous_marker" ]; then
   kill -TERM "$previous" 2>/dev/null || true
 fi
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=superseded-fixture\n' "$$"
 while :; do
   if [ -e "$FM_TRIGGER_FILE" ]; then
     outcome=$(cat "$FM_TRIGGER_FILE")
@@ -3761,14 +3761,17 @@ function pidAlive(pid) {
   }
 }
 
-function liveArms() {
+function armRows() {
   if (!existsSync(process.env.FM_ARM_LOG)) return [];
   return readFileSync(process.env.FM_ARM_LOG, "utf8")
     .trim()
     .split(/\n/)
     .map((row) => /^arm pid=(\d+) marker=(\S+)/.exec(row))
-    .filter((match) => match && existsSync(match[2]) && pidAlive(match[1]))
-    .map((match) => match[1]);
+    .filter(Boolean);
+}
+
+function liveArms() {
+  return armRows().filter((match) => existsSync(match[2]) && pidAlive(match[1])).map((match) => match[1]);
 }
 
 async function waitFor(pred, label, attempts = 500) {
@@ -3799,7 +3802,7 @@ mod.default(second.pi);
 // The newest replacement finishes starting first; the superseded one finishes last.
 await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, second.ctx);
 await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
-await waitFor(() => liveArms().length === 1, "newest session arm");
+await waitFor(() => armRows().length === 2 && liveArms().length === 1, "newest session arm");
 
 const owner = await second.getTool().execute("newest-session-arm", {}, undefined, undefined, {});
 if (!owner.details?.ok || !String(owner.details.message).includes("unchanged")) {
@@ -3826,6 +3829,156 @@ EOF
   expect_code 0 "$status" "Pi chained session replacements must keep supervision on the newest session: $out"
   [ -z "$out" ] || fail "Pi superseded-replacement test printed output: $out"
   pass "Pi superseded replacement session never takes supervision from the newest session"
+}
+
+test_pi_late_applied_replacement_owns_watch() {
+  local repo home plugin log marker_root trigger stop out status
+  repo="$TMP_ROOT/pi-late-replacement-root"
+  home="$TMP_ROOT/pi-late-replacement-home"
+  log="$TMP_ROOT/pi-late-replacement.log"
+  marker_root="$TMP_ROOT/pi-late-replacement-markers"
+  trigger="$TMP_ROOT/pi-late-replacement.trigger"
+  stop="$TMP_ROOT/pi-late-replacement.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  exit 0
+fi
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+previous=$(sed -n '1p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+previous_marker=$(sed -n '2p' "$FM_ARM_LOG.pid" 2>/dev/null || true)
+printf '%s\n%s\n' "$$" "$marker" > "$FM_ARM_LOG.pid"
+if [ -n "$previous" ] && [ -f "$previous_marker" ]; then
+  kill -TERM "$previous" 2>/dev/null || true
+fi
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=late-fixture\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    outcome=$(cat "$FM_TRIGGER_FILE")
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: %s\n' "$outcome"
+    exit 0
+  fi
+  [ ! -e "$FM_STOP_FILE" ] || exit 0
+  sleep 0.02
+done
+ARM
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_MARKER_ROOT="$marker_root" FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi(sessionFile) {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {} },
+  };
+  const ctx = { sessionManager: { getSessionFile: () => sessionFile } };
+  return { pi, handlers, getTool: () => tool, prompts, ctx };
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function armRows() {
+  if (!existsSync(process.env.FM_ARM_LOG)) return [];
+  return readFileSync(process.env.FM_ARM_LOG, "utf8")
+    .trim()
+    .split(/\n/)
+    .map((row) => /^arm pid=(\d+) marker=(\S+)/.exec(row))
+    .filter(Boolean);
+}
+
+function liveArms() {
+  return armRows().filter((match) => existsSync(match[2]) && pidAlive(match[1])).map((match) => match[1]);
+}
+
+async function waitFor(pred, label, attempts = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/late-race.meta`, "project=/projects/late-race\nwindow=fm-late-race\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+
+const original = makePi("/tmp/s0.jsonl");
+mod.default(original.pi);
+await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, original.ctx);
+await waitFor(() => liveArms().length === 1, "original session arm");
+
+// Chained /new where the first replacement's createRuntime finishes last.
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s1.jsonl" }, original.ctx);
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new", targetSessionFile: "/tmp/s2.jsonl" }, original.ctx);
+const first = makePi("/tmp/s1.jsonl");
+const second = makePi("/tmp/s2.jsonl");
+mod.default(second.pi);
+await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, second.ctx);
+await waitFor(() => armRows().length === 2 && liveArms().length === 1, "newest target arm");
+
+// The slower runtime loads its extension only after the other session started.
+mod.default(first.pi);
+const kept = await second.getTool().execute("late-factory-current-arm", {}, undefined, undefined, {});
+if (!kept.details?.ok || !String(kept.details.message).includes("unchanged")) {
+  throw new Error(`late factory took supervision from the started session: ${JSON.stringify(kept.details)}`);
+}
+
+// That runtime is applied last, so its session is the visible one and owns supervision.
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, first.ctx);
+await waitFor(() => armRows().length === 3 && liveArms().length === 1, "last applied session arm");
+const owner = await first.getTool().execute("last-applied-arm", {}, undefined, undefined, {});
+if (!owner.details?.ok || !String(owner.details.message).includes("unchanged")) {
+  throw new Error(`last applied session lost supervision: ${JSON.stringify(owner.details)}`);
+}
+const hidden = await second.getTool().execute("hidden-session-arm", {}, undefined, undefined, {});
+if (hidden.details?.ok !== false) {
+  throw new Error(`hidden session kept supervision: ${JSON.stringify(hidden.details)}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (liveArms().length !== 1) throw new Error(`expected one live arm, got ${liveArms().join(",")}`);
+
+writeFileSync(process.env.FM_TRIGGER_FILE, "late-race actionable outcome\n");
+await waitFor(() => first.prompts.some((message) => message.includes("late-race actionable outcome")), "wake reaching the last applied session");
+if (second.prompts.length !== 0) {
+  throw new Error(`wake reached the hidden session: ${second.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1, "successor arm after the wake");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi late-applied replacement must own supervision without a late factory stealing it: $out"
+  [ -z "$out" ] || fail "Pi late-applied replacement test printed output: $out"
+  pass "Pi late factory never steals supervision and the last applied replacement owns it"
 }
 
 test_pi_reloaded_module_copy_keeps_single_owner() {
@@ -6606,6 +6759,7 @@ test_pi_arm_reads_a_windows_tagged_session_lock
 test_pi_extension_keeps_marker_of_live_ancestor_session
 test_pi_session_transition_generation_owner
 test_pi_superseded_replacement_never_owns_watch
+test_pi_late_applied_replacement_owns_watch
 test_pi_reloaded_module_copy_keeps_single_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement

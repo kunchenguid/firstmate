@@ -203,6 +203,9 @@ type ReplacementCoordinator = {
   active: SessionGeneration | null;
   // Session file the latest replacement is moving to; an older session starting after it never owns supervision.
   expectedSessionFile: string | null;
+  // Generation counter when the current owner's session_start was accepted. A module copy created after it was
+  // applied after that owner, so it is the visible session even when it is not the latest replacement target.
+  ownerStartGenerationId: number;
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
   __firstmatePiWatchReplacements?: Map<string, ReplacementCoordinator>;
@@ -220,6 +223,7 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
     deliveries: new Map(),
     active: null,
     expectedSessionFile: null,
+    ownerStartGenerationId: 0,
   };
   replacementCoordinators.set(handoff, created);
   return created;
@@ -676,7 +680,8 @@ process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
-  activateGeneration(generation);
+  const factoryGenerationId = generation.id;
+  if (!replacementCoordinator.active || replacementCoordinator.active.stopping) activateGeneration(generation);
 
   let calmPresentation: CalmPresentationState = {
     active: false,
@@ -1368,13 +1373,15 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", async (_event, ctx) => {
     const expected = replacementCoordinator.expectedSessionFile;
     const sessionFile = sessionFileOf(ctx);
-    if (expected && sessionFile && sessionFile !== expected) {
+    if (expected && sessionFile && sessionFile !== expected && factoryGenerationId <= replacementCoordinator.ownerStartGenerationId) {
       // A newer replacement already superseded this session, so it never takes ownership.
-      generation.stopping = true;
+      relinquishGeneration(generation);
+      if (replacementCoordinator.active === generation) replacementCoordinator.active = null;
       return;
     }
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
+    replacementCoordinator.ownerStartGenerationId = replacementCoordinator.nextGenerationId;
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
@@ -1382,7 +1389,9 @@ export default function (pi: ExtensionAPI) {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
     if (replacement) {
       replacementCoordinator.expectedSessionFile =
-        (event as { targetSessionFile?: string }).targetSessionFile || sessionFileOf(ctx) || null;
+        (event as { targetSessionFile?: string }).targetSessionFile ||
+        (event.reason === "reload" ? sessionFileOf(ctx) : "") ||
+        null;
     }
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
