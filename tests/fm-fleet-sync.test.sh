@@ -563,6 +563,34 @@ test_explicit_binding_survives_registered_symlink() {
   pass "explicit forge bindings survive registered symlink paths"
 }
 
+test_registered_symlink_physical_path_preserves_posture_refusal() {
+  local home clone physical out before after
+  home=$(new_home)
+  clone=$(build_pair "$home" symlink-posture)
+  physical="$home/real-symlink-posture"
+  mv "$clone" "$physical"
+  ln -s "$physical" "$clone"
+  git -C "$physical" remote set-url origin https://review.example/team/project.git
+  mkdir -p "$home/data"
+  printf -- '- symlink-posture [local-only forge=gerrit] - local work (added 2026-09-15)\n' \
+    > "$home/data/projects.md"
+  assert_expected_provider "$home" "$physical" registry-refused
+  before="$home/symlink-posture-before"
+  after="$home/symlink-posture-after"
+  snapshot_clone_state "$physical" "$before"
+
+  out=$(run_sync "$home" "$physical")
+  snapshot_clone_state "$physical" "$after"
+
+  assert_contains "$out" "skipped: registry entry does not resolve to a delivery posture" \
+    "a physical path to a registered symlink target must preserve the posture refusal"
+  assert_contains "$out" "bin/fm-project-mode.sh symlink-posture" \
+    "the posture refusal must name the canonical registry project"
+  cmp -s "$before" "$after" \
+    || fail "a refused physical symlink target must remain unchanged"
+  pass "registered symlink physical paths preserve posture refusals"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -929,6 +957,7 @@ test_explicit_gerrit_binding_allows_sync
 test_explicit_legacy_bindings_allow_sync
 test_explicit_binding_does_not_cross_same_basename
 test_explicit_binding_survives_registered_symlink
+test_registered_symlink_physical_path_preserves_posture_refusal
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves

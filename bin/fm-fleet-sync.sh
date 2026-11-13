@@ -304,6 +304,8 @@ report_stuck() {
 sync_project() {
   PROJ=$1
   label=$(project_label)
+  registry_label=$(fm_forge_registered_project_id "$PROJ" 2>/dev/null || true)
+  posture_label=${registry_label:-$label}
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -327,8 +329,8 @@ sync_project() {
     fi
     return 0
   fi
-  if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then
-    echo "$label: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh $label for the refusal)"
+  if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$posture_label" 2>/dev/null); then
+    echo "$label: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh $posture_label for the refusal)"
     return 0
   fi
   mode=${mode_line%% *}

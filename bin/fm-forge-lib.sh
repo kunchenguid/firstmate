@@ -155,21 +155,28 @@ fm_forge_checkout_remote() {
   return 1
 }
 
+fm_forge_registered_project_id() {
+  local checkout=${1:-} entry projects
+
+  [ -d "$checkout" ] || return 1
+  projects=${FM_PROJECTS_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/projects}
+  for entry in "$projects"/*/; do
+    [ -e "$entry" ] || continue
+    [ "$entry" -ef "$checkout" ] || continue
+    basename "$entry"
+    return 0
+  done
+  return 1
+}
+
 fm_forge_registered_binding() {
-  local checkout=${1:-} entry project_id root home data projects forge
+  local checkout=${1:-} project_id root home data forge
 
   [ -d "$checkout" ] || return 1
   root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
   home=${FM_HOME:-$root}
   data=${FM_DATA_OVERRIDE:-$home/data}
-  projects=${FM_PROJECTS_OVERRIDE:-$home/projects}
-  for entry in "$projects"/*/; do
-    [ -e "$entry" ] || continue
-    [ "$entry" -ef "$checkout" ] || continue
-    project_id=$(basename "$entry")
-    break
-  done
-  [ -n "${project_id:-}" ] || return 1
+  project_id=$(fm_forge_registered_project_id "$checkout") || return 1
   if forge=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
     "$root/bin/fm-project-mode.sh" --forge "$project_id" 2>/dev/null); then
     case "$forge" in
@@ -208,7 +215,7 @@ fm_forge_clone_root() {
 }
 
 fm_forge_detect_provider() {
-  local checkout=${1:-} remote_url raw_host host binding
+  local checkout=${1:-} remote_url host binding project_id
 
   if [ -z "$checkout" ] || [ ! -d "$checkout" ]; then
     echo "unknown"
@@ -222,13 +229,15 @@ fm_forge_detect_provider() {
     echo "local"
     return 0
   }
+  project_id=$(fm_forge_registered_project_id "$checkout" 2>/dev/null || true)
   if binding=$(fm_forge_registered_binding "$checkout"); then
     echo "$binding"
     return 0
   else
     binding_status=$?
     if [ "$binding_status" -eq 2 ] \
-      && fm_forge_registry_refuses_local_only "$(basename "$checkout")"; then
+      && [ -n "$project_id" ] \
+      && fm_forge_registry_refuses_local_only "$project_id"; then
       echo registry-refused
       return 0
     fi
@@ -248,11 +257,12 @@ fm_forge_detect_provider() {
       return 0
       ;;
   esac
-  raw_host=$(fm_forge_resolve_host "$remote_url" 0 2>/dev/null) || raw_host=""
   host=$(fm_forge_resolve_host "$remote_url" 1 2>/dev/null) || host=""
-  if fm_forge_host_is_github "$raw_host" || fm_forge_host_is_github "$host"; then
+  if [ -z "$host" ]; then
+    echo unknown
+  elif fm_forge_host_is_github "$host"; then
     echo "github"
-  elif fm_forge_host_is_gitlab "$raw_host" || fm_forge_host_is_gitlab "$host"; then
+  elif fm_forge_host_is_gitlab "$host"; then
     echo "gitlab"
   else
     echo "unknown"
@@ -300,12 +310,13 @@ fm_forge_resolve_host() {
     *://*) ;;
     *:*) resolve_ssh=$resolve_requested ;;
   esac
-  if [ "$resolve_ssh" -eq 1 ] && [ "$resolve_requested" -eq 1 ] \
-    && command -v ssh >/dev/null 2>&1; then
+  if [ "$resolve_ssh" -eq 1 ] && [ "$resolve_requested" -eq 1 ]; then
+    command -v ssh >/dev/null 2>&1 || return 1
     local resolved
     resolved=$(fm_forge_safe_ssh_config | ssh -G -F /dev/stdin -- "$host" 2>/dev/null \
-      | awk '$1=="hostname"{print $2; exit}')
-    [ -n "$resolved" ] && host=$resolved
+      | awk '$1=="hostname"{print $2; exit}') || return 1
+    [ -n "$resolved" ] || return 1
+    host=$resolved
   fi
   # A fully-qualified DNS name may carry its optional root label (for
   # example, github.com.).  Forge host policy stores canonical names without
@@ -402,7 +413,7 @@ fm_forge_check_auth() {
 # <project-id>\t<provider>\t<host>. Tabs cannot occur in normal Git checkout
 # directory names, so the record remains lossless for spaces in project IDs.
 fm_forge_scan_registered_projects() {
-  local projects_dir=${1:-} entry project_id provider remote_url host raw_host
+  local projects_dir=${1:-} entry project_id provider remote_url host
 
   [ -n "$projects_dir" ] && [ -d "$projects_dir" ] || return 0
   for entry in "$projects_dir"/*/; do
@@ -413,11 +424,7 @@ fm_forge_scan_registered_projects() {
     host=""
     remote_url=$(fm_forge_checkout_remote "$entry" 2>/dev/null) || remote_url=""
     if [ -n "$remote_url" ]; then
-      raw_host=$(fm_forge_resolve_host "$remote_url" 0 2>/dev/null || true)
       host=$(fm_forge_resolve_host "$remote_url" 1 2>/dev/null || true)
-      if fm_forge_host_is_github "$raw_host" || fm_forge_host_is_gitlab "$raw_host"; then
-        host=$raw_host
-      fi
     fi
     printf '%s\t%s\t%s\n' "$project_id" "$provider" "${host:-}"
   done
