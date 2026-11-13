@@ -116,7 +116,7 @@ case "$mode" in
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     if [ "$mode" = spawn ]; then
       while read -r spawn_id; do
-        { printf '== %s\n' "$spawn_id"; "$FM_REPO/bin/fm-spawn.sh" "$spawn_id" --mode no-mistakes --yolo off 2>&1; } >> "$FM_HOME/engine-spawn.log"
+        { printf '== %s\n' "$spawn_id"; "$FM_REPO/bin/fm-spawn.sh" "$spawn_id" --mode no-mistakes --yolo off 2>&1; printf 'rc=%s\n' "$?"; } >> "$FM_HOME/engine-spawn.log"
       done < "$FM_HOME/stub-spawn-ids"
     fi
     [ "$mode" != hold-lease ] || "$FM_REPO/bin/fm-lease.sh" check "$task" >> "$FM_HOME/engine-lease.log" 2>&1

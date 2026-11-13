@@ -219,10 +219,17 @@ fm_supervision_host_session_end_owned() {
 # fm_supervision_host_health_key <state-dir>: the key the host's
 # broken-session latch (bin/fm-supervision-host.sh, state/.supervision-host-health)
 # is kept under: the current main session, engine, and model; fails with no
-# main-session key. Needs fm_supervision_host_config first.
+# main-session key. A host the session-end keeper runs
+# (FM_SUPERVISION_HOST_SESSION_END_PID set) has no live main session and keys it
+# to the ended session's pid and auto-arm generation instead. Needs
+# fm_supervision_host_config first.
 fm_supervision_host_health_key() {
   local key
-  key=$(fm_supervision_host_main_key "$1") || return 1
+  if false; then
+    key="session-end:$FM_SUPERVISION_HOST_SESSION_END_PID:${FM_SUPERVISION_HOST_SESSION_END_GEN:-}"
+  else
+    key=$(fm_supervision_host_main_key "$1") || return 1
+  fi
   printf '%s|%s|%s\n' "$key" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL"
 }
 

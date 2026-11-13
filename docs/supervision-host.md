@@ -277,7 +277,8 @@ A session that ends under an `/afk` or `/quiet` record keeps that record exactly
 That host proves ownership without the session: it owns supervision while no later Stop has claimed an auto-arm generation and no later session has taken the session lock.
 So the next session's start or first Stop ends the keeper.
 A wake the host hands back has no main to reach, so it stays durable in the queue for the next drain, and the keeper starts the host again.
-Each wake in the window starts a fresh engine conversation, and the broken-session latch does not trip, because both are keyed to a main session whose process is gone.
+Each wake in the window starts a fresh engine conversation, because the conversation is keyed to a main session whose process is gone.
+The broken-session latch is keyed instead to the ended session and its auto-arm generation, so two consecutive engine errors pause the window for the same cooldown as an attended host, and the next session starts clean.
 Other primaries have no such hook.
 
 ## Failure direction

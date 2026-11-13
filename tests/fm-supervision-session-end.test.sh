@@ -150,7 +150,7 @@ branch_merge() {  # <home>
 }
 
 test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
-  local home log
+  local home log daily
   SPAWN_ROOT="$TMP_ROOT/spawn-root-2"
   mkdir -p "$SPAWN_ROOT"
   git init -q -b main "$SPAWN_ROOT"
@@ -178,11 +178,39 @@ test_daily_check_spawns_queued_and_refuses_held_or_blocked() {
   wait_until_deadline 60 grep -q '== blocked-item' "$home/engine-spawn.log" || fail "the engine did not reach its last spawn"
   sleep 2
   log=$(cat "$home/engine-spawn.log")
-  assert_not_contains "$(printf '%s\n' "$log" | sed -n '/== daily-runs/,/== held-item/p')" "never a held item" "the queued daily-runs item was refused"
-  assert_contains "$(printf '%s\n' "$log" | sed -n '/== daily-runs/,/== held-item/p')" "queued work may start" "the daily-runs spawn did not pass the session-end guard"
+  daily=$(printf '%s\n' "$log" | sed -n '/== daily-runs/,/== held-item/p')
+  assert_not_contains "$daily" "error: spawn refused" "the queued daily-runs item was refused"
+  assert_not_contains "$daily" "rc=6" "the role partition refused the queued daily-runs item"
   assert_contains "$(printf '%s\n' "$log" | sed -n '/== held-item/,/== blocked-item/p')" "never a held item" "a held item was dispatched"
   assert_contains "$(printf '%s\n' "$log" | sed -n '/== blocked-item/,$p')" "never a held item" "a blocked item was dispatched"
   pass "the daily-runs check through the session-end host spawns the queued item and refuses a held or blocked one"
+}
+
+engine_calls() { ls "$1"/engine-call.* 2>/dev/null | wc -l | tr -d ' '; }
+latched() { grep -q '	latch	' "$1/state/.supervision-host.log" 2>/dev/null; }
+
+test_failing_engine_latches_the_window() {
+  local home calls
+  home=$(make_home session-end-latch attended)
+  : > "$home/config/supervision-host-session-end"
+  register_daily_check "$home"
+  echo fail > "$home/stub-mode"
+  end_session "$home" prompt_input_exit
+  wait_until 100 keeper_live "$home" || fail "no keeper runs after the session ended"
+  wait_until 300 watcher_live "$home" || fail "the keeper's host armed no watcher"
+  local i=0
+  while ! latched "$home" && [ "$i" -lt 60 ]; do
+    [ -e "$home/check.go" ] || touch "$home/check.go"
+    sleep 1
+    i=$((i + 1))
+  done
+  latched "$home" || { cat "$home/state/.supervision-host.log" >&2 2>/dev/null; fail "two engine errors did not latch the session-end window"; }
+  calls=$(engine_calls "$home")
+  touch "$home/check.go"
+  sleep 8
+  [ "$(engine_calls "$home")" = "$calls" ] || fail "an engine turn started inside the cooldown"
+  grep -q 'cooling down after engine errors' "$home/state/.supervision-host.log" || fail "the cooling wake was not passed through"
+  pass "repeated engine errors latch the session-end window and no turn starts inside the cooldown"
 }
 
 test_session_end_allows_only_queued_spawn() {
@@ -219,4 +247,5 @@ fm_test_run \
   test_clear_is_inert \
   test_standing_away_record_is_untouched \
   test_session_end_allows_only_queued_spawn \
-  test_daily_check_spawns_queued_and_refuses_held_or_blocked
+  test_daily_check_spawns_queued_and_refuses_held_or_blocked \
+  test_failing_engine_latches_the_window
