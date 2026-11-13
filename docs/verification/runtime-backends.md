@@ -1718,17 +1718,96 @@ That watcher and away-daemon reporting is covered by fakes in `tests/fm-watch-tr
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
-Measured 2026-11-12 against Claude Code 2.1.322 in an isolated tmux server with a scratch firstmate home.
+Measured 2026-11-13 against Claude Code 2.1.323 with tmux 3.8 on Linux, in an isolated tmux server with a scratch firstmate home and a throwaway project.
 After the background job finishes, the picker stays on screen with the job still listed and adds the row `Background task update waiting while this panel is open`.
 Escape closes the picker, stops nothing, and releases that held update, which starts a turn in the same session.
 With the job still running, Escape closes the picker without a turn, and the next `/exit` reopens it.
 With no background work, `/exit` exits at once, including while a turn with no running shell is in progress.
-`/exit` during a turn's foreground shell command also opens the picker, and that turn continues while the picker is open.
-`bin/fm-control.sh <id> relaunch --note <text>` then gave these results against the live pane:
+The one shape that does not reach the picker on this version is a turn whose foreground shell command is still running: there `/exit` exits at once and that command outlives the agent, measured three times.
+Because that shape never reaches the picker, relaunch meets it exactly as it met it before this change.
 
-- Job running when relaunch started: exit 0 after 35 seconds, the job reported `<status>completed</status>` with exit code 0 in the old session's transcript, and the fresh session replied from its instructions.
-- Job outliving `FM_CONTROL_PICKER_WAIT=15`: exit 1 naming `shell · sleep 90 && echo long-job-done`, the job process still running, the picker left open, and the task record and instructions byte-identical to before.
-- Picker left open after that job finished: exit 0 after 9 seconds, with the fresh session launched.
+`bin/fm-control.sh <id> relaunch --note <text>` then gave these results against the live pane, on this branch's final head:
+
+- Job running when relaunch started: exit 0 after 44 seconds, with the picker read as open at 13 of the 22 samples taken during the call. The job's own task output reads `final-a-job-done` and `[exited with code 0]`, and the replacement session answered its instructions with `fresh session up`.
+- Job outliving `FM_CONTROL_PICKER_WAIT=15`: exit 1 after 16 seconds, naming `shell · sleep 90 && echo long-job-done`, with the job process still alive, the picker left open, and the task record and instructions byte-identical to before.
+- Picker left open after that job finished: exit 0 after 8 seconds. The job's own task output read `final-c-job-done` and `[exited with code 0]` before the relaunch, the picker still listed that work under the held-update row, and the replacement session answered its instructions.
+
+Three further runs of the first case on the same head exited 0 after 46, 47, and 46 seconds.
+The collapsed logs below are the three runs above, with the notice banners removed.
+
+<details>
+<summary>Live relaunch logs</summary>
+
+Case 1, job running; the samples are the shared picker recognizer read against the live pane every two seconds.
+
+```text
+$ bin/fm-control.sh pk1 relaunch --note '...'    # FM_CONTROL_PICKER_WAIT default
+t=0s picker=no tasks=
+t=2s picker=no tasks=
+t=4s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=6s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=8s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=10s picker=no tasks=
+t=12s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=14s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=16s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=18s picker=no tasks=
+t=20s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=22s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=24s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=26s picker=no tasks=
+t=29s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=31s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=33s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=35s picker=yes tasks=shell · sleep 40 && echo final-a-job-done
+t=38s picker=no tasks=
+t=40s picker=no tasks=
+t=42s picker=no tasks=
+t=44s picker=no tasks=
+rc=0  elapsed=44s
+relaunched pk1 harness=claude from=claude model=default effort=default backend=tmux endpoint=... worktree=...
+job output: final-a-job-done
+[exited with code 0]
+fresh session: fresh session up
+```
+
+Case 2, the job outlives `FM_CONTROL_PICKER_WAIT=15`.
+
+```text
+$ FM_CONTROL_PICKER_WAIT=15 FM_CONTROL_PICKER_POLL=3 bin/fm-control.sh pk1 relaunch --note '...'
+t=0s picker=no
+t=2s picker=no
+t=4s picker=yes
+t=6s picker=yes
+t=8s picker=no
+t=10s picker=yes
+t=12s picker=yes
+t=14s picker=no
+rc=1  elapsed=16s
+error: task pk1 has background work still running after 15s (shell · sleep 90 && echo long-job-done); the Claude background-task exit picker is left open, which holds that work's completion so it cannot wake the old session. Nothing was stopped and no picker option was chosen. Retry once the work finishes, or allow a longer wait with FM_CONTROL_PICKER_WAIT
+error: relaunch of pk1 failed while stopping the old agent, which is still running; its original instructions were restored
+job process: sleep 90
+task record: identical   instructions: identical
+```
+
+Case 3, the picker was left open after its job finished.
+
+```text
+$ bin/fm-control.sh pk1 relaunch --note '...'
+picker_opened_while_job_running=yes tasks=shell · sleep 40 && echo final-c-job-done
+job output: final-c-job-done
+[exited with code 0]
+held_update_row=yes picker_still_open=yes tasks=shell · sleep 40 && echo final-c-job-done
+t=0s picker=yes tasks=shell · sleep 40 && echo final-c-job-done
+t=1s picker=no tasks=
+...
+t=8s picker=no tasks=
+rc=0  elapsed=8s
+relaunched pk1 harness=claude from=claude model=default effort=default backend=tmux endpoint=... worktree=...
+fresh session: fresh session up
+```
+
+</details>
 
 The portable regressions are the exit picker cases in `tests/fm-control-relaunch.test.sh` and `test_exit_picker_tasks_names_the_listed_work` in `tests/fm-composer-lib.test.sh`.
 
