@@ -756,7 +756,7 @@ SH
 # crew-state command. A clock frozen at a whole-second boundary cannot prove
 # that the forced visit gets a full second rather than the next clock tick.
 test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
-  local branch head out mode started elapsed deadline rc
+  local branch head out mode started elapsed deadline rc tool real_tool
   for mode in failed stalled; do
   make_world "forced-cadence-floor-$mode"; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
@@ -800,6 +800,23 @@ rc=0
 printf '%s %s %s %s\n' "$started" "$(fm_nm_now_ms)" "$FM_READ_DEADLINE" "$rc" > "$FM_FLOOR_MEASURE"
 exit "$rc"
 SH
+  # Startup of the timeout runner must not consume the reader's promised floor.
+  # Delay only the runner invocation that carries this measured reader, keeping
+  # the scan backstop and all clocks real on each supported timeout mechanism.
+  for tool in timeout gtimeout perl; do
+    real_tool=$(command -v "$tool") || continue
+    cat > "$WORLD/fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FLOOR_READER:-}" ] && [ "$arg" = "$FM_FLOOR_READER" ]; then
+    printf 'reader-setup\n' >> "$FM_FLOOR_SETUP_LOG"
+    sleep 0.2
+    break
+  fi
+done
+SH
+    printf 'exec %q "$@"\n' "$real_tool" >> "$WORLD/fakebin/$tool"
+  done
   chmod +x "$WORLD/fakebin/"*
   out=$(PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
     FM_CONFIG_OVERRIDE="$MATE/config" FM_READ_DEADLINE='' \
@@ -818,10 +835,12 @@ SH
   done
   FM_TEST_CREW_STATE_BIN="$WORLD/fakebin/measured-crew-state" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
     FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
+    FM_FLOOR_READER="$WORLD/fakebin/measured-crew-state" FM_FLOOR_SETUP_LOG="$WORLD/setup.log" \
     FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
     FM_FLOOR_DELAY=0.6 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
   grep -Fxq ledger-read "$WORLD/forge.log" || fail 'the floor regression never exhausted ledger proof'
+  grep -Fxq reader-setup "$WORLD/setup.log" || fail 'the floor regression never delayed timeout setup'
   [ -s "$WORLD/measure" ] || fail 'the forced first cadence visit never completed its measured real crew-state read'
   [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
   read -r started elapsed deadline rc < "$WORLD/measure"

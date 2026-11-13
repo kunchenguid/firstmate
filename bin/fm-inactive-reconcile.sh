@@ -51,7 +51,8 @@
 # before that deadline to leave room for the cadence scan's first visit.
 # Each pass resumes after its own last visited child on its next invocation.
 # The scan enforces that budget itself through a millisecond deadline, and the
-# first due child of every scan gets at least one full second for its reads.
+# first due child of every scan gets at least one full second starting when its
+# state reader launches, after timeout setup.
 # Later visits retain the shared scan deadline. A process-group
 # kill one second after the budget remains as a backstop for a scan wedged in
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
@@ -713,18 +714,38 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
     deadline=$((started + 1000))
   fi
   local FM_READ_DEADLINE=$deadline
-  # The visit budget includes the scan's guaranteed first-visit floor.
+  # Reserve the first-visit floor for the existing outer watchdog bound.
   fm_nm_read_timeout 30 >/dev/null || return 3
   # A deadline-aware reader must finish reaping before the outer guard fires.
-  # Borrow only half of the scan's existing cleanup reserve; its read deadline
-  # and the whole-scan backstop remain unchanged.
+  # Borrow only half of the scan's existing cleanup reserve; the whole-scan
+  # backstop and the watchdog's bound remain unchanged.
   watchdog_deadline=$((deadline + SCAN_CLEANUP_RESERVE_MS / 2))
   left=$(FM_READ_DEADLINE=$watchdog_deadline fm_nm_read_timeout \
     "$((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000))") || return 3
+  # Stamp the floor inside the timed child so guard startup cannot consume it.
+  # Its first line hands the actual deadline back for this visit's later reads.
+  # shellcheck disable=SC2016
   state_line=$(fm_run_timed "$left" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
-    FM_READ_DEADLINE="$deadline" \
-    "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
+    bash -c '
+      . "$1"
+      deadline=$2
+      if [ "$3" -eq 1 ]; then
+        started=$(fm_nm_now_ms) || exit 124
+        [ "$deadline" -ge "$((started + 1000))" ] || deadline=$((started + 1000))
+      fi
+      printf "%s\n" "$deadline"
+      export FM_READ_DEADLINE=$deadline
+      exec "$4" "$5"
+    ' _ "$SCRIPT_DIR/fm-nm-run-lib.sh" "$deadline" "$first" "$CREW_STATE_BIN" "$id" \
+    2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
+  deadline=${state_line%%$'\n'*}
+  case "$deadline" in ''|*[!0-9]*) return 3 ;; esac
+  FM_READ_DEADLINE=$deadline
+  case "$state_line" in
+    *$'\n'*) state_line=${state_line#*$'\n'} ;;
+    *) state_line='' ;;
+  esac
   fm_nm_read_timeout 1 >/dev/null || return 3
   last=$(last_status_line "$status")
   if [ -n "$self" ]; then
