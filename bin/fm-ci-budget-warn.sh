@@ -10,7 +10,7 @@
 # inputs print a warning and still exit 0.
 #
 # Usage:
-#   fm-ci-budget-warn.sh [--budget-ms <n>] <aggregate.json> [lint-telemetry-dir]
+#   fm-ci-budget-warn.sh <aggregate.json> [lint-telemetry-dir]
 #   fm-ci-budget-warn.sh --help
 #
 # Exit status: 0 always except usage errors (2).
@@ -39,15 +39,6 @@ while [ "$#" -gt 0 ]; do
       usage
       exit 0
       ;;
-    --budget-ms)
-      [ "$#" -ge 2 ] || die "--budget-ms requires a positive integer"
-      BUDGET_MS=$2
-      shift 2
-      ;;
-    --budget-ms=*)
-      BUDGET_MS=${1#*=}
-      shift
-      ;;
     --)
       shift
       break
@@ -68,9 +59,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$BUDGET_MS" in
-  ''|*[!0-9]*|0) die "--budget-ms must be a positive integer, got ${BUDGET_MS:-<empty>}" ;;
-esac
 [ -n "$AGGREGATE" ] || die "need an aggregate timing JSON (see --help)"
 
 warn() {
