@@ -1134,6 +1134,39 @@ SH
   pass "bootstrap honors repository core.sshCommand for forge classification"
 }
 
+test_forge_explicit_ssh_config_ignores_default_system_config() {
+local case_dir custom result system_seen
+case_dir="$TMP_ROOT/forge-explicit-ssh-config-boundary"
+custom="$case_dir/custom.conf"
+system_seen="$case_dir/system-config-read"
+mkdir -p "$case_dir"
+printf '%s\n' 'Host github.com' ' HostName custom.example' > "$custom"
+result=$(HOME="$case_dir/home" bash -c '
+. "$1"
+custom=$2
+system_seen=$3
+fm_forge_effective_ssh_command() {
+printf "ssh -F %s\\n" "$custom"
+}
+fm_forge_safe_ssh_config_file() {
+case "$1" in
+"$custom")
+printf "%s\\n" "Host github.com" " HostName custom.example"
+;;
+/etc/ssh/ssh_config)
+: > "$system_seen"
+printf "%s\\n" "Host github.com" " HostName system.example"
+;;
+esac
+}
+fm_forge_resolve_host git@github.com:team/project.git 1 "$PWD"
+' _ "$ROOT/bin/fm-forge-lib.sh" "$custom" "$system_seen")
+[ "$result" = custom.example ] \
+|| fail "an explicit SSH config must retain its own HostName mapping, got: $result"
+[ ! -e "$system_seen" ] \
+|| fail "an explicit SSH config must not read the default system SSH config"
+pass "explicit SSH configs exclude default system settings"
+}
 test_forge_custom_ssh_wrapper_fails_closed() {
   local case_dir fakebin out project wrapper marker calls
 
@@ -2888,6 +2921,7 @@ test_lavish_axi_min_version
 test_forge_provider_cli_policy_and_auth_host
 test_forge_ssh_effective_destination_controls_provider_and_auth
 test_forge_custom_git_ssh_command_controls_provider_and_auth
+test_forge_explicit_ssh_config_ignores_default_system_config
 test_forge_custom_ssh_wrapper_fails_closed
 test_forge_path_ssh_wrapper_fails_closed
 test_forge_effective_remote_rewrites

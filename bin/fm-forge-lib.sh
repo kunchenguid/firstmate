@@ -302,8 +302,6 @@ fm_forge_safe_ssh_config_for_checkout() {
   esac
   [ "$config" != /dev/stdin ] && [ -r "$config" ] || return 1
   fm_forge_safe_ssh_config_file "$config" 0 || return 1
-  printf '%s\n' 'Host *'
-  fm_forge_safe_ssh_config_file /etc/ssh/ssh_config 0 || return 1
 }
 
 fm_forge_registered_project_id() {
