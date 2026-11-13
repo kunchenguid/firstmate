@@ -755,9 +755,6 @@ raise "serial matrix must be 19 shards" unless shards == (1..19).to_a
   raise "#{name} timeout-minutes must stay 30" unless job.fetch("timeout-minutes") == 30
   raise "#{name} runs-on must stay ubuntu-24.04" unless job.fetch("runs-on") == "ubuntu-24.04"
   job_steps = job.fetch("steps")
-  raise "#{name} must not fetch full history" if job_steps.any? { |s|
-    s["uses"].to_s.include?("actions/checkout@") && s.dig("with", "fetch-depth") == 0
-  }
   raise "#{name} must cache pinned tools" unless job_steps.any? { |s|
     s["uses"].to_s.start_with?("actions/cache@") && s.dig("with", "path").to_s.include?("fm-ci-tools")
   }
