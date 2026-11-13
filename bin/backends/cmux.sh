@@ -3,7 +3,9 @@
 #
 # Design: data/cmux-backend-feasibility-c7/report.md (adapter design sketch,
 # section 4) plus the live-app verification pass recorded in
-# docs/cmux-backend.md (real cmux 0.64.17, macOS aarch64, 2026-07-03). cmux is
+# docs/cmux-backend.md (real cmux 0.64.17, macOS aarch64, 2026-07-03; the
+# enforced minimum is 0.64.25, where the printed create ref was verified; also
+# verified on 0.65.0). cmux is
 # a session provider ONLY, exactly like herdr/zellij: the worktree provider
 # stays treehouse. Sourced only through bin/fm-backend.sh's fm_backend_source
 # in normal operation; the unit tests source it directly.
@@ -120,9 +122,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-composer-lib.sh"
 
-# Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
+# Verified minimum: the first version where new-workspace's printed
+# `OK workspace:<n>` ref was verified live (docs/cmux-backend.md). Spawn
+# resolves the new workspace only from that ref, so the floor is patch-level.
 FM_BACKEND_CMUX_MIN_MAJOR=0
 FM_BACKEND_CMUX_MIN_MINOR=64
+FM_BACKEND_CMUX_MIN_PATCH=25
 
 # fm_backend_cmux_bin: resolve the cmux CLI binary. cmux does not reliably
 # land on PATH after a plain app install - it ships an OPTIONAL "install CLI"
@@ -188,7 +193,7 @@ fm_backend_cmux_cli() {  # <cmux-subcommand-and-args...>
 # separate from reachability/auth (fm_backend_cmux_ping_state below).
 fm_backend_cmux_version_check() {
   fm_backend_cmux_tool_check || return 1
-  local raw ver major rest minor
+  local raw ver major rest minor patch
   raw=$(fm_backend_cmux_cli version 2>/dev/null) || { echo "error: 'cmux version' failed; is cmux installed correctly?" >&2; return 1; }
   ver=$(printf '%s' "$raw" | awk '{print $2}')
   case "$ver" in
@@ -200,13 +205,20 @@ fm_backend_cmux_version_check() {
   major=${ver%%.*}
   rest=${ver#*.}
   minor=${rest%%.*}
+  patch=0
+  case "$rest" in *.*) rest=${rest#*.}; patch=${rest%%.*} ;; esac
   case "$major" in ''|*[!0-9]*) major=0 ;; esac
   case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
-  if [ "$major" -lt "$FM_BACKEND_CMUX_MIN_MAJOR" ] || { [ "$major" -eq "$FM_BACKEND_CMUX_MIN_MAJOR" ] && [ "$minor" -lt "$FM_BACKEND_CMUX_MIN_MINOR" ]; }; then
-    echo "error: cmux $ver is older than the verified minimum $FM_BACKEND_CMUX_MIN_MAJOR.$FM_BACKEND_CMUX_MIN_MINOR; update cmux before using backend=cmux" >&2
-    return 1
+  case "$patch" in ''|*[!0-9]*) patch=0 ;; esac
+  if [ "$major" -ne "$FM_BACKEND_CMUX_MIN_MAJOR" ]; then
+    [ "$major" -gt "$FM_BACKEND_CMUX_MIN_MAJOR" ] && return 0
+  elif [ "$minor" -ne "$FM_BACKEND_CMUX_MIN_MINOR" ]; then
+    [ "$minor" -gt "$FM_BACKEND_CMUX_MIN_MINOR" ] && return 0
+  elif [ "$patch" -ge "$FM_BACKEND_CMUX_MIN_PATCH" ]; then
+    return 0
   fi
-  return 0
+  echo "error: cmux $ver is older than the verified minimum $FM_BACKEND_CMUX_MIN_MAJOR.$FM_BACKEND_CMUX_MIN_MINOR.$FM_BACKEND_CMUX_MIN_PATCH; update cmux before using backend=cmux" >&2
+  return 1
 }
 
 # fm_backend_cmux_ping_state: classify socket reachability/auth from `cmux
@@ -341,17 +353,66 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+# fm_backend_cmux_workspace_id_for_ref: the live workspace uuid whose
+# short ref (e.g. `workspace:32`) equals <ref>, or empty. Refs are only listed
+# under `--id-format both` (verified live on 0.64.25: `--id-format uuids` sets
+# every `ref` to null).
+fm_backend_cmux_workspace_id_for_ref() {  # <ref>
+  local ref=$1
+  fm_backend_cmux_cli workspace list --json --id-format both 2>/dev/null \
+    | jq -r --arg want "$ref" '.workspaces[]? | select(.ref == $want) | .id' 2>/dev/null | head -1
+}
+
+# fm_backend_cmux_created_workspace_ref: the `workspace:<n>` ref that
+# new-workspace prints on success (`OK workspace:32`, verified live on
+# 0.64.25 whatever `--id-format` says), or empty when the output has none.
+fm_backend_cmux_created_workspace_ref() {  # <new-workspace-output>
+  printf '%s\n' "$1" | sed -n 's/^OK \(workspace:[0-9][0-9]*\).*$/\1/p' | tail -1
+}
+
+# fm_backend_cmux_resolve_created_workspace: the uuid of the workspace just
+# created, resolved only from the ref cmux printed at creation. A scoped-title
+# lookup is deliberately not used: cmux does not enforce unique titles, so a
+# concurrent client's workspace could match. A freshly created workspace can
+# lag in `workspace list` (verified live: a lookup right after new-workspace
+# returned empty and succeeded about half a second later), so the ref lookup
+# is retried up to 15 times, 0.2s apart. Fails at once without a printed ref.
+fm_backend_cmux_resolve_created_workspace() {  # <ref-or-empty>
+  local ref=$1 i wsid
+  [ -n "$ref" ] || return 1
+  i=0
+  while [ "$i" -lt 15 ]; do
+    [ "$i" -eq 0 ] || sleep 0.2
+    wsid=$(fm_backend_cmux_workspace_id_for_ref "$ref")
+    if [ -n "$wsid" ]; then
+      printf '%s' "$wsid"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
-# itself). Resolves the fresh workspace's default surface via one list-panes
-# call (finding: a freshly created workspace already has exactly one surface,
-# so no separate new-surface call is needed). --focus false is passed for
-# defense in depth though verified to already be the default (finding:
-# workspace/surface/pane create all default focus to false) - no
-# focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
-# <surface_id>" on success.
+# itself). Resolves the fresh workspace's id from the ref new-workspace
+# prints (fm_backend_cmux_resolve_created_workspace), then its default
+# surface via one list-panes call (finding: a freshly created workspace
+# already has exactly one surface, so no separate new-surface call is
+# needed). --focus false is passed for defense in depth though verified to
+# already be the default (finding: workspace/surface/pane create all default
+# focus to false) - no focus-restore dance is needed, unlike zellij. When
+# creation succeeds but the printed ref never resolves, the workspace is
+# closed best-effort by that printed ref, and the error names the leftover
+# title only if that close does not report success. Without a printed ref,
+# nothing is closed (a title match is never trusted for a close) and the error
+# names the leftover title. When the surface fails to resolve, the
+# ref-resolved workspace is closed by uuid through
+# fm_backend_cmux_close_workspace, so a retry is not refused on its leftover
+# duplicate title.
+# Echoes "<workspace_id> <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out ref wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
@@ -362,10 +423,21 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+  ref=$(fm_backend_cmux_created_workspace_ref "$out")
+  wsid=$(fm_backend_cmux_resolve_created_workspace "$ref") || {
+    if [ -n "$ref" ] && fm_backend_cmux_cli close-workspace --workspace "$ref" >/dev/null 2>&1; then
+      echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2
+    else
+      echo "error: could not resolve a cmux workspace id for '$title' after creation; close the leftover cmux workspace '$title' by hand" >&2
+    fi
+    return 1
+  }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+  [ -n "$sfid" ] || {
+    fm_backend_cmux_close_workspace "$wsid"
+    echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2
+    return 1
+  }
   printf '%s %s' "$wsid" "$sfid"
 }
 
@@ -616,13 +688,20 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # leaving that window a fresh default workspace (never an fm-<home>- title, so
 # recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-} wsid wininfo win count
+  local expected_label=${3:-}
   if [ -n "$expected_label" ]; then
     fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
   else
     fm_backend_cmux_parse_target "$1" || return 0
   fi
-  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  fm_backend_cmux_close_workspace "$FM_BACKEND_CMUX_WORKSPACE"
+}
+
+# fm_backend_cmux_close_workspace: best-effort close of one workspace by uuid,
+# adding the throwaway sibling first when it is the last in its window (see
+# fm_backend_cmux_kill).
+fm_backend_cmux_close_workspace() {  # <workspace_id>
+  local wsid=$1 wininfo win count
   wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
   win=${wininfo%% *}
   count=${wininfo##* }
