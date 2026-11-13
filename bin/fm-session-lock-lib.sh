@@ -231,15 +231,15 @@ fm_win_command() {  # <winpid>
     *WINPID*) ;;
     *) return 2 ;;
   esac
-  out=$(printf '%s\n' "$table" | awk -v w="$winpid" '
+  out=$(awk -v w="$winpid" '
     $4 == w {
       line = $0
       if (!sub(/^ *[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +[^ ]+ +[0-9]+ +/, "", line)) exit 3
-      if (!sub(/^[0-9]+:[0-9]+:[0-9]+ +/, "", line) && !sub(/^[A-Z][a-z][a-z] +[0-9]+ +/, "", line)) exit 3
+      if (!sub(/^[0-9]+:[0-9]+:[0-9]+ +/, "", line) && !sub(/^[^ 0-9][^ ]* +[0-9]+ +/, "", line)) exit 3
       if (line == "") exit 3
       print line
       exit
-    }') || return 2
+    }' <<<"$table") || return 2
   [ -n "$out" ] || return 1
   fm_win_normalize_command "$out"
 }

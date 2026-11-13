@@ -546,6 +546,10 @@ test_windows_session_started_on_an_earlier_day_is_identified_under_a_narrow_widt
       || fail "an earlier-day harness row was not read at COLUMNS='$width'"
     [ "$got" = 'C:/Users/u/.local/bin/claude' ] \
       || fail "an earlier-day harness row at COLUMNS='$width' read as '$got', expected C:/Users/u/.local/bin/claude"
+    got=$(COLUMNS=$width FM_TEST_WIN_TABLE="${row/Nov /nov.}" lib_eval "$fakebin" 'fm_win_command 7204') \
+      || fail "a French-locale earlier-day harness row was not read at COLUMNS='$width'"
+    [ "$got" = 'C:/Users/u/.local/bin/claude' ] \
+      || fail "a French-locale earlier-day harness row at COLUMNS='$width' read as '$got', expected C:/Users/u/.local/bin/claude"
     COLUMNS=$width FM_TEST_WIN_TABLE="$row" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 \
       lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
       || fail "the earlier-day session holding the lock did not recognize itself at COLUMNS='$width'"
