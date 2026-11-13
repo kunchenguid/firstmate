@@ -160,7 +160,7 @@ fm_auggie_script_arg() {  # <args> [pid]
 # (bin/fm-harness.sh).
 #
 # Accepted: an exact auggie command name; a node, node-*, node<N>, or MainThread
-# interpreter whose script argument resolves to auggie's own name or package.
+# interpreter whose script argument resolves into the @augmentcode/auggie package.
 #
 # Rejected: a bare interpreter with no script, an interpreter running anything
 # else, and any name or path that merely contains the auggie fragment.
