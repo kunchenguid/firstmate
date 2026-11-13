@@ -65,8 +65,12 @@
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
 # outages for the same URLs. Forge reads stop FM_CHECK_TIMEOUT (default 30)
 # minus 5 seconds after the pass starts, and each read is capped at 5 seconds.
-# Branch discovery and owned-PR reads each fan out in one concurrent wave;
-# there is no rotating PR backlog or serial network wait per PR.
+# Branch discovery fans out in one concurrent wave, and so does each pass's
+# owned-PR reads, capped at 20 PRs so a large
+# backlog cannot time every read out at once. PRs beyond the cap stay pending
+# and head the next pass, so every selected PR is read within a bounded number
+# of passes; there is no serial network wait per PR. FM_PR_HEALTH_BATCH
+# overrides the cap for tests only; it is not a supported setting.
 # Fingerprints and the notifications cursor (Last-Modified, newest seen
 # updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
 # state/pr-health.json, written by rename
@@ -336,6 +340,9 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
 # the caller may skip the fallback full sweep. GitHub ignores since= on a
 # conditional request, so a changed feed answers with its newest page and the
 # cursor is applied here.
+READ_BATCH=${FM_PR_HEALTH_BATCH:-20}
+case "$READ_BATCH" in ''|*[!0-9]*) READ_BATCH=20 ;; *) READ_BATCH=$((10#$READ_BATCH)) ;; esac
+[ "$READ_BATCH" -gt 0 ] || READ_BATCH=20
 FALLBACK_SECONDS=900 # ponytail: fixed fallback sweep; make it a config value if a home needs a faster unattended sweep
 read_notifications() { # deadline
   local lm since status next_lm next_since
@@ -352,7 +359,7 @@ read_notifications() { # deadline
   case "$status" in
     304) NOTIFY_OK=1; return 0 ;;
     200) ;;
-    4*) jq 'del(.notifications)' "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"; return 0 ;;
+    4*) jq 'del(.notifications.last_modified, .notifications.since)' "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"; return 0 ;;
     *) return 0 ;;
   esac
   next_lm=$(sed -n '1,/^$/s/^[Ll]ast-[Mm]odified: //p' "$TMP/notify.txt")
@@ -429,10 +436,19 @@ poll() {
   jq -R -r --argjson full "$full" --slurpfile health "$TMP/health.json" --rawfile events "$TMP/events" '
     ($events | split("\n")) as $events | ($health[0].notifications.pending // []) as $pending
     | select($full or $health[0].prs[.] == null or IN($events[]) or IN($pending[]))' "$TMP/owned-urls" > "$TMP/urls"
+  # Deferred and retried PRs head the order, so a backlog rotates through the
+  # batch instead of re-reading the same leading PRs.
+  jq -R -n -r --slurpfile health "$TMP/health.json" '
+    [inputs | select(length > 0)] as $sel | ($health[0].notifications.pending // []) as $pending
+    | ([$pending[] | select(. as $u | $sel | index($u))] + [$sel[] | select(. as $u | $pending | index($u) | not)])[]' \
+    "$TMP/urls" > "$TMP/urls.ordered"
+  head -n "$READ_BATCH" "$TMP/urls.ordered" > "$TMP/urls"
+  tail -n "+$((READ_BATCH + 1))" "$TMP/urls.ordered" > "$TMP/deferred"
   : > "$TMP/unsettled"
   # Persist all selected URLs with the advanced notification cursor before reads;
   # interruption leaves every unprocessed event eligible for retry.
-  jq --rawfile urls "$TMP/urls" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
+  cat "$TMP/urls" "$TMP/deferred" > "$TMP/selected"
+  jq --rawfile urls "$TMP/selected" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
     "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
   while IFS= read -r url; do
     index=$((index + 1))
@@ -464,7 +480,8 @@ poll() {
       cp "$TMP/next.json" "$TMP/health.json"
     fi
   done < "$TMP/urls"
-  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" '
+  cat "$TMP/deferred" "$TMP/unsettled" > "$TMP/carried"
+  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/carried" '
     if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
       | if $full then .notifications.swept_at = $now else . end

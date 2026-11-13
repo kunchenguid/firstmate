@@ -4,6 +4,7 @@
 # Cases drive the registered check against a fake forge, with ownership from
 # real task records, task copies and durable contributions.
 # A barrier at the forge boundary proves reads fan out across owned PRs.
+# A batch cap smaller than the backlog proves the tail PRs are read by later passes.
 set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -98,6 +99,7 @@ case "$1 $2" in
     esac ;;
   'api -i')
     # The notifications feed, when a case serves one: 304 while unchanged.
+    [ ! -f "$FORGE/notifications-denied" ] || { printf 'HTTP/2.0 403 Forbidden\r\n\r\n'; exit 1; }
     [ -f "$FORGE/notifications.json" ] || exit 1
     lm=$(cat "$FORGE/notifications-lm")
     case "$*" in *"If-Modified-Since: $lm"*) printf 'HTTP/2.0 304 Not Modified\r\n\r\n'; exit 1 ;; esac
@@ -662,7 +664,52 @@ test_all_owned_pr_reads_start_in_one_wave() {
   out=$(pass_once "$home")
   [ "$(printf '%s\n' "$out" | grep -c 'conflicts with its base')" = 8 ] \
     || fail "every owned PR must start before a slow read completes: $out"
-  pass 'all owned PR reads start in one wave without rotating a backlog'
+  pass 'all owned PR reads start in one wave'
+}
+
+backlog_passes_read_each_pr_once() { # home denied?
+  local home=$1 n out seen="" before after
+  for n in $(seq 1 7); do
+    task "$home" "ship$n" "pr=https://github.com/o/r/pull/$n"
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
+  done
+  [ -z "${2:-}" ] || : > "$home/forge/notifications-denied"
+  arm "$home"
+  export FM_PR_HEALTH_BATCH=3
+  for _ in 1 2 3; do
+    before=$(grep -cE 'pulls/[0-9]+$' "$home/forge/calls.log")
+    out=$(pass_once "$home")
+    after=$(grep -cE 'pulls/[0-9]+$' "$home/forge/calls.log")
+    [ $((after - before)) -le 3 ] || { unset FM_PR_HEALTH_BATCH; fail "a pass read more than one batch ($((after - before)) reads)"; }
+    seen="$seen$out"$'\n'
+  done
+  unset FM_PR_HEALTH_BATCH
+  for n in $(seq 1 7); do
+    printf '%s' "$seen" | grep -q "pull/$n conflicts with its base" \
+      || fail "PR $n was not read within three passes of a three-PR batch: $seen"
+  done
+  [ "$(printf '%s' "$seen" | grep -c 'conflicts with its base')" = 7 ] || fail "a conflict woke more than once: $seen"
+}
+
+test_backlog_beyond_one_batch_is_read_by_later_passes() {
+  backlog_passes_read_each_pr_once "$(new_home backlog-batch)"
+  pass 'a backlog larger than one batch is read in full by later passes'
+}
+
+test_denied_feed_keeps_the_fair_read_order() {
+  backlog_passes_read_each_pr_once "$(new_home backlog-denied-feed)" denied
+  pass 'a denied notifications feed still reads a backlog in full'
+}
+
+test_leading_zero_batch_override_still_polls() {
+  local home out
+  home=$(new_home batch-leading-zero)
+  task "$home" ship1 pr=https://github.com/o/r/pull/8
+  pr "$home" 8 "$HEAD_A" "$BASE_1" false false
+  arm "$home"
+  out=$(FM_PR_HEALTH_BATCH=08 pass_once "$home") || fail 'a leading-zero batch size aborted the poll'
+  printf '%s\n' "$out" | grep -q 'pull/8 conflicts with its base' || fail "a leading-zero batch size read nothing: $out"
+  pass 'a leading-zero batch size does not abort the poll'
 }
 
 feed() { # home : serve an empty notifications feed
@@ -978,7 +1025,7 @@ for test_name in test_maintainer_author_and_approval_states_are_distinct \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
   test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \
   test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again \
-  test_many_recorded_contributions_do_not_starve_a_new_branch_pr; do
+  test_many_recorded_contributions_do_not_starve_a_new_branch_pr test_backlog_beyond_one_batch_is_read_by_later_passes test_denied_feed_keeps_the_fair_read_order test_leading_zero_batch_override_still_polls; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures PR health regressions"
