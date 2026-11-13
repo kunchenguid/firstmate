@@ -122,7 +122,7 @@ write_registry
 fm_on() {
   FM_HOME="$LOCAL_HOME" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
-  FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+  FM_SSH_BIN="${FM_SSH_BIN:-$FAKEBIN/fake-ssh}" \
   FM_FAKE_SSH_COUNT="$SSH_COUNT" \
   FM_FAKE_SSH_LOG="$SSH_LOG" \
   FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_ROOT/bin/fm-remote-entrypoint.sh" \
@@ -176,37 +176,72 @@ pass "fm-on defaults the remote command's stdin to /dev/null"
 # this on the real ssh argv the FM_SSH_BIN process seam captured, never on
 # fm-on.sh source text.
 LAST_SSH_ARGV=$(tail -n 1 "$SSH_LOG")
+DEFAULT_CONNECT_TIMEOUT=$(printf '%s\n' "$LAST_SSH_ARGV" | grep -oE 'ConnectTimeout=[0-9]+' | cut -d= -f2)
 DEFAULT_INTERVAL=$(printf '%s\n' "$LAST_SSH_ARGV" | grep -oE 'ServerAliveInterval=[0-9]+' | cut -d= -f2)
 DEFAULT_COUNT=$(printf '%s\n' "$LAST_SSH_ARGV" | grep -oE 'ServerAliveCountMax=[0-9]+' | cut -d= -f2)
+[ -n "$DEFAULT_CONNECT_TIMEOUT" ] || fail "the ssh transport did not arm ConnectTimeout"
 [ -n "$DEFAULT_INTERVAL" ] || fail "the ssh transport did not arm ServerAliveInterval dead-peer detection"
 [ -n "$DEFAULT_COUNT" ] || fail "the ssh transport did not arm ServerAliveCountMax dead-peer detection"
+[ "$DEFAULT_CONNECT_TIMEOUT" -gt 0 ] || fail "ConnectTimeout was not a positive timeout (got $DEFAULT_CONNECT_TIMEOUT)"
 [ "$DEFAULT_INTERVAL" -gt 0 ] || fail "ServerAliveInterval was not a positive interval (got $DEFAULT_INTERVAL)"
 [ "$DEFAULT_COUNT" -gt 0 ] || fail "ServerAliveCountMax was not a positive count (got $DEFAULT_COUNT)"
+[ "$DEFAULT_CONNECT_TIMEOUT" -le 30 ] \
+  || fail "the default connect timeout is not bounded to a sane ceiling (got ${DEFAULT_CONNECT_TIMEOUT}s)"
 DEFAULT_WINDOW=$((DEFAULT_INTERVAL * DEFAULT_COUNT))
 [ "$DEFAULT_WINDOW" -le 120 ] \
   || fail "the default dead-peer detection window is not bounded to a sane ceiling (got ${DEFAULT_WINDOW}s = ${DEFAULT_INTERVAL}s x $DEFAULT_COUNT)"
-pass "fm-on arms a bounded SSH dead-peer detection window by default (${DEFAULT_INTERVAL}s x $DEFAULT_COUNT = ${DEFAULT_WINDOW}s)"
+pass "fm-on arms bounded SSH connect and dead-peer detection windows by default (connect=${DEFAULT_CONNECT_TIMEOUT}s, dead-peer=${DEFAULT_INTERVAL}s x $DEFAULT_COUNT = ${DEFAULT_WINDOW}s)"
 
 : > "$SSH_LOG"
-FM_SSH_ALIVE_INTERVAL=7 FM_SSH_ALIVE_COUNT_MAX=2 fm_on ios fm-probe-two.sh >/dev/null
+FM_SSH_CONNECT_TIMEOUT=5 FM_SSH_ALIVE_INTERVAL=7 FM_SSH_ALIVE_COUNT_MAX=2 fm_on ios fm-probe-two.sh >/dev/null
 OVERRIDE_ARGV=$(tail -n 1 "$SSH_LOG")
+assert_contains "$OVERRIDE_ARGV" 'ConnectTimeout=5' "FM_SSH_CONNECT_TIMEOUT override was not honored on the ssh transport"
 assert_contains "$OVERRIDE_ARGV" 'ServerAliveInterval=7' "FM_SSH_ALIVE_INTERVAL override was not honored on the ssh transport"
 assert_contains "$OVERRIDE_ARGV" 'ServerAliveCountMax=2' "FM_SSH_ALIVE_COUNT_MAX override was not honored on the ssh transport"
-pass "fm-on's dead-peer detection window is env-overridable"
+pass "fm-on's connect timeout and dead-peer detection windows are env-overridable"
 
 SSH_CALLS_BEFORE_INVALID=$(cat "$SSH_COUNT")
 set +e
+INVALID_TIMEOUT_OUT=$(FM_SSH_CONNECT_TIMEOUT=0 fm_on ios fm-probe-two.sh 2>&1)
+INVALID_TIMEOUT_RC=$?
+INVALID_TIMEOUT_NAN_OUT=$(FM_SSH_CONNECT_TIMEOUT=not-a-number fm_on ios fm-probe-two.sh 2>&1)
+INVALID_TIMEOUT_NAN_RC=$?
 INVALID_INTERVAL_OUT=$(FM_SSH_ALIVE_INTERVAL=0 fm_on ios fm-probe-two.sh 2>&1)
 INVALID_INTERVAL_RC=$?
 INVALID_COUNT_OUT=$(FM_SSH_ALIVE_COUNT_MAX=not-a-number fm_on ios fm-probe-two.sh 2>&1)
 INVALID_COUNT_RC=$?
 set -e
+[ "$INVALID_TIMEOUT_RC" -eq 1 ] || fail "a zero FM_SSH_CONNECT_TIMEOUT was accepted (got exit $INVALID_TIMEOUT_RC)"
+[ "$INVALID_TIMEOUT_NAN_RC" -eq 1 ] || fail "a non-integer FM_SSH_CONNECT_TIMEOUT was accepted (got exit $INVALID_TIMEOUT_NAN_RC)"
 [ "$INVALID_INTERVAL_RC" -eq 1 ] || fail "a zero FM_SSH_ALIVE_INTERVAL was accepted (got exit $INVALID_INTERVAL_RC)"
 [ "$INVALID_COUNT_RC" -eq 1 ] || fail "a non-integer FM_SSH_ALIVE_COUNT_MAX was accepted (got exit $INVALID_COUNT_RC)"
+assert_contains "$INVALID_TIMEOUT_OUT" 'FM_SSH_CONNECT_TIMEOUT must be a positive integer' "invalid connect timeout did not explain its constraint"
+assert_contains "$INVALID_TIMEOUT_NAN_OUT" 'FM_SSH_CONNECT_TIMEOUT must be a positive integer' "non-integer connect timeout did not explain its constraint"
 assert_contains "$INVALID_INTERVAL_OUT" 'FM_SSH_ALIVE_INTERVAL must be a positive integer' "invalid interval did not explain its constraint"
 assert_contains "$INVALID_COUNT_OUT" 'FM_SSH_ALIVE_COUNT_MAX must be a positive integer' "invalid count did not explain its constraint"
-[ "$(cat "$SSH_COUNT")" -eq "$SSH_CALLS_BEFORE_INVALID" ] || fail "invalid keepalive configuration launched ssh"
-pass "fm-on rejects invalid dead-peer settings before launching ssh"
+[ "$(cat "$SSH_COUNT")" -eq "$SSH_CALLS_BEFORE_INVALID" ] || fail "invalid transport configuration launched ssh"
+pass "fm-on rejects invalid connect timeout and dead-peer settings before launching ssh"
+
+# Real unreachable-peer regression test using non-routable address ssh wrapper:
+# against an unreachable host (e.g. 10.255.255.1), OpenSSH connect timeout must
+# be passed down and bound the failure window to a short duration, returning exit 255.
+cat > "$FAKEBIN/ssh-unreachable" <<'SH'
+#!/usr/bin/env bash
+exec ssh -F /dev/null -o HostName=10.255.255.1 -o BatchMode=yes \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
+SH
+chmod +x "$FAKEBIN/ssh-unreachable"
+
+start_unreachable=$(date +%s)
+set +e
+unreachable_out=$(FM_SSH_BIN="$FAKEBIN/ssh-unreachable" FM_SSH_CONNECT_TIMEOUT=1 fm_on ios fm-probe-two.sh 2>&1)
+unreachable_rc=$?
+set -e
+elapsed_unreachable=$(( $(date +%s) - start_unreachable ))
+[ "$unreachable_rc" -eq 255 ] || fail "unreachable host did not exit with 255 (got $unreachable_rc, out: $unreachable_out)"
+[ "$elapsed_unreachable" -le 5 ] || fail "unreachable host took too long to fail (${elapsed_unreachable}s > 5s bound)"
+assert_contains "$unreachable_out" 'timed out' "unreachable host output did not indicate timeout: $unreachable_out"
+pass "fm-on fails fast within bounded connect timeout against an unreachable host"
 
 out=$(TOP_SECRET='must-not-cross' fm_on remote-mac fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "remote FM_HOME was not explicit"

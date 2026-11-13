@@ -46,9 +46,9 @@ Provisioning checks any available supported backend; launch checks the selected 
 `fm-on.sh` adds its own protections:
 
 - On every call, it also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns.
-- It arms bounded SSH dead-peer detection, so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely.
+- It arms a bounded SSH connect timeout and dead-peer detection, so an unreachable or vanished host fails within a bounded window instead of hanging indefinitely.
 
-Its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
+Its [script header](../bin/fm-on.sh) owns the connect timeout and keepalive defaults and environment overrides.
 
 ### Remote clone and entrypoint
 
