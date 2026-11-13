@@ -92,7 +92,7 @@ projects/            cloned repos; gitignored; read-only except under hard rule 
 state/               runtime records and signals; gitignored
   <id>.status        append-only wake events, not current-state truth; bin/fm-classify-lib.sh owns their syntax
   <id>.turn-ended    touched by turn-end hooks
-  <id>.progress      touched for observed native-harness activity inside one Pi turn; bin/fm-busy-event.sh owns its generation binding and bin/fm-watch.sh reads it beside turn-ended for the busy-age bound only, never as a completed turn
+  <id>.progress      worker liveness marker; docs/architecture.md "Busy state is semantic, per adapter" owns its producers and consumers
   <id>.busy-state <id>.busy-gen   semantic busy-state record (one line, atomically replaced) and its per-incarnation gen sidecar; bin/fm-busy-event.sh is the only writer and bin/fm-busy-lib.sh owns the record format and classification; arming again replaces the previous incarnation so late events carrying its gen are rejected as stale; removed by retire and teardown
   <id>.model-stream <id>.model-stream-order <id>.model-progress   opt-in Pi foreground model-stream evidence, the request ordering record that admits only a strictly newer open and fences progress and close to the request it names even after that evidence clears, and the separate normal-model progress anchor the opted-in busy-age bound reads; written only by bin/fm-busy-event.sh, with bin/fm-busy-lib.sh owning the record format and trust; removed by arm, retire, and teardown; docs/configuration.md "Environment variables" owns activation
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown

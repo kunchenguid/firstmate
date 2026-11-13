@@ -182,6 +182,23 @@ test_main_direct_terminal_presentation_receipt() {
   pass "main direct terminal presentation has a durable receipt"
 }
 
+test_recent_native_progress_defers_inactive_outcome() {
+  local gen
+  make_world native-progress
+  write_child "$MAIN" child 'working: long native-harness run'
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$MAIN/state" child) || fail "could not arm native progress"
+  "$ROOT/bin/fm-busy-event.sh" progress "$MAIN/state" child --gen "$gen" || fail "could not record native progress"
+
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  assert_withheld "recent native progress"
+
+  age "$MAIN/state/child.progress"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "stale native progress suppressed the inactive outcome"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "stale native progress suppressed the supervisor wake"
+  pass "recent native progress defers inactive outcomes until activity becomes stale"
+}
+
 arm_claude_busy() { # <home> <id> <busy|idle>
   local home=$1 id=$2 state=$3
   sed 's/^harness=.*/harness=claude/' "$home/state/$id.meta" > "$home/state/$id.meta.new"
@@ -1478,6 +1495,7 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_recent_native_progress_defers_inactive_outcome
 test_busy_agent_withholds_terminal_outcome
 test_relaunched_idle_agent_withholds_terminal_outcome
 test_idle_finished_agent_keeps_terminal_outcome

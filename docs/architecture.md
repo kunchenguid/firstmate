@@ -124,6 +124,7 @@ Fresh stale panes use the same current-state read before trusting the status log
 No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
+The scan treats updates to task metadata, status, `state/<id>.turn-ended`, or `state/<id>.progress` as recent activity, so inner-turn progress defers inactive reconciliation during a long run.
 It withholds that verdict while the task's endpoint carries a live busy agent or a newer incarnation than the last status line (the script header owns the exact rule).
 Because a terminal outcome is a captain-facing claim, two rules bound what may be built from that read, and which one applies depends on where the reader sourced the state. A state sourced from the pipeline's own RUN STEP is authoritative: the crew's last self-declared word never vetoes it, so a run that failed after the crew wrote `done:` still reaches the captain instead of reaching nobody. A state sourced from the STATUS LOG is built only when that same self-declared word does not contradict it, because there the two records are genuinely comparable and a disagreement is left to ordinary supervision. Either way its pull-request identity comes from the same record as the state rather than from a separately recorded task PR, and a scout, which delivers no pull request, carries none on either path.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
@@ -295,6 +296,11 @@ Missing, malformed, stale, untrusted, or unverified semantic state is unknown, n
 Consumers deciding whether work resumed act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
+For Pi, pi-signed, and omp crewmates and scouts, the extension emits that notification only when it records idle at the run boundary described above, using the busy-state writer to commit both under one lock.
+Inner `turn_end` events only refresh the generation-bound `state/<id>.progress` liveness marker, throttled to once per second and dispatched without awaiting the helper.
+Pi's `codex-native:progress` events share that progress path.
+The watcher uses this marker alongside the completion notification for its busy-turn wedge bound; see [event-driven supervision](#event-driven-supervision) for its use by inactive reconciliation.
+The run-boundary notification and inner-turn progress behavior are covered by `tests/fm-busy-adapter-wiring.test.sh` and `tests/fm-omp-harness.test.sh`.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
 Delivery checks deliberately remain outside this contract: pane-backed submit acknowledgement and the away-mode supervisor busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, T3 Code uses adapter-native status and turn results, and `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.

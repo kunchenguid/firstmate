@@ -6913,9 +6913,12 @@ EOF
 // continue automatically - auto-retries, auto-compaction retries, tool
 // loops, and queued continuations all keep the run un-settled, and a settle
 // that raced another extension's fresh run keeps state busy via isIdle().
+// The watcher notification belongs to that same settle boundary:
+// agent_settled writes idle and touches state/<id>.turn-ended under one writer
+// lock (fm-busy-event.sh apply --turn-ended), like Claude's Stop hook.
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
-// tool calls) and stays a wake NOTIFICATION touch for the watcher, never
-// current-state truth.
+// tool calls), so it only refreshes state/<id>.progress, the liveness marker
+// the watcher's wedge bound reads; it never wakes the primary mid-run.
 import { execFile } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const notifyTurnEnd = $busy_notify_turnend;
@@ -6923,11 +6926,12 @@ const streamMonitoring = $pi_stream_monitoring;
 const excludeTools = "$EXCLUDE_TOOLS".split(",").filter(Boolean);
 const excludeFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$CONFIG/crew-exclude-tools");
 const statusFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$STATE/$ID.status");
-const busyEvent = (state: string, event: string) =>
+const busyEvent = (state: string, event: string, turnEnded = false) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
+      ...(turnEnded ? ["--turn-ended"] : []),
     ], () => resolve());
   });
 export default function (pi: any) {
@@ -7007,20 +7011,22 @@ export default function (pi: any) {
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     await closeStream();
-    return busyEvent("idle", "agent-settled");
+    return busyEvent("idle", "agent-settled", notifyTurnEnd);
   });
-  pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["$TURNEND"]); });
-  // A native harness can make progress inside one Pi turn. This separate
-  // marker prevents false wedge alarms without fabricating a completed turn.
+  // Inner turns and native harnesses make progress inside one Pi run. This
+  // separate marker prevents false wedge alarms without fabricating a
+  // completed turn.
   let lastProgress = 0;
-  pi.events?.on?.("codex-native:progress", () => {
+  const refreshProgress = () => {
     const now = Date.now();
     if (now - lastProgress < 1000) return;
     lastProgress = now;
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "progress", "$STATE_REAL", "$ID", "--gen", "$BUSY_GEN",
     ]);
-  });
+  };
+  pi.on("turn_end", refreshProgress);
+  pi.events?.on?.("codex-native:progress", refreshProgress);
 }
 EOF
     ;;
@@ -7040,25 +7046,38 @@ EOF
 // queued follow-ups, and a session_stop-forced continuation. ctx.isIdle() is
 // deliberately NOT consulted: at a natural TUI agent_end it still reads false
 // because session_stop is awaited before the session settles, so gating on it
-// would leave every completed turn recorded busy. "turn_end" fires at every
-// inner turn boundary and stays a wake NOTIFICATION touch for the watcher,
-// never current-state truth.
+// would leave every completed turn recorded busy.
+// The watcher notification belongs to that same run boundary: the final
+// agent_end writes idle and touches state/<id>.turn-ended under one writer lock
+// (fm-busy-event.sh apply --turn-ended), like Claude's Stop hook. "turn_end"
+// fires at every inner turn boundary (one LLM response plus its tool calls),
+// so it only refreshes state/<id>.progress, the liveness marker the watcher's
+// wedge bound reads; it never wakes the primary in the middle of a run.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
-const busyEvent = (state: string, event: string) =>
+const busyEvent = (state: string, event: string, turnEnded = false) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+      ...(turnEnded ? ["--turn-ended"] : []),
     ], () => resolve());
   });
 export default function (pi: any) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_end", (event: any) => {
     if (event && event.willContinue === true) return;
-    return busyEvent("idle", "agent-end");
+    return busyEvent("idle", "agent-end", notifyTurnEnd);
   });
-  pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["$TURNEND"]); });
+  let lastProgress = 0;
+  pi.on("turn_end", () => {
+    const now = Date.now();
+    if (now - lastProgress < 1000) return;
+    lastProgress = now;
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "progress", "$STATE_REAL", "$ID", "--gen", "$BUSY_GEN",
+    ]);
+  });
 }
 EOF
     ;;

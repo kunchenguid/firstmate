@@ -198,27 +198,33 @@ test_pi_extension_semantic_lifecycle() {
   [ ! -e "$state/$id.turn-ended" ] || fail "native progress fabricated a completed turn"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "native progress changed semantic state: $out"
+  rm -f "$state/$id.progress"
   out=$(drive_pi_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
+  [ ! -e "$state/$id.turn-ended" ] || fail "an inner turn_end must not wake the primary mid-run"
+  [ -f "$state/$id.progress" ] || fail "an inner turn_end must refresh the native progress marker"
   out=$(classify pi "$id" "$state")
-  [ "$out" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge, got '$out'"
+  [ "$out" = "busy fm-spawn" ] || fail "turn_end must not change busy state, got '$out'"
 
   out=$(drive_pi_ext "$ext" settle-idle) || fail "agent_settled drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "agent_settled with isIdle must classify 'idle pi-ext', got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "a settled run must touch the turn-ended notification"
 
   out=$(drive_pi_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy pi-ext" ] || fail "agent_start must classify 'busy pi-ext', got '$out'"
 
+  rm -f "$state/$id.turn-ended"
   out=$(drive_pi_ext "$ext" settle-continuing) || fail "continuing settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy pi-ext" ] || fail "a settle while another run continues must stay busy, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a settle while another run continues must not notify"
 
   out=$(drive_pi_ext "$ext" settle-idle) || fail "final settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
-  pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+  [ -f "$state/$id.turn-ended" ] || fail "the final settle must touch the turn-ended notification"
+  pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), notifies only at settle, and inner turn_end refreshes progress"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
