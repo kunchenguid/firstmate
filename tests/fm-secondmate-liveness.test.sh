@@ -685,18 +685,45 @@ test_sweep_never_acts_on_transient_unreadability() {
   pass "sweep: transient target unreadability never licenses recovery"
 }
 
-test_sweep_reports_missing_endpoint_relaunch_failure() {
-  local w fb tmuxfb log out
-  w=$(new_world sweep-missing-failure)
-  add_sm_home "$w" sm1 firstmate:fm-sm1 pi
-  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
-  log="$w/calls.log"; : > "$log"
+test_sweep_reports_relaunch_failure_and_clears_uncertainty() {
+  local w fb tmuxfb log out mode cause
+  for mode in missing zsh; do
+    case "$mode" in
+      missing) cause='recorded endpoint confidently missing' ;;
+      zsh) cause='confirmed agent absence on existing endpoint' ;;
+    esac
+    w=$(new_world "sweep-$mode-failure")
+    add_sm_home "$w" sm1 firstmate:fm-sm1 pi
+    fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+    log="$w/calls.log"; : > "$log"
+    printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-sm1"
+    : > "$w/home/state/.secondmate-liveness-uncertain-alert-sm1"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" FM_TEST_FAIL_NEW_WINDOW=1)
+    out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" "$mode" "$log" FM_TEST_FAIL_NEW_WINDOW=1)
 
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after recorded endpoint confidently missing" \
-    "a failed missing-endpoint relaunch should retain its authorizing cause"
-  pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
+    assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after $cause" \
+      "a failed $mode-endpoint relaunch should retain its authorizing cause"
+    assert_contains "$(cat "$log")" new-window "the $mode endpoint must reach the failing relaunch"
+    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-sm1" ] \
+      || fail "a definitive $mode probe did not clear uncertainty after failed recovery"
+    [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-sm1" ] \
+      || fail "a definitive $mode probe left the old alert suppressing later episodes"
+
+    FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" bash -eu -c '
+      . "$1/bin/fm-secondmate-liveness-lib.sh"
+      fm_sm_live_require_locks
+      for count in 1 2; do
+        rc=0
+        fm_secondmate_liveness_uncertain_record sm1 unreadable 3 || rc=$?
+        [ "$rc" -eq 1 ]
+        [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq "$count" ]
+      done
+      fm_secondmate_liveness_uncertain_record sm1 unreadable 3
+      [ "$FM_SM_LIVE_UNCERTAIN_COUNT" -eq 3 ]
+      [ "$FM_SM_LIVE_UNCERTAIN_EPISODE" != stale-episode ]
+    ' bash "$ROOT" || fail "a fresh uncertain episode after $mode recovery failed to reach the alert threshold"
+  done
+  pass "sweep: failed dead or missing recovery retains its cause and rearms uncertainty alerts"
 }
 
 test_sweep_never_acts_on_unverified_harness_dead_reading() {
@@ -1016,7 +1043,7 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
-test_sweep_reports_missing_endpoint_relaunch_failure
+test_sweep_reports_relaunch_failure_and_clears_uncertainty
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
