@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [several Codex accounts](#several-codex-accounts-configcodex-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1753,8 +1753,30 @@ A task with no recorded account, or one whose account is no longer declared, ref
 
 The list covers Claude ships and scouts only.
 A local secondmate's own agent never draws from it: under a list it needs its own [per-secondmate account pin](#per-secondmate-account-pins), and `--account` refuses for every secondmate, local or remote.
-Other runners ignore the list, and `--account` refuses for them.
+Other runners ignore the list, and `--account` refuses for them unless their own list exists, such as [`config/codex-accounts`](#several-codex-accounts-configcodex-accounts).
 Like the single pin, the list is not inherited into secondmate homes.
+
+### Several Codex accounts (config/codex-accounts)
+
+A Codex login lives in the directory `CODEX_HOME` names, `~/.codex` by default.
+A home with more than one ChatGPT plan can let each Codex ship and scout launch on whichever declared Codex home has quota to spare.
+Create `config/codex-accounts` with one account per line, each `ordinary` (the default `~/.codex`, launched with `CODEX_HOME` unset) or the absolute path of an existing Codex home:
+
+```text
+ordinary
+/home/me/.codex-second
+```
+
+Sign each one in once with `CODEX_HOME=<path> codex login`.
+A Codex home holds that account's whole Codex configuration, not only its login, so give a second home the `config.toml` settings its workers need; Codex asks once per home to trust a repository.
+
+The list follows the [Claude account list](#several-claude-accounts-configclaude-accounts) contract with these Codex specifics:
+
+- File format, opt-in behavior, the required `--account <entry>` on every Codex ship or scout spawn, the refusals, the `account=` record, and relaunch reuse are the same; without the list every Codex launch is unchanged and `--account` refuses.
+- [`bin/fm-codex-account-quota.sh`](../bin/fm-codex-account-quota.sh) measures each entry by running `quota-axi --provider codex --profile-only` under that entry's `CODEX_HOME`, and the [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) procedure chooses the entry at intake.
+- The sign-in check is `codex login status`, run with the same stripped environment, and a signed-out entry refuses.
+- The launch sets `CODEX_HOME` to the chosen entry, or unsets it for `ordinary`, and unsets `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN`, which Codex would otherwise spend instead of the stored login; `OPENAI_API_KEY` is not a Codex login and stays.
+- Codex has no single-account pin, so a Codex secondmate's own agent ignores the list and launches as it would without it, while `--account` still refuses for every secondmate.
 
 ### Per-secondmate account pins
 

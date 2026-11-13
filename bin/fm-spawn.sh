@@ -75,8 +75,8 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, effort, and a declared Claude account may change, which is what
-#   makes a harness switch one ordinary relaunch. It refuses unless the
+#   model, effort, and a declared Claude or Codex account may change, which
+#   is what makes a harness switch one ordinary relaunch. It refuses unless the
 #   recorded endpoint is positively agent-free on a backend with both a
 #   recovery-grade agent-state classifier and replacement-agent support
 #   (tmux or herdr), and clears the previous harness's per-task wiring
@@ -516,13 +516,15 @@
 #   Pins are never inherited; remote per-mate overrides refuse locally.
 #   T3 Code refuses a pin because its provider instance owns the account.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
-# Claude account list (config/claude-accounts, --account <entry>):
-#   Opt-in and Claude-only. When the list is present, a Claude ship or scout
-#   spawn must name one declared entry with --account, chosen at intake, and
-#   that entry is checked, launched, and recorded exactly like a pin; a
-#   relaunch reuses the recorded entry unless --account moves it. Without the
-#   list, --account refuses and nothing else changes. docs/configuration.md
-#   "Several Claude accounts" owns the contract.
+# Declared account lists (config/claude-accounts, config/codex-accounts,
+# --account <entry>):
+#   Opt-in, per runner. When a runner's list is present, a ship or scout spawn
+#   of that runner must name one declared entry with --account, chosen at
+#   intake, and that entry is checked, launched, and recorded exactly like a
+#   pin (a Codex entry selects CODEX_HOME); a relaunch reuses the recorded entry
+#   unless --account moves it. Without the list, --account refuses and nothing
+#   else changes. docs/configuration.md "Several Claude accounts" and "Several
+#   Codex accounts" own the contract.
 # Per-secondmate omp profile (config/secondmate-accounts/<id>/omp-profile):
 #   Opt-in, and read only for a local secondmate's own omp agent;
 #   bin/fm-omp-profile-lib.sh owns the file and its refusals. A pinned launch
@@ -1216,10 +1218,10 @@ fi
   echo "error: --account requires a non-empty value" >&2
   exit 1
 }
-# A secondmate, local or remote, launches on its own per-mate pin, so --account
-# is refused here, before the remote route could ignore it.
+# A secondmate, local or remote, never launches on a declared account list, so
+# --account is refused here, before the remote route could ignore it.
 [ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
-  echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
+  echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} never launches on a declared account list (a Claude secondmate uses its own config/secondmate-accounts/<id>/claude-account pin)" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -3530,9 +3532,9 @@ RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
 WORKER_ACCOUNT_MATE=
 [ "$KIND" != secondmate ] || WORKER_ACCOUNT_MATE=$ID
-# A declared Claude account list (config/claude-accounts) needs the entry this
-# launch spends: --account on a fresh spawn, and on a relaunch that flag or
-# else the account the task already records.
+# A declared account list (config/claude-accounts, config/codex-accounts)
+# needs the entry this launch spends: --account on a fresh spawn, and on a
+# relaunch that flag or else the account the task already records.
 WORKER_ACCOUNT_REQUEST=$ACCOUNT_ARG
 if [ "$RELAUNCH" -eq 1 ]; then
   WORKER_ACCOUNT_REQUEST=$(fm_worker_account_relaunch_request "$HARNESS" "$CONFIG" "$RELAUNCH_PRIOR_HARNESS" \
@@ -7693,16 +7695,18 @@ esac
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-# A home's worker account pin replaces that forwarding: the launch names the
-# pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login.
+# A home's worker account pin or declared account replaces that forwarding:
+# the launch names the selected root (or unsets the variable for the ordinary
+# account) and sheds the environment credentials the runner would spend
+# instead of the root's login.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
-  claude)
+  claude | codex)
+    WORKER_ACCOUNT_VAR=$(fm_worker_account_root_var "$HARNESS")
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
-      LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+      LAUNCH="$(fm_worker_account_shed "$HARNESS") $WORKER_ACCOUNT_VAR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     else
-      LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"
+      LAUNCH="$(fm_worker_account_shed "$HARNESS") -u $WORKER_ACCOUNT_VAR $LAUNCH"
     fi
     ;;
   pi | pi-signed)
