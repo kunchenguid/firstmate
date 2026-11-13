@@ -35,7 +35,8 @@ make_lease_case() {
   fb="$dir/fakebin"
   mkdir -p "$d" "$fb" "$dir/user-home"
   fm_test_spawn_home "$home" "$harness"
-  fm_git_worktree "$proj" "$wt" "slot-$name"
+  fm_git_init_commit "$proj"
+  git clone -q "$proj" "$wt"
   fm_test_spawn_brief "$home" "$name" "Exercise the Herdr task-copy lease for $name."
   printf '%s' "$proj" > "$d/cwd"
   printf '%s' "$proj" > "$d/fg"
@@ -71,6 +72,13 @@ case "${1:-} ${2:-}" in
   'pane close') : > "$D/pane-gone"; exit 0 ;;
   'pane get')
     [ ! -f "$D/pane-gone" ] || { printf '{"error":{"code":"pane_not_found"}}\n'; exit 0; }
+    if [ -f "$D/cd-sent" ] && [ -f "$D/delay-reads" ]; then
+      reads=$(cat "$D/reads" 2>/dev/null || printf 0)
+      reads=$((reads + 1)); printf '%s' "$reads" > "$D/reads"
+      if [ "$reads" -ge "$(cat "$D/delay-reads")" ]; then
+        bash -c 'cd -- "$1" && pwd -P > "$2"' bash "$FM_FAKE_SLOT" "$D/fg"
+      fi
+    fi
     printf '{"result":{"pane":{"pane_id":"%s","cwd":"%s","foreground_cwd":"%s"}}}\n' \
       "${3:-}" "$(cat "$D/cwd")" "$(cat "$D/fg")"
     exit 0 ;;
@@ -81,7 +89,14 @@ case "${1:-} ${2:-}" in
     esac
     case "$payload" in
       'cd -- '*) path=${payload#cd -- }; path=${path#\'}; path=${path%\'}
-        printf '%s' "$path" > "$D/cwd"; printf '%s' "$path" > "$D/fg" ;;
+        sends=$(cat "$D/cd-sends" 2>/dev/null || printf 0)
+        sends=$((sends + 1)); printf '%s' "$sends" > "$D/cd-sends"
+        : > "$D/cd-sent"
+        [ ! -f "$D/never-moves" ] || exit 0
+        [ ! -f "$D/delay-reads" ] || exit 0
+        [ ! -f "$D/drop-first-cd" ] || [ "$sends" -gt 1 ] || exit 0
+        bash -c 'cd -- "$1" && pwd -P > "$2"' bash "$path" "$D/cwd"
+        cp "$D/cwd" "$D/fg" ;;
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         [ ! -f "$D/launch-send-fails" ] || exit 1
         printf '%s\n' "$payload" > "$D/launched-command"
@@ -92,7 +107,7 @@ case "${1:-} ${2:-}" in
     if [ -f "$D/herdr-agent-live" ]; then
       printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
     else
-      printf '{"error":{"code":"agent_not_found"}}\n'
+      printf '{"result":{"agent":{"agent_status":"shell-starting"}}}\n'
     fi
     exit 0 ;;
   'workspace list') printf '{"result":{"workspaces":[]}}\n'; exit 0 ;;
@@ -141,6 +156,7 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
     || fail "the interactive treehouse get opened a nested shell the restore cannot see"
   [ "$(cat "$dir/fake/cwd")" = "$dir/slot" ] \
     || fail "the pane's restorable top-level cwd is '$(cat "$dir/fake/cwd")', not the task copy"
+  [ "$(cat "$dir/fake/cd-sends")" = 1 ] || fail "an immediately ready pane received a redundant cd"
   assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
   pass "a fresh herdr spawn leases the copy and moves the pane's top-level shell into it"
 }
@@ -235,6 +251,47 @@ test_abort_keeps_the_lease_while_the_pane_is_present() {
   assert_contains "$LEASE_OUT" "stays leased to $id" "an abort with its pane still present did not name the lease it keeps"
   pass "an abort whose pane is still present keeps the lease and names it"
 }
+
+test_delayed_worktree_entry() {
+  local id=lease-delayed-cd dir out status
+  dir=$(make_lease_case "$id")
+  printf 25 > "$dir/fake/delay-reads"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "delayed cwd should settle after the old 20-read limit"$'\n'"$out"
+  [ "$(cat "$dir/fake/reads")" -ge 25 ] || fail "the delay was not exercised"
+  [ "$(cat "$dir/fake/cd-sends")" = 2 ] || fail "cd was not resent exactly once"
+  pass "Herdr waits past the former deadline for a delayed shell cwd"
+}
+
+test_dropped_worktree_entry() {
+  local id=lease-dropped-cd dir out status
+  dir=$(make_lease_case "$id")
+  : > "$dir/fake/drop-first-cd"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "a dropped first cd should recover"$'\n'"$out"
+  [ "$(cat "$dir/fake/cd-sends")" = 2 ] || fail "cd was not resent exactly once"
+  pass "Herdr recovers a dropped initial cd with one resend"
+}
+
+test_never_moving_worktree_entry() {
+  local id=lease-stuck-cd dir out status
+  dir=$(make_lease_case "$id")
+  : > "$dir/fake/never-moves"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  [ "$status" -ne 0 ] || fail "a pane that never moves was accepted"
+  assert_contains "$out" "not its recorded worktree" "wrong cwd did not refuse"
+  assert_contains "$out" "Herdr pane 'default:%9'" "refusal did not identify the pane"
+  assert_contains "$out" "last foreground_cwd='$dir/project'" "refusal lost the last cwd"
+  assert_contains "$out" "agent_status='shell-starting'" "refusal lost agent status"
+  [ "$(cat "$dir/fake/cd-sends")" = 2 ] || fail "a stuck pane received more than one retry"
+  [ ! -e "$dir/fake/launched-command" ] || fail "a harness started outside its copy"
+  [ ! -e "$dir/home/state/$id.meta" ] || fail "refused spawn published metadata"
+  pass "Herdr refuses a never-moving pane with diagnostic context and no launch"
+}
+
+test_delayed_worktree_entry
+test_dropped_worktree_entry
+test_never_moving_worktree_entry
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell
 test_failed_lease_refuses_without_a_record

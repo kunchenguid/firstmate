@@ -18,7 +18,7 @@ fi
 
 extension_segment=${FM_EXTENSION_BINDING_SEGMENT:-all}
 case "$extension_segment" in
-  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-host-errors|lifecycle-order|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|lifecycle-orphan-readiness|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
+  all|coordinator|deadlines|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-host-errors|lifecycle-order|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|lifecycle-orphan-readiness|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
   *) printf 'unknown extension-binding segment: %s\n' "$extension_segment" >&2; exit 64 ;;
 esac
 
@@ -439,19 +439,23 @@ run_extension_section_lane() {
   return "$section_rc"
 }
 
+# The coordinator stops any section lane, including the aggregate run's, that
+# outlives this bound, so no wait inside a section can usefully run longer.
+EXTENSION_SECTION_LANE_MAX_SECONDS=34
+
 run_extension_section_lanes() {
-  local section result_file section_rc timeout_seconds deadline index remaining launched total maximum_sections
+  local section result_file section_rc timeout_seconds deadline deadline_epoch index remaining launched total maximum_sections
   local active maximum_concurrent
   local -a sections=("$@")
   local -a section_pids=()
   local -a section_results=()
   local -a section_complete=()
   local section_result_root
-  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-34}
+  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-$EXTENSION_SECTION_LANE_MAX_SECONDS}
   case "$timeout_seconds" in
     ''|*[!0-9]*) return 64 ;;
   esac
-  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 35 ] || return 64
+  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -le "$EXTENSION_SECTION_LANE_MAX_SECONDS" ] || return 64
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
   # Sixteen selectors are validated here. The bounded aggregate keeps its
@@ -463,17 +467,18 @@ run_extension_section_lanes() {
   [ "$total" -le "$maximum_sections" ] || return 64
   launched=0
   active=0
+  deadline=$((SECONDS + timeout_seconds))
+  deadline_epoch=$(($(date +%s) + timeout_seconds))
   while [ "$launched" -lt "$total" ] && [ "$active" -lt "$maximum_concurrent" ]; do
     section=${sections[$launched]}
     result_file="$section_result_root/$launched.result"
-    run_extension_section_lane "$result_file" "$section" &
+    FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH="$deadline_epoch" run_extension_section_lane "$result_file" "$section" &
     section_pids+=("$!")
     section_results+=("$result_file")
     section_complete+=("")
     launched=$((launched + 1))
     active=$((active + 1))
   done
-  deadline=$((SECONDS + timeout_seconds))
   remaining=$total
   while [ "$remaining" -gt 0 ]; do
     for index in "${!section_pids[@]}"; do
@@ -505,7 +510,7 @@ run_extension_section_lanes() {
     while [ "$launched" -lt "$total" ] && [ "$active" -lt "$maximum_concurrent" ]; do
       section=${sections[$launched]}
       result_file="$section_result_root/$launched.result"
-      run_extension_section_lane "$result_file" "$section" &
+      FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH="$deadline_epoch" run_extension_section_lane "$result_file" "$section" &
       section_pids+=("$!")
       section_results+=("$result_file")
       section_complete+=("")
@@ -569,7 +574,7 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
     (
       trap - EXIT HUP INT
       trap 'terminate_section_lanes; exit 143' TERM
-      run_extension_section_lanes lifecycle-flow lifecycle-order remote-lifecycle example
+      run_extension_section_lanes lifecycle-flow lifecycle-order remote-lifecycle example deadlines
     ) &
     section_coordinator_pid=$!
   fi
@@ -647,6 +652,154 @@ if [ "$extension_segment" = all ] || [ "$extension_segment" = coordinator ]; the
   exit 0
 fi
 
+# Freeze the real host and invocation group across each deadline. All cases
+# have private homes and run concurrently within the existing aggregate bound.
+if section_enabled deadlines; then
+P_SLEEP="$PACKAGES/sleep"
+make_package "$P_SLEEP" org.example.sleep ext-sleep
+if ! python3 - "$ROOT" "$TMP_ROOT" "$P_SLEEP" <<'PY'
+import concurrent.futures, json, os, pathlib, shutil, signal, subprocess, sys, time
+
+root, temporary, package = map(pathlib.Path, sys.argv[1:])
+host = root / "bin/fm-extension.mjs"
+
+def wait_for(predicate):
+    for _ in range(400):
+        if predicate(): return
+        time.sleep(.025)
+    raise AssertionError("deadline fixture did not reach its control boundary")
+
+def run_case(kind):
+    case = temporary / ("deadline-" + kind)
+    case.mkdir()
+    home = case / "home"
+    home.mkdir()
+    env = dict(os.environ, FM_HOME=str(home))
+    marker, release = case / "marker", case / "release"
+    process = None
+    group = None
+    host_pid = None
+    try:
+        if kind == "startup":
+            owner, ready = case / "owner", case / "ready"
+            token = "sha256:" + "a" * 64
+            entrypoint = case / "entrypoint"
+            entrypoint.write_text("#!/bin/sh\nexit 0\n")
+            entrypoint.chmod(0o755)
+            process = subprocess.Popen(["node", str(root / "bin/fm-extension-launch-barrier.mjs"),
+                token, str(owner), str(ready), str(release), str(os.getpid()),
+                str(entrypoint), str(case), "invoke"], start_new_session=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            group = process.pid
+            wait_for(ready.exists)
+            os.killpg(group, signal.SIGSTOP)
+            time.sleep(8)
+            owner.write_text(json.dumps(dict(schema="firstmate.extension-invocation-owner.v1",
+                token=token, phase="group", host_pid=os.getpid(), host_identity="fixture",
+                group_pid=group, group_identity="barrier-token:" + token,
+                extension_id="org.example.sleep", binding_digest="sha256:" + "b" * 64,
+                request_id="sha256:" + "c" * 64, source_id=None, operation="source.poll")))
+            release.write_text(json.dumps(dict(schema="firstmate.extension-invocation-release.v1", token=token)))
+            os.killpg(group, signal.SIGCONT)
+        else:
+            local_package = case / "package"
+            shutil.copytree(package, local_package)
+            if kind == "handshake":
+                (local_package / "scenario").write_text(f"handshake-block\n{marker}\n{release}\n")
+            executable = host
+            if kind == "launch":
+                code = case / "code"
+                shutil.copytree(root / "bin", code / "bin")
+                barrier = code / "bin/fm-extension-launch-barrier.mjs"
+                barrier.rename(barrier.with_name("original-barrier.mjs"))
+                barrier.write_text('import fs from "node:fs";\n'
+                    f'if (!fs.existsSync({json.dumps(str(marker))})) {{\n'
+                    f'fs.writeFileSync({json.dumps(str(marker))}, String(process.pid));\n'
+                    'process.kill(process.pid, "SIGSTOP"); }\n'
+                    'await import("./original-barrier.mjs");\n')
+                executable = code / "bin/fm-extension.mjs"
+            command = ["node", str(executable), "bind", str(local_package), "--adapter", "ext-sleep",
+                "--trust-same-user-code", "--timeout-ms", "1000"]
+            if kind in ("invoke", "stalled", "suspended-stall"):
+                subprocess.run(command, env=env, check=True, capture_output=True)
+                resolution = subprocess.run(["node", str(host), "resolve-process-event", "ext-sleep"],
+                    env=env, check=True, capture_output=True, text=True).stdout.strip().split("\t")
+                expected = []
+                for flag, value in zip(("--expect-extension", "--expect-version", "--expect-capability-version",
+                        "--expect-package-digest", "--expect-binding-digest"), resolution[1:]):
+                    expected.extend((flag, value))
+                # The package waits on these paths after stdin is delivered.
+                command = ["node", str(host), "process-event", "ext-sleep", "source.poll",
+                    "--source-id", "sleep-source", "--config-ref", f"active-block|{marker}|{release}", *expected]
+            process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            wait_for(marker.exists)
+            if kind == "launch":
+                group = int(marker.read_text())
+            else:
+                group = os.getpgid(int(marker.read_text()))
+            def invocation_owner():
+                for filename in (home / "state/extension-invocations").glob("*.owner.json"):
+                    owner = json.loads(filename.read_text())
+                    if kind == "launch" or owner["group_pid"] == group:
+                        return owner
+                return None
+            wait_for(invocation_owner)
+            host_pid = invocation_owner()["host_pid"]
+            if kind != "stalled":
+                os.kill(host_pid, signal.SIGSTOP)
+                os.killpg(group, signal.SIGSTOP)
+                time.sleep(4 if kind in ("invoke", "suspended-stall") else 8)
+                if kind != "suspended-stall": release.touch()
+                os.kill(host_pid, signal.SIGCONT)
+                os.killpg(group, signal.SIGCONT)
+        output, error = process.communicate(timeout=6)
+        if kind in ("stalled", "suspended-stall"):
+            assert process.returncode != 0, "a genuinely stalled invocation succeeded"
+            evidence = json.loads(output)
+            assert evidence["code"] == "timeout", evidence
+            assert evidence["deadline"]["bound"] == "invoke", evidence
+            assert evidence["deadline"]["timeout_ms"] == 1000, evidence
+            if kind == "stalled":
+                assert 1000 <= evidence["deadline"]["elapsed_ms"] < 3000, evidence
+                assert evidence["deadline"]["grace_ms"] == 0, evidence
+            else:
+                assert 5000 <= evidence["deadline"]["elapsed_ms"] < 8000, evidence
+                assert evidence["deadline"]["grace_ms"] == 1000, evidence
+            assert evidence["deadline"]["overrun_ms"] == evidence["deadline"]["elapsed_ms"] - 1000, evidence
+        else:
+            assert process.returncode == 0, (kind, process.returncode, output, error)
+            if kind == "invoke": assert b"active runner completed" in output, output
+        print("ok - real deadline " + kind, flush=True)
+    finally:
+        if host_pid:
+            try: os.kill(host_pid, signal.SIGCONT)
+            except ProcessLookupError: pass
+        if group:
+            try: os.killpg(group, signal.SIGCONT)
+            except ProcessLookupError: pass
+        if process and process.poll() is None:
+            process.send_signal(signal.SIGCONT)
+            process.terminate()
+            try: process.wait(timeout=4)
+            except subprocess.TimeoutExpired: process.kill(); process.wait()
+        if group:
+            try: os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError: pass
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+    futures = [executor.submit(run_case, kind) for kind in ("invoke", "handshake", "launch", "startup", "stalled", "suspended-stall")]
+    failures = []
+    for future in futures:
+        try: future.result()
+        except Exception as error: failures.append(repr(error))
+    assert not failures, "\n".join(failures)
+PY
+then
+  fail "real invocation deadlines did not survive suspension with bounded stall enforcement"
+fi
+pass "invoke, handshake, readiness and release survive suspension while awake stalls time out"
+fi
+
 # --- permanently inert absent-registry path ---------------------------------
 if section_enabled early-bind; then
 # Exercise the executable boundary without requiring Windows: this Bash payload
@@ -655,6 +808,7 @@ if section_enabled early-bind; then
 SHELL_ROOT="$TMP_ROOT/lifecycle shell root"
 mkdir -p "$SHELL_ROOT/bin"
 cp "$HOST" "$SHELL_ROOT/bin/fm-extension.mjs"
+cp "$ROOT/bin/fm-extension-deadline.mjs" "$SHELL_ROOT/bin/"
 cat > "$SHELL_ROOT/bin/fm-procevent.sh" <<'SH'
 [[ -n "$BASH_VERSION" ]] || exit 98
 if [[ "${*: -1}" = reject ]]; then
@@ -2063,6 +2217,7 @@ if section_enabled lifecycle-flow lifecycle-orphan-readiness; then
 P_INVOCATION_CLEANUP="$PACKAGES/orphan-cleanup"
 make_package "$P_INVOCATION_CLEANUP" org.example.invocation-cleanup ext-invocation-cleanup
 H_ORPHAN_READY="$HOMES/orphan-ready"; new_home "$H_ORPHAN_READY"
+fm_test_track_procevent_home "$H_ORPHAN_READY" "$FM_PROCEVENT_CLAIM_ROOT"
 bind_package "$H_ORPHAN_READY" "$P_INVOCATION_CLEANUP" ext-invocation-cleanup >/dev/null
 for orphan_source in orphan-first orphan-second; do
   FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" register-extension ext-invocation-cleanup "$orphan_source" --config-ref silent-result >/dev/null
@@ -2138,18 +2293,43 @@ write_orphan_ready "$orphan_token" "$orphan_dead_pid" "barrier-token:$orphan_tok
 orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
 assert_contains "$orphan_reconcile" "started=2" "dead orphan readiness blocked recovery of two extension sources"
 assert_contains "$orphan_reconcile" "uncertain=0" "recovered extension sources remained uncertain"
+# Reconcile confirms each launch, not its completion. Each recovered runner owns
+# its poll, capture, silent verdict, and terminal retirement, and the two take
+# their verdicts in turn under this home's extension lifecycle lock, so a loaded
+# host stretches the pair past any fixed marker poll. Wait for the recorded
+# runner groups to exit instead, and stop any survivor before failing.
+orphan_runners=()
 for orphan_source in orphan-first orphan-second; do
-  for _ in $(seq 1 200); do
-    [ -f "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" ] && break
-    sleep 0.05
+  orphan_runner=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" 2>/dev/null || true)
+  [ -z "$orphan_runner" ] || orphan_runners+=("$orphan_source:$orphan_runner")
+done
+orphan_wait_seconds=$EXTENSION_SECTION_LANE_MAX_SECONDS
+if [ -n "${FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH:-}" ]; then
+  orphan_remaining=$((FM_EXTENSION_BINDING_LANE_DEADLINE_EPOCH - $(date +%s) - 3))
+  [ "$orphan_remaining" -ge "$orphan_wait_seconds" ] || orphan_wait_seconds=$orphan_remaining
+  [ "$orphan_wait_seconds" -ge 1 ] || orphan_wait_seconds=1
+fi
+orphan_deadline=$((SECONDS + orphan_wait_seconds))
+while :; do
+  orphan_live=()
+  for orphan_runner in "${orphan_runners[@]+"${orphan_runners[@]}"}"; do
+    kill -0 -"${orphan_runner#*:}" 2>/dev/null && orphan_live+=("$orphan_runner")
   done
+  [ "${#orphan_live[@]}" -gt 0 ] && [ "$SECONDS" -lt "$orphan_deadline" ] || break
+  sleep 0.1
+done
+if [ "${#orphan_live[@]}" -gt 0 ]; then
+  # Killing the runner groups strands their detached invocation groups, which
+  # the home sweep's invocation cleanup then reclaims as host-crash residue.
+  for orphan_runner in "${orphan_live[@]}"; do
+    kill -KILL -"${orphan_runner#*:}" 2>/dev/null || true
+  done
+  FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" sweep-home >/dev/null 2>&1 || true
+  fail "recovered source ${orphan_live[*]%%:*} did not finish within ${orphan_wait_seconds}s"
+fi
+for orphan_source in orphan-first orphan-second; do
   assert_present "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" \
     "recovered source $orphan_source never handled its private result"
-  for _ in $(seq 1 200); do
-    [ ! -e "$H_ORPHAN_READY/state/procevent/$orphan_source.source" ] \
-      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" ] && break
-    sleep 0.05
-  done
   assert_absent "$H_ORPHAN_READY/state/procevent/$orphan_source.source" "recovered terminal source did not retire"
   assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" "recovered terminal source retained its claim"
 done
@@ -2245,7 +2425,7 @@ REMOTE_SSH_COUNT="$TMP_ROOT/remote-ssh.count"
 mkdir -p "$H_REMOTE_CONTROL/data" "$H_REMOTE" "$REMOTE_ROOT/bin"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 for remote_file in \
-  fm-extension.mjs fm-extension-launch-barrier.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
+  fm-extension.mjs fm-extension-deadline.mjs fm-extension-launch-barrier.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
   fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
   fm-remote-job-worker.sh; do
   cp "$ROOT/bin/$remote_file" "$REMOTE_ROOT/bin/$remote_file"

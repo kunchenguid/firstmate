@@ -688,6 +688,32 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Claude worker tool exclusions
+
+`config/crew-exclude-tools` reaches a Claude ship or scout launch as `--disallowedTools '<names>'` placed directly before `--append-system-prompt`, because the option is variadic and would otherwise swallow the launch prompt.
+[Worker tool exclusions](../configuration.md#worker-tool-exclusions-configcrew-exclude-tools) owns the contract; this record owns the measurement.
+Verified on 2026-11-06 with Claude Code 2.1.319 on Linux, interactive launches in a tmux pane with tool search on, against a capture-only local server (`ANTHROPIC_BASE_URL`) that records each `/v1/messages` body and answers 529, so no model is called.
+The arms differ only in the `--disallowedTools` value; the figures are the bytes of the JSON `tools` array and of the whole request for the main-agent request. The two repeats of the `Workflow,Artifact,mcp__claude-artifacts` arm matched on tool schema bytes and differed by 12 request bytes.
+
+| Launch | Tools sent | Tool schema bytes | Request bytes |
+| --- | --- | --- | --- |
+| no list, artifacts MCP server connected | 20 | 52064 | 188189 |
+| `Workflow,Artifact,mcp__claude-artifacts` | 12 | 28416 | 161748 |
+| `mcp__claude-artifacts` only (built-in `Artifact` takes its place) | 14 | 70987 | 206684 |
+| `Workflow,Artifact,mcp__claude-artifacts` | 12 | 28416 | 161736 |
+
+Findings that shape the contract:
+
+- A disallowed name is removed from the request's `tools` array, and a disallowed deferred MCP tool's name also leaves the deferred-tool list in the messages, so the saving is not only the schema.
+- `--tools` is not a substitute: naming an allow-list made Claude Code send every connected MCP tool eagerly (65 tools, 139760 schema bytes in the same environment), the opposite of a saving.
+- A server-level entry `mcp__<server>` hides every tool of that server, and with the artifacts server hidden Claude Code supplies a 37098-byte built-in `Artifact` tool, so both names are needed to drop every artifact schema.
+
+The token-free live guard refreshes the per-version evidence and fails naming the Claude Code version if a release stops honoring the flag:
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-tool-exclude-live.test.sh
+```
+
 ## Secondmate busy contract
 
 Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.
@@ -929,6 +955,30 @@ Live validation ran 2026-10-01 on Grok 1.0.46 (2765805b9442) [stable], with foll
 The same run's `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` proved the real idle grok 1.0.46 composer `empty` through tmux and checked that the cursorless re-read was not `pending`.
 The portable owner of the shape is `test_matrix_grok_144_approval_titled_bottom_border` in `tests/fm-composer-lib.test.sh`, which pins the `Grok 4.7 (high)` approval title's idle `empty` on tmux (with the cursor on either the content row or bottom border), herdr, and cmux/orca capability profiles, and typed `pending` on tmux and herdr only.
 It also pins idle `empty` for `Grok 4.6` at all four efforts (`low`, `medium`, `high`, `xhigh`) on tmux only, `unknown` for the tested malformed titles on tmux, rejection of light, heavy, double, and ASCII approval-title boxes on tmux, herdr, and cmux/orca profiles, and Grok 1.0.5's three-column overhang still proving `empty` for a title without the suffix on tmux.
+
+Grok 1.0.77 (50ca579fa996), verified 2026-11-12 on Rex at 80x24, keeps this aligned approval title for `grok-4.7`, `grok-4.6`, and `grok-4.5`, but titles `grok-4.7-build-fast` with a two-word model name: `╰── … ── Grok 4.7 Fast (medium) · always-approve ─╯`.
+The space in `4.7 Fast` failed the typed-title model check, so that idle composer read `unknown` and `exit` and `relaunch` refused it (#8388).
+The accepted delta is that one ` Fast` word after the model version, and only on the ` · always-approve` title; a second word, another word, and the `Fast` title at Grok 1.0.5's overhang stay `unknown`.
+The live check launched `grok --always-approve --model grok-4.7-build-fast --reasoning-effort medium` in a scratch Rex block and read it through `fm_backend_rex_composer_state` from `bin/backends/rex.sh`, with the cursor (row 19) and cursorless.
+Before the change, idle, after one turn, and after a Ctrl+C interrupt each read `unknown`, and a typed draft read `pending-unproven`.
+After the change the same states read:
+
+```text
+idle: cursor_y=19 state=empty cursorless=empty
+after Ctrl+C: cursor_y=19 state=empty cursorless=empty
+typed `draft text not sent`: cursor_y=19 state=pending cursorless=pending
+cleared with Ctrl+U: cursor_y=19 state=empty cursorless=empty
+```
+
+`test_matrix_grok_1077_fast_model_title` in `tests/fm-composer-lib.test.sh` feeds the real styled Rex captures in `tests/fixtures/rex-grok-1.0.77/` through the classifier and pins idle `empty`, typed `pending`, and the unobserved titles `unknown`.
+The live guard launches only the default model, so it does not exercise the `Fast` title; its 1.0.77 result is:
+
+```text
+$ FM_REX_COMPOSER_LIVE=1 bash tests/fm-backend-rex-composer-live-e2e.test.sh
+ok - grok (grok 1.0.77 (50ca579fa996)): real idle composer classifies empty on rex
+ok - grok (grok 1.0.77 (50ca579fa996)): the same idle screen read cursorless is not pending (verdict: empty)
+```
+
 After a Grok upgrade, rerun that live guard and refresh both this record and the 1.0.5 note above: each accepted width is pinned to an observed release, the 1.0.5 overhang has never been live-verified, and neither the approval wording nor either width carries a guarantee across a release.
 
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
@@ -968,6 +1018,7 @@ The footer zone is a property of any envelope a glyph row inside it proves, not 
 The demotion is deliberately ASYMMETRIC: `empty` is the only verdict that authorizes `fm-send` to type into a pane, so the rule may move a verdict toward refusing but never toward `empty`.
 It therefore counts a footer zone only when every row in it is demonstrably furniture - omp's status row, a braille animation row, claude's permission-mode hint row (`⏵⏵ bypass permissions on`), or a row leading with an agent glyph OTHER than the one that proved the envelope, which is what the `→` statusLine is on a `❯` claude pane.
 A run containing unclaimed activity (`Working on request...`, `→ ran npm test (3 failures)`) is not furniture in either row order and keeps invalidating the envelope above it, and a row leading with the SAME glyph the envelope was proven by (`❯ my typed draft`) is a live composer that keeps winning, so a visible draft is never overwritten.
+The one exception, the selected row of Claude 2.1.291's slash-command popup, which leads with that same `❯`, is recorded in [Claude Code 2.1.291 marks the popup's selected row](#claude-code-21291-marks-the-popups-selected-row).
 `test_composer_footer_zone_refuses_rather_than_allows` pins both directions on the bordered-box and separator-pair shapes.
 
 Coverage is the bordered box and the separator pair, the two shapes claude 2.x renders. The opencode left bar is wired into the same rule but is **unexercised**: every left-bar row this repo records leads with plain text, and opencode's own prompt character is `>`, a shell glyph deliberately outside the agent set, so no opencode shape recorded here can prove a left-bar envelope or open a footer zone beneath one.
@@ -1395,6 +1446,23 @@ The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 pro
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
+Projected worktree entry was verified on 2026-11-03 with Herdr 0.9.5 on macOS arm64:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-herdr-projected-cd-live-e2e.test.sh
+```
+
+```text
+ok - Herdr 0.9.5 projected spawn enters its recorded copy (delayed=0)
+ok - Herdr 0.9.5 projected spawn enters its recorded copy (delayed=1)
+```
+
+This token-free guard provisions only a named non-default Herdr lab session, drives the real projected spawn, cd, and cwd assertion, and verifies the exact foreground cwd against the recorded copy.
+On a supported Herdr below the presentation floor, where `fm_backend_herdr_presentation_release_supported` keeps spawns flat, it prints a skip naming the release and exits 0 instead of running the projected cases.
+Its delayed case holds the first real cd behind a 15-second shell command and verifies exactly one resend; its ordinary case verifies no redundant cd.
+The lease fixture returns a disposable clone without accessing a shared Treehouse pool.
+The portable delayed, dropped, and never-moving entry regressions are in `tests/fm-spawn-herdr-lease.test.sh`.
+
 Core read-only probes:
 
 ```sh
@@ -1544,7 +1612,7 @@ The pre-Enter payload proof then judged the typed command unsent, pressed Ctrl+U
 
 The fix captures the FULL VISIBLE VIEWPORT for every herdr adapter composer read (`pane read --source visible [--format ansi]`, `fm_backend_herdr_composer_state` and `fm_backend_herdr_composer_content`): the composer is by definition inside the viewport, and the viewport is the one bound that always contains it.
 The shared inbox pending-line confirmation read (`bin/fm-task-inbox-lib.sh`) stays a bounded tail on every backend, herdr included; its payloads are task lines, not slash commands, so the popup shape does not arise there.
-The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the menu rows never read as typed text.
+The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the unmarked menu rows never read as typed text (Claude Code 2.1.283 through 2.1.289; 2.1.291 marks the selected row, see below).
 Verified live in the lab: with the popup up the state read answers `pending` (previously `empty`) and the payload proof returns `/exit` (previously empty), the submit presses Enter, and the Claude process exits, leaving the shell prompt.
 Growing the window only adds rows above the composer, so the bottom-most-shape selection, the footer zone, and every previously passing verdict are unchanged.
 
@@ -1559,7 +1627,7 @@ ok - fm_backend_herdr_composer_state: a slash-command popup cannot hide a typed 
 ok - fm_backend_herdr_send_text_submit: a typed slash command hidden behind its popup is still proven and submitted
 ```
 
-Live guard (third scenario of the opt-in guard, verifying the agent actually exited):
+Live guard (the `/exit` scenario of the opt-in guard, verifying the agent actually exited):
 
 ```sh
 FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
@@ -1568,6 +1636,66 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
 ```
+
+#### Claude Code 2.1.291 marks the popup's selected row
+
+Measured 2026-10-06 against Herdr 0.8.2 and Claude Code 2.1.289 and 2.1.291 on Haiku 4.5 in isolated `fm-lab-` sessions.
+
+Claude Code 2.1.283, 2.1.284, 2.1.285, 2.1.286, 2.1.288 and 2.1.289 draw the popup's selected row unmarked.
+Claude Code 2.1.291 (2.1.290 is not installed here) draws it as `  ❯ /exit    Exit the CLI`, with the `❯` its composer uses, and indents the other rows to match.
+That row lies below the composer's closing rule, so it became the bottom-most bare agent-glyph row.
+The footer-zone rule deliberately keeps a row that leads with the envelope's own glyph as a live composer, so the popup's first row won the selection and the typed command's read-back was the whole popup list.
+The pre-Enter payload proof then judged `/exit` unsent, pressed Ctrl+U, and reported `send-failed`, so `bin/fm-control.sh exit` and every slash command sent through `bin/fm-send.sh` failed on Herdr.
+The notification row Claude draws under the composer when it runs inside another Claude session is not involved: the failure reproduces without it.
+
+`_fm_composer_select_cursorless` now demotes that row to the envelope above it, through `_fm_composer_bare_is_popup_selection`, only when every condition holds.
+The row lies below the closing row of a glyph-proven envelope.
+That envelope's own glyph row leads with the agent glyph, with no side border to strip (a bordered box keeps its previous reading), and holds typed text opening with `/`, read under the ghost-strip threshold of the calling read (the state read or the payload read), so the read it falls back to is never empty: typed text that read strips as ghost cannot license the demotion.
+The row opens with `/` (or `…`, a name truncated to its column) and carries a gap of two or more spaces before its description, which a numbered-choice dialog row lacks.
+The selected popup row is not always the typed text (typing `/` selects the first command, and a long plugin command name is truncated), so no equality check is made.
+Any other row keeps its previous reading, and none of these can read `empty`.
+Unverified follow-up: a bordered-box composer with the marked popup row below it is out of scope here.
+Its state read still refuses with `pending`, but its payload read still returns the popup list, so a slash command typed into a boxed Claude 2.1.291 composer would still fail the pre-Enter proof; no capture or live run here shows 2.1.291 drawing the box with the popup up.
+The other cursorless backends (cmux, orca, tern, zellij) share this classifier and inherit the change without a live check here.
+
+Portable tests run against real captures (`tests/captures/claude-2.1.291-slash-popup`):
+
+```sh
+tests/fm-composer-lib.test.sh
+tests/fm-backend-herdr.test.sh
+```
+
+These three are before-and-after regressions: each fails against the previous classifier and passes against this one.
+
+```text
+ok - fm_composer_extract_selected_content: Claude 2.1.291's marked popup row is not read as the composer
+ok - fm_backend_herdr_composer_content: Claude 2.1.291's marked popup row is not read as the typed command
+ok - fm_backend_herdr_send_text_submit: a slash command behind Claude 2.1.291's marked popup row is proven and submitted
+```
+
+These two are guards, not regressions: they already pass against the previous classifier, and check that the demotion keeps the refusals that classifier made.
+
+```text
+ok - fm_composer_classify_screen: the popup demotion needs typed slash text and the popup row shape, and never reads empty
+ok - fm_backend_herdr_send_text_submit: with Claude 2.1.291's popup on screen a suffix, a placeholder plus remainder, or a prefix is still refused and cleared
+```
+
+Live guard, which fails against the previous classifier on 2.1.291 at the `/context` scenario (`send-failed`), with `ANTHROPIC_MODEL=claude-haiku-4-5-20251001` selecting the model (the pane banner reads `Haiku 4.5`):
+
+```sh
+FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+```
+
+```text
+ok - live Herdr submit confirm: Claude Code (2.1.291 (Claude Code)) on herdr 0.8.2 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-1098793-23839
+ok - live Herdr submit confirm: Claude Code (2.1.291 (Claude Code)) on herdr 0.8.2 submits a U+2063 away-supervisor payload whose read-back drops the mark
+ok - live Herdr submit confirm: Claude Code (2.1.291 (Claude Code)) on herdr 0.8.2 proves and submits a typed /context behind its command popup and renders its report
+ok - live Herdr submit confirm: Claude Code (2.1.291 (Claude Code)) on herdr 0.8.2 proves and submits a typed /exit behind its command popup
+```
+
+The real control and steer paths, run by hand against Claude Code 2.1.291 in the lab with a scratch home whose task record names the pane, answered as follows.
+`bin/fm-control.sh <id> exit` answered `error: the exit command could not be sent to task <id> on herdr` before the change and `stopped <id> harness=claude backend=herdr ...` after it.
+`bin/fm-send.sh <id> /context` answered `error: text not sent to <endpoint> (herdr send failed; ...)` with exit 1 before the change, and exit 0 after it with Claude's `/context` output rendered.
 
 ### Claude background-task exit picker
 
@@ -3328,6 +3456,21 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 ### Process identity and markers
 
 `ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
+The bun global package (`bun install -g @oh-my-pi/pi-coding-agent`) installs `~/.bun/bin/omp` as a symlink to `dist/cli.js` with a `#!/usr/bin/env bun` shebang, so its process is named `bun` and only its arguments (`bun <path>/omp`) name omp.
+`bin/fm-omp-process-lib.sh` owns both shapes: the exact name `omp`, or `bun` whose argument right after bun is a script named exactly `omp`, including an install path that contains spaces.
+`ompd`, `comp`, and another script followed by an `omp` argument never match.
+`tests/fm-omp-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin these shapes with real processes; the former also drives `bin/fm-harness.sh` and `bin/fm-lock.sh` from a bun-run script.
+
+The token-free guard refreshes the installed-omp evidence and spends no model tokens: it starts omp in JSON-RPC mode with no prompt, and a loaded extension runs `bin/fm-harness.sh` and `bin/fm-lock.sh` from inside that process; the guard passes only when the saved lock names that process's pid.
+
+```text
+FM_OMP_IDENTITY_LIVE=1 bash tests/fm-omp-primary-live-e2e.test.sh
+ok - omp omp/18.12.3 (bun-package): detected as omp and acquired the session lock with no model tokens
+```
+
+Run on 2026-11-10 against omp 18.12.3, the bun package at `~/.bun/bin/omp`, on macOS 26 arm64.
+Before the change the same install detected as `unknown` and the lock refused with `cannot locate harness process in ancestry`.
+The portable cases ran on macOS only; the Linux procps shape (`comm` is the exec name `bun`) is covered by the fake-ps cases in `tests/fm-session-lock-ancestry.test.sh`, not by a Linux run.
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 

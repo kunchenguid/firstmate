@@ -627,7 +627,7 @@ fm_lock_holder_alive() {
   local lockdir=$1 pid=$2
   fm_pid_alive "$pid" || return 1
   _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_time || return 1
-  [ "$lockdir" = "$STATE/.watch.lock" ] || return 0
+  [ "$lockdir" -ef "$STATE/.watch.lock" ] || return 0
   _fm_lock_record_matches "$lockdir" "$pid" pid-identity fm_pid_identity
 }
 
@@ -754,7 +754,7 @@ fm_lock_wait_pending_mutation() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir=
   local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
   FM_LOCK_OWNER_DIR=
   if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
@@ -762,14 +762,23 @@ fm_lock_try_create() {
     FM_LOCK_PENDING_PREVIOUS_PID=$(set +u; printf '%s' "$!")
     # Bash 3.2 defers fatal signals until command substitutions finish, and
     # does not expose a process substitution's pid through $!.
-    ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+    if ! ownerdir=$(fm_lock_owner_dir "$lockdir"); then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
   else
     FM_LOCK_PENDING_PREVIOUS_PID=${!:-}
     # Newer bash can enter EXIT before the child finishes. A process
     # substitution exposes its pid even before read returns the owner path.
-    IFS= read -r ownerdir < <(fm_lock_owner_dir "$lockdir") || return 1
+    if ! IFS= read -r ownerdir < <(fm_lock_owner_dir "$lockdir"); then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
     FM_LOCK_PENDING_PID=$!
-    wait "$FM_LOCK_PENDING_PID" 2>/dev/null || return 1
+    if ! wait "$FM_LOCK_PENDING_PID" 2>/dev/null; then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
     FM_LOCK_PENDING_PREVIOUS_PID=$FM_LOCK_PENDING_PID
     FM_LOCK_PENDING_PID=
   fi
@@ -800,6 +809,10 @@ fm_lock_try_create() {
 
 fm_lock_remove_path() {
   local lockdir=$1 ownerdir
+  if [ "${2:-}" = stale ] && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_reap_dead_directory "$lockdir"
+    return
+  fi
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     rm -f "$lockdir" 2>/dev/null || return 1
@@ -823,6 +836,64 @@ fm_lock_mid_acquire_is_fresh() {
   return 1
 }
 
+# A real directory can contain owner records left inside it instead of being
+# the symlink to one owner record. Age never overrides a live nested holder.
+fm_lock_nested_owners_stale() {
+  local lockdir=$1 base=${2:-${1##*/}} owner pid
+  for owner in "$lockdir/$base.owner."*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    fm_lock_holder_alive "$owner" "$pid" && return 1
+    fm_lock_mid_acquire_is_fresh "$owner" "$pid" && return 1
+  done
+  return 0
+}
+
+# Pin cleanup to the real directory through cwd. Competing reapers may remove
+# its name and publish a successor symlink, but cleanup cannot follow that
+# successor and rmdir cannot unlink it. Unknown contents remain untouched.
+fm_lock_reap_dead_directory() {
+  local lockdir=$1 lock_abs base rc directory_pid nested_owner
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  base=${lock_abs##*/}
+  if (
+    # A failed cd is permanent only while the same real directory remains.
+    # A concurrent reaper's removal or replacement must stay retriable.
+    if [ "$_FM_UNAME" = Darwin ]; then
+      identity_stat=(/usr/bin/stat -f '%d:%i')
+    else
+      identity_stat=(stat -c '%d:%i')
+    fi
+    directory_identity=$("${identity_stat[@]}" "$lock_abs" 2>/dev/null) || exit 1
+    if ! cd -- "$lock_abs" 2>/dev/null; then
+      [ ! -L "$lock_abs" ] && [ -d "$lock_abs" ] \
+        && [ "$directory_identity" = "$("${identity_stat[@]}" "$lock_abs" 2>/dev/null)" ] && exit 2
+      exit 1
+    fi
+    [ ! -L "$lock_abs" ] && [ . -ef "$lock_abs" ] || exit 1
+    directory_pid=$(cat ./pid 2>/dev/null || true)
+    fm_lock_holder_alive "$lock_abs" "$directory_pid" && exit 1
+    fm_lock_mid_acquire_is_fresh . "$directory_pid" && exit 1
+    fm_lock_nested_owners_stale . "$base" || exit 1
+    for nested_owner in "./$base.owner."*; do
+      [ -d "$nested_owner" ] && [ ! -L "$nested_owner" ] || continue
+      fm_lock_discard_owner "$nested_owner"
+    done
+    fm_lock_clean_known_files .
+    rmdir -- "$lock_abs" 2>/dev/null && exit 0
+    [ . -ef "$lock_abs" ] || exit 1
+    exit 2
+  ); then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    FM_LOCK_RECLAIM_FAILED_PATH=$lockdir
+  fi
+  return 1
+}
+
 fm_lock_recheck_stale_owner() {
   local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
   if [ -n "$expected_owner" ]; then
@@ -837,6 +908,9 @@ fm_lock_recheck_stale_owner() {
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
     return 1
+  fi
+  if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_nested_owners_stale "$lockdir" || return 1
   fi
   return 0
 }
@@ -1376,7 +1450,8 @@ fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-s
 }
 
 # fm_lock_reap_dead_link <lockdir>
-# Remove a link lock whose owner is dead without a nested mutex. Renaming the
+# Remove a dead real-directory lock, or a link lock without a nested mutex.
+# For links, renaming the
 # dead owner directory to this process's tombstone elects exactly one reaper,
 # so a competing reaper that verified the same dead owner cannot remove a
 # successor's link. A reaper that died after winning leaves its tombstone; a
@@ -1388,6 +1463,10 @@ fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-s
 # probes keep the PID-only answer; only a proven mismatch permits takeover.
 fm_lock_reap_dead_link() {
   local lockdir=$1 owner pid token tomb current reaper recorded start
+  if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_remove_path "$lockdir" stale
+    return
+  fi
   [ -L "$lockdir" ] || return 1
   owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
   fm_current_pid current || return 1
@@ -1456,6 +1535,7 @@ fm_lock_try_acquire() {
   FM_LOCK_HELD_PATH=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_RECLAIM_FAILED_PATH=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
@@ -1543,7 +1623,7 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  fm_lock_remove_path "$lockdir" || true
+  fm_lock_remove_path "$lockdir" stale || true
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
@@ -1575,14 +1655,20 @@ fm_lock_parent_gone() {  # <lockdir>
   [ ! -d "$parent" ]
 }
 
-# Wait for a lock. The 0.1s retry serves live contention on short critical
-# sections, where a wider interval would delay every handoff between the
-# watcher and its writers. The wait is unbounded only while the lock can still
-# be taken: it returns 1 within 0.2s of its parent directory's removal
+# Wait for a lock without a contention deadline. The 0.1s retry serves short
+# critical sections, where a wider interval would delay every handoff between
+# the watcher and its writers. It returns 1 within 0.2s of its parent's removal
 # (fm_lock_parent_gone) instead of polling for a lock that can never exist.
+# Callers that handle failure may opt into --refuse-unreapable to refuse a
+# stale real directory that cannot be removed, naming its exact path. The
+# ordinary wait and live contention retain their behavior without a deadline.
 fm_lock_acquire_wait() {
-  local lockdir=$1
+  local lockdir=$1 refuse_unreapable=${2:-}
   while ! fm_lock_try_acquire "$lockdir"; do
+    if [ "$refuse_unreapable" = --refuse-unreapable ] && [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
+      echo "error: cannot reclaim lock directory $FM_LOCK_RECLAIM_FAILED_PATH; inspect its contents and permissions" >&2
+      return 1
+    fi
     ! fm_lock_parent_gone "$lockdir" || return 1
     sleep 0.1
   done
@@ -2080,7 +2166,9 @@ fm_failure_episode_reset() {
 #     also records "session_pid=S recovery_generation=G", binding that
 #     handling turn to its live session-lock owner and watcher recovery episode.
 #     A same-session re-anchor of state/.lock moves S with lock line 1
-#     (fm_autoarm_rekey_session).
+#     (fm_autoarm_rekey_session). A claim taken by a Stop firing whose payload
+#     named its Claude session also records "claude_session=C", which every
+#     later owned write of that generation keeps.
 #     Line 2 is the claiming process's pid-identity, the same identity every other
 #     supervision lock in this repo records (fm_pid_identity above). The
 #     identity is MANDATORY: a claimant that cannot record it does not claim
@@ -2120,11 +2208,19 @@ fm_failure_episode_reset() {
 #     whichever id the sidecar carries after lock recovery. An entry written by
 #     a build before these fields existed records neither and falls back to the
 #     descent signal alone.
+#     For a firing that names its Claude session, a claim recorded under a
+#     different claude_session is not open either: Claude delivers a hook's
+#     exit-2 rewake to the session that launched it, so a claim from a session
+#     Claude has since continued under a new id (a backgrounded session's
+#     --fork-session resume, still under the lock-holding front end) can only
+#     wake a conversation nobody runs. A claim or a caller without a session
+#     is judged as before.
 #   - Every firing DEFERS (exits 0) to an open claim; anything else - a
 #     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
-#     identityless entry, or no claim at all - lets the next firing take
-#     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
-#     reclaim: a steady-state predecessor is never signalled or revoked.
+#     identityless entry, an earlier session's claim, or no claim at all - lets
+#     the next firing take generation N+1 (fm_autoarm_claim_next). Taking a
+#     newer generation IS the reclaim: a steady-state predecessor is never
+#     signalled or revoked.
 #   - NO mutex is ever held across a blocking step. The owner lock
 #     state/.claude-autoarm.lock survives only as a micro-mutex serializing
 #     individual ledger reads-then-writes (a few non-blocking file
@@ -2189,7 +2285,8 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
 # FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION, FM_AUTOARM_RECOVERY,
-# FM_AUTOARM_OWNER_SESSION_ID, FM_AUTOARM_OWNER_LOCK_IDENTITY (line 3 of the
+# FM_AUTOARM_OWNER_SESSION_ID, FM_AUTOARM_CLAUDE_SESSION (empty for an entry
+# that recorded none), FM_AUTOARM_OWNER_LOCK_IDENTITY (line 3 of the
 # entry: the session-lock identity of the holder as the claim was taken), and
 # FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
 # line 2 - identity is never substituted from a lock, so a transient
@@ -2203,6 +2300,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_SESSION=
   FM_AUTOARM_RECOVERY=
   FM_AUTOARM_OWNER_SESSION_ID=
+  FM_AUTOARM_CLAUDE_SESSION=
   FM_AUTOARM_OWNER_LOCK_IDENTITY=
   FM_AUTOARM_IDENTITY=
   FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
@@ -2211,6 +2309,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_SESSION=$(_fm_autoarm_epoch_field "$epoch" session_pid 2>/dev/null || true)
   FM_AUTOARM_RECOVERY=$(_fm_autoarm_epoch_field "$epoch" recovery_generation 2>/dev/null || true)
   FM_AUTOARM_OWNER_SESSION_ID=$(_fm_autoarm_epoch_field "$epoch" owner_session_id 2>/dev/null || true)
+  FM_AUTOARM_CLAUDE_SESSION=$(_fm_autoarm_epoch_field "$epoch" claude_session 2>/dev/null || true)
   case "$FM_AUTOARM_GEN" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -2239,15 +2338,21 @@ fm_pid_descends_from() {  # <pid> <ancestor>
 # window without producing a first beat is the same hang. An identityless
 # entry is never open: real generation claims always record identity, a legacy
 # build's entry gets its deference from its held role-carrying lock through
-# the legacy shim, and anything else must not defer.
-fm_autoarm_claim_open() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current lock_pid lock_identity recorded
+# the legacy shim, and anything else must not defer. A caller that names its
+# Claude session (the Stop payload's session_id) also finds a claim recorded
+# under another session not open.
+fm_autoarm_claim_open() {  # <state-dir> [grace] [claude-session]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session=${3:-} epoch current lock_pid lock_identity recorded
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
   esac
   fm_autoarm_ledger_read "$state" || return 1
   [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
+  if [ -n "$session" ] && [ -n "$FM_AUTOARM_CLAUDE_SESSION" ] \
+    && [ "$session" != "$FM_AUTOARM_CLAUDE_SESSION" ]; then
+    return 1
+  fi
   fm_pid_alive "$FM_AUTOARM_OWNER" || return 1
   [ -n "$FM_AUTOARM_IDENTITY" ] || return 1
   current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
@@ -2323,15 +2428,19 @@ fm_autoarm_session_matches() {  # <state-dir> <identity> [recorded-session-id]
 }
 
 # Atomically publish this process as the owner of generation N+1, under one
-# short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
-# when a competing claimant won the race (the ledger holds an open claim), and
-# 1 when the micro-mutex is contended, the mandatory identity cannot be
-# computed, or the write failed.
-fm_autoarm_claim_next() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
+# short micro-mutex hold, recording the claimant's Claude session when it names
+# one (an id outside [A-Za-z0-9._-] is recorded as none). Returns 0 with
+# FM_AUTOARM_MY_GEN set on success, 2 when a competing claimant won the race
+# (the ledger holds a claim open to this session), and 1 when the micro-mutex
+# is contended, the mandatory identity cannot be computed, or the write failed.
+fm_autoarm_claim_next() {  # <state-dir> [grace] [claude-session]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} claude_session=${3:-} lock epoch pid gen identity session_id lock_pid lock_identity tmp interrupted_identity interrupted_session
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   FM_AUTOARM_MY_GEN=
+  case "$claude_session" in
+    *[!A-Za-z0-9._-]*) claude_session= ;;
+  esac
   # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
   # command substitution would resolve it in that subshell, recording the
   # identity of a process that exits immediately.
@@ -2347,7 +2456,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   lock_identity=$(fm_session_pid_identity "$lock_pid" 2>/dev/null || true)
   [ -n "$lock_identity" ] || session_id=
   fm_lock_try_acquire "$lock" || return 1
-  if fm_autoarm_claim_open "$state" "$grace"; then
+  if fm_autoarm_claim_open "$state" "$grace" "$claude_session"; then
     fm_lock_release "$lock"
     return 2
   fi
@@ -2373,6 +2482,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
       printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s' \
         "$gen" "$pid" "$(date +%s)"
       [ -z "$session_id" ] || printf ' owner_session_id=%s' "$session_id"
+      [ -z "$claude_session" ] || printf ' claude_session=%s' "$claude_session"
       printf '\n%s\n' "$identity"
       [ -z "$session_id" ] || printf '%s\n' "$lock_identity"
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
@@ -2435,6 +2545,7 @@ _fm_autoarm_write_owned_locked() {  # <state-dir> <gen> <outcome> [marker-file] 
         "$gen" "$pid" "$outcome" "$(date +%s)"
       [ -z "$session" ] || printf ' session_pid=%s' "$session"
       [ -z "$recovery" ] || printf ' recovery_generation=%s' "$recovery"
+      [ -z "$FM_AUTOARM_CLAUDE_SESSION" ] || printf ' claude_session=%s' "$FM_AUTOARM_CLAUDE_SESSION"
       printf '\n'
       [ -z "$identity" ] || printf '%s\n' "$identity"
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
