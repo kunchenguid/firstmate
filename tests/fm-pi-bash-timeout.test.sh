@@ -6,10 +6,15 @@ set -eu
 
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
 const extensionPath = resolve(".pi/extensions/fm-primary-turnend-guard.ts");
+const testHome = mkdtempSync(resolve(tmpdir(), "fm-pi-bash-timeout-test-"));
+process.env.FM_HOME = testHome;
+process.env.FM_STATE_OVERRIDE = resolve(testHome, "state");
 async function run(setting, timeout) {
   if (setting === undefined) delete process.env.FM_PI_BASH_TIMEOUT_MAX_MS;
   else process.env.FM_PI_BASH_TIMEOUT_MAX_MS = setting;
@@ -30,5 +35,6 @@ assert.equal((await run("500")).timeout, 0.5, "subsecond cap supplies fractional
 assert.equal((await run("500", 1)).timeout, 0.5, "subsecond cap bounds an explicit timeout");
 assert.equal((await run("500", 0.25)).timeout, 0.25, "subsecond cap preserves shorter timeout");
 assert.equal((await run("invalid")).timeout, undefined, "invalid setting leaves call unchanged");
+rmSync(testHome, { recursive: true, force: true });
 JS
 pass "Pi Bash timeout cap is opt-in, bounded, and preserves shorter timeouts"
