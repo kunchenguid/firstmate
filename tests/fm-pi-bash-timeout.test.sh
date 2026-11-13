@@ -22,9 +22,13 @@ async function run(setting, timeout) {
   return input;
 }
 assert.equal((await run(undefined)).timeout, undefined, "unset setting preserves default behavior");
-assert.equal((await run("5000")).timeout, 5000, "opt-in supplies missing timeout");
-assert.equal((await run("5000", 9000)).timeout, 5000, "opt-in caps larger timeout");
-assert.equal((await run("5000", 3000)).timeout, 3000, "opt-in preserves shorter timeout");
+assert.equal((await run("5000")).timeout, 5, "opt-in supplies missing timeout in seconds");
+assert.equal((await run("5000", 60)).timeout, 5, "opt-in caps larger timeout in seconds");
+assert.equal((await run("5000", 3)).timeout, 3, "opt-in preserves shorter timeout in seconds");
+assert.equal((await run("5000", 5)).timeout, 5, "opt-in preserves timeout equal to cap");
+assert.equal((await run("500")).timeout, 0.5, "subsecond cap supplies fractional seconds");
+assert.equal((await run("500", 1)).timeout, 0.5, "subsecond cap bounds an explicit timeout");
+assert.equal((await run("500", 0.25)).timeout, 0.25, "subsecond cap preserves shorter timeout");
 assert.equal((await run("invalid")).timeout, undefined, "invalid setting leaves call unchanged");
 JS
 pass "Pi Bash timeout cap is opt-in, bounded, and preserves shorter timeouts"

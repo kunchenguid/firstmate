@@ -184,7 +184,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## Pi bash timeout cap
 
 A Pi primary can opt in to bounded Bash tool calls by setting `FM_PI_BASH_TIMEOUT_MAX_MS` in the environment used to launch Pi.
-The positive integer value is applied as the timeout when a Bash call omits one and caps an explicit larger timeout.
+The positive integer value in milliseconds is converted to seconds for Pi's Bash tool, supplying a missing timeout and capping an explicit larger timeout.
 Unset or invalid values leave Bash calls unchanged.
 
 ## Pi repeated-read containment
