@@ -42,36 +42,37 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch other than the local no-mistakes
-# mirror (a fork counts as a remote, so upstream-contribution PRs pushed to a
-# fork satisfy this in any mode; the mirror is not a forge), after
-# refresh_remote_refs has updated those refs from each remote when the local ones
-# do not show the work, OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# the forge (GitHub, Forgejo, or - only when config/park-on-review or
-# config/auto-land opts this home in - a GitLab merge request) reports a PR head
-# that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
+# hard-resets/removes the worktree and kills its processes.
+# A branch pushed only to the local no-mistakes mirror does not count as pushed
+# to a forge. When local refs do not show the work, refresh_remote_refs updates
+# them from each remote. For PR-based delivery, work has landed when its PR is merged and
+# the forge reports a PR head (Gerrit's current revision) containing the local work, or its
+# content is already present in the up-to-date default branch. This recognizes
+# the common squash-merge-then-delete-branch flow, where the branch's own commits
+# live nowhere on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
+# its base branch instead of the default branch. Recorded GitHub, GitLab,
+# Forgejo, and Gerrit URLs use their shared provider readers; these reads need neither
+# config/park-on-review nor config/auto-land.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
+# the PR head. Divergence alone proves nothing: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or whitespace-exact patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
+# whose head contains local HEAD by ancestry, or whose whitespace-exact patch ids
+# cover every local commit since the common ancestor that is not already on the
+# freshly fetched default (or recorded base) branch. Commits merely pushed to
+# other branches still need that proof. A clean content-in-default tree match
+# also proves landing. Neither remote reachability alone
+# nor an open PR alone proves landing.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A merged-PR lookup error falls back to the content check; if that is also
+# inconclusive, teardown refuses rather than risk discarding unlanded work.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -79,9 +80,9 @@
 # Dirty refusals distinguish untracked-only leftovers from tracked edits and list
 # at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
 # untracked work and the clean return control.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# Local-only delivery accepts clean work reachable from a non-mirror remote or
+# merged into the local default branch (firstmate performs that merge after
+# configured approval), including when there is no remote at all.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -1705,8 +1706,8 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
+local_patches_are_in_pr_head() {
+  local pr_head=$1 current base pr_patch_ids commit patch_id local_commits name=${BASE_BRANCH:-} ref
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
@@ -1718,74 +1719,88 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
+  [ -n "$name" ] || name=$(default_branch) || return 1
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/origin/$name"
+  else
+    ref="refs/heads/$name"
+  fi
+  local_commits=$(git -C "$WT" log --format=%H "$base..$current" --not "$ref" -- 2>/dev/null) || return 1
+  [ -n "$local_commits" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
     printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
   done <<EOF
-$unpushed
+$local_commits
 EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
-# forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
-# (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
-# squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
-# and everything else through GitHub. Returns
+# forge for both the PR state and head: a recorded Forgejo, GitLab, or Gerrit
+# URL is read through its provider reader in bin/fm-pr-lib.sh, and everything
+# else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
-# The GitLab merged-MR read is opt-in with the park-on-review flags
-# (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
-# GitLab MR goes through the GitHub read like any other target.
-gitlab_mr_landing_opted_in() {
-  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
-}
-
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 target provider='' view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
-    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
-    head=$FM_PR_RECORD_HEAD
-    fm_pr_head_valid "$head" || return 1
-    resolved_url=$FM_PR_URL
-  elif gitlab_mr_landing_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
-    fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
-    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
-    head=$FM_PR_RECORD_HEAD
-    fm_pr_head_valid "$head" || return 1
-    resolved_url=$FM_PR_URL
-  else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
-    state=${view%%$'\t'*}
-    remainder=${view#*$'\t'}
-    [ "$state" != "$view" ] || return 1
-    head=${remainder%%$'\t'*}
-    resolved_url=${remainder#*$'\t'}
-    [ "$head" != "$remainder" ] || return 1
-    case "$state" in
-      MERGED|merged) ;;
-      *) return 1 ;;
-    esac
+  if fm_pr_url_parse "$target"; then
+    provider=$FM_PR_PROVIDER
   fi
-  [ -n "$head" ] || return 1
+  case "$provider" in
+    github)
+      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
+      ;;
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
+      ;;
+    gitlab)
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
+      ;;
+    gerrit)
+      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      fm_pr_gerrit_read_revision "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_REVISION
+      ;;
+    *)
+      view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      remainder=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      head=${remainder%%$'\t'*}
+      resolved_url=${remainder#*$'\t'}
+      [ "$head" != "$remainder" ] || return 1
+      case "$state" in
+        MERGED|merged) ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$provider" in
+    github|forgejo|gitlab|gerrit)
+      [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+      resolved_url=$FM_PR_URL
+      ;;
+  esac
+  fm_pr_head_valid "$head" || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif local_patches_are_in_pr_head "$head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1832,8 +1847,7 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# Has the worktree's committed work actually LANDED? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
@@ -2258,7 +2272,7 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
+  elif [ "$MODE" != local-only ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2269,11 +2283,11 @@ validate_worktree_teardown_safety() {
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2
       else
-        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+        echo "REFUSED: worktree $WT has work that is not landed." >&2
       fi
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       report_remote_refresh_failure
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Open a PR and land it, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi

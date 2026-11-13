@@ -168,7 +168,7 @@ case "${1:-} ${2:-}" in
     eval "state=\${FM_FAKE_PR_${number}_STATE:-\$state}"
     eval "merged=\${FM_FAKE_PR_${number}_MERGED:-\$merged}"
     [ "${FM_FAKE_PR_READ_FAIL:-0}" = 1 ] && exit 1
-    printf 'state=%s\nmerged=%s\n' "$state" "$merged"
+    printf 'state=%s\nmerged=%s\nhead=\n' "$state" "$merged"
     exit 0 ;;
 esac
 exit 1
