@@ -120,12 +120,11 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
     "$ledger" 2>/dev/null
 }
 
-# The watcher keeps one bounded episode marker for remote or local endpoints
-# whose probe remains ambiguous or unreadable. A remote host that cannot be
-# reached (`unavailable`) is never part of an episode: host loss is not evidence
-# about the endpoint, so it neither counts toward nor clears one. The marker
-# records the state, the consecutive count, and a unique token for the episode;
-# that token names the episode in FM_SM_LIVE_UNCERTAIN_EPISODE so each episode
+# docs/architecture.md owns the uncertainty-alert and episode-reset policy.
+# These helpers own its durable records: separate episode- and alert-
+# namespaces prevent collisions between valid prefixed secondmate IDs.
+# The episode marker records the state, count, and unique token; that token
+# names the episode in FM_SM_LIVE_UNCERTAIN_EPISODE so each episode
 # queues under its own key and never dedupes against a row an earlier episode
 # left queued. The count is separate from the alert marker so a failed queue
 # append never suppresses a later alert.
@@ -189,7 +188,8 @@ fm_secondmate_liveness_uncertain_clear() {  # <id>
 # Read-only probe of one registered secondmate's recorded endpoint. Populates:
 #
 #   FM_SM_LIVE_STATUS  silent | alive | relaunchable | skipped
-#   FM_SM_LIVE_STATE   the raw classifier/state word
+#   FM_SM_LIVE_STATE   the classifier word or remote-probe failure state
+#                      described in this file's header
 #   FM_SM_LIVE_KILL    1 when relaunch must first kill a confirmed-dead local
 #                      endpoint (its shell husk occupies the name)
 #   FM_SM_LIVE_RESUME  1 when relaunch continues the endpoint in place instead
