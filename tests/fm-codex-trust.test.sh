@@ -507,6 +507,57 @@ test_raw_commands_only_register_exact_codex() {
   pass "fm-codex-trust: raw Codex registers trust without matching unrelated executables"
 }
 
+test_raw_codex_registers_selected_store() {
+  local mode rec home id fakebin launchlog selected raw
+  for mode in leading repeated argument; do
+    id="trust-raw-store-$mode"
+    rec=$(make_case "$id")
+    read_case "$rec"
+    home="$CASE_DIR/home"
+    fm_test_spawn_home "$home"
+    fm_test_spawn_brief "$home" "$id"
+    fakebin=$(fm_test_make_spawn_fakebin "$CASE_DIR/fake")
+    fm_test_fake_sleep_noop "$fakebin"
+    cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$CODEX_HOME" > "$FM_CODEX_OBSERVED_HOME"
+SH
+    chmod +x "$fakebin/codex"
+    selected="$CASE_DIR/other/store"
+    case "$mode" in
+      leading) raw="CODEX_HOME=$selected codex --no-daemon" ;;
+      repeated) raw="CODEX_HOME=$CASE_DIR/unused OTHER=fixture CODEX_HOME=$selected codex --no-daemon" ;;
+      argument)
+        raw="codex --no-daemon CODEX_HOME=$selected"
+        selected=$CODEX_HOME_DIR
+        ;;
+    esac
+    launchlog="$CASE_DIR/launch.sh"
+    FM_HOME="$home" HOME="$CASE_DIR/user-home" CODEX_HOME="$CODEX_HOME_DIR" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WORKTREE" FM_FAKE_LAUNCH_LOG="$launchlog" \
+      TMUX=fake,1,0 PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT" --scout --backend tmux \
+      --harness "$raw" >"$CASE_DIR/spawn.out" 2>&1 \
+      || { cat "$CASE_DIR/spawn.out" >&2; fail "raw Codex $mode store spawn failed"; }
+    (
+      cd "$WORKTREE" || exit 1
+      HOME="$CASE_DIR/pane-home" CODEX_HOME="$CASE_DIR/pane-codex" \
+        FM_CODEX_OBSERVED_HOME="$CASE_DIR/observed-home" PATH="$fakebin:$PATH" \
+        bash "$launchlog"
+    ) || fail "raw Codex $mode store launch failed"
+    [ "$(cat "$CASE_DIR/observed-home")" = "$selected" ] \
+      || fail "raw Codex $mode launch did not use the selected store"
+    [ "$(trust_value "$selected" "$WORKTREE")" = trusted ] \
+      || fail "raw Codex $mode launch used a store without workspace trust"
+    [ "$mode" = argument ] || assert_absent "$CODEX_HOME_DIR/config.toml" \
+      "raw Codex changed the supervisor's store instead of the selected store"
+    assert_absent "$CASE_DIR/unused" "raw Codex registered an overridden store"
+    assert_absent "$CASE_DIR/pane-codex" "raw Codex changed the pane's store"
+  done
+  pass "fm-codex-trust: raw Codex registers the last leading store assignment, ignoring arguments"
+}
+
+test_raw_codex_registers_selected_store
 test_raw_commands_only_register_exact_codex
 test_updates_equivalent_project_representations
 test_test_helpers_scope_codex_store_isolation
