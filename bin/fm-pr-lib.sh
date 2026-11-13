@@ -382,6 +382,49 @@ fm_pr_file_mode() {
   fi
 }
 
+# Git for Windows mounts NTFS noacl by default: chmod there is a no-op and stat
+# derives every mode (755 with a shebang, else 644), so no exact private mode
+# can ever be stored or read back. Privacy on such a mount rests on the NTFS ACL
+# a file inherits from its folder, which for a firstmate home is the user's own
+# profile. Only on a Cygwin-family kernel, a probe in the same directory decides
+# it: the mount stores modes when chmod 644 and then chmod 600 both read back.
+# Anything else, including a probe that cannot be created, keeps modes strict.
+# Each verdict is cached per directory for the life of the shell.
+_FM_PR_MODELESS_DIRS=
+fm_pr_mode_unrepresentable() {  # <path>
+  local dir probe first second
+  case "$(uname -s 2>/dev/null)" in
+    CYGWIN*|MINGW*|MSYS*) ;;
+    *) return 1 ;;
+  esac
+  if [ -d "$1" ] && [ ! -L "$1" ]; then dir=$1; else dir=$(dirname -- "$1"); fi
+  case $'\n'"$_FM_PR_MODELESS_DIRS"$'\n' in
+    *$'\n'"+$dir"$'\n'*) return 0 ;;
+    *$'\n'"-$dir"$'\n'*) return 1 ;;
+  esac
+  probe=$(mktemp "$dir/.fm-mode-probe.XXXXXX" 2>/dev/null) || return 1
+  chmod 644 "$probe" 2>/dev/null
+  first=$(fm_pr_file_mode "$probe")
+  chmod 600 "$probe" 2>/dev/null
+  second=$(fm_pr_file_mode "$probe")
+  rm -f -- "$probe"
+  if [ "$first" = 644 ] && [ "$second" = 600 ]; then
+    _FM_PR_MODELESS_DIRS="$_FM_PR_MODELESS_DIRS"$'\n'"-$dir"
+    return 1
+  fi
+  _FM_PR_MODELESS_DIRS="$_FM_PR_MODELESS_DIRS"$'\n'"+$dir"
+}
+
+# True when $1 has exactly octal mode $2, or sits on a mount that cannot store
+# a mode at all (fm_pr_mode_unrepresentable). Every exact private-mode test goes
+# through this one predicate; a group- or other-write test reads the mode itself.
+fm_pr_file_mode_is() {  # <path> <mode>
+  local actual
+  actual=$(fm_pr_file_mode "$1") || return 1
+  [ -n "$actual" ] || return 1
+  [ "$actual" = "$2" ] || fm_pr_mode_unrepresentable "$1"
+}
+
 fm_pr_file_device() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %d "$1" 2>/dev/null
@@ -437,7 +480,7 @@ fm_pr_sha256() {
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fm_pr_file_mode_is "$path" "$mode" || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }

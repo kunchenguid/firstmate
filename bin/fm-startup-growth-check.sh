@@ -315,7 +315,7 @@ ARM_BACKUP=
 shim_write() {  # <wanted-bytes> <state-device>
   local want=$1 device=$2
   fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || return 1
-  if [ -e "$CHECK_SHIM" ] && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
+  if [ -e "$CHECK_SHIM" ] && fm_pr_file_mode_is "$CHECK_SHIM" 700 \
     && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
     return 0
   fi
