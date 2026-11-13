@@ -12,13 +12,13 @@
 # The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, gerrit-axi for Gerrit, and a Forgejo CLI for Forgejo (tea or fgj, the
-# same first installed CLI holding a login for the host that
-# bin/fm-pr-lib.sh's fm_pr_forgejo_resolve picks, duplicated here because this
-# body sources nothing), so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, and so does the GitLab degraded read (its
-# rendered view carries no head pipeline state); without jq a GitLab poll
+# GitLab, gerrit-axi for Gerrit, and a Forgejo CLI for Forgejo, so an upstream
+# checkout needs no extra tooling to follow GitHub or GitLab. The Forgejo CLI
+# is chosen from the sidecar's recorded preference (auto|tea|fgj) and that
+# CLI's own login for the host, duplicating bin/fm-pr-lib.sh's
+# fm_pr_forgejo_resolve because this body sources nothing. The Gerrit and
+# Forgejo branches additionally need jq, and so does the GitLab degraded read
+# (its rendered view carries no head pipeline state); without jq a GitLab poll
 # still wakes on a merge from the plain state field. A GitLab poll also emits
 # "ontrain" while the merge request has a merge-train car, and a degraded
 # train=dropped line once the car is gone from a still-open merge request; the
@@ -34,13 +34,14 @@ unknown=0
 degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
-if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
+if [ "$#" -eq 7 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
   [ "$1" != --baseline ] || unknown=3
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  preference=$7
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -54,13 +55,22 @@ elif [ "$#" -eq 0 ]; then
   IFS= read -r host <&3 || exit 0
   IFS= read -r path <&3 || exit 0
   IFS= read -r number <&3 || exit 0
-  if IFS= read -r _extra <&3; then
-    exit 0
+  preference=auto
+  if IFS= read -r optional <&3; then
+    preference=$optional
+    if IFS= read -r _extra <&3; then
+      exit 0
+    fi
   fi
   exec 3<&-
 else
   exit 0
 fi
+case "$preference" in
+  ''|auto) preference=auto ;;
+  tea|fgj|fj) ;;
+  *) exit 0 ;;
+esac
 
 case "$number" in
   [1-9]*) ;;
@@ -517,20 +527,29 @@ case "$provider" in
     # A repo is addressed by owner/repository slug only, and the host comes
     # from the CLI's own login rather than from a URL the way gh and glab take
     # one, so both the CLI and its login for this exact host are resolved fresh
-    # on every poll rather than trusted from anywhere durable. The CLI is tried
-    # in the same order bin/fm-pr-lib.sh's fm_pr_forgejo_resolve uses - tea, then
-    # fgj - and the first installed CLI holding exactly ONE login for $host
-    # wins; zero or several logins for the host refuse rather than guess.
-    # `fj` is deliberately absent: forgejo-cli has no authenticated request
-    # passthrough, so it cannot read this record at all. Arming refuses such a
-    # host (bin/fm-pr-check.sh), so a poll that reaches here without tea or fgj
-    # is unknown rather than silent-by-accident, and --baseline reports that.
+    # on every poll rather than trusted from anywhere durable. The CLI comes
+    # from the sidecar preference the arming write recorded
+    # (bin/fm-pr-lib.sh's fm_pr_poll_prepare): `tea` or `fgj` uses only that
+    # CLI, and `auto` is the same order bin/fm-pr-lib.sh's
+    # fm_pr_forgejo_resolve walks - tea, then fgj - taking the first installed
+    # CLI holding exactly ONE login for $host; zero or several logins for the
+    # host refuse rather than guess. `fj` is deliberately absent: forgejo-cli
+    # has no authenticated request passthrough, so it cannot read this record
+    # at all. Arming refuses such a host (bin/fm-pr-check.sh), so a poll that
+    # reaches here without tea or fgj is unknown rather than
+    # silent-by-accident, and --baseline reports that.
     # tea's login list is parsed as JSON, never split on quotes per line, so a
     # login printed as one compact object still matches; that is the same
     # filter bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
     cli=
     login=
-    if command -v tea >/dev/null 2>&1; then
+    case "$preference" in
+      tea) try_tea=1; try_fgj=0 ;;
+      fgj) try_tea=0; try_fgj=1 ;;
+      fj) try_tea=0; try_fgj=0 ;;
+      *) try_tea=1; try_fgj=1 ;;
+    esac
+    if [ "$try_tea" = 1 ] && command -v tea >/dev/null 2>&1; then
       login=$(
         tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
           if type == "array" then
@@ -550,12 +569,13 @@ case "$provider" in
       ) || login=
       [ -z "$login" ] || cli=tea
     fi
-    if [ -z "$cli" ] && command -v fgj >/dev/null 2>&1; then
+    if [ -z "$cli" ] && [ "$try_fgj" = 1 ] && command -v fgj >/dev/null 2>&1; then
       # fgj selects the instance with --hostname and keeps one login per
       # hostname, reported as "  <bullet> <host> (user: <name>)" lines. The
       # hostname is read from that report, never from fgj's config file, which
-      # also holds the token. Only stdout is read: the not-authenticated notice
-      # goes to stderr.
+      # also holds the token. The not-authenticated notice is on stdout too (as
+      # docs/forgejo-cli-alternatives.md records); it carries no `(user: ...)`
+      # line, so the awk ignores it.
       login=$(
         fgj auth status 2>/dev/null | awk -v h="$host" '
           /\(user: [^)]*\)[[:space:]]*$/ {

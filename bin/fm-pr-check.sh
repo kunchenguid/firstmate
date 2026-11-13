@@ -280,9 +280,10 @@ fi
 # reads use (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve), honoring the project's
 # registered CLI first and what is installed second. `fj` resolves but cannot
 # serve this contract, so it is refused here by name rather than armed into a
-# poll that stays silent forever. bin/fm-pr-poll.sh re-derives the same
-# selection at every poll because it is a static body with no sourced
-# dependency, so it uses the same PATH order without the registry preference;
+# poll that stays silent forever. The resolved preference is recorded in the
+# registered poll sidecar (bin/fm-pr-lib.sh's fm_pr_poll_prepare), so
+# bin/fm-pr-poll.sh, a static body with no sourced dependency, resolves the
+# CLI and login through the same recorded preference the merge path uses;
 # both read the same REST record, so the watch cannot disagree with the merge
 # path about the pull request's own state.
 if [ "$PROVIDER" = forgejo ]; then
@@ -397,6 +398,7 @@ pr_check_cleanup() {
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+  "$FM_PR_FORGEJO_CLI_PREFERENCE" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 # The degraded dedupe baseline is the poll's own reading at the ready report:
@@ -418,7 +420,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && [ "$DEGRADED_WATCH_ENABLED" = 1 ]; then
   # The read runs under the control lock the watcher waits on, so it is
   # bounded by the watcher's own check bound.
   BASELINE_RC=0
-  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$FM_PR_FORGEJO_CLI_PREFERENCE" 2>/dev/null) || BASELINE_RC=$?
   if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
     if [ "$BASELINE_RC" = 124 ]; then
       echo "error: baseline read of the PR poll timed out" >&2

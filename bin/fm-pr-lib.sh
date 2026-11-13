@@ -42,6 +42,7 @@ FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
 FM_PR_DATA_PATH=
 FM_PR_DATA_NUMBER=
+FM_PR_DATA_PREFERENCE=
 FM_PR_META_PROVIDER=
 FM_PR_META_URL=
 FM_PR_META_HOST=
@@ -69,6 +70,7 @@ FM_PR_POLL_EXPECT_URL=
 FM_PR_POLL_EXPECT_HOST=
 FM_PR_POLL_EXPECT_PATH=
 FM_PR_POLL_EXPECT_NUMBER=
+FM_PR_POLL_EXPECT_PREFERENCE=
 FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
@@ -81,6 +83,7 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_PREFERENCE=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -499,17 +502,21 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
-# Sidecar layout: provider, url, host, path, number, one per line. A sidecar
-# written before the provider tag existed has a URL on its first line and one
-# line fewer, so it fails both the field count and the provider comparison and
-# is refused rather than misread as a provider-tagged record.
+# Sidecar layout: provider, url, host, path, number, one per line, plus an
+# optional sixth line naming the project's recorded Forgejo CLI preference
+# (auto|tea|fgj|fj). A sidecar written before the provider tag existed has a URL
+# on its first line and one line fewer, so it fails both the field count and the
+# provider comparison and is refused rather than misread as a provider-tagged
+# record. A sidecar with no preference line is read as `auto`, so a poll armed
+# before this line existed keeps the selection it always had.
 fm_pr_poll_data_parse() {
-  local file=$1 provider url host path number
+  local file=$1 provider url host path number preference optional
   FM_PR_DATA_PROVIDER=
   FM_PR_DATA_URL=
   FM_PR_DATA_HOST=
   FM_PR_DATA_PATH=
   FM_PR_DATA_NUMBER=
+  FM_PR_DATA_PREFERENCE=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 8< "$file" || return 1
   IFS= read -r provider <&8 || { exec 8<&-; return 1; }
@@ -517,11 +524,19 @@ fm_pr_poll_data_parse() {
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then
-    exec 8<&-
-    return 1
+  preference=auto
+  if IFS= read -r optional <&8; then
+    preference=$optional
+    if IFS= read -r _extra <&8; then
+      exec 8<&-
+      return 1
+    fi
   fi
   exec 8<&-
+  case "$preference" in
+    auto|tea|fgj|fj) ;;
+    *) return 1 ;;
+  esac
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
@@ -532,6 +547,7 @@ fm_pr_poll_data_parse() {
   FM_PR_DATA_HOST=$FM_PR_HOST
   FM_PR_DATA_PATH=$FM_PR_PATH
   FM_PR_DATA_NUMBER=$FM_PR_NUMBER
+  FM_PR_DATA_PREFERENCE=$preference
 }
 
 # Registration layout: version tag, task id, then the same provider-tagged
@@ -620,13 +636,18 @@ fm_pr_poll_revoke_final() {
 }
 
 fm_pr_poll_prepare() {
-  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
+  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8 preference=${9:-auto}
+  local poll_preference_line
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  case "$preference" in
+    auto|tea|fgj|fj) ;;
+    *) return 1 ;;
+  esac
   [ -f "$template" ] || return 1
 
   [ ! -L "$state" ] || return 1
@@ -642,6 +663,7 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_HOST=$host
   FM_PR_POLL_EXPECT_PATH=$path
   FM_PR_POLL_EXPECT_NUMBER=$number
+  FM_PR_POLL_EXPECT_PREFERENCE=$preference
   FM_PR_POLL_TEMPLATE=$template
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
@@ -655,7 +677,9 @@ fm_pr_poll_prepare() {
     return 1
   }
 
-  if ! printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$FM_PR_POLL_DATA_TMP" \
+  poll_preference_line=
+  [ "$preference" = auto ] || poll_preference_line=$preference$'\n'
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s' "$provider" "$url" "$host" "$path" "$number" "$poll_preference_line" > "$FM_PR_POLL_DATA_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_DATA_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_DATA_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! fm_pr_poll_data_parse "$FM_PR_POLL_DATA_TMP" \
@@ -664,6 +688,7 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_DATA_HOST" != "$host" ] \
     || [ "$FM_PR_DATA_PATH" != "$path" ] \
     || [ "$FM_PR_DATA_NUMBER" != "$number" ] \
+    || [ "$FM_PR_DATA_PREFERENCE" != "$preference" ] \
     || ! cp "$template" "$FM_PR_POLL_CHECK_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
@@ -713,7 +738,8 @@ fm_pr_poll_publish_prepared() {
     || [ "$FM_PR_DATA_URL" != "$FM_PR_POLL_EXPECT_URL" ] \
     || [ "$FM_PR_DATA_HOST" != "$FM_PR_POLL_EXPECT_HOST" ] \
     || [ "$FM_PR_DATA_PATH" != "$FM_PR_POLL_EXPECT_PATH" ] \
-    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ]; then
+    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ] \
+    || [ "$FM_PR_DATA_PREFERENCE" != "$FM_PR_POLL_EXPECT_PREFERENCE" ]; then
     fm_pr_poll_revoke_final || true
     return 1
   fi
@@ -904,6 +930,7 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
   FM_PR_POLL_SNAPSHOT_PATH=$FM_PR_DATA_PATH
   FM_PR_POLL_SNAPSHOT_NUMBER=$FM_PR_DATA_NUMBER
+  FM_PR_POLL_SNAPSHOT_PREFERENCE=$FM_PR_DATA_PREFERENCE
   FM_PR_POLL_SNAPSHOT_DATA_HASH=$FM_PR_REG_DATA_HASH
   FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=$FM_PR_REG_TEMPLATE_HASH
   FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=$FM_PR_REG_DATA_IDENTITY
@@ -922,6 +949,7 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_DATA_HOST" = "$FM_PR_POLL_SNAPSHOT_HOST" ] || return 1
   [ "$FM_PR_DATA_PATH" = "$FM_PR_POLL_SNAPSHOT_PATH" ] || return 1
   [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_SNAPSHOT_NUMBER" ] || return 1
+  [ "$FM_PR_DATA_PREFERENCE" = "$FM_PR_POLL_SNAPSHOT_PREFERENCE" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$FM_PR_POLL_SNAPSHOT_DATA_HASH" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" ] || return 1
@@ -1320,10 +1348,10 @@ FIELDS
 # null, so it can neither bind a merge to a verified head nor report one. A
 # resolved `fj` is therefore refused by every operation that needs the record,
 # loudly and by name, rather than reading a rendered line as state or merging
-# unbound; docs/forgejo-forgejo-cli-integration.md holds the empirical record.
+# unbound; docs/forgejo-cli-alternatives.md holds the empirical record.
 #
 # A CLI is selected by explicit configuration first (a project's registered
-# `forge=forgejo:<cli>` registry binding, or FM_FORGEJO_CLI) and by what is
+# `forge=forgejo:<cli>` registry binding) and by what is
 # installed second: FM_PR_FORGEJO_CLI_ORDER is tried in order and the first CLI
 # that is installed AND holds exactly one login for <host> wins, so a home that
 # has tea keeps its exact previous behaviour and a home that has only fj gets a
@@ -1529,13 +1557,12 @@ fm_pr_forgejo_api() {  # <method> <owner> <repo> <suffix> [<cli-args>...]
 # bin/fm-project-mode.sh reports, so a registry gap never silently pins a CLI.
 # Every warning fm-project-mode.sh writes about an absent project goes to
 # /dev/null: this is a lookup, and the caller reports its own refusal.
-# bin/fm-pr-poll.sh, which sources nothing, deliberately does not use this and
-# always resolves `auto`.
+# bin/fm-pr-poll.sh, which sources nothing, is handed the resolved preference
+# through the registered poll sidecar (fm_pr_poll_prepare) instead of calling
+# this.
 FM_PR_FORGEJO_CLI_PREFERENCE=
-FM_PR_FORGEJO_CLI_PREFERENCE_AUTHORITATIVE=0
 fm_pr_forgejo_cli_preference() {  # <task-meta-file>
   FM_PR_FORGEJO_CLI_PREFERENCE=auto
-  FM_PR_FORGEJO_CLI_PREFERENCE_AUTHORITATIVE=0
   local meta=${1:-} project preference
   [ -n "$meta" ] && [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   project=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -1550,7 +1577,6 @@ fm_pr_forgejo_cli_preference() {  # <task-meta-file>
     auto) ;;
     *) return 0 ;;
   esac
-  FM_PR_FORGEJO_CLI_PREFERENCE_AUTHORITATIVE=1
 }
 
 # The state, merged flag, and head commit of one Forgejo pull request, read from
@@ -1558,17 +1584,18 @@ fm_pr_forgejo_cli_preference() {  # <task-meta-file>
 # CLI. "tea api" exits 0 on an HTTP error and prints the error body instead, so
 # only a record whose state, merged, and head.sha fields all have the expected
 # types is accepted; anything else returns 1 for an honest unknown.
-# The CLI is resolved `auto` here, never from the project's registered
-# preference, and deliberately so: every API-capable CLI reads this same REST
-# record with the same field names, this read is what the merge watch
-# (bin/fm-pr-poll.sh), the terminal read (bin/fm-crew-state.sh), and teardown's
-# merged proof (bin/fm-teardown.sh) depend on to reconcile a task at all, and a
-# project whose registered CLI cannot make the request (`fj`) must still be
-# readable so its tasks can be reconciled and cleaned up. The merge path is
-# where the CLI's identity matters, because the head binding is that CLI's own
-# capability, and only it honors the registered preference.
-fm_pr_forgejo_read_record() {  # <host> <path> <number>
-  local host=$1 path=$2 number=$3 owner repo json fields line
+# <preference> is the project's recorded Forgejo CLI preference
+# (fm_pr_forgejo_cli_preference); the caller resolves it from the task's own
+# metadata and passes it here, so a project that registered a CLI is read
+# through that CLI, while a project that named none stays on `auto` and reads
+# exactly as before.
+# The merge watch (bin/fm-pr-poll.sh), the terminal read
+# (bin/fm-crew-state.sh), and teardown's merged proof (bin/fm-teardown.sh) all
+# take this same read, so all three agree with the merge path about the CLI.
+# A preference that resolves to a CLI which cannot make the request (`fj`)
+# returns an honest unknown rather than reading a rendered line as state.
+fm_pr_forgejo_read_record() {  # <host> <path> <number> [<preference>]
+  local host=$1 path=$2 number=$3 preference=${4:-auto} owner repo json fields line
   local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
@@ -1583,7 +1610,7 @@ fm_pr_forgejo_read_record() {  # <host> <path> <number>
   owner=${path%%/*}
   repo=${path#*/}
   [ "$owner" != "$path" ] || return 1
-  fm_pr_forgejo_resolve "$host" auto || return 1
+  fm_pr_forgejo_resolve "$host" "$preference" || return 1
   if ! json=$(fm_pr_forgejo_api GET "$owner" "$repo" "pulls/$number" 2>/dev/null) \
     || [ -z "$json" ]; then
     return 1

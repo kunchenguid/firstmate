@@ -3794,6 +3794,70 @@ SH
   pass "Forgejo poll resolves each CLI's own store, reads through fgj api, and stays silent when only fj is present"
 }
 
+# The CLI the project registered must reach the watch: a project naming fgj is
+# armed with that preference recorded in its poll sidecar, and the poll reads
+# through fgj even when tea is installed and logged in for the same host. The
+# terminal read takes the same preference, so the task is read and reconciled
+# through the same CLI the merge path uses.
+test_forgejo_poll_honors_the_recorded_cli() {
+  local dir state out url
+  dir=$(make_case forgejo-poll-preference)
+  state="$dir/home/state"
+  url=https://forgejo.example/o/r/pulls/7
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "tea $*" >> "$FM_TEST_TEA_LOG"
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[{"name":"main","url":"https://forgejo.example"}]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+SH
+  chmod +x "$dir/fakebin/tea"
+  cat > "$dir/fakebin/fgj" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "fgj $*" >> "$FM_TEST_FGJ_LOG"
+if [ "${1:-} ${2:-}" = "auth status" ]; then
+  printf 'Authenticated instances:\n'
+  printf '  \342\200\242 forgejo.example (user: fixture)\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+SH
+  chmod +x "$dir/fakebin/fgj"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  : > "$dir/tea.log"
+  : > "$dir/fgj.log"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example o/r 7 "$POLL" fgj \
+    || fail "could not prepare a Forgejo poll recording the fgj preference"
+  fm_pr_poll_publish_prepared || fail "could not publish the fgj Forgejo poll"
+  [ "$(tail -n 1 "$state/task-a.pr-poll")" = fgj ] \
+    || fail "the poll sidecar did not record the registered fgj preference"
+
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_FGJ_LOG="$dir/fgj.log" \
+    PATH="$dir/fakebin:$BASE_PATH" bash "$state/task-a.check.sh")
+  [ "$out" = merged ] || fail "the poll did not report the merge it read through fgj: '$out'"
+  grep -qF -- "api repos/o/r/pulls/7 --hostname forgejo.example" "$dir/fgj.log" \
+    || fail "the poll did not read through the registered fgj CLI"
+  [ ! -s "$dir/tea.log" ] || fail "the poll read through tea despite the registered fgj preference"
+
+  : > "$dir/tea.log"
+  : > "$dir/fgj.log"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_FGJ_LOG="$dir/fgj.log" \
+    PATH="$dir/fakebin:$BASE_PATH" bash -c '
+      . "$1"
+      fm_pr_forgejo_read_record "$2" "$3" "$4" "$5" || exit 1
+      printf "%s\n" "$FM_PR_RECORD_MERGED"
+    ' _ "$ROOT/bin/fm-pr-lib.sh" forgejo.example o/r 7 fgj)
+  [ "$out" = true ] || fail "the terminal read did not resolve the recorded fgj preference: '$out'"
+  [ ! -s "$dir/tea.log" ] || fail "the terminal read used tea despite the recorded fgj preference"
+  pass "Forgejo poll and terminal read honor the project's recorded CLI preference"
+}
+
 # The one tea login for a Forgejo host is found by parsing
 # `tea login list --output json` as JSON, never by splitting each line on
 # quotes. The pretty-printed fixture below is byte-for-byte what tea 0.14.0
@@ -5786,6 +5850,7 @@ test_arming_baselines_an_already_degraded_change
 test_forgejo_merge_watch
 test_forgejo_fgj_merge_watch
 test_forgejo_arming_resolves_the_forgejo_cli
+test_forgejo_poll_honors_the_recorded_cli
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision

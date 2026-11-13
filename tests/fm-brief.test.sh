@@ -298,6 +298,48 @@ ROWS
   pass "fm-brief.sh: --forge forgejo names tea in Rule 3, the direct-PR DOD, and the draft read-back, marks the delivery contract, and the closed set refuses everything else"
 }
 
+# A project that names its Forgejo CLI (forge=forgejo:fgj) must not ship a brief
+# whose forge-CLI rule or Definition-of-done draft check names tea: the brief
+# follows the same recorded binding arming and the merge path use, while a
+# project that names none keeps the tea wording. forgejo-cli (fj) cannot serve
+# the contract and is refused rather than rendered.
+test_forgejo_registered_cli_reaches_the_brief() {
+  local home brief out rc
+  home="$TMP_ROOT/forge-cli-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- cli-proj [direct-PR forge=forgejo:fgj] - fixture (added 2026-07-01)
+- tea-proj [direct-PR forge=forgejo] - fixture (added 2026-07-01)
+- fj-proj [direct-PR forge=forgejo:fj] - fixture (added 2026-07-01)
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-cli-fgj cli-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
+    || fail "a forge=forgejo:fgj project should scaffold a ship brief"
+  brief="$home/data/brief-cli-fgj/brief.md"
+  assert_grep "3. Use fgj for Forgejo operations and chrome-devtools-axi for browser operations." "$brief" \
+    "a forge=forgejo:fgj brief must render the fgj Rule 3 line"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'open a PR with `fgj`' "$brief" \
+    "a forge=forgejo:fgj brief must tell the worker to open the PR with fgj"
+  # shellcheck disable=SC2016 # Backticks and braces are literal generated brief text.
+  assert_grep 'confirm it is not a draft (`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host>` must show `draft` as false' "$brief" \
+    "a forge=forgejo:fgj brief must read the draft state back with fgj api"
+  assert_no_grep 'tea api --repo' "$brief" \
+    "a forge=forgejo:fgj brief must not name tea"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-cli-auto tea-proj --mode direct-PR --forge forgejo >/dev/null 2>&1 \
+    || fail "a bare forge=forgejo project should scaffold a ship brief"
+  brief="$home/data/brief-cli-auto/brief.md"
+  assert_grep "3. Use tea for Forgejo operations" "$brief" \
+    "a bare forge=forgejo brief must keep the tea wording"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-cli-fj fj-proj --mode direct-PR --forge forgejo 2>&1); rc=$?
+  expect_code 1 "$rc" "a forge=forgejo:fj project must not ship a brief"
+  assert_contains "$out" "forgejo-cli" "the fj refusal did not name why fj cannot serve the contract"
+  [ ! -e "$home/data/brief-cli-fj/brief.md" ] || fail "the refused fj project left a brief behind"
+  pass "fm-brief.sh follows the project's registered Forgejo CLI and refuses fj"
+}
+
 # --forge external renders the external review rail from bin/fm-dod-lib.sh: a
 # first rule that forbids every task push, the review-tool contract, and the
 # home's adapter body. It is direct-PR only, carries no base branch, and needs
@@ -1696,6 +1738,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_forge_selection_renders_correct_cli
+test_forgejo_registered_cli_reaches_the_brief
 test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
