@@ -410,8 +410,9 @@ fm_pr_mode_unrepresentable() {  # <path>
 }
 
 # True when $1 has exactly octal mode $2, or sits on a mount that cannot store
-# a mode at all (fm_pr_mode_unrepresentable). Every exact private-mode test goes
-# through this one predicate; a group- or other-write test reads the mode itself.
+# a mode at all (fm_pr_mode_unrepresentable). Exact private-mode tests on check,
+# check-shim, PR-poll, merge-authority, and process-event records go through
+# this one predicate; a group- or other-write test reads the mode itself.
 fm_pr_file_mode_is() {  # <path> <mode>
   local actual
   actual=$(fm_pr_file_mode "$1") || return 1
