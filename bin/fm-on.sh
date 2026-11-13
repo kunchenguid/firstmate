@@ -22,8 +22,8 @@
 #
 # The SSH alias keeps normal public-key and strict host-key policy in ~/.ssh.
 # This command explicitly disables agent forwarding, forwarding setup, and
-# configured SendEnv patterns. The remote entrypoint executes the selected
-# command under an empty environment with only its fixed runtime values.
+# configured SendEnv patterns. The shared fm-remote-job-lib.sh header owns
+# the remote command's child environment contract.
 #
 # ServerAliveInterval/ServerAliveCountMax arm dead-peer detection so a vanished
 # peer (a reboot, a dropped link) becomes a bounded ssh failure (exit 255)
