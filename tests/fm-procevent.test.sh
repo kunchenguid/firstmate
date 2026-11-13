@@ -70,7 +70,18 @@ exec "$@"
 SH
 chmod +x "$STARTED_BLOCKER"
 
-pe() { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
+# A stored argv runs only as its installed adapter's listener, so a source that
+# runs a stub command registers it through this fixture code root: its Lavish
+# adapter's `poll` runs the stub, and every other command is the real adapter.
+# A home that holds such a registration is marked, and every runner call for it
+# uses this code root.
+STUB_ROOT="$TMP_ROOT/stub-root"
+fm_test_procevent_listener_adapter "$STUB_ROOT" lavish "$ROOT/bin/fm-procevent-lavish.sh"
+pe() {
+  local root=${FM_ROOT_OVERRIDE-}
+  [ ! -e "$1/.stub-root" ] || root=$STUB_ROOT
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"
+}
 
 # Every home this suite registers a source in is tracked so teardown can stop
 # its runners. A runner started by reconcile is detached and reparented, so a
@@ -79,9 +90,10 @@ pe() { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
 # tests/lib.sh owns that sweep and runs it from every cleanup path.
 pe_register() {  # <home> <adapter> <source-id> -- <argv>...
   local home=$1 adapter=$2 id=$3
-  shift 3
+  shift 4
   fm_test_track_procevent_home "$home"
-  pe "$home" register "$adapter" "$id" "$@"
+  mkdir -p "$home" && : > "$home/.stub-root"
+  pe "$home" register "$adapter" "$id" -- "$STUB_ROOT/bin/fm-procevent-$adapter.sh" poll "$@"
 }
 new_home() { mkdir -p "$1/state"; }
 # A worker-owned board can only be armed for a task whose endpoint metadata the
@@ -155,15 +167,114 @@ wait_for() {  # <file> [tries]
   return 1
 }
 
+# --- a stored argv runs only as its installed adapter's listener -------------
+# A source record is plain text under state/, so the runner must not execute an
+# argv that a state/ writer chose. Only the record's own installed adapter
+# script, followed by the listener verb that adapter declares, may run.
+FORGE=$TMP_ROOT/forge
+new_home "$FORGE/home"
+mkdir -p "$FORGE/home/state/procevent"
+chmod 700 "$FORGE/home/state" "$FORGE/home/state/procevent"
+forge_record() {  # <source-id> <adapter> <argv>...
+  local id=$1 adapter=$2
+  shift 2
+  { printf 'adapter=%s\nargc=%s\nargv:\n' "$adapter" "$#"; printf '%s\n' "$@"; } \
+    > "$FORGE/home/state/procevent/$id.source"
+  chmod 0600 "$FORGE/home/state/procevent/$id.source"
+}
+fm_test_track_procevent_home "$FORGE/home"
+forge_record forged-src quota /usr/bin/touch "$FORGE/ran"
+forge_rc=0
+FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$FORGE/home" reconcile > "$FORGE/reconcile.out" 2>&1 || forge_rc=$?
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -e "$FORGE/ran" ] && break; sleep 0.2; done
+[ ! -e "$FORGE/ran" ] || fail "reconcile executed a forged source record's argv"
+[ "$forge_rc" -ne 0 ] || fail "reconcile reported a forged source as started"
+assert_contains "$(cat "$FORGE/reconcile.out")" "failed=1" "reconcile counts a forged source as failed"
+forge_rc=0
+forge_err=$(pe "$FORGE/home" start forged-src 2>&1) || forge_rc=$?
+[ "$forge_rc" -ne 0 ] || fail "start ran a forged source record"
+assert_contains "$forge_err" "refused" "start reports a forged source as refused"
+[ ! -e "$FORGE/ran" ] || fail "start executed a forged source record's argv"
+[ -e "$FORGE/home/state/procevent/forged-src.source" ] || fail "a refused record was deleted instead of reported"
+pass "a forged source record is refused and never executed"
+
+# Another installed adapter's script, a verb other than the listener, or an
+# adapter name that only matches a library file is refused at registration and
+# at start.
+forge_record other-adapter-src quota "$ROOT/bin/fm-procevent-lavish.sh" poll "$FORGE/no-artifact"
+forge_record wrong-verb-src lavish "$ROOT/bin/fm-procevent-lavish.sh" retire "$FORGE/no-artifact"
+forge_record lib-src lib "$ROOT/bin/fm-procevent-lib.sh" poll
+for forged in other-adapter-src wrong-verb-src lib-src; do
+  forge_rc=0
+  forge_err=$(pe "$FORGE/home" start "$forged" 2>&1) || forge_rc=$?
+  [ "$forge_rc" -ne 0 ] || fail "start ran the forged $forged record"
+  assert_contains "$forge_err" "refused" "start reports the forged $forged record as refused"
+done
+for forged_argv in "quota|$ROOT/bin/fm-procevent-lavish.sh|poll" \
+  "lavish|$ROOT/bin/fm-procevent-lavish.sh|retire" "lib|$ROOT/bin/fm-procevent-lib.sh|poll" \
+  "quota|/usr/bin/touch|$FORGE/ran"; do
+  IFS='|' read -r forged_adapter forged_cmd forged_verb <<< "$forged_argv"
+  forge_rc=0
+  forge_err=$(pe "$FORGE/home" register "$forged_adapter" register-shape-src -- \
+    "$forged_cmd" "$forged_verb" 2>&1) || forge_rc=$?
+  [ "$forge_rc" -ne 0 ] || fail "register accepted $forged_adapter argv $forged_cmd $forged_verb"
+  assert_contains "$forge_err" "refused" "register reports a misshapen $forged_adapter argv as refused"
+done
+[ ! -e "$FORGE/home/state/procevent/register-shape-src.source" ] \
+  || fail "register published a misshapen argv"
+[ ! -e "$FORGE/ran" ] || fail "a misshapen argv was executed"
+pass "register and start refuse another adapter's script, a non-listener verb, and a library name"
+
+# The installed script is decided by resolved path, so a `..` spelling or a
+# symlinked directory that reaches the installed script still runs, while an
+# installed adapter path that is itself a symlink is refused.
+BIND_ROOT=$TMP_ROOT/bind-root
+mkdir -p "$BIND_ROOT/bin"
+cat > "$BIND_ROOT/bin/fm-procevent-argvbind.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  listener-verb) printf 'poll\n' ;;
+  poll) printf 'ran\n' > "$2" ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$BIND_ROOT/bin/fm-procevent-argvbind.sh"
+ln -s "$BIND_ROOT/bin/fm-procevent-argvbind.sh" "$BIND_ROOT/bin/fm-procevent-linked.sh"
+ln -s "$BIND_ROOT/bin" "$TMP_ROOT/bind-linked-bin"
+fm_test_track_procevent_home "$FORGE/bind"
+bind_pe() { FM_ROOT_OVERRIDE="$BIND_ROOT" pe "$1" register "${@:2}"; }
+bind_start() { FM_ROOT_OVERRIDE="$BIND_ROOT" pe "$@"; }
+new_home "$FORGE/bind"
+bind_pe "$FORGE/bind" argvbind dotdot-src -- \
+  "$BIND_ROOT/bin/../bin/fm-procevent-argvbind.sh" poll "$FORGE/dotdot-ran" >/dev/null \
+  || fail "register refused a .. spelling of the installed adapter"
+bind_start "$FORGE/bind" start dotdot-src >/dev/null 2>&1 || fail "start refused a .. spelling of the installed adapter"
+[ -e "$FORGE/dotdot-ran" ] || fail "a .. spelling of the installed adapter did not run its listener"
+bind_pe "$FORGE/bind" argvbind linkdir-src -- \
+  "$TMP_ROOT/bind-linked-bin/fm-procevent-argvbind.sh" poll "$FORGE/linkdir-ran" >/dev/null \
+  || fail "register refused a symlinked directory reaching the installed adapter"
+bind_start "$FORGE/bind" start linkdir-src >/dev/null 2>&1 \
+  || fail "start refused a symlinked directory reaching the installed adapter"
+[ -e "$FORGE/linkdir-ran" ] || fail "a symlinked directory spelling did not run its listener"
+forge_rc=0
+forge_err=$(bind_pe "$FORGE/bind" linked linked-src -- \
+  "$BIND_ROOT/bin/fm-procevent-linked.sh" poll "$FORGE/linked-ran" 2>&1) || forge_rc=$?
+[ "$forge_rc" -ne 0 ] || fail "register accepted an adapter script that is a symlink"
+assert_contains "$forge_err" "refused" "register reports a symlinked adapter script as refused"
+[ ! -e "$FORGE/linked-ran" ] || fail "a symlinked adapter script ran"
+pass "the installed adapter is matched by resolved path and must not itself be a symlink"
+
 # --- detached startup refreshes owner presence after slow caller work -------
 LEASE_ADAPTERS="$TMP_ROOT/lease-adapters"
 mkdir -p "$LEASE_ADAPTERS/bin"
 cat > "$LEASE_ADAPTERS/bin/fm-procevent-leaseplain.sh" <<'SH'
 #!/usr/bin/env bash
+case "${1-}" in listener-verb) printf 'poll\n'; exit 0 ;; poll) shift; exec "$@" ;; esac
 exit 2
 SH
 cat > "$LEASE_ADAPTERS/bin/fm-procevent-leasepublish.sh" <<'SH'
 #!/usr/bin/env bash
+case "${1-}" in listener-verb) printf 'poll\n'; exit 0 ;; poll) shift; exec "$@" ;; esac
 case "${1-}" in
   silent)
     printf 'publishing\n' > "$LEASE_PUBLISH_READY"
@@ -203,7 +314,7 @@ for lease_entry in reconcile ensure-listening; do
   lease_id="lease-$lease_entry-src"
   lease_started="$TMP_ROOT/$lease_id.started"
   lease_pe "$LEASE_HOME" register leaseplain "$lease_id" -- \
-    "$STARTED_BLOCKER" "$lease_started" "$BLOCKER" "$TMP_ROOT/$lease_id.trigger" payload >/dev/null
+    "$LEASE_ADAPTERS/bin/fm-procevent-leaseplain.sh" poll "$STARTED_BLOCKER" "$lease_started" "$BLOCKER" "$TMP_ROOT/$lease_id.trigger" payload >/dev/null
   if [ "$lease_entry" = reconcile ]; then
     mkdir -p "$LEASE_HOME/state/procevent-inbox"
     printf 'old payload\n' > "$LEASE_HOME/state/procevent-inbox/lease-old.1.result"
@@ -245,7 +356,7 @@ done
 LEASE_INHERITED="$TMP_ROOT/lease-inherited"; new_home "$LEASE_INHERITED"
 fm_test_track_procevent_home "$LEASE_INHERITED"
 lease_pe "$LEASE_INHERITED" register leaseplain lease-inherited-src -- \
-  "$STARTED_BLOCKER" "$TMP_ROOT/lease-inherited.started" /bin/sleep 30 >/dev/null
+  "$LEASE_ADAPTERS/bin/fm-procevent-leaseplain.sh" poll "$STARTED_BLOCKER" "$TMP_ROOT/lease-inherited.started" /bin/sleep 30 >/dev/null
 wait_stale_lease "$LEASE_INHERITED" || fail "the inherited caller fixture lease never expired"
 lease_before=$(cat "$LEASE_INHERITED/state/procevent/.owner-lease")
 FM_PROCEVENT_IN_RUNNER=1 lease_pe "$LEASE_INHERITED" ensure-listening lease-inherited-src \
@@ -450,7 +561,7 @@ waitpid($sibling, 0);
 exit 0;
 PL
 pe_register "$HPG" lavish shared-src -- "$BLOCKER" "$SHARED_TRIGGER" "shared result" >/dev/null
-FM_HOME="$HPG" perl "$SHARED_LAUNCHER" "$SHARED_SIBLING" \
+FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$HPG" perl "$SHARED_LAUNCHER" "$SHARED_SIBLING" \
   "$ROOT/bin/fm-procevent.sh" start shared-src > "$TMP_ROOT/shared-start.out" &
 shared_launcher=$!
 wait_for "$SHARED_SIBLING" || fail "shared caller group never started its unrelated sibling"
@@ -561,6 +672,7 @@ ADAPTER_ROOT="$TMP_ROOT/adapter-root"
 mkdir -p "$ADAPTER_ROOT/bin"
 cat > "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" <<'SH'
 #!/usr/bin/env bash
+case "${1-}" in listener-verb) printf 'poll\n'; exit 0 ;; poll) shift; exec "$@" ;; esac
 # Fixture adapter: every captured result ends this source.
 case "${1-}" in
   terminal) [ -f "${2-}" ] && exit 0 || exit 1 ;;
@@ -569,11 +681,13 @@ exit 2
 SH
 cat > "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" <<'SH'
 #!/usr/bin/env bash
+case "${1-}" in listener-verb) printf 'poll\n'; exit 0 ;; poll) shift; exec "$@" ;; esac
 # Fixture adapter with no terminal knowledge at all: nothing ever ends it.
 exit 2
 SH
 cat > "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" <<'SH'
 #!/usr/bin/env bash
+case "${1-}" in listener-verb) printf 'poll\n'; exit 0 ;; poll) shift; exec "$@" ;; esac
 case "${1-}" in
   autohandle)
     printf '%s %s\n' "$2" "$3" >> "$FM_HOME/state/applied"
@@ -584,6 +698,7 @@ esac
 SH
 cat > "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh" <<'SH'
 #!/usr/bin/env bash
+case "${1-}" in listener-verb) printf 'poll\n'; exit 0 ;; poll) shift; exec "$@" ;; esac
 # Fixture adapter that declares a durable downstream announcement of its own.
 # FM_HOME/state/selfann-fail makes its application fail so the fallback
 # publication path stays provable.
@@ -609,7 +724,7 @@ pe_adapter() {  # <home> <command>...: run the runner against the fixture adapte
 
 HPUBLISH="$TMP_ROOT/hpublish"; new_home "$HPUBLISH"
 fm_test_track_procevent_home "$HPUBLISH"
-pe_adapter "$HPUBLISH" register applying publish-src -- /bin/echo "apply after publish" >/dev/null
+pe_adapter "$HPUBLISH" register applying publish-src -- "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" poll /bin/echo "apply after publish" >/dev/null
 mkdir "$HPUBLISH/state/.wake-queue"
 out=$(pe_adapter "$HPUBLISH" start publish-src 2>&1)
 assert_contains "$out" "not-autohandled: publish-src" "failed publication did not suppress automatic application"
@@ -641,7 +756,7 @@ pass "automatic application waits for durable publication and failed publication
 # adapter could NOT apply - that one still publishes for the handler.
 HSELF="$TMP_ROOT/hself"; new_home "$HSELF"
 fm_test_track_procevent_home "$HSELF"
-pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
+pe_adapter "$HSELF" register selfann self-src -- "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh" poll /bin/echo "self announced" >/dev/null
 out=$(pe_adapter "$HSELF" start self-src 2>&1)
 assert_contains "$out" "autohandled: self-src" "the self-announcing adapter did not apply its own capture"
 assert_not_contains "$out" "not-autohandled" "the applied capture was still reported as left for the handler"
@@ -660,7 +775,7 @@ pe_adapter "$HSELF" retire self-src >/dev/null
 out=$(pe_adapter "$HSELF" reconcile)
 assert_contains "$out" "published=0" "reconcile re-announced a capture its adapter already acknowledged"
 assert_contains "$out" "started=0" "reconcile restarted an always-ready acknowledged source and raced the next start"
-pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
+pe_adapter "$HSELF" register selfann self-src -- "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh" poll /bin/echo "self announced" >/dev/null
 : > "$HSELF/state/selfann-fail"
 out=$(pe_adapter "$HSELF" start self-src 2>&1)
 assert_contains "$out" "not-autohandled: self-src" "a failed self-announcing application was reported as applied"
@@ -672,7 +787,7 @@ pass "a self-announcing adapter applies quietly and still publishes what it coul
 
 HTERM="$TMP_ROOT/hterm"; new_home "$HTERM"
 fm_test_track_procevent_home "$HTERM"
-pe_adapter "$HTERM" register endnow ends-src -- /bin/echo "terminal payload" >/dev/null
+pe_adapter "$HTERM" register endnow ends-src -- "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" poll /bin/echo "terminal payload" >/dev/null
 out=$(pe_adapter "$HTERM" start ends-src)
 assert_contains "$out" "captured:" "a terminal result is still captured durably"
 assert_contains "$out" "retired: ends-src" "the runner reports the adapter-driven retirement"
@@ -696,7 +811,7 @@ pass "an adapter-classified terminal result is captured once, announced, and ret
 
 HOPEN="$TMP_ROOT/hopen"; new_home "$HOPEN"
 fm_test_track_procevent_home "$HOPEN"
-pe_adapter "$HOPEN" register openended open-src -- /bin/echo "open payload" >/dev/null
+pe_adapter "$HOPEN" register openended open-src -- "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" poll /bin/echo "open payload" >/dev/null
 out=$(pe_adapter "$HOPEN" start open-src)
 assert_contains "$out" "captured:" "a result from an adapter with no terminal verdict is captured"
 assert_not_contains "$out" "retired:" "an adapter with no terminal verdict never retires its source"
@@ -709,11 +824,11 @@ fm_test_track_procevent_home "$HREPLACE"
 OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
 OLD_STARTED="$TMP_ROOT/replace-old-started"
 pe_adapter "$HREPLACE" register endnow replace-src -- \
-  "$STARTED_BLOCKER" "$OLD_STARTED" "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
+  "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" poll "$STARTED_BLOCKER" "$OLD_STARTED" "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
 pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
 replace_old_pid=$!
 wait_for "$OLD_STARTED" || fail "the old registration never started"
-pe_adapter "$HREPLACE" register openended replace-src -- /bin/echo "replacement payload" >/dev/null
+pe_adapter "$HREPLACE" register openended replace-src -- "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" poll /bin/echo "replacement payload" >/dev/null
 touch "$OLD_TRIGGER"
 wait "$replace_old_pid" || fail "the old terminal runner failed"
 assert_contains "$(cat "$TMP_ROOT/replace-old.out")" "cannot retire terminal source" \
@@ -742,7 +857,7 @@ done
 exec "$REAL_RM" "$@"
 SH
 chmod +x "$FAIL_RM_BIN/rm"
-pe_adapter "$HRETFAIL" register endnow retire-fail-src -- /bin/echo "one terminal payload" >/dev/null
+pe_adapter "$HRETFAIL" register endnow retire-fail-src -- "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" poll /bin/echo "one terminal payload" >/dev/null
 out=$(PATH="$FAIL_RM_BIN:$PATH" pe_adapter "$HRETFAIL" start retire-fail-src 2>&1)
 assert_contains "$out" "cannot retire terminal source" "a failed registration removal is reported"
 assert_present "$HRETFAIL/state/procevent/retire-fail-src.source" \
@@ -2906,7 +3021,7 @@ pass "nonzero exit with no output stays armed and silent"
 HF="$TMP_ROOT/hf"; new_home "$HF"
 # shellcheck disable=SC2016  # single quotes are deliberate: the child shell expands this.
 pe_register "$HF" lavish big-src -- /bin/sh -c 'printf "x%.0s" $(seq 1 5000)' >/dev/null
-FM_PROCEVENT_MAX_OUTPUT_BYTES=100 FM_HOME="$HF" "$ROOT/bin/fm-procevent.sh" start big-src >/dev/null 2>&1
+FM_PROCEVENT_MAX_OUTPUT_BYTES=100 FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$HF" "$ROOT/bin/fm-procevent.sh" start big-src >/dev/null 2>&1
 RB=$(first_result "$HF" big-src || true)
 [ -n "$RB" ] || fail "bounded output was not captured at all"
 [ "$(wc -c < "$RB" | tr -d ' ')" -le 100 ] || fail "output bound was not enforced"
@@ -3962,7 +4077,7 @@ fm_test_track_procevent_home "$HDETACHED"
 DETACHED_TRIGGER="$TMP_ROOT/detached-attached.trigger"
 pe_register "$HDETACHED" lavish detached-attached-src -- \
   "$BLOCKER" "$DETACHED_TRIGGER" "detached attached payload"
-FM_PROCEVENT_OWNER_LEASE_SECONDS=1 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 FM_HOME="$HDETACHED" \
+FM_PROCEVENT_OWNER_LEASE_SECONDS=1 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$HDETACHED" \
   perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' \
     "$ROOT/bin/fm-procevent.sh" start detached-attached-src \
     > "$TMP_ROOT/detached-attached.out" 2>&1 &
@@ -4110,7 +4225,7 @@ PROOF_LOAD_SLACK=2
 orphan_pe() {  # <home> <command...>
   local home=$1
   shift
-  FM_PROCEVENT_OWNER_LEASE_SECONDS="$PROOF_LEASE_SECONDS" \
+  FM_ROOT_OVERRIDE="$STUB_ROOT" FM_PROCEVENT_OWNER_LEASE_SECONDS="$PROOF_LEASE_SECONDS" \
     FM_PROCEVENT_OWNER_CHECK_SECONDS="$PROOF_CHECK_SECONDS" \
     FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
 }
@@ -4128,8 +4243,8 @@ HORPHAN="$TMP_ROOT/orphan-dead-owner"; new_home "$HORPHAN"
 fm_test_track_procevent_home "$HORPHAN"
 HKEEP="$TMP_ROOT/orphan-live-owner"; new_home "$HKEEP"
 fm_test_track_procevent_home "$HKEEP"
-orphan_pe "$HORPHAN" register lavish orphan-src -- "$ORPHAN_STUB" "$TMP_ROOT/orphan-dead" >/dev/null
-orphan_pe "$HKEEP" register lavish keep-src -- "$QUIET_STUB" "$TMP_ROOT/orphan-live" >/dev/null
+orphan_pe "$HORPHAN" register lavish orphan-src -- "$STUB_ROOT/bin/fm-procevent-lavish.sh" poll "$ORPHAN_STUB" "$TMP_ROOT/orphan-dead" >/dev/null
+orphan_pe "$HKEEP" register lavish keep-src -- "$STUB_ROOT/bin/fm-procevent-lavish.sh" poll "$QUIET_STUB" "$TMP_ROOT/orphan-live" >/dev/null
 orphan_pe "$HORPHAN" reconcile >/dev/null
 orphan_pe "$HKEEP" reconcile >/dev/null
 
@@ -4238,12 +4353,12 @@ SH
 chmod +x "$RETRY_BIN/ps"
 
 retry_pe() {  # <command...>
-  PATH="$RETRY_BIN:$PATH" STOP_RETRY_STATE="$RETRY_STATE" \
+  FM_ROOT_OVERRIDE="$STUB_ROOT" PATH="$RETRY_BIN:$PATH" STOP_RETRY_STATE="$RETRY_STATE" \
     FM_PROCEVENT_OWNER_LEASE_SECONDS=2 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
     FM_HOME="$RETRY_HOME" "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
-retry_pe register lavish retry-src -- "$ORPHAN_STUB" "$TMP_ROOT/stop-retry-marker" >/dev/null
+retry_pe register lavish retry-src -- "$STUB_ROOT/bin/fm-procevent-lavish.sh" poll "$ORPHAN_STUB" "$TMP_ROOT/stop-retry-marker" >/dev/null
 retry_pe reconcile >/dev/null
 wait_for "$RETRY_HOME/state/procevent/retry-src.runner" \
   || fail "the retry listener never recorded its runner"
@@ -4320,7 +4435,7 @@ for proof_state in absent zombie; do
   PROOF_RELEASE=
   if [ "$proof_state" = zombie ]; then
     PROOF_RELEASE="$HPROOF/reap"
-    FM_HOME="$HPROOF" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+    FM_ROOT_OVERRIDE="$STUB_ROOT" FM_HOME="$HPROOF" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
       perl - "$PROOF_RELEASE" "$ROOT/bin/fm-procevent.sh" _start proof-src >"$HPROOF/start.log" 2>&1 <<'PL' &
 my $release = shift @ARGV;
 defined(my $pid = fork) or exit 125;
@@ -4392,7 +4507,7 @@ trap fm_test_cleanup EXIT
 HPGUARD="$TMP_ROOT/signal-proof-guard"; new_home "$HPGUARD"
 fm_test_track_procevent_home "$HPGUARD"
 orphan_pe "$HPGUARD" register lavish proof-guard-src \
-  -- "$SIGNAL_PROOF_STUB" "$TMP_ROOT/proof-guard" >/dev/null
+  -- "$STUB_ROOT/bin/fm-procevent-lavish.sh" poll "$SIGNAL_PROOF_STUB" "$TMP_ROOT/proof-guard" >/dev/null
 orphan_pe "$HPGUARD" reconcile >/dev/null
 # The owner is kept present until the fixture is fully up, because the input
 # under test is an owner that GOES AWAY, not a runner that never finished
@@ -4522,12 +4637,12 @@ exec "$REAL_PERL" "\$@"
 SH
 chmod +x "$BOUND_BIN/perl"
 bound_pe() {
-  PATH="$BOUND_BIN:$PATH" GUARD_BOUND_STATE="$BOUND_STATE" \
+  FM_ROOT_OVERRIDE="$STUB_ROOT" PATH="$BOUND_BIN:$PATH" GUARD_BOUND_STATE="$BOUND_STATE" \
     FM_PROCEVENT_OWNER_LEASE_SECONDS="$BOUND_LEASE_SECONDS" \
     FM_PROCEVENT_OWNER_CHECK_SECONDS="$BOUND_CHECK_SECONDS" \
     FM_HOME="$HBOUND" "$ROOT/bin/fm-procevent.sh" "$@"
 }
-bound_pe register lavish bound-src -- "$QUIET_STUB" "$TMP_ROOT/guard-bound-marker" >/dev/null
+bound_pe register lavish bound-src -- "$STUB_ROOT/bin/fm-procevent-lavish.sh" poll "$QUIET_STUB" "$TMP_ROOT/guard-bound-marker" >/dev/null
 bound_pe reconcile >/dev/null
 wait_for "$HBOUND/state/procevent/bound-src.runner" \
   || fail "the bound fixture's listener never recorded its runner"
@@ -4671,12 +4786,12 @@ chmod +x "$DEBOUNCE_BIN/perl"
 DEBOUNCE_LEASE_SECONDS=30
 DEBOUNCE_CHECK_SECONDS=1
 debounce_pe() {
-  PATH="$DEBOUNCE_BIN:$PATH" LEASE_DEBOUNCE_STATE="$DEBOUNCE_STATE" \
+  FM_ROOT_OVERRIDE="$STUB_ROOT" PATH="$DEBOUNCE_BIN:$PATH" LEASE_DEBOUNCE_STATE="$DEBOUNCE_STATE" \
     FM_PROCEVENT_OWNER_LEASE_SECONDS="$DEBOUNCE_LEASE_SECONDS" \
     FM_PROCEVENT_OWNER_CHECK_SECONDS="$DEBOUNCE_CHECK_SECONDS" \
     FM_HOME="$DEBOUNCE_HOME" "$ROOT/bin/fm-procevent.sh" "$@"
 }
-debounce_pe register lavish debounce-src -- "$QUIET_STUB" "$TMP_ROOT/lease-debounce-marker" >/dev/null
+debounce_pe register lavish debounce-src -- "$STUB_ROOT/bin/fm-procevent-lavish.sh" poll "$QUIET_STUB" "$TMP_ROOT/lease-debounce-marker" >/dev/null
 debounce_pe reconcile >/dev/null
 wait_for "$DEBOUNCE_HOME/state/procevent/debounce-src.runner" \
   || fail "the debounce fixture's listener never recorded its runner"

@@ -282,6 +282,32 @@ fm_test_track_procevent_home() {  # <home> [claim-root]
   printf '%s\t%s\n' "$1" "${2-}" >> "$FM_TEST_PROCEVENT_REGISTRY"
 }
 
+# The process-event runner executes a stored argv only when it starts with the
+# installed adapter script and that adapter's listener verb. This installs a
+# fixture adapter in <code-root>/bin whose listener verb `poll` runs the rest of
+# its argv, so a test passes FM_ROOT_OVERRIDE=<code-root> and registers any
+# command as `<code-root>/bin/fm-procevent-<adapter>.sh poll <command>...`.
+# Every other adapter command goes to [delegate-script] when given, and exits 2
+# otherwise, the answer of an adapter that has no such command.
+fm_test_procevent_listener_adapter() {  # <code-root> <adapter> [delegate-script]
+  local script="$1/bin/fm-procevent-$2.sh"
+  mkdir -p "$1/bin" || return 1
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  listener-verb) printf 'poll\n'; exit 0 ;;
+  poll) shift; exec "$@" ;;
+esac
+SH
+    if [ -n "${3-}" ]; then
+      printf 'exec %q "$%s"\n' "$3" @
+    else
+      printf 'exit 2\n'
+    fi
+  } > "$script" && chmod +x "$script"
+}
+
 fm_test_reap_procevent_homes() {
   local home claim_root seen=$'\n'
   [ -f "$FM_TEST_PROCEVENT_REGISTRY" ] || return 0

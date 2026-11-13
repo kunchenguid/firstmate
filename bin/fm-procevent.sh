@@ -21,10 +21,18 @@
 #   fm-procevent.sh list
 #
 # register   Record a built-in source: its adapter, its canonical id, and the
-#            exact argv to execute. argv is stored one argument per line and
+#            argv to execute. argv is stored one argument per line and
 #            executed directly, so there is no shell surface and no argument
 #            splitting. Built-in adapters register sources; nothing here parses
-#            user text.
+#            user text. argv must begin with the installed
+#            bin/fm-procevent-<adapter>.sh of the code root (a regular file, not
+#            a symlink, matched by resolved path) followed by the verb that
+#            adapter prints for `listener-verb`. register and register-task
+#            refuse any other shape, and start refuses and reports a stored
+#            record of any other shape without deleting it, because a record
+#            under state/ is plain text; what runs is the installed path itself.
+#            A writer of state/ can still choose the arguments passed to an
+#            installed adapter's listener.
 # register-task
 #            Record a worker-owned built-in source. Its one source record
 #            persists across rounds, and re-registration by the same task
@@ -288,6 +296,29 @@ fi
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
+path_resolve() {  # <path>: print its canonical path, or fail when it does not exist
+  perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) && -e $p or exit 1; print "$p\n"' "$1" 2>/dev/null
+}
+
+# A stored argv is plain text under state/, so it runs only as its record's
+# installed adapter listener: ARGV[0] must resolve to the installed adapter
+# script, which is a regular file and not a symlink, and ARGV[1] must be the
+# verb that adapter prints for `listener-verb`. On success ARGV[0] becomes the
+# installed path itself, so the stored spelling is never what runs.
+listener_argv_bind() {  # <adapter>: checks and rewrites ARGV
+  local script real verb
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] && [ "${#ARGV[@]}" -ge 2 ] || return 1
+  real=$(path_resolve "$script") || return 1
+  [ "$(path_resolve "${ARGV[0]}")" = "$real" ] || return 1
+  verb=$("$script" listener-verb 2>/dev/null) || return 1
+  [ -n "$verb" ] && [ "${ARGV[1]}" = "$verb" ] || return 1
+  ARGV[0]=$script
+}
+listener_refusal() {  # <adapter>
+  printf 'argv refused: it must start with the installed %s adapter script and its listener verb' "$1"
+}
+
 extension_lifecycle_lock_acquire() {
   state_root_bind create || return 1
   (umask 077; mkdir -p "$REG") || return 1
@@ -532,7 +563,8 @@ cmd_register() {
   for arg in "$@"; do
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
   done
-  [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  ARGV=("$@")
+  listener_argv_bind "$adapter" || die "$(listener_refusal "$adapter")"
   state_root_bind create || die "cannot safely prepare the process-event state root"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
@@ -569,7 +601,8 @@ cmd_register_task() {
   for arg in "${argv[@]}"; do
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
   done
-  [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  ARGV=("${argv[@]}")
+  listener_argv_bind "$adapter" || die "$(listener_refusal "$adapter")"
   state_root_bind create || die "cannot safely prepare the process-event state root"
   fm_backend_validate_task_endpoint "$STATE/$task.meta" "$task" >/dev/null \
     || die "cannot own a board for task $task; its captured feedback would reach no endpoint"
@@ -1057,6 +1090,10 @@ cmd_start() {
         fm_procevent_source_lock_release "$id"
         die "registration argv is unreadable: $id"
       fi
+      if ! listener_argv_bind "$adapter"; then
+        fm_procevent_source_lock_release "$id"
+        die "$(listener_refusal "$adapter") (source $id)"
+      fi
       ;;
     *)
       fm_procevent_source_lock_release "$id"
@@ -1130,7 +1167,8 @@ cmd_start() {
     now_adapter=$(read_adapter "$id" 2>/dev/null || true)
     current=$(fm_pr_file_identity "$registration" 2>/dev/null || true)
     previous=("${ARGV[@]}")
-    if [ "$now_adapter" != "$adapter" ] || [ -z "$current" ] || ! read_argv "$id"; then
+    if [ "$now_adapter" != "$adapter" ] || [ -z "$current" ] || ! read_argv "$id" \
+      || ! listener_argv_bind "$adapter"; then
       ARGV=("${previous[@]}")
       fm_procevent_source_lock_release "$id"
       return 1

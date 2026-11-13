@@ -3083,6 +3083,9 @@ Never run the registered blocking source command directly in a conversational tu
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
 `bin/fm-procevent.sh` owns the generic contract; built-in adapters retain their tracked `bin/fm-procevent-<adapter>.sh` commands, while an explicitly bound external adapter routes through the trusted host contract above.
+A built-in source record under `state/procevent/` is plain text, so the runner executes its stored argv only when it begins with the installed `bin/fm-procevent-<adapter>.sh` of the record's adapter and the listener verb that adapter declares; any other record is refused and reported, never executed, and `register` refuses that shape up front.
+Every built-in adapter already registers in that shape, so live registrations carry over unchanged.
+A writer of `state/` can still choose the arguments passed to an installed adapter's listener; the `bin/fm-procevent.sh` header owns the exact check.
 
 `bin/fm-procevent-lavish.sh` is the first built-in adapter and wraps the published `lavish-axi poll` interface plus `lavish-axi reply` when the installed version supports synchronous reply acceptance.
 

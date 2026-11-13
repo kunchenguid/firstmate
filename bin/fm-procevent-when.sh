@@ -12,6 +12,7 @@
 #   fm-procevent-when.sh retire <name>
 #   fm-procevent-when.sh rebind-all
 #   fm-procevent-when.sh run <source-id>
+#   fm-procevent-when.sh listener-verb
 #
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
@@ -628,6 +629,7 @@ cmd_retire() {
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   run)       shift; [ "$#" -eq 1 ] || usage; cmd_run "$@" ;;
+  listener-verb) printf 'run\n' ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;

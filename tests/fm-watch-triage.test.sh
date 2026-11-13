@@ -4117,16 +4117,19 @@ SH
 # print an actionable reason and exit into the same rewake path every other
 # actionable wake uses - rather than leaving it to be found by a manual drain.
 
-# Run the runner against a case home. FM_ROOT_OVERRIDE (exported by the shared
-# wake harness to keep the drain's tangle check inert) would otherwise point the
-# runner at a root with no installed adapters, and the claim root must stay
-# inside the case so nothing here can observe a real home's source ownership.
+# Run the runner against a case home. A stored argv runs only as its installed
+# adapter's listener, so the runner uses a fixture code root whose Lavish adapter
+# delegates every other command to the real one. The claim root must stay inside
+# the case so nothing here can observe a real home's source ownership.
 pe_case() {  # <dir> <command>...
   local dir=$1
   dir=$(cd "$dir" && pwd -P) || return 1
   shift
-  (unset FM_ROOT_OVERRIDE
-   FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_HOME="$dir" "$ROOT/bin/fm-procevent.sh" "$@")
+  [ -x "$dir/stub-root/bin/fm-procevent-lavish.sh" ] \
+    || fm_test_procevent_listener_adapter "$dir/stub-root" lavish "$ROOT/bin/fm-procevent-lavish.sh" \
+    || return 1
+  FM_ROOT_OVERRIDE="$dir/stub-root" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_HOME="$dir" \
+    "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
 # Capture one real process-event result into <dir>'s home, then retire the
@@ -4134,7 +4137,10 @@ pe_case() {  # <dir> <command>...
 # captured, unhandled, queued result and no remaining poll work.
 seed_captured_procevent_result() {  # <dir>
   local dir=$1 i=0
+  local dir_real
+  dir_real=$(cd "$dir" && pwd -P) || return 1
   pe_case "$dir" register lavish delivery-src -- \
+    "$dir_real/stub-root/bin/fm-procevent-lavish.sh" poll \
     /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
   pe_case "$dir" reconcile >/dev/null || return 1
   while [ "$i" -lt 100 ]; do

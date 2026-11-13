@@ -6,6 +6,7 @@
 #   fm-procevent-quota.sh poll [--interval <secs>] [--threshold <percent>] [--provider <provider>] [--timeout <secs>]
 #   fm-procevent-quota.sh classify <result-file>
 #   fm-procevent-quota.sh terminal <result-file>
+#   fm-procevent-quota.sh listener-verb
 #   fm-procevent-quota.sh source-id
 #   fm-procevent-quota.sh retire [--provider <provider>]
 #
@@ -23,6 +24,8 @@
 #            successful read resets the command-failure streak.
 # classify   Print the captured outcome class: low, exhausted, error, or unknown.
 # terminal   Every quota poll is terminal because the source fires at most once.
+# listener-verb
+#            Print `poll`, the verb a registered argv must name after this script.
 # source-id  Print the canonical source id.
 # retire     Stop the aggregate watch, or the matching provider watch when
 #            --provider is supplied, and retire the registration.
@@ -321,6 +324,7 @@ case "${1-}" in
   poll)      shift; cmd_poll "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  listener-verb) printf 'poll\n' ;;
   source-id) shift; cmd_source_id "${1-}" ;;
   retire)    shift; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
