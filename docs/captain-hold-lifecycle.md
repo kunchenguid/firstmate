@@ -177,12 +177,11 @@ It remains on the appropriate Captain's Call or Charted Next decision surface in
 ### Interrupted cleanup
 
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns when teardown publishes its pending-close record.
-That record carries the retention intent as a `mode=retain` line.
-An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
+Interrupted retention follows the [pending-close recovery contract](../bin/fm-backlog-transition-lib.sh), which owns replay eligibility and generation-safe record retirement.
 
 If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
 A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
-Replay then retires the record.
+Eligible replay then retires the record.
 
 ### Known retained-delivery gaps
 
@@ -520,7 +519,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   That cleanup leaves no pending record behind.
   The call survives a `--force` cleanup and closes only when `answer` records the captain's words.
   An ordinary finished task in the same home still closes with its report link.
-- An interrupted cleanup leaves the row In flight and untouched with its pending record.
+- After branch cleanup is verified, interrupted task-record retirement leaves the row In flight and untouched with its pending record.
   When the row remains unanswered, the next session start retains it as queued and held with the deliverable recorded.
   An answer before replay preserves that record's completed report while closing the call, so the next session start retires the satisfied record without losing the delivery from Recently Landed.
 - A pending-close record that cannot be validated refuses the answer while naming the record and the reason.
