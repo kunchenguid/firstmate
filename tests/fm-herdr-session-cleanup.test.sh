@@ -75,12 +75,6 @@ fm_lock_try_acquire() {
 }
 fm_lock_release() { rm -rf -- "$1"; }
 fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
-fm_backend_herdr_projection_focus_snapshot() {
-  local tab
-  [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
-  tab=$(cat "$FIXTURE_DIR/active-tab")
-  printf '%s\t%s' "${tab%%:*}" "$tab"
-}
 
 fixture_workspace_json() {
   local title=$1 tabs=$2 panes=$3 focused=false active=$TAB
@@ -91,13 +85,18 @@ fixture_workspace_json() {
 }
 
 fixture_workspaces() {
-  local title tabs panes
+  local title tabs panes active
+  active=$(cat "$FIXTURE_DIR/active-tab")
   title=$(cat "$FIXTURE_DIR/title")
   tabs=$(cat "$FIXTURE_DIR/tabs")
   panes=$(cat "$FIXTURE_DIR/panes")
-  printf '[{"workspace_id":"w1","label":"firstmate","focused":%s,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1},' \
-    "$( [ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t1 ] && printf true || printf false )"
-  fixture_workspace_json "$title" "$tabs" "$panes"
+  printf '[{"workspace_id":"w1","label":"firstmate","focused":%s,"active_tab_id":"%s","tab_count":2,"pane_count":2}' \
+    "$( [ "${active%%:*}" = w1 ] && printf true || printf false )" \
+    "$( [ "${active%%:*}" = w1 ] && printf '%s' "$active" || printf w1:t1 )"
+  if [ ! -e "$FIXTURE_DIR/closed" ]; then
+    printf ','
+    fixture_workspace_json "$title" "$tabs" "$panes"
+  fi
   printf ',{"workspace_id":"w3","label":"notes","focused":%s,"active_tab_id":"w3:t1","tab_count":1,"pane_count":1}' \
     "$( [ "$(cat "$FIXTURE_DIR/active-tab")" = w3:t1 ] && printf true || printf false )"
   if [ -e "$FIXTURE_DIR/duplicate-token" ]; then
@@ -107,16 +106,26 @@ fixture_workspaces() {
 }
 
 fixture_tabs() {
-  local count i pane_count
-  count=$(cat "$FIXTURE_DIR/tabs")
+  local workspace=${1:-$WS} count i pane_count focused
+  case "$workspace" in
+    w1) count=2 ;;
+    w3) count=1 ;;
+    "$WS")
+      [ ! -e "$FIXTURE_DIR/closed" ] || { printf '[]'; return; }
+      count=$(cat "$FIXTURE_DIR/tabs")
+      ;;
+    *) return 1 ;;
+  esac
   printf '['
   i=1
   while [ "$i" -le "$count" ]; do
     [ "$i" -eq 1 ] || printf ','
     pane_count=1
-    [ ! -e "$FIXTURE_DIR/empty-tab" ] || pane_count=0
-    printf '{"tab_id":"%s:t%s","workspace_id":"%s","focused":false,"pane_count":%s,"label":"fm-task"}' \
-      "$WS" "$i" "$WS" "$pane_count"
+    [ "$workspace" != "$WS" ] || [ ! -e "$FIXTURE_DIR/empty-tab" ] || pane_count=0
+    focused=false
+    [ "$(cat "$FIXTURE_DIR/active-tab")" != "$workspace:t$i" ] || focused=true
+    printf '{"tab_id":"%s:t%s","workspace_id":"%s","focused":%s,"pane_count":%s,"label":"fm-task"}' \
+      "$workspace" "$i" "$workspace" "$focused" "$pane_count"
     i=$((i + 1))
   done
   printf ']'
@@ -138,7 +147,7 @@ fixture_panes() {
 }
 
 fm_backend_herdr_cli() {
-  local _session=$1 first=${2:-} second=${3:-} target=${4:-} title tabs panes
+  local _session=$1 first=${2:-} second=${3:-} target=${4:-} workspace=${5:-} title tabs panes active read_status
   shift
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
   if [ "$first $second" = "tab get" ] && [ "$target" = "$TAB" ] \
@@ -146,6 +155,19 @@ fm_backend_herdr_cli() {
     rm -f "$FIXTURE_DIR/presence-unreadable"
     printf 'unreadable\n' >&2
     return 1
+  fi
+  if [ "$first $second" = "workspace list" ]; then
+    if [ -e "$FIXTURE_DIR/fail-next-workspace-list" ]; then
+      read_status=$(cat "$FIXTURE_DIR/fail-next-workspace-list")
+      rm -f "$FIXTURE_DIR/fail-next-workspace-list"
+      printf 'unreadable\n'
+      return "$read_status"
+    fi
+    if [ -s "$CLOSE_LOG" ] && [ -e "$FIXTURE_DIR/workspace-presence-unreadable" ]; then
+      rm -f "$FIXTURE_DIR/workspace-presence-unreadable"
+      printf 'unreadable\n'
+      return 1
+    fi
   fi
   if [ -e "$FIXTURE_DIR/closed" ]; then
     case "$first $second" in
@@ -156,7 +178,6 @@ fm_backend_herdr_cli() {
           return 1
         fi
         ;;
-      "workspace list") printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1}]}}'; return 0 ;;
     esac
   fi
   if [ -e "$FIXTURE_DIR/race" ] && [ -e "$FIXTURE_DIR/snapshotted" ] && [ "$first $second" = "workspace list" ]; then
@@ -174,7 +195,7 @@ fm_backend_herdr_cli() {
       printf '{"result":{"workspace":'; fixture_workspace_json "$title" "$tabs" "$panes"; printf '}}\n'
       ;;
     "tab list")
-      printf '{"result":{"tabs":'; fixture_tabs; printf '}}\n'
+      printf '{"result":{"tabs":'; fixture_tabs "$workspace"; printf '}}\n'
       ;;
     "pane list")
       printf '{"result":{"panes":'; fixture_panes; printf '}}\n'
@@ -183,14 +204,18 @@ fm_backend_herdr_cli() {
       printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
       ;;
     "tab get")
-      if [ "$target" = w1:t1 ]; then
-        [ ! -e "$FIXTURE_DIR/switch-during-restore" ] || cat "$FIXTURE_DIR/switch-during-restore" > "$FIXTURE_DIR/active-tab"
-        printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1","pane_count":1}}}'
-      elif [ -e "$FIXTURE_DIR/empty-tab" ]; then
-        printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s","pane_count":0}}}\n' "$TAB" "$WS"
-      else
-        printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s","pane_count":1}}}\n' "$TAB" "$WS"
+      if [ "$target" = w1:t1 ] && [ -e "$FIXTURE_DIR/switch-during-restore" ]; then
+        cat "$FIXTURE_DIR/switch-during-restore" > "$FIXTURE_DIR/active-tab"
       fi
+      if [ "$target" = "$TAB" ] && [ -e "$FIXTURE_DIR/pre-close-list-unreadable" ]; then
+        rm -f "$FIXTURE_DIR/pre-close-list-unreadable"
+        printf '1\n' > "$FIXTURE_DIR/fail-next-workspace-list"
+      elif [ "$target" = "$TAB" ] && [ -e "$FIXTURE_DIR/pre-close-list-malformed" ]; then
+        rm -f "$FIXTURE_DIR/pre-close-list-malformed"
+        printf '0\n' > "$FIXTURE_DIR/fail-next-workspace-list"
+      fi
+      fixture_tabs "${target%%:*}" | jq -e --arg tab "$target" \
+        '.[] | select(.tab_id == $tab) | {result: {tab: .}}'
       ;;
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in
@@ -201,9 +226,12 @@ fm_backend_herdr_cli() {
       ;;
     "api snapshot")
       : > "$FIXTURE_DIR/snapshotted"
-      printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
+      active=$(cat "$FIXTURE_DIR/active-tab")
+      printf '{"result":{"snapshot":{"focused_workspace_id":"%s","focused_tab_id":"%s","focused_pane_id":"%s:p%s","workspaces":' \
+        "${active%%:*}" "$active" "${active%%:*}" "${active##*:t}"
       fixture_workspaces
-      printf ',"tabs":'; fixture_tabs
+      printf ',"tabs":'
+      { fixture_tabs w1; fixture_tabs "$WS"; fixture_tabs w3; } | jq -s 'add'
       printf ',"panes":'; fixture_panes
       printf '}}}\n'
       ;;
@@ -226,6 +254,8 @@ fm_backend_herdr_cli() {
       [ ! -e "$FIXTURE_DIR/close-response-lost" ] || return 1
       ;;
     "tab focus")
+      fixture_tabs "${target%%:*}" | jq -e --arg tab "$target" \
+        'any(.[]; .tab_id == $tab)' >/dev/null || return 1
       printf '%s\n' "$target" > "$FIXTURE_DIR/active-tab"
       ;;
     *) return 1 ;;
@@ -355,9 +385,9 @@ for close_failure in close-fails close-response-lost presence-unreadable; do
   printf 'w1:t2\n' > "$FIXTURE_DIR/switch-during-close"
   close_status=0
   fm_backend_herdr_projection_close_empty_tab_focus_preserving test "$WS" "$TAB" || close_status=$?
-  [ "$close_status" -eq 1 ] || fail "$close_failure lost the unconfirmed close result after a focus switch"
+  [ "$close_status" -ne 0 ] || fail "$close_failure lost the unconfirmed close result after a focus switch"
   [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "$close_failure did not attempt the exact tab close"
-  [ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t2 ] || fail "$close_failure replaced the tab selected during close"
+  [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t2' ] || fail "$close_failure replaced the tab selected during close"
   pass "$close_failure preserves a tab selected during close"
 done
 for presence in readable unreadable; do
@@ -381,8 +411,33 @@ close_status=0
 fm_backend_herdr_projection_close_empty_tab_focus_preserving test "$WS" "$TAB" || close_status=$?
 [ "$close_status" -ne 0 ] || fail "a focus switch during restoration lost the close failure"
 [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "restoration race did not attempt the exact close"
-[ "$(cat "$FIXTURE_DIR/active-tab")" = w1:t2 ] || fail "restoration replaced the newer tab selection"
+[ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t2' ] || fail "restoration replaced the newer tab selection"
 pass "uncertain close rechecks current focus immediately before restoration"
+for uncertainty in workspace-presence-unreadable pre-close-list-unreadable pre-close-list-malformed error-tab-focus; do
+  for close_failure in close-response-lost presence-unreadable; do
+    reset_fixture
+    : > "$FIXTURE_DIR/empty-tab"
+    : > "$FIXTURE_DIR/$close_failure"
+    : > "$FIXTURE_DIR/$uncertainty"
+    if [ "$uncertainty" = workspace-presence-unreadable ]; then
+      : > "$FIXTURE_DIR/presence-unreadable"
+    fi
+    write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+    fm_herdr_session_cleanup >/dev/null 2>&1
+    [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$close_failure with $uncertainty retired the journal before resolving focus"
+    if [[ "$uncertainty" = pre-close-list-* ]]; then
+      [ ! -s "$CLOSE_LOG" ] || fail "unreadable pre-close workspace list allowed a close"
+      [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w1\tw1:t1' ] || fail "refused close displaced focus"
+    else
+      [ "$(cat "$CLOSE_LOG")" = "tab close $TAB" ] || fail "$uncertainty did not attempt the exact close"
+      [ "$(fm_backend_herdr_tab_presence_state test "$TAB")" = dead ] || fail "$uncertainty did not reproduce deletion despite the uncertain close"
+      [ "$(fm_backend_herdr_projection_focus_snapshot test)" = $'w3\tw3:t1' ] || fail "$uncertainty did not reproduce unresolved focus"
+      fm_herdr_session_cleanup >/dev/null 2>&1
+      [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "repeat cleanup retired an unresolved journal"
+    fi
+    pass "$close_failure with $uncertainty preserves the journal until focus is resolved"
+  done
+done
 reset_fixture
 : > "$FIXTURE_DIR/empty-tab"
 write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"

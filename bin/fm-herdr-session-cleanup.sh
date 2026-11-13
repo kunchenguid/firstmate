@@ -299,7 +299,9 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
     close_kind='pane'
   fi
-  if [ "$state" = dead ]; then
+  if [ "$empty_tab" = 1 ] && [ "$close_status" -eq 2 ]; then
+    fm_herdr_cleanup_warn "$id journal preserved because empty tab closure left focus unresolved"
+  elif [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \
       && { [ "$empty_tab" = 1 ] \
         && fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \

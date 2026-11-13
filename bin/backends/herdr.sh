@@ -2201,6 +2201,8 @@ fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
 # the presentation lock. A live viewer of the target tab is never displaced;
 # an uncertain non-target close restores prior focus only after confirmed
 # removal and while focus still matches the close's expected destination.
+# Return 2 after an issued close when focus remains unresolved, so the caller
+# retains the journal even if a later presence read confirms deletion.
 fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <workspace> <tab>
   local session=$1 workspace=$2 tab=$3 before active_tab info target_tab target_workspace pane_count
   local foreground_rc=0 skip_restore=0 close_status=0 after presence list restore_from
@@ -2219,7 +2221,7 @@ fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <w
   fi
   # Older Herdr releases focus the removed workspace's right neighbor, or
   # the new last workspace. Capture that destination before issuing the close.
-  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || list=
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   restore_from=$(printf '%s' "$list" | jq -r --arg workspace "$workspace" '
     .result.workspaces as $ws
     | select(($ws | type) == "array" and ($ws | length) > 1)
@@ -2230,6 +2232,7 @@ fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <w
     | select((.active_tab_id | type) == "string" and (.active_tab_id | length) > 0)
     | [.workspace_id, .active_tab_id] | @tsv
   ' 2>/dev/null) || restore_from=
+  [ "$skip_restore" -eq 1 ] || [ -n "$restore_from" ] || return 1
   fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$tab" || return 1
   if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
     before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
@@ -2240,20 +2243,20 @@ fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <w
   [ "$presence" = dead ] || close_status=1
   if [ "$skip_restore" -eq 0 ]; then
     if [ "$close_status" -ne 0 ]; then
-      [ "$presence" != present ] && [ -n "$restore_from" ] || return "$close_status"
+      [ "$presence" != present ] || return 2
+      [ -n "$restore_from" ] || return 2
       if [ "$presence" = unknown ]; then
-        [ "$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")" = dead ] || return "$close_status"
+        [ "$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")" = dead ] || return 2
       fi
     else
       restore_from=
     fi
     if ! fm_backend_herdr_projection_focus_restore "$session" "$before" "empty tab close" "$restore_from"; then
-      [ "$close_status" -ne 0 ] && return "$close_status"
       return 2
     fi
   fi
-  after=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
-  [ "$skip_restore" -eq 1 ] || [ "$after" = "$before" ] || return 1
+  after=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 2
+  [ "$skip_restore" -eq 1 ] || [ "$after" = "$before" ] || return 2
   return "$close_status"
 }
 

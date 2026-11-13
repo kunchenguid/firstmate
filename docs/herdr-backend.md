@@ -454,8 +454,9 @@ The proof retries strict single samples for a bounded settle window, because an 
 A genuinely busy pane fails every sample.
 Any foreground command, child process, active shell job, unknown shell, unreadable process table, missing field, or API error preserves the pane.
 
-An unconfirmed close retains the journal.
-A confirmed close may retire it even when focus restoration reported an error after the close.
+Unconfirmed deletion retains the journal.
+A confirmed pane close may retire it even when focus restoration reported an error after the close.
+An empty-tab close retains the journal while focus restoration is unresolved, even if a later read confirms deletion.
 A second run finds no matching title or journal and is a no-op.
 
 Before closure, any of these preserves the candidate and lets session startup continue with at most a concise warning:
