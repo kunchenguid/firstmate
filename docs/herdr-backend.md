@@ -300,15 +300,16 @@ The worker remains on the ordinary flat or Herdr-current-order path.
 ### Cleanup and focus safety
 
 Normal task metadata remains the sole endpoint authority after creation.
-Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+Task cleanup closes only the exact recorded task pane and never calls `workspace close`.
 For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
 If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
+For a projected tab left empty after its pane disappears, see [Startup cleanup of restored projections](#startup-cleanup-of-restored-projections).
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
 Both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter header of `bin/backends/herdr.sh`.
 
-Projected cleanup therefore:
+Projected pane cleanup therefore:
 
 - Runs under the same session lock.
 - Refuses to delete the tab a live foreground client is viewing.
@@ -363,8 +364,8 @@ Durable task records are erased only once the exact pane is confirmed gone throu
 After every close path, only a structured not-found response counts as gone.
 A present or unknown result retains every record with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
-If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
-Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate; a journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for that sweep.
+Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate.
+A journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for [startup cleanup](#startup-cleanup-of-restored-projections).
 
 ### Restart recovery
 
@@ -420,21 +421,26 @@ A candidate must meet all of these conditions:
 
 - The title must contain exactly one token occurrence across the named-session snapshot.
 - The title must equal the title derived from exactly one valid presentation journal in this home's own `state/`.
-- A version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+- A version 2 journal additionally must bind this exact physical home, named session, workspace, and tab, and it must bind the pane when one remains.
 - The task's ordinary metadata must be absent.
-- The candidate must have exactly one tab and exactly one pane.
+- The candidate must have exactly one tab and exactly one pane, or exactly one empty tab and zero panes left by a completed pane close.
+- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab, even when no foreground client is attached.
+  An unbound version 1 journal never authorizes closing an empty tab, so that tab is preserved.
 
 Firstmate then cleans up the candidate in this order:
 
 1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
 2. Inside both locks, take one exact snapshot.
 3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
-4. Positively confirm no registered agent.
-5. Read Herdr's process information for the exact named-session pane and apply the process proof below.
-6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
-7. Call the existing exact-pane focus-preserving close helper.
-   It closes only that pane, never a workspace.
-8. Retire the matching journal only after the exact pane is positively confirmed gone.
+4. Positively confirm no registered agent when a pane remains.
+5. Read Herdr's process information for the exact named-session pane and apply the process proof below when a pane remains.
+6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane or empty-tab topology, exact endpoint relationship, absent agent when a pane exists, process proof when a pane exists, and non-target focus.
+7. Call the existing exact-pane focus-preserving close helper for a one-pane candidate, or the exact empty-tab focus-preserving close helper for an empty-tab candidate.
+   Neither helper grants cleanup authority to an ambiguous object.
+8. Retire the matching journal only after the exact pane or empty tab is positively confirmed gone.
+
+After a failed or uncertain empty-tab close, cleanup restores the exact prior focus only if the tab or its workspace is confirmed gone and current focus still matches the close's expected destination; a newer tab selection is preserved.
+Closing the last empty tab also removes its workspace in Herdr; cleanup never issues `workspace close` or closes a workspace that still has another tab.
 
 The process proof requires all of these:
 
@@ -447,11 +453,12 @@ The proof retries strict single samples for a bounded settle window, because an 
 A genuinely busy pane fails every sample.
 Any foreground command, child process, active shell job, unknown shell, unreadable process table, missing field, or API error preserves the pane.
 
-An unconfirmed close retains the journal.
-A confirmed close may retire it even when focus restoration reported an error after the close.
+Unconfirmed deletion retains the journal.
+A confirmed pane close may retire it even when focus restoration reported an error after the close.
+If the exact bound tab is confirmed gone but focus restoration remains unresolved, cleanup retires its journal without issuing another focus mutation, so the next task spawn can create a fresh projection.
 A second run finds no matching title or journal and is a no-op.
 
-Any of these preserves the candidate and lets session startup continue with at most a concise warning:
+Before closure, any of these preserves the candidate and lets session startup continue with at most a concise warning:
 
 - A malformed or missing title or token.
 - A duplicate token.
@@ -482,7 +489,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
-  Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
+  Session-start cleanup is limited to the [proof above](#startup-cleanup-of-restored-projections).
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
@@ -493,7 +500,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
-| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
+| `tests/fm-herdr-session-cleanup.test.sh` | Portable cleanup coverage for idle-shell panes and bound empty tabs, including focus restoration after uncertain closes. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
