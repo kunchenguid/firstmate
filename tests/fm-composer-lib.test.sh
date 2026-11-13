@@ -1907,3 +1907,46 @@ test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only
+
+# A ruled first row whose typed continuation opens with a mode-hint glyph is a
+# real wrapped draft, not border furniture over a footer.
+test_ruled_first_row_with_mode_glyph_continuation_is_pending() {
+  local caps screen out rule cursor
+  rule=$(printf '─%.0s' $(seq 1 60))
+  screen=$(printf '%s\n' "❯ $rule" '⏸ pause playback')
+  caps=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
+  for cursor in 0 1 ''; do
+    out=$(fm_composer_classify_screen "$caps" "$screen" "$cursor" '')
+    [ "$out" = pending ] || fail "ruled first row over a typed mode-glyph row (cursor '$cursor') must read pending, got '$out'"
+  done
+  out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+  [ "$out" = "$rule ⏸ pause playback" ] \
+    || fail "ruled first row and mode-glyph continuation must be extracted in full, got '$out'"
+  pass "a ruled first row over a typed mode-glyph continuation stays a pending draft"
+}
+test_ruled_first_row_with_mode_glyph_continuation_is_pending
+
+test_ruled_first_row_over_plan_mode_footer_is_empty() {
+  local caps screen out rule cursor variant
+  rule=$(printf '─%.0s' $(seq 1 60))
+  caps=$(printf 'styled=1\ncursor=1\nidentity=1\nrows=0\n')
+  for variant in plain bright; do
+    case "$variant" in
+      plain) screen=$(printf '%s\n' "❯ $rule" '⏸ plan mode on') ;;
+      bright) screen=$(printf '%s\n' "${ESC}[97m❯ $rule${ESC}[0m" '⏸ plan mode on') ;;
+    esac
+    for cursor in 0 1 ''; do
+      out=$(fm_composer_classify_screen "$caps" "$screen" "$cursor" '')
+      [ "$out" != pending ] || fail "$variant ruled first row over plan-mode footer (cursor '$cursor') must not read pending, got '$out'"
+    done
+    out=$(fm_composer_classify_screen "$caps" "$screen" 0 '')
+    [ "$out" = empty ] || fail "$variant ruled first row over plan-mode footer must read empty, got '$out'"
+    out=$(fm_composer_classify_screen "$(printf 'styled=1\n')" "$screen")
+    [ "$out" = empty ] || fail "cursorless $variant ruled first row over plan-mode footer must read empty, got '$out'"
+    out=$(fm_composer_extract_selected_content "$(printf 'styled=1\n')" "$screen")
+    [ -z "$out" ] \
+      || fail "$variant ruled first row over plan-mode footer must extract no input, got '$out'"
+  done
+  pass "a plan-mode footer below a plain or bright ruled first row remains empty"
+}
+test_ruled_first_row_over_plan_mode_footer_is_empty

@@ -1490,10 +1490,27 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
 # be the harness's own idle suggestion (claude's rotating dim hint, codex's
 # `Use /skills ...`), so it must read `unknown` rather than a false `pending`.
 _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
-  local screen=$1 styled=$2 row=$3 raw content plain state
+  local screen=$1 styled=$2 row=$3 raw content plain next glyph state
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  content=$(_fm_composer_row_content "$raw" 0)
+  next=$(_fm_composer_row_content "$(_fm_composer_screen_row "$((row + 1))" "$screen")" 0)
+  fm_composer_normalize_trim_var content
+  fm_composer_normalize_trim_var next
+  if fm_composer_leading_agent_glyph_var plain "$content" \
+     && _fm_composer_row_is_rule_furniture "${content#*"$plain"}" \
+     && _fm_composer_row_is_draft_continuation "$next"; then
+    _fm_composer_classify_bare_wrap "$screen" "$styled" "$row" "$((row + 1))"
+    return 0
+  fi
   raw=$(_fm_composer_screen_row "$row" "$screen")
   content=$(_fm_composer_row_content "$raw" "$styled")
   plain=$(_fm_composer_row_content "$raw" 0)
+  if fm_composer_leading_agent_glyph_var glyph "$plain" \
+     && _fm_composer_row_is_rule_furniture "${plain#*"$glyph"}" \
+     && _fm_composer_row_is_mode_footer "$next"; then
+    content=$glyph
+    plain=$glyph
+  fi
   _fm_composer_bare_row_strip_furniture_var content
   _fm_composer_bare_row_strip_furniture_var plain
   state=$(fm_composer_classify_content 0 "$content" \
@@ -1547,6 +1564,64 @@ _fm_composer_row_is_braille_furniture() {  # <row>
   [ -z "$rest" ]
 }
 
+# _fm_composer_bare_row_is_ruled: 0 when the bare agent-glyph <row> of the plain
+# screen is the glyph followed only by rule cells and no draft continuation wraps
+# onto the row below it, so the row is its own closing border and owns no wrapped
+# input. A ruled row whose next row continues a draft stays input.
+_fm_composer_bare_row_is_ruled() {  # <plain-screen> <row>
+  local text glyph next
+  text=$(_fm_composer_screen_row "$2" "$1")
+  fm_composer_normalize_trim_var text
+  fm_composer_leading_agent_glyph_var glyph "$text" || return 1
+  _fm_composer_row_is_rule_furniture "${text#*"$glyph"}" || return 1
+  next=$(_fm_composer_screen_row "$(($2 + 1))" "$1")
+  fm_composer_normalize_trim_var next
+  _fm_composer_row_is_draft_continuation "$next" && return 1
+  return 0
+}
+
+# _fm_composer_row_is_mode_hint: 0 when the trimmed <row> opens with a mode-hint
+# glyph (FM_COMPOSER_MODE_HINT_RE).
+_fm_composer_row_is_mode_hint() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" \
+    "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive
+}
+
+# _fm_composer_row_is_mode_footer: 0 when the mode-hint <row> is shaped like
+# claude's permission-mode footer: the doubled `⏵⏵` opener, the `⏸ plan mode
+# on` form, or the `shift+tab` cycle hint. Anything else is read as typed text,
+# the safe direction, because a draft read as pending never has a message
+# injected over it.
+_fm_composer_row_is_mode_footer() {  # <trimmed-row>
+  case "$1" in
+    '⏵⏵'*|'⏸ plan mode on'|*'shift+tab'*) return 0 ;;
+  esac
+  return 1
+}
+
+# _fm_composer_row_is_ordinary_continuation: 0 when the trimmed <row> is plain
+# text that can continue a wrapped draft: non-blank, no structural edge, not a
+# status, mode-hint or furniture row, and not itself a prompt-glyph or rule row.
+_fm_composer_row_is_ordinary_continuation() {  # <trimmed-row>
+  local row=$1 glyph
+  [ -n "$row" ] || return 1
+  fm_composer_row_has_edge "$row" && return 1
+  _fm_composer_row_is_omp_status "$row" && return 1
+  _fm_composer_row_is_braille_furniture "$row" && return 1
+  _fm_composer_row_is_rule_furniture "$row" && return 1
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 1
+  fm_composer_leading_prompt_glyph_var glyph "$row" && return 1
+  return 0
+}
+
+# _fm_composer_row_is_draft_continuation: 0 when the trimmed <row> continues a
+# wrapped draft, including a typed mode-hint row but excluding the mode footer.
+_fm_composer_row_is_draft_continuation() {  # <trimmed-row>
+  _fm_composer_row_is_ordinary_continuation "$1" && return 0
+  _fm_composer_row_is_mode_hint "$1" && ! _fm_composer_row_is_mode_footer "$1"
+}
+
 # _fm_composer_bare_row_strip_furniture_var: on a bare agent-glyph row, reduce
 # the row to its glyph when everything behind the glyph is braille furniture,
 # in place through the named variable; a row whose tail carries anything else,
@@ -1562,12 +1637,26 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
   fi
 }
 
+# _fm_composer_row_is_rule_furniture: 0 when the text is non-blank and made only
+# of horizontal-rule cells (`─ ━ ═`).
+_fm_composer_row_is_rule_furniture() {  # <text>
+  local text=$1 rest
+  fm_composer_normalize_trim_var text
+  [ -n "$text" ] || return 1
+  rest=${text//─/}
+  rest=${rest//━/}
+  rest=${rest//═/}
+  fm_composer_normalize_trim_var rest
+  [ -z "$rest" ]
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
 # rather than unrelated screen content.
 _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
   local plain=$1 g=$2 cy=$3 row line trimmed glyph
+  _fm_composer_bare_row_is_ruled "$plain" "$g" && return 1
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
@@ -2083,6 +2172,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
           && next=-1
       fi
     fi
+    _fm_composer_bare_row_is_ruled "$plain" "$FM_COMPOSER_SELECTED_FIRST" && next=-1
     while [ "$next" -ge 0 ]; do
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
@@ -2151,6 +2241,17 @@ EOF
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && [ "$FM_COMPOSER_SELECTED_FIRST" -eq "$FM_COMPOSER_SELECTED_LAST" ]; then
+          _fm_composer_bare_row_strip_furniture_var content
+          # A lone ruled glyph row is proven composer furniture by selection.
+          # Preserve its cells in multi-row wrapped drafts, but do not expose
+          # them as extracted input from this single-row selection.
+          if fm_composer_leading_agent_glyph_var glyph "$content" \
+             && _fm_composer_row_is_rule_furniture "${content#*"$glyph"}"; then
+            content=$glyph
+          fi
+        fi
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}
