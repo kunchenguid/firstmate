@@ -279,7 +279,183 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+# A host whose `sleep` is a multicall coreutils (uutils on Ubuntu 26.04) refuses
+# to run under a foreign name, so a harness-named symlink to it never becomes a
+# live process. The fake `sleep` below models that refusal on any host, which
+# keeps this case meaningful where CI's own `sleep` is single-purpose.
+test_agent_standin_survives_a_multicall_sleep() (
+  local dir="$TMP_ROOT/standin" fakebin real_sleep standin pid
+  real_sleep=$(command -v sleep) || fail "sleep not found"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${0##*/}" in
+  sleep) exec "$real_sleep" "\$@" ;;
+  *) echo "Requested utility \${0##*/} does not match executable name" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/sleep"
+  ln -s "$fakebin/sleep" "$dir/pi"
+  "$fakebin/sleep" 0 || fail "the fake multicall sleep must run under its own name"
+  if "$dir/pi" 0 2>/dev/null; then
+    fail "the fake multicall sleep must refuse a harness name, or this case proves nothing"
+  fi
+
+  if standin=$(PATH="$fakebin:$(fm_test_base_path_sans "$PATH" cc gcc)" fm_agent_standin "$dir/nocc"); then
+    fail "without a compiler, a multicall sleep must not be offered as a stand-in, got '$standin'"
+  fi
+  assert_absent "$dir/nocc/standin" "a refused stand-in must not be left behind"
+
+  if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+    echo "skip: no C compiler, so the compiled stand-in half of the multicall case cannot run"
+    pass "agent stand-in: a multicall sleep is refused rather than offered as a stand-in"
+    exit 0
+  fi
+  standin=$(PATH="$fakebin:$PATH" fm_agent_standin "$dir/cc") \
+    || fail "with a compiler, a multicall host sleep must still yield a stand-in"
+  ln -s "$standin" "$dir/cc/pi"
+  "$dir/cc/pi" 60 &
+  pid=$!
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "the stand-in must stay alive under a harness name"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "agent stand-in: a multicall sleep is refused, and the compiled stand-in survives a harness name"
+)
+
+# An inherited absolute GIT_DIR (a linked-worktree hook exports one) overrides
+# `git -C`, so fixture setup would commit, move refs, and register worktrees in
+# the caller's repository; GIT_INDEX_FILE and GIT_COMMON_DIR redirect the index
+# and refs the same way, and GIT_WORK_TREE breaks the setup outright. Each entry
+# point runs fm-teardown.test.sh's Git setup with each variable aimed in turn at
+# a disposable ambient clone, which must come through unchanged.
+test_inherited_git_location_isolation() (
+  local dir="$TMP_ROOT/git-location" before after var value helper rc
+  mkdir -p "$dir/runner/bin" "$dir/runner/tests"
+  fm_git_init_commit "$dir/ambient"
+  git -C "$dir/ambient" worktree add -q --detach "$dir/linked" main
+  cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
+  cat > "$dir/setup.sh" <<'SH'
+case_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-git-location.XXXXXX")
+git init -q --bare "$case_dir/origin.git"
+git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+echo seed > "$case_dir/_seed/seed.txt"
+git -C "$case_dir/_seed" add seed.txt
+git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t commit -q -m "origin baseline"
+git -C "$case_dir/_seed" push -q origin main
+git clone -q "$case_dir/origin.git" "$case_dir/project"
+git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+[ "$(git -C "$case_dir/wt" log -1 --format=%s)" = "origin baseline" ]
+SH
+  { printf '#!/usr/bin/env bash\nset -eu\n'; cat "$dir/setup.sh"; } > "$dir/runner/tests/fm-test-run.test.sh"
+  chmod +x "$dir/runner/tests/fm-test-run.test.sh"
+
+  ambient_state() {
+    git -C "$dir/ambient" for-each-ref --format='%(refname) %(objectname)'
+    git -C "$dir/ambient" worktree list --porcelain
+    git -C "$dir/ambient" ls-files --stage
+    git -C "$dir/linked" ls-files --stage
+  }
+
+  before=$(ambient_state)
+  for var in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; do
+    case $var in
+      GIT_DIR) value=$(git -C "$dir/linked" rev-parse --absolute-git-dir) ;;
+      GIT_WORK_TREE) value="$dir/linked" ;;
+      GIT_INDEX_FILE) value=$(git -C "$dir/linked" rev-parse --path-format=absolute --git-path index) ;;
+      GIT_COMMON_DIR) value=$(git -C "$dir/linked" rev-parse --path-format=absolute --git-common-dir) ;;
+    esac
+    for helper in lib herdr-test-safety runner-1 runner-2; do
+      rc=0
+      case $helper in
+        runner-*)
+          env "$var=$value" TMPDIR="$dir" "$dir/runner/bin/fm-test-run.sh" --jobs "${helper#runner-}" \
+            tests/fm-test-run.test.sh > "$dir/out.log" 2>&1 || rc=$?
+          [ "$rc" != 0 ] || assert_grep 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0' "$dir/out.log" \
+            "$helper did not execute the Git fixture under $var" ;;
+        *)
+          # shellcheck disable=SC2016 # expanded by the child bash
+          env "$var=$value" TMPDIR="$dir" bash -eu -c '. "$1"; . "$2"' _ "$ROOT/tests/$helper.sh" "$dir/setup.sh" \
+            > "$dir/out.log" 2>&1 || rc=$? ;;
+      esac
+      # The ambient check comes first: it is the escape this case exists to catch.
+      after=$(ambient_state)
+      [ "$before" = "$after" ] \
+        || fail "$helper fixture setup under $var changed the ambient repository: $(diff <(echo "$before") <(echo "$after"))"
+      [ "$rc" = 0 ] || fail "$helper fixture setup failed under $var: $(cat "$dir/out.log")"
+    done
+  done
+  pass "shared helpers and runner keep fixture Git off an inherited repository location"
+)
+
+# A suite started from a Herdr-hosted terminal inherits the launcher's identity,
+# its terminal marker, and a supervisor's home/state overrides. Sourcing the
+# library must leave none of them for a fixture to bind to, and a value a case
+# exports afterwards must still be honored.
+test_inherited_launcher_env_is_cleared() (
+  local dir="$TMP_ROOT/launcher-env" decoy out rc=0
+  decoy="$dir/decoy-home"
+  mkdir -p "$decoy/config" "$dir/own-home" "$dir/empty-config"
+  printf 'paseo\n' > "$decoy/config/backend"
+  # shellcheck disable=SC2016 # expanded by the child bash
+  out=$(env -u TMUX -u CMUX_WORKSPACE_ID -u __CFBundleIdentifier \
+    HERDR_ENV=1 HERDR_PANE_ID=w1:p1 HERDR_TAB_ID=w1:t1 HERDR_WORKSPACE_ID=w1 \
+    HERDR_SOCKET_PATH="$decoy/herdr.sock" HERDR_SESSION=host \
+    HERDR_BIN_PATH="$decoy/herdr" TERM_PROGRAM=rex FM_BACKEND=paseo \
+    FM_HOME="$decoy" FM_ROOT="$decoy" FM_ROOT_OVERRIDE="$decoy" \
+    FM_STATE_OVERRIDE="$decoy/state" FM_DATA_OVERRIDE="$decoy/data" \
+    FM_CONFIG_OVERRIDE="$decoy/config" FM_PROJECTS_OVERRIDE="$decoy/projects" \
+    bash -c '
+    set -u
+    . "$1/tests/lib.sh"
+    for name in HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID \
+      HERDR_SOCKET_PATH HERDR_SESSION HERDR_BIN_PATH TERM_PROGRAM FM_BACKEND \
+      FM_HOME FM_ROOT FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
+      FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE; do
+      [ -z "${!name+x}" ] || { echo "$name survived tests/lib.sh"; exit 1; }
+    done
+    (
+      . "$ROOT/bin/fm-backend.sh"
+      [ "$FM_BACKEND_CONFIG_DIR" = "$ROOT/config" ] \
+        || { echo "cleared home still resolves config at $FM_BACKEND_CONFIG_DIR"; exit 1; }
+    ) || exit 1
+    (
+      export FM_CONFIG_OVERRIDE="$2/empty-config" REX_BLOCK=block
+      . "$ROOT/bin/fm-backend.sh"
+      backend=$(fm_backend_name)
+      case "$backend" in
+        herdr|rex|paseo) echo "inherited launcher still selects $backend"; exit 1 ;;
+      esac
+    ) || exit 1
+    (
+      export FM_CONFIG_OVERRIDE="$2/empty-config" HERDR_ENV=1
+      . "$ROOT/bin/fm-backend.sh"
+      [ "$(fm_backend_name)" = herdr ] \
+        || { echo "a launcher identity exported after sourcing was ignored"; exit 1; }
+    ) || exit 1
+    (
+      export FM_CONFIG_OVERRIDE="$2/empty-config" FM_BACKEND=paseo
+      . "$ROOT/bin/fm-backend.sh"
+      [ "$(fm_backend_name)" = paseo ] \
+        || { echo "a backend exported after sourcing was ignored"; exit 1; }
+    ) || exit 1
+    (
+      export FM_HOME="$2/own-home"
+      . "$ROOT/bin/fm-backend.sh"
+      [ "$FM_BACKEND_CONFIG_DIR" = "$2/own-home/config" ] \
+        || { echo "a home exported after sourcing was ignored"; exit 1; }
+    ) || exit 1
+  ' _ "$ROOT" "$dir" 2>&1) || rc=$?
+  [ "$rc" = 0 ] || fail "inherited launcher environment reached a fixture: $out"
+  pass "tests/lib.sh clears an inherited launcher environment and honors later exports"
+)
+
 test_git_config_isolation || fail "Git fixture config isolation"
+test_inherited_launcher_env_is_cleared || fail "launcher environment isolation"
+test_inherited_git_location_isolation || fail "Git fixture location isolation"
+test_agent_standin_survives_a_multicall_sleep || fail "agent stand-in multicall case"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers

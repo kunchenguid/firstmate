@@ -7,13 +7,13 @@
 # both use this owner without duplicating lint configuration.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks and source
-# following. CI, main, and merge-base-less runs keep --norc --external-sources
-# with full dataflow over the whole canonical set. An ordinary local branch
-# (changed-file mode, including the no-mistakes lint step) drops
+# following. CI, main, and merge-base-less runs attempt --norc
+# --external-sources with full dataflow for each canonical root. An ordinary
+# local branch (changed-file mode, including the no-mistakes lint step) drops
 # --external-sources, keeps dataflow, and excludes SC1091, SC2034, SC2153,
-# and SC2329, the codes that need library context. Those codes still run in
-# CI over the whole set. Explicit paths keep --external-sources with the
-# selected dataflow mode.
+# and SC2329, the codes that need library context. CI checks those codes
+# on source-following attempts (see the memory fallback below). Explicit
+# paths attempt --external-sources with the selected dataflow mode.
 # Tests stop source analysis at imported production modules because CI analyzes
 # every production shell separately as a canonical, source-aware root.
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
@@ -25,8 +25,8 @@
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
 #     merge-base against origin/main (or local main) can be found, it lints
 #     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, with
-#     --external-sources and full dataflow. This is what CI always runs, so
-#     CI coverage never depends on a local diff.
+#     --external-sources and full dataflow first. CI coverage never depends
+#     on a local diff; memory failures may take the narrower retry below.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -50,9 +50,10 @@
 # two CI runners, each with those same concurrency-limited workers.
 # Partitions are complete, disjoint, and byte-weight balanced; --list-files
 # exposes their actual roots.
-# Partition mode is always full source-aware analysis, never changed-only or
-# --fast, and does not accept explicit paths. Each partition also runs workflow
-# lint and backend-purity checks, keeping either invocation independently useful.
+# Partition mode starts with full source-aware analysis, never changed-only
+# or --fast, and does not accept explicit paths. Each partition also runs
+# workflow lint and backend-purity checks, keeping either invocation
+# independently useful.
 #
 # With FM_LINT_REQUIRE_BOUNDS=1, which CI sets, every per-root ShellCheck
 # process runs under an enforced envelope: a wall deadline
@@ -71,29 +72,42 @@
 # cannot apply the address-space limit at all) each root still runs in its
 # own ShellCheck process with identical diagnostics, just unbounded.
 #
+# If a source-following root exits with a memory failure, it is retried once
+# without --external-sources under the same memory limit and only the time
+# left in that root's original deadline; with under a second left, the
+# memory failure stands without a retry. A clean retry passes
+# with an explicit memory-fallback reason and warning; only the same
+# cross-file-dependent codes omitted in local no-source lint are excluded.
+# Other findings and failed retries still fail lint. The retry's diagnostics
+# replace the failed attempt's output; peak RSS is the maximum of both attempts.
+#
 # Per-root evidence is incremental: workers append begin/end records (root,
-# mode, shard, start, end, duration, exit status, reason, and peak RSS when
-# measured) to a roots log as each root completes, so a mid-run kill still
-# leaves the completed record and names the root in flight as
-# begun-but-unfinished. With --telemetry the log is retained at
+# mode, shard, start, end, duration, final exit status, reason, peak RSS when
+# measured, and whether the final attempt followed sources) to a roots log
+# as each root completes, so a mid-run kill still leaves the completed record
+# and names the root in flight as begun-but-unfinished. With --telemetry the
+# log is retained at
 # <telemetry-without-.tsv>.roots.tsv (or <telemetry>.roots.tsv if there is no
 # .tsv suffix); otherwise it lives only in the
-# run's scratch dir. Reason values are ok, findings, timeout, memory,
-# signal:<sig>, limit-unavailable, or error:<rc>. Memory requires process-level
-# evidence (a GHC exhaustion status or runtime error on stderr), not an echoed
-# source excerpt or an OOM phrase in a filename. In partition mode begin/end
+# run's scratch dir. Reason values are ok, findings, memory-fallback,
+# timeout, memory, signal:<sig>, limit-unavailable, or error:<rc>.
+# Memory requires process-level evidence (a GHC exhaustion status or runtime
+# error on stderr), not an echoed source excerpt or an OOM phrase in a
+# filename. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
 # there.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
+# source_followed_directives counts directives only for roots whose final
+# attempt followed sources, not roots that passed or failed a no-source retry.
 #
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override concurrent worker count
-#   fm-lint.sh --partition <1of2|2of2> lint one full-rigor canonical CI partition
+#   fm-lint.sh --partition <1of2|2of2> lint one canonical CI partition (see fallback above)
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -101,8 +115,8 @@
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
-# Cross-file codes that need --external-sources. Local changed-file mode
-# cannot judge them, so they stay CI-only.
+# Cross-file codes that need --external-sources. No-source checks (local
+# changed-file mode and memory fallback) cannot judge them.
 LOCAL_NOX_EXCLUDE=SC1091,SC2034,SC2153,SC2329
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SELF="$SELF_DIR/fm-lint.sh"
@@ -160,6 +174,17 @@ fm_lint_root_rss() {  # <rss-file>
   printf '%s\n' "${kib:-unavailable}"
 }
 
+fm_lint_max_root_rss() {  # <rss-kib> <rss-kib>
+  local first=$1 second=$2
+  case "$first" in ''|unavailable|*[!0-9]*) printf '%s\n' "$second"; return ;; esac
+  case "$second" in ''|unavailable|*[!0-9]*) printf '%s\n' "$first"; return ;; esac
+  if [ "$first" -gt "$second" ]; then
+    printf '%s\n' "$first"
+  else
+    printf '%s\n' "$second"
+  fi
+}
+
 # Map a root's exit status onto the reported reason vocabulary without
 # pretending every signal or nonzero exit is a memory kill: only process-level
 # memory-failure evidence earns the memory reason - GHC's heap-exhaustion
@@ -209,24 +234,11 @@ fm_lint_classify_root() {  # <rc> <root-stderr-file>
   esac
 }
 
-# Run one selected root in its own ShellCheck process, record its lifecycle
-# in the roots log, and append its diagnostics to the shard output.
-fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
-  local index=$1 path=$2 output_dir=$3 shard_index=$4
-  local root_out="$output_dir/root.$shard_index.$index.out"
-  local root_err="$output_dir/root.$shard_index.$index.err"
-  local rss_file="$output_dir/root.$shard_index.$index.rss"
-  local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib
-  start_ms=$(fm_lint_now_ms)
-  if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
-    printf 'begin\t%s\t%s\t%s\t%s\t%s\n' \
-      "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" "$start_ms" \
-      >> "$FM_LINT_INTERNAL_ROOTS_LOG"
-  fi
-  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ]; then
-    printf 'fm-lint: begin %s (shard %s, %s mode)\n' \
-      "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-unknown}" >&2
-  fi
+# Run one ShellCheck invocation under the given deadline and the per-root
+# address-space limit, returning its exit status in FM_LINT_LAST_RC.
+fm_lint_exec_root() {  # <path> <stdout-file> <stderr-file> <rss-file> <seconds> <args...>
+  local path=$1 root_out=$2 root_err=$3 rss_file=$4 seconds=$5 invocation_rc=0
+  shift 5
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ]; then
     # The watchdog runs in a process group of its own (the same setpgrp hop the
     # workers use), so the owner's TERM-then-KILL group sweep cannot kill it
@@ -237,33 +249,105 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
     # the watchdog is still starting is detected too.
     ( FM_EXEC_TIMED_OWNER_PID=$$ exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         "${BASH:-bash}" "$SELF" --internal-timed \
-        "$FM_LINT_INTERNAL_ROOT_SECS" "$FM_LINT_INTERNAL_GRACE" \
+        "$seconds" "$FM_LINT_INTERNAL_GRACE" \
         "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIB" \
-        "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" ) > "$root_out" 2> "$root_err" &
+        "$FM_LINT_SHELLCHECK" "$@" -- "$path" ) > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
     FM_LINT_WORKER_RUN_PID=
   else
-    "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" > "$root_out" 2> "$root_err" &
+    "$FM_LINT_SHELLCHECK" "$@" -- "$path" > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
     FM_LINT_WORKER_RUN_PID=
   fi
-  end_ms=$(fm_lint_now_ms)
-  duration_ms=$((end_ms - start_ms))
-  rss_kib=$(fm_lint_root_rss "$rss_file")
-  reason=$(fm_lint_classify_root "$invocation_rc" "$root_err")
+  FM_LINT_LAST_RC=$invocation_rc
+}
+
+# Run one selected root, retry memory failures without source following, record
+# its lifecycle in the roots log, and append the final diagnostics.
+fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
+  local index=$1 path=$2 output_dir=$3 shard_index=$4
+  local root_out="$output_dir/root.$shard_index.$index.out"
+  local root_err="$output_dir/root.$shard_index.$index.err"
+  local rss_file="$output_dir/root.$shard_index.$index.rss"
+  local fallback_out="$output_dir/root.$shard_index.$index.fallback.out"
+  local fallback_err="$output_dir/root.$shard_index.$index.fallback.err"
+  local fallback_rss="$output_dir/root.$shard_index.$index.fallback.rss"
+  local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib initial_rc initial_reason
+  local fallback_secs
+  local final_follow_sources=${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}
+  local -a fallback_args
+  start_ms=$(fm_lint_now_ms)
   if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
-    printf 'end\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" \
-      "$start_ms" "$end_ms" "$duration_ms" "$invocation_rc" "$reason" "$rss_kib" \
+    printf 'begin\t%s\t%s\t%s\t%s\t%s\n' \
+      "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" "$start_ms" \
       >> "$FM_LINT_INTERNAL_ROOTS_LOG"
   fi
-  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ] || { [ "$reason" != ok ] && [ "$reason" != findings ]; }; then
+  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ]; then
+    printf 'fm-lint: begin %s (shard %s, %s mode)\n' \
+      "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-unknown}" >&2
+  fi
+  fm_lint_exec_root "$path" "$root_out" "$root_err" "$rss_file" \
+    "$FM_LINT_INTERNAL_ROOT_SECS" "${FM_LINT_WORKER_ARGS[@]}"
+  invocation_rc=$FM_LINT_LAST_RC
+  reason=$(fm_lint_classify_root "$invocation_rc" "$root_err")
+  initial_rc=$invocation_rc
+  initial_reason=$reason
+  # The retry spends what is left of this root's one deadline rather than a
+  # fresh one, so both attempts together still fit the budget CI sized its job
+  # timeout around.
+  fallback_secs=$(( (start_ms + FM_LINT_INTERNAL_ROOT_SECS * 1000 - $(fm_lint_now_ms)) / 1000 ))
+  if [ "$reason" = memory ] \
+    && [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ] \
+    && [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ] \
+    && [ "$fallback_secs" -lt 1 ]; then
+    printf 'fm-lint: %s hit the memory ceiling with --external-sources (reason=%s rc=%s); no time left in its %ss deadline to retry without it\n' \
+      "$path" "$initial_reason" "$initial_rc" "$FM_LINT_INTERNAL_ROOT_SECS" >> "$output_dir/shard.$shard_index.out"
+    rss_kib=$(fm_lint_root_rss "$rss_file")
+    cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
+  elif [ "$reason" = memory ] \
+    && [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
+    fallback_args=()
+    for arg in "${FM_LINT_WORKER_ARGS[@]}"; do
+      [ "$arg" = --external-sources ] || fallback_args+=("$arg")
+    done
+    [ -z "$LOCAL_NOX_EXCLUDE" ] || fallback_args+=("--exclude=$LOCAL_NOX_EXCLUDE")
+    fm_lint_exec_root "$path" "$fallback_out" "$fallback_err" "$fallback_rss" \
+      "$fallback_secs" "${fallback_args[@]}"
+    final_follow_sources=0
+    invocation_rc=$FM_LINT_LAST_RC
+    reason=$(fm_lint_classify_root "$invocation_rc" "$fallback_err")
+    rss_kib=$(fm_lint_max_root_rss \
+      "$(fm_lint_root_rss "$rss_file")" "$(fm_lint_root_rss "$fallback_rss")")
+    printf 'fm-lint: %s hit the memory ceiling with --external-sources (reason=%s rc=%s); retried without it' \
+      "$path" "$initial_reason" "$initial_rc" >> "$output_dir/shard.$shard_index.out"
+    if [ "$reason" = ok ]; then
+      reason=memory-fallback
+      invocation_rc=0
+      printf '; fallback passed with cross-file codes excluded (%s)\n' "$LOCAL_NOX_EXCLUDE" \
+        >> "$output_dir/shard.$shard_index.out"
+    else
+      printf '; fallback reason=%s rc=%s\n' "$reason" "$invocation_rc" \
+        >> "$output_dir/shard.$shard_index.out"
+    fi
+    cat "$fallback_out" "$fallback_err" >> "$output_dir/shard.$shard_index.out"
+  else
+    rss_kib=$(fm_lint_root_rss "$rss_file")
+    cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
+  fi
+  end_ms=$(fm_lint_now_ms)
+  duration_ms=$((end_ms - start_ms))
+  if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
+    printf 'end\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" \
+      "$start_ms" "$end_ms" "$duration_ms" "$invocation_rc" "$reason" "$rss_kib" "$final_follow_sources" \
+      >> "$FM_LINT_INTERNAL_ROOTS_LOG"
+  fi
+  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ] || { [ "$reason" != ok ] && [ "$reason" != findings ] && [ "$reason" != memory-fallback ]; }; then
     printf 'fm-lint: end %s reason=%s rc=%s duration_ms=%s rss_kib=%s\n' \
       "$path" "$reason" "$invocation_rc" "$duration_ms" "$rss_kib" >&2
   fi
-  cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
   return "$invocation_rc"
 }
 
@@ -1206,7 +1290,11 @@ if [ -n "$TELEMETRY" ]; then
   : > "$TMP_ROOT/source-targets"
   source_directives=0
   source_boundaries=0
+  source_followed=0
+  awk -F '\t' '$1 == "end" && $12 == 0 { print $2 }' "$ROOTS_LOG" > "$TMP_ROOT/no-source-indices"
+  root_index=0
   for path in "${ROOTS[@]}"; do
+    root_index=$((root_index + 1))
     if [ -f "$path" ]; then
       bytes=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
       case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
@@ -1219,17 +1307,18 @@ if [ -n "$TELEMETRY" ]; then
           sub(/[[:space:]].*$/, "", target)
           print target
         }
-      ' "$path" >> "$TMP_ROOT/source-targets"
+      ' "$path" > "$TMP_ROOT/root-source-targets"
+      cat "$TMP_ROOT/root-source-targets" >> "$TMP_ROOT/source-targets"
+      if [ "$FOLLOW_SOURCES" -eq 1 ] \
+        && ! grep -qx "$root_index" "$TMP_ROOT/no-source-indices"; then
+        followed_here=$(grep -cv '^/dev/null$' "$TMP_ROOT/root-source-targets" || true)
+        source_followed=$((source_followed + followed_here))
+      fi
     fi
   done
   source_directives=$(wc -l < "$TMP_ROOT/source-targets" | tr -d '[:space:]')
   source_boundaries=$(grep -c '^/dev/null$' "$TMP_ROOT/source-targets" 2>/dev/null || true)
   case "$source_boundaries" in ''|*[!0-9]*) source_boundaries=0 ;; esac
-  if [ "$FOLLOW_SOURCES" -eq 1 ]; then
-    source_followed=$((source_directives - source_boundaries))
-  else
-    source_followed=0
-  fi
   source_targets=$(LC_ALL=C sort -u "$TMP_ROOT/source-targets" | wc -l | tr -d '[:space:]')
   content_cksum=$(cksum "$TMP_ROOT/content-cksums" | awk '{print $1 "-" $2}')
   git_head=$(git rev-parse HEAD 2>/dev/null || printf 'unavailable')

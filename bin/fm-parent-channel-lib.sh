@@ -123,6 +123,28 @@ fm_parent_channel_destination() {  # <home> <state>
   esac
 }
 
+# The outbound parent-channel status path that lives INSIDE <state>, printed,
+# when <home> is a remote mate; non-zero for a main home, a local mate, or an
+# unusable identity or binding. Only the remote route resolves the channel into
+# the mate's own state dir, so parent-replies.status there is the mate's parent
+# channel rather than a self-home task status file: a home's own status scans
+# and decision folds exclude exactly this resolved path (the same special case
+# fm-pending-reply-lib.sh's wrong-home detection applies). A local mate's
+# channel lives in the parent home's state/<id>.status, which the parent's
+# scans must keep classifying, so only the remote route resolves here.
+fm_parent_channel_outbound_status() {  # <home> <state>
+  local home=$1 state=$2 destination rc=0
+  destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  # The substitution above ran the resolver in a subshell, so its route global
+  # died with it; resolve once more in this shell (stdout discarded, the same
+  # shape fm-pending-reply-lib.sh's wrong-home detection uses) so the route
+  # check reads the resolver's own verdict rather than re-deriving it.
+  fm_parent_channel_destination "$home" "$state" >/dev/null || return 1
+  [ "$FM_PARENT_CHANNEL_ROUTE" = remote ] || return 1
+  printf '%s\n' "$destination"
+}
+
 # Fold <text> onto one bounded line, so a note copied from a child ledger or a
 # hold reason cannot break the channel's line framing.
 fm_parent_channel_clean_note() {  # <text>
@@ -130,24 +152,46 @@ fm_parent_channel_clean_note() {  # <text>
 }
 
 # Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:
-# the caller declaring a new event is the one that stamps it.
-fm_parent_channel_append_once() {  # <path> <line>
-  local path=$1 line=$2
+# the caller declaring a new event is the one that stamps it. With <key>, the
+# line is compared only against that key's latest line, not the whole history.
+fm_parent_channel_append_once() {  # <path> <line> [key]
+  local path=$1 line=$2 key=${3:-} latest wanted
   if [ -e "$path" ] || [ -L "$path" ]; then
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
   else
     mkdir -p "$(dirname "$path")" || return 1
   fi
-  if status_event_recorded "$path" "$line"; then
+  if [ -n "$key" ]; then
+    _fm_parent_channel_latest_for_key "$path" "$key" latest
+    _fm_status_untimed "$line" wanted
+    [ "$latest" != "$wanted" ] || return 0
+  elif status_event_recorded "$path" "$line"; then
     return 0
   fi
   printf '%s\n' "$line" >> "$path"
 }
 
+# The untimed last line of <path> that states decision key <key>, into
+# <out-var>; empty when none does. The fold reads a key's latest line as its
+# state, so this is the line a keyed append compares against.
+_fm_parent_channel_latest_for_key() {  # <path> <key> <out-var>
+  local __fm_pc_line __fm_pc_last=''
+  if [ -f "$1" ]; then
+    while IFS= read -r __fm_pc_line || [ -n "$__fm_pc_line" ]; do
+      [ "$(_fm_decision_key "$__fm_pc_line" '')" = "$2" ] || continue
+      _fm_status_untimed "$__fm_pc_line" __fm_pc_last
+    done < <(grep -F "[key=$2]" "$1" || true)
+  fi
+  printf -v "$3" '%s' "$__fm_pc_last"
+}
+
 # Publish one parent-facing line from <home>. See the return codes above.
-fm_parent_channel_report() {  # <home> <state> <line>
-  local home=$1 state=$2 line=$3 destination rc=0
+# With <key>, the line is a keyed state update: it is suppressed only when it
+# repeats that key's latest line, so a state that returns to an earlier value
+# (a hold re-dated A -> B -> A) is still delivered.
+fm_parent_channel_report() {  # <home> <state> <line> [key]
+  local home=$1 state=$2 line=$3 key=${4:-} destination rc=0
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
-  fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || return 4
+  fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" "$key" || return 4
 }

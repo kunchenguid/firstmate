@@ -53,6 +53,19 @@ append_wake() {
   ' _ "$lib" "$kind" "$key" "$payload"
 }
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-watch-key-lib.sh"
+
+# A differential fixture may select an older watcher with its own key format.
+watch_window_key() {  # <window> [<watcher>]
+  if [ "$#" -eq 1 ]; then
+    window_key "$1"
+    return
+  fi
+  FM_HOME="$TMP_ROOT/key-owner" FM_STATE_OVERRIDE="$TMP_ROOT/key-owner/state" \
+    bash -c '. "$1"; window_key "$2"' _ "$2" "$1"
+}
+
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
@@ -181,7 +194,15 @@ case "${1:-}" in
     [ "$_print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    _window=${FM_FAKE_TMUX_WINDOW:-firstmate:supervisor}
+    case "$*" in
+      *'#{session_name}:#{window_name}'*) printf '%s\n' "$_window" ;;
+      *'#{window_id}'*'#{window_index}'*'#{window_name}'*)
+        printf '@0|0|%s\n' "${_window#*:}" ;;
+      *'#{window_id}'*) printf '@0\n' ;;
+      *'#{window_index}'*) printf '0\n' ;;
+      *) printf '%s\n' "${_window#*:}" ;;
+    esac
     exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
@@ -270,7 +291,13 @@ case "${1:-}" in
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    case "$*" in
+      *'#{window_id}'*'#{window_index}'*'#{window_name}'*)
+        printf '@0|0|supervisor\n@1|1|win\n' ;;
+      *) printf 'supervisor\nwin\n' ;;
+    esac
+    exit 0 ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0
@@ -336,6 +363,24 @@ wait_for_exit() {
   fi
   wait "$pid" 2>/dev/null || true
   return 124
+}
+
+# Separate a launched watcher's startup from the run a caller times. Startup -
+# interpreter, sourced libraries, singleton-lock acquisition - slows with host
+# contention, so wait until the lock names <pid> or <pid> already exited, and
+# only then start the caller's wait_for_exit deadline. The generous bound still
+# fails a watcher that never takes its lock, stopping it through wait_for_exit.
+wait_for_watcher_lock() {
+  local pid=$1 state=$2 limit=${3:-300} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$pid" ] || return 0
+    is_live_non_zombie "$pid" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf 'wait_for_watcher_lock: owned pid %s never held its singleton lock in %s polls\n' "$pid" "$limit" >&2
+  wait_for_exit "$pid" 0 || true
+  return 1
 }
 
 is_live_non_zombie() {

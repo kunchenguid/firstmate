@@ -22,6 +22,12 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
+function parentPid(pid: string): string {
+  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
 function pidAlive(pid: string): boolean {
   try {
     process.kill(Number(pid), 0);
@@ -31,6 +37,16 @@ function pidAlive(pid: string): boolean {
   }
 }
 
+// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
+// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
+// Node on Windows sees Windows pids directly, so a tagged holder is compared
+// and probed by its digits. Any other value is no usable identity, "".
+function lockHolderPid(lockPid: string): string {
+  const tagged = process.platform === "win32" ? /^win:([0-9]+)$/.exec(lockPid) : null;
+  const pid = tagged ? tagged[1] : lockPid;
+  return /^[0-9]+$/.test(pid) && pid !== "1" ? pid : "";
+}
+
 function lockOwnership(): LockOwnership {
   let lockPid = "";
   try {
@@ -38,16 +54,40 @@ function lockOwnership(): LockOwnership {
   } catch {
     return "missing";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  const holderPid = lockHolderPid(lockPid);
+  if (!holderPid) return "other";
   // The Pi engine is the session owner. Shell startup resolves the exact
   // native Codex transport shapes to this same PID in fm-session-lock-lib.sh.
   // A launcher or another enclosing session is not this Pi session.
-  if (lockPid === String(process.pid)) return "owned";
-  return pidAlive(lockPid) ? "other" : "missing";
+  if (holderPid === String(process.pid)) return "owned";
+  return pidAlive(holderPid) ? "other" : "missing";
+}
+
+// A Pi command started from inside the live session, such as the `pi --help`
+// capability probe in bin/fm-spawn.sh, auto-loads this extension too. Its pid
+// dies at once, so the marker must keep naming the live session above it even
+// when the lock is missing. This marker-preservation check grants no ownership.
+function markerNamesLiveAncestor(): boolean {
+  let markerPid = "";
+  try {
+    markerPid = readFileSync(marker, "utf8").split(/\r?\n/)[1] ?? "";
+  } catch {
+    return false;
+  }
+  if (!/^[0-9]+$/.test(markerPid) || markerPid === String(process.pid) || !pidAlive(markerPid)) {
+    return false;
+  }
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    pid = parentPid(pid);
+    if (!pid || pid === "1") return false;
+    if (pid === markerPid) return true;
+  }
+  return false;
 }
 
 function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
+  if (!existsSync(state) || lockOwnership() === "other" || markerNamesLiveAncestor()) return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 

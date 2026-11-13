@@ -14,7 +14,8 @@
 #   4. The composer pre-check is advisory: visibly pending text skips the ring
 #      with a notice, and the steer is still durably sent (exit 0).
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
-#      watcher's re-ring ladder owns delivery from the record on.
+#      watcher's re-ring ladder owns delivery from the record on. A
+#      fire-and-forget record whose ring did not land is owed one retry ring.
 #   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
 #      "$" to codex, an explicit backend target, and the --key path.
 #   7. A marked secondmate steer carries its marker + corr token in the record
@@ -76,7 +77,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) printf 'fm-t1\n'; exit 0 ;;
+  list-windows) printf 'fm-t1\nwin\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -241,6 +242,56 @@ test_failed_ring_is_still_sent() {
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
 }
 
+# Contract: a fire-and-forget record stays outside the re-ring ladder, so a
+# ring that did not land at enqueue is owed exactly one retry by the watcher.
+test_fire_and_forget_unlanded_ring_owes_one_retry() {
+  local dir err rc
+  dir=$(setup_case faf-retry)
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/wait-no-turns"
+  err="$dir/send.err"
+  # The stub lists only window fm-t1, so the secondmate takes it over.
+  rm -f "$dir/home/state/t1.meta"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-t1" alpha claude
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- \
+    fm-domain --fire-and-forget 0123456789abcdef "reconcile your books"; rc=$?
+  expect_code 0 "$rc" "a skipped fire-and-forget ring is still a sent steer"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
+    || fail "a skipped fire-and-forget ring did not owe its one retry"
+  assert_contains "$(cat "$err")" "the watcher will ring it once more" \
+    "the skip notice should promise exactly one retry"
+
+  run_send "$dir" "$err" -- fm-domain --fire-and-forget 1123456789abcdef "reconcile again"; rc=$?
+  expect_code 0 "$rc" "a rung fire-and-forget steer should succeed"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
+    || fail "a ring that landed must not owe a retry for its own record"
+
+  dir=$(setup_case ordinary-no-retry)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "ordinary steer"
+  [ ! -e "$dir/home/state/t1.inbox/.retry-ring" ] \
+    || fail "an ordinary record rides the ladder and must not owe a separate retry"
+  pass "fm-send inbox: a fire-and-forget ring that did not land owes one retry ring"
+}
+
+# Without the flag a skipped fire-and-forget ring is not owed a retry.
+test_fire_and_forget_retry_stays_off_without_the_flag() {
+  local dir err rc
+  dir=$(setup_case faf-retry-off)
+  err="$dir/send.err"
+  [ ! -e "$dir/home/config/wait-no-turns" ]
+  rm -f "$dir/home/state/t1.meta"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-t1" alpha claude
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- \
+    fm-domain --fire-and-forget 0123456789abcdef "reconcile your books"; rc=$?
+  expect_code 0 "$rc" "a skipped fire-and-forget ring is still a sent steer"
+  [ ! -e "$dir/home/state/domain.inbox/.retry-ring" ] \
+    || fail "an absent flag still owed a fire-and-forget retry"
+  assert_contains "$(cat "$err")" "the watcher will re-ring" \
+    "an absent flag should keep the ordinary re-ring notice"
+  pass "fm-send inbox: without config/wait-no-turns a fire-and-forget ring is not retried"
+}
+
 test_harness_invocations_stay_typed() {
   local dir err typed
   # A slash command must reach the harness's own parser, on any harness.
@@ -358,6 +409,44 @@ SH
   pass "fm-send inbox: lost reply bookkeeping never invites a resend, and the delivered steer is never duplicated"
 }
 
+test_delivery_lock_serializes_enqueue() {
+  local dir err lock sender rc=0 waiting i=0
+  dir=$(setup_case delivery-lock)
+  err="$dir/send.err"
+  waiting="$dir/delivery-lock-waiting"
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  lock=$(fm_task_inbox_delivery_lock_path "$dir/home/state" t1)
+  fm_task_inbox_lock_acquire "$lock" || fail "could not acquire the inbox delivery lock"
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_DELIVERY_LOCK_WAITING:-}" = "" ] || : > "$FM_TEST_DELIVERY_LOCK_WAITING"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$dir/fakebin/sleep"
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=10 FM_TEST_DELIVERY_LOCK_WAITING="$waiting" -- t1 "arrived during parking" &
+  sender=$!
+  while [ ! -e "$waiting" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$waiting" ] || {
+    fm_lock_release "$lock"
+    wait "$sender" 2>/dev/null || true
+    fail "fm-send did not reach the held delivery-lock wait"
+  }
+  kill -0 "$sender" 2>/dev/null || fail "fm-send exited while the delivery lock was held"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || {
+    fm_lock_release "$lock"
+    wait "$sender" 2>/dev/null || true
+    fail "fm-send wrote the instruction while parking held the delivery lock"
+  }
+  fm_lock_release "$lock"
+  wait "$sender" || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-send failed after the delivery lock cleared: $(cat "$err")"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "fm-send did not enqueue after the delivery lock cleared"
+  pass "fm-send waits for the inbox delivery lock before enqueueing an instruction"
+}
+
 test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
   dir=$(setup_case meta-lock)
@@ -459,11 +548,14 @@ test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
+test_fire_and_forget_unlanded_ring_owes_one_retry
+test_fire_and_forget_retry_stays_off_without_the_flag
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
+test_delivery_lock_serializes_enqueue
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused

@@ -85,7 +85,7 @@ harness_version() {  # <binary>
 launch_cmd() {  # <name>
   case "$1" in
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\''' ;;
-    codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox' ;;
+    codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox --disable hooks' ;;
     opencode) printf '%s' "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode" ;;
     pi|pi-signed) printf '%s' "$1" ;;
     grok) printf '%s' 'grok --always-approve' ;;
@@ -94,6 +94,17 @@ launch_cmd() {  # <name>
     *) return 1 ;;
   esac
 }
+
+# codex's crewmate launch in bin/fm-spawn.sh carries --disable hooks because the
+# hook-trust modal ("N hooks are new or changed") opens on "Review hooks" and
+# firstmate's key plane has no arrow navigation to move off it. Without the flag
+# this guard parks on that dialog for the whole timeout and reports the doorbell
+# unhonored, which is a dialog verdict rather than a doorbell one, so pin the
+# switch here instead of letting the codex check go quietly unprovable again.
+case "$(launch_cmd codex)" in
+  *'--disable hooks'*) ;;
+  *) fail 'codex launch recipe lost --disable hooks; the check would park on the hook-trust modal instead of judging the doorbell' ;;
+esac
 
 # Wait for the harness to look steerable. 0 = the composer classified a
 # proven empty; 2 = the readiness budget expired without an empty verdict but

@@ -32,6 +32,7 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
 No separate Calm status row is added.
+The boat claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one boat rather than two, and turning Firstmate Calm off does not clear the standalone boat.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 
 The boat looks like this:
@@ -206,7 +207,7 @@ Toggling Calm redraws every hooked row already on screen, so rows drawn before t
 ### Working sailboat on Claude Code
 
 While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry.
-The sailboat fills the row inside the transcript margin.
+The sailboat fills the row inside the transcript margin, under one blank row so its sail never touches the highlighted prompt above it.
 It repaints on the boat's 220ms cadence, with the hull moving every 880ms.
 It reflows on resize, and appears and disappears exactly where the stock row would.
 

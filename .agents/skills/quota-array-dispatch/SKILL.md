@@ -1,10 +1,7 @@
 ---
 name: quota-array-dispatch
 description: >-
-  Agent-only decision procedure for resolving a matched crew-dispatch profile
-  array from quota-axi's default TOON, ranking by spendPriority after three
-  orthogonal gates.
-  Load when a dispatch rule or default resolves to more than one profile candidate.
+  Load when a crew-dispatch rule or default resolves to more than one profile candidate, or a Claude ship or scout is dispatched from a home that declares config/claude-accounts.
 user-invocable: false
 metadata:
   internal: true
@@ -17,7 +14,15 @@ This skill is the single owner of the completion-aware profile-array selection p
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
 `quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
-The [worker helper](../../../bin/fm-quota-choose.sh) and [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) own their deterministic mapping boundaries.
+The [worker helper](../../../bin/fm-quota-choose.sh) and [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) own their deterministic mapping boundaries.
+
+## Shared-quota opt-out
+
+When the home's `config/crew-dispatch.json` declares a top-level `"shared_quota": true`, this home draws every provider's usage from one single shared budget, so per-provider quota rows do not describe what is left, and this skill's quota snapshot, the quota parts of the eligibility and runway gates, and `spendPriority` ranking are off by home declaration.
+Make no `quota-axi` call, apply no quota row, quota floor, runway gate, or `spendPriority` rank, and choose the matched rule's first declared profile that its authoritative catalog supports and that meets the required reasoning class; catalog eligibility and reasoning-class fit still apply.
+`preferred_provider` is not a quota signal, so it still applies: `preferred_provider` still narrows the pool; declared order then picks within it.
+Account for every candidate as always, stating in place of quota evidence that quota ranking is off by home declaration.
+The declared value must be a boolean; anything else is an actionable configuration error.
 
 ## Worker-side quota helper
 
@@ -33,11 +38,23 @@ Authoritative multi-provider routing - including provider discovery from the har
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
-The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) has its own documented gates.
+The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) has its own documented gates.
 It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
+
+## Claude account list
+
+When the home declares `config/claude-accounts`, each Claude candidate is one candidate per declared account, and the spawn needs the chosen account as `--account <entry>`.
+Measure them with `bin/fm-claude-account-quota.sh [--model <model>]` instead of the default TOON's single `claude` row, which reads only the ambient account; its header owns the per-account read and output.
+It prints data only, never a choice: each account's applicable scopes and any uncertainty it could not measure.
+Apply the three gates below to each account's rows, taking a projected runway's time from the row's own `usableRunwaySeconds`, rank the eligible ones by their limiting scope's `spendPriority` exactly as for profiles, and pass the chosen entry as `--account <entry>`.
+A genuine tie or no rankable account is the same terminal case as below: decide in the open from the rows or ask the captain, never by file order.
+Account for every declared account in the rationale, including unmeasured ones.
+A typed-resolver `clear` profile for Claude still needs this step's `--account`.
+The account is chosen once, at intake: a relaunch keeps the recorded one, and only an explicit `--account` relaunch moves a task ([`docs/configuration.md`](../../../docs/configuration.md#several-claude-accounts-configclaude-accounts) owns the contract).
 
 ## Read the default TOON
 
+When the home declares the [shared-quota opt-out](#shared-quota-opt-out), skip this section's quota reading and every quota-derived check built on it (quota rows, floors, runway, and `spendPriority`); catalog eligibility and reasoning-class fit still apply.
 Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
@@ -49,13 +66,13 @@ Do not read `--json` on the normal path, and do not reach for `--full` to rebuil
 After reading the TOON, fall back to one `quota-axi --json` call only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
 Ambiguous means a candidate's `spendPriority` is the literal `unknown` or unmeasurable, a real tie still needs extra evidence, or a candidate's eligibility is unclear from `quota[]` plus `attention[]`.
 The fallback therefore has an explicit TOON-then-JSON call sequence; reuse its JSON result and do not take any further quota snapshots.
-Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports `MISSING` before dispatch; if an intake somehow reaches an older build whose TOON lacks `spendPriority`, use the defensive `--json` fallback rather than treating the missing scalar as healthy.
+Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports `OUTDATED` before dispatch; if an intake somehow reaches an older build whose TOON lacks `spendPriority`, use the defensive `--json` fallback rather than treating the missing scalar as healthy.
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
-## Three gates, then spendPriority
+## Three gates, then provider preference and spendPriority
 
 Apply the three cheap orthogonal gates first.
 `spendPriority` ranks only among candidates that pass all three.
@@ -71,6 +88,7 @@ A model the catalog does not list is concrete contradictory evidence: block that
 Apply quota at the granularity the vendor actually supplies.
 A provider-level or `all_models`/`all_products` scope bounds every model you established in that family within the candidate's matched account, including one with no window of its own.
 A named-model or named-product scope is an additional bound for that model alone.
+A scope the vendor reports outside those names, such as an Antigravity tier, bounds a candidate only when its profile declares that exact scope as `quota_scope`; never infer the tier from the model name.
 Match the candidate to its `quota[]` row by that established provider, its `accountKey` when the snapshot is schema 6 (a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter, then the `default` row, else unmeasured; never a row picked by position, never rows summed across accounts), and scope; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
 
 A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it, and `harness=pi` with `model=xai/grok-*` is Pi using xAI rather than the standalone Grok CLI.
@@ -111,7 +129,18 @@ Do not invent a generic percentage floor, and honor an explicit captain floor fo
 
 ## Rank by spendPriority
 
-Among candidates that pass all three gates, pick the highest known `spendPriority`.
+Among candidates that pass all three gates, first apply the optional top-level `preferred_provider` from `config/crew-dispatch.json`.
+Its schema is owned by [Crew dispatch profiles](../../../docs/configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
+Within the already matched rule or default, restrict ranking to eligible candidates of that family when any remain.
+Do not introduce other profiles, change a Claude-only rule, or override an explicit captain choice or approval requirement.
+Only concrete evidence that every matched preferred candidate is ineligible authorizes fallback to other families.
+Unknown quota, missing account evidence, and unrankable scalars do not establish ineligibility.
+If preferred candidates remain eligible but none can be ranked, escalate with that uncertainty instead of switching families.
+When no matched profile belongs to the preferred family, preserve the rule's candidate set.
+With the field absent, keep the existing candidate set unchanged.
+Print the preferred-family decision, including the reason for any fallback.
+
+Within the resulting candidate set, pick the highest known `spendPriority`.
 A higher known scalar is better: positive means paid allowance is on track to reach reset unused, `0` is exact utilization, and negative means overdrawn against the reset clock.
 Rank only from comparable known scalars.
 Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.

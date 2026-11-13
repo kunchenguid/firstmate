@@ -31,6 +31,11 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/paseo-backend.md",
+    "docs/rex-backend.md",
+    "docs/t3code-backend.md",
+    "docs/tern-backend.md",
+    "docs/hc-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -99,6 +104,18 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/t3code-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/tern-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/hc-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
       "source": "docs/codex-app-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
@@ -133,10 +150,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -150,6 +163,10 @@
     },
     {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-self-repo/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -189,6 +206,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/commandcode.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/cortex.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/cursor.md",
       "audience": "agent-runtime"
     },
@@ -209,6 +234,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/hermes.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/kiro.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/muse.md",
       "audience": "agent-runtime"
     },
@@ -222,6 +255,10 @@
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/polytoken.md",
       "audience": "agent-runtime"
     },
     {
@@ -317,6 +354,14 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/tern-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/hc-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/codex-app-backend.md",
       "audience": "operator-current"
     },
@@ -349,6 +394,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/usage-warner",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
@@ -365,8 +414,16 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/forgejo-tea-integration.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/gerrit-change-watch.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/external-review-forge.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/gerrit-forge-integration.md",
@@ -393,7 +450,19 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/paseo-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/rex-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/plans/2026-10-12-2032-feat-pi-stream-silence-plan.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -417,11 +486,19 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/supervision-protocols/agy.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },
     {
       "path": "docs/supervision-protocols/codex.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/codex-checkpoint.md",
       "audience": "agent-runtime"
     },
     {
@@ -457,6 +534,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/t3code-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
@@ -469,7 +550,23 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/opencode-2-plugin-port-scope.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/usage-warner.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/commandcode.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/cortex.md",
       "audience": "maintainer-verification"
     },
     {
@@ -485,6 +582,14 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/hermes.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/kiro.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/lint-option-a.md",
       "audience": "maintainer-verification"
     },
@@ -494,6 +599,10 @@
     },
     {
       "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/polytoken.md",
       "audience": "maintainer-verification"
     },
     {
@@ -549,11 +658,19 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/captures/kimi-code-2.3.0/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/agent-skill-trigger-index/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/away-quiet-supervision/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/lavish-url/SKILL.md",
       "audience": "agent-runtime"
     },
     {

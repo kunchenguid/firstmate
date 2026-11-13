@@ -62,6 +62,231 @@ test_remote_containing_named_head_is_accepted() {
   pass "named head on a remote-tracking ref is accepted"
 }
 
+test_gate_mirror_only_named_head_is_refused() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/mirror-repo"
+  wt="$TMP_ROOT/mirror-wt"
+  fm_git_worktree "$repo" "$wt" fm/mirror
+  git -C "$wt" commit -q --allow-empty -m 'fix pushed only to the local gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  # The local no-mistakes gate mirror lives on this machine, so a head that
+  # only reached it has not left the machine.
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror "$sha"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head only on the no-mistakes gate mirror was accepted (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "gate-mirror refusal did not name the commit: $reason" ;;
+  esac
+  # A refresh fetches origin, which does not hold the head, and never counts
+  # the mirror, so the refusal stands with no refresh failure to report.
+  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head only on the gate mirror was accepted after a refresh (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "gate-mirror refusal after a refresh changed its reason: $reason" ;;
+  esac
+  git -C "$wt" update-ref refs/remotes/origin/fm/mirror "$sha"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green" >/dev/null \
+    || fail "named head on origin beside the gate mirror was refused"
+  pass "named head only on the no-mistakes gate mirror is refused, even after a refresh; on origin it is accepted"
+}
+
+test_head_pushed_from_gate_clone_is_accepted_after_refresh() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/gate-push-repo"
+  wt="$TMP_ROOT/gate-push-wt"
+  origin="$repo.origin.git"
+  fm_git_worktree "$repo" "$wt" fm/gate-push
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/gate-push "$sha"
+  # The pipeline pushes from its own gate clone, so origin holds the head while
+  # neither the copy nor the project clone has fetched it.
+  git -C "$origin" fetch -q "$wt" "fm/gate-push:refs/heads/fm/gate-push"
+  [ "$(git -C "$origin" rev-parse refs/heads/fm/gate-push)" = "$sha" ] \
+    || fail "fixture: origin does not hold the gate clone's push"
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/gate-push >/dev/null \
+    || fail "fixture: the copy already tracks origin's branch"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unfetched refusal without a refresh did not name the commit: $reason" ;;
+  esac
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/gate-push >/dev/null \
+    || fail "a caller that does not refresh fetched anyway"
+  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
+    || fail "head origin holds through the gate clone was refused after a refresh"
+  [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/gate-push)" = "$sha" ] \
+    || fail "the refresh did not leave origin's head in the copy's refs"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
+    || fail "a caller that does not refresh refused the head a refresh already fetched"
+  pass "head origin holds through the gate clone is accepted after a refresh, and later reads see it"
+}
+
+test_passed_refresh_deadline_refuses_with_last_known_refs() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/deadline-passed-repo"
+  wt="$TMP_ROOT/deadline-passed-wt"
+  origin="$repo.origin.git"
+  fm_git_worktree "$repo" "$wt" fm/deadline-passed
+  git -C "$wt" commit -q --allow-empty -m 'fix origin holds while the copy has not fetched it'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/deadline-passed:refs/heads/fm/deadline-passed"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/8 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy; could not refresh remote: origin, so this verdict used the last-known refs"*) ;;
+    *) fail "a refusal past the refresh deadline did not say it used the last-known refs: $reason" ;;
+  esac
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/deadline-passed >/dev/null \
+    || fail "a refresh past its deadline fetched anyway"
+  pass "past the refresh deadline nothing is fetched and the refusal says it used the last-known refs"
+}
+
+test_separate_project_clone_is_refreshed() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/separate-project-repo"
+  wt="$TMP_ROOT/separate-project-wt"
+  origin="$repo.origin.git"
+  fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$origin"
+  # The copy is a repository of its own whose only remote is the project clone,
+  # so only a refresh of the project clone reaches the origin holding the head.
+  git clone -q "$repo" "$wt"
+  git -C "$wt" checkout -q -b fm/separate
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/separate:refs/heads/fm/separate"
+  [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture: the copy shares the project clone's git directory"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unfetched refusal without a refresh did not name the commit: $reason" ;;
+  esac
+  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green" >/dev/null \
+    || fail "head the project clone's origin holds was refused after a refresh"
+  [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/separate)" = "$sha" ] \
+    || fail "the refresh did not fetch the project clone's origin"
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/separate >/dev/null \
+    || fail "fixture: the copy's own remote held the head"
+  pass "a project clone with its own git directory is refreshed too, and its origin's head is accepted"
+}
+
+test_failed_refresh_refuses_with_last_known_refs() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/refresh-fail-repo"
+  wt="$TMP_ROOT/refresh-fail-wt"
+  fm_git_worktree "$repo" "$wt" fm/refresh-fail
+  git -C "$wt" commit -q --allow-empty -m 'fix behind an unreachable remote'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$repo" remote set-url origin "file://$TMP_ROOT/refresh-fail-missing.git"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/6 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head was accepted although the refresh failed (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy; could not refresh remote: origin, so this verdict used the last-known refs"*) ;;
+    *) fail "failed-refresh refusal did not say it used the last-known refs: $reason" ;;
+  esac
+  [ "$(printf '%s\n' "$reason" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "failed-refresh refusal is not one line: $reason"
+  pass "a failed refresh still refuses and says the verdict used the last-known refs"
+}
+
+test_remote_hanging_before_origin_leaves_origin_its_refresh() {
+  local repo wt origin fakebin sha start
+  repo="$TMP_ROOT/hang-first-repo"
+  wt="$TMP_ROOT/hang-first-wt"
+  origin="$repo.origin.git"
+  fakebin="$TMP_ROOT/hang-first-bin"
+  fm_git_worktree "$repo" "$wt" fm/hang-first
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/hang-first:refs/heads/fm/hang-first"
+  # backup sorts before origin and never answers a fetch.
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "$fakebin/git-remote-hang"
+  chmod +x "$fakebin/git-remote-hang"
+  git -C "$repo" remote add backup hang::backup
+  [ "$(git -C "$wt" remote | head -1)" = backup ] \
+    || fail "fixture: the hanging remote is not listed before origin"
+  FM_DOD_REFRESH_FAILED=
+  start=$(date +%s)
+  PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 4)) \
+    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/9 checks green" >/dev/null \
+    || fail "a remote hanging before origin under a short refresh deadline kept origin's head from being accepted"
+  [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/hang-first)" = "$sha" ] \
+    || fail "origin was not fetched behind a remote that hangs"
+  [ "$FM_DOD_REFRESH_FAILED" = backup ] \
+    || fail "the hanging remote was not named as not refreshed: '$FM_DOD_REFRESH_FAILED'"
+  [ "$(date +%s)" -le $((start + 6)) ] || fail "the refresh outlived its deadline"
+  pass "a remote that hangs and sorts before origin cannot take origin's refresh; origin's head is accepted and the hanging remote is named"
+}
+
+test_hanging_copy_remote_leaves_the_project_clone_its_refresh() {
+  local repo wt origin fakebin sha reason rc start
+  repo="$TMP_ROOT/copy-hang-repo"
+  wt="$TMP_ROOT/copy-hang-wt"
+  origin="$repo.origin.git"
+  fakebin="$TMP_ROOT/copy-hang-bin"
+  fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$origin"
+  # A standalone copy whose origin is the project clone and whose second remote
+  # never answers a fetch; only the project clone's origin holds the head.
+  git clone -q "$repo" "$wt"
+  git -C "$wt" checkout -q -b fm/copy-hang
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/copy-hang:refs/heads/fm/copy-hang"
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "$fakebin/git-remote-hang"
+  chmod +x "$fakebin/git-remote-hang"
+  git -C "$wt" remote add fork hang::fork
+  [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture: the copy shares the project clone's git directory"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
+  case "$reason" in
+    *"could not refresh remote: origin, fork, origin (project clone), so this verdict used the last-known refs"*) ;;
+    *) fail "the refusal did not tell the copy's remotes from the project clone's: $reason" ;;
+  esac
+  FM_DOD_REFRESH_FAILED=
+  start=$(date +%s)
+  PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 6)) \
+    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green" >/dev/null \
+    || fail "a hanging remote in the copy kept the project clone's origin head from being accepted"
+  [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/copy-hang)" = "$sha" ] \
+    || fail "the project clone's origin was not fetched behind the copy's hanging remote"
+  [ "$FM_DOD_REFRESH_FAILED" = fork ] \
+    || fail "the hanging remote was not named as not refreshed: '$FM_DOD_REFRESH_FAILED'"
+  [ "$(date +%s)" -le $((start + 8)) ] || fail "the refresh outlived its deadline"
+  pass "a hanging remote in a standalone copy cannot take the project clone's refresh; its origin's head is accepted and failed remotes name their repository"
+}
+
+test_local_only_branch_beside_gate_mirror_is_accepted() {
+  local repo wt sha
+  repo="$TMP_ROOT/mirror-local-repo"
+  wt="$TMP_ROOT/mirror-local-wt"
+  fm_git_worktree "$repo" "$wt" fm/mirror-local
+  git -C "$wt" commit -q --allow-empty -m 'local-only work also on the gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror-local "$sha"
+  accept_done ship local-only "$wt" "$repo" "done: ready in branch fm/mirror-local" >/dev/null \
+    || fail "local-only named branch in the project clone was refused beside a gate mirror ref"
+  pass "local-only named branch stays reachable when the gate mirror also holds it"
+}
+
 test_moved_branch_without_named_head_is_refused() {
   local repo wt main_sha fix_sha reason rc
   repo="$TMP_ROOT/moved-repo"
@@ -253,6 +478,30 @@ test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
   pass "a direct-PR recorded head does not cover a later unpushed commit"
 }
 
+test_ci_ready_requires_pr_reference() {
+  local note
+  for note in \
+    'paused: PROD deploy watch, checks green on TEST' \
+    'paused: checks green on TEST, PROPERTIES watch' \
+    'PR checks green' \
+    'PR #12 checks pending'; do
+    if fm_dod_note_reports_ci_ready "$note"; then
+      fail "non-CI-ready note accepted: $note"
+    fi
+  done
+  for note in \
+    'PR https://github.com/o/r/pull/5 checks green' \
+    'checks green: https://github.com/o/r/pull/5' \
+    'PR #12 checks green' \
+    'checks green: PR#12' \
+    'https://gitlab.com/o/r/-/merge_requests/5 checks green' \
+    'https://git.example.org/team/repo/pulls/12 checks green'; do
+    fm_dod_note_reports_ci_ready "$note" \
+      || fail "CI-ready PR reference rejected: $note"
+  done
+  pass "CI-ready notes require checks green and an actual PR reference"
+}
+
 test_ci_ready_variants_are_gated() {
   local repo wt line rc
   repo="$TMP_ROOT/variant-repo"
@@ -382,16 +631,67 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A scout spawned on a named base keeps that base through promotion: the ship
+# instructions start from it and the PR targets it; local-only cannot carry it.
+test_promotion_keeps_the_recorded_base_branch() {
+  local home id meta out status mode
+  home="$TMP_ROOT/promote-base-home"
+  for mode in direct-PR local-only; do
+    id="promote-base-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+
+# Setup
+You are in a disposable git worktree of proj, at a detached HEAD on a clean copy of its base branch.
+Base branch: feature/hub
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    if [ "$mode" = direct-PR ]; then
+      expect_code 0 "$status" "promoting a scout with a recorded base should succeed"$'\n'"$out"
+      # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+      assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not start the ship from the recorded base"
+      # shellcheck disable=SC2016
+      assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not target the PR at the recorded base"
+      assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
+    else
+      [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
+      assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"
+      assert_grep 'kind=scout' "$meta" "a refused promotion changed the task record"
+    fi
+  done
+  pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
+test_gate_mirror_only_named_head_is_refused
+test_head_pushed_from_gate_clone_is_accepted_after_refresh
+test_separate_project_clone_is_refreshed
+test_passed_refresh_deadline_refuses_with_last_known_refs
+test_failed_refresh_refuses_with_last_known_refs
+test_remote_hanging_before_origin_leaves_origin_its_refresh
+test_hanging_copy_remote_leaves_the_project_clone_its_refresh
+test_local_only_branch_beside_gate_mirror_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
+test_ci_ready_requires_pr_reference
 test_ci_ready_variants_are_gated
 test_keyed_and_spaced_done_lines_are_gated
 test_local_only_linked_branch_is_accepted
@@ -400,5 +700,136 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_promotion_keeps_the_recorded_base_branch
+
+# The launch role is the generated text a worker receives. It must keep the
+# skill name, so a session that registers the skill loads it by name, and must
+# name the skill file as the fallback for a session where the name does not
+# resolve.
+test_worker_role_names_skill_and_fallback_file() {
+  local role_file path
+  role_file="$TMP_ROOT/worker-role.txt"
+  path="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
+  [ -f "$path" ] || fail "Firstmate skill file is missing at $path"
+  fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "$ROOT" >"$role_file"
+  assert_grep "\`CONTRIBUTING.md\` and \`firstmate-coding-guidelines\` for Firstmate changes" "$role_file" \
+    "worker role did not name the skill"
+  assert_grep "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`$path\` instead." "$role_file" \
+    "worker role did not name the skill file as the fallback"
+  assert_no_grep "Skill tool cannot resolve" "$role_file" \
+    "worker role claims the Skill tool never resolves the skill"
+  pass "worker role names the skill and its fallback skill file"
+}
+
+# forge=external: a review tool uploads its own snapshot, so nothing is pushed.
+# The fixtures name an invented tool and an RFC 6761 reserved host only.
+EXT_CFG="$TMP_ROOT/external-config"
+mkdir -p "$EXT_CFG"
+# shellcheck disable=SC2016 # Backticks are literal adapter text.
+printf '%s\n' 'Run `review-tool upload --draft` and stop at a draft with checks green.' > "$EXT_CFG/external-review.md"
+
+test_external_forge_is_direct_pr_only() {
+  local out
+  fm_forge_valid_for_mode external direct-PR test 2>/dev/null || fail "forge=external direct-PR was refused"
+  out=$(fm_forge_valid_for_mode external no-mistakes test 2>&1) && fail "forge=external no-mistakes was accepted"
+  assert_contains "$out" "ships direct-PR only for now" "the no-mistakes refusal did not say why"
+  out=$(fm_forge_valid_for_mode external local-only test 2>&1) && fail "forge=external local-only was accepted"
+  assert_contains "$out" "cannot ship mode=local-only" "the local-only refusal did not say why"
+  out=$(fm_base_branch_valid release direct-PR external test 2>&1) && fail "a base branch was accepted on forge=external"
+  pass "forge=external composes with direct-PR only and refuses a base branch"
+}
+
+test_external_rule_one_forbids_every_task_push() {
+  local rule
+  rule=$(CONFIG=$EXT_CFG fm_ship_rule_one direct-PR t1 fm/t1 external) || fail "external rule one did not render"
+  assert_contains "$rule" "Never push to \`origin\`" "external rule one does not forbid the origin push"
+  assert_contains "$rule" "never push your \`fm/t1\` branch or any \`fm/\`-prefixed branch to any remote" \
+    "external rule one does not forbid the task-prefixed push"
+  assert_not_contains "$rule" "push only your" "external rule one still invites a branch push"
+  assert_not_contains "$rule" "personal backup remote" "external rule one offers a backup nobody configured"
+  printf 'backup\n' > "$EXT_CFG/external-review-backup"
+  rule=$(CONFIG=$EXT_CFG fm_ship_rule_one direct-PR t1 fm/t1 external) || fail "external rule one with a backup did not render"
+  rm -f "$EXT_CFG/external-review-backup"
+  assert_contains "$rule" "\`git push backup HEAD:refs/heads/backup/t1\`" "external rule one does not name the backup copy"
+  pass "external rule one forbids origin and task-prefixed pushes and names only the backup copy"
+}
+
+test_external_dod_renders_the_adapter() {
+  local dod out
+  dod=$(CONFIG=$EXT_CFG fm_dod_block direct-PR t1 fm/t1 external) || fail "external DoD did not render"
+  assert_contains "$dod" "Delivery contract: mode=direct-PR forge=external" "external DoD lacks its contract line"
+  assert_contains "$dod" "done [at=<epoch>]: review {url} uploaded for review" "external DoD lacks the ready grammar"
+  assert_contains "$dod" "## Review tool instructions (home configuration)" "external DoD lacks the adapter section"
+  assert_contains "$dod" "review-tool upload --draft" "external DoD lacks the adapter body"
+  assert_not_contains "$dod" "push your branch and open a PR" "external DoD still asks for a pushed PR"
+  out=$(CONFIG="$TMP_ROOT/no-such-config" fm_dod_block direct-PR t1 fm/t1 external 2>&1) \
+    && fail "external DoD rendered with no adapter"
+  assert_contains "$out" "external-review.md" "the missing-adapter refusal did not name the file"
+  pass "external DoD renders the contract, the review grammar, and the adapter, and refuses without one"
+}
+
+# A review-tool fixture: a worker copy, its meta recording forge=external, and
+# optionally a backup remote. Sets EXT_WT, EXT_REPO, EXT_META.
+external_fixture() {  # <name> [backup]
+  local name=$1 backup=${2:-}
+  EXT_REPO="$TMP_ROOT/$name-repo"
+  EXT_WT="$TMP_ROOT/$name-wt"
+  fm_git_worktree "$EXT_REPO" "$EXT_WT" "fm/$name"
+  git -C "$EXT_WT" commit -q --allow-empty -m 'change only in the copy'
+  EXT_META="$TMP_ROOT/$name.meta"
+  if [ -n "$backup" ]; then
+    fm_write_meta "$EXT_META" kind=ship mode=direct-PR forge=external backup_remote=backup backup_prefix=backup/
+  else
+    fm_write_meta "$EXT_META" kind=ship mode=direct-PR forge=external
+  fi
+}
+
+ext_accept() {  # <line>
+  CONFIG=$EXT_CFG fm_dod_accept_ship_done ship direct-PR "$EXT_WT" "$EXT_REPO" "$1" "$TMP_ROOT" ext "$EXT_META"
+}
+
+test_external_review_done_without_backup_is_accepted_on_the_url() {
+  local reason
+  external_fixture ext-nobackup
+  ext_accept 'done [at=1]: review https://review.example.test/r/123 uploaded for review' \
+    || fail "an external review done with HEAD only in the copy was refused with no backup recorded"
+  reason=$(ext_accept 'done [at=1]: PR https://github.com/o/r/pull/1') && fail "a PR done on an external project was accepted"
+  assert_contains "$reason" "never a PR" "the PR refusal did not point at the review grammar"
+  for bad in 'http://review.example.test/r/1' 'https://review.example.test/r/1?x=1' \
+    'https://review.example.test/r/1#c' 'https://github.com/o/r/pull/1'; do
+    reason=$(ext_accept "done [at=1]: review $bad uploaded for review") && fail "review URL $bad was accepted"
+  done
+  printf '%s\n' '^https://review\.example\.test/r/[1-9][0-9]*$' > "$EXT_CFG/external-review-url"
+  reason=$(ext_accept 'done [at=1]: review https://other.example.test/r/1 uploaded for review') \
+    && fail "a review URL outside config/external-review-url was accepted"
+  ext_accept 'done [at=1]: review https://review.example.test/r/7 uploaded for review' \
+    || fail "a review URL matching config/external-review-url was refused"
+  rm -f "$EXT_CFG/external-review-url"
+  pass "external review done: accepted on a canonical URL alone without a backup; PR, non-https, query, fragment, forge, and pattern mismatches refused"
+}
+
+test_external_review_done_with_backup_needs_the_copy() {
+  local reason sha
+  external_fixture ext-backup backup
+  sha=$(git -C "$EXT_WT" rev-parse HEAD)
+  reason=$(ext_accept 'done [at=1]: review https://review.example.test/r/9 uploaded for review') \
+    && fail "a backed-up external done was accepted before the copy existed"
+  assert_contains "$reason" "not on the backup remote backup" "the backup refusal did not name the remote"
+  git -C "$EXT_WT" update-ref refs/remotes/backup/fm/ext-backup "$sha"
+  reason=$(ext_accept 'done [at=1]: review https://review.example.test/r/9 uploaded for review') \
+    && fail "a copy outside the backup prefix satisfied the backup gate"
+  git -C "$EXT_WT" update-ref refs/remotes/backup/backup/ext-backup "$sha"
+  ext_accept 'done [at=1]: review https://review.example.test/r/9 uploaded for review' \
+    || fail "a backed-up external done was refused once HEAD was on the backup namespace"
+  pass "external review done with a backup: refused until HEAD is under refs/remotes/backup/backup/, then accepted"
+}
+
+test_external_forge_is_direct_pr_only
+test_external_rule_one_forbids_every_task_push
+test_external_dod_renders_the_adapter
+test_external_review_done_without_backup_is_accepted_on_the_url
+test_external_review_done_with_backup_needs_the_copy
+
+test_worker_role_names_skill_and_fallback_file
 
 echo "all fm-dod-lib tests passed"

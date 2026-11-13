@@ -6,29 +6,31 @@
 # library so classification handling and the guarded relaunch path stay
 # single-sourced here.
 #
-# A secondmate's recorded endpoint is the tmux window, herdr pane, or remote
-# peer it runs in. Probing classifies that endpoint through the owning backend
-# adapter's fm_backend_agent_state (local) or the remote control script's
+# A secondmate's recorded endpoint is the tmux window, herdr pane, T3 thread,
+# or remote peer it runs in. Probing classifies that endpoint through the owning
+# backend adapter's fm_backend_agent_state (local) or the remote control script's
 # state verb (remote), which returns one of:
 #
 #   alive       - a primary-agent runtime is positively running
-#   dead        - the endpoint exists, but no agent is running in it
+#   dead        - no agent remains in a pane, or T3 reports a failed run
 #   missing     - the endpoint itself is gone
 #   ambiguous   - backend inventory could not prove either way
 #   unreadable  - backend state exists but could not be parsed
 #   unverified  - the endpoint is recorded under a session this home does not
 #                 own, so probing is not authorized
 #
-# Only `dead` and `missing` are recovery-authorizing states: they prove the
-# agent is not running, so relaunching cannot produce a duplicate endpoint.
+# Only `dead` and `missing` authorize recovery. The probe and recovery functions
+# below own whether that means resuming the endpoint or proving its close before
+# replacement; docs/t3code-backend.md owns T3's native status meanings.
 # `ambiguous`, `unreadable`, and `unverified` leave the endpoint untouched -
 # relaunching on inconclusive evidence could create a second endpoint beside a
 # live one - and an unreachable remote host is never evidence of death, so a
 # remote route is never replaced by a local endpoint.
 #
-# Relaunch goes through `bin/fm-spawn.sh <id> --secondmate` with
-# FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. That path
-# re-resolves placement from the task's own metadata and registry route, so a
+# Replacement relaunch goes through `bin/fm-spawn.sh <id> --secondmate` with
+# FM_SPAWN_NO_GUARD=1, the same guarded path every recovery uses. A local mate
+# is pinned to its recorded backend. That path re-resolves placement from the
+# task's own metadata and registry route, so a
 # remote mate is relaunched on its recorded remote host through bin/fm-on.sh -
 # never as a local replacement - behind fm-spawn's own readiness gate and
 # per-task spawn lock.
@@ -36,7 +38,8 @@
 # Modes:
 #   full - session-start sweep: remote routes run the full readiness repair
 #          sequence before probing, and an alive remote route is revalidated
-#          (route readable, backend herdr) so the sweep reports drift.
+#          (route readable, backend matches the recorded one) so the sweep
+#          reports drift.
 #   poll - watcher tick: remote routes take one read-only state probe per
 #          check; repair still happens, but inside fm-spawn's launch gate only
 #          when a relaunch is actually authorized.
@@ -44,6 +47,9 @@
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
 # task across the bootstrap sweep and the watcher tick, so a concurrent
 # relaunch can never be observed mid-flight as a dead endpoint and killed.
+# A separate per-home lock serializes relaunches of different mates, since each
+# fresh spawn owns the same task-set lock. The watcher uses its spawn timeout
+# as the lock-wait bound; an untimed sweep defaults to 600 seconds.
 # The attempt ledger (.secondmate-relaunch-<id>, one line per attempt plus one
 # per outcome) is both the durable relaunch record and the input to the
 # watcher's relaunch bound; teardown removes it.
@@ -119,6 +125,10 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #   FM_SM_LIVE_STATE   the raw classifier/state word
 #   FM_SM_LIVE_KILL    1 when relaunch must first kill a confirmed-dead local
 #                      endpoint (its shell husk occupies the name)
+#   FM_SM_LIVE_RESUME  1 when relaunch continues the endpoint in place instead
+#                      of replacing it: a T3 thread whose last run failed is
+#                      still readable and takes a new turn on its own
+#                      transcript, so it is resumed, never replaced
 #   FM_SM_LIVE_CAUSE   relaunch cause phrase, on relaunchable
 #   FM_SM_LIVE_WHERE   backend=<b> or host=<h>, on relaunchable
 #   FM_SM_LIVE_REASON  exact skip suffix, on skipped
@@ -131,17 +141,21 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 # relaunchable verdict could be acted on.
 fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
-  FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0
+  FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0 FM_SM_LIVE_RESUME=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
-  local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
+  local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend expected_remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
+    # A record written before rex existed carries no remote_backend; those
+    # endpoints are herdr.
+    expected_remote_backend=$(fm_meta_get "$meta" remote_backend)
+    [ -n "$expected_remote_backend" ] || expected_remote_backend=herdr
     if [ "$mode" = full ]; then
       remote_rc=0
-      fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" || remote_rc=$?
+      fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" "$expected_remote_backend" || remote_rc=$?
       if [ "$remote_rc" -eq 255 ]; then
         FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
         return 0
@@ -187,8 +201,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
             return 0
           fi
           remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
-          if [ "$remote_backend" != herdr ]; then
-            FM_SM_LIVE_REASON="alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
+          case "$remote_backend" in
+            herdr | rex) ;;
+            *)
+              FM_SM_LIVE_REASON="alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
+              return 0
+              ;;
+          esac
+          if [ "$remote_backend" != "$expected_remote_backend" ]; then
+            FM_SM_LIVE_REASON="alive remote endpoint runs on backend '$remote_backend', but this home recorded '$expected_remote_backend'; migrate or retire it explicitly"
             return 0
           fi
         fi
@@ -229,10 +250,17 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
       ;;
     dead|missing)
       FM_SM_LIVE_STATUS=relaunchable
-      if [ "$agent_state" = dead ]; then
+      if [ "$agent_state" = dead ] && [ "$backend" = t3code ]; then
+        FM_SM_LIVE_RESUME=1
+        FM_SM_LIVE_CAUSE="a failed run on its still-readable T3 thread, resumed in place"
+      elif [ "$agent_state" = dead ]; then
         FM_SM_LIVE_KILL=1
         FM_SM_LIVE_CAUSE="confirmed agent absence on existing endpoint"
       else
+        # A T3 thread reads missing once archived, which T3 may still be
+        # finishing; its idempotent kill re-proves the close before a
+        # replacement thread is launched.
+        [ "$backend" != t3code ] || FM_SM_LIVE_KILL=1
         FM_SM_LIVE_CAUSE="recorded endpoint confidently missing"
       fi
       FM_SM_LIVE_WHERE="backend=$backend"
@@ -255,17 +283,25 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 
 # fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs]
 #
-# Acts on a `relaunchable` probe verdict for <id>: kills a confirmed-dead local
-# endpoint first (FM_SM_LIVE_KILL), records the attempt and its outcome in the
-# per-mate ledger, then runs the guarded secondmate spawn. A positive timeout
+# Acts on a `relaunchable` probe verdict for <id>: takes the per-home relaunch
+# lock, records the attempt, kills a confirmed-dead local endpoint if required
+# (FM_SM_LIVE_KILL), runs the guarded spawn, then records its outcome.
+# On t3code a close that cannot be proven stops there: the thread and its
+# metadata stay as recorded, the verdict becomes skipped, and nothing is
+# spawned, because a second thread beside a live one is the duplicate
+# supervisor recovery must never create. Other backends keep their existing
+# best-effort kill. FM_SM_LIVE_RESUME instead sends the endpoint's backend
+# resume turn and spawns nothing.
+# The header owns the lock-wait bounds. A positive timeout separately
 # wraps the spawn in fm_run_timed so a watcher poll stays bounded; 124/137 mean
 # the bound fired. Returns the spawn exit status; combined spawn output is in
-# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the ledger cannot be
-# read or the attempt row cannot be appended, nothing is killed or spawned: the verdict becomes
+# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the lock wait expires,
+# the ledger cannot be read, or the attempt row cannot be appended, nothing is
+# killed or spawned and no attempt is recorded: the verdict becomes
 # FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
 # Caller holds the liveness lock and owns reporting.
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
-  local meta=$1 id=$2 timeout=${3:-}
+  local meta=$1 id=$2 timeout=${3:-} relaunch_lock wait_seconds rc=0
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
   if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
     FM_SM_LIVE_STATUS=skipped
@@ -273,7 +309,17 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     FM_SM_LIVE_RC=1
     return 1
   fi
+  fm_sm_live_require_locks || return 1
+  relaunch_lock="$STATE/.secondmate-relaunch.lock"
+  wait_seconds=${timeout:-600}
+  if ! fm_lock_acquire_wait_bounded "$relaunch_lock" "$wait_seconds"; then
+    FM_SM_LIVE_STATUS=skipped
+    FM_SM_LIVE_REASON="another secondmate relaunch still owns the per-home relaunch lock after ${wait_seconds}s; endpoint left $FM_SM_LIVE_STATE"
+    FM_SM_LIVE_RC=1
+    return 1
+  fi
   if ! fm_secondmate_liveness_ledger_add "$id" attempt; then
+    fm_lock_release "$relaunch_lock" || true
     FM_SM_LIVE_STATUS=skipped
     FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unwritable; endpoint left $FM_SM_LIVE_STATE"
     FM_SM_LIVE_RC=1
@@ -287,13 +333,49 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
       window=$(fm_meta_get "$meta" window)
       target=$window
     fi
-    [ -z "$target" ] || fm_backend_kill "$backend" "$target" 2>/dev/null || true
+    if [ "$backend" != t3code ]; then
+      if [ -n "$target" ]; then
+        if [ "$backend" = rex ]; then
+          local home
+          home=$(fm_meta_get "$meta" home)
+          [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
+          ( unset FM_ROOT_OVERRIDE; FM_HOME="$home" FM_ROOT="$home" STATE="$home/state" fm_backend_kill "$backend" "$target" ) 2>/dev/null || true
+        else
+          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        fi
+      fi
+    elif [ -n "$target" ] && ! fm_backend_kill "$backend" "$target" 2>/dev/null; then
+      fm_secondmate_liveness_ledger_add "$id" failed || true
+      FM_SM_LIVE_STATUS=skipped
+      fm_lock_release "$relaunch_lock" || true
+      FM_SM_LIVE_REASON="could not prove the old $backend endpoint $target closed; it and its record are left in place, not replaced"
+      FM_SM_LIVE_RC=1
+      return 1
+    fi
   fi
-  local rc=0
+  if [ "$FM_SM_LIVE_RESUME" = 1 ]; then
+    local target
+    target=$(fm_backend_target_of_meta "$meta")
+    if fm_backend_source t3code && FM_SM_LIVE_OUT=$(fm_backend_t3code_resume_failed "$target" 2>&1); then
+      fm_secondmate_liveness_ledger_add "$id" relaunched || true
+    else
+      rc=$?
+      FM_SM_LIVE_RC=$rc
+      fm_secondmate_liveness_ledger_add "$id" failed || true
+    fi
+    fm_lock_release "$relaunch_lock" || true
+    return "$rc"
+  fi
+  # The respawn stays on the backend the mate is recorded on: a changed
+  # config/backend applies to new spawns, and moving a live mate to another
+  # backend is the explicit `fm-control.sh <id> relaunch --backend` path.
+  # A remote mate's backend is its host's, so it is never pinned from here.
+  local -a respawn_args=("$id" --secondmate)
+  [ -n "$(fm_meta_get "$meta" remote_host)" ] || respawn_args+=(--backend "$(fm_backend_of_meta "$meta")")
   if [ -n "$timeout" ]; then
-    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
+    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1) || rc=$?
   else
-    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1) || rc=$?
+    FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1) || rc=$?
   fi
   FM_SM_LIVE_RC=$rc
   if [ "$rc" -eq 0 ]; then
@@ -301,5 +383,6 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   else
     fm_secondmate_liveness_ledger_add "$id" failed || true
   fi
+  fm_lock_release "$relaunch_lock" || true
   return "$rc"
 }

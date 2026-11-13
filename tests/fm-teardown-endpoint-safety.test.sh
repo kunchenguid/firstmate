@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/t3-fake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
@@ -110,6 +112,93 @@ test_invalid_endpoint_records_refuse_before_mutation() {
   assert_refused_without_mutation "$dir" "$id" "duplicate task binding"
 
   pass "fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call"
+}
+
+# A record whose worktree identity is unusable refuses, and that refusal has to
+# leave the operator somewhere: a message that only says what is missing sends
+# the next reader hunting for a cause instead of restoring the line, and the
+# refusal is unconditional, so no flag gets them out of it either.
+# The refusal itself does not change: it still names what is wrong first, still
+# preserves the record, and still refuses under --force.
+test_worktree_identity_refusal_names_the_repair_path() {
+  local dir id=repair-hint err printed shape
+
+  dir=$(make_case repair-hint)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project" "branch=fm/$id" "kind=ship"
+  printf 'worktree=%s\n' "$dir/worktree" > "$dir/home/state/$id.control-relaunch.meta-prior"
+  assert_refused_without_mutation "$dir" "$id" "worktree identity without a repair path"
+
+  err=$(cat "$dir/stderr")
+  assert_contains "$err" "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." \
+    "the refusal must still name what is wrong and that the record is kept"
+  assert_contains "$err" "exactly one worktree= line" \
+    "the repair must name the end state all three refused shapes share"
+  assert_contains "$err" "add it, fill it in, or keep only the right one of several" \
+    "the repair must cover a line that is missing, empty, or duplicated, not only a missing one"
+  assert_contains "$err" "git -C $dir/project worktree list" \
+    "the repair path must name the listing that maps the recorded branch back to its copy"
+  assert_contains "$err" "recorded branch fm/$id" \
+    "the repair path must name the branch to look for"
+  assert_contains "$err" "$dir/home/state/$id.control-relaunch.meta-prior" \
+    "the repair path must name the preserved pre-relaunch record when one exists"
+  assert_contains "$err" ".fm-slot-owner" \
+    "the repair path must say how a reassigned pool slot is proved and why restoring stays safe"
+
+  # Exercise the other two unusable shapes through the public teardown CLI.
+  # In each case the refusal must preserve the exact hand-edited record and
+  # explain how to reduce it to one correct worktree identity.
+  for shape in empty duplicate; do
+    dir=$(make_case "repair-hint-$shape")
+    if [ "$shape" = empty ]; then
+      fm_write_meta "$dir/home/state/$id.meta" \
+        "window=isolated:fm-$id" "endpoint_task_id=$id" \
+        "worktree=" "project=$dir/project" "branch=fm/$id" "kind=ship"
+    else
+      fm_write_meta "$dir/home/state/$id.meta" \
+        "window=isolated:fm-$id" "endpoint_task_id=$id" \
+        "worktree=$dir/worktree" "worktree=$dir/other-worktree" \
+        "project=$dir/project" "branch=fm/$id" "kind=ship"
+    fi
+    cp "$dir/home/state/$id.meta" "$dir/meta.before"
+    assert_refused_without_mutation "$dir" "$id" "$shape worktree identity"
+    cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" \
+      || fail "$shape worktree refusal changed the record"
+    err=$(cat "$dir/stderr")
+    assert_contains "$err" "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." \
+      "$shape worktree refusal must stay unchanged"
+    assert_contains "$err" "exactly one worktree= line" \
+      "$shape worktree repair must name the required end state"
+    assert_contains "$err" "add it, fill it in, or keep only the right one of several" \
+      "$shape worktree repair must explain how to fix this shape"
+    assert_contains "$err" "git -C $dir/project worktree list" \
+      "$shape worktree repair must identify the listing to inspect"
+    assert_contains "$err" "recorded branch fm/$id" \
+      "$shape worktree repair must identify the recorded branch"
+    assert_contains "$err" ".fm-slot-owner" \
+      "$shape worktree repair must explain reassigned-slot safety"
+  done
+
+  # The listing is only useful if it can be copied and run as printed, which a
+  # project path with a space breaks unless the command is quoted. Prove it by
+  # running exactly what the refusal printed, against exactly such a path.
+  dir=$(make_case repair-hint-spaced)
+  mv "$dir/project" "$dir/project dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "project=$dir/project dir" "branch=fm/$id" "kind=ship"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  set -e
+  printed=$(sed -n '/^git -C .* worktree list$/p' "$dir/stderr")
+  [ "$(printf '%s\n' "$printed" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the refusal did not print exactly one standalone worktree listing: $(cat "$dir/stderr")"
+  eval "$printed" > "$dir/listing" 2> "$dir/listing-err" \
+    || fail "the printed listing did not run as printed: $printed"$'\n'"$(cat "$dir/listing-err")"
+  assert_contains "$(cat "$dir/listing")" "$dir/project dir" \
+    "the printed listing must inspect the project the record names"
+  pass "fm-teardown: an unusable worktree identity refuses as before and names a repair path that runs as printed"
 }
 
 test_control_lock_contention_refuses_before_mutation() {
@@ -288,14 +377,59 @@ test_supported_backend_endpoint_records_validate() {
     "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid cmux endpoint refused"
 
-  for backend in tmux herdr zellij orca cmux; do
+  id=paseo-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=terminal-1:wks_1" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=paseo" "paseo_terminal_id=terminal-1" "paseo_workspace_id=wks_1"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid paseo endpoint refused"
+
+  id=rex-task
+  rex_meta() {  # <window> <session-id> <window-id> <block-id> <server>
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=$1" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+      "backend=rex" "rex_server=$5" "rex_session_id=$2" "rex_window_id=$3" "rex_block_id=$4"
+  }
+  rex_meta "01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a161fb-16e2-7124-835e-e6c8a35bbf9e "unix:///tmp/rex%20server.sock"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid rex endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_BACKEND:$FM_BACKEND_VALIDATED_TARGET" = \
+    "rex:01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" ] \
+    || fail "rex endpoint validation returned wrong identity"
+  rex_meta "01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a10000-0000-7000-8000-000000000000 "unix:///tmp/rex.sock"
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a rex window= that names a different block than rex_block_id must refuse"
+  fi
+  rex_meta "session:01a161f8-ca97-7d13-9f71-de705f5dc343:block:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a161fb-16e2-7124-835e-e6c8a35bbf9e "unix:///tmp/rex.sock"
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a rex window= that keeps the colon-carrying id prefixes must refuse"
+  fi
+  rex_meta "01a161f8-ca97-7d13-9f71-de705f5dc343:01a161fb-16e2-7124-835e-e6c8a35bbf9e" \
+    session:01a161f8-ca97-7d13-9f71-de705f5dc343 window:01a161fb-16ed-782d-a616-6a21af27ebe8 \
+    block:01a161fb-16e2-7124-835e-e6c8a35bbf9e ""
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a rex record with no rex_server must refuse"
+  fi
+
+  id=tern-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=9007199254740993:9223372036854775807" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=tern" "tern_session_id=9007199254740993" "tern_tab_id=9007199254740995" "tern_block_id=9223372036854775807"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid tern endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = "9007199254740993:9223372036854775807" ] || fail "tern endpoint validation changed the 64-bit ids"
+
+  for backend in tmux herdr zellij orca cmux paseo rex tern; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, Rex, and tern records validate, inconsistent Rex records refuse, and every empty backend target refuses"
 }
 
 test_orca_composite_worktree_id_validates() {
@@ -897,6 +1031,16 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
     "$description: the warning should name the reassignment as the cause"
 }
 
+# The tracked Codex overlay bin/fm-t3code-codex-env.sh installs needs a Python
+# with tomllib (3.11+); without one the T3 overlay case is reported skipped.
+tomllib_python_available() {
+  local candidate
+  for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+    command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import tomllib' >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   local dir id=stale-task other=reassigned-task worker rc
 
@@ -981,6 +1125,45 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "unreadable-claim refusal should name the claim file to inspect"
 
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
+}
+
+# A T3 task whose pool slot was reassigned still archives its own thread, but
+# T3's slot cleanup undoes a tracked Codex overlay, so only the slot's
+# ownership keeps it off the claimant's overlay.
+test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3() {
+  local dir id=stale-t3-task other=reassigned-task rc=0 mutations
+  local thread=mcp:8c9d0e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f
+  command -v node >/dev/null 2>&1 || { printf 'note: %s skipped: node absent\n' "${FUNCNAME[0]}"; return 0; }
+  tomllib_python_available || { printf 'note: %s skipped: no Python 3.11+ (tomllib) interpreter on PATH\n' "${FUNCNAME[0]}"; return 0; }
+
+  dir=$(make_case slot-reassigned-t3)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/worktree/.codex"
+  printf 'model = "gpt-5.6-sol"\n' > "$dir/worktree/.codex/config.toml"
+  git -C "$dir/worktree" add .codex/config.toml
+  git -C "$dir/worktree" -c user.name=t -c user.email=t@example.invalid commit -qm "project Codex config"
+  "$ROOT/bin/fm-t3code-codex-env.sh" install "$dir/worktree" "FM_TASK_ID=$other" || fail "install reassigned task's overlay"
+  cp "$dir/worktree/.codex/config.toml" "$dir/other-overlay.toml"
+  t3_fake_start "$dir/t3-server"
+  t3_fake_case "$dir/t3-case" "{\"threads\":{\"$thread\":{\"threadId\":\"$thread\",\"projectId\":\"proj-1\",\"status\":\"completed\",\"activeRunId\":null,\"archived\":false,\"worktreePath\":\"$dir/worktree\",\"pendingRequestCount\":0,\"items\":[],\"runs\":[]}}}"
+  t3_fake_credential "$dir/home/config/t3code-token"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    backend=t3code "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  mutations=$(t3_fake_mutations)
+  t3_fake_stop
+
+  [ "$rc" -eq 0 ] || fail "teardown of a T3 task whose slot was reassigned failed: $(cat "$dir/stderr")"
+  [ "$mutations" = "t3_thread_organize" ] || fail "teardown must still archive the stale task's own T3 thread, got '$mutations'"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
+  cmp -s "$dir/other-overlay.toml" "$dir/worktree/.codex/config.toml" || fail "teardown changed the other task's Codex overlay"
+  [ "$(git -C "$dir/worktree" ls-files -v -- .codex/config.toml)" = "S .codex/config.toml" ] || fail "teardown cleared the other task's overlay protection"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "T3 task on a reassigned slot with --force"
+  pass "fm-teardown backend=t3code: a reassigned pool slot keeps its claimant's Codex overlay while the task's own thread is archived"
 }
 
 # The reuse collision where BOTH records survive: the stale task's record still
@@ -1421,6 +1604,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
 }
 
 test_invalid_endpoint_records_refuse_before_mutation
+test_worktree_identity_refusal_names_the_repair_path
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
@@ -1440,6 +1624,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down

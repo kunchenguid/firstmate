@@ -7,8 +7,9 @@
 # constants in bin/fm-bootstrap.sh.
 #
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
-# turns a failing check into the operator-facing MISSING diagnostic, which is
-# what keeps an older build from reaching a dispatch intake at all.
+# turns an absent binary into the operator-facing MISSING diagnostic and an
+# incompatible installed build into OUTDATED, which keeps an older build from
+# reaching a dispatch intake at all.
 #
 # Snapshot schemas: fm_quota_json_valid accepts quota-axi schema 5 (one row per
 # provider, no accountKey) and schema 6 (every row carries accountKey, unique on
@@ -44,19 +45,13 @@ FM_QUOTA_ROW_JQ='
     end;
 '
 
-fm_quota_axi_compatible() {
-  local timeout=${1:-} output parts major minor patch extra
+# fm_quota_axi_version_compatible <version-output>
+# True when the printed `quota-axi --version` text meets FM_QUOTA_AXI_MIN.
+# Callers that already captured a bounded --version pass that text here so they
+# do not launch a second, unbounded version probe.
+fm_quota_axi_version_compatible() {
+  local output=${1-} parts major minor patch extra
   local min_major min_minor min_patch min_extra
-  command -v quota-axi >/dev/null 2>&1 || return 1
-  if [ -n "$timeout" ]; then
-    case "$timeout" in
-      ''|*[!0-9]*|0) return 1 ;;
-    esac
-    [ "$(type -t fm_run_timed)" = function ] || return 1
-    output=$(fm_run_timed "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
-  else
-    output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
-  fi
   parts=$(printf '%s\n' "$output" |
     sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
     head -1)
@@ -72,6 +67,21 @@ fm_quota_axi_compatible() {
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
+}
+
+fm_quota_axi_compatible() {
+  local timeout=${1:-} output
+  command -v quota-axi >/dev/null 2>&1 || return 1
+  if [ -n "$timeout" ]; then
+    case "$timeout" in
+      ''|*[!0-9]*|0) return 1 ;;
+    esac
+    [ "$(type -t fm_run_timed)" = function ] || return 1
+    output=$(fm_run_timed "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
+  else
+    output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
+  fi
+  fm_quota_axi_version_compatible "$output"
 }
 
 fm_quota_json_valid() {

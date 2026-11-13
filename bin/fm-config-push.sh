@@ -8,11 +8,13 @@
 # home= from data/secondmates.md for older meta records, and reuses the same
 # propagation machinery as bootstrap, but deliberately does not
 # fast-forward tracked files.
-# After a successful per-home propagation that changes any allowlisted config/*
-# item, local routes receive the generation-specific literal-content pointer from
+# After per-home propagation that changes any allowlisted config/* item, local
+# routes receive the generation-specific literal-content pointer from
 # fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
-# through their SSH route. Unchanged config and data/captain-shared.md-only
-# updates send no reread unless a previous send failure is pending for that home.
+# through their SSH route when the transfer changed the home, and keep that
+# obligation across a partial, unknown, or killed completion. Unchanged homes send no
+# reread unless a previous reread is still owed. For local routes only,
+# data/captain-shared.md-only updates send no new reread pointer.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -25,9 +27,9 @@ live secondmate home.
 
 This is local-material-only:
   - does not fast-forward tracked files
-  - after successful config/* changes, sends a local literal-content pointer or
+  - after config/* changes, sends a local literal-content pointer or
     one durable marked remote reread nudge
-    (no message when config is unchanged unless a previous send failure is pending)
+    (no message when unchanged unless a previous reread is still owed)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
   - exits non-zero for real propagation errors or reread-send failures
@@ -137,20 +139,29 @@ while IFS='|' read -r id home _window meta; do
     fi
     remote_marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id" 2>/dev/null || true)
     remote_pending=0
-    if [ -f "$remote_marker" ] && [ "$(fm_meta_get "$remote_marker" remote)" = 1 ]; then remote_pending=1; fi
+    if fm_secondmate_remote_nudge_owed "$STATE" "$id"; then remote_pending=1; fi
+    # Write-ahead: the reread is owed before the push can change the home, so
+    # a kill at any point leaves it owed (bin/fm-secondmate-nudge-lib.sh).
     if ! fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
-      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1; then
+      "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 1; then
       echo "  config-reread: retry marker failed"
       errors=1
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      printf '%s\n' "$remote_out" | sed 's/^/  /'
-      remote_nudge=0
-      if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
-      [ "$remote_pending" -eq 0 ] || remote_nudge=1
+    remote_nudge=$remote_pending
+    remote_rc=0
+    remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) || remote_rc=$?
+    [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
+    if [ "$remote_rc" -eq 255 ] || printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then
+      remote_nudge=1
+    fi
+    if [ "$remote_rc" -ne 0 ] && [ "$remote_nudge" -eq 0 ]; then
+      fm_secondmate_nudge_write "$STATE" "$id" "$home" "" remote \
+        "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" 1 0 || echo "  config-reread: retry marker update failed"
+    fi
+    if [ "$remote_rc" -eq 0 ]; then
       if [ "$remote_nudge" -eq 1 ]; then
         if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
           "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
@@ -164,7 +175,6 @@ while IFS='|' read -r id home _window meta; do
         rm -f -- "$remote_marker"
       fi
     else
-      [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
     fm_lock_release "$remote_lock" || true

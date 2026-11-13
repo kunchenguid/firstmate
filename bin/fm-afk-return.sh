@@ -71,6 +71,9 @@ RETURN_GRACE=${FM_GUARD_GRACE:-300}
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
+# Functions only: decodes the stored hold reasons the catch-up listing shows.
+# shellcheck source=bin/fm-hold-reason-lib.sh
+. "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 
 usage() {
   sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -372,8 +375,9 @@ engine_snapshot() {  # <evidence-file> <since-epoch>
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
   # fm-session-start.sh acquires fm-lock.sh first. That writer refreshes .lock
-  # on takeover and replaces .lock-session on a session-id change, but leaves
-  # both untouched on same-session confirmation. Both contribute to the host key.
+  # on takeover or when it re-anchors a live non-ancestor line 1, and replaces
+  # .lock-session on a session-id change, but otherwise leaves both untouched
+  # on same-session confirmation. Both contribute to the host key.
   # shellcheck source=bin/fm-lock-lib.sh
   . "$SCRIPT_DIR/fm-lock-lib.sh" || return 0
   lock_start=$(fm_lock_path_mtime "$STATE/.lock" 2>/dev/null) || lock_start=0
@@ -591,7 +595,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-
     elif [ -n "$rows" ]; then
       count=$((count + 1))
       printf '  held in the backlog:\n'
-      printf '%s\n' "$rows" | sed 's/^/    /'
+      printf '%s\n' "$rows" | fm_hold_reason_decode_stream | sed 's/^/    /'
     fi
   else
     held_err=$(printf '%s' "$held" | head -1 | clean_field)

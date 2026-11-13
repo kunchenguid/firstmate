@@ -58,7 +58,7 @@ test_supervision_host_protocol_on_every_arm_owner() {
   home="$TMP_ROOT/host-owners-home"
   config="$TMP_ROOT/host-owners-config"
   mkdir -p "$home/state" "$config"
-  for harness in claude cursor opencode omp grok codex; do
+  for harness in claude cursor agy opencode omp grok codex; do
     : > "$config/supervision-host-off"
     plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
     assert_not_contains "$plain" "Supervision host" "$harness: a home opted out by config/supervision-host-off rendered the host protocol"
@@ -184,6 +184,34 @@ test_repair_lines() {
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
+test_omp_restart_guidance_depends_on_home_vs_checkout() {
+  local home out
+  home="$TMP_ROOT/omp-other-home"
+  mkdir -p "$home/state"
+
+  # Home is not the firstmate checkout: relaunch through the launcher.
+  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'relaunch through `fm <project>`' "omp repair line must direct a non-checkout home to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp repair line omits the bare omp warning"
+  assert_not_contains "$out" "restart omp inside this home" "omp repair line still tells a non-checkout home to restart omp inside it"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp)
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'exit omp and relaunch through `fm <project>`, which sets FM_HOME and --cwd' "omp protocol must direct a non-checkout home to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp protocol omits the bare omp warning"
+  assert_not_contains "$out" "restart omp inside this home" "omp protocol still tells a non-checkout home to restart omp inside it"
+
+  # Home is the checkout itself: today's text.
+  out=$(FM_HOME="$ROOT" "$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "restart omp inside this home" "omp repair line lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp repair line named the launcher for the checkout home"
+  out=$(env -u FM_HOME "$RENDER" --harness omp)
+  assert_contains "$out" "restart omp inside this home; pass \`-e " "omp protocol lost today's wording for the checkout home"
+  assert_contains "$out" "restart omp inside this home if the extensions are not loaded" "omp protocol repair step lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp protocol named the launcher for the checkout home"
+  pass "omp restart guidance names the fm launcher only when the home is not the checkout"
+}
+
 test_cross_harness_ordinary_continuation_and_repair_matrix() {
   local ordinary out
 
@@ -225,6 +253,16 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_not_contains "$out" "is broken" "claude recovery line claimed failure before verification"
   assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line must not create a repeatable manual arm loop"
 
+  out=$("$RENDER" --harness agy)
+  assert_contains "$out" "primary harness: agy" "agy heading missing"
+  assert_contains "$out" "Mode: Antigravity Stop-hook-owned supervision." "agy mode line missing"
+  assert_contains "$out" "bin/fm-turnend-guard-agy.sh" "agy block lost the Stop-hook park script name"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-turnend-guard-agy.sh" "agy ordinary-wake line lost the Stop-hook park script name"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "agy ordinary-wake line must not call the manual arm"
+  out=$("$RENDER" --harness agy --repair-line)
+  assert_contains "$out" "Stop-hook park" "agy recovery line lost its Stop-hook park guidance"
+
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "re-arm" "grok ordinary-wake line does not tell the model to re-arm"
@@ -244,6 +282,32 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
 
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
+}
+
+# A parked Codex session reaches the renderer through the park's own
+# --capable verdict, which needs a live native session, so a fixture checkout
+# stands in for it and answers that one verdict.
+test_codex_park_ordinary_wake_line_leaves_continuity_to_the_stop_hook() {
+  local code home out ordinary
+  code="$TMP_ROOT/codex-park-code"
+  home="$TMP_ROOT/codex-park-home"
+  mkdir -p "$code/docs" "$home/state"
+  cp -R "$ROOT/bin" "$code/bin"
+  cp -R "$ROOT/docs/supervision-protocols" "$code/docs/supervision-protocols"
+  cat > "$code/bin/fm-codex-stop-park.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --capable ]
+SH
+  chmod +x "$code/bin/fm-codex-stop-park.sh"
+  out=$(FM_HOME="$home" "$code/bin/fm-supervision-instructions.sh" --harness codex)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-codex-stop-park.sh" "a parked codex ordinary-wake line lost the Stop-hook owner"
+  assert_contains "$ordinary" "do not arm another cycle" "a parked codex ordinary-wake line does not forbid a model re-arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "a parked codex ordinary-wake line must not send the model to a foreground checkpoint"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$code/bin/fm-codex-stop-park.sh"
+  ordinary=$(FM_HOME="$home" "$code/bin/fm-supervision-instructions.sh" --harness codex | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "a codex session without the park must keep the foreground checkpoint line"
+  pass "a parked codex session's ordinary-wake line names the Stop hook and never the foreground checkpoint"
 }
 
 test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
@@ -304,6 +368,35 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_literal_paths_in_rendered_snippets() {
+  local name home harness out quoted_config
+  for name in normal 'R&D "double" '\''single'\'' home'; do
+    home="$TMP_ROOT/$name"
+    mkdir -p "$home/config" "$home/state"
+    : > "$home/config/supervision-host-off"
+    quoted_config="'$(printf '%s' "$home/config/x-mode.env" | sed "s/'/'\\\\''/g")'"
+    for harness in pi pi-signed omp codex grok cursor opencode claude; do
+      out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$RENDER" --harness "$harness" --x-mode 1)
+      assert_not_contains "$out" '__FM_' "$harness: literal path leaked a placeholder"
+      case "$harness" in
+        pi|pi-signed)
+          assert_contains "$out" "$home/.pi/extensions/fm-primary-pi-watch.ts" "Pi watch path changed"
+          assert_contains "$out" "$home/.pi/extensions/fm-primary-turnend-guard.ts" "Pi turn-end path changed"
+          ;;
+        omp)
+          assert_contains "$out" "$home/.omp/extensions/fm-primary-omp-watch.ts" "omp watch path changed"
+          assert_contains "$out" "$home/.omp/extensions/fm-primary-turnend-guard.ts" "omp turn-end path changed"
+          ;;
+        grok)
+          assert_contains "$out" "[ -f $quoted_config ] && . $quoted_config; exec bin/fm-watch-arm.sh" "quoted config path changed"
+          ;;
+      esac
+    done
+  done
+  pass "snippets preserve literal ampersands, quotes and spaces in paths across primary harnesses"
+}
+
+test_literal_paths_in_rendered_snippets
 test_supervision_host_protocol_on_a_claude_home_unless_off
 test_supervision_host_protocol_on_every_arm_owner
 test_selected_harness_block_only
@@ -311,7 +404,9 @@ test_unknown_fallback
 test_conditional_stanzas
 test_quiet_mode_stanzas
 test_repair_lines
+test_omp_restart_guidance_depends_on_home_vs_checkout
 test_cross_harness_ordinary_continuation_and_repair_matrix
+test_codex_park_ordinary_wake_line_leaves_continuity_to_the_stop_hook
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
