@@ -757,7 +757,7 @@ SH
 # crew-state command. A clock frozen at a whole-second boundary cannot prove
 # that the forced visit gets a full second rather than the next clock tick.
 test_forced_cadence_visit_keeps_floor_after_ledger_deadline() {
-  local branch head out mode started elapsed deadline rc tool real_tool
+  local branch head out mode started elapsed deadline rc tool real_tool outer_expiry reader_expiry
   for mode in failed stalled; do
   make_world "forced-cadence-floor-$mode"; bind_secondmate local
   write_child "$MATE" 0-cadence 'working: awaiting the pipeline result'
@@ -817,13 +817,29 @@ SH
     real_tool=$(command -v "$tool") || continue
     cat > "$WORLD/fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
+kind='' previous='' seconds=''
 for arg in "$@"; do
+  case "$arg" in
+    bash|env) [ -n "$seconds" ] || seconds=$previous ;;
+    _scan-locked) kind=outer ;;
+  esac
   if [ -n "${FM_FLOOR_READER:-}" ] && [ "$arg" = "$FM_FLOOR_READER" ]; then
+    kind=reader
     printf 'reader-setup\n' >> "$FM_FLOOR_SETUP_LOG"
     sleep 0.2
     break
   fi
+  previous=$arg
 done
+if [ -n "$kind" ]; then
+  . "$FM_FLOOR_LIB"
+  whole=${seconds%%.*}
+  fraction=${seconds#*.}
+  [ "$fraction" != "$seconds" ] || fraction=0
+  fraction="${fraction}000"
+  fraction=${fraction:0:3}
+  printf '%s %s\n' "$kind" "$(( $(fm_nm_now_ms) + whole * 1000 + 10#$fraction ))" >> "$FM_FLOOR_WATCHDOGS"
+fi
 SH
     printf 'exec %q "$@"\n' "$real_tool" >> "$WORLD/fakebin/$tool"
   done
@@ -846,6 +862,7 @@ SH
   FM_TEST_CREW_STATE_BIN="$WORLD/fakebin/measured-crew-state" FM_INACTIVE_RECONCILE_BUDGET_SECS=3 \
     FM_FLOOR_LIB="$ROOT/bin/fm-nm-run-lib.sh" FM_FLOOR_MEASURE="$WORLD/measure" \
     FM_FLOOR_READER="$WORLD/fakebin/measured-crew-state" FM_FLOOR_SETUP_LOG="$WORLD/setup.log" \
+    FM_FLOOR_WATCHDOGS="$WORLD/watchdogs" \
     FM_FLOOR_CALLS="$WORLD/run.calls" FM_FLOOR_STALL="$([ "$mode" = stalled ] && printf 1 || printf 0)" \
     FM_FLOOR_DELAY=0.6 \
     FM_FLOOR_BRANCH="$branch" FM_FLOOR_HEAD="$head" run_reconcile "$MATE" --startup
@@ -857,8 +874,15 @@ SH
     ''|*[!0-9]*) fail 'the reader did not record its own start and deadline' ;;
   esac
   elapsed=$((elapsed - started))
-  printf 'floor-measure mode=%s start=%s deadline=%s budget_ms=%s elapsed_ms=%s rc=%s\n' \
-    "$mode" "$started" "$deadline" "$((deadline - started))" "$elapsed" "$rc"
+  outer_expiry=$(awk '$1 == "outer" { print $2; exit }' "$WORLD/watchdogs")
+  reader_expiry=$(awk '$1 == "reader" { print $2; exit }' "$WORLD/watchdogs")
+  case "$outer_expiry:$reader_expiry" in
+    :*|*:|*[!0-9:]*) fail 'the floor regression did not observe both enclosing watchdogs' ;;
+  esac
+  printf 'floor-measure mode=%s start=%s deadline=%s budget_ms=%s elapsed_ms=%s rc=%s outer_expiry=%s reader_expiry=%s\n' \
+    "$mode" "$started" "$deadline" "$((deadline - started))" "$elapsed" "$rc" "$outer_expiry" "$reader_expiry"
+  [ "$deadline" -le "$outer_expiry" ] && [ "$deadline" -le "$reader_expiry" ] \
+    || fail 'the reader promised time beyond an enclosing watchdog'
   [ ! -e "$MATE/state/.meta-0-cadence.lock" ] || fail 'the forced first cadence visit retained its metadata lock after cleanup'
   [ "$((deadline - started))" -ge 900 ] \
     || fail 'the forced first cadence visit inherited less than a full second of real budget'
