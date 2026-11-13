@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 
 const extensionPath = resolve(".pi/extensions/fm-primary-turnend-guard.ts");
 const testHome = mkdtempSync(resolve(tmpdir(), "fm-pi-bash-timeout-test-"));
+process.once("exit", () => rmSync(testHome, { recursive: true, force: true }));
 process.env.FM_HOME = testHome;
 process.env.FM_STATE_OVERRIDE = resolve(testHome, "state");
 async function run(setting, timeout) {
@@ -24,6 +25,7 @@ async function run(setting, timeout) {
   mod.default(pi);
   const input = timeout === undefined ? { command: "" } : { command: "", timeout };
   await handlers.get("tool_call")({ type: "tool_call", toolName: "bash", input });
+  await handlers.get("session_shutdown")();
   return input;
 }
 assert.equal((await run(undefined)).timeout, undefined, "unset setting preserves default behavior");
@@ -34,7 +36,13 @@ assert.equal((await run("5000", 5)).timeout, 5, "opt-in preserves timeout equal 
 assert.equal((await run("500")).timeout, 0.5, "subsecond cap supplies fractional seconds");
 assert.equal((await run("500", 1)).timeout, 0.5, "subsecond cap bounds an explicit timeout");
 assert.equal((await run("500", 0.25)).timeout, 0.25, "subsecond cap preserves shorter timeout");
+assert.equal((await run("1")).timeout, 0.001, "minimum cap supplies one millisecond in seconds");
+assert.equal((await run("2147483647")).timeout, 2147483.647, "native timer maximum supplies a supported timeout");
+assert.equal((await run("2147483647", 2147483.648)).timeout, 2147483.647, "native timer maximum caps an unsupported explicit timeout");
+for (const setting of ["2147483648", "9007199254740991", "9007199254740992"]) {
+  assert.equal((await run(setting)).timeout, undefined, `${setting} cannot inject an unsupported timeout`);
+  assert.equal((await run(setting, 60)).timeout, 60, `${setting} preserves an explicit timeout`);
+}
 assert.equal((await run("invalid")).timeout, undefined, "invalid setting leaves call unchanged");
-rmSync(testHome, { recursive: true, force: true });
 JS
 pass "Pi Bash timeout cap is opt-in, bounded, and preserves shorter timeouts"
