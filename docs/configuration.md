@@ -2467,6 +2467,10 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 
 A project with no `forge=` token is classified from its origin against the configured GitHub and GitLab host lists.
 Recognized GitHub origins use `gh` and `gh-axi`, recognized GitLab origins use `glab`, and an origin outside those lists reports `FORGE_UNSUPPORTED` until its host is configured or an explicit supported forge binding is added.
+Classification uses Git's effective `origin` URL, so `insteadOf` rewrites are included before host policy is applied.
+SSH remotes also use the effective Git SSH command and a safe projection of supported OpenSSH configuration to resolve aliases; unsupported custom executables, destination-affecting directives, or unresolved includes fail closed as `FORGE_UNSUPPORTED` instead of falling back to the raw host.
+An explicit `forge=` binding is resolved before origin classification only for the canonical registered checkout, with filesystem identity preserving bindings for registered symlinked clones and rejecting unrelated clones with the same basename.
+Fleet refresh skips unknown or unresolved origins without fetching them.
 A remote-backed project on a Forgejo or Gitea server is registered with `forge=forgejo`, one value of the same closed `forge=` binding that Gerrit uses; `bin/fm-project-mode.sh`'s header owns its grammar, values, and refusals, and `bin/fm-project-mode.sh --forge <name>` reads it back.
 Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
