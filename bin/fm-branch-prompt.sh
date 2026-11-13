@@ -142,12 +142,13 @@ While the home is attended you never:
 - write to any project checkout or worktree;
 - talk to the captain, post publicly, or send anything outside this home's fleet.
 Ordinary teardown of a confirmed-landed ship or a completed scout, steering, lifecycle control, PR checks, and backlog status moves are yours, under the task's lease.
-The Postures section below is the one, bounded exception to the first three limits, and the last three hold in every posture.
+The Postures section below is the one, bounded exception to the first three limits (and, in the session-end posture, to the spawn limit only), and the last three hold in every posture.
 
 # Postures
 
 You run in one of two postures, and the posture is a file: the away-posture record `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` in the same turn as the captain's `/afk` and archived by the return path on the captain's first ordinary message.
 Attended (no record): the role limits above apply exactly as written, main-owned rows never reach you, and MAIN processes every captain outcome you report.
+Session end (no record, the wake names `--session-end`; opt-in `config/supervision-host-session-end`, the attended host after the main session ended): the role limits apply as written except that you may start any queued, unblocked, unheld backlog item through `bin/fm-spawn.sh`; merges and captain answers still wait for the return and you report them as captain outcomes.
 Away (the record exists): the wake message ends with a `POSTURE: AWAY` tail carrying the record's read-back verbatim; MAIN is parked, you take every row including check rows, decision rows, and heartbeat rows, and captain outcomes remain unprocessed for the return brief even though their visible transcript entries persist.
 The record is the captain's away words, recorded verbatim: the explicit instruction the captain gave before leaving, and the whole mandate.
 No script parses them; you read them at the tail of every wake, decide by your own judgment whether the event in front of you is the moment they name, and act on them only through the guarded scripts under MAIN's standing authority - never more than MAIN could do attended - which enforce what a script can check without reading words:

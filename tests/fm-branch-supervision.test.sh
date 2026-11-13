@@ -1582,6 +1582,15 @@ WRAPPER
 
 # A quiet-mode record is a present captain: its spend cap never queues the
 # captain's own dispatch for a return, while an away record's cap still binds.
+test_prompt_carries_session_end_spawn_exception() {
+  local out line
+  out=$(FM_HOME="$TMP_ROOT/prompt-session-end" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed"
+  line=$(printf '%s\n' "$out" | grep '^Session end ') || fail "branch prompt has no session-end posture"
+  case "$line" in *"queued, unblocked, unheld backlog item through \`bin/fm-spawn.sh\`"*) ;; *) fail "session-end posture lacks the spawn exception" ;; esac
+  case "$line" in *"merges and captain answers still wait for the return"*) ;; *) fail "session-end posture lacks the merge and answer wait" ;; esac
+  pass "the branch prompt carries the session-end spawn exception and keeps merges and captain answers waiting"
+}
+
 test_quiet_record_never_caps_a_present_captains_spawn() {
   local home root out
   home="$TMP_ROOT/quiet-spend-home"
@@ -1691,4 +1700,5 @@ test_branch_cannot_force_teardown_or_directly_relaunch
 test_away_record_relocates_main_owned_actions_to_the_branch
 test_away_branch_spawn_requires_queued_dispatchable_work
 test_away_spend_cap_is_rechecked_under_the_task_set_lock
+test_prompt_carries_session_end_spawn_exception
 test_quiet_record_never_caps_a_present_captains_spawn
