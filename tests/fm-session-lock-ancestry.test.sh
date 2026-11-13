@@ -476,8 +476,13 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$mode" = W ]; then
   [ -z "${FM_TEST_WIN_PS_FAIL:-}" ] || { echo "ps: cannot read the Windows process table" >&2; exit 1; }
-  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
-  [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
+  # The real Cygwin ps cuts every line to a positive COLUMNS, even off a tty.
+  width=
+  case "${COLUMNS:-}" in ''|*[!0-9]*|0) ;; *) width=$COLUMNS ;; esac
+  {
+    printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+    [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
+  } | if [ -n "$width" ]; then cut -c "1-$width"; else cat; fi
   exit 0
 fi
 # The Cygwin-side table. 700 is an MSYS-native harness; everything else is an
@@ -519,6 +524,56 @@ test_windows_session_is_identified_from_its_published_pid() {
   FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "the session holding the lock did not recognize itself as the owner"
   pass "session-lock: a Windows session is identified from its published pid across the severed parent link"
+}
+
+# Claude's hooks carry a COLUMNS narrower than a ps -W line, and a session that
+# began on an earlier day shows a two-word STIME. Both are what the real table
+# printed for a live Claude session; either one alone made its hooks read the
+# session as unidentified and leave the home read-only.
+test_windows_session_started_on_an_earlier_day_is_identified_under_a_narrow_width() {
+  local dir fakebin row got
+  dir="$TMP_ROOT/win-earlier-day"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:7204\n' > "$dir/state/.lock"
+  row='  4224372       0       0       7204  ?              0   Nov  8 C:\Users\u\.local\bin\claude.exe'
+
+  got=$(COLUMNS=80 FM_TEST_WIN_TABLE="$row" "$fakebin/ps" -W | tail -n 1)
+  [ "${#got}" -eq 80 ] || fail "fixture is vacuous: the fake ps did not cut a line to COLUMNS=80 (got ${#got} characters)"
+
+  for width in '' 80; do
+    got=$(COLUMNS=$width FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_win_command 7204') \
+      || fail "an earlier-day harness row was not read at COLUMNS='$width'"
+    [ "$got" = 'C:/Users/u/.local/bin/claude' ] \
+      || fail "an earlier-day harness row at COLUMNS='$width' read as '$got', expected C:/Users/u/.local/bin/claude"
+    got=$(COLUMNS=$width FM_TEST_WIN_TABLE="${row/Nov /nov.}" lib_eval "$fakebin" 'fm_win_command 7204') \
+      || fail "a French-locale earlier-day harness row was not read at COLUMNS='$width'"
+    [ "$got" = 'C:/Users/u/.local/bin/claude' ] \
+      || fail "a French-locale earlier-day harness row at COLUMNS='$width' read as '$got', expected C:/Users/u/.local/bin/claude"
+    COLUMNS=$width FM_TEST_WIN_TABLE="$row" FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=7204 \
+      lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "the earlier-day session holding the lock did not recognize itself at COLUMNS='$width'"
+  done
+
+  # A today-format row still reads, and a listed row whose time is in neither
+  # form is unknown (2), never proof that the process is gone (1).
+  got=$(COLUMNS=80 FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_win_command 7204') \
+    || fail "a today-format harness row was not read under COLUMNS=80"
+  [ "$got" = 'C:/Users/u/.local/bin/claude' ] || fail "a today-format harness row read as '$got'"
+  row='  4224372       0       0       7204  ?              0 sometime C:\Users\u\.local\bin\claude.exe'
+  FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_win_command 7204 >/dev/null; echo "rc=$?"' > "$dir/rc"
+  [ "$(cat "$dir/rc")" = rc=2 ] || fail "an unrecognized STIME row returned $(cat "$dir/rc"), expected rc=2 (unknown)"
+  # A listed row with a valid time but no command is unknown too, so the lock
+  # its pid holds is still refused to another session rather than reclaimed.
+  for row in '  4224372       0       0       7204  ?              0 22:24:48' \
+             '  4224372       0       0       7204  ?              0 22:24:48 ' \
+             '  4224372       0       0       7204  ?              0   Nov  8 '; do
+    FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_win_command 7204 >/dev/null; echo "rc=$?"' > "$dir/rc"
+    [ "$(cat "$dir/rc")" = rc=2 ] || fail "a row with no command ('$row') returned $(cat "$dir/rc"), expected rc=2 (unknown)"
+    FM_TEST_WIN_TABLE="$row" lib_eval "$fakebin" 'fm_session_lock_pid_blocks_reclaim win:7204' \
+      || fail "a row with no command ('$row') left the lock of win:7204 reclaimable"
+  done
+  pass "session-lock: a Windows session started on an earlier day is identified under a narrow COLUMNS"
 }
 
 test_windows_published_pid_is_confirmed_before_it_is_trusted() {
@@ -1666,6 +1721,7 @@ test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_windows_session_is_identified_from_its_published_pid
+test_windows_session_started_on_an_earlier_day_is_identified_under_a_narrow_width
 test_windows_published_pid_is_confirmed_before_it_is_trusted
 test_windows_pid_is_never_resolved_as_a_cygwin_pid
 test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
