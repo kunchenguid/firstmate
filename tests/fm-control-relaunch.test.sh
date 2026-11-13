@@ -392,6 +392,77 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+# A start wake the previous launch already queued names the launch a relaunch
+# replaces, so the relaunch drops only that row: another task's start wake and
+# this task's other wakes stay queued for the supervisor.
+test_relaunch_drops_the_replaced_launchs_queued_start_wake() {
+  local dir out rc state rows
+  dir=$(new_case startwake rq1)
+  add_ship_task "$dir" rq1 claude
+  state="$dir/home/state"
+  mkdir -p "$dir/home/config"
+  touch "$dir/home/config/spawn-start-check"
+  printf 'busy_gen=%s\n' "$("$ROOT/bin/fm-busy-event.sh" arm "$state" rq1)" >> "$state/rq1.meta"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"
+    fm_wake_append check start:rq1 "check: start rq1: no start signal 120s after spawn (harness=claude)"
+    fm_wake_append check start:other "check: start other: no start signal 120s after spawn (harness=claude)"
+    fm_wake_append check "$1/rq1.check.sh" "check: rq1 poll result"' "$ROOT" "$state" \
+    || fail "fixture: could not queue the wakes"
+  out=$(run_control "$dir" rq1 relaunch --note "replace the parked launch"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ -f "$state/rq1.start-pending" ] || fail "the relaunch did not arm the replacement's start check"
+  rows=$(awk -F '\t' '$3 == "check" { print $4 }' "$state/.wake-queue")
+  case $'\n'"$rows"$'\n' in *$'\nstart:rq1\n'*) fail "the relaunch kept the replaced launch's queued start wake: $rows" ;; esac
+  case $'\n'"$rows"$'\n' in *$'\nstart:other\n'*) ;; *) fail "the relaunch dropped another task's start wake: $rows" ;; esac
+  case $'\n'"$rows"$'\n' in *$'\n'"$state/rq1.check.sh"$'\n'*) ;; *) fail "the relaunch dropped this task's other wake: $rows" ;; esac
+  pass "fm-control relaunch: a relaunch drops only the replaced launch's queued start wake"
+}
+
+# Without the opt-in config/spawn-start-check flag a relaunch arms no start
+# check and leaves the wake queue exactly as it found it.
+test_relaunch_without_start_check_flag_arms_nothing() {
+  local dir out rc state
+  dir=$(new_case startwake-off rq2)
+  add_ship_task "$dir" rq2 claude
+  state="$dir/home/state"
+  printf 'busy_gen=%s\n' "$("$ROOT/bin/fm-busy-event.sh" arm "$state" rq2)" >> "$state/rq2.meta"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-wake-lib.sh"
+    fm_wake_append check "$1/rq2.check.sh" "check: rq2 poll result"' "$ROOT" "$state" \
+    || fail "fixture: could not queue the wake"
+  cp "$state/.wake-queue" "$dir/queue-before"
+  out=$(run_control "$dir" rq2 relaunch --note "replace the launch"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ ! -e "$state/rq2.start-pending" ] || fail "a relaunch without config/spawn-start-check armed a start check"
+  cmp -s "$dir/queue-before" "$state/.wake-queue" \
+    || fail "a relaunch without config/spawn-start-check changed the wake queue: $(cat "$state/.wake-queue")"
+  pass "fm-control relaunch: without config/spawn-start-check a relaunch arms no start check"
+}
+
+# A watcher stopped after it claimed a launch's start check leaves only the
+# claimed copy (bin/fm-watch.sh start_check_claim), which its next poll puts
+# back. A relaunch after the check was disabled replaces that launch, so it
+# clears the claimed copy too; a Codex launch records no busy generation, so a
+# restored copy would otherwise match the replacement and warn about it.
+test_disabled_relaunch_clears_an_abandoned_claimed_start_check() {
+  local dir out rc state rows
+  dir=$(new_case startwake-claimed rq3)
+  add_ship_task "$dir" rq3 codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  state="$dir/home/state"
+  printf '1000 - codex\n' > "$state/rq3.start-pending.claim.99999"
+  out=$(run_control "$dir" rq3 relaunch --note "replace the parked launch"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_WAKE_QUEUE="$state/.wake-queue" bash -c '. "$1/bin/fm-watch.sh"; start_check_tick 900000' _ "$ROOT" \
+    >/dev/null 2>&1 || fail "the watcher's start-check poll failed"
+  rows=$(awk -F '\t' '$3 == "check" { print $4 }' "$state/.wake-queue" 2>/dev/null)
+  case $'\n'"$rows"$'\n' in *$'\nstart:rq3\n'*) fail "a relaunch after the check was disabled was warned about by the replaced launch's claimed check" ;; esac
+  [ ! -e "$state/rq3.start-pending" ] || fail "the replaced launch's claimed check was restored after the relaunch"
+  [ -z "$(ls "$state/rq3.start-pending.claim."* 2>/dev/null)" ] || fail "the relaunch left the replaced launch's claimed check behind"
+  pass "fm-control relaunch: a relaunch after the check was disabled clears the replaced launch's claimed check"
+}
+
 # A lane relaunched after its PR was recorded keeps that PR as its record's
 # tail, so the armed merge poll still validates against it.
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll() {
@@ -3254,6 +3325,9 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_drops_the_replaced_launchs_queued_start_wake
+test_relaunch_without_start_check_flag_arms_nothing
+test_disabled_relaunch_clears_an_abandoned_claimed_start_check
 test_relaunch_keeps_a_recorded_pr_valid_for_the_merge_poll
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

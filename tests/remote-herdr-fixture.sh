@@ -12,6 +12,10 @@
 # tab's only pane closes the tab, and agent get reports agent_not_found for a
 # pane no agent has registered on.
 #
+# A pane opened by `tab create --cwd` reports that directory as its
+# foreground_cwd, which a host-local relaunch reads to prove the endpoint still
+# sits in its recorded worktree.
+#
 # Beyond that it models the pane IO a real launch performs. A pane reports a
 # registered agent once anything has been typed into it, and submitting starts
 # one turn: the next agent read reports working and the pane settles back to
@@ -25,6 +29,9 @@
 # Every invocation is appended verbatim to <log-file>, so a test reads back what
 # the remote pane received. Creating <send-fail-flag> makes every pane write
 # fail, which is how a test simulates an endpoint that cannot be reached.
+# Writing <reply-log-path> and <line> as the two lines of <state-file>.launch-reply
+# makes the next submit append <line> to that log once, the way a fast worker
+# replies before its launch returns.
 
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
@@ -83,7 +90,8 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      jq_state -c --arg p "$pane" \
+        '{result:{pane:({pane_id:$p} + ([.tabs[]|select(.pane_id==$p)][0] | if (.cwd // "") != "" then {foreground_cwd:.cwd} else {} end))}}'
     fi
     ;;
   "pane close")
@@ -96,7 +104,15 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
+    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save
+    # A one-shot fast reply: the agent this submit starts appends its line to
+    # its reply log before the launcher returns.
+    if [ -f "$STATE.launch-reply" ]; then
+      { IFS= read -r reply_log; IFS= read -r reply_line; } < "$STATE.launch-reply"
+      rm -f -- "$STATE.launch-reply"
+      printf '%s\n' "$reply_line" >> "$reply_log"
+    fi
+    ;;
   "pane read") printf '\n' ;;
   "pane process-info")
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}\n' \

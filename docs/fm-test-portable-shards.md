@@ -6,6 +6,7 @@
 ## Verification inputs
 
 Balance hints come from serial runs of the real lanes on `ubuntu-latest`.
+The `tests/fm-start-check.test.sh` value of 88823 ms in `portable_parallel_weight_hints` is its completed, passing Ubuntu serial sample from CI run [42658232603](https://github.com/kunchenguid/firstmate/actions/runs/42658232603) serial 10, until parallel-lane timing artifacts refresh it.
 The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
 Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
 
@@ -35,6 +36,7 @@ The 2026-10-26 `tests/fm-test-tap-verify.test.sh` serial hint is a provisional l
 The 2026-11-08 `tests/fm-lavish-url.test.sh` serial hint is a provisional local measurement of 30000 ms, above the slowest of three `bin/fm-test-run.sh` samples (25148-26650 ms) on a Linux host, until the next CI refresh replaces it with an Ubuntu timing-artifact maximum.
 The 2026-10-27 read-repetition suites carry provisional Linux x86_64 local runner maxima: 602 ms for `tests/fm-read-repetition.test.sh` (six successful samples, 528-602 ms) and 1110 ms for `tests/fm-read-repetition-live.test.sh` (five successful samples, 949-1110 ms).
 `tests/fm-park.test.sh` is now a portable parallel member; its 70085 ms parallel hint is its completed passing Ubuntu `FM_TEST_END` sample from CI run [42730709201](https://github.com/kunchenguid/firstmate/actions/runs/42730709201), and `tests/fm-arm-pretool-check.test.sh` moved to parallel lane 2 to keep the lanes within 5%.
+With `tests/fm-start-check.test.sh` and `tests/fm-park.test.sh` both in parallel lane 1, `tests/fm-crew-state.test.sh` and `tests/fm-backend-herdr.test.sh` swapped lanes to keep the lanes within 5%.
 The live samples exercised installed Pi 1.4.0 RPC without capability skips; they are not CI timing evidence or timings for unavailable harnesses.
 Both suites retain serial placement and full coverage; replace these provisional hints with Ubuntu timing-artifact maxima at the next CI refresh.
 The 2026-10-29 `tests/fm-live-lab-isolation.test.sh` serial hint is a provisional local measurement of 6459 ms, the slowest of six `bin/fm-test-run.sh` samples (4308-6459 ms) taken inside a private `unshare -Urm` /tmp on this Linux host, until the next CI refresh replaces it with an Ubuntu timing-artifact maximum.
