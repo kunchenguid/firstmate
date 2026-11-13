@@ -581,6 +581,13 @@ fm_lock_abs_path() {
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*)
+      # readlink re-derives a junction's target through the mount table, so the
+      # owner path is minted in that same spelling.
+      lock_abs=$(cygpath -u "$(cygpath -w "$lock_abs")") || return 1
+      ;;
+  esac
   # An opted-in caller can recover its own staging directories even when a
   # signal interrupts this command substitution before it returns the path.
   mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
@@ -662,6 +669,16 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
+# A junction's readlink spelling follows the mount table, so on a Cygwin-family
+# host a caller-spelled owner path is matched by identity. Other hosts keep the
+# string compare alone.
+fm_lock_junction_resolves_to() {  # <lock-path> <owner-directory>
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*) [ -L "$1" ] && [ "$1" -ef "$2" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_lock_discard_owner() {
   local ownerdir=$1
   [ -n "$ownerdir" ] || return 0
@@ -676,6 +693,7 @@ fm_lock_discard_staged_owners() {
   for owner in "$lockdir.owner.$scope."*; do
     [ -d "$owner" ] && [ ! -L "$owner" ] || continue
     fm_lock_points_to_owner "$lockdir" "$owner" && continue
+    fm_lock_junction_resolves_to "$lockdir" "$owner" && continue
     pid=$(cat "$owner/pid" 2>/dev/null || true)
     [ -z "$pid" ] || [ "$pid" = "$mypid" ] || continue
     fm_lock_discard_owner "$owner"
@@ -753,6 +771,24 @@ fm_lock_wait_pending_mutation() {
   fi
 }
 
+fm_lock_create_owner_link() {  # <owner-directory> <lock-path>
+  case "$_FM_UNAME" in
+    CYGWIN*|MINGW*|MSYS*)
+      # Git Bash's ln -s silently makes a directory COPY when native symlinks
+      # are unavailable, so readlink then fails and a lock can never verify its
+      # own claim (it waits on itself forever). A directory junction needs no
+      # privilege, reads back as a link through -L and readlink, and mklink /J
+      # refuses an existing destination exactly as mkdir does. The quoted paths
+      # travel in the environment and are expanded after cmd parses the line,
+      # so cmd metacharacters in a path stay literal.
+      FM_LOCK_LINK_PATH="\"$(cygpath -w "$2")\"" FM_LOCK_LINK_TARGET="\"$(cygpath -w "$1")\"" \
+        MSYS2_ARG_CONV_EXCL='*' cmd.exe /v:on /c mklink /J '!FM_LOCK_LINK_PATH!' '!FM_LOCK_LINK_TARGET!' >/dev/null 2>&1
+      return
+      ;;
+  esac
+  ln -s "$1" "$2"
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir=
   local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
@@ -790,7 +826,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  ln -s "$ownerdir" "$lockdir" 2>/dev/null &
+  fm_lock_create_owner_link "$ownerdir" "$lockdir" 2>/dev/null &
   FM_LOCK_PENDING_PID=$!
   if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -802,6 +838,9 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    if fm_lock_junction_resolves_to "$lockdir" "$ownerdir"; then
+      rm -f "$lockdir" 2>/dev/null || true
+    fi
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1

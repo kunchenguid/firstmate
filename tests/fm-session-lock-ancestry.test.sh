@@ -495,6 +495,7 @@ else
 fi
 SH
   chmod +x "$fakebin/uname" "$fakebin/ps"
+  fm_fake_windows_link_tools "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -766,6 +767,45 @@ test_windows_clear_rekeys_the_lock_under_the_same_pid() {
     fail "the Windows session read its own lock as foreign after /clear"
   fi
   pass "session-lock: a Windows /clear keeps the lock and re-keys its session id"
+}
+
+test_windows_interrupted_link_probe_leaves_no_probe_files() {
+  local dir fakebin slowbin home real_cmd lock_pid status i=0 leftovers
+  dir="$TMP_ROOT/win-probe-interrupt"
+  fakebin=$(cygwin_fakebin "$dir")
+  home="$dir/home"
+  slowbin="$dir/slowbin"
+  mkdir -p "$home/state" "$slowbin"
+  real_cmd=$(PATH="$fakebin:$PATH" command -v cmd.exe) || fail "fixture has no cmd.exe to publish an owner link"
+
+  # Hold the probe's link creation open so the signal lands while it is in
+  # flight, then let it finish: the link is published after the interruption.
+  cat > "$slowbin/cmd.exe" <<'SH'
+#!/usr/bin/env bash
+echo started > "$FM_TEST_LINK_STARTED"
+while [ ! -e "$FM_TEST_LINK_RESUME" ]; do sleep 0.05; done
+exec "$FM_TEST_REAL_CMD" "$@"
+SH
+  chmod +x "$slowbin/cmd.exe"
+
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID PATH="$slowbin:$fakebin:$PATH" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" FM_HOME="$home" CLAUDE_PID=7204 CLAUDE_CODE_SESSION_ID=S1 \
+    FM_TEST_LINK_STARTED="$dir/link-started" FM_TEST_LINK_RESUME="$dir/link-resume" \
+    FM_TEST_REAL_CMD="$real_cmd" "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1 &
+  lock_pid=$!
+  while [ "$i" -lt 12000 ] && [ ! -s "$dir/link-started" ]; do
+    kill -0 "$lock_pid" 2>/dev/null || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/link-started" ] || fail "fm-lock.sh never reached the owner-link probe"
+  kill -TERM "$lock_pid"
+  : > "$dir/link-resume"
+  if wait "$lock_pid"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "an interrupted fm-lock.sh reported success"
+  leftovers=$(ls -A "$home/state")
+  [ -z "$leftovers" ] || fail "an interrupted owner-link probe left files in state: $leftovers"
+  pass "session-lock: an interrupted Windows owner-link probe joins its link creation and leaves no probe files"
 }
 
 test_tagged_lock_is_inert_off_windows() {
@@ -1673,6 +1713,7 @@ test_windows_tagged_holder_is_a_live_foreign_owner
 test_windows_tagged_lock_acquisition_uses_the_shared_owner_verdict
 test_windows_published_pid_needs_its_claude_session_id
 test_windows_clear_rekeys_the_lock_under_the_same_pid
+test_windows_interrupted_link_probe_leaves_no_probe_files
 test_tagged_lock_is_inert_off_windows
 test_windows_task_lease_follows_a_tagged_lock_holder
 test_cygwin_ps_without_o_still_resolves_a_local_harness

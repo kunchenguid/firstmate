@@ -61,6 +61,7 @@ SH
   chmod +x "$FAKEBIN/stat"
 fi
 chmod +x "$FAKEBIN/uname" "$FAKEBIN/ps"
+fm_fake_windows_link_tools "$FAKEBIN"
 
 # WINPID 7204 is the Claude session holding the lock.
 WIN_TABLE='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe

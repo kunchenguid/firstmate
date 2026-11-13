@@ -722,6 +722,7 @@ printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME C
 printf '%s 1 %s 9999 ? 0 00:00:00 /usr/bin/bash\n' "$pid" "$pid"
 SH
   chmod +x "$fakebin/uname" "$fakebin/ps"
+  fm_fake_windows_link_tools "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

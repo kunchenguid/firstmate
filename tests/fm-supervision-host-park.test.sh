@@ -607,6 +607,7 @@ printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME C
 printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
 SH
   chmod +x "$home/fakebin/uname" "$home/fakebin/ps"
+  fm_fake_windows_link_tools "$home/fakebin"
   printf 'win:7204\n' > "$home/state/.lock"
   env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
     FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
