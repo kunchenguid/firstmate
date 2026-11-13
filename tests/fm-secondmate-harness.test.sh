@@ -1025,6 +1025,92 @@ test_spawn_secondmate_harness_model_token() {
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
 }
 
+# The patterns a Claude secondmate's --settings file must exclude for <home>,
+# spelled out here rather than taken from bin/fm-claude-project-memory-lib.sh so
+# the test pins the contract: the instruction files under that home's own
+# physical projects directory.
+sm_project_memory_excludes() {  # <home>
+  local projects
+  projects="$(cd "$1" && pwd -P)/projects"
+  jq -cn --arg p "$projects" '[$p + "/**/CLAUDE*.md", $p + "/**/AGENTS.md", $p + "/**/.claude/rules/**"]'
+}
+
+# A Claude secondmate home keeps its clones under projects/ inside its session
+# root, where Claude Code would load each clone's CLAUDE.md, imports, and rules
+# on a plain read. The --settings file excludes them by the mate home's own
+# physical path: not the parent's FM_PROJECTS_OVERRIDE, which the secondmate
+# launch clears, and not a **/projects/** glob, which would also exclude this
+# home's own CLAUDE.md because the home itself sits under a projects directory.
+test_spawn_claude_secondmate_excludes_its_projects_instructions() {
+  local w sm launchlog settings got
+  w="$TMP_ROOT/spawn-project-memory"
+  sm="$w/projects/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1 \
+    || fail "project-memory: claude secondmate spawn failed"
+
+  settings=$(sm_claude_settings "$w" sm)
+  got=$(jq -c '.claudeMdExcludes' "$settings" 2>&1)
+  [ "$got" = "$(sm_project_memory_excludes "$sm")" ] \
+    || fail "project-memory: --settings excludes were '$got', want the home's own projects patterns"
+  jq -e '.feedbackDrafts == "off" and .attribution.commit == "" and .hooks.UserPromptSubmit' \
+    "$settings" >/dev/null \
+    || fail "project-memory: the excludes displaced the session keys or busy hooks"
+  pass "a claude secondmate's --settings file excludes its home's projects/ instruction files by absolute physical path"
+}
+
+# config/keep-ai-trailers drops only the attribution key; the excludes stay.
+test_spawn_claude_secondmate_keeps_excludes_with_ai_trailers() {
+  local w sm launchlog settings got
+  w="$TMP_ROOT/spawn-project-memory-trailers"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  : > "$w/home/config/keep-ai-trailers"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1 \
+    || fail "project-memory-trailers: claude secondmate spawn failed"
+
+  settings=$(sm_claude_settings "$w" sm)
+  got=$(jq -c '.claudeMdExcludes' "$settings" 2>&1)
+  [ "$got" = "$(sm_project_memory_excludes "$sm")" ] \
+    || fail "project-memory-trailers: --settings excludes were '$got' with config/keep-ai-trailers"
+  jq -e '.feedbackDrafts == "off" and (has("attribution") | not) and .hooks.UserPromptSubmit' \
+    "$settings" >/dev/null \
+    || fail "project-memory-trailers: keep-ai-trailers no longer drops only the attribution key"
+  pass "config/keep-ai-trailers keeps the secondmate's project-instruction excludes"
+}
+
+# A home path holding a character picomatch reads as a pattern gets no excludes
+# rather than a pattern that could match other files, and the spawn says so.
+test_spawn_claude_secondmate_skips_excludes_for_a_pattern_path() {
+  local w sm launchlog settings err
+  w="$TMP_ROOT/spawn-project-memory-pattern"
+  sm="$w/sm{1}"
+  launchlog="$w/launch.log"
+  err="$w/spawn.err"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>"$err" \
+    || fail "project-memory-pattern: claude secondmate spawn failed: $(cat "$err")"
+
+  settings=$(sm_claude_settings "$w" sm)
+  jq -e '(has("claudeMdExcludes") | not) and .feedbackDrafts == "off" and .hooks.UserPromptSubmit' \
+    "$settings" >/dev/null \
+    || fail "project-memory-pattern: a pattern-character home path still produced excludes or lost its keys"
+  assert_contains "$(cat "$err")" "will load the instructions of the projects cloned under" \
+    "project-memory-pattern: the spawn did not warn that the projects path stays unprotected"
+  pass "a secondmate home path with pattern characters gets no excludes and a warning"
+}
+
 # "<harness> <model> <effort>" threads both flags into the launch and meta.
 test_spawn_secondmate_harness_model_and_effort_tokens() {
   local w sm meta launchlog launch
@@ -2979,6 +3065,9 @@ test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
+test_spawn_claude_secondmate_excludes_its_projects_instructions
+test_spawn_claude_secondmate_keeps_excludes_with_ai_trailers
+test_spawn_claude_secondmate_skips_excludes_for_a_pattern_path
 test_spawn_secondmate_harness_model_and_effort_tokens
 test_spawn_secondmate_with_a_legacy_pin_file_uses_the_first_line
 test_spawn_secondmate_with_a_malformed_declared_pin_refuses

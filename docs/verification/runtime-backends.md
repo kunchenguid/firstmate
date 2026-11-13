@@ -714,6 +714,44 @@ The token-free live guard refreshes the per-version evidence and fails naming th
 bin/fm-test-run.sh tests/fm-claude-tool-exclude-live.test.sh
 ```
 
+## Claude nested project memory
+
+[Claude and cloned projects' instructions](../configuration.md#claude-and-cloned-projects-instructions) owns the contract and the [Claude harness reference](../../.agents/skills/harness-adapters/references/harness/claude.md#nested-project-memory) owns the facts; this record owns the measurement.
+Verified on 2026-11-13 with Claude Code 2.1.323 on macOS, in throwaway homes whose `CLAUDE.md` imports `AGENTS.md`, with a `projects/app/` clone holding a `CLAUDE.md` that imports `AGENTS.md`, rules with and without `paths:`, and a nested `src/sub/CLAUDE.md`.
+Each read ran as `claude -p "<prompt>" --model haiku --setting-sources project,local --session-id <uuid>` in the home, and the session transcript's `nested_memory` attachments recorded what loaded.
+
+| Read in the session | Nested memory that loaded |
+| --- | --- |
+| Bash `sed -n '2,3p' projects/app/src/Foo.swift`, and the Read tool on the same file | `projects/app/CLAUDE.md`, its imported `AGENTS.md`, the rule without `paths:`, and the rule whose `paths:` is `src/**/*.swift`, but not the rule scoped to `docs/**` |
+| Bash `cat projects/app/src/sub/bar.txt` | the same chain without the `*.swift` rule, plus `projects/app/src/sub/CLAUDE.md` |
+| Bash `head -1`, `tail -1`, `cat -n`, or `grep -n two` on one clone file | that clone's `CLAUDE.md` |
+| Bash `ls`, `rg -n two <dir>`, `wc -l`, `git -C <clone> show HEAD:<file>`, or a two-file `cat` | nothing |
+| Bash or Read on a clone holding only `AGENTS.md`, or on a file outside the session root | nothing |
+| the `sed -n` read with default setting sources and `--settings '{"disableAllHooks":true}'` | also the two user rules whose `paths:` matched `**/*.swift` |
+
+The same read of `projects/app/src/sub/bar.txt` with `claudeMdExcludes` set:
+
+| Patterns and where they were set | Clone instructions | Home's own `CLAUDE.md` |
+| --- | --- | --- |
+| absolute `<home>/projects/**/CLAUDE*.md` and `<home>/projects/**/.claude/rules/**`, in `.claude/settings.json`, `.claude/settings.local.json`, or `--settings` | excluded | loaded |
+| the same absolute patterns in `.claude/settings.local.json`, spelled through the real path or a symlink, with the session started through the symlink | excluded | loaded |
+| `projects/**/…`, `./projects/**/…`, `$CLAUDE_PROJECT_DIR/projects/**/…`, `${CLAUDE_PROJECT_DIR}/projects/**/…`, or `~/…/projects/**/…`, in `.claude/settings.json` | loaded | loaded |
+| `**/projects/**/CLAUDE*.md` and `**/projects/**/.claude/rules/**`, in `.claude/settings.json` of a home at `…/projects/<home>/` | excluded | excluded; only the home's `AGENTS.md` reached the session, through Claude Code's built-in `AGENTS.md` fallback |
+
+The token-free live guard refreshes the guarantee against a scripted local API (`tests/fixtures/fm-claude-read-replay.py`) and fails naming the Claude Code version if a release stops honoring the `bin/fm-claude-project-memory-lib.sh` patterns from `--settings` or drops the home's own `CLAUDE.md`:
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-project-memory-live.test.sh
+```
+
+On 2026-11-13 with Claude Code 2.1.323 it passed, and it failed when the library's patterns were replaced by relative ones and by `**/projects/**` ones:
+
+```text
+ok - Claude Code 2.1.323 (Claude Code): the --settings project-memory patterns keep a clone's CLAUDE.md and rules out while the home's own CLAUDE.md loads
+not ok - claude 2.1.323 (Claude Code) still loads the clone's instructions under claudeMdExcludes from --settings (home clone rule: 1 1 1)
+not ok - claude 2.1.323 (Claude Code) lost the home's own CLAUDE.md under the project-memory patterns (home clone rule: 0 0 0)
+```
+
 ## Secondmate busy contract
 
 Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.
