@@ -271,7 +271,8 @@ When a session that holds the lock ends any other way and no away daemon exists,
 It enters no away posture and writes no away record, so it grants no away merge authority.
 The host runs attended, as with the captain at the terminal, except that the main session is gone: it takes the check wakes that are normally main-only, so due work that a check row names, such as the daily runs, starts.
 Merges and captain decisions wait for the return, and the engine records them as captain outcomes for the next drain: `bin/fm-pr-merge.sh` and `bin/fm-send.sh --resolve-key` keep their attended refusals.
-The one authority it gains is `bin/fm-spawn.sh` of a task that the check row it is handling names by its task id, while that task is a queued, unblocked, unheld backlog item, work the captain already approved.
+The one authority it gains is `bin/fm-spawn.sh` of a task whose id the check row it is handling prints, while that task is already filed as a queued, unblocked, unheld backlog item, work the captain already approved.
+A check that wants work started must print each such task id.
 The host writes the task ids that the turn's check rows name into its turn record, and the lease check (`fm_lease_session_end_relocated` and `fm_lease_session_end_names`) admits a branch spawn only of such a task, only while the keeper is alive, still owns supervision, and the ended session's process is gone.
 A wake that is not a check row, such as a worker finishing or a PR event, names no task, so it is handled without spawning.
 A session that ends under an `/afk` or `/quiet` record keeps that record exactly as it is, and the host runs under it.
