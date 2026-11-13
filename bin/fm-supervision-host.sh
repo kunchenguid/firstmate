@@ -1122,6 +1122,8 @@ handle_wake() {  # <reason-lines>
     set -- "$@" --away ${readback:+--readback-file "$readback"}
   elif [ -z "$SESSION_END_PID" ]; then
     set -- "$@" --mirror-file "$mirror"
+  else
+    set -- "$@" --session-end
   fi
   rm -f "$WAKE_FILE"
   rc=0

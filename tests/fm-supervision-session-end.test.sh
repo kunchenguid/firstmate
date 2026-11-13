@@ -141,9 +141,45 @@ test_standing_away_record_is_untouched() {
   pass "a session ending under /afk keeps the record exactly as /afk wrote it and keeps a host running under it"
 }
 
+branch_spawn() {  # <home>
+  FM_HOME="$1" FM_ROOT_OVERRIDE="$SPAWN_ROOT" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1
+}
+branch_merge() {  # <home>
+  FM_HOME="$1" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1
+}
+
+test_session_end_allows_only_queued_spawn() {
+  local home out status
+  SPAWN_ROOT="$TMP_ROOT/spawn-root"
+  mkdir -p "$SPAWN_ROOT"
+  git init -q -b main "$SPAWN_ROOT"
+  git -C "$SPAWN_ROOT" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$SPAWN_ROOT/bin"
+  home=$(make_home session-end-spawn attended)
+  : > "$home/config/supervision-host-session-end"
+  register_daily_check "$home"
+  out=$(branch_spawn "$home"); status=$?
+  [ "$status" -eq 6 ] || fail "before the session ended the branch spawn exited $status, not 6: $out"
+  end_session "$home" prompt_input_exit
+  wait_until 100 keeper_live "$home" || fail "no keeper runs after the session ended"
+  out=$(branch_spawn "$home"); status=$?
+  [ "$status" -ne 6 ] || fail "the branch spawn was refused by the role partition with a live keeper: $out"
+  assert_contains "$out" "queued work may start" "the spawn did not pass the session-end allowance"
+  assert_contains "$out" "no dispatchable backlog item" "the spawn of work that is not queued was not refused"
+  out=$(branch_merge "$home"); status=$?
+  [ "$status" -eq 6 ] || fail "the branch merge exited $status, not 6, with a live keeper: $out"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  wait_until_deadline 30 keeper_gone "$home" || fail "the keeper outlived the next session's start"
+  out=$(branch_spawn "$home"); status=$?
+  [ "$status" -eq 6 ] || fail "after the keeper ended the branch spawn exited $status, not 6: $out"
+  pass "a live session-end keeper admits a branch spawn of queued work only, never a merge, and ends with the keeper"
+}
+
 fm_test_run \
   test_off_leaves_supervision_down \
   test_on_keeps_supervision_after_exit \
   test_later_stop_ends_keeper \
   test_clear_is_inert \
-  test_standing_away_record_is_untouched
+  test_standing_away_record_is_untouched \
+  test_session_end_allows_only_queued_spawn

@@ -2244,8 +2244,15 @@ fi
 # the words); filing the item the captain asked for is not inventing work.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-if [ "$RELAUNCH" -ne 1 ]; then
+spawn_forbid_branch() {
+  if fm_lease_session_end_relocated; then
+    echo "note: new-task spawn (fm-spawn) proceeds for the supervision branch after the main session ended: the host keeper owns supervision and queued work may start; merges and captain answers still wait for main" >&2
+    return 0
+  fi
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+}
+if [ "$RELAUNCH" -ne 1 ]; then
+  spawn_forbid_branch
 fi
 spawn_refuse_if_away_spend_cap() {
   local cap live
@@ -2289,7 +2296,7 @@ spawn_require_relocated_queued_work() {
   if [ "$KIND" = secondmate ]; then
     fm_lease_forbid_branch "new-task spawn (fm-spawn)"
   fi
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+  spawn_forbid_branch
   if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "queued no no" ]; then
     echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
     exit 1

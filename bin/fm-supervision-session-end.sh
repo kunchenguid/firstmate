@@ -94,7 +94,7 @@ if [ "$MODE" = keep ]; then
   trap 'exit 0' TERM INT
   identity=$(fm_pid_identity "$$") || exit 1
   tmp=$(mktemp "$KEEPER_RECORD.XXXXXX") || exit 1
-  printf '%s\t%s\n' "$$" "$identity" > "$tmp" && mv -f "$tmp" "$KEEPER_RECORD" || exit 1
+  printf '%s\t%s\t%s\t%s\n' "$$" "$identity" "$GEN" "$SESSION_PID" > "$tmp" && mv -f "$tmp" "$KEEPER_RECORD" || exit 1
   i=0
   while [ "$i" -lt 30 ] && fm_pid_alive "$SESSION_PID"; do
     sleep 1
