@@ -673,7 +673,23 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
 function displaceActiveGeneration(successor: SessionGeneration): void {
   const displaced = replacementCoordinator.active;
   if (displaced && displaced !== successor && !displaced.stopping) {
-    void stopSessionGeneration(displaced, true).catch(() => relinquishGeneration(displaced));
+    void stopSessionGeneration(displaced, true).catch((error) => {
+      relinquishGeneration(displaced);
+      const observed = displaced.child ? armPendingActionable.get(displaced.child) : undefined;
+      if (observed && !displaced.pendingActionables.some((item) => item.token === observed.token)) {
+        displaced.pendingActionables.push(observed);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      for (const pending of displaced.pendingActionables) {
+        if (pending.delivered || replacementCoordinator.pending.some((item) => item.token === pending.token)) continue;
+        const failed = {
+          ...pending,
+          message: `${pending.message}\n\nwatcher: FAILED - Pi extension could not hand off a displaced-session actionable wake\n${detail}`,
+        };
+        if (replacementCoordinator.receiver) replacementCoordinator.receiver(failed);
+        else replacementCoordinator.pending.push(failed);
+      }
+    });
   }
 }
 
