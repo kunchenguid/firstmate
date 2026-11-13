@@ -44,6 +44,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-operational-input.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 fm_backend_source tmux || exit 1
 # Delivery transport: only the pane identity the pane runtime injected is
 # trusted, mirroring bin/fm-supervisor-target-lib.sh's discovery order. An
@@ -172,7 +174,8 @@ retry_delivery() {
 
 keep_owning() {
   session_owned && [ -e "$CONFIG/$FLAG" ] && [ ! -e "$STATE/.afk" ] \
-    && { [ "$SWEEP" -eq 1 ] || [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; }
+    && if [ "$SWEEP" -eq 1 ]; then fm_supervision_host_enabled "$CONFIG" claude
+       else [ "$(cat "$PENDING" 2>/dev/null)" = "$TOKEN" ]; fi
 }
 
 NEXT_RETRY=$((SECONDS + RETRY))

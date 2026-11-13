@@ -431,7 +431,7 @@ Removing it stops further retries and leaves the current watcher for the ordinar
 Create the empty, home-local `config/supervision-midturn-sweep` file to keep watcher cycles running while one attended Claude primary turn lasts on a home that runs the supervision host.
 The flag is off when absent, is not inherited, and has no effect on other primaries, the host-off Stop path, or a home that also enables the acknowledged hand-back.
 The host reads its presence at each main-only pass-through, so enabling it needs no session restart.
-Removing it stops further cycle replacement and leaves the current watcher for the ordinary next park.
+Removing it, or turning the supervision host off, stops further cycle replacement and leaves the current watcher for the ordinary next park.
 [Supervision host](supervision-host.md#attended) owns the behavior.
 
 ## Codex native Stop park (config/codex-stop-park)
