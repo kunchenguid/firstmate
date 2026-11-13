@@ -83,6 +83,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-agy-process-lib.sh
+. "${SCRIPT_DIR:-/}/fm-agy-process-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -247,14 +249,23 @@ harness_process_verdict() {  # <pid>
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
-    # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
-    # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
-    # *agy*, so unrelated commands cannot be misread as this harness. agy
+    # is `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and Herdr's
+    # process-info reports name agy with argv[0] agy), or `antigravity` / `exe`
+    # when started through its real file name or as its Linux sandbox init.
+    # bin/fm-agy-process-lib.sh owns that rule: the two generic names count only
+    # with agy CLI evidence in argv[0], so the Antigravity IDE (also named
+    # `antigravity`) is never this harness. Anchored, never *agy*, so unrelated
+    # commands cannot be misread as this harness. agy
     # publishes no harness-identity marker of its own (a live 1.2.0 TUI
     # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
-    agy) echo "comm agy"; return ;;
+    agy|antigravity|exe)
+      if fm_agy_process_matches "$comm" "${args%% *}"; then
+        echo "comm agy"
+        return
+      fi
+      ;;
     # polytoken (Polytoken CLI) is a daemon-plus-TUI whose per-session daemon
     # process name is exactly `polytoken` (verified live on 0.8.19: a TUI
     # session's daemon runs as comm `polytoken` at ppid 1, and a shell tool
