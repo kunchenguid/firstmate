@@ -52,7 +52,7 @@
 # Each pass resumes after its own last visited child on its next invocation.
 # The scan enforces that budget itself through a millisecond deadline, and the
 # first due child of every scan gets at least one full second starting when its
-# state reader launches, after timeout setup.
+# state reader starts its reads, after its own initialization.
 # Later visits retain the shared scan deadline. A process-group
 # kill one second after the budget remains as a backstop for a scan wedged in
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
@@ -694,7 +694,7 @@ task_holds_live_work() { # <id> <meta> <timeout> <last-status-line>; 0 when the 
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadline> <first>
-  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left watchdog_deadline
+  local id=$1 meta=$2 self=${3:-} deadline=$4 first=$5 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 started left floor_ms='' watchdog_ms watchdog_limit budget_line extra
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -710,41 +710,38 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <deadli
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   started=$(fm_nm_now_ms) || return 3
-  if [ "$first" -eq 1 ] && [ "$deadline" -lt "$((started + 1000))" ]; then
-    deadline=$((started + 1000))
+  left=$((deadline - started))
+  if [ "$first" -eq 1 ]; then
+    floor_ms=1000
+    [ "$left" -ge "$floor_ms" ] || left=$floor_ms
   fi
+  [ "$left" -gt 0 ] || return 3
   local FM_READ_DEADLINE=$deadline
-  # Reserve the first-visit floor for the existing outer watchdog bound.
-  fm_nm_read_timeout 30 >/dev/null || return 3
-  # A deadline-aware reader must finish reaping before the outer guard fires.
-  # Borrow only half of the scan's existing cleanup reserve; the whole-scan
-  # backstop and the watchdog's bound remain unchanged.
-  watchdog_deadline=$((deadline + SCAN_CLEANUP_RESERVE_MS / 2))
-  left=$(FM_READ_DEADLINE=$watchdog_deadline fm_nm_read_timeout \
-    "$((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000))") || return 3
-  # Stamp the floor inside the timed child so guard startup cannot consume it.
-  # Its first line hands the actual deadline back for this visit's later reads.
-  # shellcheck disable=SC2016
+  # Keep the existing watchdog ceiling and half-reserve for reader cleanup.
+  # The floor itself is a duration consumed by fm_nm_read_budget_start in the
+  # initialized reader, so neither timeout setup nor exec can spend it.
+  watchdog_ms=$((left + SCAN_CLEANUP_RESERVE_MS / 2))
+  watchdog_limit=$(((FM_INACTIVE_RECONCILE_BUDGET_SECS + SCAN_CLEANUP_RESERVE_MS / 1000) * 1000))
+  [ "$watchdog_ms" -le "$watchdog_limit" ] || watchdog_ms=$watchdog_limit
+  left=$(printf '%d.%03d\n' "$((watchdog_ms / 1000))" "$((watchdog_ms % 1000))")
   state_line=$(fm_run_timed "$left" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
-    bash -c '
-      . "$1"
-      deadline=$2
-      if [ "$3" -eq 1 ]; then
-        started=$(fm_nm_now_ms) || exit 124
-        [ "$deadline" -ge "$((started + 1000))" ] || deadline=$((started + 1000))
-      fi
-      printf "%s\n" "$deadline"
-      export FM_READ_DEADLINE=$deadline
-      exec "$4" "$5"
-    ' _ "$SCRIPT_DIR/fm-nm-run-lib.sh" "$deadline" "$first" "$CREW_STATE_BIN" "$id" \
-    2>/dev/null) || state_rc=$?
+    FM_READ_DEADLINE="$deadline" FM_READ_BUDGET_MS="$floor_ms" FM_READ_BUDGET_REPORT=1 \
+    "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
-  deadline=${state_line%%$'\n'*}
-  case "$deadline" in ''|*[!0-9]*) return 3 ;; esac
-  FM_READ_DEADLINE=$deadline
   case "$state_line" in
-    *$'\n'*) state_line=${state_line#*$'\n'} ;;
-    *) state_line='' ;;
+    'read-budget: '*)
+      budget_line=${state_line%%$'\n'*}
+      read -r started deadline extra <<< "${budget_line#read-budget: }"
+      [ -n "$started" ] && [ -n "$deadline" ] && [ -z "$extra" ] || return 3
+      case "$started$deadline" in *[!0-9]*) return 3 ;; esac
+      [ "${#started}" -le 18 ] && [ "${#deadline}" -le 18 ] || return 3
+      [ "$deadline" -ge "$started" ] || return 3
+      FM_READ_DEADLINE=$deadline
+      case "$state_line" in
+        *$'\n'*) state_line=${state_line#*$'\n'} ;;
+        *) state_line='' ;;
+      esac
+      ;;
   esac
   fm_nm_read_timeout 1 >/dev/null || return 3
   last=$(last_status_line "$status")

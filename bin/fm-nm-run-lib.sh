@@ -38,6 +38,32 @@ fm_nm_now_ms() {
   fi
 }
 
+# A reader may consume a one-shot FM_READ_BUDGET_MS floor (1..1000 ms) after
+# startup, before reading task state. Descendants inherit only the resulting
+# FM_READ_DEADLINE. FM_READ_BUDGET_REPORT=1 prefixes its captured output with
+# the reader's own start and deadline; ordinary state reads keep their output.
+fm_nm_read_budget_start() {
+  local budget=${FM_READ_BUDGET_MS:-} report=${FM_READ_BUDGET_REPORT:-0}
+  local deadline=${FM_READ_DEADLINE:-} started floor
+  unset FM_READ_BUDGET_MS FM_READ_BUDGET_REPORT
+  [ -n "$budget" ] || return 0
+  case "$budget" in 0*|*[!0-9]*) return 124 ;; esac
+  [ "${#budget}" -le 4 ] && [ "$budget" -le 1000 ] || return 124
+  case "$report" in 0|1) ;; *) return 124 ;; esac
+  case "$deadline" in
+    '') ;;
+    0*|*[!0-9]*) return 124 ;;
+  esac
+  [ "${#deadline}" -le 18 ] || return 124
+  started=$(fm_nm_now_ms) || return 124
+  floor=$((started + budget))
+  if [ -z "$deadline" ] || [ "$deadline" -lt "$floor" ]; then
+    deadline=$floor
+  fi
+  export FM_READ_DEADLINE=$deadline
+  [ "$report" != 1 ] || printf 'read-budget: %s %s\n' "$started" "$deadline"
+}
+
 fm_nm_read_timeout() {
   local timeout_secs=$1 deadline=${FM_READ_DEADLINE:-} remaining now sec frac timeout_ms
   if [ -n "$deadline" ]; then

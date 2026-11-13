@@ -253,6 +253,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
+# Startup is complete. The reader, not its launcher, starts any requested floor.
+fm_nm_read_budget_start || exit 124
+
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
 # An override is honoured only when its basename is this task's own file name.
