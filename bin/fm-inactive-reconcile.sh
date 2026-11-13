@@ -47,8 +47,8 @@
 # that --startup performs the same scan immediately in the locked session
 # start's deferred worker. Ledger delivery and the cadence scan share one
 # FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30).
-# When the cadence scan is due, ledger delivery stops one second
-# before that deadline to leave room for the cadence scan's first visit.
+# When the cadence scan is due, ledger delivery reserves time before that
+# deadline for reader startup and the cadence scan's first visit.
 # Each pass resumes after its own last visited child on its next invocation.
 # The scan enforces that budget itself through a millisecond deadline, and the
 # first due child of every scan gets at least one full second starting when its
