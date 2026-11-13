@@ -164,10 +164,12 @@ fm_forge_safe_ssh_config_file() {
         [ "$in_match" -eq 0 ] || [ "$match_safe" -eq 1 ] || return 1
         local patterns
         patterns=$(fm_forge_safe_ssh_include_patterns "$rest") || return 1
+        [ -n "$patterns" ] || return 1
         while IFS= read -r pattern; do
           [ -n "$pattern" ] || continue
           case "$pattern" in
             "~/"*) candidate="${HOME:-}/${pattern:2}" ;;
+            "~"*|*\$*|*%*) return 1 ;;
             /*) candidate=$pattern ;;
             *) candidate="$dir/$pattern" ;;
           esac

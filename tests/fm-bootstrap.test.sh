@@ -1769,6 +1769,33 @@ EOF
   pass "forge host resolver expands included aliases without executing SSH config commands"
 }
 
+test_forge_unsupported_ssh_include_fails_closed() {
+  local case_dir fakebin out project calls
+
+  case_dir="$TMP_ROOT/forge-ssh-unsupported-include"
+  project="$case_dir/home/projects/unsupported-include"
+  mkdir -p "$project" "$case_dir/home/config" "$case_dir/home/.ssh"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 'Include ~otheruser/.ssh/config' > "$case_dir/home/.ssh/config"
+  git -C "$project" init -q
+  git -C "$project" remote add origin git@github.com:example/project.git
+  fakebin=$(make_fake_toolchain "$case_dir")
+  calls="$case_dir/gh.calls"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_GH_CALLS:?}"
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_GH_CALLS="$calls" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "FORGE_UNSUPPORTED: unsupported-include (host: unresolved)" ] \
+    || fail "unsupported SSH Include syntax must fail closed, got: $out"
+  [ ! -s "$calls" ] || fail "unsupported SSH Include syntax must not invoke GitHub auth, got: $(cat "$calls")"
+  pass "bootstrap rejects unsupported SSH Include expansion"
+}
+
 test_cmux_bundled_cli_satisfies_dependency() {
   local case_dir fakebin bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
@@ -2784,6 +2811,7 @@ test_forge_host_trailing_dot_is_canonicalized
 test_forge_configured_host_trailing_dot_is_canonicalized
 test_forge_host_resolver_rejects_invalid_resolution_flag
 test_forge_host_resolver_expands_safe_includes
+test_forge_unsupported_ssh_include_fails_closed
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux

@@ -613,6 +613,31 @@ test_custom_git_ssh_command_fails_closed_for_sync() {
   pass "fleet-sync fails closed for repository custom SSH transport"
 }
 
+test_unsupported_ssh_include_fails_closed_for_sync() {
+  local home clone out before after provider
+
+  home=$(new_home)
+  clone=$(build_pair "$home" unsupported-include-sync)
+  advance_origin "$home" unsupported-include-sync C1
+  git -C "$clone" remote set-url origin git@github.com:example/project.git
+  mkdir -p "$home/.ssh"
+  printf '%s\n' 'Include ~otheruser/.ssh/config' > "$home/.ssh/config"
+  provider=$(HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$1"; fm_forge_detect_provider "$2"' _ \
+    "$ROOT/bin/fm-forge-lib.sh" "$clone")
+  [ "$provider" = unknown ] || fail "unsupported SSH Include must classify as unknown, got: $provider"
+  before="$home/unsupported-include-before"
+  after="$home/unsupported-include-after"
+  snapshot_clone_state "$clone" "$before"
+
+  out=$(HOME="$home" run_sync "$home" "$clone")
+  snapshot_clone_state "$clone" "$after"
+
+  [ -z "$out" ] || fail "sync must skip an unsupported SSH Include, got: $out"
+  cmp -s "$before" "$after" || fail "sync mutated a clone with unsupported SSH Include syntax"
+  pass "fleet-sync fails closed for unsupported SSH Include expansion"
+}
+
 test_local_only_skipped() {
   local home clone out
   home=$(new_home)
@@ -981,6 +1006,7 @@ test_explicit_binding_does_not_cross_same_basename
 test_explicit_binding_survives_registered_symlink
 test_registered_symlink_physical_path_preserves_posture_refusal
 test_custom_git_ssh_command_fails_closed_for_sync
+test_unsupported_ssh_include_fails_closed_for_sync
 test_local_only_skipped
 test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves
