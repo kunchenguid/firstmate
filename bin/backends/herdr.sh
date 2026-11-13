@@ -927,11 +927,8 @@ fm_backend_herdr_projection_focus_snapshot() {  # <session>
 # fm_backend_herdr_projection_focus_restore: verify that one presentation
 # mutation preserved the exact active workspace and tab captured immediately
 # before it.
-# This is the backstop for every focus-unsafe instant: on Herdr 0.7.5 an
-# explicit pane.close that empties a non-focused workspace moves focus to
-# that workspace's neighbor (upstream #1328/#1877), and a pane-death removal
-# before a non-last focused workspace moves focus to the focused workspace's
-# right neighbor (upstream #1621/#1912); both fixes are unreleased.
+# The adapter header owns the release-specific focus defects requiring this
+# backstop.
 # A single tab.focus on the exact response-independent pre-operation tab id
 # restores both the workspace and tab atomically.
 fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation> [expected-current-focus]
@@ -2198,11 +2195,12 @@ fm_backend_herdr_tab_presence_state() {  # <session> <tab_id>
 # fm_backend_herdr_projection_close_empty_tab_focus_preserving: close one exact
 # empty projection tab after a pane close left the tab behind. The caller must
 # already have proven the tab is the matching agent-free task tab and must hold
-# the presentation lock. A live viewer of the target tab is never displaced;
+# the presentation lock. A focused target is always preserved;
 # an uncertain non-target close restores prior focus only after confirmed
 # removal and while focus still matches the close's expected destination.
-# Return 2 after an issued close when focus remains unresolved, so the caller
-# retains the journal even if a later presence read confirms deletion.
+# Return 2 after an issued close when focus remains unresolved; this is not
+# a deletion verdict. The caller owns journal retirement under the startup
+# cleanup contract in docs/herdr-backend.md.
 fm_backend_herdr_projection_close_empty_tab_focus_preserving() {  # <session> <workspace> <tab>
   local session=$1 workspace=$2 tab=$3 before active_tab info target_tab target_workspace pane_count
   local close_status=0 after presence list restore_from

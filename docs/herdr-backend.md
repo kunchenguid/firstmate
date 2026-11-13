@@ -364,7 +364,6 @@ Durable task records are erased only once the exact pane is confirmed gone throu
 After every close path, only a structured not-found response counts as gone.
 A present or unknown result retains every record with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
-If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 Once the exact pane is confirmed gone, teardown retires the task's own journal when it binds that same pane, or when it is a version 1 attempt whose token-bearing projected workspace is itself confirmed gone, because nothing then remains for the session-start sweep to correlate.
 A journal bound to any other pane, or a version 1 attempt whose workspace is still present or unreadable, stays for [startup cleanup](#startup-cleanup-of-restored-projections).
 
@@ -425,7 +424,7 @@ A candidate must meet all of these conditions:
 - A version 2 journal additionally must bind this exact physical home, named session, workspace, and tab, and it must bind the pane when one remains.
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane, or exactly one empty tab and zero panes left by a completed pane close.
-- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab.
+- An empty-tab candidate requires the exact workspace and tab binding from a version 2 journal, and it must not be the focused tab, even when no foreground client is attached.
   An unbound version 1 journal never authorizes closing an empty tab, so that tab is preserved.
 
 Firstmate then cleans up the candidate in this order:
@@ -456,7 +455,6 @@ Any foreground command, child process, active shell job, unknown shell, unreadab
 
 Unconfirmed deletion retains the journal.
 A confirmed pane close may retire it even when focus restoration reported an error after the close.
-An empty-tab close retains the journal while deletion is unconfirmed.
 If the exact bound tab is confirmed gone but focus restoration remains unresolved, cleanup retires its journal without issuing another focus mutation, so the next task spawn can create a fresh projection.
 A second run finds no matching title or journal and is a no-op.
 
