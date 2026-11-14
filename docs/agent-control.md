@@ -76,6 +76,8 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
+   For a `kind=secondmate` task, `--model` without `--harness` refuses before the checkpoint, naming the recorded harness and the exact command that keeps it (or, for a recorded raw-command basename whose launch command cannot be reconstructed, asking for a deliberately chosen `--harness` instead of offering one), because a model names no runtime and a secondmate's implicit harness is its configured pin.
+   A ship or scout is exempt from that refusal: it keeps the harness already recorded for it, so an explicit `--model` or `--effort` wins on that recorded runtime without the caller naming the harness again.
    Without an explicit harness, a `kind=secondmate` task re-resolves its [configured runtime pin for that mate](configuration.md#choose-the-secondmate-harness) before the checkpoint.
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
@@ -93,6 +95,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   When a secondmate relaunch leaves no agent running, whether its replacement did not come up or the stop left the old agent dead before launch, the failure also prints the `bin/fm-spawn.sh <id> --secondmate` recovery command with the task's recorded backend and the target harness and model; it is never run automatically.
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr and Rex can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Preserve runtime-bound status authority where supported.**
    The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
