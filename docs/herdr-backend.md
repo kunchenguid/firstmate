@@ -64,6 +64,7 @@ An auto-detected Herdr spawn stays silent, matching the verified tmux default pa
 ### Spawn preflight and CI
 
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
+Spawn and relaunch also refuse a task id longer than Herdr's 32-character agent-name cap before any endpoint is created, because Herdr's `agent start` rejects over-cap names with `invalid_agent_name`; ids are semantic, so recreate the task under a shorter id.
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.

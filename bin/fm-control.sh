@@ -219,6 +219,10 @@ die() {  # <message>
   exit 1
 }
 
+# The herdr agent-name-cap guard (bin/fm-control-lib.sh) fires on the relaunch
+# path before the old agent is stopped or any durable record is mutated; see
+# bin/fm-control-lib.sh for the cap's rationale.
+
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
@@ -1219,6 +1223,14 @@ record_note() {
 do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
+
+  # Herdr caps agent names at FM_HERDR_AGENT_NAME_MAX chars; refuse here before
+  # stopping the old agent or mutating any durable record, so a relaunch that
+  # would silently strand the replacement never gets to that point. fm-spawn's
+  # own --relaunch path repeats the same check as a defense-in-depth backstop.
+  if [ "$BACKEND" = herdr ] && ! fm_herdr_agent_name_within_cap "$ID"; then
+    die "herdr caps agent names at $FM_HERDR_AGENT_NAME_MAX characters (lowercase/digits/-/_), but task id '$ID' is ${#ID} chars; recreate the task under a shorter id before relaunching"
+  fi
 
   require_state_verified_backend relaunch
   fm_control_backend_relaunch_supported "$BACKEND" \
