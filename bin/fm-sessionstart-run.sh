@@ -128,6 +128,9 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
+  # A native Codex thread's ownership proof is its payload session_id, so it
+  # is bound before any lock consumer below runs.
+  fm_session_lock_codex_hook_identity "$PAYLOAD"
   SOURCE=$(printf '%s' "$PAYLOAD" | awk '
     BEGIN { RS = "\"" }
     seen == 2 { print; exit }
