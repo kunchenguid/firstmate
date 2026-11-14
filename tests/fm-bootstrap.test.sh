@@ -632,7 +632,7 @@ test_stale_no_mistakes_daemon() {
 daemon running the installed executable stays silent^daemon running (pid PID)^current^silent
 daemon running a replaced executable reports^daemon running (pid PID)^/nix/store/old/bin/no-mistakes^stale
 no daemon running stays silent^daemon not running^/nix/store/old/bin/no-mistakes^silent
-unreadable daemon pid stays silent^daemon running (pid 99999999)^/nix/store/old/bin/no-mistakes^silent
+unreadable daemon pid stays silent^daemon running (pid 99999999)^^silent
 unparseable daemon status stays silent^something else entirely^/nix/store/old/bin/no-mistakes^silent
 unresponsive daemon status stays silent^daemon running (pid PID)^/nix/store/old/bin/no-mistakes^silent^1
 ROWS
