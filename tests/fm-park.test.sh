@@ -945,9 +945,15 @@ test_release_retries_on_later_ticks() {
   gh_fixture "$w/gh.1.json"
   run_park "$w" park lane >/dev/null 2>&1 || fail "retry: park failed"
   ! grep -q '^slot_released=' "$w/state/lane.review-park" || fail "retry: the first release succeeded"
-  rm -f "$w/treehouse.return.fail"
+  out=$(tick_and_report "$w" retry-refused)
+  case "$out" in "release-kept lane: PR $GH_URL: copy kept because treehouse return failed: a foreign process remains") ;; *) fail "retry: refusal report: $out" ;; esac
+  sleep 2
   out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] || fail "retry: tick printed: $out"
+  [ -z "$out" ] || fail "retry: the same refusal was reported again: $out"
+  sleep 2
+  rm -f "$w/treehouse.return.fail"
+  out=$(tick_and_report "$w" retry)
+  [ "$out" = "released lane: PR $GH_URL: copy returned to the pool" ] || fail "retry: tick output: $out"
   grep -qx slot_released=1 "$w/state/lane.review-park" || fail "retry: a later tick did not return the slot"
   grep -qx "return --force --if-lease-holder lane $old" "$w/treehouse.log" || fail "retry: no return call: $(cat "$w/treehouse.log")"
   [ "$(fm_meta_get_test "$w" worktree)" = "$w/state/lane.released-copy" ] || fail "retry: the task record still names the copy"
@@ -960,12 +966,12 @@ test_release_retries_on_later_ticks() {
   gh_fixture "$w/gh.1.json"
   kill_park_during_stop "$w"
   grep -qx 'pending=1' "$w/state/lane.review-park" || fail "settled: no pending park record"
-  out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] || fail "settled: tick printed: $out"
+  out=$(tick_and_report "$w" settled)
+  [ "$out" = "released lane: PR $GH_URL: copy returned to the pool" ] || fail "settled: tick output: $out"
   ! grep -q '^pending=' "$w/state/lane.review-park" || fail "settled: the record was not promoted"
   grep -qx slot_released=1 "$w/state/lane.review-park" || fail "settled: the settled park kept its slot"
   grep -qx "return --force --if-lease-holder lane $old" "$w/treehouse.log" || fail "settled: no return call: $(cat "$w/treehouse.log")"
-  pass "a refused release is retried by later ticks, and a park settled by a tick returns its slot"
+  pass "a refused release is reported once and retried by detached releases on later ticks, and a park settled by a tick returns its slot"
 }
 
 test_due_rebase_relaunches_only_with_release_flag() {
@@ -977,7 +983,7 @@ test_due_rebase_relaunches_only_with_release_flag() {
   pass "with config/park-release-slot a parked branch that fell behind its base relaunches for the due rebase"
 }
 
-test_no_free_copy_fails_the_relaunch_until_a_manual_resume() {
+test_no_free_copy_waits_and_a_later_tick_relaunches_in_a_new_copy() {
   local w head new out
   w=$(release_world release-no-copy "$GH_URL")
   head=$(cat "$w/head")
@@ -986,21 +992,32 @@ test_no_free_copy_fails_the_relaunch_until_a_manual_resume() {
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   : > "$w/treehouse.get.fail"
   out=$(tick_and_report "$w" no-copy)
-  [ "$out" = "relaunch-failed lane: PR $GH_URL (checks are failing on ${head:0:12}): no copy to relaunch in: no pool slot could be leased: no worktree is available" ] \
+  [ "$out" = "relaunch-waiting lane: PR $GH_URL (checks are failing on ${head:0:12}): no free copy yet, retrying on each tick: no pool slot could be leased: no worktree is available" ] \
     || fail "no-copy: tick output: $out"
-  grep -q '^resume_error=' "$w/state/lane.review-park" || fail "no-copy: the record does not note the failure"
+  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "no-copy: the wait was recorded as a failure"
   grep -qx slot_released=1 "$w/state/lane.review-park" || fail "no-copy: the record no longer notes the release"
   [ "$(fm_meta_get_test "$w" worktree)" = "$w/state/lane.released-copy" ] || fail "no-copy: the task record names a copy"
   [ ! -e "$w/control.log" ] || fail "no-copy: a relaunch ran without a copy: $(cat "$w/control.log")"
+  case "$(crew_state "$w")" in *"paused"*"review-park"*) ;; *) fail "no-copy: crew state: $(crew_state "$w")" ;; esac
+
+  sleep 2
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "no-copy: the retry tick printed: $out"
+  sleep 2
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "no-copy: the wait was reported again: $out"
+  [ ! -e "$w/control.log" ] || fail "no-copy: a retry relaunched without a copy"
 
   rm -f "$w/treehouse.get.fail"
   git -C "$w/project" branch -q -D fm/lane
-  out=$(run_park "$w" resume lane --trigger "manual retry" 2>&1) || fail "no-copy: manual resume failed: $out"
-  [ "$(fm_meta_get_test "$w" worktree)" = "$new" ] || fail "no-copy: the manual resume did not record the new copy"
+  out=$(tick_and_report "$w" no-copy-freed)
+  case "$out" in "relaunched lane: PR $GH_URL - checks are failing on "*) ;; *) fail "no-copy: freed tick output: $out" ;; esac
+  [ "$(fm_meta_get_test "$w" worktree)" = "$new" ] || fail "no-copy: the retry did not record the new copy"
   [ "$(git -C "$new" symbolic-ref --short HEAD)" = fm/lane ] && [ "$(git -C "$new" rev-parse HEAD)" = "$head" ] \
     || fail "no-copy: the deleted branch was not created again at the parked head"
-  [ ! -e "$w/state/lane.review-park" ] || fail "no-copy: park record kept after the manual resume"
-  pass "a released lane with no free copy reports the failed relaunch once, and a manual resume later relaunches it in a new copy"
+  head -1 "$w/control.log" | grep -q "^lane relaunch --note-file " || fail "no-copy: no relaunch call: $(cat "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] || fail "no-copy: park record kept after the relaunch"
+  pass "a released lane with no free copy reports the wait once, and a later tick relaunches it in a new copy once one frees"
 }
 
 # A relaunch that takes longer than the whole tick budget still completes: the
@@ -1402,7 +1419,7 @@ fm_test_run \
   test_release_keeps_the_copy_when_it_cannot_be_returned_safely \
   test_release_retries_on_later_ticks \
   test_due_rebase_relaunches_only_with_release_flag \
-  test_no_free_copy_fails_the_relaunch_until_a_manual_resume \
+  test_no_free_copy_waits_and_a_later_tick_relaunches_in_a_new_copy \
   test_slow_relaunch_is_never_cut_short_by_the_tick \
   test_tick_resumes_where_the_last_one_ran_out_of_time \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
