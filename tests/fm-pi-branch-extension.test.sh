@@ -4801,7 +4801,7 @@ const project = `${process.env.FM_HOME}/projects/approved`;
 const mainOnlyRows = [
   "1\t1\tcheck\tx-inbox\tcheck: pending x mention",
   "1\t1\tcheck\tsome-poll.check.sh\tcheck: some-poll.check.sh: merged",
-  "1\t1\tcheck\tunauthenticated-state-checks\tcheck: rejected unauthenticated state checks",
+  "1\t1\tcheck\tuntrusted-state-checks\tcheck: rejected untrusted state checks",
 ];
 for (const row of mainOnlyRows) {
   writeFileSync(`${state}/.wake-queue`, row);

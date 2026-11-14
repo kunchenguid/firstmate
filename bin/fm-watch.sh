@@ -159,7 +159,7 @@
 #                          background record-hygiene scan found a new set of
 #                          RECORD_HYGIENE findings (fm-record-hygiene-lib.sh);
 #                          an unchanged set does not wake again
-#   check: rejected unauthenticated state checks: <paths>
+#   check: rejected untrusted state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
@@ -4416,8 +4416,8 @@ EOF
       pr_poll_control_release || exit 1
     done
     if [ -n "$rejected_checks" ]; then
-      reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      reason="check: rejected untrusted state checks:$rejected_checks"
+      fm_wake_append check untrusted-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
     fi

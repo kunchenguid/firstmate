@@ -5324,7 +5324,7 @@ SH
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
       run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-open.out" 2> "$dir/watch-open.err" || rc=$?
     [ "$rc" -eq 0 ] || fail "$scenario open watcher failed: $(cat "$dir/watch-open.err")"
-    ! grep -F 'rejected unauthenticated state checks' "$dir/watch-open.out" >/dev/null \
+    ! grep -F 'rejected untrusted state checks' "$dir/watch-open.out" >/dev/null \
       || fail "$scenario revoked an intact generation before its merge: $(cat "$dir/watch-open.out")"
     case "$(cat "$dir/watch-open.out")" in
       check:*z-stop.check.sh:*stop-cycle) ;;
@@ -5393,7 +5393,7 @@ test_device_renumbered_poll_stays_armed() {
   [ "$rc" -eq 0 ] || fail "renumbered poll watcher failed: $(cat "$dir/watch.err")"
   out=$(cat "$dir/watch.out")
   case "$out" in
-    *'rejected unauthenticated state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
+    *'rejected untrusted state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
   esac
   [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
     || fail "renumbered poll did not surface its merge exactly once: $out"
@@ -5514,7 +5514,7 @@ SH
     [ "$rc" -eq 0 ] || fail "$mutation watcher failed: $(cat "$dir/watch.err")"
     out=$(cat "$dir/watch.out")
     case "$out" in
-      "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+      "check: rejected untrusted state checks:"*"task-a.check.sh"*) ;;
       *) fail "$mutation on a renumbered registration was not refused: $out" ;;
     esac
     [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_sha" ] \
