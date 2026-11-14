@@ -34,6 +34,29 @@ $1
 EOF
 }
 
+make_same_origin_clones() {
+  local name=$1 case_dir origin main mate wt config
+  case_dir="$TMP_ROOT/$name"
+  origin="$case_dir/origin.git"
+  main="$case_dir/main/project"
+  wt="$case_dir/pool/project"
+  mate="$case_dir/mate/projects/project"
+  config="$case_dir/claude-config"
+  mkdir -p "$config" "$(dirname -- "$wt")" "$(dirname -- "$mate")"
+  fm_git_init_commit "$main"
+  fm_git_add_origin "$main" "$origin"
+  git -C "$main" worktree add --quiet -b "wt-$name" "$wt"
+  git clone --quiet "$origin" "$mate"
+  git -C "$mate" remote set-url origin "file://$(cd -- "$origin" && pwd)"
+  printf '%s|%s|%s|%s|%s\n' "$case_dir" "$main" "$wt" "$mate" "$config"
+}
+
+read_clone_case() {
+  IFS='|' read -r CASE_DIR CLONE_MAIN CLONE_WT CLONE_MATE CLONE_CONFIG <<EOF
+$1
+EOF
+}
+
 # run_trust <config> <worktree> <project> [home]: invoke with an isolated store.
 run_trust() {
   local config=$1 wt=$2 proj=$3 home=${4:-$1}
@@ -838,6 +861,174 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   pass "fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded"
 }
 
+# Exercise each supported origin form without contacting a remote service.
+test_same_origin_spellings() {
+  local kind rec out origin
+  for kind in absolute https scp; do
+    rec=$(make_same_origin_clones "origin-form-$kind")
+    read_clone_case "$rec"
+    case $kind in
+      absolute) origin="$CASE_DIR/origin.git" ;;
+      https) origin=https://example.invalid/team/project.git ;;
+      scp) origin=git@example.invalid:team/project.git ;;
+    esac
+    git -C "$CLONE_MAIN" remote set-url origin "$origin"
+    git -C "$CLONE_MATE" remote set-url origin "$origin"
+    out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+    expect_code 0 $? "matching $kind origins should prove scope: $out"
+    assert_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" "$kind origin was not trusted"
+  done
+  pass "fm-claude-trust.sh: accepts matching local paths and exact remote URLs"
+}
+
+test_same_origin_clone_worktree_is_trusted() {
+  local rec out
+  rec=$(make_same_origin_clones same-origin)
+  read_clone_case "$rec"
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 0 $? "a worktree of a same-origin clone of the project must be trusted: $out"
+  assert_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" \
+    "a same-origin clone's worktree was not registered as trusted"
+  assert_store_value "$CLONE_CONFIG/.claude.json" undefined \
+    "registration wrote an entry for the caller's own clone" projects "$CLONE_MATE"
+  pass "fm-claude-trust.sh: trusts a worktree of a same-origin clone of the project"
+}
+
+# Consent is read from the worktree's owning checkout, so a decline there wins
+# over an approval on the caller's own clone.
+test_same_origin_clone_worktree_honors_the_owning_checkouts_decline() {
+  local rec out store before after
+  rec=$(make_same_origin_clones same-origin-decline)
+  read_clone_case "$rec"
+  store="$CLONE_CONFIG/.claude.json"
+  node -e 'const fs=require("node:fs");fs.writeFileSync(process.argv[1],JSON.stringify({projects:{[process.argv[2]]:{hasTrustDialogAccepted:true,hasClaudeMdExternalIncludesApproved:false,hasClaudeMdExternalIncludesWarningShown:true},[process.argv[3]]:{hasTrustDialogAccepted:true,hasClaudeMdExternalIncludesApproved:true,hasClaudeMdExternalIncludesWarningShown:true}}}));' \
+    "$store" "$CLONE_MAIN" "$CLONE_MATE"
+  before=$(cat "$store")
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a decline on the worktree's owning checkout must refuse registration: $out"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "the store was modified despite the owning checkout's decline"
+  pass "fm-claude-trust.sh: honors the owning checkout's import decline over the caller's clone"
+}
+
+test_same_origin_clone_worktree_refreshes_the_worktrees_own_canonical_import_consent() {
+  local rec out
+  rec=$(make_same_origin_clones same-origin-canonical)
+  read_clone_case "$rec"
+  node -e 'const fs=require("node:fs"),p=process.argv[2];fs.writeFileSync(process.argv[1],JSON.stringify({projects:{[p]:{hasTrustDialogAccepted:true,hasClaudeMdExternalIncludesApproved:true,hasClaudeMdExternalIncludesWarningShown:false}}}));' \
+    "$CLONE_CONFIG/.claude.json" "$CLONE_MAIN"
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 0 $? "a same-origin clone's worktree must be trusted when consent already exists: $out"
+  assert_all_flags "$CLONE_CONFIG/.claude.json" "$CLONE_MAIN" \
+    "the import-consent refresh did not land on the checkout Claude reads for this worktree"
+  assert_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" \
+    "a same-origin clone's worktree was not registered as trusted"
+  pass "fm-claude-trust.sh: refreshes import consent on the worktree's own canonical checkout"
+}
+
+test_different_origin_clone_worktree_is_refused() {
+  local rec out other_origin
+  rec=$(make_same_origin_clones different-origin)
+  read_clone_case "$rec"
+  other_origin="$CASE_DIR/other-origin.git"
+  git clone --quiet --bare "$CLONE_MAIN" "$other_origin"
+  git -C "$CLONE_MATE" remote set-url origin "file://$(cd -- "$other_origin" && pwd)"
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a worktree of a different-origin clone must be refused: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_not_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" \
+    "a different-origin clone's worktree was trusted on its shared git shape alone"
+  pass "fm-claude-trust.sh: refuses a worktree of a clone with a different origin"
+}
+
+test_originless_clone_worktree_is_refused() {
+  local rec out second_rec
+  rec=$(make_same_origin_clones originless-project)
+  read_clone_case "$rec"
+  git -C "$CLONE_MATE" remote remove origin
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a project clone with no origin must be refused: $out"
+  assert_not_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" "an origin-less project clone's worktree was trusted"
+
+  second_rec=$(make_same_origin_clones originless-worktree)
+  read_clone_case "$second_rec"
+  git -C "$CLONE_MAIN" remote remove origin
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a worktree whose owning clone has no origin must be refused: $out"
+  assert_not_trusted "$CLONE_CONFIG/.claude.json" "$CLONE_WT" "an origin-less owning clone's worktree was trusted"
+  pass "fm-claude-trust.sh: refuses an origin-less repository with no shared identity to prove"
+}
+
+test_missing_file_url_origin_collision_is_refused() {
+  local rec out origin
+  rec=$(make_same_origin_clones missing-file-origin)
+  read_clone_case "$rec"
+  origin="file://$CASE_DIR/missing/project.git"
+  git -C "$CLONE_MAIN" remote set-url origin "$origin"
+  git -C "$CLONE_MATE" remote set-url origin "$origin"
+  out=$(run_trust "$CLONE_CONFIG" "$CLONE_WT" "$CLONE_MATE")
+  expect_code 1 $? "a missing file:// origin must not prove a shared identity: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_absent "$CLONE_CONFIG/.claude.json" "trust was written for clones sharing a missing file:// origin"
+  pass "fm-claude-trust.sh: refuses two clones sharing a missing file:// origin"
+}
+
+test_unresolvable_relative_origin_collision_is_refused() {
+  local case_dir config main_proj main_wt mate_proj out
+  case_dir="$TMP_ROOT/relative-origin"
+  config="$case_dir/claude-config"
+  main_proj="$case_dir/main/projects/project"
+  main_wt="$case_dir/main/pool/project"
+  mate_proj="$case_dir/mate/projects/project"
+  mkdir -p "$config" "$(dirname -- "$main_wt")" "$(dirname -- "$mate_proj")"
+  fm_git_init_commit "$main_proj"
+  git -C "$main_proj" remote add origin ../project.git
+  git -C "$main_proj" worktree add --quiet -b wt-relative "$main_wt"
+  fm_git_init_commit "$mate_proj"
+  printf 'mate\n' > "$mate_proj/mate-only.txt"
+  git -C "$mate_proj" add mate-only.txt
+  git -C "$mate_proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm mate-only
+  git -C "$mate_proj" remote add origin ../project.git
+  [ "$(git -C "$main_wt" rev-parse --git-common-dir)" != "$(git -C "$mate_proj" rev-parse --git-common-dir)" ] \
+    || fail "the relative-origin case was vacuous: both paths share one common dir"
+  [ "$(git -C "$main_wt" rev-parse HEAD)" != "$(git -C "$mate_proj" rev-parse HEAD)" ] \
+    || fail "the relative-origin case was vacuous: both repositories share a history"
+  [ "$(git -C "$main_wt" remote get-url origin)" = "$(git -C "$mate_proj" remote get-url origin)" ] \
+    || fail "the relative-origin case was vacuous: the two origins are spelled differently"
+  [ ! -d "$(dirname -- "$main_proj")/project.git" ] && [ ! -d "$(dirname -- "$mate_proj")/project.git" ] \
+    || fail "the relative-origin case was vacuous: a relative origin actually resolved"
+  out=$(run_trust "$config" "$main_wt" "$mate_proj")
+  expect_code 1 $? "an unresolvable relative origin must not prove a shared identity: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_not_trusted "$config/.claude.json" "$main_wt" \
+    "an unrelated repository's worktree was trusted on a colliding relative origin"
+  pass "fm-claude-trust.sh: refuses two unrelated repos sharing an unresolvable relative origin"
+}
+
+test_colon_in_relative_origin_is_not_a_url() {
+  local case_dir config main_proj main_wt mate_proj out
+  case_dir="$TMP_ROOT/colon-relative-origin"
+  config="$case_dir/claude-config"
+  main_proj="$case_dir/main/projects/project"
+  main_wt="$case_dir/main/pool/project"
+  mate_proj="$case_dir/mate/projects/project"
+  mkdir -p "$config" "$(dirname -- "$main_wt")" "$(dirname -- "$mate_proj")"
+  fm_git_init_commit "$main_proj"
+  git -C "$main_proj" remote add origin ../project:x.git
+  git -C "$main_proj" worktree add --quiet -b wt-colon "$main_wt"
+  fm_git_init_commit "$mate_proj"
+  git -C "$mate_proj" remote add origin ../project:x.git
+  [ "$(git -C "$main_wt" rev-parse --git-common-dir)" != "$(git -C "$mate_proj" rev-parse --git-common-dir)" ] \
+    || fail "the colon-origin case was vacuous: both paths share one common dir"
+  out=$(run_trust "$config" "$main_wt" "$mate_proj")
+  expect_code 1 $? "a relative origin containing a colon must not prove a shared identity: $out"
+  assert_contains "$out" "is not a worktree of project" "the refusal did not name the project mismatch"
+  assert_not_trusted "$config/.claude.json" "$main_wt" \
+    "an unrelated repository's worktree was trusted on a colon-containing relative origin"
+  pass "fm-claude-trust.sh: refuses a colon-containing relative origin"
+}
+
 test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
@@ -869,3 +1060,13 @@ test_secondmate_leased_worktree_home_is_trusted
 test_secondmate_home_trust_refuses_everything_unseeded
 test_worktree_mode_still_refuses_a_secondmate_home
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded
+
+test_same_origin_clone_worktree_is_trusted
+test_same_origin_clone_worktree_refreshes_the_worktrees_own_canonical_import_consent
+test_different_origin_clone_worktree_is_refused
+test_originless_clone_worktree_is_refused
+test_missing_file_url_origin_collision_is_refused
+test_same_origin_clone_worktree_honors_the_owning_checkouts_decline
+test_unresolvable_relative_origin_collision_is_refused
+test_colon_in_relative_origin_is_not_a_url
+test_same_origin_spellings

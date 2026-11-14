@@ -52,9 +52,9 @@
 # (`es`/`F1e`) has no such fallback: it reads ONLY the canonical project-root
 # entry, and that root is never the worktree - Claude Code's own git-root
 # canonicalization (`Fr`/`Se`) walks a linked worktree's `.git` file through
-# its `commondir` pointer back to the PRIMARY CHECKOUT, exactly the <project>
-# argument this script already receives for the worktree-mode scope test
-# below. So the trust flag is registered on BOTH the worktree entry (for
+# its `commondir` pointer back to its owning PRIMARY CHECKOUT, resolved
+# structurally below. So the trust flag is registered on BOTH the worktree
+# entry (for
 # trust's ancestor-walk fallback and defense in depth) and the project entry
 # (the trust check's first, canonical-shaped, look); the two external-imports
 # flags land on those same two entries only when the project entry already
@@ -86,12 +86,16 @@
 # different shapes on disk.
 #
 # WORKTREE MODE. <worktree> must be a LINKED git worktree - its own git dir,
-# sharing <project>'s common dir - whose top level is exactly the resolved
-# argument. Git is the ground truth, so the argument is never trusted on its
+# sharing <project>'s common dir or proven origin identity - whose top level
+# is exactly the resolved argument. Git is the ground truth, so the argument is never trusted on its
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
 # directory are each refused. Refusal is a non-zero exit, never a warning and
-# never a silent skip. When <project> is itself a linked worktree (a
+# never a silent skip. Separate clones can share a treehouse pool, so origin
+# identity also proves scope: remote URLs must match exactly, and absolute local
+# paths must resolve to the same directory. Missing, relative, or unresolvable
+# origins prove nothing.
+# When <project> is itself a linked worktree (a
 # secondmate home spawned from, rather than as, the primary checkout),
 # refusing outright would wedge a relaunch that is otherwise perfectly valid:
 # its own common dir already IS the primary checkout's own git dir (git's
@@ -102,7 +106,7 @@
 # resolved git dir must equal that common dir, the same primary-checkout
 # definition used throughout, or this refuses rather than guess. The
 # consent-gated external-imports flags land on that resolved canonical
-# checkout, never on the linked-worktree argument itself.
+# checkout of the worktree's owning clone, never on <project> when it differs.
 #
 # The test is deliberately NOT a treehouse or orca path prefix. Treehouse's
 # root is configurable (--root, TREEHOUSE_ROOT, config, and a relative
@@ -245,6 +249,24 @@ common_dir_of() {
   (cd -P -- "$dir" && real_dir "$common")
 }
 
+# Compare remote URLs exactly and absolute local origins by resolved path.
+# A file:// origin is a local path, not a remote URL, so it resolves the same way.
+# Missing, relative, or unresolvable origins prove no shared identity.
+origin_identity() {  # <path-inside-repo>
+  local dir=$1 url
+  url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  case $url in
+    file://localhost/*) url=${url#file://localhost} ;;
+    file:///*) url=${url#file://} ;;
+    file:*) return 1 ;;
+  esac
+  case $url in
+    /*) [ -d "$url" ] && (CDPATH='' cd -P -- "$url" && pwd -P) || return 1 ;;
+    *) case ${url%%/*} in *:*) printf '%s\n' "$url" ;; *) return 1 ;; esac ;;
+  esac
+}
+
 TARGET_REAL=$(real_dir "$TARGET_ARG") || true
 [ -n "$TARGET_REAL" ] || refuse "$SCOPE_NOUN '$TARGET_ARG' is not an accessible directory"
 if [ "$MODE" = worktree ]; then
@@ -299,36 +321,22 @@ if [ "$MODE" = worktree ]; then
 
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
-
-  # The external-imports flags must land on the primary checkout - its own git
-  # dir equals the common dir - because that is exactly the path Claude Code's
-  # own git-root canonicalization collapses every linked worktree to. When
-  # <project> is itself a linked worktree (a secondmate home spawned from,
-  # rather than as, the primary checkout), refusing outright would wedge a
-  # relaunch that is otherwise perfectly valid: PROJ_COMMON already IS that
-  # primary checkout's own git dir (git's git-common-dir answer never changes
-  # by which worktree asks), so the checkout is derived structurally from it -
-  # its parent directory in the standard non-bare, non-GIT_DIR-overridden
-  # layout this script already requires elsewhere - and verified, never
-  # assumed: the candidate's own resolved git dir must equal PROJ_COMMON, the
-  # same primary-checkout definition used above, or this refuses rather than
-  # guess.
-  PROJ_GIT_DIR=$(git -C "$PROJ_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
-  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has no resolvable git directory"
-  PROJ_GIT_DIR=$(real_dir "$PROJ_GIT_DIR") || true
-  [ -n "$PROJ_GIT_DIR" ] || refuse "project '$PROJ_REAL' has an unresolvable git directory"
-  if [ "$PROJ_GIT_DIR" = "$PROJ_COMMON" ]; then
-    PROJ_CANON=$PROJ_REAL
-  else
-    PROJ_CANON=$(real_dir "$(dirname -- "$PROJ_COMMON")") || true
-    [ -n "$PROJ_CANON" ] \
-      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
-    CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
-    CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
-    [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
-      || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
+  if [ "$WT_COMMON" != "$PROJ_COMMON" ]; then
+    WT_ORIGIN=$(origin_identity "$TARGET_REAL") || true
+    PROJ_ORIGIN=$(origin_identity "$PROJ_REAL") || true
+    [ -n "$WT_ORIGIN" ] && [ "$WT_ORIGIN" = "$PROJ_ORIGIN" ] \
+      || refuse "'$TARGET_REAL' is not a worktree of project '$PROJ_REAL'"
   fi
+
+  # Claude canonicalizes the worktree to its owning primary checkout, which
+  # may be a different clone than <project>. Verify that checkout before writing.
+  PROJ_CANON=$(real_dir "$(dirname -- "$WT_COMMON")") || true
+  [ -n "$PROJ_CANON" ] \
+    || refuse "'$TARGET_REAL' has no resolvable primary checkout"
+  CANON_GIT_DIR=$(git -C "$PROJ_CANON" rev-parse --absolute-git-dir 2>/dev/null) || true
+  CANON_GIT_DIR=$(real_dir "${CANON_GIT_DIR:-}") || true
+  [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$WT_COMMON" ] \
+    || refuse "'$TARGET_REAL' has no resolvable primary checkout"
 elif [ "$MODE" = lab-home ]; then
   LAB_MARKER="$TARGET_REAL/$FM_GATE_LAB_MARKER"
   [ ! -L "$LAB_MARKER" ] || refuse "'$LAB_MARKER' is a symlink; a lab home carries the marker as a regular file"
