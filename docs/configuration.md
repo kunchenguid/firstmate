@@ -1146,7 +1146,7 @@ A `captain-hold-<task>-<n>` key, which a secondmate's `bin/fm-captain-hold.sh ho
 When that hold was set with `--until YYYY-MM-DD`, the relayed line carries a structured `[until=YYYY-MM-DD]` field before its first colon, and the key re-arms from 00:00 UTC on that date; a malformed field re-arms it at once.
 Note text never decides either exemption.
 With the flag present, the watcher also queues one `check: captain hold <task> recheck due <YYYY-MM-DD>` wake per main-home captain hold and `--until` date, once that date arrives (00:00 UTC), so the first mate can re-validate the deferred call.
-The date comes from the backlog's structured `hold_until` field of a `captain`-kind hold, never from note text; undated holds never fire.
+The date comes from the backlog's structured `hold_until` field of a `captain`-kind hold, never from note text; undated holds and answered (Done) rows never fire.
 Each task-and-date pair fires once and survives watcher restarts, and a hold re-held with a new date fires again on that date.
 The backlog is read at most every five minutes.
 Resolving a key stops its reminders, and a later opening starts a new reminder episode.
