@@ -180,7 +180,10 @@
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
 # until the stop is confirmed, slot_released while the copy is back in the
 # pool, slot_releasing from just before the copy is returned until the release
-# is fully recorded, so a release cut short is resumed like a released lane,
+# is fully recorded, so a release cut short is resumed like a released lane;
+# a release cut short after slot_releasing is written but before the copy is
+# returned is not retried, so that lane keeps its copy until review activity
+# relaunches it or someone cleans it up by hand, as without the feature,
 # release_refused with the reason a release was last refused,
 # resume_waiting while a relaunch waits for a free copy, and resume_error after
 # a failed relaunch), mode 0600, published by
