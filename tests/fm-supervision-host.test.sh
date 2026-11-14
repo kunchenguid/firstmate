@@ -16,6 +16,39 @@ set -u
 # shellcheck source=tests/supervision-host-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
+test_engine_result_accepts_single_json() {
+  local dir shape actual expected
+  dir="$TMP_ROOT/engine-results"
+  mkdir -p "$dir"
+  node - "$dir" <<'JS'
+const fs = require("node:fs");
+const dir = process.argv[2];
+const result = {type: "result", subtype: "success", is_error: false,
+  total_cost_usd: 0.5, num_turns: 3,
+  usage: {input_tokens: 5, cache_read_input_tokens: 100,
+    cache_creation_input_tokens: 10, output_tokens: 20}};
+const failed = {...result, subtype: "error_during_execution", is_error: true};
+const fixtures = {
+  single: result,
+  failed,
+  incomplete: {type: "result", subtype: "success", is_error: false}
+};
+for (const [name, value] of Object.entries(fixtures))
+  fs.writeFileSync(`${dir}/${name}.json`, JSON.stringify(value));
+JS
+  for shape in single failed incomplete; do
+    actual=$(bash -c '. "$1"; fm_supervision_engine_result claude "$2" 0.25' _ \
+      "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/$shape.json") || fail "$shape: result could not be read"
+    case "$shape" in
+      single) expected='error=0 cost=0.25 conversation_cost=0.5 input=5 cache_read=100 cache_write=10 output=20 turns=3' ;;
+      failed) expected='error=1 cost=0.25 conversation_cost=0.5 input=5 cache_read=100 cache_write=10 output=20 turns=3' ;;
+      *) expected='error=1 cost=0 conversation_cost=0 input=0 cache_read=0 cache_write=0 output=0 turns=0' ;;
+    esac
+    assert_equals "$expected" "$actual" "$shape: the result must determine success and usage"
+  done
+  pass 'engine: single JSON preserves usage; failed and incomplete results fail closed'
+}
+
 test_park_exit_probe_uses_half_second_child_sleeps() {
   local home host_pid
   home=$(make_home park-cadence attended)
@@ -643,6 +676,8 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   assert_re '^primary=claude$' "$first" "the engine must carry the primary-harness pin"
   assert_re '^turn=host-' "$first" "the engine must carry its report turn"
   assert_re '^arg=--safe-mode$' "$first" "the engine must load none of the home's hooks"
+  assert_re '^arg=--settings$' "$first" "the engine must override user verbosity"
+  assert_re '^arg=\{"verbose":false\}$' "$first" "the engine must request a single JSON result"
   assert_re '^arg=dontAsk$' "$first" "the engine must never prompt"
   assert_re '^arg=sonnet$' "$first" "the engine must default to its default model"
   assert_re '^arg=--session-id$' "$first" "the first turn must open a new conversation"
@@ -917,6 +952,7 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
 }
 
 fm_test_run \
+  test_engine_result_accepts_single_json \
   test_park_exit_probe_uses_half_second_child_sleeps \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
   test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue \

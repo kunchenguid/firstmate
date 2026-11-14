@@ -421,6 +421,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 **Result and cost**
 
 - `--output-format json` carries the error flag, turn count, usage, and the tool's own cost estimate.
+  The [engine library](../bin/fm-supervision-engine-lib.sh) owns the output settings that isolate the result shape from user verbosity, and the result contract; [runtime verification](verification/runtime-backends.md#claude-supervision-engine-json) records the live guard.
 - On a resumed conversation that cost is the conversation's running total, while the usage and turn count are the turn's own.
   So the engine lib derives each turn's cost from the total the host recorded after the previous turn.
 - The host counts a turn successful only when that result is complete:
@@ -466,7 +467,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the home gate, the feed, and the verified-writer list. |
 | `tests/fm-afk-launch.test.sh` | The home gate on each primary, the `/afk` daemon refusal, and `/quiet` on a home that runs the host: the statement, the paused statement, each named missing part, the quiet daemon fallback that carries its recorded mode, a failed quiet start that archives its quiet record, and the refusal under a live away record until the return. |
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
-| `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
+| `tests/fm-supervision-host-live-e2e.test.sh` | Runs real engine turns with verbose project settings; opt-in because it spends tokens. |
 | `tests/fm-supervision-host-attended-live-e2e.test.sh` | Opt-in credentialed guard for repeated attended main-only hand-backs to an idle Claude primary, the successor's own close, a close that turns main-only at its turn, and a stand-in remote listener; accepts a pre-fix ref for a negative control. |
 | `tests/fm-supervision-host-herdr-live-e2e.test.sh` | Opt-in credentialed guard that a real Claude primary in an isolated herdr session loses its hand-back continuation, receives the detached retry through the inherited pane, drains, and acknowledges, with one watcher retained. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
