@@ -960,6 +960,7 @@ test_release_retries_on_later_ticks() {
 
   w=$(release_world release-settled "$GH_URL")
   sed -i 's/^backend=rex$/backend=herdr/' "$w/state/lane.meta"
+  # shellcheck disable=SC2016
   printf '#!/usr/bin/env bash\n[ "${1:-} ${2:-}" = "status --json" ] || exit 1\necho "{\\"server\\":{\\"running\\":false}}"\n' > "$w/fakebin/herdr"
   chmod +x "$w/fakebin/herdr"
   old=$(fm_meta_get_test "$w" worktree)
