@@ -1560,25 +1560,29 @@ require_app_worktree_id() {  # <meta> <backend>
   printf '%s\n' "$id"
 }
 
-# app_worktree_released=<worktree-id> is written only after the backend
-# confirmed it released that exact worktree. A retry after a later reporting or
-# export failure then skips the id/path gate, the terminal close, and the
-# release (the recorded folder is gone by design) and finishes the rest.
+# state/<id>.app-worktree-released records backend= and worktree_id= only
+# after the backend confirmed it released that exact worktree. It is a sidecar,
+# never part of the task record, so every meta parser sees the record unchanged.
+# A retry after a later reporting or export failure then skips the id/path
+# gate, the terminal close, and the release (the recorded folder is gone by
+# design) and finishes the rest. Retired together with the task record.
+APP_WORKTREE_RELEASED_FILE="$STATE/$ID.app-worktree-released"
 APP_WORKTREE_RELEASED=0
 if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
   APP_WORKTREE_ID=$(require_app_worktree_id "$META" "$BACKEND") || exit 1
   T_APP=$(meta_value "$META" terminal)
   [ -z "$T_APP" ] || T=$T_APP
-  [ "$(meta_value "$META" app_worktree_released)" != "$APP_WORKTREE_ID" ] || APP_WORKTREE_RELEASED=1
+  if [ "$(meta_value "$APP_WORKTREE_RELEASED_FILE" backend)" = "$BACKEND" ] \
+     && [ "$(meta_value "$APP_WORKTREE_RELEASED_FILE" worktree_id)" = "$APP_WORKTREE_ID" ]; then
+    APP_WORKTREE_RELEASED=1
+  fi
 fi
 
-# Atomically append the released marker to the task record.
+# Atomically write the released sidecar (temp file + rename).
 record_app_worktree_released() {
-  local tmp="$META.released.$$"
-  cp -p -- "$META" "$tmp" \
-    && { [ ! -s "$tmp" ] || [ -z "$(tail -c 1 -- "$tmp")" ] || printf '\n' >> "$tmp"; } \
-    && printf 'app_worktree_released=%s\n' "$APP_WORKTREE_ID" >> "$tmp" \
-    && mv -f -- "$tmp" "$META" && return 0
+  local tmp="$APP_WORKTREE_RELEASED_FILE.tmp.$$"
+  printf 'backend=%s\nworktree_id=%s\n' "$BACKEND" "$APP_WORKTREE_ID" > "$tmp" \
+    && mv -f -- "$tmp" "$APP_WORKTREE_RELEASED_FILE" && return 0
   rm -f -- "$tmp"
   return 1
 }
@@ -4104,7 +4108,7 @@ elif fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
     exit 1
   }
   record_app_worktree_released || {
-    echo "error: released the $(fm_backend_worktree_owner_label "$BACKEND") worktree $APP_WORKTREE_ID for $ID but could not record app_worktree_released= in $META; a retry will refuse at the id/path gate" >&2
+    echo "error: released the $(fm_backend_worktree_owner_label "$BACKEND") worktree $APP_WORKTREE_ID for $ID but could not record $APP_WORKTREE_RELEASED_FILE; a retry will refuse at the id/path gate" >&2
     exit 1
   }
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
@@ -4307,6 +4311,9 @@ else
     exit 1
   fi
 fi
+# The released sidecar goes only once the record is gone: a failed record
+# removal above keeps it so the retry still skips the released worktree.
+rm -f "$APP_WORKTREE_RELEASED_FILE"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

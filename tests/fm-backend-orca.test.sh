@@ -1086,29 +1086,41 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
 }
 
-# Release succeeds, then the record export fails: the record keeps
-# app_worktree_released=, and a rerun finishes without touching Orca again.
-# Without the marker the same record (its folder now gone) is still refused.
+# Release succeeds, then the record export fails: the task record is kept
+# byte-for-byte unchanged and state/<id>.app-worktree-released names the
+# released worktree, so a rerun finishes without touching Orca again.
+# Without the sidecar the same record (its folder now gone) is still refused.
+# "merged" is a ship whose merged-PR poll retirement receipt is still pending:
+# the receipt is validated against the unchanged record on every attempt.
 test_teardown_retry_after_orca_release_skips_released_worktree() {
-  local kind proj wt data state config id out rc neutral wid
-  for kind in scout ship; do
-    id="orcaretry${kind}z1"
-    wid="wt-retry-$kind::/orca/wt-retry-$kind"
-    proj="$TMP_ROOT/retry-$kind-project"
-    wt="$TMP_ROOT/retry-$kind-wt"
-    data="$TMP_ROOT/retry-$kind-data"
-    state="$TMP_ROOT/retry-$kind-state"
-    config="$TMP_ROOT/retry-$kind-config"
+  local variant kind proj wt data state config id out rc neutral wid released
+  for variant in scout ship merged; do
+    kind=$variant
+    [ "$variant" != merged ] || kind=ship
+    id="orcaretry${variant}z1"
+    wid="wt-retry-$variant::/orca/wt-retry-$variant"
+    proj="$TMP_ROOT/retry-$variant-project"
+    wt="$TMP_ROOT/retry-$variant-wt"
+    data="$TMP_ROOT/retry-$variant-data"
+    state="$TMP_ROOT/retry-$variant-state"
+    config="$TMP_ROOT/retry-$variant-config"
+    released="$state/$id.app-worktree-released"
     fm_git_worktree "$proj" "$wt" "fm/$id"
     mkdir -p "$data/$id" "$state" "$config"
     [ "$kind" != scout ] || printf 'report\n' > "$data/$id/report.md"
     touch "$state/.last-watcher-beat"
     fm_write_meta "$state/$id.meta" \
-      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-retry-$kind" "worktree=$wt" "project=$proj" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-retry-$variant" "worktree=$wt" "project=$proj" \
       "harness=claude" "kind=$kind" "mode=local-only" "yolo=off" \
       "backend=orca" "orca_worktree_id=$wid" "decisions_reviewed=1" "decision_keys="
     printf 'relative/export-root\n' > "$config/record-export-root"
-    orca_case "retry-$kind"
+    orca_case "retry-$variant"
+    if [ "$variant" = merged ]; then
+      printf 'pr=https://github.com/o/r/pull/1\n' >> "$state/$id.meta"
+      fm_write_pr_poll_retirement_receipt "$state" "$id"
+      printf '#!/bin/sh\nexit 1\n' > "$FB/gh" && chmod +x "$FB/gh"
+    fi
+    cp -p "$state/$id.meta" "$state/$id.meta.before"
     printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$wid" "$wt" > "$RESP/1.out"
     neutral=$(neutral_fm_root "$CASE_DIR/neutral")
     set +e
@@ -1117,19 +1129,19 @@ test_teardown_retry_after_orca_release_skips_released_worktree() {
       "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
     rc=$?
     set -e
-    [ "$rc" -ne 0 ] || fail "Orca $kind teardown should fail when the record export fails"$'\n'"$out"
-    assert_contains "$out" "record export archive failed for $id" "Orca $kind: the failure should come from the export step"
+    [ "$rc" -ne 0 ] || fail "Orca $variant teardown should fail when the record export fails"$'\n'"$out"
+    assert_contains "$out" "record export archive failed for $id" "Orca $variant: the failure should come from the export step"
     assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$wid" \
-      "Orca $kind: the first attempt should release the worktree"
-    assert_present "$state/$id.meta" "Orca $kind: a failed export must keep the record"
-    grep -qx "app_worktree_released=$wid" "$state/$id.meta" || fail "Orca $kind: the confirmed release should be recorded"
+      "Orca $variant: the first attempt should release the worktree"
+    assert_present "$state/$id.meta" "Orca $variant: a failed export must keep the record"
+    cmp -s "$state/$id.meta.before" "$state/$id.meta" || fail "Orca $variant: the task record must not change"
+    [ "$(cat "$released")" = "backend=orca"$'\n'"worktree_id=$wid" ] \
+      || fail "Orca $variant: the confirmed release should be recorded in the sidecar, got: $(cat "$released" 2>&1)"
     # Orca removes the folder on release.
     git -C "$proj" worktree remove --force "$wt"
     rm -f "$config/record-export-root"
 
-    grep -v '^app_worktree_released=' "$state/$id.meta" > "$state/$id.nomarker"
-    cp -p "$state/$id.meta" "$state/$id.withmarker"
-    cp "$state/$id.nomarker" "$state/$id.meta"
+    mv "$released" "$released.aside"
     : > "$LOG"
     set +e
     out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1137,13 +1149,12 @@ test_teardown_retry_after_orca_release_skips_released_worktree() {
       "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
     rc=$?
     set -e
-    [ "$rc" -ne 0 ] || fail "Orca $kind: without the marker a missing recorded path must still refuse"
+    [ "$rc" -ne 0 ] || fail "Orca $variant: without the sidecar a missing recorded path must still refuse"
     assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
-      "Orca $kind: an unmarked record with no folder must not release"
-    assert_present "$state/$id.meta" "Orca $kind: the unmarked refusal keeps the record"
+      "Orca $variant: an unreleased record with no folder must not release"
+    assert_present "$state/$id.meta" "Orca $variant: the unreleased refusal keeps the record"
 
-    mv "$state/$id.withmarker" "$state/$id.meta"
-    rm -f "$state/$id.nomarker"
+    mv "$released.aside" "$released"
     : > "$LOG"
     set +e
     out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1151,11 +1162,14 @@ test_teardown_retry_after_orca_release_skips_released_worktree() {
       "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
     rc=$?
     set -e
-    expect_code 0 "$rc" "Orca $kind: the retry should finish once the export is fixed"$'\n'"$out"
-    [ ! -s "$LOG" ] || fail "Orca $kind: the retry must make no Orca calls, got: $(cat "$LOG")"
-    assert_absent "$state/$id.meta" "Orca $kind: the retry should retire the record"
+    expect_code 0 "$rc" "Orca $variant: the retry should finish once the export is fixed"$'\n'"$out"
+    [ ! -s "$LOG" ] || fail "Orca $variant: the retry must make no Orca calls, got: $(cat "$LOG")"
+    assert_absent "$state/$id.meta" "Orca $variant: the retry should retire the record"
+    assert_absent "$released" "Orca $variant: the retry should retire the released sidecar"
+    assert_absent "$state/$id.pr-poll-retirement" "Orca $variant: the retry should retire the poll receipt"
+    rm -f "$state/$id.meta.before"
   done
-  pass "fm-teardown.sh backend=orca: a retry after a confirmed release finishes without releasing again"
+  pass "fm-teardown.sh backend=orca: a retry after a confirmed release finishes without releasing again, including a merged task with a pending poll receipt"
 }
 
 test_ship_teardown_refuses_orca_unresolvable_worktree_id() {

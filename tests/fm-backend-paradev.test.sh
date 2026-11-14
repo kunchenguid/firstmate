@@ -1052,48 +1052,61 @@ test_scout_teardown_refuses_missing_worktree_path() {
   pass "fm-teardown.sh backend=paradev: a missing recorded worktree refuses archive for scouts and recovery records"
 }
 
-# Archive succeeds, then the record export fails: the record keeps
-# app_worktree_released=, and a rerun finishes without touching Paradev again.
-# Without the marker the same record (its folder now gone) is still refused.
+# Archive succeeds, then the record export fails: the task record is kept
+# byte-for-byte unchanged and state/<id>.app-worktree-released names the
+# released workspace, so a rerun finishes without touching Paradev again.
+# Without the sidecar the same record (its folder now gone) is still refused.
+# "merged" is a ship whose merged-PR poll retirement receipt is still pending:
+# the receipt is validated against the unchanged record on every attempt.
 test_teardown_retry_after_archive_skips_released_workspace() {
-  local kind id out rc
-  for kind in scout ship; do
-    id="pdretry${kind}z1"
-    teardown_fixture "$id" "retry-$kind" "$kind"
+  local variant kind id out rc released
+  for variant in scout ship merged; do
+    kind=$variant
+    [ "$variant" != merged ] || kind=ship
+    id="pdretry${variant}z1"
+    teardown_fixture "$id" "retry-$variant" "$kind"
+    released="$STATE/$id.app-worktree-released"
     sed -i.bak 's/^mode=no-mistakes$/mode=local-only/' "$STATE/$id.meta" && rm -f "$STATE/$id.meta.bak"
+    if [ "$variant" = merged ]; then
+      printf 'pr=https://github.com/o/r/pull/1\n' >> "$STATE/$id.meta"
+      fm_write_pr_poll_retirement_receipt "$STATE" "$id"
+      printf '#!/bin/sh\nexit 1\n' > "$FB/gh" && chmod +x "$FB/gh"
+    fi
+    cp -p "$STATE/$id.meta" "$STATE/$id.meta.before"
     respond workspaces-get "$(ws_row "$WS" "$WT")"
     printf 'relative/export-root\n' > "$CONFIG/record-export-root"
     out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
     rc=$?
-    [ "$rc" -ne 0 ] || fail "$kind teardown should fail when the record export fails"$'\n'"$out"
-    assert_contains "$out" "record export archive failed for $id" "$kind: the failure should come from the export step"
-    log_has "superset${SEP}workspaces${SEP}archive${SEP}$WS${SEP}--local${SEP}--json" "$kind: the first attempt should archive"
-    assert_present "$STATE/$id.meta" "$kind: a failed export must keep the record"
-    grep -qx "app_worktree_released=$WS" "$STATE/$id.meta" || fail "$kind: the confirmed archive should be recorded"
+    [ "$rc" -ne 0 ] || fail "$variant teardown should fail when the record export fails"$'\n'"$out"
+    assert_contains "$out" "record export archive failed for $id" "$variant: the failure should come from the export step"
+    log_has "superset${SEP}workspaces${SEP}archive${SEP}$WS${SEP}--local${SEP}--json" "$variant: the first attempt should archive"
+    cmp -s "$STATE/$id.meta.before" "$STATE/$id.meta" || fail "$variant: the task record must not change"
+    [ "$(cat "$released")" = "backend=paradev"$'\n'"worktree_id=$WS" ] \
+      || fail "$variant: the confirmed archive should be recorded in the sidecar, got: $(cat "$released" 2>&1)"
     # Paradev deletes the folder on archive.
     git -C "$PROJ" worktree remove --force "$WT"
     rm -f "$CONFIG/record-export-root"
 
-    grep -v '^app_worktree_released=' "$STATE/$id.meta" > "$STATE/$id.nomarker"
-    cp -p "$STATE/$id.meta" "$STATE/$id.withmarker"
-    cp "$STATE/$id.nomarker" "$STATE/$id.meta"
+    mv "$released" "$released.aside"
     : > "$LOG"
     out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
     rc=$?
-    [ "$rc" -ne 0 ] || fail "$kind: without the marker a missing recorded path must still refuse"
-    log_lacks "superset${SEP}workspaces${SEP}archive" "$kind: an unmarked record with no folder must not archive"
-    assert_present "$STATE/$id.meta" "$kind: the unmarked refusal keeps the record"
+    [ "$rc" -ne 0 ] || fail "$variant: without the sidecar a missing recorded path must still refuse"
+    log_lacks "superset${SEP}workspaces${SEP}archive" "$variant: an unreleased record with no folder must not archive"
+    assert_present "$STATE/$id.meta" "$variant: the unreleased refusal keeps the record"
 
-    mv "$STATE/$id.withmarker" "$STATE/$id.meta"
-    rm -f "$STATE/$id.nomarker"
+    mv "$released.aside" "$released"
     : > "$LOG"
     out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
     rc=$?
-    expect_code 0 "$rc" "$kind: the retry should finish once the export is fixed"$'\n'"$out"
-    [ ! -s "$LOG" ] || fail "$kind: the retry must make no Paradev calls, got: $(cat "$LOG")"
-    assert_absent "$STATE/$id.meta" "$kind: the retry should retire the record"
+    expect_code 0 "$rc" "$variant: the retry should finish once the export is fixed"$'\n'"$out"
+    [ ! -s "$LOG" ] || fail "$variant: the retry must make no Paradev calls, got: $(cat "$LOG")"
+    assert_absent "$STATE/$id.meta" "$variant: the retry should retire the record"
+    assert_absent "$released" "$variant: the retry should retire the released sidecar"
+    assert_absent "$STATE/$id.pr-poll-retirement" "$variant: the retry should retire the poll receipt"
+    rm -f "$STATE/$id.meta.before"
   done
-  pass "fm-teardown.sh backend=paradev: a retry after a confirmed archive finishes without re-archiving"
+  pass "fm-teardown.sh backend=paradev: a retry after a confirmed archive finishes without re-archiving, including a merged task with a pending poll receipt"
 }
 
 if [ -n "${FM_TEST_ONLY:-}" ]; then
