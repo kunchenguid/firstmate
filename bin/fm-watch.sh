@@ -409,21 +409,21 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
-# working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
-# than wake firstmate's LLM for each, this watcher classifies every wake in bash
-# and ABSORBS the benign majority - it advances the suppression marker, logs to a
-# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
-# / stale path is absorb-only-on-positive-evidence. The shared proof is an actively
-# running no-mistakes step or a busy pane via crew_is_provably_working over
-# fm-crew-state.sh; where config/turnend-churn-absorb opts in, a bare turn-end alone
-# may also use bounded pane churn since the previous poll.
+# working: note or turn-end while a pipeline runs, a no-change heartbeat over an
+# empty queue). Rather than wake firstmate's LLM for each, this watcher
+# classifies every wake in bash and ABSORBS the benign majority - it advances the
+# suppression marker, logs to a debug log, and keeps blocking WITHOUT enqueuing
+# or exiting. The no-verb signal / stale path is absorb-only-on-positive-evidence.
+# The shared proof is an actively running no-mistakes step or a busy pane via
+# crew_is_provably_working over fm-crew-state.sh; where config/turnend-churn-absorb
+# opts in, a bare turn-end alone may also use bounded pane churn since the previous poll.
 # Every other crew that stopped its turn is SURFACED, so a finish reported
 # only through interactive pane menus (no done: status) is never swallowed. An
 # ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
 # eligible proof, any check, a stale pane whose crew is not provably working, a
-# provably-working stale past the threshold, or anything unknown) is written to
-# the durable queue and exits. That wakes the LLM through the background-task
-# completion. The same classifier
+# provably-working stale past the threshold, a heartbeat over ready or unknown
+# queue readiness, or anything unknown) is written to the durable queue and exits.
+# That wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
@@ -4864,8 +4864,8 @@ EOF
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
-  # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
-  # surfaced non-heartbeat wake or actionable heartbeat backstop.
+  # absorbed heartbeat up to HEARTBEAT_MAX, and resets on any surfaced
+  # non-heartbeat wake or actionable heartbeat.
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
