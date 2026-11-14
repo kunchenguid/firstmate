@@ -1300,6 +1300,16 @@ test_validate_on_done_flag_selects_handoff() {
   brief="$home/data/brief-vod-on/brief.md"
   assert_grep "then run /no-mistakes in that same turn" "$brief" "the flag did not start validation in the same turn"
   assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" "the flag kept the stop-and-wait handoff"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vod-man some-proj --mode no-mistakes --pr manual >/dev/null 2>&1 \
+    || fail "fm-brief.sh pr=manual scaffold exited non-zero"
+  brief="$home/data/brief-vod-man/brief.md"
+  assert_grep "then run /no-mistakes in that same turn" "$brief" "the flag did not reach the pr=manual brief"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" "the flag left the pr=manual stop-and-wait handoff"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vod-ger some-proj --mode no-mistakes --forge gerrit --shape squash >/dev/null 2>&1 \
+    || fail "fm-brief.sh gerrit scaffold exited non-zero"
+  brief="$home/data/brief-vod-ger/brief.md"
+  assert_grep "then run /no-mistakes in that same turn" "$brief" "the flag did not reach the gerrit brief"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" "the flag left the gerrit stop-and-wait handoff"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vod-dpr some-proj --mode direct-PR >/dev/null 2>&1 \
     || fail "fm-brief.sh direct-PR scaffold exited non-zero"
   assert_no_grep "in that same turn" "$home/data/brief-vod-dpr/brief.md" "the flag leaked into a direct-PR brief"
