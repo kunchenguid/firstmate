@@ -793,6 +793,15 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Validation starts on the first done (config/validate-on-done)
+
+The optional local, gitignored `config/validate-on-done` presence flag opts this home into starting no-mistakes validation in the same turn as a ship worker's first `done`.
+With it present, a no-mistakes ship brief tells the worker to run `/no-mistakes` right after it appends the first `done`, instead of stopping until firstmate steers it.
+No-mistakes stays the only publisher, and a later firstmate instruction to run it needs no second run.
+With the file absent, the worker stops after the first `done` and waits for firstmate's instruction.
+Direct-PR, local-only, and scout briefs are unchanged.
+The flag is a home-local preference and is not inherited by secondmate homes.
+
 ## PR health monitor (config/pr-health-monitor)
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.

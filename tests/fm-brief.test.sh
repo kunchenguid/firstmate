@@ -1285,6 +1285,27 @@ test_wait_no_turns_absent_keeps_the_previous_brief() {
   pass "fm-brief: without config/wait-no-turns the brief and drive text stay as they were"
 }
 
+test_validate_on_done_flag_selects_handoff() {
+  local home brief
+  home="$TMP_ROOT/validate-on-done"
+  mkdir -p "$home/data" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vod-off some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-vod-off/brief.md"
+  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" "an absent flag lost the stop-and-wait handoff"
+  assert_no_grep "in that same turn" "$brief" "an absent flag started validation in the same turn"
+  : > "$home/config/validate-on-done"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vod-on some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  brief="$home/data/brief-vod-on/brief.md"
+  assert_grep "then run /no-mistakes in that same turn" "$brief" "the flag did not start validation in the same turn"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" "the flag kept the stop-and-wait handoff"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-vod-dpr some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh direct-PR scaffold exited non-zero"
+  assert_no_grep "in that same turn" "$home/data/brief-vod-dpr/brief.md" "the flag leaked into a direct-PR brief"
+  pass "fm-brief: config/validate-on-done switches the no-mistakes handoff"
+}
+
 test_inbox_guidance_explains_marked_body_terminator() {
   local home brief kind id
   home="$TMP_ROOT/inbox-guidance"
@@ -1723,6 +1744,7 @@ test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
+test_validate_on_done_flag_selects_handoff
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded

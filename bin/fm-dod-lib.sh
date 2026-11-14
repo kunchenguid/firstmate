@@ -678,13 +678,18 @@ EOF
         fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent" "$nm_base" "$pr_base"
         return
       fi
+      local nm_handoff='stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.'
+      if [ -e "${CONFIG:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}}/validate-on-done" ]; then
+        nm_handoff='then run /no-mistakes in that same turn, without waiting for firstmate to instruct you.
+A later instruction from firstmate to run it needs no second run.'
+      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and $nm_handoff
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
 EOF
