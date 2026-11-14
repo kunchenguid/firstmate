@@ -230,10 +230,9 @@ The outcome store is `bin/fm-branch-outcome.sh`.
 Its header owns the append-only format, read cursor, and bounded per-task status-coverage indexes.
 
 Outcomes are written to the store before delivery to Pi.
-A captain row advances the cursor only after its matching visible session entry exists.
-Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.
+The [store header](../bin/fm-branch-outcome.sh) owns the delivery prerequisites for advancing the read cursor and the session-start replay barrier.
 
-A routine note has no such sequence-keyed record.
+A routine note has no sequence-keyed visible session entry.
 If its cursor write fails after the note was delivered, the next reconciliation sends that note once more.
 That asymmetry is a known limitation of the routine delivery representation rather than of the ordering above.
 It predates delivery moving off Pi's render thread.

@@ -61,7 +61,8 @@
 #     session's next park without --restart requests a take-over of its cycle
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
 #     conditions under which that restores a single owner and the fallback;
-#   - away (an away record exists): every close goes to the engine.
+#   - away (an away record exists): eligible closes go to the engine under
+#     the shared offer rule; Firstmate-owned handoffs stay on main.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
 # between) or an attended close whose task turned main-only while the
@@ -81,9 +82,10 @@
 # queue. Before parking after a handled turn, it settles the successor handoff;
 # docs/watcher-continuity.md "Durable queue and turn-end backstop" owns how
 # that transition makes rows still queued for main recoverable. A handled wake
-# with only routine outcomes never wakes main, and neither does any handled
-# wake while away: captain outcomes wait in
-# the outcome store for the return drain's BRANCH OUTCOMES section. A handled
+# with only routine outcomes never wakes main. A firstmate outcome exits with
+# a "supervision-host: firstmate-outcome:" line in either posture; its durable
+# check is already queued by bin/fm-branch-report.sh. Away captain outcomes
+# wait in the store for the return drain's BRANCH OUTCOMES section. A handled
 # attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
 # line naming its store rows, without the close it handled; main drains, where
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every

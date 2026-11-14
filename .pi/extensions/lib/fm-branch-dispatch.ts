@@ -437,8 +437,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     const kind = fields[2];
     const key = fields[3];
     if (kind === "heartbeat") {
-      // Attended, a heartbeat row is claimed only by a heartbeat review; away,
-      // no main drain will ever take it, so any wake claims it.
+      // Attended, a heartbeat row is claimed only by a heartbeat review;
+      // away, any eligible wake may claim it.
       if (heartbeat || afk) {
         eligibleSeqs.push(seq);
         heartbeatSeqs.push(seq);
@@ -452,8 +452,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       }
       // Main-owned while attended: excluded from what the branch may claim,
       // never a reason to reject the rest of the queue and never a reason to
-      // send an otherwise-eligible heartbeat review to main. Away, the branch
-      // is the only actor, so the row is claimed unscoped.
+      // send an otherwise-eligible heartbeat review to main. Away, ordinary
+      // check rows may be claimed unscoped.
       if (afk) {
         eligibleSeqs.push(seq);
         checkSeqs.push(seq);
