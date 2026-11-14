@@ -53,8 +53,9 @@
 #     as a rewake (measured on Claude Code 2.1.278 and 2.1.281,
 #     docs/verification/supervision.md), so a park that outlives that timeout
 #     records the failure durably without waking an idle primary. Nothing
-#     shortens a quiet park, because no-change heartbeats are absorbed without
-#     closing the arm.
+#     shortens a quiet park: a heartbeat is absorbed without closing the arm
+#     only when no ready queued work or captain-relevant change needs review
+#     (the header of bin/fm-watch.sh owns that policy).
 #   - Handling successor: Pi, omp, and OpenCode start the next arm before they
 #     deliver an actionable wake, so the fleet stays covered while the model
 #     handles it. After an actionable close, including an attached peer cycle

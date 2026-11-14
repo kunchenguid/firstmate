@@ -164,8 +164,21 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
-#   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#   heartbeat              backlog readiness read ready or unknown through
+#                          bin/fm-ready-queue-lib.sh, or the fleet-scan backstop
+#                          found an unsurfaced captain-relevant status; a present
+#                          state/.afk emits every heartbeat. Readiness is checked
+#                          before the posture split, so ready queued work is
+#                          actionable in every posture and resets the idle
+#                          interval instead of waiting out backoff, while an away
+#                          heartbeat over a proven-empty queue stays plain for the
+#                          daemon's own triage and keeps the interval doubling. The
+#                          backlog consumer owns readiness; supervision rechecks
+#                          current stops and worker capacity. Otherwise the
+#                          heartbeat is absorbed: the schedule advances and the
+#                          interval doubles per consecutive absorbed pass, up to
+#                          FM_HEARTBEAT_MAX, and any surfaced non-heartbeat wake or
+#                          actionable heartbeat resets it.
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -396,21 +409,21 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
-# working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
-# than wake firstmate's LLM for each, this watcher classifies every wake in bash
-# and ABSORBS the benign majority - it advances the suppression marker, logs to a
-# debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
-# / stale path is absorb-only-on-positive-evidence. The shared proof is an actively
-# running no-mistakes step or a busy pane via crew_is_provably_working over
-# fm-crew-state.sh; where config/turnend-churn-absorb opts in, a bare turn-end alone
-# may also use bounded pane churn since the previous poll.
+# working: note or turn-end while a pipeline runs, a no-change heartbeat over an
+# empty queue). Rather than wake firstmate's LLM for each, this watcher
+# classifies every wake in bash and ABSORBS the benign majority - it advances the
+# suppression marker, logs to a debug log, and keeps blocking WITHOUT enqueuing
+# or exiting. The no-verb signal / stale path is absorb-only-on-positive-evidence.
+# The shared proof is an actively running no-mistakes step or a busy pane via
+# crew_is_provably_working over fm-crew-state.sh; where config/turnend-churn-absorb
+# opts in, a bare turn-end alone may also use bounded pane churn since the previous poll.
 # Every other crew that stopped its turn is SURFACED, so a finish reported
 # only through interactive pane menus (no done: status) is never swallowed. An
 # ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
 # eligible proof, any check, a stale pane whose crew is not provably working, a
-# provably-working stale past the threshold, or anything unknown) is written to
-# the durable queue and exits. That wakes the LLM through the background-task
-# completion. The same classifier
+# provably-working stale past the threshold, a heartbeat over ready or unknown
+# queue readiness, or anything unknown) is written to the durable queue and exits.
+# That wakes the LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
@@ -3567,6 +3580,9 @@ EOF
   return "$rc"
 }
 
+# shellcheck source=bin/fm-ready-queue-lib.sh
+. "$SCRIPT_DIR/fm-ready-queue-lib.sh"
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any status log carries a captain-relevant event past the position already
 # surfaced to firstmate (.hb-surfaced-<task>). It walks every log rather than only
@@ -4848,8 +4864,8 @@ EOF
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
-  # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
-  # surfaced non-heartbeat wake or actionable heartbeat backstop.
+  # absorbed heartbeat up to HEARTBEAT_MAX, and resets on any surfaced
+  # non-heartbeat wake or actionable heartbeat.
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
@@ -4894,12 +4910,15 @@ EOF
       hygiene_started=$(ps -o lstart= -p "$hygiene_worker" 2>/dev/null | sed 's/^[[:space:]]*//')
       printf '%s\t%s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
     fi
-    # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
-    # no-change case (advance the schedule and back off exactly as wake() would,
-    # without exiting); the away-mode daemon, when present, owns triage and wants
-    # every heartbeat.
-    if afk_present; then
+    # Triage: ready or unknown queue readiness resets idle backoff in every
+    # posture. Away-mode heartbeats with a proven-empty queue retain idle
+    # accounting; the daemon owns their triage and wants every heartbeat.
+    # Otherwise surface missed captain-relevant statuses or absorb no change.
+    if fm_ready_queue_needs_review; then
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat" actionable
+    elif afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
