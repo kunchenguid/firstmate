@@ -219,7 +219,8 @@ QUIET_SECS=${FM_PARK_QUIET_SECS:-900}
 READ_SECS=${FM_PARK_READ_SECS:-15}
 ACTION_SECS=${FM_PARK_ACTION_SECS:-900}
 TICK_SECS=${FM_PARK_TICK_SECS:-180}
-for v in "$QUIET_SECS" "$READ_SECS" "$ACTION_SECS" "$TICK_SECS"; do
+LOCK_SECS=${FM_PARK_LOCK_SECS:-60}
+for v in "$QUIET_SECS" "$READ_SECS" "$ACTION_SECS" "$TICK_SECS" "$LOCK_SECS"; do
   case "$v" in ''|*[!0-9]*) printf 'fm-park: timing overrides must be whole seconds\n' >&2; exit 2 ;; esac
 done
 
@@ -704,7 +705,7 @@ slot_release() {  # <id> <head>
   fi
   lock=$(fm_treehouse_project_lock_path "$project") \
     || { echo "the Treehouse project lock could not be resolved"; return 1; }
-  lock_wait "$lock" 60 || { echo "another slot allocation or return holds the project"; return 1; }
+  lock_wait "$lock" "$LOCK_SECS" || { echo "another slot allocation or return holds the project"; return 1; }
   fm_treehouse_slot_owner_state "$wt" "$id"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) ;;
@@ -750,7 +751,8 @@ release_due() {  # <id>
 
 # Leases a copy again for a released lane, checks out its ship branch, and
 # records it as the task's worktree; prints the copy, or the reason and
-# returns 1 (2 when the pool had no free copy). A copy the record already names and this task claims is reused,
+# returns 1 (2 when the pool had no free copy or another
+# allocation held the project lock). A copy the record already names and this task claims is reused,
 # so a retry after a failure takes no second slot.
 slot_reacquire() {  # <id>
   local id=$1 meta project branch head wt lock fresh=0 why=''
@@ -762,7 +764,7 @@ slot_reacquire() {  # <id>
   [ -n "$project" ] && [ -d "$project" ] || { echo "the project $project is missing"; return 1; }
   lock=$(fm_treehouse_project_lock_path "$project") \
     || { echo "the Treehouse project lock could not be resolved"; return 1; }
-  lock_wait "$lock" 60 || { echo "another slot allocation or return holds the project"; return 1; }
+  lock_wait "$lock" "$LOCK_SECS" || { echo "another slot allocation or return holds the project"; return 2; }
   wt=$(fm_meta_get "$meta" worktree)
   fm_treehouse_slot_owner_state "$wt" "$id"
   if ! fm_treehouse_pool_slot "$project" "$wt" || [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ]; then

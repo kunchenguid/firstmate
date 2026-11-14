@@ -983,6 +983,28 @@ test_due_rebase_relaunches_only_with_release_flag() {
   pass "with config/park-release-slot a parked branch that fell behind its base relaunches for the due rebase"
 }
 
+test_project_lock_contention_waits_and_a_later_tick_relaunches() {
+  local w head new lock out
+  w=$(release_world release-lock-busy "$GH_URL")
+  head=$(cat "$w/head")
+  new=$(cat "$w/treehouse.next")
+  gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  lock=$(FM_HOME="$w" fm_treehouse_project_lock_path "$w/project")
+  fm_lock_try_acquire "$lock" || fail "lock-busy: the test could not take the project lock"
+  out=$(FM_PARK_LOCK_SECS=1 tick_and_report "$w" lock-busy)
+  fm_lock_release "$lock"
+  case "$out" in "relaunch-waiting lane: PR $GH_URL (checks are failing on ${head:0:12}): no free copy yet, retrying on each tick: another slot allocation or return holds the project") ;; *) fail "lock-busy: tick output: $out" ;; esac
+  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "lock-busy: the contention was recorded as a failure"
+  [ ! -e "$w/control.log" ] || fail "lock-busy: a relaunch ran without a copy"
+
+  out=$(tick_and_report "$w" lock-freed)
+  case "$out" in "relaunched lane: PR $GH_URL - checks are failing on "*) ;; *) fail "lock-busy: freed tick output: $out" ;; esac
+  [ "$(fm_meta_get_test "$w" worktree)" = "$new" ] || fail "lock-busy: the retry did not record the new copy"
+  [ ! -e "$w/state/lane.review-park" ] || fail "lock-busy: park record kept after the relaunch"
+  pass "a released lane whose project lock is busy waits instead of failing, and a later tick relaunches it once the lock frees"
+}
+
 test_no_free_copy_waits_and_a_later_tick_relaunches_in_a_new_copy() {
   local w head new out
   w=$(release_world release-no-copy "$GH_URL")
@@ -1419,6 +1441,7 @@ fm_test_run \
   test_release_keeps_the_copy_when_it_cannot_be_returned_safely \
   test_release_retries_on_later_ticks \
   test_due_rebase_relaunches_only_with_release_flag \
+  test_project_lock_contention_waits_and_a_later_tick_relaunches \
   test_no_free_copy_waits_and_a_later_tick_relaunches_in_a_new_copy \
   test_slow_relaunch_is_never_cut_short_by_the_tick \
   test_tick_resumes_where_the_last_one_ran_out_of_time \
