@@ -5,7 +5,7 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
+#     "verdict":"routine"|"firstmate"|"captain","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible. A silent
 #     row must have verdict `routine`; the branch prompt and delivery consumers
@@ -76,9 +76,16 @@
 #     conversation memory.
 #
 # Usage:
-#   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
+#   fm-branch-outcome.sh append --task <id> --verdict routine|firstmate|captain \
 #       --summary <text> [--wake <text>] [--silent true|false]
 #     Append one outcome record; prints the assigned seq.
+#   fm-branch-outcome.sh handoff --seq <seq>
+#     Queue a firstmate outcome as a durable MAIN-owned check in either posture.
+#     Reporters call this before acknowledging the original wake; Pi also
+#     retries it before marking an unread firstmate row read during recovery.
+#     The wake queue owns delivery and acknowledgement, independently of the
+#     captain-only processed marker, so handling it cannot acknowledge a held
+#     captain decision. Replays prefer duplicate delivery over loss.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -124,8 +131,9 @@
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
 #     field is true, and mark those leading routine rows read. Stop before the
-#     first captain row because only Pi's sequence-keyed visible entry may
-#     acknowledge that row. Prints nothing when nothing replayable is unread.
+#     first non-routine row: captain rows need Pi's visible entry, and
+#     firstmate rows need their durable MAIN handoff before marking read.
+#     Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
 #   fm-branch-outcome.sh seed-tail
@@ -163,7 +171,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|firstmate|captain --summary <text> [--wake <text>] [--silent true|false] | handoff --seq <seq> | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -249,7 +257,7 @@ last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
-      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
+      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "firstmate" or .verdict == "captain"))
       and (.silent != true or .verdict == "routine");
     if endswith("\n") then split("\n")[:-1]
     else error("unterminated outcome store")
@@ -516,7 +524,7 @@ case "$CMD" in
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
-    case "$VERDICT" in routine|captain) ;; *) usage ;; esac
+    case "$VERDICT" in routine|firstmate|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
       echo "error: silent outcomes must have the routine verdict" >&2
@@ -558,6 +566,18 @@ case "$CMD" in
     fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    ;;
+  handoff)
+    [ "$#" -eq 2 ] && [ "$1" = --seq ] || usage
+    bounded_uint "$2" && [ "$2" -gt 0 ] || usage
+    ROW=$("$SCRIPT_DIR/fm-branch-outcome.sh" lookup --seqs "$2") || exit 1
+    [ "$(printf '%s\n' "$ROW" | jq -r .verdict)" = firstmate ] || {
+      echo "error: only a firstmate outcome may be handed to MAIN" >&2
+      exit 2
+    }
+    NOTE=$(printf '%s\n' "$ROW" | jq -r '"firstmate-outcome: seq \(.seq) for \(.task): \(.summary | gsub("[\\t\\n\\r]"; " "))"') || exit 1
+    fm_wake_append check "firstmate-outcome:$2" \
+      "check: $NOTE; MAIN owns this decision: check current state and decide within standing authority this turn, or escalate only an act reserved for the captain. Acknowledge this wake after handling it; do not defer a Firstmate-owned OPEN DECISIONS entry to the return brief."
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
@@ -755,9 +775,9 @@ case "$CMD" in
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
       REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '
-        map(.verdict) as $verdicts
-        | ($verdicts | index("captain")) as $captain
-        | .[0:($captain // length)][]
+        [ .[].verdict != "routine" ] as $actionable
+        | ($actionable | index(true)) as $stop
+        | .[0:($stop // length)][]
       ')
       VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then

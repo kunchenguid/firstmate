@@ -88,7 +88,8 @@ The other owners read the file at every arm.
 `bin/fm-branch-report.sh` appends to the outcome store (`bin/fm-branch-outcome.sh`) plus a per-turn receipt the host requires.
 A non-silent row an away turn records after the captain returned is also queued for main as a durable check wake.
 Silent outcomes remain in the store but are not queued or relayed as notes.
-An attended turn queues nothing: its captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.
+An attended turn's captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.
+Firstmate-owned outcomes use the main handoff in [Pi supervision branch](pi-supervision-branch.md#while-the-record-exists) in both postures.
 
 ### Leases and authority
 
@@ -136,7 +137,7 @@ The engine turn runs beside a captain who is present, so its guarded actions tak
 
 ### Away
 
-Every close goes to the engine; captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
+Every eligible close goes to the engine; Firstmate-owned handoffs stay on main, while captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
 Every turn that starts attended meets the attended rule again at its start, and the offer's scan is the scope the turn claims: a close accepted away whose turn starts attended, because the captain returned in between, or an attended close whose task turned main-only (a decision appeared) while the successor started, reaches main unchanged and leaves that successor cycle running, with the handoff that turn had confirmed handed back to downtime as already announced, so that successor does not announce the same close again.
 A captain who leaves while an attended turn runs turns its captain outcomes into away outcomes: they wait for the return too.
 
@@ -184,13 +185,14 @@ The host counts the wake handled only when all three hold:
 
 ### Where a handled wake's outcome goes
 
-Away, a handled wake never reaches main, whether its outcome was routine or captain.
+Away, a handled wake with a routine or captain outcome stays off main.
+An unresolved Firstmate-owned decision uses the durable main handoff described in [Pi supervision branch](pi-supervision-branch.md#while-the-record-exists).
 Captain outcomes wait in the outcome store, and after the return the drain's `BRANCH OUTCOMES` section presents them; the return brief (`bin/fm-afk-return.sh`) counts them and points there.
 Attended, see [Captain outcomes](#captain-outcomes).
 
 ### A captain who returns during a turn
 
-The one exception to the away rule is a captain who returns while an away turn is still running.
+A captain who returns while an away turn is still running also needs a handback.
 The return brief may have been rendered before that turn's visible outcomes existed.
 So the host hands the close to main with any visible outcomes for main to relay, whether or not the turn handled its wake.
 
@@ -227,7 +229,7 @@ An unprocessed captain outcome is never adopted as processed, including across a
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
 Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed.
 Main runs the printed acknowledgement for every presented outcome, settled and handled open ones alike.
-Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
+The branch prompt's "Verdict owner" section classifies actions main must take and reserves captain-only acts for the captain.
 
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.
 The captain row is still durable, and the next drain presents it until it is acknowledged.

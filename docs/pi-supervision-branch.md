@@ -52,7 +52,8 @@ The away posture, recorded by `state/.afk-contract`, hands every row to the bran
 
 While attended, captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries.
 They then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
-While away, the entries persist but processing waits until the record is archived.
+While away, captain entries persist but their processing waits until the record is archived.
+Firstmate-owned decisions use a separate durable main wake in either posture.
 
 ### Design source
 
@@ -458,7 +459,7 @@ A home with no processed marker, including an upgrade or switch from the supervi
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty.
 Deterministic entry delivery owns captain visibility.
 
-The branch prompt's "Verdict: routine or captain" section owns the classification criteria, including task-level silence eligibility and the rule to escalate doubt.
+The branch prompt's "Verdict owner" section owns the classification criteria, including task-level silence eligibility and ownership assessment.
 
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from:
 
@@ -567,7 +568,7 @@ A leftover `state/.afk` flag declines nothing.
 
 ### While the record exists
 
-- Every actionable row is branch-eligible.
+- Every actionable row except a Firstmate-owned outcome handoff is branch-eligible.
   Check rows, decision-owned signal and stale rows, and heartbeat rows are claimed by the branch on whatever wake finds them unread.
   The trigger class no longer forces a batch to main.
   The fail-closed scope checks in [Decision-owned rows](#decision-owned-rows), including ambiguous metadata ownership, still apply, as does structural queue validation.
@@ -575,6 +576,10 @@ A leftover `state/.afk` flag declines nothing.
 - Main is parked, and reachable only for the classes only main can act on:
   - A watcher-failure alarm is delivered to main as always, because `fm_watch_arm_pi` lives there.
   - A wake the branch declines or cannot take (a broken branch inside its cooldown, an unresolvable or corrupt scan) falls back to main exactly as attended.
+  - A structured `firstmate` outcome queues a durable main-owned check through `bin/fm-branch-outcome.sh handoff`.
+    The dispatcher excludes that check from branch claims in both postures, and the supervision host also hands back immediately after its turn reports one.
+    Main handles its still-open Firstmate-owned decisions in that turn under standing authority, including entries under OPEN DECISIONS, and acknowledges the wake through the ordinary drain.
+    This path never advances the captain-only processed marker or grants new authority.
 
   Parking is a cost and chat-cleanliness measure.
   Supervision continuity is the safety property, and the return brief's health section reads any gap.
@@ -603,7 +608,7 @@ The captain's away words are the whole mandate:
 - The branch reads them at the tail.
 - It decides by its own judgment whether the event in front of it is the moment they name.
 - It acts on them only through the guarded scripts, never by analogy.
-- It holds with verdict captain on doubt.
+- It holds the action on doubt and routes the decision under the branch prompt's "Verdict owner" policy.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
 It requires every action taken under the words to open its outcome summary with "per your away instructions:".

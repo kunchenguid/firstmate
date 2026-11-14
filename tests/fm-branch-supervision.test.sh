@@ -413,6 +413,31 @@ test_outcome_startup_replay_stops_at_captain_barrier() {
   pass "startup replay cannot advance the cursor across an unrendered captain outcome"
 }
 
+test_firstmate_handoff_survives_startup_without_acknowledging_captain_rows() {
+  local home replay unread out rc
+  home="$TMP_ROOT/store-firstmate-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict firstmate \
+    --summary 'arrange the approved closure review' >/dev/null || fail "firstmate append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-2 --verdict captain \
+    --summary 'red merge needs captain' >/dev/null || fail "captain append failed"
+  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "firstmate replay failed"
+  [ -z "$replay" ] || fail "startup replay crossed a firstmate handoff"
+  unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "firstmate unread failed"
+  assert_contains "$unread" '"seq":1' "startup lost the unqueued firstmate row"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff --seq 1 || fail "firstmate handoff failed"
+  assert_grep 'firstmate-outcome:1' "$home/state/.wake-queue" "handoff did not queue MAIN's check"
+  assert_grep 'arrange the approved closure review' "$home/state/.wake-queue" "handoff lost the decision"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff --seq 2 2>&1); rc=$?
+  expect_code 2 "$rc" "a captain verdict cannot become a firstmate handoff"
+  assert_contains "$out" 'only a firstmate outcome' "captain handoff refusal lost diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-3 --verdict firstmate \
+    --summary 'cannot hide a decision' --silent true 2>&1); rc=$?
+  expect_code 2 "$rc" "firstmate outcomes cannot be silent"
+  assert_absent "$home/state/.branch-outcomes-processed" "handoff acknowledged a held captain decision"
+  pass "firstmate handoffs survive startup and cannot release or silence captain decisions"
+}
+
 test_outcome_cursor_corruption_fails_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-corrupt-cursor-home"
@@ -1665,6 +1690,7 @@ test_outcome_seed_tail_creates_only_an_absent_display_tail
 test_outcome_seed_tail_only_reads_bounded_suffix
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
+test_firstmate_handoff_survives_startup_without_acknowledging_captain_rows
 test_outcome_cursor_corruption_fails_closed
 test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed

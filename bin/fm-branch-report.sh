@@ -15,11 +15,12 @@
 # the host's turn record; this script only compares against it.
 #
 # Usage:
-#   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
+#   fm-branch-report.sh --task <id|fleet> --verdict routine|firstmate|captain \
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
-# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine outcome.
+# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict owner");
+# --silent true is legal only for a routine outcome. A firstmate outcome
+# queues a durable MAIN-owned check before the host receipt is written.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -78,10 +79,10 @@ done
 
 TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
+case "$VERDICT" in routine|firstmate|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
-  echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
+  echo "invalid report: --task, --verdict (routine|firstmate|captain), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
@@ -123,10 +124,20 @@ if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then
   echo "outcome store append failed (nothing recorded)" >&2
   exit 1
 fi
+if [ "$VERDICT" = firstmate ]; then
+  if ! "$SCRIPT_DIR/fm-branch-outcome.sh" handoff --seq "$SEQ"; then
+    echo "recorded seq $SEQ, but its MAIN handoff failed; the original wake remains unhandled" >&2
+    exit 1
+  fi
+fi
 printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
+if [ "$VERDICT" = firstmate ]; then
+  printf 'recorded seq %s [firstmate]; queued for MAIN in either posture\n' "$SEQ"
+  exit 0
+fi
 if [ "$SILENT" = true ]; then
   printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
   exit 0

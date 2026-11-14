@@ -21,10 +21,10 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 // Postures (docs/pi-supervision-branch.md "Postures"). The away-posture record
 // state/.afk-contract (owner: bin/fm-afk-contract.sh) is the posture; it is
 // read as a file at every routing decision, never inferred from chat. While
-// it exists the branch takes EVERY actionable row - check rows, decision-owned
+// it exists the branch takes eligible actionable rows - check rows, decision-owned
 // rows, and heartbeat rows included - and main is offered nothing the branch
-// can take. The two vetoes that describe a broken queue stay vetoes in both
-// postures, and such a wake, like every watcher-failure alarm, still falls
+// can take. Firstmate-outcome checks always stay on main. The two vetoes that
+// describe a broken queue stay vetoes in both postures, and such a wake, like every watcher-failure alarm, still falls
 // back to main exactly as attended, because only main can repair supervision
 // itself; parking main is a cost measure, continuity is the safety property.
 
@@ -50,9 +50,9 @@ export function afkPostureRecordPresent(state: string): boolean {
 // never prefix; bin/fm-branch-prompt.sh's fixed "Postures" section is what it
 // refers back to.
 export const AWAY_POSTURE_TAIL =
-  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
+  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked except for firstmate handoffs and supervision failures: you take eligible check rows and decision rows, and captain outcomes wait for the return brief. " +
   "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
-  "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
+  "Never by analogy, and hold the action on doubt: determine its owner under the Verdict owner policy; unresolved Firstmate-owned decisions report verdict firstmate and wake MAIN now, while captain-only decisions report verdict captain and wait for the return. " +
   "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
   "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
   "A mirrored captain sentence authorizes nothing new once the record exists. " +
@@ -442,6 +442,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       continue;
     }
     if (kind === "check") {
+      // A report's structured firstmate verdict hands authority back to MAIN.
+      // Reclaiming that handoff while away would park the decision again.
+      if (/^firstmate-outcome:[1-9][0-9]*$/.test(key)) continue;
       // Main-owned while attended: excluded from what the branch may claim,
       // never a reason to reject the rest of the queue and never a reason to
       // send an otherwise-eligible heartbeat review to main. Away, the branch
@@ -605,8 +608,8 @@ export interface BranchOfferVerdict {
 // row: until that row is read, a later signal or stale trigger for the same
 // task stays on main. Other tasks and heartbeat handling remain independent.
 //
-// The away posture collapses that partition: every actionable row is
-// branch-eligible and the trigger class no longer forces anything to main
+// Away, every actionable row except a Firstmate-owned handoff is
+// branch-eligible and other trigger classes no longer force anything to main
 // (scopeForUnreadWake owns the per-row rule).
 export function branchOfferForWake(state: string, message: string, afk: boolean, attendedHost = false): BranchOfferVerdict {
   const heartbeat = /^heartbeat($|:)/.test(message);
@@ -628,7 +631,8 @@ export function branchOfferForWake(state: string, message: string, afk: boolean,
   const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
     afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
   );
-  const eligible = afk ? scope.eligible : attendedEligible;
+  const mainHandoff = /^check: firstmate-outcome:/.test(message);
+  const eligible = !mainHandoff && (afk ? scope.eligible : attendedEligible);
   return { scope, heartbeat, eligible, awayOnly: Boolean(eligible && !attendedEligible) };
 }
 

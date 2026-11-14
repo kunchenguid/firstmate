@@ -1036,10 +1036,12 @@ handle_wake() {  # <reason-lines>
     attended_acceptor "$first" || return 2
     scope=$ATTENDED_OFFER
   else
-    set --
-    case "$first" in heartbeat*) set -- --heartbeat ;; esac
-    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
+    if ! scope=$(printf '%s\n' "$first" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer --afk 2>/dev/null); then
       HANDLE_WHY="branch eligibility could not be computed"
+      return 1
+    fi
+    if [ "$(printf '%s\n' "$scope" | sed -n 's/^eligible=//p')" != 1 ]; then
+      HANDLE_WHY="a MAIN-owned handoff or unsafe wake must be handled by MAIN"
       return 1
     fi
   fi
@@ -1362,6 +1364,13 @@ while :; do
   elif [ "$RETURNED_LOOKUP_FAILED" -eq 1 ]; then
     exit_to_main "the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
       "$(turn_outcome_lookup_warning)"
+  fi
+  # Firstmate outcomes already queued their durable checks. Hand back now,
+  # even away, rather than waiting for another watcher cycle to open MAIN.
+  FIRSTMATE_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn && $3 == "firstmate" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
+  if [ -n "$FIRSTMATE_SEQS" ]; then
+    ARM_TEXT=
+    exit_to_main "firstmate-outcome: the supervision session needs MAIN's standing authority (store rows $FIRSTMATE_SEQS); run bin/fm-wake-drain.sh and decide the queued firstmate-outcome checks this turn, including Firstmate-owned OPEN DECISIONS; captain-only outcomes still wait for the return" "$HEALTH_NOTE"
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close
