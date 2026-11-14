@@ -7,12 +7,16 @@
 # way a fleet-launched pane does.
 set -u
 
-# A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set that
-# override themselves, so drop the inherited one before any git command.
-unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
+# A fleet pane already carries GIT_CONFIG core.hooksPath, and a wrapped hook
+# exports FM_GIT_HOOK_ACTIVE. These cases control both themselves, so drop the
+# inherited values before any git command.
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS FM_GIT_HOOK_ACTIVE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 STRIP="$ROOT/bin/fm-git-strip-ai-trailers.sh"
 TMP_ROOT=$(fm_test_tmproot fm-git-strip-ai-trailers)
@@ -28,6 +32,24 @@ with_hooks_env() {  # <hooks-dir> <command...>
 make_repo() {
   local dir=$1
   fm_git_init_commit "$dir"
+}
+
+test_push_guard_runs_with_inherited_reentrancy_sentinel() {
+  local repo hooks guard bare out rc
+  repo="$TMP_ROOT/push-guard-sentinel"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-sentinel-origin.git"
+  git init -q --bare "$bare"
+  git -C "$repo" remote add origin "file://$bare"
+  guard="$TMP_ROOT/push-guard-sentinel-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard-sentinel"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  out=$(FM_GIT_HOOK_ACTIVE=1 with_hooks_env "$hooks" git -C "$repo" push origin HEAD:refs/heads/main 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an inherited FM_GIT_HOOK_ACTIVE let a refused push through the guard"
+  assert_contains "$out" "fm-git-push-guard: refused:" "the guard was skipped under an inherited sentinel"
+  pass "the push guard still runs and refuses with FM_GIT_HOOK_ACTIVE inherited"
 }
 
 test_cursor_trailer_does_not_reach_the_commit_object() {
@@ -455,6 +477,130 @@ test_cortex_attribution_does_not_reach_the_commit_object() {
   pass "Cortex Code's Generated with line and co-author trailer are stripped; a human at its vendor domain is kept"
 }
 
+test_reentrant_hook_cycle_exits_at_first_reentry() {
+  local repo hooks stubbin depthlog maxdepth body outer
+  repo="$TMP_ROOT/reentry"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-reentry"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  # A repository hook that fires git the way an integration block does:
+  # hook -> bd -> git -> hook. The pane wrappers deliberately scrub the
+  # GIT_CONFIG environment before chaining, so a bare nested git resolves the
+  # repository hooks directly and never re-enters a wrapper. The fake bd below
+  # instead carries the pane hooks override on its own command line, the way a
+  # child process inherits a git -c override - the channel the wrapper header
+  # names as live. That nested entry reaches a pane wrapper a second time on
+  # the same stack with a different hooks resolution, which no path comparison
+  # can recognize. Without the re-entrancy sentinel this recursed until
+  # something external killed it; the depth cap stands in for that kill so the
+  # failure is fast instead of hanging the suite, and the assertion reads the
+  # cap it never should reach.
+  stubbin="$TMP_ROOT/reentry-bin"
+  mkdir -p "$stubbin"
+  depthlog="$TMP_ROOT/reentry.depth"
+  rm -f "$depthlog"
+  cat >"$stubbin/bd" <<SH
+#!/usr/bin/env bash
+# Fake bd: the nested commit carries the pane hooks override the way a child
+# process inherits a git -c override, so the nested entry reaches a pane
+# wrapper a second time on the same stack.
+exec git -c core.hooksPath="$hooks" -C "$repo" commit --allow-empty -q -m "nested"
+SH
+  chmod 700 "$stubbin/bd"
+  cat >"$repo/.git/hooks/post-commit" <<SH
+#!/usr/bin/env bash
+depth=\${REENTRY_DEPTH:-0}
+printf '%s\\n' "\$depth" >> "$depthlog"
+if [ "\$depth" -ge 3 ]; then
+  exit 0
+fi
+export REENTRY_DEPTH=\$((depth + 1))
+PATH="$stubbin:\$PATH" bd hooks run post-commit || true
+exit 0
+SH
+  chmod 700 "$repo/.git/hooks/post-commit"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  with_hooks_env "$hooks" fm_run_timed 60 git -C "$repo" commit -q \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: reentrant cycle' ||
+    fail "commit through a re-entered wrapper hung or failed"
+  [ -f "$depthlog" ] || fail "the repository post-commit hook never ran, so the chain is broken"
+  maxdepth=$(sort -rn "$depthlog" | head -1)
+  [ "$maxdepth" = "0" ] ||
+    fail "the hook re-entered to depth $maxdepth; without the depth cap this hangs"
+  [ "$(wc -l < "$depthlog" | tr -d ' ')" = "1" ] ||
+    fail "the repository hook ran more than once; the re-entrant entry must exit at once"
+  # The nested commit lands on the branch: re-entrant git proceeds, only the
+  # hooks are shed. So HEAD is the nested commit and HEAD~1 is the outer one.
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_contains "$body" "nested" "the nested commit did not land; re-entrant git must proceed"
+  outer=$(git -C "$repo" log -1 --format=%B HEAD~1)
+  assert_not_contains "$outer" "cursoragent@cursor.com" "Cursor trailer survived a commit through the re-entered wrapper"
+  assert_contains "$outer" "fix: reentrant cycle" "subject was rewritten"
+  pass "a hook re-entered through bd-style nesting exits at once instead of recursing"
+}
+
+test_wrapper_copy_inside_repository_hookspath_completes() {
+  local repo hooks copyland body
+  repo="$TMP_ROOT/self-copy"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-self-copy"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  # Beads preserves the pane's hooks into .beads/hooks on init and then points
+  # core.hooksPath there, so the repository's own hooks directory ends up
+  # holding a copy of this wrapper. That copy's chain lookup names its own
+  # directory, which used to exec the copy again forever while git waited for
+  # a hook exit that never came. No pane override here: bd scrubs the fleet
+  # environment before running git, so the lookup resolves the repository's
+  # own config only.
+  copyland="$repo/.beads-hooks"
+  mkdir -p "$copyland"
+  cp "$hooks/prepare-commit-msg" "$copyland/prepare-commit-msg"
+  cp "$hooks/commit-msg" "$copyland/commit-msg"
+  chmod 700 "$copyland/prepare-commit-msg" "$copyland/commit-msg"
+  git -C "$repo" config core.hooksPath "$copyland"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  fm_run_timed 60 git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: self-contained wrapper' ||
+    fail "commit through a wrapper copy inside the repository hooks hung or failed"
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "Cursor trailer survived a commit through the copied wrapper"
+  assert_contains "$body" "fix: self-contained wrapper" "subject was rewritten"
+  pass "a wrapper copy inside the repository hooks completes instead of re-entering itself"
+}
+
+# The guarded pre-push wrapper deliberately carries no re-entrancy sentinel (a
+# skipped guard would fail open), so the -ef self-copy check in its chain is the
+# only thing stopping a copy of it from exec-ing itself forever.
+test_push_guard_wrapper_copy_inside_repository_hookspath_completes() {
+  local repo hooks guard bare mirror copyland out rc
+  repo="$TMP_ROOT/push-guard-self-copy"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-self-copy-origin.git"
+  mirror="$TMP_ROOT/push-guard-self-copy-mirror.git"
+  git init -q --bare "$bare"
+  git init -q --bare "$mirror"
+  git -C "$repo" remote add origin "file://$bare"
+  git -C "$repo" remote add mirror "file://$mirror"
+  guard="$TMP_ROOT/push-guard-self-copy-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard-self-copy"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  # Beads copies the pane's hooks into the repository and points core.hooksPath
+  # there, so the chain lookup of the copy names its own directory.
+  copyland="$repo/.beads-hooks"
+  mkdir -p "$copyland"
+  cp "$hooks/pre-push" "$copyland/pre-push"
+  chmod 700 "$copyland/pre-push"
+  git -C "$repo" config core.hooksPath "$copyland"
+  rc=0
+  out=$(fm_run_timed 60 git -C "$repo" push mirror HEAD:refs/heads/side 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a push through a pre-push wrapper copy inside the repository hooks hung or failed (rc=$rc): $out"
+  git -C "$mirror" rev-parse --verify -q refs/heads/side >/dev/null \
+    || fail "the push through the copied guarded wrapper never landed"
+  pass "a guarded pre-push wrapper copy inside the repository hooks completes instead of re-entering itself"
+}
+
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
   msg="$TMP_ROOT/msg.txt"
@@ -538,8 +684,12 @@ test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
 test_env_file_canonicalizes_hooks_dir
 test_cortex_attribution_does_not_reach_the_commit_object
+test_reentrant_hook_cycle_exits_at_first_reentry
+test_wrapper_copy_inside_repository_hookspath_completes
+test_push_guard_wrapper_copy_inside_repository_hookspath_completes
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 test_no_strip_keeps_the_message_and_still_chains
 test_push_guard_install_runs_the_guard_before_chaining
+test_push_guard_runs_with_inherited_reentrancy_sentinel
 
 echo "# all fm-git-strip-ai-trailers tests passed"
