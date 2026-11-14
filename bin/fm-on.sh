@@ -49,8 +49,10 @@
 # 900) - every --bounded call to that host fails at once with 255 without
 # dialing it, so one stuck host costs a supervision cycle at most one bound
 # per backoff window. Any --bounded call that completes without hitting the
-# bound clears the record. Calls without --bounded keep the unbounded
-# behavior above and never consult or change the record. bin/fm-watch.sh
+# bound clears the record. A per-host lock, state/.remote-call-timeout-<host>.lock,
+# serializes that clear and each count update; a call that cannot take it
+# within two seconds leaves the record as it is. Calls without --bounded keep
+# the unbounded behavior above and never consult or change the record. bin/fm-watch.sh
 # turns a record whose count reaches FM_REMOTE_CALL_WAKE_AFTER into one wake.
 #
 # Per-host backoff alone still lets several stuck hosts each spend a bound in
@@ -188,6 +190,7 @@ BOUND=$((CALL_TIMEOUT + BOUND_EXTRA))
 STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 TIMEOUT_DIR="$STATE_DIR/remote-call-timeouts"
 TIMEOUT_RECORD="$TIMEOUT_DIR/$HOST"
+TIMEOUT_LOCK="$STATE_DIR/.remote-call-timeout-$HOST.lock"
 BUDGET_FILE=${FM_REMOTE_CALL_BUDGET_FILE:-}
 # One line naming the remote command for diagnostics and the wake, with control
 # bytes flattened so another machine's arguments cannot shape the record.
@@ -196,6 +199,16 @@ CALL_LABEL=${CALL_LABEL% }
 
 record_field() {  # <field>
   sed -n "s/^$1=//p" "$TIMEOUT_RECORD" 2>/dev/null | head -1
+}
+
+# Serializes the record's read-modify-write and its clear against concurrent
+# bounded calls to the same host (the watcher and the procevent reply runner).
+# The wait is capped at two seconds, and a lock not taken by then skips the
+# record update rather than stall the caller.
+lock_record() {
+  # shellcheck source=bin/fm-wake-lib.sh
+  command -v fm_lock_acquire_wait_max >/dev/null 2>&1 || . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait_max "$TIMEOUT_LOCK" 2
 }
 
 NOW=$(date +%s)
@@ -243,7 +256,10 @@ fi
 ELAPSED=$((SECONDS - STARTED))
 [ -z "$BUDGET_FILE" ] || printf '%s\n' "$((SPENT + ELAPSED))" > "$BUDGET_FILE" 2>/dev/null || true
 if ! fm_timed_out "$RC" || [ "$ELAPSED" -lt "$EFFECTIVE_BOUND" ]; then
-  [ ! -e "$TIMEOUT_RECORD" ] || rm -f -- "$TIMEOUT_RECORD" 2>/dev/null || true
+  if [ -e "$TIMEOUT_RECORD" ] && lock_record; then
+    rm -f -- "$TIMEOUT_RECORD" 2>/dev/null || true
+    fm_lock_release "$TIMEOUT_LOCK" || true
+  fi
   exit "$RC"
 fi
 if [ "$EFFECTIVE_BOUND" -lt "$BOUND" ]; then
@@ -252,6 +268,11 @@ if [ "$EFFECTIVE_BOUND" -lt "$BOUND" ]; then
   exit 255
 fi
 
+if ! lock_record; then
+  printf 'error: remote command on host %s timed out after %ss (timeout record busy, not updated): %s\n' \
+    "$HOST" "$BOUND" "$CALL_LABEL" >&2
+  exit 255
+fi
 COUNT=1 STREAK="$(date +%s)-$$"
 if [ -f "$TIMEOUT_RECORD" ] && [ ! -L "$TIMEOUT_RECORD" ]; then
   COUNT=$(record_field count)
@@ -272,4 +293,5 @@ if mkdir -p "$TIMEOUT_DIR" 2>/dev/null && [ ! -L "$TIMEOUT_DIR" ] \
     rm -f -- "$RECORD_TMP"
   fi
 fi
+fm_lock_release "$TIMEOUT_LOCK" || true
 exit 255

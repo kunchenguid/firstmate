@@ -1165,12 +1165,14 @@ EOF
 
 # One wake per streak of bounded remote-call timeouts to a host. bin/fm-on.sh
 # owns each record, keeps its streak id across consecutive timeouts, and removes
-# it when a bounded call completes. This tick never rewrites a record: it notes
-# the streak it already woke for in a sibling .woken.<host> marker and drops
+# it when a bounded call completes. This tick never rewrites a record: it queues
+# the wake first and only then notes the streak it woke for in a sibling
+# .woken.<host> marker, so an append that fails or is interrupted is retried
+# next cycle (the queued key keeps a retry from doubling the row). It drops
 # markers whose record is gone, so a record that vanishes or changes while it
 # is read only skips that host this cycle.
 remote_call_timeout_tick() {
-  local dir="$STATE/remote-call-timeouts" rec marker host count bound command streak reason key tmp first_reason=''
+  local dir="$STATE/remote-call-timeouts" rec marker host count bound command streak reason key tmp i first_reason=''
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] && [ ! -L "$rec" ] || continue
@@ -1187,13 +1189,22 @@ remote_call_timeout_tick() {
     command=$(sed -n 's/^command=//p' "$rec" 2>/dev/null | head -1 | fm_wake_clean_field)
     reason="check: remote host $host timed out $count consecutive times running $command (bound ${bound}s); the remote command is alive but stuck - inspect that host (disk space, load, its remote job worker); bounded polls to it back off meanwhile"
     key="remote-call-timeout-$host"
+    # Test seam: hold here, between reading the record and acting on it, until
+    # the named gate file is removed (at most 10s).
+    if [ -n "${FM_TEST_REMOTE_TIMEOUT_TICK_GATE:-}" ]; then
+      : > "$FM_TEST_REMOTE_TIMEOUT_TICK_GATE.reached"
+      i=0
+      while [ -e "$FM_TEST_REMOTE_TIMEOUT_TICK_GATE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    fi
+    # A record cleared or restarted while it was read no longer holds this streak.
+    [ "$(sed -n 's/^streak=//p' "$rec" 2>/dev/null | head -1)" = "$streak" ] || continue
+    fm_wake_queued_keys check | grep -Fx "$key" >/dev/null 2>&1 \
+      || fm_wake_append check "$key" "$reason" || return 1
     tmp=$(umask 077; mktemp "$dir/.woken-tmp.XXXXXX") || return 1
     if ! { printf '%s\n' "$streak" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
       rm -f -- "$tmp"
       return 1
     fi
-    fm_wake_queued_keys check | grep -Fx "$key" >/dev/null 2>&1 \
-      || fm_wake_append check "$key" "$reason" || return 1
     [ -n "$first_reason" ] || first_reason=$reason
   done
   for marker in "$dir"/.woken.*; do

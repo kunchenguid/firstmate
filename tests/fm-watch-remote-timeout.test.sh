@@ -280,10 +280,58 @@ test_tick_tolerates_a_record_cleared_concurrently() {
   pass "the timeout tick never rewrites a record and a new streak wakes again"
 }
 
+# The record is cleared while a running watcher's tick holds it mid-read: the
+# tick must skip that host without exiting the watcher or waking on it.
+test_tick_skips_a_record_cleared_while_it_reads() {
+  local w n pid i=0 gate
+  w=$(make_world midread)
+  for n in 1 2 3; do
+    on "$w" FM_REMOTE_CALL_TIMEOUT=1 FM_REMOTE_CALL_BACKOFF=0 -- \
+      --bounded rsm1 fm-remote-file.sh get data/r.md 10 > /dev/null 2>&1 || true
+  done
+  [ -f "$w/home/state/remote-call-timeouts/lab-host" ] || fail "the timeouts left no record to race on"
+  touch "$w/home/state/home-summary.json"
+  fm_test_track_watcher_state "$w/home/state"
+  gate="$w/tick-gate"
+  : > "$gate"
+  FM_HOME="$w/home" FM_STATE_OVERRIDE="$w/home/state" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_DATA_OVERRIDE="$w/home/data" FM_POLL=1 FM_REMOTE_CALL_WAKE_AFTER=3 \
+    FM_TEST_REMOTE_TIMEOUT_TICK_GATE="$gate" \
+    bash "$ROOT/bin/fm-watch.sh" > "$w/out" 2> "$w/err" &
+  pid=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.reached" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1; i=$((i + 1))
+  done
+  if [ ! -e "$gate.reached" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "the tick never reached the read gate: $(cat "$w/err")"
+  fi
+  on "$w" FM_REMOTE_CALL_BACKOFF=0 FM_FAKE_SSH_REPLY=alive -- \
+    --bounded rsm1 fm-remote-secondmate-control.sh state rsm1 > /dev/null 2>&1 \
+    || fail "a recovered host should answer"
+  [ ! -e "$w/home/state/remote-call-timeouts/lab-host" ] || fail "the completed call did not clear the record"
+  rm -f "$gate"
+  sleep 2
+  kill -0 "$pid" 2>/dev/null || fail "the watcher exited after the record vanished mid-read: $(cat "$w/err")"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  ! grep -F 'remote-call timeout check failed' "$w/err" >/dev/null \
+    || fail "a record cleared mid-read made the tick fail: $(cat "$w/err")"
+  ! grep -F 'lab-host' "$w/out" >/dev/null \
+    || fail "the tick woke on a record cleared mid-read: $(cat "$w/out")"
+  ! grep -F 'remote-call-timeout' "$w/home/state/.wake-queue" >/dev/null 2>&1 \
+    || fail "the tick queued a wake for a record cleared mid-read: $(cat "$w/home/state/.wake-queue")"
+  [ -z "$(ls -A "$w/home/state/remote-call-timeouts")" ] \
+    || fail "the tick left state for a cleared record: $(ls -A "$w/home/state/remote-call-timeouts")"
+  pass "a record cleared while the tick reads it is skipped without exiting or waking"
+}
+
 fm_test_run test_bounded_call_times_out_as_unavailable \
   test_timed_out_host_backs_off_without_another_bound \
   test_watcher_cycle_is_not_stalled_by_a_blocked_remote \
   test_repeated_timeouts_wake_once_naming_host_and_command \
   test_stuck_hosts_share_one_cycle_budget \
   test_remote_exit_before_the_bound_is_not_a_timeout \
-  test_tick_tolerates_a_record_cleared_concurrently
+  test_tick_tolerates_a_record_cleared_concurrently \
+  test_tick_skips_a_record_cleared_while_it_reads
