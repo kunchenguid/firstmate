@@ -1560,11 +1560,28 @@ require_app_worktree_id() {  # <meta> <backend>
   printf '%s\n' "$id"
 }
 
+# app_worktree_released=<worktree-id> is written only after the backend
+# confirmed it released that exact worktree. A retry after a later reporting or
+# export failure then skips the id/path gate, the terminal close, and the
+# release (the recorded folder is gone by design) and finishes the rest.
+APP_WORKTREE_RELEASED=0
 if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
   APP_WORKTREE_ID=$(require_app_worktree_id "$META" "$BACKEND") || exit 1
   T_APP=$(meta_value "$META" terminal)
   [ -z "$T_APP" ] || T=$T_APP
+  [ "$(meta_value "$META" app_worktree_released)" != "$APP_WORKTREE_ID" ] || APP_WORKTREE_RELEASED=1
 fi
+
+# Atomically append the released marker to the task record.
+record_app_worktree_released() {
+  local tmp="$META.released.$$"
+  cp -p -- "$META" "$tmp" \
+    && { [ ! -s "$tmp" ] || [ -z "$(tail -c 1 -- "$tmp")" ] || printf '\n' >> "$tmp"; } \
+    && printf 'app_worktree_released=%s\n' "$APP_WORKTREE_ID" >> "$tmp" \
+    && mv -f -- "$tmp" "$META" && return 0
+  rm -f -- "$tmp"
+  return 1
+}
 
 # Where a harness's firstmate-owned global turn-end registry entry lives is
 # owned by bin/fm-control-lib.sh, so teardown and the control plane's relaunch
@@ -3795,7 +3812,8 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ] \
+   && [ "$APP_WORKTREE_RELEASED" != 1 ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: $(fm_backend_worktree_owner_label "$BACKEND") ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
@@ -4058,7 +4076,9 @@ if [ "$BACKEND" = t3code ]; then
   }
 fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
+if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ] && [ "$APP_WORKTREE_RELEASED" = 1 ]; then
+  echo "note: the $(fm_backend_worktree_owner_label "$BACKEND") worktree $APP_WORKTREE_ID for $ID was already released by an earlier teardown; finishing the remaining cleanup" >&2
+elif fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
   if [ "$APP_PATH_MATCH_VERIFIED" != 1 ]; then
     require_app_worktree_path_match "$BACKEND" "$APP_WORKTREE_ID" "$WT" || exit 1
     APP_PATH_MATCH_VERIFIED=1
@@ -4081,6 +4101,10 @@ if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
   fi
   fm_backend_remove_worktree "$BACKEND" "$APP_WORKTREE_ID" || {
     echo "error: could not release the $(fm_backend_worktree_owner_label "$BACKEND") worktree $APP_WORKTREE_ID for $ID; preserving the task record for retry" >&2
+    exit 1
+  }
+  record_app_worktree_released || {
+    echo "error: released the $(fm_backend_worktree_owner_label "$BACKEND") worktree $APP_WORKTREE_ID for $ID but could not record app_worktree_released= in $META; a retry will refuse at the id/path gate" >&2
     exit 1
   }
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then

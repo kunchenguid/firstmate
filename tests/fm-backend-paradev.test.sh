@@ -1052,6 +1052,50 @@ test_scout_teardown_refuses_missing_worktree_path() {
   pass "fm-teardown.sh backend=paradev: a missing recorded worktree refuses archive for scouts and recovery records"
 }
 
+# Archive succeeds, then the record export fails: the record keeps
+# app_worktree_released=, and a rerun finishes without touching Paradev again.
+# Without the marker the same record (its folder now gone) is still refused.
+test_teardown_retry_after_archive_skips_released_workspace() {
+  local kind id out rc
+  for kind in scout ship; do
+    id="pdretry${kind}z1"
+    teardown_fixture "$id" "retry-$kind" "$kind"
+    sed -i.bak 's/^mode=no-mistakes$/mode=local-only/' "$STATE/$id.meta" && rm -f "$STATE/$id.meta.bak"
+    respond workspaces-get "$(ws_row "$WS" "$WT")"
+    printf 'relative/export-root\n' > "$CONFIG/record-export-root"
+    out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$kind teardown should fail when the record export fails"$'\n'"$out"
+    assert_contains "$out" "record export archive failed for $id" "$kind: the failure should come from the export step"
+    log_has "superset${SEP}workspaces${SEP}archive${SEP}$WS${SEP}--local${SEP}--json" "$kind: the first attempt should archive"
+    assert_present "$STATE/$id.meta" "$kind: a failed export must keep the record"
+    grep -qx "app_worktree_released=$WS" "$STATE/$id.meta" || fail "$kind: the confirmed archive should be recorded"
+    # Paradev deletes the folder on archive.
+    git -C "$PROJ" worktree remove --force "$WT"
+    rm -f "$CONFIG/record-export-root"
+
+    grep -v '^app_worktree_released=' "$STATE/$id.meta" > "$STATE/$id.nomarker"
+    cp -p "$STATE/$id.meta" "$STATE/$id.withmarker"
+    cp "$STATE/$id.nomarker" "$STATE/$id.meta"
+    : > "$LOG"
+    out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$kind: without the marker a missing recorded path must still refuse"
+    log_lacks "superset${SEP}workspaces${SEP}archive" "$kind: an unmarked record with no folder must not archive"
+    assert_present "$STATE/$id.meta" "$kind: the unmarked refusal keeps the record"
+
+    mv "$STATE/$id.withmarker" "$STATE/$id.meta"
+    rm -f "$STATE/$id.nomarker"
+    : > "$LOG"
+    out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+    rc=$?
+    expect_code 0 "$rc" "$kind: the retry should finish once the export is fixed"$'\n'"$out"
+    [ ! -s "$LOG" ] || fail "$kind: the retry must make no Paradev calls, got: $(cat "$LOG")"
+    assert_absent "$STATE/$id.meta" "$kind: the retry should retire the record"
+  done
+  pass "fm-teardown.sh backend=paradev: a retry after a confirmed archive finishes without re-archiving"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1106,3 +1150,4 @@ test_teardown_preserves_record_when_archive_fails
 test_spawn_recovery_record_without_terminal_tears_down
 test_recovery_record_without_terminal_refuses_unsafe_release
 test_scout_teardown_refuses_missing_worktree_path
+test_teardown_retry_after_archive_skips_released_workspace
