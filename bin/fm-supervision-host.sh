@@ -1040,10 +1040,6 @@ handle_wake() {  # <reason-lines>
       HANDLE_WHY="branch eligibility could not be computed"
       return 1
     fi
-    if [ "$(printf '%s\n' "$scope" | sed -n 's/^eligible=//p')" != 1 ]; then
-      HANDLE_WHY="a MAIN-owned handoff or unsafe wake must be handled by MAIN"
-      return 1
-    fi
   fi
   status=$(printf '%s\n' "$scope" | sed -n 's/^status=//p')
   corrupted=$(printf '%s\n' "$scope" | sed -n 's/^corrupted=//p')
@@ -1054,7 +1050,15 @@ handle_wake() {  # <reason-lines>
     HANDLE_WHY="a queued wake could not be read or resolved to a task record, so its scope is unknown"
     return 1
   fi
-  if [ "$status" = empty ] || [ -z "$rows" ]; then
+  if [ "$status" = empty ]; then
+    log_line "no-op	nothing for the branch to claim	$first"
+    return 0
+  fi
+  if [ "$TURN_POSTURE" = away ] && [ "$(printf '%s\n' "$scope" | sed -n 's/^eligible=//p')" != 1 ]; then
+    HANDLE_WHY="a MAIN-owned handoff or unsafe wake must be handled by MAIN"
+    return 1
+  fi
+  if [ -z "$rows" ]; then
     log_line "no-op	nothing for the branch to claim	$first"
     return 0
   fi
@@ -1370,7 +1374,16 @@ while :; do
   FIRSTMATE_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn && $3 == "firstmate" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
   if [ -n "$FIRSTMATE_SEQS" ]; then
     ARM_TEXT=
-    exit_to_main "firstmate-outcome: the supervision session needs MAIN's standing authority (store rows $FIRSTMATE_SEQS); run bin/fm-wake-drain.sh and decide the queued firstmate-outcome checks this turn, including Firstmate-owned OPEN DECISIONS; captain-only outcomes still wait for the return" "$HEALTH_NOTE"
+    if fm_afk_contract_away_present "$STATE"; then
+      exit_to_main "firstmate-outcome: the supervision session needs MAIN's standing authority (store rows $FIRSTMATE_SEQS); run bin/fm-wake-drain.sh and decide the queued firstmate-outcome checks this turn, including Firstmate-owned OPEN DECISIONS; captain-only outcomes still wait for the return" "$HEALTH_NOTE"
+    fi
+    CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
+    CAPTAIN_HANDOFF=
+    if [ -n "$CAPTAIN_SEQS" ]; then
+      CAPTAIN_HANDOFF="supervision-host: branch-outcome: the supervision session recorded captain outcomes (store rows $CAPTAIN_SEQS); process the drain's BRANCH OUTCOMES section this turn and acknowledge them as it prints"
+    fi
+    exit_to_main "firstmate-outcome: the supervision session needs MAIN's standing authority (store rows $FIRSTMATE_SEQS); run bin/fm-wake-drain.sh and decide the queued firstmate-outcome checks this turn, including Firstmate-owned OPEN DECISIONS" \
+      "${CAPTAIN_HANDOFF}${HEALTH_NOTE:+${CAPTAIN_HANDOFF:+$'\n'}$HEALTH_NOTE}"
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close

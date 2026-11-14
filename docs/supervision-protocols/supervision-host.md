@@ -27,6 +27,8 @@ Supervision host: on for this home (`config/supervision-host-off` turns it off; 
 {grok} 3. `supervision-host: cycle boundary ...` means the host ended its park at its bound: run `bin/fm-wake-drain.sh`, handle whatever it presents, run its printed acknowledgement (an empty queue prints `--ack-through 0`), and re-arm the same background host call.
 {codex-park} 3. Quiet host park boundaries retain the same watcher and recovery generation without a model call.
 {codex-checkpoint} 3. The host's park boundary returns as the checkpoint's ordinary `checkpoint: no actionable wake within <n>s` line; handle it as step 5 above says.
+   `supervision-host: firstmate-outcome: ...` hands a decision to MAIN in either posture: run `bin/fm-wake-drain.sh` and decide its queued Firstmate-owned checks under standing authority this turn, without treating an away wake as a return.
+   While attended, also process and acknowledge any captain outcomes named by the accompanying `supervision-host: branch-outcome: ...` line.
 4. A guarded command that exits 6 naming the branch actor's lease means the supervision session is handling that task right now: leave the lease alone and retry after it releases, which it does when its turn ends.
 5. Captain outcomes the away session records stay in the outcome store until the return drain presents them; the return brief (`bin/fm-afk-return.sh`) counts them and points you to the `BRANCH OUTCOMES` section for processing and acknowledgement ([Captain outcomes](../supervision-host.md#captain-outcomes)).
 {claude,grok} 6. `/afk` writes only the record here (`bin/fm-afk-launch.sh start-native` refuses the away daemon on this home); for `/quiet`, follow the [quiet skill](../../.agents/skills/quiet/SKILL.md).

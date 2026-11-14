@@ -89,6 +89,7 @@ export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
 export interface UnreadWakeScope {
   status: UnreadWakeScopeStatus;
   eligible: boolean;
+  mainHandoff: boolean;
   /** Exact project values touched by the currently eligible rows (context only). */
   projects: string[];
   /**
@@ -148,6 +149,7 @@ export interface UnreadWakeScope {
 const EMPTY_SCOPE: UnreadWakeScope = {
   status: "empty",
   eligible: false,
+  mainHandoff: false,
   projects: [],
   eligibleSeqs: [],
   eligibleTasks: [],
@@ -160,6 +162,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
   eligible: false,
+  mainHandoff: false,
   projects: [],
   eligibleSeqs: [],
   eligibleTasks: [],
@@ -413,6 +416,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     return UNSAFE_SCOPE;
   }
 
+  let mainHandoff = false;
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
@@ -442,9 +446,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       continue;
     }
     if (kind === "check") {
-      // A report's structured firstmate verdict hands authority back to MAIN.
-      // Reclaiming that handoff while away would park the decision again.
-      if (/^firstmate-outcome:[1-9][0-9]*$/.test(key)) continue;
+      if (/^firstmate-outcome:[1-9][0-9]*$/.test(key)) {
+        mainHandoff = true;
+        continue;
+      }
       // Main-owned while attended: excluded from what the branch may claim,
       // never a reason to reject the rest of the queue and never a reason to
       // send an otherwise-eligible heartbeat review to main. Away, the branch
@@ -554,6 +559,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     eligibleTasks.add(task);
     eligibleSeqs.push(seq);
   }
+  if (mainHandoff) return { ...EMPTY_SCOPE, status: "unsafe", mainHandoff: true };
   const eligible = eligibleSeqs.length > 0;
   // Reached only after every row passed classification without a veto. A scan
   // that ends up ineligible simply found nothing the branch may claim - a
@@ -565,6 +571,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   return {
     status: eligible ? "safe" : "unsafe",
     eligible,
+    mainHandoff: false,
     projects: [...projects],
     eligibleSeqs,
     eligibleTasks: [...eligibleTasks],
@@ -631,8 +638,7 @@ export function branchOfferForWake(state: string, message: string, afk: boolean,
   const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
     afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
   );
-  const mainHandoff = /^check: firstmate-outcome:/.test(message);
-  const eligible = !mainHandoff && (afk ? scope.eligible : attendedEligible);
+  const eligible = afk ? scope.eligible : attendedEligible;
   return { scope, heartbeat, eligible, awayOnly: Boolean(eligible && !attendedEligible) };
 }
 

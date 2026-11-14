@@ -105,10 +105,10 @@ task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }
 [ -n "$task" ] || task=fleet
 verdict=routine
 [ "$mode" != go-away ] || verdict=captain
-[ "$mode" != firstmate ] || verdict=firstmate
+case "$mode" in firstmate|mixed-firstmate) verdict=firstmate ;; esac
 case "$mode" in
   fail) exit 3 ;;
-  handle|firstmate|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|firstmate|mixed-firstmate|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
@@ -127,6 +127,10 @@ case "$mode" in
           ;;
       esac
       "$FM_REPO/bin/fm-branch-report.sh" "${report_args[@]}" >> "$FM_HOME/engine-report.log" 2>&1
+    fi
+    if [ "$mode" = mixed-firstmate ]; then
+      "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain \
+        --summary 'mixed captain decision' >> "$FM_HOME/engine-report.log" 2>&1
     fi
     if [ "$mode" = return-many ]; then
       awk -v task="$task" 'BEGIN { for (seq = 2; seq <= 1001; seq++)

@@ -1536,6 +1536,9 @@ ${context.command}
         // rows are store-first and the durable queue keeps them.
         const afk = afkPostureRecordPresent(state);
         const scope = scopeForUnreadWake(state, heartbeat, afk);
+        if (scope.mainHandoff) {
+          throw new Error("an unread Firstmate outcome needs MAIN's standing authority");
+        }
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as

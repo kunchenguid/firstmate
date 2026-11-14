@@ -17,7 +17,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
 test_away_firstmate_decisions_wake_main_without_releasing_captain_outcomes() {
-  local home kind drained scope offer
+  local home kind drained scope offer handoff_seq branch_rows posture
   for kind in blocked paused; do
     home=$(make_home "away-firstmate-$kind" away)
     echo firstmate > "$home/stub-mode"
@@ -42,10 +42,24 @@ test_away_firstmate_decisions_wake_main_without_releasing_captain_outcomes() {
     # reclaim the handoff after the host restarts or on Pi.
     FM_HOME="$home" bash -c '. "$1"; fm_wake_append heartbeat heartbeat heartbeat' _ "$ROOT/bin/fm-wake-lib.sh"
     scope=$(FM_HOME="$home" node "$DISPATCH" scope --afk --heartbeat) || fail "$kind: scope failed"
-    assert_not_contains "$scope" 'rows=2 ' "$kind: branch reclaimed the MAIN check"
-    offer=$(printf 'check: firstmate-outcome: seq 2 for demo\n' | FM_HOME="$home" node "$DISPATCH" offer --afk) \
-      || fail "$kind: offer failed"
-    assert_contains "$offer" 'eligible=0' "$kind: MAIN check trigger was offered back to branch"
+    handoff_seq=$(awk -F '\t' '$3 == "check" && $4 == "firstmate-outcome:2" { print $2 }' "$home/state/.wake-queue")
+    [ -n "$handoff_seq" ] || fail "$kind: no handoff queue sequence"
+    branch_rows=$(printf '%s\n' "$scope" | sed -n 's/^rows=//p')
+    case " $branch_rows " in *" $handoff_seq "*) fail "$kind: branch reclaimed the MAIN check" ;; esac
+    for posture in attended away; do
+      if [ "$posture" = away ]; then
+        offer=$(printf 'heartbeat\n' | FM_HOME="$home" node "$DISPATCH" offer --afk)
+      else
+        offer=$(printf 'heartbeat\n' | FM_HOME="$home" node "$DISPATCH" offer)
+      fi
+      assert_contains "$offer" 'eligible=0' "$kind: $posture mixed heartbeat reclaimed the MAIN handoff"
+    done
+    rm -f -- "$home/host.rc"
+    start_host "$home"
+    wait_until_deadline 60 host_exited "$home" || fail "$kind: recovered mixed queue stayed on branch"
+    assert_re '^check: rearm-resurface$' "$home/host.out" "$kind: recovery did not use the watcher close"
+    assert_re '^supervision-host: .*MAIN-owned handoff' "$home/host.out" "$kind: recovery did not reach MAIN"
+    [ "$(engine_calls "$home")" -eq 1 ] || fail "$kind: recovery ran another branch turn"
     drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
     assert_contains "$drained" 'MAIN owns this decision' "$kind: MAIN drain lost the decision"
     assert_contains "$drained" 'decide within standing authority this turn' "$kind: MAIN was not told to act"
@@ -74,6 +88,32 @@ test_away_captain_only_decision_stays_parked() {
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" 'red merge needs captain' "captain control: return lost captain decision"
   pass "host: a red-merge captain verdict stays parked until return"
+}
+
+test_mixed_firstmate_and_captain_outcomes_follow_current_posture() {
+  local home posture drained
+  for posture in attended away; do
+    home=$(make_home "mixed-firstmate-$posture" "$posture")
+    echo mixed-firstmate > "$home/stub-mode"
+    start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "$posture: no watcher started"
+    append_status "$home" 'decision inside approved scope'
+    wait_until_deadline 60 host_exited "$home" || fail "$posture: mixed turn stayed parked"
+    assert_re '^supervision-host: firstmate-outcome: .*store rows 1' "$home/host.out" "$posture: missing MAIN decision handback"
+    drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+    if [ "$posture" = attended ]; then
+      assert_re '^supervision-host: branch-outcome: .*store rows 2.*this turn' "$home/host.out" "attended: captain outcomes must be handled now"
+      assert_no_grep 'captain-only outcomes still wait for the return' "$home/host.out" "attended: handback deferred captain outcomes"
+      assert_contains "$drained" 'mixed captain decision' "attended: drain lost the captain outcome"
+    else
+      assert_grep 'captain-only outcomes still wait for the return' "$home/host.out" "away: handback released captain outcomes"
+      assert_no_re '^supervision-host: branch-outcome:' "$home/host.out" "away: captain handback escaped"
+      assert_not_contains "$drained" 'mixed captain decision' "away: drain released captain outcomes"
+    fi
+    assert_absent "$home/state/.branch-outcomes-processed" "$posture: handback acknowledged captain outcome"
+    stop_home_processes "$home"
+  done
+  pass "host: mixed turns process attended captain outcomes and hold away captain outcomes"
 }
 
 test_park_exit_probe_uses_half_second_child_sleeps() {
@@ -979,6 +1019,7 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
 fm_test_run \
   test_away_firstmate_decisions_wake_main_without_releasing_captain_outcomes \
   test_away_captain_only_decision_stays_parked \
+  test_mixed_firstmate_and_captain_outcomes_follow_current_posture \
   test_park_exit_probe_uses_half_second_child_sleeps \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
   test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue \
