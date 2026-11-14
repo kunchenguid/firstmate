@@ -172,8 +172,10 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 # --- disabled: the remote route must stay byte-identically untraced ----------
 freeze_parent_session
 : > "$HERDR_LOG"
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
-  || fail "default-off remote secondmate spawn failed"
+OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model gpt-5.6-sol 2>&1) \
+  || fail "default-off remote secondmate spawn failed: $OUT"
+assert_contains "$OUT" "model pin unverified: pin 'gpt-5.6-sol'" \
+  "remote host and parent launch boundaries must relay the observed model verdict"
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
