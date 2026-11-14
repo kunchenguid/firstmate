@@ -3922,7 +3922,28 @@ startup_lock_failed() {
   fi
   exit 1
 }
+# Succeeds when a restart has something for main's drain to show: a queued
+# wake row, or a task decision that is still open and that the drain re-folds.
+# Succeeds too when either cannot be read, so an unreadable restart announces.
+restart_has_news() {
+  local queued=0 f exclude open
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 0
+  [ ! -s "$FM_WAKE_QUEUE" ] || queued=1
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$queued" -eq 0 ] || return 0
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [ "$f" != "$exclude" ] || continue
+    # A log that exists but cannot be read is unknown, not empty.
+    [ -r "$f" ] || return 0
+    open=$(status_open_decisions_incremental "$f" '' timed strict) || return 0
+    [ -z "$open" ] || return 0
+  done
+  return 1
+}
 WATCHER_RECOVERY_PENDING=0
+WATCHER_RECOVERY_DOUBTFUL=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -3933,9 +3954,12 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
 fi
 fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
   || startup_lock_failed "could not be consumed safely"
+[ "$FM_RECOVERY_MARKER_DOUBTFUL" -eq 0 ] || WATCHER_RECOVERY_DOUBTFUL=1
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
-elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || [ "$WATCHER_RECOVERY_DOUBTFUL" -eq 1 ]; then
+  # Doubt recovers on its own: a quiet restart leaves the marker announced, so
+  # the stale lock a later restart clears would otherwise be consumed unreported.
   WATCHER_RECOVERY_PENDING=1
 fi
 # Side-band ledger publication, detached from the poll loop.
@@ -4052,7 +4076,18 @@ resurface_after_downtime() {
       echo "watcher: recovery state could not be consumed safely" >&2
       exit 1
     fi
-    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+    [ "$FM_RECOVERY_MARKER_DOUBTFUL" -eq 0 ] || WATCHER_RECOVERY_DOUBTFUL=1
+    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || [ "$WATCHER_RECOVERY_DOUBTFUL" -eq 1 ] || return 0
+  fi
+  # A doubtful restart always announces: the previous holder may have stopped
+  # between seeing an event and queuing it. Otherwise the arm check already
+  # marked this episode announced, and with nothing queued and no decision open
+  # a recovery wake would only make main drain an empty queue; the next real
+  # wake's drain acknowledges the episode. Settle the recovery once so later
+  # polls take the ordinary arm check instead of rescanning every poll.
+  if [ "$WATCHER_RECOVERY_DOUBTFUL" -ne 1 ] && ! restart_has_news; then
+    WATCHER_RECOVERY_PENDING=0
+    return 0
   fi
   wake "check: rearm-resurface"
 }
