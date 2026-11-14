@@ -896,6 +896,43 @@ test_released_copy_returns_to_the_pool_and_resumes_in_a_new_one() {
   pass "with config/park-release-slot a parked lane returns its slot, and review activity relaunches its worker in a new copy on the same branch"
 }
 
+test_release_keeps_the_task_record_parseable_for_the_merge_poll() {
+  local w
+  w=$(release_world release-pr-identity "$GH_URL")
+  grep -v '^backend=' "$w/state/lane.meta" | sed '/^pr=/i backend=rex' > "$w/state/lane.meta.new"
+  mv "$w/state/lane.meta.new" "$w/state/lane.meta"
+  (. "$ROOT/bin/fm-pr-lib.sh"; fm_pr_metadata_identity_parse "$w/state/lane.meta") || fail "identity: the fixture record does not parse before the release"
+  gh_fixture "$w/gh.1.json"
+  run_park "$w" park lane >/dev/null 2>&1 || fail "identity: park failed"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$w/state/lane.released-copy" ] || fail "identity: the slot was not released"
+  (
+    # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$w/state/lane.meta" && [ "$FM_PR_META_URL" = "$GH_URL" ]
+  ) || fail "identity: the released task record no longer parses as the PR identity"
+  pass "a released lane's task record still parses as its PR identity, so its merge poll stays valid"
+}
+
+test_interrupted_release_resumes_in_a_new_copy() {
+  local w old new later out
+  later=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+  w=$(release_world release-interrupted "$GH_URL")
+  old=$(fm_meta_get_test "$w" worktree)
+  new=$(cat "$w/treehouse.next")
+  gh_fixture "$w/gh.1.json"
+  run_park "$w" park lane >/dev/null 2>&1 || fail "interrupted: park failed"
+  sed -i '/^slot_released=/d' "$w/state/lane.review-park"
+  printf 'slot_releasing=1\n' >> "$w/state/lane.review-park"
+  sed -i "s|^worktree=.*|worktree=$old|" "$w/state/lane.meta"
+  : > "$w/treehouse.log"
+  gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"carol\",\"__typename\":\"User\"},\"createdAt\":\"$later\",\"updatedAt\":\"$later\"}]"
+  out=$(tick_and_report "$w" release-interrupted)
+  case "$out" in "relaunched lane: PR $GH_URL - new comments from carol") ;; *) fail "interrupted: tick output: $out" ;; esac
+  grep -qx "get --lease --lease-holder lane" "$w/treehouse.log" || fail "interrupted: no new copy was leased: $(cat "$w/treehouse.log")"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$new" ] || fail "interrupted: the task record names $(fm_meta_get_test "$w" worktree), not the new copy"
+  pass "a release cut short after the return resumes in a newly leased copy, never the returned one"
+}
+
 test_release_flag_off_keeps_the_copy() {
   local w head old out
   w=$(release_world release-off "$GH_URL")
@@ -1438,6 +1475,8 @@ fm_test_run \
   test_edited_comment_beyond_first_hundred_triggers_relaunch \
   test_behind_base_does_not_relaunch \
   test_released_copy_returns_to_the_pool_and_resumes_in_a_new_one \
+  test_release_keeps_the_task_record_parseable_for_the_merge_poll \
+  test_interrupted_release_resumes_in_a_new_copy \
   test_release_flag_off_keeps_the_copy \
   test_release_keeps_the_copy_when_it_cannot_be_returned_safely \
   test_release_retries_on_later_ticks \

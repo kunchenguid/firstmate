@@ -179,7 +179,9 @@
 #
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
 # until the stop is confirmed, slot_released while the copy is back in the
-# pool, release_refused with the reason a release was last refused,
+# pool, slot_releasing from just before the copy is returned until the release
+# is fully recorded, so a release cut short is resumed like a released lane,
+# release_refused with the reason a release was last refused,
 # resume_waiting while a relaunch waits for a free copy, and resume_error after
 # a failed relaunch), mode 0600, published by
 # rename.
@@ -339,17 +341,21 @@ record_set() {  # <id> <key> [<value>]
 
 released_copy() { printf '%s/%s.released-copy' "$STATE" "$1"; }
 
-# Rewrites the task record's worktree= under its meta lock.
+# Rewrites the task record's worktree= under its meta lock, in place, so the
+# PR fields stay after it as fm_pr_metadata_identity_parse requires.
 meta_set_worktree() {  # <id> <path>
-  local id=$1 path=$2 meta lock tmp line rc=0
+  local id=$1 path=$2 meta lock tmp line rc=0 seen=0
   meta="$STATE/$id.meta"
   lock=$(fm_meta_lock_path "$meta") || return 1
   lock_wait "$lock" 60 || return 1
   if tmp=$(mktemp "$STATE/.review-park.XXXXXX"); then
     {
       while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in worktree=*) ;; *) printf '%s\n' "$line" ;; esac
-      done < "$meta" && printf 'worktree=%s\n' "$path"
+        case "$line" in
+          worktree=*) printf 'worktree=%s\n' "$path"; seen=1 ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done < "$meta" && { [ "$seen" -eq 1 ] || printf 'worktree=%s\n' "$path"; }
     } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$meta" || rc=1
     rm -f -- "$tmp"
   else
@@ -728,8 +734,11 @@ EOF
   fi
   git -C "$wt" checkout -q --detach 2>/dev/null \
     || { lock_drop "$lock"; echo "the copy's HEAD could not be detached from $branch"; return 1; }
+  record_set "$id" slot_releasing 1 \
+    || { lock_drop "$lock"; echo "the park record could not be marked as releasing"; return 1; }
   if ! out=$( (cd "$project" && fm_run_timed "$ACTION_SECS" treehouse return --force --if-lease-holder "$id" "$wt") 2>&1); then
     git -C "$wt" checkout -q "$branch" 2>/dev/null || true
+    record_set "$id" slot_releasing "" || true
     lock_drop "$lock"
     echo "treehouse return failed: $(printf '%s\n' "$out" | tail -1)"
     return 1
@@ -738,6 +747,7 @@ EOF
   record_set "$id" slot_released 1 || warn="its park record could not be marked released"
   meta_set_worktree "$id" "$(released_copy "$id")" \
     || warn="${warn:+$warn; }its task record still names the returned slot $wt"
+  [ -n "$warn" ] || record_set "$id" slot_releasing "" || true
   lock_drop "$lock"
   [ -z "$warn" ] || printf 'warning: %s\n' "$warn"
 }
@@ -746,7 +756,7 @@ EOF
 release_due() {  # <id>
   local id=$1
   [ -e "$CONFIG/park-release-slot" ] && [ "$(record_get "$id" slot_leased)" = yes ] || return 1
-  [ -z "$(record_get "$id" slot_released)" ] && [ -z "$(record_get "$id" resume_error)" ] && [ -z "$(record_get "$id" pending)" ]
+  [ -z "$(record_get "$id" slot_released)" ] && [ -z "$(record_get "$id" slot_releasing)" ] && [ -z "$(record_get "$id" resume_error)" ] && [ -z "$(record_get "$id" pending)" ]
 }
 
 # Leases a copy again for a released lane, checks out its ship branch, and
@@ -871,7 +881,7 @@ cmd_resume() {
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   copy="the same local copy"
-  if [ "$(record_get "$id" slot_released)" = 1 ]; then
+  if [ "$(record_get "$id" slot_released)" = 1 ] || [ -n "$(record_get "$id" slot_releasing)" ]; then
     reacquire_rc=0
     out=$(slot_reacquire "$id") || reacquire_rc=$?
     if [ "$reacquire_rc" -eq 2 ]; then
@@ -886,6 +896,7 @@ cmd_resume() {
       return 1
     fi
     record_set "$id" slot_released "" || true
+    record_set "$id" slot_releasing "" || true
     copy="a new local copy (the parked one went back to the pool)"
   fi
   note="$PARK_TMP/note"
