@@ -839,7 +839,8 @@ The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#poli
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
-The optional `config/park-release-slot` presence flag, off by default, also returns a parked lane's Treehouse pool slot once its copy is clean at the PR head, leases a new copy when review activity, a merge conflict, or a due rebase relaunches the lane.
+The optional `config/park-release-slot` presence flag, off by default, also returns a parked lane's Treehouse pool slot once its copy is clean at the PR head.
+A review comment, a merge conflict, or a due rebase leases a new copy for the relaunched lane; when the pool has no free copy, the lane stays parked and a later tick retries.
 A tick retries a release that was refused, and releases the slot of a park it settles.
 The flag applies only to Herdr and Rex workers.
 A tmux worker keeps its pool slot while parked, because its relaunch cannot move into a new copy.
