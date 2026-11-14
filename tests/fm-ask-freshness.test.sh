@@ -272,6 +272,30 @@ test_a_short_row_before_a_block_is_still_checked_and_named() {
   pass "a short row before a block is still checked, and the block is not counted"
 }
 
+# A line holding a pipe stays a row even when it begins like a list item or a
+# heading, so a stale row in a table without outer pipes is checked, not dropped.
+test_a_piped_line_that_looks_like_a_block_is_still_a_row() {
+  local report out rc=0
+  report="$TMP_ROOT/piped-list-row.md"
+  {
+    printf '%s\n' 'item | checked_at'
+    printf '%s\n' '--- | ---'
+    printf '%s\n' 'a | 2026-11-13T11:30Z'
+    printf '%s\n' '2. resend reply | 2026-11-13T02:00Z'
+    printf '%s\n' '- ping owner | 2026-11-13T01:00Z'
+    printf '%s\n' '# retry | 2026-11-13T00:30Z'
+    printf '%s\n' '- follow up note'
+  } > "$report"
+  out=$(run_gate "$report") || rc=$?
+  expect_code 1 "$rc" "a stale row that begins like a list item must fail the gate"$'\n'"$out"
+  assert_contains "$out" "3 of 4 rows are older than 2h" "every piped row must be counted, the pipe-less note must not"
+  assert_contains "$out" "line 4: STALE" "the numbered row must be checked"
+  assert_contains "$out" "line 5: STALE" "the bulleted row must be checked"
+  assert_contains "$out" "line 6: STALE" "the heading-like row must be checked"
+  assert_not_contains "$out" "follow up note" "a pipe-less list item still ends the body"
+  pass "a piped line that begins like a list item or heading is still a checked row"
+}
+
 fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_an_over_age_row_fails_and_is_named_without_editing_the_report \
   test_column_and_max_age_options \
@@ -282,4 +306,5 @@ fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_a_table_without_the_column_fails_even_beside_a_fresh_table \
   test_input_errors_exit_two \
   test_a_block_after_a_table_ends_the_body_instead_of_becoming_a_row \
-  test_a_short_row_before_a_block_is_still_checked_and_named
+  test_a_short_row_before_a_block_is_still_checked_and_named \
+  test_a_piped_line_that_looks_like_a_block_is_still_a_row

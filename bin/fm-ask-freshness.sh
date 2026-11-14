@@ -11,7 +11,8 @@
 # column, matched case-insensitively with surrounding backticks or emphasis
 # ignored. A table's body runs to the next blank line or to whatever starts a
 # new markdown block there (an ATX heading, a fence, a thematic break, a
-# blockquote, a list item, or an HTML block), so a short row with no outer pipes or fewer
+# blockquote, a list item, or an HTML block) on a line with no unescaped pipe,
+# so a line holding a pipe is always checked as a row, and so a short row with no outer pipes or fewer
 # cells than the header is still checked, while the block that follows a table
 # directly is not mistaken for a row. A missing timestamp cell is unreadable.
 # Every table must have that column: a table
@@ -189,6 +190,8 @@ def starts_new_block(line):
     stripped = line.strip()
     if not stripped:
         return True
+    if re.search(r"(?<!\\)\|", stripped):
+        return False
     if HEADING.match(stripped) or FENCE.match(stripped):
         return True
     if THEMATIC.fullmatch(stripped):
