@@ -8,7 +8,13 @@ TMP_ROOT=$(fm_test_tmproot fm-home-payload-return)
 repo="$TMP_ROOT/repo"
 home="$TMP_ROOT/slot"
 parent="$TMP_ROOT/parent"
-mkdir -p "$repo" "$parent/state"
+# Callers may keep their state in an overridden directory and never create the
+# returning parent's own state/, so the return creates its staging parent
+# instead of refusing the retirement for a directory the parent does not use.
+override_state="$TMP_ROOT/override-state"
+mkdir -p "$repo" "$parent" "$override_state"
+FM_STATE_OVERRIDE="$override_state"
+export FM_STATE_OVERRIDE
 git -C "$repo" init -q
 git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm initial --allow-empty
 git -C "$repo" worktree add --quiet --detach "$home" HEAD

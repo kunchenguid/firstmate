@@ -101,6 +101,10 @@ fm_home_payload_return() (
   shift 3
   fm_home_payload_check "$home" || return 1
   fm_home_worktree_lock_check "$home" "$id" "$parent" || return 1
+  # A caller may keep its state in an overridden directory and never create
+  # this parent's own state/, so the staging parent is created on demand; the
+  # return needs same-filesystem staging, not a directory the caller uses.
+  mkdir -p "$parent/state" || return 1
   staging=$(mktemp -d "$parent/state/.home-return.XXXXXX") || return 1
   fm_home_payload_check_devices "$home" "$staging" || { rmdir "$staging"; return 1; }
   if [ "$FM_HOME_LOCK_LINKED" = 1 ] && [ -f "$FM_HOME_LOCK_RECEIPT" ]; then
