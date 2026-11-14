@@ -93,6 +93,12 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$world/treehouse.log"
 if [ "\${1:-} \${2:-}" = "status --json" ]; then cat "$world/treehouse.status.json" 2>/dev/null || echo '[]'; exit 0; fi
+# return succeeds unless treehouse.return.fail exists; get --lease hands out
+# the copy named in treehouse.next unless treehouse.get.fail exists.
+case "\${1:-}" in
+  return) [ ! -e "$world/treehouse.return.fail" ] || { echo "a foreign process remains" >&2; exit 1; }; exit 0 ;;
+  get) [ ! -e "$world/treehouse.get.fail" ] || { echo "no worktree is available" >&2; exit 1; }; cat "$world/treehouse.next"; exit 0 ;;
+esac
 [ "\${1:-}" = lease ] || exit 1
 [ ! -e "$world/treehouse.fail" ] || exit 1
 printf '%s\n' "$wt"
@@ -826,6 +832,146 @@ test_behind_base_does_not_relaunch() {
   pass "a parked branch that merely fell behind its base stays parked"
 }
 
+# A Rex lane opted into config/park-release-slot whose copy carries the Claude
+# hook wiring and this task's owner claim, with a second free pool slot ready
+# for treehouse get --lease to hand out.
+release_world() {  # <name> <url>
+  local w wt next
+  w=$(make_world "$1" "$2")
+  printf 'backend=rex\n' >> "$w/state/lane.meta"
+  : > "$w/config/park-release-slot"
+  wt=$(fm_meta_get_test "$w" worktree)
+  printf '.claude/\n' >> "$(git -C "$w/project" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+  mkdir -p "$wt/.claude"
+  printf '{}\n' > "$wt/.claude/settings.local.json"
+  printf 'task=lane\nhome=%s\n' "$w" > "$(dirname "$wt")/.fm-slot-owner"
+  next="$w/root/.treehouse/repo-1/4/repo"
+  git -C "$w/project" worktree add -q --detach "$next" main
+  printf '%s\n' "$next" > "$w/treehouse.next"
+  printf '%s\n' "$w"
+}
+
+crew_state() {  # <world>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config" "$ROOT/bin/fm-crew-state.sh" lane 2>&1 | head -1
+}
+
+test_released_copy_returns_to_the_pool_and_resumes_in_a_new_one() {
+  local w head old new out later
+  later=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+  w=$(release_world release-resume "$GH_URL")
+  head=$(cat "$w/head")
+  old=$(fm_meta_get_test "$w" worktree)
+  new=$(cat "$w/treehouse.next")
+  gh_fixture "$w/gh.1.json"
+  out=$(run_park "$w" park lane 2>&1) || fail "release: park failed: $out"
+  [ "$out" = "parked lane: PR $GH_URL clean at ${head:0:12}; agent stopped; copy returned to the pool" ] \
+    || fail "release: park output: $out"
+  grep -qx "return --force --if-lease-holder lane $old" "$w/treehouse.log" \
+    || fail "release: the leased slot was not returned: $(cat "$w/treehouse.log")"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$w/state/lane.released-copy" ] \
+    || fail "release: the task record still names a copy: $(fm_meta_get_test "$w" worktree)"
+  [ ! -e "$w/state/lane.released-copy" ] || fail "release: the released-copy path exists"
+  grep -qx slot_released=1 "$w/state/lane.review-park" || fail "release: the park record does not note the release"
+  [ ! -e "$old/.claude/settings.local.json" ] || fail "release: the hook wiring stayed in the returned copy"
+  [ ! -e "$(dirname "$old")/.fm-slot-owner" ] || fail "release: the owner claim stayed on the returned slot"
+  ! git -C "$old" symbolic-ref -q HEAD >/dev/null || fail "release: the returned copy still has the ship branch checked out"
+  tail -1 "$w/state/lane.status" | grep -q "; agent stopped and its copy returned to the pool, relaunches in a new copy on review activity$" \
+    || fail "release: status line: $(tail -1 "$w/state/lane.status")"
+  case "$(run_park "$w" list)" in *"	copy returned to the pool") ;; *) fail "release: list does not show the release" ;; esac
+  case "$(crew_state "$w")" in *"paused"*"review-park"*"copy returned to the pool"*) ;; *) fail "release: crew state: $(crew_state "$w")" ;; esac
+
+  rm -f "$w/gh.count" "$w/control.log"
+  gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"carol\",\"__typename\":\"User\"},\"createdAt\":\"$later\",\"updatedAt\":\"$later\"}]"
+  out=$(tick_and_report "$w" release-resume)
+  case "$out" in "relaunched lane: PR $GH_URL - new comments from carol") ;; *) fail "resume: tick output: $out" ;; esac
+  grep -qx "get --lease --lease-holder lane" "$w/treehouse.log" || fail "resume: no copy was leased: $(cat "$w/treehouse.log")"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$new" ] || fail "resume: the task record names $(fm_meta_get_test "$w" worktree), not the new copy"
+  [ "$(git -C "$new" symbolic-ref --short HEAD)" = fm/lane ] && [ "$(git -C "$new" rev-parse HEAD)" = "$head" ] \
+    || fail "resume: the new copy is not on fm/lane at the parked head"
+  grep -qx task=lane "$(dirname "$new")/.fm-slot-owner" || fail "resume: the new slot is not claimed for the lane"
+  head -1 "$w/control.log" | grep -q "^lane relaunch --note-file " || fail "resume: no relaunch call: $(cat "$w/control.log")"
+  grep -qF "relaunched in a new local copy (the parked one went back to the pool) on the same branch" "$w/control.log" \
+    || fail "resume: the note does not name the new copy"
+  [ ! -e "$w/state/lane.review-park" ] || fail "resume: park record kept after relaunch"
+  pass "with config/park-release-slot a parked lane returns its slot, and review activity relaunches its worker in a new copy on the same branch"
+}
+
+test_release_flag_off_keeps_the_copy() {
+  local w head old out
+  w=$(release_world release-off "$GH_URL")
+  rm -f "$w/config/park-release-slot"
+  head=$(cat "$w/head")
+  old=$(fm_meta_get_test "$w" worktree)
+  gh_fixture "$w/gh.1.json"
+  out=$(run_park "$w" park lane 2>&1) || fail "release-off: park failed: $out"
+  [ "$out" = "parked lane: PR $GH_URL clean at ${head:0:12}; agent stopped" ] || fail "release-off: park output: $out"
+  ! grep -q '^return ' "$w/treehouse.log" || fail "release-off: the slot was returned without the flag"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$old" ] || fail "release-off: the task record lost its copy"
+  ! grep -q '^slot_released=' "$w/state/lane.review-park" || fail "release-off: the record notes a release"
+  [ -e "$old/.claude/settings.local.json" ] || fail "release-off: the hook wiring was removed"
+  [ "$(git -C "$old" symbolic-ref --short HEAD)" = fm/lane ] || fail "release-off: the branch was detached"
+  pass "without config/park-release-slot a parked lane keeps its leased copy untouched"
+}
+
+test_release_keeps_the_copy_when_it_cannot_be_returned_safely() {
+  local w old out
+  w=$(make_world release-tmux "$GH_URL")
+  : > "$w/config/park-release-slot"
+  old=$(fm_meta_get_test "$w" worktree)
+  gh_fixture "$w/gh.1.json"
+  out=$(run_park "$w" park lane 2>&1) || fail "release-tmux: park failed: $out"
+  case "$out" in *"; agent stopped; copy kept because a tmux relaunch cannot start in another copy") ;; *) fail "release-tmux: park output: $out" ;; esac
+  ! grep -q '^return ' "$w/treehouse.log" || fail "release-tmux: a tmux slot was returned"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$old" ] || fail "release-tmux: the task record lost its copy"
+
+  w=$(release_world release-return-fails "$GH_URL")
+  : > "$w/treehouse.return.fail"
+  old=$(fm_meta_get_test "$w" worktree)
+  gh_fixture "$w/gh.1.json"
+  out=$(run_park "$w" park lane 2>&1) || fail "return-fails: park failed: $out"
+  case "$out" in *"; agent stopped; copy kept because treehouse return failed: a foreign process remains") ;; *) fail "return-fails: park output: $out" ;; esac
+  [ "$(fm_meta_get_test "$w" worktree)" = "$old" ] || fail "return-fails: the task record lost its copy"
+  ! grep -q '^slot_released=' "$w/state/lane.review-park" || fail "return-fails: the record notes a release"
+  [ "$(git -C "$old" symbolic-ref --short HEAD)" = fm/lane ] || fail "return-fails: the branch was not checked out again"
+  [ -e "$(dirname "$old")/.fm-slot-owner" ] || fail "return-fails: the owner claim was dropped"
+  pass "a release a tmux relaunch cannot follow, or one treehouse refuses, leaves the lane parked in its copy on its branch"
+}
+
+test_due_rebase_relaunches_only_with_release_flag() {
+  local w
+  w=$(make_world trig-rebase "$GH_URL"); : > "$w/config/park-release-slot"
+  gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" mss=BEHIND
+  expect_relaunch "$w" rebase "the branch is behind its base and needs a rebase"
+  pass "with config/park-release-slot a parked branch that fell behind its base relaunches for the due rebase"
+}
+
+test_no_free_copy_fails_the_relaunch_until_a_manual_resume() {
+  local w head new out
+  w=$(release_world release-no-copy "$GH_URL")
+  head=$(cat "$w/head")
+  new=$(cat "$w/treehouse.next")
+  gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  : > "$w/treehouse.get.fail"
+  out=$(tick_and_report "$w" no-copy)
+  [ "$out" = "relaunch-failed lane: PR $GH_URL (checks are failing on ${head:0:12}): no copy to relaunch in: no pool slot could be leased: no worktree is available" ] \
+    || fail "no-copy: tick output: $out"
+  grep -q '^resume_error=' "$w/state/lane.review-park" || fail "no-copy: the record does not note the failure"
+  grep -qx slot_released=1 "$w/state/lane.review-park" || fail "no-copy: the record no longer notes the release"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$w/state/lane.released-copy" ] || fail "no-copy: the task record names a copy"
+  [ ! -e "$w/control.log" ] || fail "no-copy: a relaunch ran without a copy: $(cat "$w/control.log")"
+
+  rm -f "$w/treehouse.get.fail"
+  git -C "$w/project" branch -q -D fm/lane
+  out=$(run_park "$w" resume lane --trigger "manual retry" 2>&1) || fail "no-copy: manual resume failed: $out"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$new" ] || fail "no-copy: the manual resume did not record the new copy"
+  [ "$(git -C "$new" symbolic-ref --short HEAD)" = fm/lane ] && [ "$(git -C "$new" rev-parse HEAD)" = "$head" ] \
+    || fail "no-copy: the deleted branch was not created again at the parked head"
+  [ ! -e "$w/state/lane.review-park" ] || fail "no-copy: park record kept after the manual resume"
+  pass "a released lane with no free copy reports the failed relaunch once, and a manual resume later relaunches it in a new copy"
+}
+
 # A relaunch that takes longer than the whole tick budget still completes: the
 # tick only starts it, and nothing bounded by the tick can kill it.
 test_slow_relaunch_is_never_cut_short_by_the_tick() {
@@ -1220,6 +1366,11 @@ fm_test_run \
   test_each_relaunch_trigger_relaunches_a_fresh_worker \
   test_edited_comment_beyond_first_hundred_triggers_relaunch \
   test_behind_base_does_not_relaunch \
+  test_released_copy_returns_to_the_pool_and_resumes_in_a_new_one \
+  test_release_flag_off_keeps_the_copy \
+  test_release_keeps_the_copy_when_it_cannot_be_returned_safely \
+  test_due_rebase_relaunches_only_with_release_flag \
+  test_no_free_copy_fails_the_relaunch_until_a_manual_resume \
   test_slow_relaunch_is_never_cut_short_by_the_tick \
   test_tick_resumes_where_the_last_one_ran_out_of_time \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
