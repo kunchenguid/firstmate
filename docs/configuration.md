@@ -2515,7 +2515,7 @@ github.com/acme/app github-actions pull_request test (ubuntu-latest)
 - The check name is the rest of the line, matched exactly: the check run's name, which for GitHub Actions is the job name, the same name branch rules and `--allow-red` use.
 - Blank lines and lines starting with `#` are ignored, and repeated lines count once.
 - A line in any other form, such as one with `-` or a numeric app id in place of the app slug or event, is malformed.
-- A malformed line anywhere in the file, even one for another repository, a present file that cannot be read, or a file hidden because its directory or a directory above it cannot be searched, refuses every merge on a plan that hides branch rules and names the file and line, so a typo never drops a requirement.
+- A malformed line anywhere in the file, even one for another repository, a present file that cannot be read, or a file hidden because its directory or a directory above it cannot be searched, refuses every merge on a plan that hides branch rules and names the file, plus the line number of each malformed line, so a typo never drops a requirement.
 
 A declared check must have succeeded at the pull request's verified head: a check run completed with success, neutral, or skipped.
 Only runs from the declared app and event count, so a same-named run from another app or event never stands in for it.
