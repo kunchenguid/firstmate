@@ -2118,7 +2118,8 @@ assert_autoarm_commits_attended_alarm_on_exhausted_continuation() {
   install_integrated_autoarm "$dir"
   case "$variant" in
     arm|alarm-signal)
-      printf '#!/usr/bin/env bash\nsleep 1\nprintf '"'"'watcher: FAILED - persistent fixture failure\\n'"'"'\nexit 1\n' > "$dir/bin/fm-watch-arm.sh"
+      # shellcheck disable=SC2016 # FM_HOME expands in the fixture child.
+      printf '#!/usr/bin/env bash\nwhile [ ! -e "$FM_HOME/state/fixture-guard-done" ]; do sleep 0.02; done\nprintf '"'"'watcher: FAILED - persistent fixture failure\\n'"'"'\nexit 1\n' > "$dir/bin/fm-watch-arm.sh"
       ;;
     signal)
       printf '#!/usr/bin/env bash\nexec sleep 30\n' > "$dir/bin/fm-watch-arm.sh"
@@ -2128,7 +2129,8 @@ assert_autoarm_commits_attended_alarm_on_exhausted_continuation() {
       [ "$variant" = lost-handback ] || marker=announced
       rm -f "$dir/config/supervision-host-off"
       {
-        printf '#!/usr/bin/env bash\nsleep 1\n'
+        # shellcheck disable=SC2016 # FM_HOME expands in the fixture child.
+        printf '#!/usr/bin/env bash\nwhile [ ! -e "$FM_HOME/state/fixture-guard-done" ]; do sleep 0.02; done\n'
         printf "printf '%s:handling:fixture-generation\\\\n' > \"\$FM_HOME/state/.watcher-down\"\n" "$marker"
         cat <<'SH'
 printf 'signal: fixture.status\n'
@@ -2163,6 +2165,7 @@ SH
   # lock as its own session's however the test itself is launched.
   cat > "$dir/stop-driver.sh" <<'SH'
 i=$1 variant=$2
+rm -f "$FM_HOME/state/fixture-guard-done"
 # Each Stop is a new fake-claude pid, as a real Stop is a new hook process.
 # The session lock sidecar is what makes those Stops the same session, so an
 # interrupted episode can still exhaust its budget instead of resetting.
@@ -2174,17 +2177,20 @@ printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
 auto_pid=$!
 # Fire the guard only once this generation's claim is observed open, so the
 # guard deterministically takes its step-aside observe branch instead of racing
-# the pre-claim ledger (the fixture still runs for ~1s).
+# the pre-claim ledger. The fixture waits for the guard to finish, so runner
+# load cannot let the failure commit race ahead of the guard's open-claim check.
+# Allow slow hook startup on loaded runners without changing the handshake.
 waited=0
-while [ "$waited" -lt 100 ]; do
+while [ "$waited" -lt 600 ]; do
   [ "$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null)" = arming ] && break
   sleep 0.05
   waited=$((waited + 1))
 done
-[ "$waited" -lt 100 ] || : > "$FM_HOME/noclaim-$i"
+[ "$waited" -lt 600 ] || : > "$FM_HOME/noclaim-$i"
 printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
   | CLAUDECODE=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$FM_HOME/guard-$i.out" 2>&1
 printf '%s' "$?" > "$FM_HOME/guard-$i.status"
+: > "$FM_HOME/state/fixture-guard-done"
 [ "$variant" != signal ] || kill -TERM "$auto_pid" 2>/dev/null || : > "$FM_HOME/nokill-$i"
 wait "$auto_pid"
 printf '%s' "$?" > "$FM_HOME/auto-$i.status"
