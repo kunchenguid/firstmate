@@ -3023,8 +3023,10 @@ EOF
 # STATE/.captain-hold-due keeps those pairs across watcher restarts and drops a
 # pair once its row no longer qualifies, so a hold re-dated or answered starts
 # clean. An undated hold never fires, and an unreadable backlog changes
-# nothing. The backlog is read at most every CAPTAIN_HOLD_DUE_READ_SECS.
+# nothing. The backlog is read at most every CAPTAIN_HOLD_DUE_READ_SECS, failed
+# attempts included, and one read is bounded by CAPTAIN_HOLD_DUE_READ_TIMEOUT_SECS.
 CAPTAIN_HOLD_DUE_READ_SECS=300
+CAPTAIN_HOLD_DUE_READ_TIMEOUT_SECS=${CAPTAIN_HOLD_DUE_READ_TIMEOUT_SECS:-20}
 CAPTAIN_HOLD_DUE_REMINDER=
 
 captain_hold_due_tick() {  # [now-epoch], for deterministic clock callers
@@ -3045,8 +3047,9 @@ captain_hold_due_tick() {  # [now-epoch], for deterministic clock callers
     [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] || return 1
     old=$(cat "$ledger") || return 1
   fi
-  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" list --fields hold_kind,hold_until,held 2>/dev/null) || return 0
   printf '%s\n' "$now" > "$checked" || return 1
+  out=$(fm_run_timed "$CAPTAIN_HOLD_DUE_READ_TIMEOUT_SECS" env FM_HOME="$FM_HOME" \
+    "$SCRIPT_DIR/fm-tasks-axi.sh" list --fields hold_kind,hold_until,held 2>/dev/null) || return 0
   while IFS=$'\t' read -r id until; do
     [ -n "$id" ] || continue
     kept="$kept$id"$'\t'"$until"$'\n'

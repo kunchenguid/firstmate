@@ -403,6 +403,39 @@ test_captain_hold_redate_fires_again() {
   pass "a re-dated hold fires again on its new date"
 }
 
+test_captain_hold_failed_read_is_throttled() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  local fake="$TMP_ROOT/fake-scripts" saved=$SCRIPT_DIR
+  mkdir -p "$fake"
+  printf '#!/bin/sh\necho x >> "%s/calls"\nexit 1\n' "$TMP_ROOT" > "$fake/fm-tasks-axi.sh"
+  chmod +x "$fake/fm-tasks-axi.sh"
+  rm -f -- "$TMP_ROOT/calls"
+  SCRIPT_DIR=$fake
+  captain_hold_due_tick 1794614400
+  captain_hold_due_tick 1794614500
+  SCRIPT_DIR=$saved
+  [ "$(wc -l < "$TMP_ROOT/calls" | tr -d ' ')" = 1 ] || fail "a failed read was retried inside the throttle window"
+  [ ! -e "$STATE/.captain-hold-due" ] || fail "a failed read rewrote the ledger"
+  pass "a failed backlog read still counts as an attempt"
+}
+
+test_captain_hold_hung_read_is_bounded() {
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  local fake="$TMP_ROOT/fake-scripts" saved=$SCRIPT_DIR start
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nexec sleep 30\n' > "$fake/fm-tasks-axi.sh"
+  chmod +x "$fake/fm-tasks-axi.sh"
+  SCRIPT_DIR=$fake
+  CAPTAIN_HOLD_DUE_READ_TIMEOUT_SECS=1
+  start=$SECONDS
+  captain_hold_due_tick 1794614400
+  SCRIPT_DIR=$saved
+  [ "$((SECONDS - start))" -lt 10 ] || fail "a hung backlog read was not bounded"
+  pass "a hung backlog read is cut off by the time limit"
+}
+
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
   test_wait_exemptions test_relayed_captain_hold_is_exempt_by_key \
@@ -410,4 +443,5 @@ fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct
   test_resolved_same_text_reopen_starts_fresh test_republish_updates_until_date \
   test_unknown_times_and_keyless test_timed_fold_is_incremental \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop \
-  test_captain_hold_due_wakes_once test_captain_hold_done_row_stays_quiet test_captain_hold_redate_fires_again
+  test_captain_hold_due_wakes_once test_captain_hold_done_row_stays_quiet test_captain_hold_redate_fires_again \
+  test_captain_hold_failed_read_is_throttled test_captain_hold_hung_read_is_bounded
