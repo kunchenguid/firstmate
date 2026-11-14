@@ -2797,6 +2797,53 @@ The first line is the sign-in with only the read and operate scopes; the second 
 | `fm-control.sh exit` | refused before anything was sent |
 | Teardown, including the archive read-back and slot return | 23.5 s; the thread read `archived:true` with no active run, the record was removed, and the slot read `available` |
 
+### Stable 0.1.9
+
+The `/mcp` transport was verified live on 2026-11-14 against stable `t3 v0.1.9` (native Linux x86-64 runtime), the operator's own running loopback server with telemetry on, with Claude Code 2.1.325 and node v24.20.0 on Ubuntu 24.04 x86-64.
+That run drove `bin/fm-t3-mcp.mjs` directly against a scratch project and one scratch Claude thread (`claudeAgent`, `claude-haiku-5-5`, effort `low`) at the project root, archived afterwards; it launched no `fm-spawn.sh` worker.
+T3 0.1.9 offers 68 tools to a full-access `mcp-client`, and three things the helper reads differ from 0.1.0:
+
+- `t3_thread_configuration` is now `t3_thread_configure`, and `t3_pending_request_list`, `_read`, and `_respond` are one `t3_pending_request` taking `action`; their reply shapes are unchanged, and every other tool the helper calls keeps its 0.1.0 name.
+- An `orchestrator_capabilities` option descriptor is `{id, values}` with no `type`, where 0.1.0 gave a typed `select` with `options` or a typed `boolean`.
+  The string options (`effort`, `reasoningEffort`, `serviceTier`) also carry a `default`.
+  A boolean option lists JSON booleans and carries no `default`: the reply gave `{"id":"fastMode","values":[false,true]}` on `claudeAgent` model `claude-opus-5-5`, and `{"id":"ultracode","values":[false,true]}` on `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2`, and `claude-haiku-5-5`.
+- `orchestrator_capabilities` lists only a short list of each instance's models and counts the rest in `omittedModels`; a call with `search` set to a model slug lists the matching models instead.
+
+```sh
+bin/fm-t3-mcp.mjs login --access full-access
+bin/fm-t3-mcp.mjs status
+bin/fm-t3-mcp.mjs resolve-selection --harness claude --instance claudeAgent --model claude-haiku-5-5 --effort low
+bin/fm-t3-mcp.mjs resolve-selection --harness claude --instance claudeAgent --model claude-sonnet-5 --effort high
+bin/fm-t3-mcp.mjs launch --project <id> --title <title> --model-selection <json>
+bin/fm-t3-mcp.mjs send --thread <id> --message-file <file> --client-request-id <id>
+bin/fm-t3-mcp.mjs watch --thread <id> --timeout-ms 10000
+bin/fm-t3-mcp.mjs requests --thread <id>
+bin/fm-t3-mcp.mjs respond --thread <id> --request <request-id> --answers-file <file>
+bin/fm-t3-mcp.mjs wait --thread <id> --timeout-ms 120000
+bin/fm-t3-mcp.mjs archive --thread <id>
+```
+
+```text
+{"ok":true,"origin":"http://127.0.0.1:3773","access":"full-access",...,"serverVersion":"0.1.9","recordedServerVersion":"0.1.9","telemetry":"on"}
+{"ok":true,"driverKind":"claudeAgent","selection":{"instanceId":"claudeAgent","model":"claude-haiku-5-5","options":[{"id":"effort","value":"low"}]}}
+{"ok":true,"driverKind":"claudeAgent","selection":{"instanceId":"claudeAgent","model":"claude-sonnet-5","options":[{"id":"effort","value":"high"}]}}
+{"ok":true,"threadId":"<id>",...,"instanceId":"claudeAgent","model":"claude-haiku-5-5","runId":null,"status":"idle",...,"serverVersion":"0.1.9"}
+{"ok":true,"threadId":"<id>","clientRequestId":"<id>","delivery":"started","status":"starting","runId":"<run-id>",...}
+{"ok":true,"event":"blocked","threadId":"<id>","signature":"q:<request-id>;a:0","questions":["<request-id>"],"approvals":0,"cleared":[]}
+{"ok":true,"threadId":"<id>","pendingRequestCount":1,"questions":[{"requestId":"<request-id>","questions":[{"id":"Pick a letter","header":"Letter","question":"Pick a letter","options":[{"label":"a","description":"Option a"},{"label":"b","description":"Option b"}],"multiSelect":false}]}],"approvals":0,...}
+{"ok":true,"threadId":"<id>","requestId":"<request-id>"}
+{"ok":true,"threadId":"<id>","runId":"<run-id>","status":"completed","timedOut":false}
+{"ok":true,"threadId":"<id>","closed":true,"archived":true,"activeRunId":null,"status":"completed"}
+```
+
+Live facts this run added:
+
+- The sign-in and every later verb pass the capability gate on the 0.1.9 tool names.
+- The launch's `t3_thread_configure` read-back returns `threadId`, `modelSelection`, `runtimeMode`, and `interactionMode`, the reply `t3_thread_configuration` gave on 0.1.0.
+- `claude-sonnet-5` is outside the `claudeAgent` short list (`omittedModels: 10`) and resolves through the `search` lookup.
+- Claude's question tool raises `pendingRequestCount`, and `t3_pending_request` lists it, reads it keyed by question text, and answers it; the run then completed with the answered letter as its reply.
+- `t3_pending_request` `read` or `respond` naming a request that is not pending is a typed `invalid_request` failure.
+
 ### Permission approvals in the activity view
 
 The approval part of the pending-request signature was checked against the stable `t3 v0.1.0` source (tag `v0.1.0`, commit `81493efb`); no permission approval was triggered on the live lab server.
@@ -2834,10 +2881,10 @@ FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-live
 ```
 
 ```text
-ok - t3code live transport: T3 0.1.0 environment <id> passes the gate (telemetry=off)
+ok - t3code live transport: T3 0.1.9 environment <id> passes the gate (telemetry=on)
 ```
 
-That result is from the 2026-10-17 stable 0.1.0 lab run; refresh it with the command above after signing in.
+That result is from the 2026-11-14 stable 0.1.9 run; refresh it with the command above after signing in.
 
 ### Portable regression coverage
 
