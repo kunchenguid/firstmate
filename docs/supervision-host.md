@@ -421,7 +421,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 **Result and cost**
 
 - `--output-format json` carries the error flag, turn count, usage, and the tool's own cost estimate.
-  The [engine library header](../bin/fm-supervision-engine-lib.sh) owns the output settings and normalization of verbose result arrays; [runtime verification](verification/runtime-backends.md#claude-supervision-engine-json) records the live guard.
+  The [engine library header](../bin/fm-supervision-engine-lib.sh) owns the output settings and result contract; [runtime verification](verification/runtime-backends.md#claude-supervision-engine-json) records the live guard.
 - On a resumed conversation that cost is the conversation's running total, while the usage and turn count are the turn's own.
   So the engine lib derives each turn's cost from the total the host recorded after the previous turn.
 - The host counts a turn successful only when that result is complete:

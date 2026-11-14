@@ -422,8 +422,7 @@ fm_supervision_engine_turn() {
 # running total on a resumed conversation, while its usage and num_turns are
 # per turn. error=0 only for a complete success result: type "result",
 # subtype "success", is_error false, and finite total_cost_usd, num_turns, and
-# the four usage token counts. Verbose JSON arrays use their last type=result
-# element; a missing or unsuccessful result is error=1. Returns 1 when the
+# the four usage token counts; any other shape is error=1. Returns 1 when the
 # result cannot be read. The host treats both as a failed turn.
 fm_supervision_engine_result() {
   case "$1" in
@@ -433,7 +432,6 @@ fm_supervision_engine_result() {
         const fs = require("node:fs");
         let j;
         try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
-        if (Array.isArray(j)) j = j.filter(event => event && event.type === "result").pop() || {};
         if (!j || typeof j !== "object") process.exit(1);
         const u = j.usage && typeof j.usage === "object" ? j.usage : {};
         const finite = (v) => typeof v === "number" && Number.isFinite(v);
