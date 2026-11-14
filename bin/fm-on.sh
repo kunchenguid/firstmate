@@ -42,7 +42,8 @@
 # exit 255, the same "unavailable transport or unknown remote completion" a
 # dead peer produces, with a diagnostic naming the host and the command.
 # Each timeout is recorded per SSH alias in state/remote-call-timeouts/<host>
-# (count, last_at, bound, command, woken). While a host's record is younger
+# (count, last_at, bound, command, streak). A command that exits 124 or 137 on
+# its own before the bound is a normal completion, not a timeout. While a host's record is younger
 # than its backoff - FM_REMOTE_CALL_BACKOFF seconds (default 60) doubled per
 # further consecutive timeout, capped at FM_REMOTE_CALL_BACKOFF_MAX (default
 # 900) - every --bounded call to that host fails at once with 255 without
@@ -51,6 +52,16 @@
 # bound clears the record. Calls without --bounded keep the unbounded
 # behavior above and never consult or change the record. bin/fm-watch.sh
 # turns a record whose count reaches FM_REMOTE_CALL_WAKE_AFTER into one wake.
+#
+# Per-host backoff alone still lets several stuck hosts each spend a bound in
+# one supervision cycle. The watcher therefore names a per-cycle budget file in
+# FM_REMOTE_CALL_BUDGET_FILE, which its bounded calls share: each adds the
+# seconds it spent, a call's bound is cut to what remains of
+# FM_REMOTE_CALL_CYCLE_BUDGET seconds (default 150, well under the watcher's
+# default 300s stale grace), and once the budget is spent every further
+# bounded call that cycle fails at once with 255 without dialing its host. A
+# call cut short by the budget fails with 255 but is not recorded as a timeout
+# of its host. Without FM_REMOTE_CALL_BUDGET_FILE no budget applies.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -161,19 +172,23 @@ if [ "$BOUNDED" -eq 0 ]; then
   exec "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null
 fi
 
-# --bounded: the wall-clock bound and per-host backoff described in the header.
+# --bounded: the wall-clock bound, per-host backoff, and cycle budget described
+# in the header.
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 CALL_TIMEOUT=${FM_REMOTE_CALL_TIMEOUT:-120}
 BACKOFF_BASE=${FM_REMOTE_CALL_BACKOFF:-60}
 BACKOFF_MAX=${FM_REMOTE_CALL_BACKOFF_MAX:-900}
+CYCLE_BUDGET=${FM_REMOTE_CALL_CYCLE_BUDGET:-150}
 positive_int FM_REMOTE_CALL_TIMEOUT "$CALL_TIMEOUT"
 positive_int FM_REMOTE_CALL_BACKOFF "$BACKOFF_BASE" allow-zero
 positive_int FM_REMOTE_CALL_BACKOFF_MAX "$BACKOFF_MAX" allow-zero
+positive_int FM_REMOTE_CALL_CYCLE_BUDGET "$CYCLE_BUDGET"
 BOUND=$((CALL_TIMEOUT + BOUND_EXTRA))
 STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 TIMEOUT_DIR="$STATE_DIR/remote-call-timeouts"
 TIMEOUT_RECORD="$TIMEOUT_DIR/$HOST"
+BUDGET_FILE=${FM_REMOTE_CALL_BUDGET_FILE:-}
 # One line naming the remote command for diagnostics and the wake, with control
 # bytes flattened so another machine's arguments cannot shape the record.
 CALL_LABEL=$(printf '%s ' "$COMMAND" "$@" | LC_ALL=C tr -c '[:print:]' ' ' | cut -c1-200)
@@ -203,33 +218,54 @@ if [ -f "$TIMEOUT_RECORD" ] && [ ! -L "$TIMEOUT_RECORD" ]; then
   fi
 fi
 
+EFFECTIVE_BOUND=$BOUND
+SPENT=0
+if [ -n "$BUDGET_FILE" ]; then
+  SPENT=$(head -1 "$BUDGET_FILE" 2>/dev/null || true)
+  case "$SPENT" in ''|*[!0-9]*) SPENT=0 ;; esac
+  if [ "$SPENT" -ge "$CYCLE_BUDGET" ]; then
+    printf 'error: remote-call budget of %ss for this supervision cycle is spent; not running %s on host %s\n' \
+      "$CYCLE_BUDGET" "$CALL_LABEL" "$HOST" >&2
+    exit 255
+  fi
+  [ $((CYCLE_BUDGET - SPENT)) -ge "$BOUND" ] || EFFECTIVE_BOUND=$((CYCLE_BUDGET - SPENT))
+fi
+
 # fm_exec_timed replaces a subshell with the bounded ssh, so the call stages no
 # temporary files and its watchdog also ends ssh if this process is killed.
 RC=0
+STARTED=$SECONDS
 if [ "$STDIN_MODE" = caller ]; then
-  ( fm_exec_timed "$BOUND" 2 "$SSH_BIN" "${SSH_ARGS[@]}" ) || RC=$?
+  ( fm_exec_timed "$EFFECTIVE_BOUND" 2 "$SSH_BIN" "${SSH_ARGS[@]}" ) || RC=$?
 else
-  ( fm_exec_timed "$BOUND" 2 "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null ) || RC=$?
+  ( fm_exec_timed "$EFFECTIVE_BOUND" 2 "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null ) || RC=$?
 fi
-if ! fm_timed_out "$RC"; then
+ELAPSED=$((SECONDS - STARTED))
+[ -z "$BUDGET_FILE" ] || printf '%s\n' "$((SPENT + ELAPSED))" > "$BUDGET_FILE" 2>/dev/null || true
+if ! fm_timed_out "$RC" || [ "$ELAPSED" -lt "$EFFECTIVE_BOUND" ]; then
   [ ! -e "$TIMEOUT_RECORD" ] || rm -f -- "$TIMEOUT_RECORD" 2>/dev/null || true
   exit "$RC"
 fi
+if [ "$EFFECTIVE_BOUND" -lt "$BOUND" ]; then
+  printf 'error: remote command on host %s ran out the remaining %ss of this supervision cycle'"'"'s remote-call budget: %s\n' \
+    "$HOST" "$EFFECTIVE_BOUND" "$CALL_LABEL" >&2
+  exit 255
+fi
 
-COUNT=1 WOKEN=0
+COUNT=1 STREAK="$(date +%s)-$$"
 if [ -f "$TIMEOUT_RECORD" ] && [ ! -L "$TIMEOUT_RECORD" ]; then
   COUNT=$(record_field count)
-  WOKEN=$(record_field woken)
+  PRIOR_STREAK=$(record_field streak)
   case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
-  case "$WOKEN" in 1) ;; *) WOKEN=0 ;; esac
   COUNT=$((COUNT + 1))
+  [ -z "$PRIOR_STREAK" ] || STREAK=$PRIOR_STREAK
 fi
 printf 'error: remote command on host %s timed out after %ss (consecutive timeouts: %s): %s\n' \
   "$HOST" "$BOUND" "$COUNT" "$CALL_LABEL" >&2
 if mkdir -p "$TIMEOUT_DIR" 2>/dev/null && [ ! -L "$TIMEOUT_DIR" ] \
   && RECORD_TMP=$(umask 077; mktemp "$TIMEOUT_DIR/.record.XXXXXX" 2>/dev/null); then
-  if printf 'count=%s\nlast_at=%s\nbound=%s\ncommand=%s\nwoken=%s\n' \
-      "$COUNT" "$(date +%s)" "$BOUND" "$CALL_LABEL" "$WOKEN" > "$RECORD_TMP" \
+  if printf 'count=%s\nlast_at=%s\nbound=%s\ncommand=%s\nstreak=%s\n' \
+      "$COUNT" "$(date +%s)" "$BOUND" "$CALL_LABEL" "$STREAK" > "$RECORD_TMP" \
     && mv -f -- "$RECORD_TMP" "$TIMEOUT_RECORD"; then
     :
   else

@@ -461,6 +461,10 @@ case "$SECONDMATE_LIVENESS_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_SECS=60 ;
 # Consecutive bounded remote-call timeouts to one host before one wake.
 REMOTE_CALL_WAKE_AFTER=${FM_REMOTE_CALL_WAKE_AFTER:-}
 case "$REMOTE_CALL_WAKE_AFTER" in ''|*[!0-9]*|0) REMOTE_CALL_WAKE_AFTER=3 ;; esac
+# The per-cycle budget file bin/fm-on.sh --bounded shares (its header owns the
+# budget); passed only to this watcher's own bounded polls, never exported.
+FM_REMOTE_CALL_BUDGET_FILE="$STATE/.remote-call-cycle-budget"
+export -n FM_REMOTE_CALL_BUDGET_FILE
 # Per-relaunch wall-clock bound, so a wedged spawn cannot stall the poll.
 SECONDMATE_LIVENESS_TIMEOUT=${FM_SECONDMATE_LIVENESS_TIMEOUT:-}
 case "$SECONDMATE_LIVENESS_TIMEOUT" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_TIMEOUT=120 ;; esac
@@ -1160,31 +1164,41 @@ EOF
 }
 
 # One wake per streak of bounded remote-call timeouts to a host. bin/fm-on.sh
-# writes each record and clears it when a bounded call completes; this tick only
-# reads it and stamps woken=1 so the same streak never wakes twice.
+# owns each record, keeps its streak id across consecutive timeouts, and removes
+# it when a bounded call completes. This tick never rewrites a record: it notes
+# the streak it already woke for in a sibling .woken.<host> marker and drops
+# markers whose record is gone, so a record that vanishes or changes while it
+# is read only skips that host this cycle.
 remote_call_timeout_tick() {
-  local dir="$STATE/remote-call-timeouts" rec host count bound command woken reason key tmp first_reason=''
+  local dir="$STATE/remote-call-timeouts" rec marker host count bound command streak reason key tmp first_reason=''
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] && [ ! -L "$rec" ] || continue
     host=${rec##*/}
     case "$host" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
-    count=$(sed -n 's/^count=//p' "$rec" | head -1)
-    woken=$(sed -n 's/^woken=//p' "$rec" | head -1)
+    count=$(sed -n 's/^count=//p' "$rec" 2>/dev/null | head -1)
+    streak=$(sed -n 's/^streak=//p' "$rec" 2>/dev/null | head -1)
     case "$count" in ''|*[!0-9]*) continue ;; esac
-    [ "$count" -ge "$REMOTE_CALL_WAKE_AFTER" ] && [ "$woken" != 1 ] || continue
-    bound=$(sed -n 's/^bound=//p' "$rec" | head -1)
-    command=$(sed -n 's/^command=//p' "$rec" | head -1 | fm_wake_clean_field)
+    case "$streak" in ''|*[!0-9-]*) continue ;; esac
+    [ "$count" -ge "$REMOTE_CALL_WAKE_AFTER" ] || continue
+    marker="$dir/.woken.$host"
+    [ "$(cat "$marker" 2>/dev/null || true)" != "$streak" ] || continue
+    bound=$(sed -n 's/^bound=//p' "$rec" 2>/dev/null | head -1)
+    command=$(sed -n 's/^command=//p' "$rec" 2>/dev/null | head -1 | fm_wake_clean_field)
     reason="check: remote host $host timed out $count consecutive times running $command (bound ${bound}s); the remote command is alive but stuck - inspect that host (disk space, load, its remote job worker); bounded polls to it back off meanwhile"
     key="remote-call-timeout-$host"
-    tmp=$(umask 077; mktemp "$dir/.woken.XXXXXX") || return 1
-    if ! { sed 's/^woken=.*/woken=1/' "$rec" > "$tmp" && mv -f -- "$tmp" "$rec"; }; then
+    tmp=$(umask 077; mktemp "$dir/.woken-tmp.XXXXXX") || return 1
+    if ! { printf '%s\n' "$streak" > "$tmp" && mv -f -- "$tmp" "$marker"; }; then
       rm -f -- "$tmp"
       return 1
     fi
     fm_wake_queued_keys check | grep -Fx "$key" >/dev/null 2>&1 \
       || fm_wake_append check "$key" "$reason" || return 1
     [ -n "$first_reason" ] || first_reason=$reason
+  done
+  for marker in "$dir"/.woken.*; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    [ -e "$dir/${marker##*/.woken.}" ] || rm -f -- "$marker"
   done
   [ -z "$first_reason" ] || wake "$first_reason"
 }
@@ -4186,6 +4200,7 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
+  : > "$FM_REMOTE_CALL_BUDGET_FILE" 2>/dev/null || true
   fm_pending_reply_tick "$STATE" || true
 
   open_decision_reminder_tick || {
