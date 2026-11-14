@@ -828,6 +828,97 @@ EOF
   pass "Pi actionable output draining after exit stays actionable"
 }
 
+# Node can fire the arm child's `exit` before its stdout pipe drains, and the
+# exit-path settlement must then count only newline-terminated lines, as the
+# data handler does. The split case leaves `signal: /some/pa` buffered at exit
+# and sends `th\n` afterwards; settling on the cut-off buffer would deliver it
+# and then deliver the completed line as a second wake. The whole and drain
+# cases keep an ordinary single wake, and a full line that only drains after
+# exit, delivered exactly once.
+test_pi_exit_settlement_delivers_each_wake_once() {  # split|whole|drain
+  local case=$1 repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-exit-once-$case-root"
+  home="$TMP_ROOT/pi-exit-once-$case-home"
+  log="$TMP_ROOT/pi-exit-once-$case.log"
+  stop="$TMP_ROOT/pi-exit-once-$case.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  case "${FM_EXIT_CASE:?}" in
+    split)
+      printf 'signal: /some/pa'
+      ( sleep 0.3; printf 'th\n' ) &
+      ;;
+    whole)
+      printf 'signal: /some/path\n'
+      ;;
+    drain)
+      ( sleep 0.3; printf 'signal: /some/path\n' ) &
+      ;;
+  esac
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=exit-once\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_EXIT_CASE="$case" FM_WATCH_REARM_RETRY_BASE_MS=2000 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(String(message));
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("exit-once-arm", {}, undefined, undefined, {});
+for (let i = 0; i < 150 && prompts.length === 0; i += 1) await sleep(20);
+// The split tail and the drained line both land 300ms after exit; wait well
+// past that so a second delivery has time to show up.
+await sleep(1000);
+const wakes = prompts.filter((prompt) => prompt.includes("FIRSTMATE WATCHER WAKE"));
+let failure = "";
+if (wakes.length !== 1) {
+  failure = `expected one wake, got ${wakes.length}: ${JSON.stringify(wakes)}`;
+} else if (!/FIRSTMATE WATCHER WAKE: signal: \/some\/path(\n|$)/.test(wakes[0])) {
+  failure = `wake did not carry the full line: ${JSON.stringify(wakes[0])}`;
+} else if (armRows().length !== 2) {
+  failure = `expected two arms, got: ${armRows().join(" | ")}`;
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await sleep(100);
+if (failure) throw new Error(failure);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi exit settlement must deliver one full wake ($case): $out"
+  [ -z "$out" ] || fail "Pi exit-once test ($case) printed output: $out"
+  pass "Pi exit settlement delivers one full wake ($case)"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -6315,6 +6406,9 @@ test_pi_actionable_output_waits_for_predecessor_close
 test_pi_dead_ready_successor_is_retried_before_delivery
 test_pi_successor_exit_with_held_pipe_schedules_retry
 test_pi_actionable_line_draining_after_exit_stays_actionable
+test_pi_exit_settlement_delivers_each_wake_once split
+test_pi_exit_settlement_delivers_each_wake_once whole
+test_pi_exit_settlement_delivers_each_wake_once drain
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
