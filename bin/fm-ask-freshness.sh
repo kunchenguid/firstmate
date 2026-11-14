@@ -181,7 +181,7 @@ HEADING = re.compile(r"#{1,6}(?:\s|$)")
 FENCE = re.compile(r"(?:`{3,}|~{3,})")
 THEMATIC = re.compile(r"(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})")
 LIST_ITEM = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?:\s|$)")
-HTML_BLOCK = re.compile(r"(?:<!--|<[A-Za-z][A-Za-z0-9-]*(?:\s|>|/))")
+HTML_BLOCK = re.compile(r"(?:<!--|</?[A-Za-z][A-Za-z0-9-]*(?:\s|>|/))")
 
 
 def starts_new_block(line):
@@ -216,10 +216,17 @@ checked = 0
 tables = 0
 undated = []
 bad = []
+fence = None
 i = 0
 while i < len(lines):
     line = lines[i]
-    if "|" in line and i + 1 < len(lines) and is_separator(lines[i + 1]):
+    opener = FENCE.match(line.strip())
+    if fence is None and opener:
+        fence = opener.group(0)
+    elif fence is not None:
+        if re.fullmatch(re.escape(fence[0]) + "{%d,}" % len(fence), line.strip()):
+            fence = None
+    elif "|" in line and i + 1 < len(lines) and is_separator(lines[i + 1]):
         header = [normalize(c) for c in cells(line)]
         start = i + 1
         i += 2

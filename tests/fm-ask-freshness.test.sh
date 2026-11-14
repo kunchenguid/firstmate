@@ -296,6 +296,56 @@ test_a_piped_line_that_looks_like_a_block_is_still_a_row() {
   pass "a piped line that begins like a list item or heading is still a checked row"
 }
 
+# A table inside a fenced code block is an example, not a triage table, so
+# an undated example after a fresh table does not fail the report.
+test_a_table_inside_a_fence_is_not_a_triage_table() {
+  local report out rc=0
+  report="$TMP_ROOT/fenced-example.md"
+  {
+    printf '%s\n' '| item | checked_at |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '| a | 2026-11-13T11:30Z |'
+    printf '%s\n' ''
+    printf '%s\n' '````markdown'
+    printf '%s\n' '| item | action |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '```'
+    printf '%s\n' '| b | old ask |'
+    printf '%s\n' '````'
+    printf '%s\n' ''
+    printf '%s\n' '| item | checked_at |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '| c | 2026-11-13T02:00Z |'
+  } > "$report"
+  out=$(run_gate "$report") || rc=$?
+  expect_code 1 "$rc" "the table after the fence must still be checked"$'\n'"$out"
+  assert_contains "$out" "line 3: fresh age 30m" "the table before the fence must be checked"
+  assert_contains "$out" "line 14: STALE" "the table after the fence must be checked"
+  assert_contains "$out" "1 of 2 rows" "rows inside the fence must not be counted"
+  assert_not_contains "$out" "no 'checked_at' column" "a fenced example is not an undated table"
+  pass "a table inside a fenced code block is skipped"
+}
+
+# A closing HTML tag right after a table ends its body, as an opening tag does.
+test_a_closing_html_tag_ends_the_table_body() {
+  local report out rc=0
+  report="$TMP_ROOT/details-table.md"
+  {
+    printf '%s\n' '<details>'
+    printf '%s\n' '<summary>Triage</summary>'
+    printf '%s\n' ''
+    printf '%s\n' '| item | checked_at |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '| a | 2026-11-13T11:30Z |'
+    printf '%s\n' '</details>'
+  } > "$report"
+  out=$(run_gate "$report") || rc=$?
+  expect_code 0 "$rc" "a closing tag must not be read as a row"$'\n'"$out"
+  assert_contains "$out" "all 1 rows are within 2h" "only the dated row is counted"
+  assert_not_contains "$out" "UNREADABLE" "the closing tag is not an undated row"
+  pass "a closing HTML tag ends the table body"
+}
+
 fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_an_over_age_row_fails_and_is_named_without_editing_the_report \
   test_column_and_max_age_options \
@@ -307,4 +357,6 @@ fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_input_errors_exit_two \
   test_a_block_after_a_table_ends_the_body_instead_of_becoming_a_row \
   test_a_short_row_before_a_block_is_still_checked_and_named \
-  test_a_piped_line_that_looks_like_a_block_is_still_a_row
+  test_a_piped_line_that_looks_like_a_block_is_still_a_row \
+  test_a_table_inside_a_fence_is_not_a_triage_table \
+  test_a_closing_html_tag_ends_the_table_body
