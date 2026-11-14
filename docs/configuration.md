@@ -839,6 +839,12 @@ The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#poli
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
+The optional `config/park-release-slot` presence flag, off by default, also returns a parked lane's Treehouse pool slot once its copy is clean at the PR head.
+A review comment, a merge conflict, or a due rebase leases a new copy for the relaunched lane; when the pool has no free copy, the lane stays parked and a later tick retries.
+A tick retries a release that was refused, and releases the slot of a park it settles.
+The flag applies only to Herdr and Rex workers.
+A tmux worker keeps its pool slot while parked, because its relaunch cannot move into a new copy.
+A release cut short before the copy is returned is not retried, so that lane keeps its copy until review activity relaunches it or someone cleans it up by hand.
 Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
 Both flags are home-local and not inherited by secondmate homes.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.

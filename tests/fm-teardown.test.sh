@@ -934,6 +934,23 @@ test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup() {
   pass "teardown leaves a merge cleanup request for the detached cleanup that owns it"
 }
 
+test_teardown_of_a_lane_whose_copy_was_released_touches_no_slot() {
+  local case_dir rc
+  case_dir=$(make_case released-copy)
+  write_meta "$case_dir" no-mistakes ship "$case_dir/state/task-x1.released-copy"
+  printf 'pr=https://github.com/example/repo/pull/7\nslot_released=1\n' > "$case_dir/state/task-x1.review-park"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/treehouse.log"\n' "$case_dir" > "$case_dir/fakebin/treehouse"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "released-copy: teardown of a lane whose copy went back to the pool should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/treehouse.log" "released-copy: teardown returned a pool slot the lane no longer holds"
+  assert_absent "$case_dir/state/task-x1.meta" "released-copy: teardown kept the task record"
+  assert_absent "$case_dir/state/task-x1.review-park" "released-copy: teardown kept the park record"
+  pass "teardown of a parked lane whose copy went back to the pool cleans up its records and returns no slot"
+}
+
 # Send the task branch's commits to <target> on origin from a separate clone, so
 # the task copy's tracking refs do not show them. Args: case_dir target
 land_task_commits_from_other_clone() {
@@ -6599,6 +6616,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
+test_teardown_of_a_lane_whose_copy_was_released_touches_no_slot
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits

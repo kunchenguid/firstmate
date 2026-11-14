@@ -6081,7 +6081,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ] && [ "$BACKEND" != rex ]; then
+    if ! fm_control_backend_relaunch_moves_copy "$BACKEND"; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi

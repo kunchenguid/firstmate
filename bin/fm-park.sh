@@ -10,7 +10,7 @@
 #   fm-park.sh land <task-id> [--if-eligible] [--detach]
 #   fm-park.sh tick
 #   fm-park.sh list
-#   fm-park.sh run <task-id> park|resume|land [<args>...]   (internal)
+#   fm-park.sh run <task-id> park|resume|release|land [<args>...]   (internal)
 #
 # gate is read-only: one fresh forge read of the task's recorded pr= (GitHub
 # through one gh GraphQL read, GitLab through glab api for the merge request and
@@ -70,13 +70,44 @@
 # parking. Each tick promotes a pending record to parked once its agent is
 # confirmed dead and drops it only if still alive after the stop timeout.
 #
+# With the config/park-release-slot presence flag (off by default), a park that
+# confirmed its stop also returns the copy's Treehouse pool slot, directly or
+# through a detached release a later tick starts, so a lane that
+# only waits on its reviewer holds no slot. It releases only a pool slot it
+# leased above, on a backend whose relaunch can start in another copy
+# (bin/fm-control-lib.sh fm_control_backend_relaunch_moves_copy: herdr, rex),
+# and only while the copy is clean with untracked files counted, its HEAD is
+# still the PR head the gate just verified on the forge, and its owner claim is
+# this task's or absent. Under the Treehouse project lock it then removes the
+# harness wiring the recorded adapter keeps inside the copy
+# (fm_control_harness_wiring_paths), detaches HEAD so the ship branch stays in
+# the repository for the next copy, runs treehouse return --force
+# --if-lease-holder <id>, drops the owner claim, and rewrites the task record's
+# worktree= to the never-created path state/<id>.released-copy, so no record
+# names a slot the pool may hand to another task. Any refusal or failure
+# before the return leaves the lane parked in its copy with the branch checked
+# out again, and the outcome line names why. For a confirmed parked lane that has
+# no slot_released and no resume_error, when no relaunch trigger fired, a tick
+# only starts the release as a detached lane action (run release, under the lane
+# lock); a refusal is reported once per reason and retried on later ticks.
+# Teardown of a released lane finds
+# no copy and cleans up only the record and endpoint.
+#
 # resume writes a note naming the PR, the parked head and the trigger, then runs
 # bin/fm-control.sh relaunch --note-file, which starts a fresh agent of the
 # recorded adapter in the same copy on the same branch with its original brief
-# plus that note. A working: line superseding the declared wait is appended just
+# plus that note. A released lane first gets a copy again under the project
+# lock: treehouse get --lease --lease-holder <id> from the project, an owner
+# claim, a checkout of the ship branch (created at the parked head when it is
+# gone), and worktree= rewritten to that copy; the relaunch then starts there.
+# A retry after a failure reuses a copy the record already names and this task
+# claims. A working: line superseding the declared wait is appended just
 # before the launch, so the fresh worker's own reports always follow it. Success
 # removes the park record; failure keeps it with resume_error=, which crew state
 # reports as blocked and which stops tick retrying until resume runs by hand.
+# The one exception is a released lane whose pool has no free copy: it stays
+# parked and released, the wait is reported once (resume_waiting=), and each
+# later tick starts the resume again while the trigger is still pending.
 #
 # land waits for any other park action on the lane to finish, runs
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
@@ -115,18 +146,20 @@
 # requested, a merge conflict, any unresolved review thread, or any new
 # comment (inline review-thread replies included), review or note created or
 # edited after the park (an approval with
-# no body is not a comment). A branch merely behind its base is not a trigger. It
+# no body is not a comment). A branch merely behind its base is a trigger only
+# with config/park-release-slot, where the forge's behind state means a rebase
+# is due before the PR can merge. It
 # records its outcome and close lines as one check park-on-review wake before
 # it removes the reports they came from or marks a close as reported, then
 # prints them for the watcher to ring; when the wake cannot be recorded it
 # removes and prints nothing, so the next tick retries. A quiet tick prints
 # nothing.
 #
-# A lane action started by tick (park, resume) or by the merge poll (land) runs
+# A lane action started by tick (park, resume, release) or by the merge poll (land) runs
 # detached, as fm-park.sh run, in its own process group with stdio closed, so it
 # outlives the watcher iteration that started it and no tick or watcher budget
 # can cut it short. It takes the lane's lock itself (state/.review-park-<id>.lock,
-# held by every park, resume and land), so a lane runs one action at a time and
+# held by every park, resume, release and land), so a lane runs one action at a time and
 # tick skips a lane whose lock is held. Its stdout outcome line, if any, is
 # published as state/.review-park-report-<id>-<epoch>-<pid> (a park refusal
 # prints none), and the next tick reports it.
@@ -141,11 +174,20 @@
 # Parked lanes use only the first half of the tick, reserving the rest for
 # unparked lanes.
 #
-# list prints each parked lane: id, PR, parked head, and when it parked.
+# list prints each parked lane: id, PR, parked head, when it parked, and
+# whether its copy went back to the pool.
 #
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
-# until the stop is confirmed, and resume_error after a failed relaunch), mode
-# 0600, published by rename.
+# until the stop is confirmed, slot_released while the copy is back in the
+# pool, slot_releasing from just before the copy is returned until the release
+# is fully recorded, so a release cut short is resumed like a released lane;
+# a release cut short after slot_releasing is written but before the copy is
+# returned is not retried, so that lane keeps its copy until review activity
+# relaunches it or someone cleans it up by hand, as without the feature,
+# release_refused with the reason a release was last refused,
+# resume_waiting while a relaunch waits for a free copy, and resume_error after
+# a failed relaunch), mode 0600, published by
+# rename.
 # GraphQL and jq programs below are literal, not shell expressions.
 # shellcheck disable=SC2016
 set -eu
@@ -182,7 +224,8 @@ QUIET_SECS=${FM_PARK_QUIET_SECS:-900}
 READ_SECS=${FM_PARK_READ_SECS:-15}
 ACTION_SECS=${FM_PARK_ACTION_SECS:-900}
 TICK_SECS=${FM_PARK_TICK_SECS:-180}
-for v in "$QUIET_SECS" "$READ_SECS" "$ACTION_SECS" "$TICK_SECS"; do
+LOCK_SECS=${FM_PARK_LOCK_SECS:-60}
+for v in "$QUIET_SECS" "$READ_SECS" "$ACTION_SECS" "$TICK_SECS" "$LOCK_SECS"; do
   case "$v" in ''|*[!0-9]*) printf 'fm-park: timing overrides must be whole seconds\n' >&2; exit 2 ;; esac
 done
 
@@ -206,6 +249,14 @@ PARK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-park.XXXXXX") || die "cannot create a t
 lock_try() {  # <lock-path>
   fm_lock_try_acquire "$1" || return 1
   LOCKS_HELD="$LOCKS_HELD $1"
+}
+lock_wait() {  # <lock-path> <max-seconds>
+  fm_lock_acquire_wait_max "$1" "$2" || return 1
+  LOCKS_HELD="$LOCKS_HELD $1"
+}
+lock_drop() {  # <lock-path>
+  fm_lock_release "$1" || true
+  LOCKS_HELD=${LOCKS_HELD// $1/}
 }
 
 # The epoch second a tick must end by; empty outside tick.
@@ -277,6 +328,44 @@ record_write() {  # <id> <key=value>...
     rm -f -- "$tmp"
     return 1
   fi
+}
+
+# Rewrites one key of the park record and keeps every other line; an empty
+# value drops the key.
+record_set() {  # <id> <key> [<value>]
+  local id=$1 key=$2 value=${3-} line
+  local -a kept=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$key="*) ;; *) kept+=("$line") ;; esac
+  done < "$(record_path "$id")" || return 1
+  [ -z "$value" ] || kept+=("$key=$value")
+  record_write "$id" "${kept[@]}"
+}
+
+released_copy() { printf '%s/%s.released-copy' "$STATE" "$1"; }
+
+# Rewrites the task record's worktree= under its meta lock, in place, so the
+# PR fields stay after it as fm_pr_metadata_identity_parse requires.
+meta_set_worktree() {  # <id> <path>
+  local id=$1 path=$2 meta lock tmp line rc=0 seen=0
+  meta="$STATE/$id.meta"
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  lock_wait "$lock" 60 || return 1
+  if tmp=$(mktemp "$STATE/.review-park.XXXXXX"); then
+    {
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          worktree=*) printf 'worktree=%s\n' "$path"; seen=1 ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done < "$meta" && { [ "$seen" -eq 1 ] || printf 'worktree=%s\n' "$path"; }
+    } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$meta" || rc=1
+    rm -f -- "$tmp"
+  else
+    rc=1
+  fi
+  lock_drop "$lock"
+  return "$rc"
 }
 
 status_append() {  # <id> <line>
@@ -492,6 +581,7 @@ TRIGGER_PROGRAM="$JQ_TIME"'
         (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])" else empty end),
         (if $s.changes_requested then "changes were requested" else empty end),
         (if $s.conflict == "conflict" then "the PR has merge conflicts" else empty end),
+        (if $rebase and $s.conflict == "behind" then "the branch is behind its base and needs a rebase" else empty end),
         (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
         (if ($s.threads_complete | not) then "review threads could not all be read" else empty end),
         (if ($s.comments_complete | not) then "review comments could not all be read" else empty end),
@@ -606,8 +696,126 @@ slot_lease() {  # <id>
   printf 'yes\n'
 }
 
+# Gives a parked lane's leased pool slot back to the pool. Returns 1 with the
+# reason printed while the copy stays the lane's; returns 0 once the slot is
+# returned, printing a warning when the records could not all follow it.
+slot_release() {  # <id> <head>
+  local id=$1 head=$2 meta project wt backend branch harness lock path dirty local_head out warn=''
+  meta="$STATE/$id.meta"
+  project=$(fm_meta_get "$meta" project)
+  wt=$(fm_meta_get "$meta" worktree)
+  backend=$(fm_backend_of_meta "$meta")
+  branch=$(fm_meta_get "$meta" branch)
+  [ -n "$branch" ] || branch="fm/$id"
+  fm_control_backend_relaunch_moves_copy "$backend" \
+    || { echo "a ${backend:-tmux} relaunch cannot start in another copy"; return 1; }
+  if [ -z "$project" ] || ! fm_treehouse_pool_slot "$project" "$wt"; then
+    echo "the copy is not a Treehouse pool slot"; return 1
+  fi
+  lock=$(fm_treehouse_project_lock_path "$project") \
+    || { echo "the Treehouse project lock could not be resolved"; return 1; }
+  lock_wait "$lock" "$LOCK_SECS" || { echo "another slot allocation or return holds the project"; return 1; }
+  fm_treehouse_slot_owner_state "$wt" "$id"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine|absent) ;;
+    *) lock_drop "$lock"; echo "the slot's owner claim is not this task's ($FM_TREEHOUSE_SLOT_OWNER)"; return 1 ;;
+  esac
+  harness=$(fm_control_harness_family "$(fm_meta_get "$meta" harness)") || harness=
+  while IFS= read -r path; do
+    case "$path" in "$wt"/*) ;; *) continue ;; esac
+    git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue
+    rm -f -- "$path"
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$STATE" "$id" 2>/dev/null)
+EOF
+  if ! dirty=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || [ -n "$dirty" ]; then
+    lock_drop "$lock"; echo "the copy has uncommitted or untracked files"; return 1
+  fi
+  local_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+  if [ "$local_head" != "$head" ]; then
+    lock_drop "$lock"; echo "the copy is at ${local_head:0:12}, not the PR head ${head:0:12}"; return 1
+  fi
+  git -C "$wt" checkout -q --detach 2>/dev/null \
+    || { lock_drop "$lock"; echo "the copy's HEAD could not be detached from $branch"; return 1; }
+  record_set "$id" slot_releasing 1 \
+    || { lock_drop "$lock"; echo "the park record could not be marked as releasing"; return 1; }
+  if ! out=$( (cd "$project" && fm_run_timed "$ACTION_SECS" treehouse return --force --if-lease-holder "$id" "$wt") 2>&1); then
+    git -C "$wt" checkout -q "$branch" 2>/dev/null || true
+    record_set "$id" slot_releasing "" || true
+    lock_drop "$lock"
+    echo "treehouse return failed: $(printf '%s\n' "$out" | tail -1)"
+    return 1
+  fi
+  fm_treehouse_slot_owner_release "$wt" "$id"
+  record_set "$id" slot_released 1 || warn="its park record could not be marked released"
+  meta_set_worktree "$id" "$(released_copy "$id")" \
+    || warn="${warn:+$warn; }its task record still names the returned slot $wt"
+  [ -n "$warn" ] || record_set "$id" slot_releasing "" || true
+  lock_drop "$lock"
+  [ -z "$warn" ] || printf 'warning: %s\n' "$warn"
+}
+
+# True for a confirmed park that still holds its leased copy and may return it.
+release_due() {  # <id>
+  local id=$1
+  [ -e "$CONFIG/park-release-slot" ] && [ "$(record_get "$id" slot_leased)" = yes ] || return 1
+  [ -z "$(record_get "$id" slot_released)" ] && [ -z "$(record_get "$id" slot_releasing)" ] && [ -z "$(record_get "$id" resume_error)" ] && [ -z "$(record_get "$id" pending)" ]
+}
+
+# Leases a copy again for a released lane, checks out its ship branch, and
+# records it as the task's worktree; prints the copy, or the reason and
+# returns 1 (2 when the pool had no free copy or another
+# allocation held the project lock). A copy the record already names and this task claims is reused,
+# so a retry after a failure takes no second slot.
+slot_reacquire() {  # <id>
+  local id=$1 meta project branch head wt lock fresh=0 why=''
+  meta="$STATE/$id.meta"
+  project=$(fm_meta_get "$meta" project)
+  branch=$(fm_meta_get "$meta" branch)
+  [ -n "$branch" ] || branch="fm/$id"
+  head=$(record_get "$id" head)
+  [ -n "$project" ] && [ -d "$project" ] || { echo "the project $project is missing"; return 1; }
+  lock=$(fm_treehouse_project_lock_path "$project") \
+    || { echo "the Treehouse project lock could not be resolved"; return 1; }
+  lock_wait "$lock" "$LOCK_SECS" || { echo "another slot allocation or return holds the project"; return 2; }
+  wt=$(fm_meta_get "$meta" worktree)
+  fm_treehouse_slot_owner_state "$wt" "$id"
+  if ! fm_treehouse_pool_slot "$project" "$wt" || [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ]; then
+    if ! wt=$( (cd "$project" && fm_run_timed "$ACTION_SECS" treehouse get --lease --lease-holder "$id") 2>"$PARK_TMP/get.err"); then
+      lock_drop "$lock"
+      echo "no pool slot could be leased: $(tail -1 "$PARK_TMP/get.err" 2>/dev/null)"
+      return 2
+    fi
+    fresh=1
+    if [ -z "$wt" ] || ! fm_treehouse_pool_slot "$project" "$wt"; then
+      why="treehouse get --lease reported '${wt:-nothing}', not a pool slot of $project"
+    elif ! fm_treehouse_slot_owner_claim "$wt" "$id" "$FM_HOME"; then
+      why="the pool slot $wt could not be claimed"
+    fi
+  fi
+  if [ -z "$why" ] && [ "$(git -C "$wt" symbolic-ref -q --short HEAD 2>/dev/null)" != "$branch" ]; then
+    if git -C "$wt" show-ref --verify -q "refs/heads/$branch"; then
+      git -C "$wt" checkout -q "$branch" 2>/dev/null || why="the copy could not check out $branch"
+    else
+      git -C "$wt" checkout -q -b "$branch" "$head" 2>/dev/null || why="the copy could not create $branch at ${head:0:12}"
+    fi
+  fi
+  [ -n "$why" ] || meta_set_worktree "$id" "$wt" || why="the task record could not be pointed at $wt"
+  if [ -n "$why" ]; then
+    if [ "$fresh" = 1 ] && [ -n "$wt" ] && [ -d "$wt" ]; then
+      (cd "$project" && fm_run_timed "$ACTION_SECS" treehouse return --force --if-lease-holder "$id" "$wt") >/dev/null 2>&1 \
+        && fm_treehouse_slot_owner_release "$wt" "$id"
+    fi
+    lock_drop "$lock"
+    echo "$why"
+    return 1
+  fi
+  lock_drop "$lock"
+  printf '%s\n' "$wt"
+}
+
 cmd_park() {
-  local id=${1-} why result head local_head pr lease parked_at out rc=0 line inbox_lock
+  local id=${1-} why result head local_head pr lease parked_at out rc=0 line inbox_lock copy outcome
   task_id_ok "$id" || die "usage: fm-park.sh park <task-id>" 2
   lock_try "$(lane_lock "$id")" || die "another park action holds $id"
   why=$(park_preflight "$id") || die "refusing to park $id: $why"
@@ -645,16 +853,27 @@ cmd_park() {
   fi
   record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked_at" "slot_leased=$lease" \
     || die "$id: the agent was stopped but its park record could not be marked parked; the next tick settles it"
-  line="paused [at=$(date +%s)]: parked on review: PR $pr clean at ${head:0:12}; agent stopped, relaunches on review activity"
+  lock_drop "$inbox_lock"
+  copy="agent stopped, relaunches on review activity"
+  outcome="agent stopped"
+  if [ -e "$CONFIG/park-release-slot" ] && [ "$lease" = yes ]; then
+    if why=$(slot_release "$id" "$head"); then
+      copy="agent stopped and its copy returned to the pool, relaunches in a new copy on review activity"
+      outcome="agent stopped; copy returned to the pool${why:+ ($why)}"
+    else
+      outcome="agent stopped; copy kept because $why"
+    fi
+  fi
+  line="paused [at=$(date +%s)]: parked on review: PR $pr clean at ${head:0:12}; $copy"
   status_append "$id" "$line"
   fm_parent_channel_report "$FM_HOME" "$STATE" "$line" >/dev/null 2>&1 || true
-  printf 'parked %s: PR %s clean at %s; agent stopped\n' "$id" "$pr" "${head:0:12}"
+  printf 'parked %s: PR %s clean at %s; %s\n' "$id" "$pr" "${head:0:12}" "$outcome"
 }
 
 # --- resume ----------------------------------------------------------------
 
 cmd_resume() {
-  local id=${1-} trigger pr head note out rc=0 rec
+  local id=${1-} trigger pr head note out rc=0 rec copy reacquire_rc
   task_id_ok "$id" || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
   shift
   [ "${1-}" = --trigger ] && [ -n "${2-}" ] || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
@@ -664,10 +883,29 @@ cmd_resume() {
   lock_try "$(lane_lock "$id")" || die "another park action holds $id"
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
+  copy="the same local copy"
+  if [ "$(record_get "$id" slot_released)" = 1 ] || [ -n "$(record_get "$id" slot_releasing)" ]; then
+    reacquire_rc=0
+    out=$(slot_reacquire "$id") || reacquire_rc=$?
+    if [ "$reacquire_rc" -eq 2 ]; then
+      if [ -z "$(record_get "$id" resume_waiting)" ]; then
+        record_set "$id" resume_waiting "$(date +%s)" || true
+        printf 'relaunch-waiting %s: PR %s (%s): no free copy yet, retrying on each tick: %s\n' "$id" "$pr" "$trigger" "$out"
+      fi
+      return 1
+    elif [ "$reacquire_rc" -ne 0 ]; then
+      record_set "$id" resume_error "$(date +%s)" || true
+      printf 'relaunch-failed %s: PR %s (%s): no copy to relaunch in: %s\n' "$id" "$pr" "$trigger" "$out"
+      return 1
+    fi
+    record_set "$id" slot_released "" || true
+    record_set "$id" slot_releasing "" || true
+    copy="a new local copy (the parked one went back to the pool)"
+  fi
   note="$PARK_TMP/note"
   {
     printf 'This lane was parked on review: PR %s was clean and ready to merge at head %s, so its previous agent was stopped.\n' "$pr" "$head"
-    printf 'You are a fresh agent relaunched in the same local copy on the same branch because: %s.\n' "$trigger"
+    printf 'You are a fresh agent relaunched in %s on the same branch because: %s.\n' "$copy" "$trigger"
     printf 'Read the PR and its new review activity, address it on this branch, then report again exactly as your instructions define done.\n'
   } > "$note"
   # Written before the launch, so the fresh worker's own reports always follow
@@ -675,13 +913,31 @@ cmd_resume() {
   status_append "$id" "working [at=$(date +%s)]: relaunched from review park: $trigger"
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" relaunch --note-file "$note" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
-    record_write "$id" "pr=$pr" "head=$head" "parked_at=$(record_get "$id" parked_at)" \
-      "slot_leased=$(record_get "$id" slot_leased)" "resume_error=$(date +%s)" || true
+    record_set "$id" resume_error "$(date +%s)" || true
     printf 'relaunch-failed %s: PR %s (%s): %s\n' "$id" "$pr" "$trigger" "$(printf '%s\n' "$out" | tail -1)"
     return 1
   fi
   rm -f -- "$rec"
   printf 'relaunched %s: PR %s - %s\n' "$id" "$pr" "$trigger"
+}
+
+# --- release ---------------------------------------------------------------
+
+# Returns a confirmed park's leased copy to the pool. A refusal is reported
+# once per reason and retried on later ticks.
+cmd_release() {
+  local id=${1-} why prev
+  task_id_ok "$id" || die "usage: fm-park.sh run <task-id> release" 2
+  lock_try "$(lane_lock "$id")" || die "another park action holds $id"
+  [ -f "$(record_path "$id")" ] && release_due "$id" || return 0
+  if why=$(slot_release "$id" "$(record_get "$id" head)"); then
+    printf 'released %s: PR %s: copy returned to the pool%s\n' "$id" "$(record_get "$id" pr)" "${why:+ ($why)}"
+    return 0
+  fi
+  prev=$(record_get "$id" release_refused)
+  [ "$prev" != "$why" ] || return 0
+  record_set "$id" release_refused "$why" || true
+  printf 'release-kept %s: PR %s: copy kept because %s\n' "$id" "$(record_get "$id" pr)" "$why"
 }
 
 # --- land ------------------------------------------------------------------
@@ -752,8 +1008,8 @@ cmd_land() {
 
 cmd_run() {
   local id=${1-} verb=${2-} out
-  task_id_ok "$id" || die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2
-  case "$verb" in park|resume|land) ;; *) die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2 ;; esac
+  task_id_ok "$id" || die "usage: fm-park.sh run <task-id> park|resume|release|land [<args>...]" 2
+  case "$verb" in park|resume|release|land) ;; *) die "usage: fm-park.sh run <task-id> park|resume|release|land [<args>...]" 2 ;; esac
   shift 2
   out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
   if [ -n "$out" ]; then
@@ -774,7 +1030,7 @@ closed_once() {  # <id> <pr>
 }
 
 watch_parked() {  # <id>
-  local id=$1 pr head parked snap result state triggers
+  local id=$1 pr head parked snap result state triggers rebase
   ! lane_busy "$id" || return 0
   if [ -n "$(record_get "$id" pending)" ]; then
     ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
@@ -787,14 +1043,20 @@ watch_parked() {  # <id>
   parked=$(record_get "$id" parked_at)
   case "$parked" in ''|*[!0-9]*) return 0 ;; esac
   snap=$(snapshot "$pr") || return 0
-  result=$(printf '%s' "$snap" | jq -c --arg head "$head" --argjson parked "$parked" "$TRIGGER_PROGRAM") || return 0
+  rebase=false
+  [ ! -e "$CONFIG/park-release-slot" ] || rebase=true
+  result=$(printf '%s' "$snap" | jq -c --arg head "$head" --argjson parked "$parked" \
+    --argjson rebase "$rebase" "$TRIGGER_PROGRAM") || return 0
   state=$(printf '%s' "$result" | jq -r .state)
   case "$state" in
     merged) return 0 ;;
     closed) closed_once "$id" "$pr"; return 0 ;;
   esac
   triggers=$(printf '%s' "$result" | jq -r '.triggers | join("; ")')
-  [ -n "$triggers" ] || return 0
+  if [ -z "$triggers" ]; then
+    ! release_due "$id" || action_start "$id" release
+    return 0
+  fi
   action_start "$id" resume --trigger "$triggers"
 }
 
@@ -920,7 +1182,7 @@ cmd_list() {
     printf '%s\tPR %s\thead %s\tparked %s%s\n' "$id" "$(record_get "$id" pr)" \
       "$(record_get "$id" head | cut -c1-12)" \
       "$(date -u -r "$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || record_get "$id" parked_at)" \
-      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
+      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" slot_released)" ] || printf '\tcopy returned to the pool')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
   done
 }
 
