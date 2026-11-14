@@ -1017,6 +1017,41 @@ test_recovery_record_without_terminal_refuses_unsafe_release() {
   pass "fm-teardown.sh backend=paradev: a terminal-less recovery record keeps the id/path and landing gates; ordinary records still refuse"
 }
 
+test_scout_teardown_refuses_missing_worktree_path() {
+  local id out rc other
+  id="pdscoutgonez3"
+  teardown_fixture "$id" scout-gone scout
+  other="$TMP_ROOT/scout-gone-other-wt"
+  git -C "$PROJ" worktree add --quiet -b "fm/$id-other" "$other"
+  printf 'uncommitted\n' > "$other/scratch.txt"
+  rm -rf "$WT"
+  git -C "$PROJ" worktree prune
+  respond workspaces-get "$(ws_row "$WS" "$other")"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "scout teardown must refuse when the recorded worktree is missing"
+  assert_contains "$out" "cannot canonicalize inspected worktree" "the refusal should name the missing recorded worktree"
+  log_lacks "superset${SEP}terminals${SEP}close" "a refused scout teardown must not close terminals"
+  log_lacks "superset${SEP}workspaces${SEP}archive" "a missing recorded path must never count as a match"
+  assert_present "$other/scratch.txt" "the folder the workspace resolves to must survive"
+  assert_present "$STATE/$id.meta" "a refused scout teardown should keep the record"
+
+  id="pdrecgonez5"
+  recovery_fixture "$id" rec-gone
+  other="$TMP_ROOT/rec-gone-other-wt"
+  git -C "$PROJ" worktree add --quiet -b "fm/$id-other" "$other"
+  rm -rf "$WT"
+  git -C "$PROJ" worktree prune
+  respond workspaces-get "$(ws_row "$WS" "$other")"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG" --force)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse when the recorded worktree is missing"
+  log_lacks "superset${SEP}workspaces${SEP}archive" "a missing recorded path must never archive a recovery workspace"
+  assert_present "$other" "the folder the workspace resolves to must survive"
+  assert_present "$STATE/$id.meta" "a refused recovery teardown should keep the record"
+  pass "fm-teardown.sh backend=paradev: a missing recorded worktree refuses archive for scouts and recovery records"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1070,3 +1105,4 @@ test_teardown_refuses_terminal_from_another_workspace
 test_teardown_preserves_record_when_archive_fails
 test_spawn_recovery_record_without_terminal_tears_down
 test_recovery_record_without_terminal_refuses_unsafe_release
+test_scout_teardown_refuses_missing_worktree_path

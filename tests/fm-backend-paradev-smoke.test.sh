@@ -61,8 +61,15 @@ command -v git >/dev/null 2>&1 || { echo "skip: git not found"; exit 0; }
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
 
+# Every superset call this run makes - its own and the adapter's create, get,
+# terminals create/send/read/close, archive, and the cleanup trap's - goes
+# through this bound, so a host that stops answering fails that one step (and
+# still reaches cleanup) instead of hanging the run.
+SUPERSET_BIN=$(type -P superset) || { echo "skip: superset is not an executable on PATH"; exit 0; }
+superset() { fm_run_timed 30 "$SUPERSET_BIN" "$@"; }
+
 # Bounded probe: a wedged host service must skip, not hang the lane.
-PROJECTS=$(fm_run_timed 20 superset projects list --local --json 2>/dev/null) \
+PROJECTS=$(superset projects list --local --json 2>/dev/null) \
   || { echo "skip: no reachable Paradev host (superset projects list --local --json failed)"; exit 0; }
 PROJECT_ID=$FM_PARADEV_SMOKE_PROJECT
 PROJECT_PATH=$(printf '%s' "$PROJECTS" | jq -r --arg id "$PROJECT_ID" '.[]? | select(.id == $id) | .path | strings' 2>/dev/null)
@@ -87,7 +94,7 @@ paradev_smoke_owned() {  # <workspace-id>
   local ws=$1 out err name branch
   case "$ws" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
   err=$(mktemp "${TMPDIR:-/tmp}/fm-paradev-smoke.XXXXXX") || return 2
-  if ! out=$(fm_run_timed 20 superset workspaces get "$ws" --local --json 2>"$err"); then
+  if ! out=$(superset workspaces get "$ws" --local --json 2>"$err"); then
     case "$(cat "$err")" in
       *"not found"*|*"Not found"*|*"is not on this host"*) rm -f "$err"; return 1 ;;
     esac
@@ -111,13 +118,13 @@ cleanup_all() {
   local ws rc found branch
   [ "$CLEANED" -eq 0 ] || return 0
   CLEANED=1
-  found=$(fm_run_timed 20 superset workspaces list --local --tag "$TAG" --json 2>/dev/null \
+  found=$(superset workspaces list --local --tag "$TAG" --json 2>/dev/null \
     | jq -r --arg p "$NAME_PREFIX-" '.[]? | select((.name // "") | startswith($p)) | .id | strings' 2>/dev/null) || found=
   for ws in $CREATED_WS $found; do
     rc=0
     paradev_smoke_owned "$ws" || rc=$?
     case "$rc" in
-      0) fm_run_timed 30 superset workspaces archive "$ws" --local --json >/dev/null 2>&1 \
+      0) superset workspaces archive "$ws" --local --json >/dev/null 2>&1 \
            || printf 'warning: could not archive smoke workspace %s\n' "$ws" >&2 ;;
       1) : ;;
       *) printf 'warning: refusing to archive workspace %s: not provably this run'"'"'s\n' "$ws" >&2 ;;
@@ -209,7 +216,7 @@ check_worktree b "$WS_B" "$PATH_B"
 [ "$(real_dir "$PATH_A")" != "$(real_dir "$PATH_B")" ] || fail "both crewmates share one worktree"
 pass "real paradev: each crewmate owns its own isolated worktree on its spike/ branch, and worktree_path reads it back by id"
 
-tagged=$(fm_run_timed 20 superset workspaces list --local --tag "$TAG" --json) || fail "workspaces list --tag $TAG failed"
+tagged=$(superset workspaces list --local --tag "$TAG" --json) || fail "workspaces list --tag $TAG failed"
 for ws in "$WS_A" "$WS_B"; do
   printf '%s' "$tagged" | jq -e --arg w "$ws" 'any(.[]; .id == $w)' >/dev/null \
     || fail "workspace $ws is missing from the $TAG sidebar folder"
@@ -334,7 +341,7 @@ pass "real paradev: crewmate b tears down the same way"
 # --- the guarded cleanup leaves nothing ----------------------------------------------------
 
 cleanup_all
-left=$(fm_run_timed 20 superset workspaces list --local --tag "$TAG" --json \
+left=$(superset workspaces list --local --tag "$TAG" --json \
   | jq -r --arg p "$NAME_PREFIX-" '[.[]? | select((.name // "") | startswith($p))] | length') \
   || fail "could not re-read the $TAG folder after cleanup"
 [ "$left" = 0 ] || fail "cleanup left $left smoke workspace(s) in the $TAG folder"

@@ -2641,12 +2641,6 @@ require_app_worktree_path_match() {  # <backend> <worktree-id> <inspected-path>
   fi
 }
 
-require_app_worktree_path_match_if_present() {  # <backend> <worktree-id> <inspected-path>
-  local backend=$1 worktree_id=$2 inspected=$3
-  [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
-  require_app_worktree_path_match "$backend" "$worktree_id" "$inspected"
-}
-
 # The task's own live slot, canonicalized, or empty when this record has no slot
 # to release (a secondmate home, a record with no worktree=, or a path that is
 # already gone). Every slot-ownership check below is scoped to that value, so a
@@ -4066,7 +4060,7 @@ fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
   if [ "$APP_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_app_worktree_path_match_if_present "$BACKEND" "$APP_WORKTREE_ID" "$WT" || exit 1
+    require_app_worktree_path_match "$BACKEND" "$APP_WORKTREE_ID" "$WT" || exit 1
     APP_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then

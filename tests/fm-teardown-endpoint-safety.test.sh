@@ -1537,13 +1537,12 @@ test_orca_close_failure_refuses_even_under_force() {
   orca_free=$(fm_test_base_path_sans "$PATH" orca)
   ! PATH="$dir/fakebin:$orca_free" command -v orca >/dev/null 2>&1 \
     || fail "the orca-free search path still resolved orca"
-  # The Orca arm reports a close its missing CLI never attempted, and the step
-  # right after this close removes the Orca worktree through that same CLI, so
-  # a forced continue could only die there having removed nothing. --force
-  # therefore changes nothing at this site.
+  # With its CLI gone, Orca cannot resolve the recorded worktree id to the
+  # recorded path, so the id/path gate refuses before any close or removal is
+  # attempted. --force changes nothing here: it never stands in for that gate.
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "worktree=$dir/worktree" "project=$dir/project" \
     "backend=orca" "orca_worktree_id=worktree-9::/orca/worktree-9" "kind=ship" "mode=no-mistakes"
 
   set +e
@@ -1554,8 +1553,8 @@ test_orca_close_failure_refuses_even_under_force() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a forced Orca cleanup continued past a close that never happened: $(cat "$dir/orca-forced.err")"
-  assert_grep "could not be closed" "$dir/orca-forced.err" \
-    "the forced Orca run did not report the close it could not make"
+  assert_grep "cannot resolve Orca worktree id" "$dir/orca-forced.err" \
+    "the forced Orca run did not refuse at the id/path gate"
   assert_no_grep "--force authorizes continuing" "$dir/orca-forced.err" \
     "the forced Orca run announced a continue it cannot carry out"
   assert_no_grep "teardown $id complete" "$dir/orca-forced.out" \
@@ -1579,29 +1578,41 @@ test_orca_close_failure_refuses_even_under_force() {
   assert_present "$dir/home/state/$id.meta" \
     "the unforced Orca refusal removed the only durable record naming the terminal"
 
-  pass "fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal"
+  pass "fm-teardown: an Orca record whose CLI is gone refuses at the id/path gate even under --force, keeping the record naming the terminal"
 }
 
 test_paradev_close_failure_refuses_even_under_force() {
-  local dir superset_free id=paradev-strand rc
+  local dir id=paradev-strand rc
   dir=$(make_case paradev-close-failure)
-  superset_free=$(fm_test_base_path_sans "$PATH" superset)
-  ! PATH="$dir/fakebin:$superset_free" command -v superset >/dev/null 2>&1 \
-    || fail "the superset-free search path still resolved superset"
   # Archiving a Paradev workspace deletes its worktree folder even while a
   # terminal is live, so a close that cannot be proven must stop cleanup
-  # before the archive, with or without --force.
+  # before the archive, with or without --force. The fake host resolves the
+  # recorded workspace to the recorded worktree, so the id/path gate passes,
+  # but it keeps listing the terminal after every close.
+  cat > "$dir/fakebin/superset" <<SH
+#!/usr/bin/env bash
+printf 'superset' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+case "\$1 \$2" in
+  "workspaces get") printf '{"id":"%s","worktreePath":"%s","archivedAt":null}\n' "\$3" "$dir/worktree" ;;
+  "terminals list") printf '{"sessions":[{"terminalId":"43cf75c5-4b3b-4b72-9d64-013ebb326040","exited":false}]}\n' ;;
+  "terminals close") printf '{"status":"disposed"}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/superset"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" \
     "terminal=86221aff-2041-4f7f-9a50-9dbbde70e05f:43cf75c5-4b3b-4b72-9d64-013ebb326040" \
-    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "worktree=$dir/worktree" "project=$dir/project" \
     "backend=paradev" "paradev_workspace_id=86221aff-2041-4f7f-9a50-9dbbde70e05f" \
     "paradev_project_id=b9858b1a-100c-47b1-8304-a268c314eca6" "kind=ship" "mode=no-mistakes"
 
   set +e
   env -u TMUX -u TMUX_PANE \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-    PATH="$dir/fakebin:$superset_free" "$TEARDOWN" "$id" --force \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force \
     > "$dir/paradev-forced.out" 2> "$dir/paradev-forced.err"
   rc=$?
   set -e
@@ -1612,6 +1623,12 @@ test_paradev_close_failure_refuses_even_under_force() {
     "the forced Paradev run announced a continue it cannot carry out"
   assert_present "$dir/home/state/$id.meta" \
     "the forced Paradev refusal removed the only durable record naming the workspace"
+  assert_grep "superset <terminals> <close>" "$dir/runtime.log" \
+    "the forced Paradev run never attempted the close"
+  assert_no_grep "<archive>" "$dir/runtime.log" \
+    "the forced Paradev run archived a workspace whose terminal may still be live"
+  assert_present "$dir/worktree/sentinel" \
+    "the forced Paradev refusal lost the worktree contents"
   pass "fm-teardown: a Paradev close that cannot be proven refuses even under --force, before any archive"
 }
 
