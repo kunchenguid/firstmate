@@ -544,6 +544,14 @@ test_resolve_selection_uses_t3_catalog() {
   mcp resolve-selection --harness codex --instance codex --model default --effort default --project no-such-project
   expect_code 4 "$RC" "a default model on a project T3 does not list is refused"
   assert_equals project_not_found "$(field "$OUT" error.code)" "the refusal names the missing project"
+  FM_T3_ID="$project" t3_fake_set 'w.projects.find((p) => p.id === process.env.FM_T3_ID).defaultModelSelection = { instanceId: "claudeAgent", model: "claude-sonnet-5-5", options: [{ id: "effort", value: "low" }, { id: "fastMode", value: false }] }'
+  mcp resolve-selection --harness claude --instance claudeAgent --model default --effort high --project "$project"
+  expect_code 0 "$RC" "a boolean default option is valid in the catalog: $ERR"
+  assert_equals '[{"id":"effort","value":"high"},{"id":"fastMode","value":false}]' "$(field "$OUT" selection.options)" "an effort override keeps a false boolean option as a boolean"
+  FM_T3_ID="$project" t3_fake_set 'w.projects.find((p) => p.id === process.env.FM_T3_ID).defaultModelSelection.options[1].value = "false"'
+  mcp resolve-selection --harness claude --instance claudeAgent --model default --effort high --project "$project"
+  expect_code 4 "$RC" "the string false is not the boolean the catalog lists"
+  assert_equals option_unsupported "$(field "$OUT" error.code)" "the refusal names the unsupported option"
   t3_fake_set 'w.shortList = 1'
   mcp resolve-selection --harness codex --instance codex --model gpt-6-luna --effort high --project "$project"
   expect_code 0 "$RC" "a model T3 leaves out of its short list is found by searching its slug: $ERR"
