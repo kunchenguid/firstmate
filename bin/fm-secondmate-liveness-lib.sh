@@ -169,7 +169,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
         return 0
       fi
     fi
-    if out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+    if out=$(FM_REMOTE_CALL_BUDGET_FILE=${FM_REMOTE_CALL_BUDGET_FILE:-} "$FM_SM_LIVE_LIB_DIR/fm-on.sh" --bounded "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
       remote_rc=0
     else
       remote_rc=$?
@@ -187,7 +187,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     case "$agent_state" in
       alive)
         if [ "$mode" = full ]; then
-          if route_out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
+          if route_out=$(FM_REMOTE_CALL_BUDGET_FILE=${FM_REMOTE_CALL_BUDGET_FILE:-} "$FM_SM_LIVE_LIB_DIR/fm-on.sh" --bounded "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
             remote_rc=0
           else
             remote_rc=$?

@@ -322,7 +322,7 @@ cmd_source() {
   output=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-reply-source.XXXXXX") \
     || die "cannot stage remote reply source output"
   SOURCE_OUT=$output
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+  "$SCRIPT_DIR/fm-on.sh" --bounded --bound-extra "$WAIT_SECONDS" "$id" fm-remote-delta-read.sh \
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" \
     < /dev/null > "$output" || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
@@ -469,7 +469,7 @@ fetch_document() { # <id> <remote-relative> <result-var>
   FETCH_ERR=$err
   tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; FETCH_ERR=''; return "$DOCUMENT_LOCAL_FAILURE"; }
   FETCH_TMP=$tmp
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
+  "$SCRIPT_DIR/fm-on.sh" --bounded "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
   if [ "$rc" -ne 0 ]; then
     FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
     rm -f -- "$tmp" "$err"
