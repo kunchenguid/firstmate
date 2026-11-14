@@ -937,6 +937,37 @@ test_release_keeps_the_copy_when_it_cannot_be_returned_safely() {
   pass "a release a tmux relaunch cannot follow, or one treehouse refuses, leaves the lane parked in its copy on its branch"
 }
 
+test_release_retries_on_later_ticks() {
+  local w old out
+  w=$(release_world release-retry "$GH_URL")
+  : > "$w/treehouse.return.fail"
+  old=$(fm_meta_get_test "$w" worktree)
+  gh_fixture "$w/gh.1.json"
+  run_park "$w" park lane >/dev/null 2>&1 || fail "retry: park failed"
+  ! grep -q '^slot_released=' "$w/state/lane.review-park" || fail "retry: the first release succeeded"
+  rm -f "$w/treehouse.return.fail"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "retry: tick printed: $out"
+  grep -qx slot_released=1 "$w/state/lane.review-park" || fail "retry: a later tick did not return the slot"
+  grep -qx "return --force --if-lease-holder lane $old" "$w/treehouse.log" || fail "retry: no return call: $(cat "$w/treehouse.log")"
+  [ "$(fm_meta_get_test "$w" worktree)" = "$w/state/lane.released-copy" ] || fail "retry: the task record still names the copy"
+
+  w=$(release_world release-settled "$GH_URL")
+  sed -i 's/^backend=rex$/backend=herdr/' "$w/state/lane.meta"
+  printf '#!/usr/bin/env bash\n[ "${1:-} ${2:-}" = "status --json" ] || exit 1\necho "{\\"server\\":{\\"running\\":false}}"\n' > "$w/fakebin/herdr"
+  chmod +x "$w/fakebin/herdr"
+  old=$(fm_meta_get_test "$w" worktree)
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "settled: no pending park record"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "settled: tick printed: $out"
+  ! grep -q '^pending=' "$w/state/lane.review-park" || fail "settled: the record was not promoted"
+  grep -qx slot_released=1 "$w/state/lane.review-park" || fail "settled: the settled park kept its slot"
+  grep -qx "return --force --if-lease-holder lane $old" "$w/treehouse.log" || fail "settled: no return call: $(cat "$w/treehouse.log")"
+  pass "a refused release is retried by later ticks, and a park settled by a tick returns its slot"
+}
+
 test_due_rebase_relaunches_only_with_release_flag() {
   local w
   w=$(make_world trig-rebase "$GH_URL"); : > "$w/config/park-release-slot"
@@ -1369,6 +1400,7 @@ fm_test_run \
   test_released_copy_returns_to_the_pool_and_resumes_in_a_new_one \
   test_release_flag_off_keeps_the_copy \
   test_release_keeps_the_copy_when_it_cannot_be_returned_safely \
+  test_release_retries_on_later_ticks \
   test_due_rebase_relaunches_only_with_release_flag \
   test_no_free_copy_fails_the_relaunch_until_a_manual_resume \
   test_slow_relaunch_is_never_cut_short_by_the_tick \

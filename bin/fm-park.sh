@@ -71,7 +71,8 @@
 # confirmed dead and drops it only if still alive after the stop timeout.
 #
 # With the config/park-release-slot presence flag (off by default), a park that
-# confirmed its stop also returns the copy's Treehouse pool slot, so a lane that
+# confirmed its stop, directly or when a later tick settles a pending record, also
+# returns the copy's Treehouse pool slot, so a lane that
 # only waits on its reviewer holds no slot. It releases only a pool slot it
 # leased above, on a backend whose relaunch can start in another copy
 # (bin/fm-control-lib.sh fm_control_backend_relaunch_moves_copy: herdr, rex),
@@ -85,7 +86,9 @@
 # worktree= to the never-created path state/<id>.released-copy, so no record
 # names a slot the pool may hand to another task. Any refusal or failure
 # before the return leaves the lane parked in its copy with the branch checked
-# out again, and the outcome line names why. Teardown of a released lane finds
+# out again, and the outcome line names why. A tick retries a refused release
+# for a parked lane that has no slot_released and no resume_error, when no
+# relaunch trigger fired. Teardown of a released lane finds
 # no copy and cleans up only the record and endpoint.
 #
 # resume writes a note naming the PR, the parked head and the trigger, then runs
@@ -731,6 +734,14 @@ EOF
   [ -z "$warn" ] || printf 'warning: %s\n' "$warn"
 }
 
+# Retries the slot release for a confirmed park that still holds its leased copy.
+release_slot_if_due() {  # <id>
+  local id=$1
+  [ -e "$CONFIG/park-release-slot" ] && [ "$(record_get "$id" slot_leased)" = yes ] || return 0
+  [ -z "$(record_get "$id" slot_released)" ] && [ -z "$(record_get "$id" resume_error)" ] || return 0
+  slot_release "$id" "$(record_get "$id" head)" >/dev/null || true
+}
+
 # Leases a copy again for a released lane, checks out its ship branch, and
 # records it as the task's worktree; prints the copy, or the reason and
 # returns 1. A copy the record already names and this task claims is reused,
@@ -993,7 +1004,10 @@ watch_parked() {  # <id>
     closed) closed_once "$id" "$pr"; return 0 ;;
   esac
   triggers=$(printf '%s' "$result" | jq -r '.triggers | join("; ")')
-  [ -n "$triggers" ] || return 0
+  if [ -z "$triggers" ]; then
+    ( LOCKS_HELD=; trap release_locks EXIT; lock_try "$(lane_lock "$id")" && release_slot_if_due "$id" ) || true
+    return 0
+  fi
   action_start "$id" resume --trigger "$triggers"
 }
 
@@ -1032,7 +1046,8 @@ settle_pending() {  # <id>
   case "$alive" in
     dead)
       record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
-        "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" ;;
+        "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)"
+      release_slot_if_due "$id" ;;
     alive)
       parked_at=$(record_get "$id" parked_at)
       [[ "$parked_at" =~ ^[0-9]+$ ]] || return 0
