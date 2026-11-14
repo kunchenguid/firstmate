@@ -334,7 +334,8 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 }
 
 # Which named keys a backend adapter can deliver. Every session provider
-# normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
+# normalizes Enter, Ctrl+C, and the Ctrl+U composer clear (Paradev through
+# `terminals send --keys`); Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor
 # Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key). T3 has no composer
 # to clear, so Ctrl+U has nothing to do there; Escape and Ctrl+C are both a
@@ -342,7 +343,7 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
-    tmux|herdr|zellij|cmux|paseo|rex|tern|hc)
+    tmux|herdr|zellij|cmux|paseo|rex|tern|hc|paradev)
       case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
@@ -356,7 +357,7 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
-# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
+# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, paseo, and paradev report
 # `unverified`, and tern's `tern process` classifier answers for display but is
 # not promoted to this list, so no reading of theirs can prove an agent stopped.
 # The control plane refuses a stop-proving verb there instead of reporting an
@@ -387,7 +388,7 @@ fm_control_backend_exit_supported() {  # <backend>
 # nightlies refused a driver change outright), never the fresh agent a
 # relaunch promises. So t3code has no replacement to launch and a relaunch
 # is refused before anything is stopped (docs/t3code-backend.md "Active
-# limits"). zellij, orca, cmux, and paseo never reach this table: they fail
+# limits"). zellij, orca, cmux, paseo, and paradev never reach this table: they fail
 # fm_control_backend_state_verified first.
 fm_control_backend_relaunch_supported() {  # <backend>
   case "${1-}" in

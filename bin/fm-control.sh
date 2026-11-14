@@ -137,8 +137,8 @@
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
 #     classifier (tmux, herdr, rex, or t3code), because without one the "the
 #     agent stopped" postcondition cannot be proven. Relaunch also requires
-#     replacement support, which t3code lacks. zellij, orca, cmux, paseo, and tern are
-#     refused rather than reported as successful blind.
+#     replacement support, which t3code lacks. zellij, orca, cmux, paseo, tern,
+#     and paradev are refused rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts (a Rex `unreadable` first goes through the absence
 #     proof `exit` describes, and refuses unless that proof settles it).

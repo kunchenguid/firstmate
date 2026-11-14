@@ -1576,7 +1576,7 @@ if ! pane_readable "$BACKEND_TARGET"; then
   #   anything else - the cheap probes themselves failed to answer or
   #             contradicted themselves, which is unknown, never death.
   # t3code answers from the server's own session status through the same
-  # contract. Backends with no classifier (orca, zellij, cmux, and paseo all
+  # contract. Backends with no classifier (orca, zellij, cmux, paseo, and paradev all
   # report unverified, and tern's classifier is not promoted to recovery grade)
   # keep their historical capture-failure-means-gone reading.
   case "$TASK_BACKEND" in

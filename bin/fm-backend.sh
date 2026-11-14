@@ -47,6 +47,11 @@
 # bin/backends/hc.sh adds herdr-core (`hc`, the core under Herdr.app), also
 # EXPERIMENTAL, spawn-capable, and session-provider-only; see
 # docs/hc-backend.md "Runtime auto-detection" for its selection contract.
+# bin/backends/paradev.sh adds Paradev (the `superset` CLI), also EXPERIMENTAL,
+# spawn-capable, and EXPLICIT-ONLY: like Orca it owns the task worktree (one
+# Paradev workspace per task) as well as the terminal, and Paradev stamps
+# SUPERSET_* markers into every terminal it opens, so an inherited marker is
+# not a selection.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -54,8 +59,8 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, rex, or
-# t3code, tern, or hc, carries an explicit `backend=` line.
+# spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, rex,
+# t3code, tern, hc, or paradev, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -100,8 +105,38 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 # hc is EXPERIMENTAL and spawn-capable, session-provider-only like tmux
 # (docs/hc-backend.md).
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
+# paradev is EXPERIMENTAL and spawn-capable; like orca it is also the worktree
+# provider (bin/backends/paradev.sh).
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc paradev"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc paradev"
+
+# Backends that own the task worktree as well as the terminal: the spawn takes
+# the worktree from the backend instead of Treehouse, and cleanup releases it
+# through fm_backend_remove_worktree only after proving the recorded worktree id
+# still resolves to the inspected path. Each records that id under its own key
+# (fm_backend_worktree_id_key) and its terminal target in terminal=.
+FM_BACKEND_OWNS_WORKTREE="orca paradev"
+
+fm_backend_owns_worktree() {  # <backend>
+  fm_backend_list_contains "$FM_BACKEND_OWNS_WORKTREE" "${1:-}"
+}
+
+fm_backend_worktree_id_key() {  # <backend>
+  case "${1:-}" in
+    orca) printf '%s' orca_worktree_id ;;
+    paradev) printf '%s' paradev_workspace_id ;;
+    *) return 1 ;;
+  esac
+}
+
+# The product name a worktree-owning backend's refusals and notices use.
+fm_backend_worktree_owner_label() {  # <backend>
+  case "${1:-}" in
+    orca) printf '%s' Orca ;;
+    paradev) printf '%s' Paradev ;;
+    *) return 1 ;;
+  esac
+}
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -266,6 +301,10 @@ fm_backend_detect() {
   # Bare hc markers without the Herdr app claim above are not a selection
   # either: HC_TERMINAL_ID reaches every process an hc terminal starts
   # (docs/hc-backend.md "Runtime auto-detection").
+  # Paradev is NOT detected here either. SUPERSET_WORKSPACE_ID and the other
+  # SUPERSET_* markers reach every process a Paradev terminal starts, including
+  # a captain session that only happens to run there, and Paradev also owns
+  # task worktrees, so only FM_BACKEND or config/backend selects it.
   return 1
 }
 
@@ -526,13 +565,14 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo/rex/tern);
-#   - jq, for the JSON-emitting adapters (herdr, zellij, cmux, paseo, rex, tern) whose spawn/liveness
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo/rex/tern,
+#     and `superset` for paradev);
+#   - jq, for the JSON-emitting adapters (herdr, zellij, cmux, paseo, rex, tern, paradev) whose spawn/liveness
 #     paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux, paseo, rex, t3code, tern); orca owns its own task worktree and
-#     terminal, so it drops both treehouse and any other backend's session CLI;
+#     (tmux, herdr, zellij, cmux, paseo, rex, t3code, tern); orca and paradev own their own task
+#     worktree and terminal, so they drop both treehouse and any other backend's session CLI;
 #   - node for t3code, whose adapter speaks MCP to the T3 server through
 #     bin/fm-t3-mcp.mjs.
 # Prints a single space-separated line and returns 0 for a known backend; returns
@@ -548,6 +588,7 @@ fm_backend_required_tools() {  # <backend>
     tern)   printf '%s' 'tern jq treehouse' ;;
     hc)     printf '%s' 'hc jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    paradev) printf '%s' 'superset jq' ;;
     t3code) printf '%s' 'node treehouse' ;;
     *) return 1 ;;
   esac
@@ -603,7 +644,7 @@ fm_backend_of_meta() {  # <meta-file>
 fm_backend_target_of_meta() {  # <meta-file>
   local meta=$1 backend terminal window
   backend=$(fm_backend_of_meta "$meta")
-  if [ "$backend" = orca ]; then
+  if fm_backend_owns_worktree "$backend"; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
   fi
@@ -623,6 +664,10 @@ fm_backend_target_of_meta() {  # <meta-file>
 # valid only when their window name itself is exactly fm-<task-id>.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# --cleanup-recovery (teardown only) also accepts a worktree-owning backend's
+# spawn-abort recovery record (cleanup_recovery=<backend>) that never got a
+# terminal: there is nothing to close, and teardown still proves the recorded
+# worktree id and landed work before releasing it.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -700,9 +745,10 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
   echo "A pool slot handed on to another task since is still safe to name: cleanup reads that slot's own .fm-slot-owner claim and then leaves the slot untouched, while a slot with no claim is proved only by that worktree listing."
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [--cleanup-recovery]
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block
+  local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block paradev_project
+  local terminal_optional=0
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -758,6 +804,11 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: endpoint metadata belongs to task $binding, not $id; preserving task state." >&2
     return 1
   fi
+  if [ "${3:-}" = --cleanup-recovery ] && fm_backend_owns_worktree "$backend" \
+    && [ "$(fm_backend_meta_exact_value "$meta" cleanup_recovery)" = "$backend" ] \
+    && [ "$(grep -c '^terminal=' "$meta" 2>/dev/null || true)" = 0 ]; then
+    terminal_optional=1
+  fi
 
   case "$backend" in
     tmux)
@@ -811,7 +862,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
-      [ -n "$terminal" ] || {
+      [ -n "$terminal" ] || [ "$terminal_optional" = 1 ] || {
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
       }
@@ -820,12 +871,42 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       }
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
+        || { [ "$terminal_optional" != 1 ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      window=$terminal
+      [ -z "$terminal" ] || window=$terminal
+      ;;
+    paradev)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: Paradev endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
+      workspace=$(fm_backend_meta_exact_value "$meta" paradev_workspace_id) || workspace=
+      paradev_project=$(fm_backend_meta_exact_value "$meta" paradev_project_id) || paradev_project=
+      [ -n "$terminal" ] || [ "$terminal_optional" = 1 ] || {
+        echo "REFUSED: missing terminal in $meta; cannot close Paradev endpoint; preserving task state." >&2
+        return 1
+      }
+      [ -n "$workspace" ] || {
+        echo "REFUSED: missing paradev_workspace_id in $meta; cannot archive Paradev workspace; preserving task state." >&2
+        return 1
+      }
+      # terminal= is <workspace>:<terminal> and must name the recorded
+      # workspace, so a terminal id can never steer cleanup into another one.
+      if [ "$window" != "fm-$id" ] \
+        || { [ "$terminal_optional" != 1 ] && {
+          [ "${terminal%%:*}" != "$workspace" ] \
+            || [ "${terminal#*:}" = "$terminal" ] \
+            || ! fm_backend_endpoint_atom_valid "${terminal#*:}"; }; } \
+        || ! fm_backend_endpoint_atom_valid "$workspace" \
+        || ! fm_backend_endpoint_atom_valid "$paradev_project"; then
+        echo "REFUSED: Paradev endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      [ -z "$terminal" ] || window=$terminal
       ;;
     cmux)
       [ "$binding" = "$id" ] || {
@@ -1041,7 +1122,7 @@ fm_backend_source() {  # <name>
     zellij)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
       ;;
-    orca)
+    orca|paradev)
       set -- fm-composer-lib.sh
       ;;
     cmux|paseo)
@@ -1139,6 +1220,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_HC_SOURCED=1
       fi
       ;;
+    paradev)
+      if [ -z "${_FM_BACKEND_PARADEV_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_PARADEV_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -1147,7 +1235,7 @@ fm_backend_source() {  # <name>
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
 #                      this firstmate home) - backend-independent, a literal string.
 #   exact task id      routed through <state-dir>/<id>.meta's backend target
-#                      (`window=` normally, `terminal=` for Orca,
+#                      (`window=` normally, `terminal=` for Orca and Paradev,
 #                      `t3_thread_id=` for T3 Code) -
 #                      backend-independent, a stored value, NOT re-verified
 #                      against a live backend inventory (matches today's
@@ -1216,6 +1304,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     t3code) fm_backend_t3code_capture "$@" ;;
     tern) fm_backend_tern_capture "$@" ;;
     hc) fm_backend_hc_capture "$@" ;;
+    paradev) fm_backend_paradev_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1272,6 +1361,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     t3code) fm_backend_t3code_send_key "$@" ;;
     tern) fm_backend_tern_send_key "$@" ;;
     hc) fm_backend_hc_send_key "$@" ;;
+    paradev) fm_backend_paradev_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1317,6 +1407,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     t3code) fm_backend_t3code_send_text_submit "$@" || rc=$? ;;
     tern) fm_backend_tern_send_text_submit "$@" || rc=$? ;;
     hc) fm_backend_hc_send_text_submit "$@" || rc=$? ;;
+    paradev) fm_backend_paradev_send_text_submit "$@" || rc=$? ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; rc=1 ;;
   esac
   fm_composer_dialog_sink_release
@@ -1333,8 +1424,9 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # resolves a failed close against the window's exact recorded identity, Rex
 # proves the closed block gone through a structured not-found, tern
 # re-reads its inventory and refuses while the block is still present or the
-# inventory cannot be read, Orca reports a close its missing CLI never
-# attempted, and the remaining arms still report 0 for a close command that
+# inventory cannot be read, Paradev re-reads the workspace's terminal list and
+# refuses while the terminal is still listed or the list cannot be read, Orca
+# reports a close its missing CLI never attempted, and the remaining arms still report 0 for a close command that
 # failed after being accepted.
 # docs/verification/runtime-backends.md "Endpoint close" is the per-backend
 # record.
@@ -1354,6 +1446,7 @@ fm_backend_kill() {  # <backend> <target>
     t3code) fm_backend_t3code_kill "$1" ;;
     tern) fm_backend_tern_kill "$@" ;;
     hc) fm_backend_hc_kill "$@" ;;
+    paradev) fm_backend_paradev_kill "$1" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1364,6 +1457,7 @@ fm_backend_remove_worktree() {  # <backend> <worktree-id>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     orca) fm_backend_orca_remove_worktree "$@" ;;
+    paradev) fm_backend_paradev_remove_worktree "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
   esac
 }
@@ -1374,13 +1468,15 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     orca) fm_backend_orca_worktree_path "$@" ;;
+    paradev) fm_backend_paradev_worktree_path "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
   esac
 }
 
-# fm_backend_busy_state: native busy/idle/unknown for Herdr, Rex, T3 Code, and
-# Tern; backends without a native primitive report unknown. Recorded-task consumers
-# use fm-busy-lib.sh's shared classifier, which owns native-state precedence
+# fm_backend_busy_state: native busy/idle/unknown for Herdr, Rex, T3 Code,
+# Tern, hc, and Paradev (its `agents explain` state); backends without a
+# native primitive report unknown. Recorded-task consumers use fm-busy-lib.sh's
+# shared classifier, which owns native-state precedence
 # and harness fallbacks. Delivery-only callers own their separate guards.
 # tern reads Tern's native agent list through `tern ctl` when a desktop window
 # answers (an agent waiting on input reads `blocked`) and reports unknown when
@@ -1395,6 +1491,7 @@ fm_backend_busy_state() {  # <backend> <target>
     t3code) fm_backend_t3code_busy_state "$@" ;;
     tern) fm_backend_tern_busy_state "$@" ;;
     hc) fm_backend_hc_busy_state "$@" ;;
+    paradev) fm_backend_paradev_busy_state "$1" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1426,6 +1523,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     t3code) fm_backend_t3code_composer_state "$@" ;;
     tern) fm_backend_tern_composer_state "$@" ;;
     hc) fm_backend_hc_composer_state "$@" ;;
+    paradev) fm_backend_paradev_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1437,7 +1535,8 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # server as a side effect via fm_backend_herdr_server_ensure - fine for an
 # operation that is about to use the pane, wrong for a passive liveness
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
-# closed), missing zellij pane, unreadable Orca terminal, or absent Tern block
+# closed), missing zellij pane, unreadable Orca terminal, absent Tern block, or
+# a Paradev terminal its workspace no longer lists
 # simply fails, which IS "does not exist" for this purpose.
 # Owns fm-crew-state.sh's pane_readable check too, so callers that only need a
 # fast alive/dead read (recovery digests, the session-start fleet digest) do
@@ -1500,6 +1599,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source hc || return 1
       fm_backend_hc_target_ready "$target" "$expected_label"
       ;;
+    paradev)
+      fm_backend_source paradev || return 1
+      fm_backend_paradev_target_ready "$target"
+      ;;
     *)
       return 1
       ;;
@@ -1528,7 +1631,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # shared classifier and reads a structured not-found as `missing`. Zellij
 # remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca, cmux, paseo, and tern do not support secondmate
+# empirically validated. Orca, cmux, paseo, tern, and paradev do not support secondmate
 # spawns. The t3code adapter maps the thread's V2 status through its one status
 # table (bin/backends/t3code.sh); there is no process to attribute locally.
 # Tern answers through the same process classifier from `tern process`, but
@@ -1678,6 +1781,7 @@ fm_backend_runtime_check() {  # <backend>
   fm_backend_source "$1" || return 1
   case "$1" in
     orca) fm_backend_orca_runtime_check ;;
+    paradev) fm_backend_paradev_runtime_check ;;
     t3code) fm_backend_t3code_runtime_check ;;
     *) return 0 ;;
   esac

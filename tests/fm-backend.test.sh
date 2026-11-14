@@ -881,6 +881,62 @@ test_backend_dispatch_tables_include_tern() {
   pass "fm_backend dispatch tables: tern requires tern+jq+treehouse, has visible capture, declares no push stream"
 }
 
+# Paradev stamps SUPERSET_* markers into every terminal it opens (a captain
+# session that merely runs in a Paradev workspace carries them), and it owns
+# task worktrees, so no marker may ever select it.
+test_backend_paradev_is_never_autodetected() {
+  local dir cfg cfg_paradev out errfile markers
+
+  dir="$TMP_ROOT/paradev-explicit-only"; cfg="$dir/config-empty"; cfg_paradev="$dir/config-paradev"
+  mkdir -p "$cfg" "$cfg_paradev"; printf 'paradev\n' > "$cfg_paradev/backend"
+  errfile="$dir/err.txt"
+  markers="SUPERSET_WORKSPACE_ID=86221aff-2041-4f7f-9a50-9dbbde70e05f SUPERSET_TERMINAL_ID=43cf75c5-4b3b-4b72-9d64-013ebb326040 SUPERSET_HOME_DIR=/Users/x/.paradev SUPERSET_AGENT_HOOK_PORT=51741 SUPERSET_ENV=production"
+
+  # $markers is a deliberate list of NAME=value words for env, and each child
+  # shell expands its own positional parameters.
+  # shellcheck disable=SC2086,SC2016
+  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM; env $markers __CFBundleIdentifier=com.superset.desktop PATH="$FAKE_NONDARWIN_BIN:$PATH" bash -c '. "$1"; fm_backend_detect' _ "$ROOT/bin/fm-backend.sh"); then
+    fail "fm_backend_detect must not report a backend from the Paradev markers, got '$out'"
+  fi
+  # shellcheck disable=SC2086,SC2016
+  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM; env $markers __CFBundleIdentifier=com.superset.desktop bash -c '. "$1"; fm_backend_detect' _ "$ROOT/bin/fm-backend.sh"); then
+    [ "$out" != paradev ] || fail "fm_backend_detect must never report paradev, even on macOS with the Paradev bundle id"
+  fi
+
+  : > "$errfile"
+  # shellcheck disable=SC2086,SC2016
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM __CFBundleIdentifier; env $markers PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" bash -c '. "$1"; FM_BACKEND_CONFIG_DIR=$2; fm_backend_name' _ "$ROOT/bin/fm-backend.sh" "$cfg" 2>"$errfile")
+  [ "$out" = tmux ] || fail "fm_backend_name inside a Paradev terminal with nothing configured must default to tmux, got '$out'"
+  [ -s "$errfile" ] && fail "the tmux default inside a Paradev terminal must stay silent"$'\n'"$(cat "$errfile")"
+
+  # A multiplexer started inside a Paradev terminal still detects itself.
+  # shellcheck disable=SC2086,SC2016
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM __CFBundleIdentifier; env $markers TMUX='fake,1,0' PATH="$FAKE_NONDARWIN_BIN:$PATH" bash -c '. "$1"; fm_backend_detect' _ "$ROOT/bin/fm-backend.sh")
+  [ "$out" = tmux ] || fail "tmux started inside a Paradev terminal still detects tmux, got '$out'"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND=paradev FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = paradev ] || fail "FM_BACKEND=paradev must select paradev, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg_paradev" fm_backend_name)
+  [ "$out" = paradev ] || fail "config/backend=paradev must select paradev, got '$out'"
+
+  pass "fm_backend_detect/fm_backend_name: paradev is never auto-detected from SUPERSET_* markers or the Paradev bundle id; only FM_BACKEND or config/backend select it"
+}
+
+test_backend_dispatch_tables_include_paradev() {
+  local tools
+  tools=$(fm_backend_required_tools paradev) || fail "fm_backend_required_tools should know paradev"
+  [ "$tools" = 'superset jq' ] || fail "paradev should require exactly superset and jq (no treehouse, no tmux), got '$tools'"
+  fm_backend_validate_spawn paradev 2>/dev/null || fail "fm_backend_validate_spawn should accept paradev"
+  fm_backend_owns_worktree paradev || fail "paradev owns its task worktrees"
+  fm_backend_owns_worktree orca || fail "orca owns its task worktrees"
+  fm_backend_owns_worktree tmux && fail "tmux must not claim to own task worktrees"
+  [ "$(fm_backend_worktree_id_key paradev)" = paradev_workspace_id ] || fail "paradev records its worktree id as paradev_workspace_id"
+  [ "$(fm_backend_worktree_id_key orca)" = orca_worktree_id ] || fail "orca keeps its orca_worktree_id key"
+  fm_backend_visible_capture_supported paradev && fail "paradev must not advertise a viewport-only capture until one is verified"
+  fm_backend_has_push paradev && fail "paradev must not claim a native push stream"
+  pass "fm_backend dispatch tables: paradev requires superset+jq, owns its worktrees, declares no visible capture or push"
+}
+
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
 # runtime auto-detection, even when a detection marker points the other way.
 test_backend_name_explicit_beats_detection() {
@@ -1165,6 +1221,7 @@ test_backend_of_selector_matches_explicit_target_meta() {
   fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
   fm_write_meta "$state/custom-window-task.meta" "window=custom-window"
   fm_write_meta "$state/orca-task.meta" "window=fm-orca-task" "terminal=term-orca-task" "backend=orca"
+  fm_write_meta "$state/paradev-task.meta" "window=fm-paradev-task" "terminal=ws-1:term-1" "backend=paradev"
   fm_write_meta "$state/t3-task.meta" "window=fm-t3-task" "t3_thread_id=6f1c2b3a-0000-4000-8000-00000000c0de" "backend=t3code"
 
   [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = herdr ] \
@@ -1177,6 +1234,10 @@ test_backend_of_selector_matches_explicit_target_meta() {
     || fail "Orca fm-<id> selector should resolve to terminal=, not window="
   [ "$(fm_backend_resolve_selector 'term-orca-task' "$state")" = term-orca-task ] \
     || fail "raw Orca terminal selector should resolve through metadata"
+  [ "$(fm_backend_resolve_selector 'fm-paradev-task' "$state")" = ws-1:term-1 ] \
+    || fail "Paradev fm-<id> selector should resolve to terminal=, not window="
+  [ "$(fm_backend_of_selector 'fm-paradev-task' 'ws-1:term-1' "$state")" = paradev ] \
+    || fail "a Paradev selector should inherit its metadata backend"
   [ "$(fm_backend_resolve_selector 'custom-window' "$state")" = custom-window ] \
     || fail "raw window selector matching metadata should not require tmux fallback"
   [ "$(fm_backend_of_selector 'term-orca-task' 'term-orca-task' "$state")" = orca ] \
@@ -1762,6 +1823,8 @@ test_backend_detect_herdr_app
 test_backend_name_herdr_app
 test_backend_tern_is_never_autodetected
 test_backend_dispatch_tables_include_tern
+test_backend_paradev_is_never_autodetected
+test_backend_dispatch_tables_include_paradev
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable

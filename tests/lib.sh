@@ -954,6 +954,18 @@ fm_write_meta() {
   done
 }
 
+# fm_write_pr_poll_retirement_receipt <state> <id>: a receipt-only pending
+# merged-PR poll retirement for https://github.com/o/r/pull/1, in the 14-line
+# fm-pr-poll-retirement-v1 layout bin/fm-pr-lib.sh validates (mode 600). The
+# task record must carry pr=https://github.com/o/r/pull/1 as its PR identity.
+fm_write_pr_poll_retirement_receipt() {
+  local receipt="$1/$2.pr-poll-retirement" hash
+  hash=$(printf '%064d' 0)
+  printf '%s\n' fm-pr-poll-retirement-v1 "$2" github https://github.com/o/r/pull/1 \
+    github.com o/r 1 "$hash" "$hash" 1:1 1:1 "$hash" 1:1 merged > "$receipt"
+  chmod 600 "$receipt"
+}
+
 # fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the
 # standard kind=secondmate meta block used across the secondmate suites. Window
 # defaults to firstmate:fm-<id>, projects defaults to alpha, and harness defaults

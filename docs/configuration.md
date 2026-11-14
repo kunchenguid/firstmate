@@ -557,6 +557,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `herdr` | Has its own required CI lane | [`docs/herdr-backend.md`](herdr-backend.md) |
 | `zellij` | Experimental; no dedicated real-backend CI lane | [`docs/zellij-backend.md`](zellij-backend.md) |
 | `orca` | Experimental; no dedicated real-backend CI lane | [`docs/orca-backend.md`](orca-backend.md) |
+| `paradev` | Experimental; no dedicated real-backend CI lane | [`docs/paradev-backend.md`](paradev-backend.md) |
 | `cmux` | Experimental; no dedicated real-backend CI lane | [`docs/cmux-backend.md`](cmux-backend.md) |
 | `paseo` | Experimental; no dedicated real-backend CI lane | [`docs/paseo-backend.md`](paseo-backend.md) |
 | `rex` | Experimental; no dedicated real-backend CI lane | [`docs/rex-backend.md`](rex-backend.md) |
@@ -564,7 +565,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `tern` | Experimental; no dedicated real-backend CI lane | [`docs/tern-backend.md`](tern-backend.md) |
 | `hc` | Experimental; the `tests-hc` lane runs the hc family against the pinned build | [`docs/hc-backend.md`](hc-backend.md) |
 
-Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, paseo, rex, t3code, tern, and hc, since herdr, zellij, cmux, paseo, rex, t3code, tern, and hc are session providers only; Orca provides both the task worktree and terminal endpoint.
+Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, paseo, rex, t3code, tern, and hc, since herdr, zellij, cmux, paseo, rex, t3code, tern, and hc are session providers only; Orca and Paradev each provide both the task worktree and terminal endpoint.
 
 ### Backend selection order
 
@@ -584,13 +585,13 @@ See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can
 
 Auto-detected Herdr and Rex stay silent like tmux, while auto-detected cmux prints a stderr notice naming `config/backend` and `--backend tmux` because cmux remains experimental.
 For hc notices, missing-piece handling, and detection metadata, see [Runtime auto-detection](hc-backend.md#runtime-auto-detection).
-T3 Code, Zellij, Orca, Paseo, and tern are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
-Paseo and tern stay explicit-only because their runtime markers leak into every descendant process, so they cannot stand for a selection (see [`docs/paseo-backend.md`](paseo-backend.md#selection-is-explicit) and [`docs/tern-backend.md`](tern-backend.md#selection-is-explicit)); bare `HC_TERMINAL_*` markers leak the same way, so hc detection requires the Herdr app's own signal.
+T3 Code, Zellij, Orca, Paseo, tern, and Paradev are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
+Paseo, tern, and Paradev stay explicit-only because their runtime markers leak into every descendant process, so they cannot stand for a selection (see [`docs/paseo-backend.md`](paseo-backend.md#selection-is-explicit), [`docs/tern-backend.md`](tern-backend.md#selection-is-explicit), and [`docs/paradev-backend.md`](paradev-backend.md#setup)); bare `HC_TERMINAL_*` markers leak the same way, so hc detection requires the Herdr app's own signal.
 
 ### Accepted backends and secondmate limits
 
-Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, or `hc` is rejected until another adapter is implemented and verified.
-`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, and `hc` for ship and scout tasks; `backend=orca`, `backend=cmux`, `backend=paseo`, `backend=tern`, and `backend=hc` all still refuse `--secondmate` until secondmate launch semantics are designed for each, while `backend=t3code` supports secondmates and runs only the `claude` and `codex` harnesses.
+Any value other than `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, `hc`, or `paradev` is rejected until another adapter is implemented and verified.
+`fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`, `t3code`, `tern`, `hc`, and `paradev` for ship and scout tasks; `backend=orca`, `backend=cmux`, `backend=paseo`, `backend=tern`, `backend=hc`, and `backend=paradev` all still refuse `--secondmate` until secondmate launch semantics are designed for each, while `backend=t3code` supports secondmates and runs only the `claude` and `codex` harnesses.
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 
@@ -614,6 +615,7 @@ The compatibility helper `fm_backend_agent_alive` continues to collapse those de
 - A rex spawn additionally gates both the `rex` CLI and the running Rex server at API revision 5 or newer and requires `jq` (see [`docs/rex-backend.md`](rex-backend.md) "Setup"), refusing loudly on a missing CLI, an older API revision, or a server that cannot be reached or started.
 - A tern spawn requires `tern` and `jq`, refusing loudly when either is missing (see [`docs/tern-backend.md`](tern-backend.md) "Setup"); bootstrap reports a missing `tern` as `MISSING_MANUAL` with `https://stencil.so/tern`.
 - For hc spawn prerequisites, binary resolution, and compatibility gates, see [`docs/hc-backend.md`](hc-backend.md#setup).
+- A paradev spawn requires `superset` and `jq` and a successful `superset projects list --local --json`, and refuses when the project's clone path is not a registered Paradev project (see [`docs/paradev-backend.md`](paradev-backend.md#setup)); bootstrap reports a missing `superset` as `MISSING_MANUAL`.
 
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 
@@ -630,6 +632,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 - A rex task additionally records `rex_server=`, `rex_session_id=`, `rex_window_id=`, and `rex_block_id=`, with the immutable block id as routing authority (see [`docs/rex-backend.md`](rex-backend.md) "Task shape and metadata").
 
 - An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
+- A paradev task additionally records `terminal=<workspace id>:<terminal id>`, `paradev_workspace_id=`, and `paradev_project_id=`, with `window=fm-<id>` kept as the shared firstmate alias (see [`docs/paradev-backend.md`](paradev-backend.md#task-shape-and-metadata)).
 
 - A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 - A t3code task additionally records `t3_thread_id=` and `t3_project_id=`, with `window=fm-<id>` kept as the shared firstmate alias.
@@ -2379,19 +2382,20 @@ The per-backend delta is required only for the backend resolved from `FM_BACKEND
 | `herdr` | `herdr`, `jq`, `treehouse` |
 | `zellij` | `zellij`, `jq`, `treehouse` |
 | `orca` | `orca` |
+| `paradev` | `superset`, `jq` |
 | `cmux` | `cmux`, `jq`, `treehouse` |
 | `paseo` | `paseo`, `jq`, `treehouse` |
 | `rex` | `rex`, `jq`, `treehouse` |
 | `t3code` | `node`, `treehouse` |
 | `tern` | `tern`, `jq`, `treehouse` |
 
-The JSON-emitting adapters (`herdr`, `zellij`, `cmux`, `paseo`, `rex`, `tern`) need `jq` because their spawn and liveness paths parse backend JSON.
+The JSON-emitting adapters (`herdr`, `zellij`, `cmux`, `paseo`, `rex`, `tern`, `paradev`) need `jq` because their spawn and liveness paths parse backend JSON.
 Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`, `paseo`, `rex`, `t3code`, `tern`) uses `treehouse` for worktrees.
 
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI and the Rex server bundle's `rex`.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 
-Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
+Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI; Paradev does the same, so `backend=paradev` requires only `superset` and `jq`.
 A herdr, zellij, cmux, paseo, rex, t3code, or tern home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 
 **Feature-specific requirements**
@@ -3517,7 +3521,7 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity readers, mainly for tests
-FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex/t3code/tern support ship/scout spawns, codex-app is not accepted
+FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex/t3code/tern/paradev support ship/scout spawns, codex-app is not accepted
 FM_T3CODE_ORIGIN=       # optional T3 Code server origin for bin/fm-t3-mcp.mjs login; the default is read from ~/.t3/userdata/server-runtime.json
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh delivers to ship and scout environments, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set

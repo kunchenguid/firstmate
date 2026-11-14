@@ -36,6 +36,7 @@
     "docs/t3code-backend.md",
     "docs/tern-backend.md",
     "docs/hc-backend.md",
+    "docs/paradev-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -97,6 +98,10 @@
     },
     {
       "source": "docs/orca-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/paradev-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -163,6 +168,10 @@
     },
     {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/firstmate-paradev/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -447,6 +456,10 @@
     },
     {
       "path": "docs/orca-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/paradev-backend.md",
       "audience": "operator-current"
     },
     {

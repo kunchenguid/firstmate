@@ -50,6 +50,8 @@ Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the w
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
+If spawn fails after the worktree exists and Orca cannot remove it, spawn leaves a `cleanup_recovery=orca` record naming the worktree id, with no `terminal=` when no terminal was opened.
+Rerun `bin/fm-teardown.sh <id>` on the task to release it: cleanup skips the terminal close but still runs the landing checks and the worktree id/path match below, and keeps the record on any refusal.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 
 `fm-peek.sh` reads with `orca terminal read`.

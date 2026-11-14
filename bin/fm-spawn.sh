@@ -133,11 +133,13 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
 #   adapter, and experimental zellij, orca, cmux, paseo, rex, t3code, tern,
-#   and hc adapters. Orca owns both the task worktree and terminal, so ship/scout Orca
-#   spawns do not run treehouse get; cmux, paseo, rex, tern, and hc are session
-#   providers only, exactly like herdr/zellij, so they do. Auto-detected herdr
+#   hc, and paradev adapters. Orca and Paradev own both the task worktree and
+#   terminal, so their ship/scout spawns do not run treehouse get (a Paradev
+#   spawn creates one workspace tagged firstmate on the task branch, opens a
+#   shell terminal in it, and types the launch there); cmux, paseo, rex, tern,
+#   and hc are session providers only, exactly like herdr/zellij, so they do. Auto-detected herdr
 #   and rex stay silent like tmux; auto-detected cmux and Herdr-app-driven hc
-#   print a loud stderr notice; zellij, orca, paseo, t3code, and tern are never
+#   print a loud stderr notice; zellij, orca, paseo, t3code, tern, and paradev are never
 #   auto-detected (the paseo and tern markers, like bare hc markers, leak into
 #   every descendant process). An app-detected hc also records its signal in
 #   meta's backend_detect= line.
@@ -145,8 +147,8 @@
 #   top-level shell into it, because a restart restores that shell's cwd.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
-#   --secondmate spawns.
+#   absent backend= means tmux. Orca, cmux, paseo, tern, hc, and paradev do not
+#   support --secondmate spawns.
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
 #   own Rex session; a --secondmate launch opens its tab in that secondmate
@@ -1684,9 +1686,10 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
-ORCA_ABORT_CLEANUP=0
-ORCA_WORKTREE_ID=
-ORCA_TERMINAL=
+APP_WT_ABORT_CLEANUP=0
+APP_WORKTREE_ID=
+APP_TERMINAL=
+PARADEV_PROJECT_ID=
 T3CODE_ABORT_CLEANUP=0
 T3CODE_LEASED=0
 T3CODE_HOME_ENV=0
@@ -1744,20 +1747,20 @@ spawn_fresh_commit_rollback() {
   return 1
 }
 
-parse_orca_worktree_result() {
+parse_app_worktree_result() {
   local raw=$1 rest
-  ORCA_WORKTREE_ID=${raw%%$'\t'*}
-  if [ "$raw" = "$ORCA_WORKTREE_ID" ]; then
+  APP_WORKTREE_ID=${raw%%$'\t'*}
+  if [ "$raw" = "$APP_WORKTREE_ID" ]; then
     WT=
-    ORCA_TERMINAL=
+    APP_TERMINAL=
     return 1
   fi
   rest=${raw#*$'\t'}
   WT=${rest%%$'\t'*}
   if [ "$rest" != "$WT" ]; then
-    ORCA_TERMINAL=${rest#*$'\t'}
+    APP_TERMINAL=${rest#*$'\t'}
   else
-    ORCA_TERMINAL=
+    APP_TERMINAL=
   fi
 }
 
@@ -1821,13 +1824,15 @@ spawn_abort_cleanup() {
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
-  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
-    ORCA_ABORT_CLEANUP=0
-    if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+  # A worktree-owning backend (fm_backend_owns_worktree): close the terminal and
+  # release the worktree it created, or keep a recovery record naming both.
+  if [ "$APP_WT_ABORT_CLEANUP" = 1 ]; then
+    APP_WT_ABORT_CLEANUP=0
+    if [ -n "${APP_TERMINAL:-}" ]; then
+      fm_backend_kill "$BACKEND" "$APP_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
     fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+    if [ -n "${APP_WORKTREE_ID:-}" ]; then
+      if ! fm_backend_remove_worktree "$BACKEND" "$APP_WORKTREE_ID" 2>/dev/null; then
         if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
           if ! spawn_fresh_commit_rollback; then
             status=1
@@ -1836,11 +1841,11 @@ spawn_abort_cleanup() {
         fi
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
-          SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
+          SPAWN_META_TMP="$STATE/.$ID.meta.$BACKEND-recovery.${BASHPID:-$$}"
           {
             echo "window=$W"
             echo "endpoint_task_id=$ID"
-            echo "cleanup_recovery=orca"
+            echo "cleanup_recovery=$BACKEND"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
@@ -1851,9 +1856,10 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            echo "backend=$BACKEND"
+            echo "$(fm_backend_worktree_id_key "$BACKEND")=$APP_WORKTREE_ID"
+            [ -z "${APP_TERMINAL:-}" ] || echo "terminal=$APP_TERMINAL"
+            [ "$BACKEND" != paradev ] || echo "paradev_project_id=$PARADEV_PROJECT_ID"
           } >"$SPAWN_META_TMP" 2>/dev/null &&
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
@@ -2397,6 +2403,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = paradev ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=paradev does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
@@ -2440,6 +2450,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     elif [ -n "$LAUNCH_ENV_NAMES" ]; then
       echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
     fi
+  fi
+  if [ "$BACKEND" = paradev ] && [ -n "$LAUNCH_ENV_NAMES" ]; then
+    echo "warning: backend=paradev resolves config/launch-env-allowlist names from the Paradev terminal's own environment (the Paradev host service's), not this home's" >&2
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -4259,13 +4272,13 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_PROJECT_CAPACITY_ANY=$FM_PROJECT_CAPACITY_ANY
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
-  { [ "$BACKEND" != orca ] || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
+  { ! fm_backend_owns_worktree "$BACKEND" || [ -n "$SPAWN_PROJECT_CAPACITY_ANY" ]; }; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-    if [ "$BACKEND" = orca ]; then
+    if fm_backend_owns_worktree "$BACKEND"; then
       echo "error: another spawn or cleanup holds the shared project lock for $PROJ_ABS; refusing to race its capacity admission" >&2
     else
       echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
@@ -5380,28 +5393,54 @@ EOF
     ;;
   orca)
     set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-    ORCA_WT_STATUS=$?
+    APP_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+    APP_WT_STATUS=$?
     set -e
-    if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-      if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-          ORCA_ABORT_CLEANUP=1
+    if [ "$APP_WT_STATUS" -ne 0 ]; then
+      if [ "$APP_WT_STATUS" -eq 2 ] && [ -n "$APP_WT_RAW" ]; then
+        if parse_app_worktree_result "$APP_WT_RAW" && [ -n "$APP_WORKTREE_ID" ]; then
+          APP_WT_ABORT_CLEANUP=1
         fi
       fi
       exit 1
     fi
-    parse_orca_worktree_result "$ORCA_WT_RAW" || true
-    ORCA_ABORT_CLEANUP=1
-    if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
+    parse_app_worktree_result "$APP_WT_RAW" || true
+    APP_WT_ABORT_CLEANUP=1
+    if [ -z "$APP_WORKTREE_ID" ] || [ -z "$WT" ]; then
       echo "error: orca did not return a worktree id/path for $W" >&2
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
-    if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+    if [ -z "$APP_TERMINAL" ]; then
+      APP_TERMINAL=$(fm_backend_orca_terminal_create "$APP_WORKTREE_ID" "$W") || exit 1
     fi
-    T="$ORCA_TERMINAL"
+    T="$APP_TERMINAL"
+    ;;
+  paradev)
+    # The project must already be a Paradev project on this host; resolving it
+    # first refuses an unregistered one before any workspace exists.
+    PARADEV_PROJECT_ID=$(fm_backend_paradev_project_id "$PROJ_ABS") || exit 1
+    set +e
+    APP_WT_RAW=$(fm_backend_paradev_worktree_create "$PARADEV_PROJECT_ID" "$W" "${BRANCH:-fm/$ID}" "$BASE_BRANCH")
+    APP_WT_STATUS=$?
+    set -e
+    if [ "$APP_WT_STATUS" -ne 0 ]; then
+      if [ "$APP_WT_STATUS" -eq 2 ] && [ -n "$APP_WT_RAW" ]; then
+        if parse_app_worktree_result "$APP_WT_RAW" && [ -n "$APP_WORKTREE_ID" ]; then
+          APP_WT_ABORT_CLEANUP=1
+        fi
+      fi
+      exit 1
+    fi
+    parse_app_worktree_result "$APP_WT_RAW" || true
+    APP_WT_ABORT_CLEANUP=1
+    if [ -z "$APP_WORKTREE_ID" ] || [ -z "$WT" ]; then
+      echo "error: paradev did not return a workspace id/path for $W" >&2
+      exit 1
+    fi
+    validate_spawn_worktree "paradev workspaces create" "$W"
+    APP_TERMINAL=$(fm_backend_paradev_terminal_create "$APP_WORKTREE_ID" "$W") || exit 1
+    T="$APP_TERMINAL"
     ;;
   t3code)
     # Validate the project policy before the first T3 or Treehouse mutation;
@@ -5470,10 +5509,11 @@ EOF
     T3CODE_ABORT_CLEANUP=1
     ;;
   esac
-  # Orca and the Herdr projection own their own abort cleanup above; every other
-  # endpoint a fresh polytoken spawn opened is closed by spawn_abort_cleanup when
-  # the spawn ends with no record before its launch is delivered.
-  if [ "$HARNESS" = polytoken ] && [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
+  # Worktree-owning backends and the Herdr projection own their own abort
+  # cleanup above; every other endpoint a fresh polytoken spawn opened is closed
+  # by spawn_abort_cleanup when the spawn ends with no record before its launch
+  # is delivered.
+  if [ "$HARNESS" = polytoken ] && ! fm_backend_owns_worktree "$BACKEND" && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
     SPAWN_FRESH_ENDPOINT_OPENED=1
   fi
 fi
@@ -5500,6 +5540,7 @@ spawn_send_text_line() { # <target> <text>
   t3code) fm_backend_t3code_send_literal "$1" "$2" ;;
   tern) fm_backend_tern_send_text_line "$1" "$2" "$W" ;;
   hc) fm_backend_hc_send_text_line "$1" "$2" "$W" ;;
+  paradev) fm_backend_paradev_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -5529,6 +5570,7 @@ spawn_send_literal() { # <target> <text>
   # `+` or `_`, so the line is pasted and submitted here and the Enter that
   # follows it is consumed below (docs/hc-backend.md "Limits").
   hc) fm_backend_hc_send_text_line "$1" "$2" "$W" && SPAWN_HC_LINE_SUBMITTED=1 ;;
+  paradev) fm_backend_paradev_send_literal "$1" "$2" ;;
   esac
 }
 SPAWN_HC_LINE_SUBMITTED=0
@@ -5550,6 +5592,7 @@ spawn_send_key() { # <target> <key>
       fm_backend_hc_send_key "$1" "$2" "$W"
     fi
     ;;
+  paradev) fm_backend_paradev_send_key "$1" "$2" ;;
   esac
 }
 
@@ -5593,7 +5636,7 @@ spawn_enter_recorded_worktree() {
 spawn_assert_agent_worktree() {
   local expected seen i last_poll=19 agent_status
   [ "$KIND" = secondmate ] && return 0
-  case "$BACKEND" in orca|t3code) return 0 ;; esac
+  case "$BACKEND" in orca|paradev|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
   # The out-of-pane Herdr lease no longer waits for the new shell to process
   # treehouse get. Allow its former minute of startup tolerance here, and
@@ -5838,15 +5881,16 @@ rovo_spawn_fail() { # <detail>
 }
 
 # The launch-then-confirm gates run after the task record is published, when
-# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
+# APP_WT_ABORT_CLEANUP is already cleared and neither the abort trap nor a
 # teardown owns this endpoint yet, so a gate failure must close the launched
 # process here or it keeps running as an orphaned autonomous agent outside
-# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
-# the exact terminal is closed: that stops the CLI while its worktree stays
-# for the record's own teardown, which owns worktree deletion.
+# task control. Mirrors fm-teardown.sh's own generic kill call. On a
+# worktree-owning backend only the exact terminal is closed: that stops the CLI
+# while its worktree stays for the record's own teardown, which owns worktree
+# deletion.
 rovo_endpoint_cleanup() {
-  if [ "$BACKEND" = orca ]; then
-    fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+  if fm_backend_owns_worktree "$BACKEND"; then
+    fm_backend_kill "$BACKEND" "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
     return 0
   fi
   local tab_id=
@@ -6066,7 +6110,7 @@ polytoken_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
-if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
+if [ "$RELAUNCH" -eq 1 ] && fm_backend_owns_worktree "$BACKEND"; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
@@ -6101,7 +6145,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && ! fm_backend_owns_worktree "$BACKEND"; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" = t3code ]; then
     :
@@ -7307,7 +7351,7 @@ else
 fi
 
 META_WINDOW=$T
-[ "$BACKEND" = orca ] && META_WINDOW=$W
+fm_backend_owns_worktree "$BACKEND" && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
@@ -7326,7 +7370,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal paradev_workspace_id paradev_project_id cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7394,9 +7438,12 @@ preserve_relaunch_meta() {
     echo "zellij_tab_id=$ZELLIJ_TAB_ID"
     echo "zellij_pane_id=$ZELLIJ_PANE_ID"
   fi
-  if [ "$BACKEND" = orca ]; then
-    echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
+  if fm_backend_owns_worktree "$BACKEND"; then
+    echo "$(fm_backend_worktree_id_key "$BACKEND")=$APP_WORKTREE_ID"
+    echo "terminal=$APP_TERMINAL"
+  fi
+  if [ "$BACKEND" = paradev ]; then
+    echo "paradev_project_id=$PARADEV_PROJECT_ID"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
@@ -7530,7 +7577,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+fm_backend_owns_worktree "$BACKEND" && APP_WT_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

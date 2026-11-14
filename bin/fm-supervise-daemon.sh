@@ -97,7 +97,7 @@
 #                                   TERM_PROGRAM=rex selects rex, then T3
 #                                   discovery behind its explicit-selection gate
 #                                   - falling back to tmux).
-#                                   zellij, orca, cmux, paseo, and tern are not yet
+#                                   zellij, orca, cmux, paseo, tern, and paradev are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against an unsupported endpoint.
@@ -212,7 +212,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. rex goes
 # through the same dispatcher primitives as herdr (bin/backends/rex.sh). zellij,
-# orca, cmux, paseo, and tern are real backends elsewhere in firstmate
+# orca, cmux, paseo, tern, and paradev are real backends elsewhere in firstmate
 # (bin/fm-backend.sh) but this daemon has no verified composer/busy primitives
 # wired up for them yet - see docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
