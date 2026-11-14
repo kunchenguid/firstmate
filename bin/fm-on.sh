@@ -2,7 +2,7 @@
 # Execute one tracked Firstmate command in a configured remote secondmate home.
 #
 # Usage:
-#   fm-on.sh [--stdin] <secondmate-id|unambiguous-ssh-alias> <fm-command> [args...]
+#   fm-on.sh [--stdin] [--bounded [--bound-extra <seconds>]] <secondmate-id|unambiguous-ssh-alias> <fm-command> [args...]
 #
 # Routes come only from remote records in data/secondmates.md. A record names an
 # SSH config alias, remote Firstmate code root, and remote FM_HOME. A host alias
@@ -32,6 +32,25 @@
 # is doing, so a legitimately long-but-alive remote command is never falsely
 # killed. FM_SSH_ALIVE_INTERVAL and FM_SSH_ALIVE_COUNT_MAX override the
 # defaults; the worst-case detection window is roughly interval * count.
+#
+# Keepalives do not bound a remote command that is alive but stuck (a full
+# disk, a wedged remote job worker): sshd keeps answering while the command
+# never finishes. A caller on a supervision critical path therefore opts in
+# with --bounded, which runs ssh under a wall-clock bound of
+# FM_REMOTE_CALL_TIMEOUT seconds (default 120) plus any --bound-extra seconds
+# the remote command legitimately waits by design. A hit bound is reported as
+# exit 255, the same "unavailable transport or unknown remote completion" a
+# dead peer produces, with a diagnostic naming the host and the command.
+# Each timeout is recorded per SSH alias in state/remote-call-timeouts/<host>
+# (count, last_at, bound, command, woken). While a host's record is younger
+# than its backoff - FM_REMOTE_CALL_BACKOFF seconds (default 60) doubled per
+# further consecutive timeout, capped at FM_REMOTE_CALL_BACKOFF_MAX (default
+# 900) - every --bounded call to that host fails at once with 255 without
+# dialing it, so one stuck host costs a supervision cycle at most one bound
+# per backoff window. Any --bounded call that completes without hitting the
+# bound clears the record. Calls without --bounded keep the unbounded
+# behavior above and never consult or change the record. bin/fm-watch.sh
+# turns a record whose count reaches FM_REMOTE_CALL_WAKE_AFTER into one wake.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,15 +66,31 @@ PROTOCOL=1
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
+positive_int() {  # <name> <value> [allow-zero]
+  case "$2" in ''|*[!0-9]*) die "$1 must be a non-negative integer: $2" ;; esac
+  [ -n "${3:-}" ] || [ "$2" -gt 0 ] || die "$1 must be a positive integer: $2"
+}
+
 encode_base64() {
   base64 | tr -d '\n'
 }
 
 STDIN_MODE=closed
-if [ "${1:-}" = --stdin ]; then
-  STDIN_MODE=caller
-  shift
-fi
+BOUNDED=0
+BOUND_EXTRA=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --stdin) STDIN_MODE=caller; shift ;;
+    --bounded) BOUNDED=1; shift ;;
+    --bound-extra)
+      [ "$#" -ge 2 ] || usage
+      positive_int --bound-extra "$2" allow-zero
+      BOUND_EXTRA=$2
+      shift 2
+      ;;
+    *) break ;;
+  esac
+done
 [ "$#" -ge 2 ] || usage
 ROUTE=$1
 COMMAND=$2
@@ -119,7 +154,86 @@ SSH_ARGS=(
   -o "ServerAliveCountMax=$ALIVE_COUNT_MAX"
   -- "$HOST" fm-remote-entrypoint.sh "$PROTOCOL" "$ROOT_B64" "$HOME_B64" "$ARGV_B64"
 )
-if [ "$STDIN_MODE" = caller ]; then
-  exec "$SSH_BIN" "${SSH_ARGS[@]}"
+if [ "$BOUNDED" -eq 0 ]; then
+  if [ "$STDIN_MODE" = caller ]; then
+    exec "$SSH_BIN" "${SSH_ARGS[@]}"
+  fi
+  exec "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null
 fi
-exec "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null
+
+# --bounded: the wall-clock bound and per-host backoff described in the header.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+CALL_TIMEOUT=${FM_REMOTE_CALL_TIMEOUT:-120}
+BACKOFF_BASE=${FM_REMOTE_CALL_BACKOFF:-60}
+BACKOFF_MAX=${FM_REMOTE_CALL_BACKOFF_MAX:-900}
+positive_int FM_REMOTE_CALL_TIMEOUT "$CALL_TIMEOUT"
+positive_int FM_REMOTE_CALL_BACKOFF "$BACKOFF_BASE" allow-zero
+positive_int FM_REMOTE_CALL_BACKOFF_MAX "$BACKOFF_MAX" allow-zero
+BOUND=$((CALL_TIMEOUT + BOUND_EXTRA))
+STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+TIMEOUT_DIR="$STATE_DIR/remote-call-timeouts"
+TIMEOUT_RECORD="$TIMEOUT_DIR/$HOST"
+# One line naming the remote command for diagnostics and the wake, with control
+# bytes flattened so another machine's arguments cannot shape the record.
+CALL_LABEL=$(printf '%s ' "$COMMAND" "$@" | LC_ALL=C tr -c '[:print:]' ' ' | cut -c1-200)
+CALL_LABEL=${CALL_LABEL% }
+
+record_field() {  # <field>
+  sed -n "s/^$1=//p" "$TIMEOUT_RECORD" 2>/dev/null | head -1
+}
+
+NOW=$(date +%s)
+if [ -f "$TIMEOUT_RECORD" ] && [ ! -L "$TIMEOUT_RECORD" ]; then
+  PRIOR_COUNT=$(record_field count)
+  PRIOR_AT=$(record_field last_at)
+  case "$PRIOR_COUNT" in ''|*[!0-9]*) PRIOR_COUNT=0 ;; esac
+  case "$PRIOR_AT" in ''|*[!0-9]*) PRIOR_AT=0 ;; esac
+  BACKOFF=$BACKOFF_BASE
+  i=1
+  while [ "$i" -lt "$PRIOR_COUNT" ] && [ "$BACKOFF" -lt "$BACKOFF_MAX" ]; do
+    BACKOFF=$((BACKOFF * 2))
+    i=$((i + 1))
+  done
+  [ "$BACKOFF" -le "$BACKOFF_MAX" ] || BACKOFF=$BACKOFF_MAX
+  if [ "$PRIOR_COUNT" -gt 0 ] && [ "$NOW" -lt $((PRIOR_AT + BACKOFF)) ]; then
+    printf 'error: remote host %s is backing off for %ss after %s consecutive timeouts (last: %s); not running %s\n' \
+      "$HOST" "$((PRIOR_AT + BACKOFF - NOW))" "$PRIOR_COUNT" "$(record_field command)" "$CALL_LABEL" >&2
+    exit 255
+  fi
+fi
+
+# fm_exec_timed replaces a subshell with the bounded ssh, so the call stages no
+# temporary files and its watchdog also ends ssh if this process is killed.
+RC=0
+if [ "$STDIN_MODE" = caller ]; then
+  ( fm_exec_timed "$BOUND" 2 "$SSH_BIN" "${SSH_ARGS[@]}" ) || RC=$?
+else
+  ( fm_exec_timed "$BOUND" 2 "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null ) || RC=$?
+fi
+if ! fm_timed_out "$RC"; then
+  [ ! -e "$TIMEOUT_RECORD" ] || rm -f -- "$TIMEOUT_RECORD" 2>/dev/null || true
+  exit "$RC"
+fi
+
+COUNT=1 WOKEN=0
+if [ -f "$TIMEOUT_RECORD" ] && [ ! -L "$TIMEOUT_RECORD" ]; then
+  COUNT=$(record_field count)
+  WOKEN=$(record_field woken)
+  case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
+  case "$WOKEN" in 1) ;; *) WOKEN=0 ;; esac
+  COUNT=$((COUNT + 1))
+fi
+printf 'error: remote command on host %s timed out after %ss (consecutive timeouts: %s): %s\n' \
+  "$HOST" "$BOUND" "$COUNT" "$CALL_LABEL" >&2
+if mkdir -p "$TIMEOUT_DIR" 2>/dev/null && [ ! -L "$TIMEOUT_DIR" ] \
+  && RECORD_TMP=$(umask 077; mktemp "$TIMEOUT_DIR/.record.XXXXXX" 2>/dev/null); then
+  if printf 'count=%s\nlast_at=%s\nbound=%s\ncommand=%s\nwoken=%s\n' \
+      "$COUNT" "$(date +%s)" "$BOUND" "$CALL_LABEL" "$WOKEN" > "$RECORD_TMP" \
+    && mv -f -- "$RECORD_TMP" "$TIMEOUT_RECORD"; then
+    :
+  else
+    rm -f -- "$RECORD_TMP"
+  fi
+fi
+exit 255

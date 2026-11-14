@@ -47,8 +47,10 @@ Provisioning checks any available supported backend; launch checks the selected 
 
 - On every call, it also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns.
 - It arms bounded SSH dead-peer detection, so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely.
+- Dead-peer detection cannot catch a remote command that is alive but stuck, such as one blocked on a full disk, so the watcher's polls run under a wall-clock bound.
+  A host whose polls time out is treated as unavailable and backs off, so it cannot stall the rest of a supervision cycle, and repeated timeouts wake firstmate once with the host and the stuck command.
 
-Its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
+Its [script header](../bin/fm-on.sh) owns the keepalive and timeout defaults and environment overrides.
 
 ### Remote clone and entrypoint
 

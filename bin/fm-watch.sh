@@ -186,6 +186,13 @@
 #                          inbox and a fresh child beacon are not idle proof;
 #                          the foreign queue itself stays read-only, and one
 #                          parent notification covers each no-progress episode
+#   check: remote host <host> timed out <n> consecutive times running <command> ...
+#                          bounded remote calls (bin/fm-on.sh --bounded, whose
+#                          header owns the bound, backoff, and record) to one
+#                          SSH alias hit their wall-clock bound at least
+#                          FM_REMOTE_CALL_WAKE_AFTER (default 3) times in a row;
+#                          one wake per streak, which ends when a bounded call
+#                          to that host completes
 #   check: secondmate <id> auto-relaunched after <cause> (<where>)
 #                          the liveness tick probed a registered secondmate's
 #                          recorded endpoint, got the recovery-grade `dead` or
@@ -451,6 +458,9 @@ case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=
 # relaunch wake cannot restart the probe into a tight loop.
 SECONDMATE_LIVENESS_SECS=${FM_SECONDMATE_LIVENESS_SECS:-}
 case "$SECONDMATE_LIVENESS_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_SECS=60 ;; esac
+# Consecutive bounded remote-call timeouts to one host before one wake.
+REMOTE_CALL_WAKE_AFTER=${FM_REMOTE_CALL_WAKE_AFTER:-}
+case "$REMOTE_CALL_WAKE_AFTER" in ''|*[!0-9]*|0) REMOTE_CALL_WAKE_AFTER=3 ;; esac
 # Per-relaunch wall-clock bound, so a wedged spawn cannot stall the poll.
 SECONDMATE_LIVENESS_TIMEOUT=${FM_SECONDMATE_LIVENESS_TIMEOUT:-}
 case "$SECONDMATE_LIVENESS_TIMEOUT" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_TIMEOUT=120 ;; esac
@@ -1147,6 +1157,36 @@ EOF
     wake "$reason"
   done
   return 0
+}
+
+# One wake per streak of bounded remote-call timeouts to a host. bin/fm-on.sh
+# writes each record and clears it when a bounded call completes; this tick only
+# reads it and stamps woken=1 so the same streak never wakes twice.
+remote_call_timeout_tick() {
+  local dir="$STATE/remote-call-timeouts" rec host count bound command woken reason key tmp first_reason=''
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    host=${rec##*/}
+    case "$host" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+    count=$(sed -n 's/^count=//p' "$rec" | head -1)
+    woken=$(sed -n 's/^woken=//p' "$rec" | head -1)
+    case "$count" in ''|*[!0-9]*) continue ;; esac
+    [ "$count" -ge "$REMOTE_CALL_WAKE_AFTER" ] && [ "$woken" != 1 ] || continue
+    bound=$(sed -n 's/^bound=//p' "$rec" | head -1)
+    command=$(sed -n 's/^command=//p' "$rec" | head -1 | fm_wake_clean_field)
+    reason="check: remote host $host timed out $count consecutive times running $command (bound ${bound}s); the remote command is alive but stuck - inspect that host (disk space, load, its remote job worker); bounded polls to it back off meanwhile"
+    key="remote-call-timeout-$host"
+    tmp=$(umask 077; mktemp "$dir/.woken.XXXXXX") || return 1
+    if ! { sed 's/^woken=.*/woken=1/' "$rec" > "$tmp" && mv -f -- "$tmp" "$rec"; }; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    fm_wake_queued_keys check | grep -Fx "$key" >/dev/null 2>&1 \
+      || fm_wake_append check "$key" "$reason" || return 1
+    [ -n "$first_reason" ] || first_reason=$reason
+  done
+  [ -z "$first_reason" ] || wake "$first_reason"
 }
 
 # The ordinary-supervision half of the secondmate liveness guarantee, paired
@@ -4153,6 +4193,11 @@ while :; do
     exit 1
   }
   [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
+
+  remote_call_timeout_tick || {
+    echo "watcher: remote-call timeout check failed" >&2
+    exit 1
+  }
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
