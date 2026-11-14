@@ -1374,6 +1374,7 @@ github_declared_checks_unmet() {  # <head>
       else "failed" end
     | [., $d.context, "\($d.app), \($d.event)"]
     | join("\t")' 2>/dev/null); then
+    # shellcheck disable=SC2034 # read by the callers
     FM_PR_GITHUB_DECLARED_UNMET=
     FM_PR_GITHUB_DECLARED_ERROR="the check runs at head $head could not be matched"
     return 1
