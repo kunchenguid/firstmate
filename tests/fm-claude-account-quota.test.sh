@@ -23,6 +23,7 @@ new_case() {
   cat > "$FAKEBIN/quota-axi" <<SH
 #!/usr/bin/env bash
 printf '%s %s %s\n' "\${CLAUDE_CONFIG_DIR-unset}" "\${QUOTA_AXI_SNAPSHOT-unset}" "\$*" >> '$CASE/reads'
+[ ! -f "\$CLAUDE_CONFIG_DIR/sleep" ] || sleep "\$(cat "\$CLAUDE_CONFIG_DIR/sleep")"
 [ -f "\$CLAUDE_CONFIG_DIR/quota.json" ] || exit 1
 cat "\$CLAUDE_CONFIG_DIR/quota.json"
 [ ! -f "\$CLAUDE_CONFIG_DIR/exit-1" ] || exit 1
@@ -69,9 +70,11 @@ rate_limited_account() {
   : > "$1/exit-1"
 }
 
+# RUN_ENV holds extra space-separated NAME=value pairs for the tool's environment.
 run_tool() {
+  # shellcheck disable=SC2086  # RUN_ENV is split into separate assignments.
   env -i HOME="$CASE/user-home" PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
-    QUOTA_AXI_SNAPSHOT="$CASE/shared-fixture.json" "$TOOL" "$@" 2>&1
+    QUOTA_AXI_SNAPSHOT="$CASE/shared-fixture.json" ${RUN_ENV:-} "$TOOL" "$@" 2>&1
 }
 
 assert_no_choice() {
@@ -123,6 +126,21 @@ test_exhausted_and_unreadable_accounts_print_facts() {
   assert_contains "$out" "row: $CASE/unread  root=$CASE/unread  uncertainty: quota-axi could not read this account" "an unreadable account is disclosed uncertainty"
   assert_no_choice "$out"
   pass "exhausted, 0%, and unreadable accounts print facts and uncertainty without a verdict"
+}
+
+test_the_claude_read_timeout_is_honored() {
+  local out
+  new_case timeout
+  account "$CASE/slow" 70 0.2
+  printf '3\n' > "$CASE/slow/sleep"
+  printf '%s\n' "$CASE/slow" > "$HOME_DIR/config/claude-accounts"
+  out=$(RUN_ENV="FM_CLAUDE_ACCOUNT_QUOTA_SECONDS=1" run_tool)
+  assert_contains "$out" "row: $CASE/slow  root=$CASE/slow  uncertainty: quota-axi could not read this account" \
+    "a read slower than FM_CLAUDE_ACCOUNT_QUOTA_SECONDS should be cut off as unreadable"
+  out=$(RUN_ENV="FM_CLAUDE_ACCOUNT_QUOTA_SECONDS=1 FM_ACCOUNT_QUOTA_SECONDS=10" run_tool)
+  assert_contains "$out" "row: $CASE/slow  root=$CASE/slow  scope=all_models  status=known  remaining=70%" \
+    "FM_ACCOUNT_QUOTA_SECONDS should take precedence over FM_CLAUDE_ACCOUNT_QUOTA_SECONDS"
+  pass "FM_CLAUDE_ACCOUNT_QUOTA_SECONDS bounds a Claude read unless FM_ACCOUNT_QUOTA_SECONDS overrides it"
 }
 
 test_projected_runway_prints_its_seconds() {
@@ -186,6 +204,7 @@ test_absent_or_malformed_lists_refuse() {
 test_two_accounts_print_their_own_rows
 test_the_model_scope_is_printed
 test_exhausted_and_unreadable_accounts_print_facts
+test_the_claude_read_timeout_is_honored
 test_projected_runway_prints_its_seconds
 test_a_rate_limited_account_names_the_vendor_reason
 test_ordinary_is_measured_from_the_default_root

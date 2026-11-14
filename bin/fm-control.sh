@@ -84,8 +84,9 @@
 #              A replacement Claude or Pi profile must also pass this home's
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
-#              agent stops. Under a declared config/claude-accounts list, a
-#              Claude ship or scout keeps the account its record names, and
+#              agent stops. Under a declared config/claude-accounts or
+#              config/codex-accounts list, a Claude or Codex ship or scout
+#              keeps the account its record names, and
 #              only an explicit --account <entry> moves it to another
 #              declared one, checked here the same way.
 #              A replacement omp secondmate likewise passes its per-secondmate
@@ -1082,8 +1083,8 @@ resolve_relaunch_profile() {
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet.
-  # Under a declared Claude account list, the replacement stays on the
-  # account the task records unless --account explicitly moves it.
+  # Under a declared Claude or Codex account list, the replacement stays on
+  # the account the task records unless --account explicitly moves it.
   local account_model=$TARGET_MODEL account_mate=
   [ "$account_model" != default ] || account_model=
   [ "$KIND" != secondmate ] || account_mate=$ID

@@ -1155,7 +1155,7 @@ test_account_list_relaunch_refusals_happen_before_stop() {
         needle="account '$dir/retired' is not declared in config/claude-accounts" ;;
       wrong-harness)
         flag=(--harness codex --account "$dir/second")
-        needle="applies to Claude workers only, not codex" ;;
+        needle="needs config/codex-accounts, which this home does not declare" ;;
     esac
     add_listed_task "$dir" "$id" "$recorded"
     cp "$dir/home/state/$id.meta" "$dir/meta-before"
@@ -1167,6 +1167,47 @@ test_account_list_relaunch_refusals_happen_before_stop() {
     cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the $case_name refusal must leave the task record untouched"
   done
   pass "fm-control relaunch: undeclared, newline-split, signed-out, unrecorded, retired, and wrong-runner accounts refuse before the old agent stops"
+}
+
+make_codex_auth_stub() {  # <case-dir>
+  cat > "$1/fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = login ] && [ "${2:-}" = status ] || exit 0
+[ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]
+SH
+  chmod +x "$1/fakebin/codex"
+}
+
+test_codex_account_list_relaunch_keeps_or_moves_the_recorded_account() {
+  local dir out rc id=rl-codex-list
+  dir=$(new_case codex-list "$id")
+  add_ship_task "$dir" "$id" codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  make_codex_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/first" "$dir/second" "$dir/signed-out"
+  : > "$dir/first/auth.json"
+  : > "$dir/second/auth.json"
+  printf '%s\n' "$dir/first" "$dir/second" "$dir/signed-out" > "$dir/home/config/codex-accounts"
+  echo "account=$dir/first" >> "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a Codex relaunch under a list should reuse the recorded account"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/first" ] || fail "the relaunched record should keep the recorded Codex account"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$dir/first'" \
+    "the replacement should launch under the recorded Codex home"
+  : > "$dir/fake/literal"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/signed-out" --note "refuse"); rc=$?
+  expect_code 1 "$rc" "a signed-out Codex account must refuse"$'\n'"$out"
+  assert_contains "$out" "config/codex-accounts pins Codex workers to $dir/signed-out, which is not signed in" "the refusal should say why"
+  [ "$(cat "$dir/fake/command")" = codex ] || fail "the refusal must happen before the running agent stops"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the refusal must leave the task record untouched"
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/second" --note "first is exhausted"); rc=$?
+  expect_code 0 "$rc" "an explicit --account relaunch should move the Codex task"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "the relaunched record should name the new Codex account"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$dir/second'" \
+    "the replacement should launch under the explicitly chosen Codex home"
+  pass "fm-control relaunch: a Codex task keeps its recorded account, refuses a signed-out one before stopping, and moves only on --account"
 }
 
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {
@@ -3281,6 +3322,7 @@ test_worker_account_pin_follows_the_relaunch
 test_account_list_relaunch_reuses_the_recorded_account
 test_account_list_relaunch_moves_only_on_explicit_account
 test_account_list_relaunch_refusals_happen_before_stop
+test_codex_account_list_relaunch_keeps_or_moves_the_recorded_account
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_claude_exclude_tools_follow_the_relaunch
