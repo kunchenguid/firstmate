@@ -36,7 +36,7 @@ Once a Pi primary session owns this home's fleet lock, the branch handles two ki
   A row is one queued wake entry.
 - Heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant.
 
-The branch then merges each outcome back into the captain conversation's transcript.
+The branch delivers each outcome through the [verdict-specific path](#two-stage-noise-filter).
 
 Some wakes stay on main:
 
@@ -144,8 +144,9 @@ The wake message itself retains its existing shape, so other harness-arm scripts
 
 Heartbeat handling remains independent.
 A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
-A co-present main-owned check row no longer defers that review to main.
-That row is not fleet context the branch is missing, and main is woken for it on its own triggering close.
+An ordinary co-present main-owned check row no longer defers that review to main.
+[Firstmate-owned handoffs](#while-the-record-exists) always do.
+An ordinary check row is not fleet context the branch is missing, and main is woken for it on its own triggering close.
 
 ### The branch itself
 
@@ -266,7 +267,7 @@ Local-only landing and second-mate retirement never do ("Postures" below).
 Supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch").
 No captain grant file is required.
 
-A fleet-wide heartbeat is separately eligible only when every row other than a check or decision-owned signal/stale row is a heartbeat row or a resolvable task-local row (see "Heartbeat routing" below).
+A fleet-wide heartbeat is separately eligible under [Heartbeat routing](#heartbeat-routing), subject to the [Firstmate-owned handoff veto](#while-the-record-exists).
 Every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on main.
 
 #### Pre-drain recheck
@@ -274,9 +275,10 @@ Every other fleet-wide or unresolvable wake, and every watcher-failure alarm, st
 The branch recomputes eligibility immediately before prompting the branch to drain.
 It publishes the exact eligible row set to `state/.branch-eligible-rows` through `writeEligibleRowsSnapshot`.
 
-After an independently eligible wake has already been offered, a newly-arrived main-owned row observed at that pre-drain recheck does not revoke the offer.
+After an independently eligible wake has already been offered, a newly-arrived ordinary main-owned row observed at that pre-drain recheck does not revoke the offer.
 Instead, that row is excluded from the eligible set.
 Whatever else is currently eligible still reaches the branch, and the main-owned row stays queued for main's own drain.
+An unread [Firstmate-owned handoff](#while-the-record-exists) instead returns the wake to main in either posture, including at this recheck.
 [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the consume-side guarantee that neither actor can present or acknowledge the other's claim.
 
 Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them.
@@ -391,6 +393,7 @@ Stage two is the branch's verdict on each handled event, reported through its `f
 | Verdict | Delivery |
 | --- | --- |
 | `routine` | A non-silent outcome uses the custom-message path; a silent outcome is stored without a rendered note. Neither opens a follow-up turn. |
+| `firstmate` | Uses the durable [MAIN handback](#while-the-record-exists) in either posture. |
 | `captain` | Appends a versioned `fm-branch-visible-outcome` custom session entry. |
 
 ### The visible captain entry
@@ -480,7 +483,7 @@ The branch accepts it without a project only when every branch-ownable row obser
 
 ### Co-present main-owned rows
 
-A heartbeat is never vetoed or ridden into main by a co-present check row or decision-owned signal/stale row.
+Except for the [Firstmate-owned handoff veto](#while-the-record-exists), a co-present check row or decision-owned signal/stale row does not send a heartbeat to main.
 Those rows are main-owned while attended.
 They are excluded from what the branch may claim and left queued for main.
 Main is woken for each on its own watcher cycle, so nothing starves by being left behind.
@@ -653,7 +656,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
 - Suppression of empty or exact-repeat retry finals with differing replies preserved, preserved tool calls and user responses, the triggered-then-next-turn pacing, and session-start re-presentation.
-- Routine outcomes staying turn-free, task-level no-change notes staying hidden, absent-marker re-presentation, and malformed-age reporting without acknowledgement.
+- Routine outcomes staying turn-free, Firstmate handoffs leaving captain processing parked, task-level no-change notes staying hidden, absent-marker re-presentation, and malformed-age reporting without acknowledgement.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
 - Mirroring.
@@ -667,7 +670,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 
 - Prompt stability, including the landed-work cleanup instruction and the second-mate relay, signal-span, and stale-liveness rules.
 - The emitted completed-scout cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
-- Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
+- Store append-only behavior, startup replay stopping before a Firstmate handoff or captain entry, Firstmate handoffs preserving held captain rows and refusing silence, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
@@ -686,7 +689,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 For the away posture:
 
 - `tests/fm-pi-watch-extension.test.sh` covers the away eligibility collapse (check-kind and decision-owned triggers offered) with the broken-queue vetoes and the watcher-failure alarm still reaching main.
-- `tests/fm-pi-branch-extension.test.sh` covers the posture tail with the verbatim read-back, the unscoped claim of check and heartbeat rows, no processing turn under the record, cancellation of a request pending when the record appears, and the re-presentation at the first run boundary after archive.
+- `tests/fm-pi-branch-extension.test.sh` covers the posture tail with the verbatim read-back, the unscoped claim of eligible check and heartbeat rows, no captain-processing turn under the record, cancellation of a request pending when the record appears, and the re-presentation at the first run boundary after archive.
 
 `tests/fm-wake-drain-outcome-backstop.test.sh` covers keyless resurfacing, causal suppression, same-second ordering, one-shot presentation, first-drain index self-healing under the outcome lock, store-fault fail-closed behavior, bounded history cost and output, and the oversized-line limit.
 

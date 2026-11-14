@@ -1539,8 +1539,9 @@ ${context.command}
         if (scope.mainHandoff) {
           throw new Error("an unread Firstmate outcome needs MAIN's standing authority");
         }
-        // A newly-arrived main-owned (check-kind) row never bounces this
-        // whole recheck back to main - scopeForUnreadWake excludes it from
+        // Apart from the Firstmate handoff veto above, a newly-arrived
+        // main-owned (check-kind) row never bounces this whole recheck back
+        // to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
         // in every other, so it stays queued for main while whatever else is
         // eligible right now still reaches the branch. A genuinely empty

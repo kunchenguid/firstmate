@@ -253,13 +253,7 @@ The legacy `state/.afk` daemon flag has no effect on Pi.
 
 ### Attended and away authority
 
-While the away-posture record `state/.afk-contract` exists:
-
-- The branch takes every actionable row.
-- No processing turn opens on the parked main.
-- Main's standing authority moves to the branch through the guarded scripts, each retaining its own gate.
-
-[docs/pi-supervision-branch.md](pi-supervision-branch.md#postures) defines that posture.
+[Postures](pi-supervision-branch.md#postures) owns away routing, Firstmate-owned handbacks to main, and the guarded authority available while `state/.afk-contract` exists.
 
 While attended, the branch cannot merge a PR, land local work, freshly spawn, or answer a decision.
 These are the bounds set by the captain-approved architecture.

@@ -19,6 +19,7 @@
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq presented
 #     by Pi as a routine merge note or sequence-keyed visible captain entry,
+#     handed to MAIN as a durable firstmate check,
 #     emitted by Pi's locked session-start replay, silently consumed there
 #     because `silent` is true, or presented by the supervision-host drain.
 #     Records above the cursor are unread. A captain row advances only after
@@ -30,10 +31,10 @@
 #     from the read cursor: reading (the visible entry) is the branch's act,
 #     processing (main acting on the outcome and calling its acknowledgement
 #     tool) is main's. A captain row between the two markers is "unprocessed":
-#     delivered and shown, not yet acted on. Routine rows never wait on this
-#     marker. It only advances through an explicit sequence-bound
+#     delivered and shown, not yet acted on. Routine and firstmate rows never
+#     wait on this marker. It only advances through an explicit sequence-bound
 #     acknowledgement naming a currently unprocessed captain row at or below
-#     the read cursor; a routine, unread, or already-processed target is
+#     the read cursor; a routine, firstmate, unread, or already-processed target is
 #     refused. It never moves past the read cursor or backwards, so an
 #     unrelated or empty model answer cannot move it. An absent marker reads as
 #     0 (every delivered captain row is unprocessed, the safe direction), and
