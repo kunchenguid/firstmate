@@ -1215,6 +1215,72 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   pass "fm-teardown.sh backend=orca: refuses incomplete worktree-only endpoint metadata before runtime dispatch"
 }
 
+orca_recovery_teardown() {  # <label> <id> <dirty:0|1> <show-response|exit> -> sets out rc state wt
+  local label=$1 id=$2 dirty=$3 show=$4 proj data config neutral
+  proj="$TMP_ROOT/$label-project"
+  wt="$TMP_ROOT/$label-wt"
+  data="$TMP_ROOT/$label-data"
+  state="$TMP_ROOT/$label-state"
+  config="$TMP_ROOT/$label-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "cleanup_recovery=orca" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" "branch=fm/$id" \
+    "backend=orca" "orca_worktree_id=wt-$label::/orca/wt-$label"
+  [ "$dirty" = 0 ] || printf 'uncommitted\n' > "$wt/scratch.txt"
+  orca_case "$label"
+  case "$show" in
+    exit) printf '1\n' > "$RESP/1.exit" ;;
+    *) printf '{"ok":true,"result":{"worktree":{"id":"wt-%s::/orca/wt-%s","path":"%s"}}}\n' "$label" "$label" "$show" > "$RESP/1.out" ;;
+  esac
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+}
+
+test_teardown_releases_orca_recovery_record_without_terminal() {
+  local out rc state wt
+  orca_recovery_teardown rec-ok orcarecokz1 0 "$TMP_ROOT/rec-ok-wt"
+  expect_code 0 "$rc" "a terminal-less Orca recovery record should tear down once its id resolves to the worktree"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f''id:wt-rec-ok::/orca/wt-rec-ok'$'\x1f''--json' \
+    "recovery teardown did not resolve the Orca worktree id"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-rec-ok::/orca/wt-rec-ok'$'\x1f''--force'$'\x1f''--json' \
+    "recovery teardown did not remove the Orca worktree"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' "a record with no terminal has nothing to close"
+  assert_absent "$state/orcarecokz1.meta" "recovery teardown should remove the record"
+  pass "fm-teardown.sh backend=orca: a terminal-less spawn recovery record tears down after the id/path gate"
+}
+
+test_teardown_refuses_unsafe_orca_recovery_record_without_terminal() {
+  local out rc state wt
+  mkdir -p "$TMP_ROOT/rec-other"
+  orca_recovery_teardown rec-mismatch orcarecmisz2 0 "$TMP_ROOT/rec-other"
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse an Orca id/path mismatch"
+  assert_contains "$out" "not inspected worktree" "the mismatch refusal should name the mismatch"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' "a mismatched recovery record must not be removed"
+  assert_present "$state/orcarecmisz2.meta" "a refused recovery teardown should keep the record"
+
+  orca_recovery_teardown rec-unresolved orcarecunrz3 0 exit
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse an unresolvable Orca worktree id"
+  assert_contains "$out" "cannot resolve Orca worktree id" "the refusal should explain the fail-closed check"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' "an unresolvable id must not be removed"
+  assert_present "$state/orcarecunrz3.meta" "a refused recovery teardown should keep the record"
+
+  orca_recovery_teardown rec-dirty orcarecdirz4 1 "$TMP_ROOT/rec-dirty-wt"
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse unlanded work"
+  assert_contains "$out" "has work not yet merged" "the refusal should come from the landing checks"
+  assert_present "$wt/scratch.txt" "unlanded work must survive a refused recovery teardown"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' "unlanded work must never be removed"
+  assert_present "$state/orcarecdirz4.meta" "a refused recovery teardown should keep the record"
+  pass "fm-teardown.sh backend=orca: a terminal-less recovery record keeps the id/path and landing gates"
+}
+
 test_secondmate_force_teardown_removes_orca_child_via_orca() {
   local home subhome childproj childwt child_id neutral out rc
   home="$TMP_ROOT/orca-child-parent"
@@ -1398,6 +1464,8 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
+test_teardown_releases_orca_recovery_record_without_terminal
+test_teardown_refuses_unsafe_orca_recovery_record_without_terminal
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child

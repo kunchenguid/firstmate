@@ -60,6 +60,7 @@ worktree=<absolute Paradev worktree path>
 Spawn resolves the Paradev project id from the clone path, creates a tagged workspace on the task branch with Paradev's own branch prefix skipped, and refuses a branch whose workspace already exists rather than adopting or archiving it.
 It then reads the worktree path back by workspace id, runs the isolated-worktree assertion, opens one plain shell terminal, records metadata, and types the selected harness launch into that shell, so every supported harness and Firstmate's own harness hooks work unchanged.
 If spawn fails after the workspace exists, it archives that workspace; when that archive also fails, it leaves a recovery record naming the workspace.
+That record carries `cleanup_recovery=paradev` and no `terminal=` when no terminal was opened; rerun `bin/fm-teardown.sh <id>` on the task to release it, which skips the terminal close but still runs the landing checks and the workspace id/path match before archiving, and keeps the record on any refusal.
 Exact command flags and response parsing are owned by `bin/backends/paradev.sh`.
 
 `fm-peek.sh` reads with `superset terminals read`, which returns the terminal's visible screen rather than scrollback.

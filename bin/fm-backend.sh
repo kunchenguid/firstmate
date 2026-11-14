@@ -664,6 +664,10 @@ fm_backend_target_of_meta() {  # <meta-file>
 # valid only when their window name itself is exactly fm-<task-id>.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# --cleanup-recovery (teardown only) also accepts a worktree-owning backend's
+# spawn-abort recovery record (cleanup_recovery=<backend>) that never got a
+# terminal: there is nothing to close, and teardown still proves the recorded
+# worktree id and landed work before releasing it.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -741,9 +745,10 @@ fm_backend_worktree_identity_repair_hint() {  # <meta-file>
   echo "A pool slot handed on to another task since is still safe to name: cleanup reads that slot's own .fm-slot-owner claim and then leaves the slot untouched, while a slot with no claim is proved only by that worktree listing."
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [--cleanup-recovery]
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface rex_window rex_server thread block paradev_project
+  local terminal_optional=0
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -799,6 +804,11 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: endpoint metadata belongs to task $binding, not $id; preserving task state." >&2
     return 1
   fi
+  if [ "${3:-}" = --cleanup-recovery ] && fm_backend_owns_worktree "$backend" \
+    && [ "$(fm_backend_meta_exact_value "$meta" cleanup_recovery)" = "$backend" ] \
+    && [ "$(grep -c '^terminal=' "$meta" 2>/dev/null || true)" = 0 ]; then
+    terminal_optional=1
+  fi
 
   case "$backend" in
     tmux)
@@ -852,7 +862,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
-      [ -n "$terminal" ] || {
+      [ -n "$terminal" ] || [ "$terminal_optional" = 1 ] || {
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1
       }
@@ -861,12 +871,12 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       }
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
+        || { [ "$terminal_optional" != 1 ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      window=$terminal
+      [ -z "$terminal" ] || window=$terminal
       ;;
     paradev)
       [ "$binding" = "$id" ] || {
@@ -876,7 +886,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       workspace=$(fm_backend_meta_exact_value "$meta" paradev_workspace_id) || workspace=
       paradev_project=$(fm_backend_meta_exact_value "$meta" paradev_project_id) || paradev_project=
-      [ -n "$terminal" ] || {
+      [ -n "$terminal" ] || [ "$terminal_optional" = 1 ] || {
         echo "REFUSED: missing terminal in $meta; cannot close Paradev endpoint; preserving task state." >&2
         return 1
       }
@@ -887,15 +897,16 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       # terminal= is <workspace>:<terminal> and must name the recorded
       # workspace, so a terminal id can never steer cleanup into another one.
       if [ "$window" != "fm-$id" ] \
-        || [ "${terminal%%:*}" != "$workspace" ] \
-        || [ "${terminal#*:}" = "$terminal" ] \
+        || { [ "$terminal_optional" != 1 ] && {
+          [ "${terminal%%:*}" != "$workspace" ] \
+            || [ "${terminal#*:}" = "$terminal" ] \
+            || ! fm_backend_endpoint_atom_valid "${terminal#*:}"; }; } \
         || ! fm_backend_endpoint_atom_valid "$workspace" \
-        || ! fm_backend_endpoint_atom_valid "${terminal#*:}" \
         || ! fm_backend_endpoint_atom_valid "$paradev_project"; then
         echo "REFUSED: Paradev endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      window=$terminal
+      [ -z "$terminal" ] || window=$terminal
       ;;
     cmux)
       [ "$binding" = "$id" ] || {

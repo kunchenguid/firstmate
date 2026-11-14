@@ -927,6 +927,96 @@ test_teardown_preserves_record_when_archive_fails() {
   pass "fm-teardown.sh backend=paradev: a failed archive preserves the record"
 }
 
+# A spawn that failed before any terminal existed and could not archive its
+# workspace leaves a cleanup_recovery=paradev record with no terminal=.
+recovery_fixture() {  # <id> <label> -> sets PROJ WT DATA STATE CONFIG
+  PROJ="$TMP_ROOT/$2-project"
+  WT="$TMP_ROOT/$2-wt"
+  DATA="$TMP_ROOT/$2-data"
+  STATE="$TMP_ROOT/$2-state"
+  CONFIG="$TMP_ROOT/$2-config"
+  fm_git_worktree "$PROJ" "$WT" "fm/$1"
+  mkdir -p "$DATA/$1" "$STATE" "$CONFIG"
+  touch "$STATE/.last-watcher-beat"
+  fm_write_meta "$STATE/$1.meta" \
+    "window=fm-$1" "endpoint_task_id=$1" "cleanup_recovery=paradev" "worktree=$WT" "project=$PROJ" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" "branch=fm/$1" \
+    "backend=paradev" "paradev_workspace_id=$WS" "paradev_project_id=$PROJECT_ID"
+  paradev_case "$2"
+  respond workspaces-archive "{\"deleted\":[\"$WS\"],\"notFound\":[],\"failed\":[],\"warnings\":[]}"
+}
+
+test_spawn_recovery_record_without_terminal_tears_down() {
+  local id out rc
+  id="pdrecoverz9"
+  spawn_fixture "$id" recover-spawn
+  respond workspaces-create "{\"workspace\":{\"id\":\"$WS\"},\"alreadyExists\":false}"
+  respond workspaces-get "$(ws_row "$WS" "$WT")"
+  respond_error terminals-create "boom"
+  respond workspaces-archive "{\"deleted\":[],\"notFound\":[],\"failed\":[\"$WS\"],\"warnings\":[]}"
+  spawn_paradev "$id" "$PROJ" "$STATE" "$DATA" "$CONFIG" --mode local-only --yolo off --backend paradev >/dev/null
+  assert_grep "cleanup_recovery=paradev" "$STATE/$id.meta" "the failed spawn should leave a recovery record"
+  assert_no_grep "terminal=" "$STATE/$id.meta" "the recovery record should carry no terminal"
+  : > "$LOG"
+  respond workspaces-archive "{\"deleted\":[\"$WS\"],\"notFound\":[],\"failed\":[],\"warnings\":[]}"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+  rc=$?
+  expect_code 0 "$rc" "rerunning teardown on a terminal-less recovery record should release the workspace"$'\n'"$out"
+  log_has "superset${SEP}workspaces${SEP}get${SEP}$WS${SEP}--local${SEP}--json" "recovery teardown did not prove the recorded workspace path"
+  log_has "superset${SEP}workspaces${SEP}archive${SEP}$WS${SEP}--local${SEP}--json" "recovery teardown did not archive the recorded workspace"
+  log_lacks "superset${SEP}terminals${SEP}close" "a record with no terminal has nothing to close"
+  assert_absent "$STATE/$id.meta" "recovery teardown should remove the record"
+  pass "fm-teardown.sh backend=paradev: a terminal-less spawn recovery record tears down after the id/path gate"
+}
+
+test_recovery_record_without_terminal_refuses_unsafe_release() {
+  local id out rc other
+  id="pdrecmismatchz1"
+  recovery_fixture "$id" rec-mismatch
+  other="$TMP_ROOT/rec-mismatch-other-wt"
+  git -C "$PROJ" worktree add --quiet -b "fm/$id-other" "$other"
+  respond workspaces-get "$(ws_row "$WS" "$other")"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse an id/path mismatch"
+  assert_contains "$out" "not inspected worktree" "the mismatch refusal should name the mismatch"
+  log_lacks "superset${SEP}workspaces${SEP}archive" "a mismatched recovery record must not archive"
+  assert_present "$STATE/$id.meta" "a refused recovery teardown should keep the record"
+
+  id="pdrecunreadz2"
+  recovery_fixture "$id" rec-unread
+  respond_error workspaces-get "host unreachable"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse an unreadable workspace identity"
+  log_lacks "superset${SEP}workspaces${SEP}archive" "an unreadable identity must not archive"
+  assert_present "$STATE/$id.meta" "a refused recovery teardown should keep the record"
+
+  id="pdrecdirtyz3"
+  recovery_fixture "$id" rec-dirty
+  respond workspaces-get "$(ws_row "$WS" "$WT")"
+  printf 'uncommitted\n' > "$WT/scratch.txt"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "recovery teardown must refuse unlanded work"
+  assert_contains "$out" "worktree $WT has work not yet merged" "the refusal should come from the landing checks"
+  assert_present "$WT/scratch.txt" "unlanded work must survive a refused recovery teardown"
+  log_lacks "superset${SEP}workspaces${SEP}archive" "unlanded work must never be archived"
+  assert_present "$STATE/$id.meta" "a refused recovery teardown should keep the record"
+
+  id="pdnotermz4"
+  recovery_fixture "$id" no-term-ordinary
+  grep -v '^cleanup_recovery=' "$STATE/$id.meta" > "$STATE/$id.meta.new" && mv "$STATE/$id.meta.new" "$STATE/$id.meta"
+  respond workspaces-get "$(ws_row "$WS" "$WT")"
+  out=$(teardown_paradev "$id" "$STATE" "$DATA" "$CONFIG")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an ordinary record without terminal= must still refuse"
+  assert_contains "$out" "missing terminal" "the ordinary refusal should name the missing terminal"
+  [ ! -s "$LOG" ] || fail "an ordinary terminal-less refusal must not call the Paradev CLI"
+  assert_present "$STATE/$id.meta" "an ordinary terminal-less refusal should keep the record"
+  pass "fm-teardown.sh backend=paradev: a terminal-less recovery record keeps the id/path and landing gates; ordinary records still refuse"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -978,3 +1068,5 @@ test_ship_teardown_refuses_missing_worktree_path
 test_teardown_refuses_missing_paradev_workspace_id
 test_teardown_refuses_terminal_from_another_workspace
 test_teardown_preserves_record_when_archive_fails
+test_spawn_recovery_record_without_terminal_tears_down
+test_recovery_record_without_terminal_refuses_unsafe_release

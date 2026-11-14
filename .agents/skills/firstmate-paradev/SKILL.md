@@ -83,6 +83,7 @@ For a messy Paradev-backed task:
 1. Read `state/<id>.meta` and the relevant status tail first.
 2. Confirm the task is actually Paradev-backed before using Paradev-specific assumptions.
 3. Use the recorded `terminal=`, `paradev_workspace_id=`, and `worktree=` as the task identity.
+   A `cleanup_recovery=paradev` record from a failed spawn may have no `terminal=`; rerun `bin/fm-teardown.sh <id>` on it, which skips the close but keeps the landing and id/path checks.
 4. Prefer firstmate helpers for peek, send, state, and teardown.
 5. Never archive a workspace, close a terminal, or delete a branch by hand.
 6. Stop and inspect if the recorded worktree path, workspace id, or project registration no longer matches expectations.
