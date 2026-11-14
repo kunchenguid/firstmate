@@ -429,7 +429,7 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 The honesty-gate default remains the 300-second `FM_GUARD_GRACE` floor.
 Only the watcher process touches `state/.last-watcher-beat`.
 No helper process can make a wedged watcher appear healthy.
-An owned child is reaped only after its beacon is stale past the poll-derived grace (`fm_poll_derived_grace`; [Guard grace and the poll cadence](turnend-guard.md#guard-grace-and-the-poll-cadence)), so a healthy wait of one `FM_POLL` is not treated as a wedge.
+An owned child is reaped only after its beacon is stale past the poll-derived grace (`fm_poll_derived_grace`; [Guard grace and the poll cadence](turnend-guard.md#guard-grace-and-the-poll-cadence)) or an explicit `FM_WATCHER_STALE_GRACE`/`FM_GUARD_GRACE` override, so a healthy wait of one `FM_POLL` is not treated as a wedge.
 The replacement has to pass the honesty gate.
 The arm never reports started, attached, or healthy off the stale beacon.
 The watcher detaches inherited stdio pipes onto `state/.watch-runtime.log` so a dead reader in the arm chain cannot freeze the beat.
