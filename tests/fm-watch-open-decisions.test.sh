@@ -341,10 +341,62 @@ test_watcher_loop() {
   pass "the actual watcher wakes and exits on an overdue key without any recorded pane"
 }
 
+seed_hold_backlog() {  # <hold-line>...
+  mkdir -p "$TMP_ROOT/data"
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' > "$TMP_ROOT/.tasks.toml"
+  { printf '# Backlog\n\n## Queued\n'; printf '%s\n' "$@"; printf '## In flight\n\n## Done\n'; } > "$TMP_ROOT/data/backlog.md"
+}
+
+test_captain_hold_due_wakes_once() {
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return; }
+  reset_case
+  seed_hold_backlog \
+    '- [ ] due-a - Due, with comma (since 2026-11-01) (hold: pick) (hold-kind: captain) (hold-until: 2026-11-14)' \
+    '- [ ] future-b - Future (since 2026-11-01) (hold: pick) (hold-kind: captain) (hold-until: 2026-11-15)' \
+    '- [ ] undated-c - Undated (since 2026-11-01) (hold: pick) (hold-kind: captain)' \
+    '- [ ] other-d - Other kind (since 2026-11-01) (hold: wait) (hold-kind: external) (hold-until: 2026-11-10)'
+  captain_hold_due_tick 1700000000
+  [ "$(count_wakes)" = 0 ] || fail "disabled flag queued a captain-hold wake"
+  touch "$CONFIG/open-decision-reminders"
+  captain_hold_due_tick 1794614400
+  [ "$(count_wakes)" = 1 ] || fail "arrived date did not queue exactly one wake: $(count_wakes)"
+  [ "$CAPTAIN_HOLD_DUE_REMINDER" = 'check: captain hold due-a recheck due 2026-11-14' ] \
+    || fail "unexpected wake reason: $CAPTAIN_HOLD_DUE_REMINDER"
+  captain_hold_due_tick 1794614400
+  captain_hold_due_tick 1794615000
+  [ "$(count_wakes)" = 1 ] || fail "throttled or repeated read refired a pair"
+  rm -f -- "$STATE/.captain-hold-due-checked"
+  captain_hold_due_tick 1794700800
+  [ "$(count_wakes)" = 2 ] || fail "next day's date did not queue its wake"
+  [ "$CAPTAIN_HOLD_DUE_REMINDER" = 'check: captain hold future-b recheck due 2026-11-15' ] \
+    || fail "unexpected second reason: $CAPTAIN_HOLD_DUE_REMINDER"
+  rm -f -- "$STATE/.captain-hold-due-checked"
+  captain_hold_due_tick 1794700800
+  [ "$(count_wakes)" = 2 ] || fail "a restart's fresh read refired a recorded pair"
+  pass "an arrived captain-hold date wakes once per task and date, undated and other kinds stay quiet"
+}
+
+test_captain_hold_redate_fires_again() {
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return; }
+  reset_case
+  touch "$CONFIG/open-decision-reminders"
+  seed_hold_backlog '- [ ] due-a - Due (since 2026-11-01) (hold: pick) (hold-kind: captain) (hold-until: 2026-11-14)'
+  captain_hold_due_tick 1794614400
+  seed_hold_backlog '- [ ] due-a - Due (since 2026-11-01) (hold: pick) (hold-kind: captain) (hold-until: 2026-12-01)'
+  rm -f -- "$STATE/.captain-hold-due-checked"
+  captain_hold_due_tick 1794614400
+  [ "$(count_wakes)" = 1 ] || fail "a future re-date fired early"
+  rm -f -- "$STATE/.captain-hold-due-checked"
+  captain_hold_due_tick 1796083200
+  [ "$(count_wakes)" = 2 ] || fail "a re-dated hold did not fire on its new date"
+  pass "a re-dated hold fires again on its new date"
+}
+
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
   test_wait_exemptions test_relayed_captain_hold_is_exempt_by_key \
   test_relayed_captain_hold_until_rearms test_unchanged_republish_keeps_backoff \
   test_resolved_same_text_reopen_starts_fresh test_republish_updates_until_date \
   test_unknown_times_and_keyless test_timed_fold_is_incremental \
-  test_invalid_settings test_timed_cursor_retirement test_watcher_loop
+  test_invalid_settings test_timed_cursor_retirement test_watcher_loop \
+  test_captain_hold_due_wakes_once test_captain_hold_redate_fires_again

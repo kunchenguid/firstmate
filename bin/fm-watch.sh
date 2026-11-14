@@ -3014,6 +3014,67 @@ EOF
   fi
 }
 
+# Opt-in wake for a main-home captain hold whose `hold --until` date has
+# arrived (bin/fm-captain-hold.sh). The date is read from the backlog's
+# structured hold_until field only, never from note text, and counts from 00:00
+# UTC like the relayed-key re-arm above. A hold past its date is no longer held
+# to tasks-axi, so the read lists every row and keeps captain-kind rows with a
+# well-formed date on or before today. Each (task, date) fires once;
+# STATE/.captain-hold-due keeps those pairs across watcher restarts and drops a
+# pair once its row no longer qualifies, so a hold re-dated or answered starts
+# clean. An undated hold never fires, and an unreadable backlog changes
+# nothing. The backlog is read at most every CAPTAIN_HOLD_DUE_READ_SECS.
+CAPTAIN_HOLD_DUE_READ_SECS=300
+CAPTAIN_HOLD_DUE_REMINDER=
+
+captain_hold_due_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} ledger checked last today out id until old='' kept='' due='' tmp
+  CAPTAIN_HOLD_DUE_REMINDER=
+  [ -e "$CONFIG/open-decision-reminders" ] || return 0
+  [ -n "$now" ] || fm_epoch_seconds_to now
+  checked="$STATE/.captain-hold-due-checked"
+  last=$(cat "$checked" 2>/dev/null || true)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ "${#last}" -le 12 ] || last=0
+  if [ "$last" -ne 0 ] && [ "$now" -ge "$last" ] && [ "$((now - last))" -lt "$CAPTAIN_HOLD_DUE_READ_SECS" ]; then
+    return 0
+  fi
+  today=$(date -u -d "@$now" +%Y-%m-%d 2>/dev/null || date -u -r "$now" +%Y-%m-%d 2>/dev/null) || return 0
+  ledger="$STATE/.captain-hold-due"
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] || return 1
+    old=$(cat "$ledger") || return 1
+  fi
+  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" list --fields hold_kind,hold_until,held 2>/dev/null) || return 0
+  printf '%s\n' "$now" > "$checked" || return 1
+  while IFS=$'\t' read -r id until; do
+    [ -n "$id" ] || continue
+    kept="$kept$id"$'\t'"$until"$'\n'
+    case $'\n'"$old"$'\n' in *$'\n'"$id"$'\t'"$until"$'\n'*) continue ;; esac
+    due="$due$id"$'\t'"$until"$'\n'
+  done <<EOF
+$(printf '%s\n' "$out" | awk -F, -v today="$today" '
+  /^  [A-Za-z0-9._-]+,/ {
+    id = $1; sub(/^ +/, "", id)
+    kind = $(NF - 2); until = $(NF - 1)
+    if (kind == "captain" && until ~ /^[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]$/ && until <= today)
+      printf "%s\t%s\n", id, until
+  }')
+EOF
+  while IFS=$'\t' read -r id until; do
+    [ -n "$id" ] || continue
+    CAPTAIN_HOLD_DUE_REMINDER="check: captain hold $id recheck due $until"
+    fm_wake_append check "captain-hold-due:$id:$until" "$CAPTAIN_HOLD_DUE_REMINDER" || return 1
+  done <<EOF
+$due
+EOF
+  tmp=$(mktemp "$STATE/.captain-hold-due.XXXXXX") || return 1
+  if ! printf '%s' "$kept" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 # The identity a re-surface throttle is bound to: the task's whole status-log
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
@@ -4153,6 +4214,12 @@ while :; do
     exit 1
   }
   [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
+
+  captain_hold_due_tick || {
+    echo 'watcher: captain-hold due check failed' >&2
+    exit 1
+  }
+  [ -z "$CAPTAIN_HOLD_DUE_REMINDER" ] || wake "$CAPTAIN_HOLD_DUE_REMINDER"
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
