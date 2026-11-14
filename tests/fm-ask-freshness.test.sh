@@ -326,6 +326,30 @@ test_a_table_inside_a_fence_is_not_a_triage_table() {
   pass "a table inside a fenced code block is skipped"
 }
 
+# A line of inline code that starts with backticks is not an opening fence
+# (a backtick fence's info string has no backtick), so a later stale table
+# is still checked.
+test_inline_code_does_not_open_a_fence() {
+  local report out rc=0
+  report="$TMP_ROOT/inline-code.md"
+  {
+    printf '%s\n' '| item | checked_at |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '| a | 2026-11-13T11:30Z |'
+    printf '%s\n' ''
+    # shellcheck disable=SC2016 # Literal Markdown inline code, not a command substitution.
+    printf '%s\n' '```fm --help``` now lists the flag.'
+    printf '%s\n' ''
+    printf '%s\n' '| item | checked_at |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '| b | 2026-11-13T02:00Z |'
+  } > "$report"
+  out=$(run_gate "$report") || rc=$?
+  expect_code 1 "$rc" "inline code must not hide the stale table"$'\n'"$out"
+  assert_contains "$out" "line 9: STALE" "the table after the inline code must be checked"
+  pass "a line of inline code does not open a fence"
+}
+
 # A closing HTML tag right after a table ends its body, as an opening tag does.
 test_a_closing_html_tag_ends_the_table_body() {
   local report out rc=0
@@ -359,4 +383,5 @@ fm_test_run test_fresh_rows_pass_and_every_row_is_printed_with_its_age \
   test_a_short_row_before_a_block_is_still_checked_and_named \
   test_a_piped_line_that_looks_like_a_block_is_still_a_row \
   test_a_table_inside_a_fence_is_not_a_triage_table \
+  test_inline_code_does_not_open_a_fence \
   test_a_closing_html_tag_ends_the_table_body

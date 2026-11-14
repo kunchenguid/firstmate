@@ -178,7 +178,7 @@ def normalize(name):
 
 
 HEADING = re.compile(r"#{1,6}(?:\s|$)")
-FENCE = re.compile(r"(?:`{3,}|~{3,})")
+FENCE = re.compile(r" {0,3}(`{3,}(?=[^`]*$)|~{3,})")
 THEMATIC = re.compile(r"(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})")
 LIST_ITEM = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?:\s|$)")
 HTML_BLOCK = re.compile(r"(?:<!--|</?[A-Za-z][A-Za-z0-9-]*(?:\s|>|/))")
@@ -192,7 +192,7 @@ def starts_new_block(line):
         return True
     if re.search(r"(?<!\\)\|", stripped):
         return False
-    if HEADING.match(stripped) or FENCE.match(stripped):
+    if HEADING.match(stripped) or FENCE.match(line):
         return True
     if THEMATIC.fullmatch(stripped):
         return True
@@ -220,9 +220,9 @@ fence = None
 i = 0
 while i < len(lines):
     line = lines[i]
-    opener = FENCE.match(line.strip())
+    opener = FENCE.match(line)
     if fence is None and opener:
-        fence = opener.group(0)
+        fence = opener.group(1)
     elif fence is not None:
         if re.fullmatch(re.escape(fence[0]) + "{%d,}" % len(fence), line.strip()):
             fence = None
