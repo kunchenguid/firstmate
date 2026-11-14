@@ -180,6 +180,7 @@ For one-off or infrequent operational work, start with the simplest direct end-t
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
 Before commissioning an investigation, consult existing reports and established evidence.
+A captain ask taken from a triage list passes through `bin/fm-ask-freshness.sh` immediately before it is put to the captain, and an over-age row is re-checked rather than presented; without that gate a triage row recommending a message that had already been sent eight hours earlier reached the captain, and only a re-read caught it before it went out.
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
