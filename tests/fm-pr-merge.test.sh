@@ -5110,26 +5110,31 @@ write_github_workflow_runs() {
 test_declared_required_check_refuses_a_head_without_checks() {
   local case_dir head variant
   head=d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
-  for variant in undeclared declared waived; do
+  for variant in undeclared no-config-dir declared waived; do
     case_dir=$(make_case "declared-skip-ci-$variant")
     add_gh_mocks "$case_dir" "$head"
     write_github_rollup_json "$case_dir" "$head"
     write_github_rules_hidden_on_plan "$case_dir"
     write_github_check_runs "$case_dir" "$head"
     write_github_workflow_runs "$case_dir" "$head"
-    [ "$variant" = undeclared ] || write_required_check_declarations "$case_dir" \
-      'github.com/example/repo github-actions pull_request build'
+    case "$variant" in
+      undeclared) ;;
+      # A home with no config directory at all declares nothing either.
+      no-config-dir) rmdir "$case_dir/home/config" ;;
+      *) write_required_check_declarations "$case_dir" \
+        'github.com/example/repo github-actions pull_request build' ;;
+    esac
     if [ "$variant" = waived ]; then
       run_required_case "$case_dir" 120 --allow-missing build
     else
       run_required_case "$case_dir" 120
     fi
     case "$variant" in
-      undeclared)
-        expect_code 0 "$RC" "skip-ci-undeclared: without a declaration the merge must behave as before: $(cat "$case_dir/stderr")"
+      undeclared|no-config-dir)
+        expect_code 0 "$RC" "skip-ci-$variant: without a declaration the merge must behave as before: $(cat "$case_dir/stderr")"
         assert_logged_gh_merge "$case_dir" 120 example/repo --squash
-        assert_no_grep 'check-runs' "$case_dir/gh.log" "skip-ci-undeclared: an undeclared repository read check runs"
-        assert_no_grep 'actions/runs' "$case_dir/gh.log" "skip-ci-undeclared: an undeclared repository read workflow runs"
+        assert_no_grep 'check-runs' "$case_dir/gh.log" "skip-ci-$variant: an undeclared repository read check runs"
+        assert_no_grep 'actions/runs' "$case_dir/gh.log" "skip-ci-$variant: an undeclared repository read workflow runs"
         ;;
       declared)
         expect_code 1 "$RC" "skip-ci-declared: a head without the declared check must refuse"
@@ -5238,14 +5243,14 @@ test_required_check_declarations_apply_only_where_the_plan_hides_rules() {
 
 # The declaration file's failures: pending runs, unreadable reads, and a
 # malformed or unreadable file, including a line that puts "-" or a numeric
-# app id in place of the app slug or event, which refuses rather than dropping
-# a requirement.
+# app id in place of the app slug or event, or one hidden by a directory that
+# cannot be searched, which refuses rather than dropping a requirement.
 test_declared_required_check_sources_and_errors() {
-  local case_dir head label message config
+  local case_dir head label message config override
   head=d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
   for label in pending runs-unreadable workflow-runs-unreadable stale-runs \
     selector-case malformed malformed-other-repository malformed-status \
-    malformed-app-id malformed-any-event unreadable unsearchable; do
+    malformed-app-id malformed-any-event unreadable unsearchable unsearchable-parent; do
     case_dir=$(make_case "declared-source-$label")
     config="$case_dir/home/config/github-required-checks"
     add_gh_mocks "$case_dir" "$head"
@@ -5319,20 +5324,35 @@ test_declared_required_check_sources_and_errors() {
         chmod 000 "$case_dir/home/config"
         message="the required-check declarations in $config could not be read"
         ;;
+      unsearchable-parent)
+        # A directory above the config directory that cannot be searched
+        # hides the declaration file the same way.
+        override="$case_dir/shared/operator/config"
+        mkdir -p "$override"
+        config="$override/github-required-checks"
+        printf '%s\n' 'github.com/example/repo github-actions pull_request build' > "$config"
+        chmod 000 "$case_dir/shared/operator"
+        message="the required-check declarations in $config could not be read, so a required check that has not reported cannot be ruled out"
+        ;;
     esac
     # A waiver names one check, so it never stands in for declarations that
     # could not be read or judged.
     case "$label" in
+      unsearchable-parent)
+        FM_CONFIG_OVERRIDE=$override run_required_case "$case_dir" 123 --allow-missing build ;;
       malformed*|unreadable|unsearchable|*-unreadable|stale-runs)
         run_required_case "$case_dir" 123 --allow-missing build ;;
       *) run_required_case "$case_dir" 123 ;;
     esac
-    [ "$label" != unsearchable ] || chmod 755 "$case_dir/home/config"
+    case "$label" in
+      unsearchable) chmod 755 "$case_dir/home/config" ;;
+      unsearchable-parent) chmod 755 "$case_dir/shared/operator" ;;
+    esac
     expect_code 1 "$RC" "source-$label: $(cat "$case_dir/stderr")"
     assert_grep "$message" "$case_dir/stderr" "source-$label: the refusal did not say: $message"
     assert_no_grep 'pr merge' "$case_dir/gh.log" "source-$label: gh pr merge ran"
     case "$label" in
-      malformed*|unreadable|unsearchable)
+      malformed*|unreadable|unsearchable*)
         assert_no_grep 'check-runs' "$case_dir/gh.log" "source-$label: check runs were read without a valid declaration" ;;
     esac
   done

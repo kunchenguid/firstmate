@@ -1145,11 +1145,11 @@ github_branch_rules_unavailable_on_plan() {
 # it only after the branch-rules read answered with the plan refusal above.
 # docs/configuration.md "GitHub required checks on plans without branch rules"
 # owns the file format. An absent file declares nothing, unless the directory
-# that would hold it cannot be searched, because then whether a declaration
-# exists cannot be told. A present file that is not a readable regular file,
-# and a malformed line anywhere in it, even one for another repository, return
-# 1 with each reason in FM_PR_GITHUB_DECLARED_ERROR, one per line, so a typo
-# never drops a requirement silently.
+# that would hold it, or any directory above it, cannot be searched, because
+# then whether a declaration exists cannot be told. A present file that is not
+# a readable regular file, and a malformed line anywhere in it, even one for
+# another repository, return 1 with each reason in FM_PR_GITHUB_DECLARED_ERROR,
+# one per line, so a typo never drops a requirement silently.
 FM_PR_GITHUB_DECLARED='[]'
 FM_PR_GITHUB_DECLARED_ERROR=
 github_read_required_check_declarations() {
@@ -1157,9 +1157,18 @@ github_read_required_check_declarations() {
   FM_PR_GITHUB_DECLARED='[]'
   FM_PR_GITHUB_DECLARED_ERROR=
   file="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$_FM_PR_LIB_ROOT}/config}/github-required-checks"
-  dir=${file%/*}
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    if { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || { [ -d "$dir" ] && [ -x "$dir" ]; }; then
+    # A path whose lookup fails looks absent whether it does not exist or a
+    # directory above it cannot be searched, so walk up to the nearest path
+    # that exists: only a searchable directory there proves the file absent.
+    dir=${file%/*}
+    while [ ! -e "$dir" ] && [ ! -L "$dir" ]; do
+      case $dir in
+        */*) dir=${dir%/*}; dir=${dir:-/} ;;
+        *) dir=. ;;
+      esac
+    done
+    if [ -d "$dir" ] && [ -x "$dir" ]; then
       return 0
     fi
     FM_PR_GITHUB_DECLARED_ERROR="the required-check declarations in $file could not be read"
