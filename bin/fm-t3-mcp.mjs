@@ -35,7 +35,8 @@
 //     The model selection a launch sends, resolved against T3's own catalog
 //     (orchestrator_capabilities): the instance must exist, be usable, and run
 //     the harness's driver (claude: claudeAgent, codex: codex); the model must
-//     be one that instance lists; model default takes the project's default
+//     be one that instance lists, looked up by slug when T3 0.1.9 leaves it
+//     out of its short list; model default takes the project's default
 //     selection, which must name the same instance. A non-default effort
 //     replaces only the driver's reasoning option (claude: effort, codex:
 //     reasoningEffort) and keeps every other default option; every option is
@@ -776,13 +777,14 @@ function modelSelection(flags) {
   return sel;
 }
 
-// An option selection is valid when the model's catalog describes its id and,
-// for a select, lists its value; a boolean option takes a boolean.
+// An option selection is valid when the model's catalog describes its id and
+// lists its value: T3 0.1.9 gives each option its `values`, while 0.1.0 gives a
+// select its `options` and types a boolean, which takes a boolean.
 function optionProblem(model, option) {
   const descriptor = (model.options ?? []).find((d) => d.id === option.id);
   if (!descriptor) return `option '${option.id}' is not one model ${model.id} offers`;
   if (descriptor.type === "boolean") return typeof option.value === "boolean" ? null : `option '${option.id}' takes true or false`;
-  const values = (descriptor.options ?? []).map((c) => c.id);
+  const values = descriptor.values ?? (descriptor.options ?? []).map((c) => c.id);
   return values.includes(option.value) ? null : `option '${option.id}' value '${option.value}' is not one of ${values.join(", ")} for model ${model.id}`;
 }
 
@@ -794,8 +796,8 @@ async function resolveSelection(flags) {
   const wantModel = need(flags, "model");
   const effort = need(flags, "effort");
   const { session } = await verifiedSession(flags);
-  const caps = await session.call("orchestrator_capabilities", {});
-  const provider = (caps?.providers ?? []).find((p) => p.providerInstanceId === instanceId);
+  const catalog = async (args) => ((await session.call("orchestrator_capabilities", args))?.providers ?? []).find((p) => p.providerInstanceId === instanceId);
+  const provider = await catalog({});
   if (!provider) throw new Refusal("instance_unknown", `T3 has no provider instance '${instanceId}' (config/t3code-instances maps the ${harness} harness to it)`);
   if (provider.driverKind !== driver.driverKind) {
     throw new Refusal("driver_mismatch", `T3 instance '${instanceId}' runs the ${provider.driverKind} driver, not ${driver.driverKind}, so it cannot host the ${harness} harness; fix config/t3code-instances`);
@@ -813,7 +815,8 @@ async function resolveSelection(flags) {
     }
     base = { instanceId, model: def.model, ...(def.options !== undefined ? { options: def.options } : {}) };
   }
-  const model = (provider.models ?? []).find((m) => m.id === base.model);
+  const listed = (p) => (p?.models ?? []).find((m) => m.id === base.model);
+  const model = listed(provider) ?? (provider.omittedModels ? listed(await catalog({ search: base.model })) : undefined);
   if (!model) throw new Refusal("model_unknown", `T3 instance '${instanceId}' does not list model '${base.model}'; pass --model with a slug from its catalog`);
   let options = base.options;
   if (effort !== "default") {

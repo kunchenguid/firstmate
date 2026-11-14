@@ -49,7 +49,10 @@
 //   answers with text content only, as a tool handler that throws), waitCapMs (one
 //   t3_thread_wait times out after at most this long), probePath (each log
 //   line records whether it exists), providers (the orchestrator_capabilities
-//   catalog; default FAKE_PROVIDERS), projects ([{id, title, workspaceRoot,
+//   catalog; default the fake catalog, whose option descriptors carry `values`
+//   as T3 0.1.9's do, or `type` and `options` as 0.1.0's with legacyTools),
+//   shortList (each provider lists only its first n models and counts the
+//   rest in omittedModels, unless the call searches by model id), projects ([{id, title, workspaceRoot,
 //   defaultModelSelection, deletedAt}]), threads ({id: detail plus items,
 //   runs, and runtimeRequests [{id, kind: user_input|approval, status,
 //   questions}]}). An approval's activity item is an items entry {itemId,
@@ -74,21 +77,17 @@ const LEGACY_TOOLS = [...SHARED_TOOLS, "t3_thread_configuration", "t3_pending_re
 const offeredTools = (w) => w.tools ?? (w.legacyTools ? LEGACY_TOOLS : ALL_TOOLS);
 const ACTIVE = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted", "rolled_back"]);
-const select = (id, values) => ({ id, label: id, type: "select", options: values.map((v) => ({ id: v, label: v })) });
-const FAKE_PROVIDERS = [
-  {
-    providerInstanceId: "claudeAgent", driverKind: "claudeAgent", displayName: "Claude", constraints: [],
-    models: ["claude-sonnet-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"].map((id) => ({
-      id, label: id, options: [select("effort", ["low", "medium", "high", "xhigh", "max"]), { id: "fastMode", label: "Fast Mode", type: "boolean" }],
-    })),
-  },
-  {
-    providerInstanceId: "codex", driverKind: "codex", displayName: "Codex", constraints: [],
-    models: ["gpt-5.6-sol", "gpt-6-luna"].map((id) => ({
-      id, label: id, options: [select("reasoningEffort", ["low", "medium", "high", "xhigh"]), select("serviceTier", ["default", "priority"])],
-    })),
-  },
+const FAKE_CATALOG = [
+  ["claudeAgent", "Claude", ["claude-sonnet-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5"], { effort: ["low", "medium", "high", "xhigh", "max"], fastMode: [false, true] }],
+  ["codex", "Codex", ["gpt-5.6-sol", "gpt-6-luna"], { reasoningEffort: ["low", "medium", "high", "xhigh"], serviceTier: ["default", "priority"] }],
 ];
+const legacyOption = ([id, values]) =>
+  typeof values[0] === "boolean" ? { id, label: id, type: "boolean" } : { id, label: id, type: "select", options: values.map((v) => ({ id: v, label: v })) };
+const fakeProviders = (legacy) =>
+  FAKE_CATALOG.map(([providerInstanceId, displayName, models, options]) => ({
+    providerInstanceId, driverKind: providerInstanceId, displayName, constraints: [],
+    models: models.map((id) => ({ id, label: id, options: Object.entries(options).map(legacy ? legacyOption : ([oid, values]) => ({ id: oid, values })) })),
+  }));
 
 const caseDir = () => readFileSync(args["case-file"], "utf8").trim();
 const worldFile = () => path.join(caseDir(), "world.json");
@@ -204,8 +203,14 @@ async function callTool(w, name, a) {
   switch (name) {
     case "t3_environment_read":
       return [ok({ environmentId: w.environmentId ?? "env-fake-1", serverVersion: w.serverVersion ?? "0.0.46-nightly.fake" }), false];
-    case "orchestrator_capabilities":
-      return [ok({ parentThreadId: null, runtimeMode: "full-access", interactionMode: "default", providers: w.providers ?? FAKE_PROVIDERS }), false];
+    case "orchestrator_capabilities": {
+      const providers = (w.providers ?? fakeProviders(w.legacyTools)).map((p) => {
+        if (w.shortList === undefined) return p;
+        const models = a.search ? p.models.filter((m) => m.id.includes(a.search)) : p.models.slice(0, w.shortList);
+        return { ...p, models, ...(a.search || models.length === p.models.length ? {} : { omittedModels: p.models.length - models.length }) };
+      });
+      return [ok({ parentThreadId: null, runtimeMode: "full-access", interactionMode: "default", providers }), false];
+    }
     case "t3_project_list":
       return [ok({ projects, nextCursor: null }), false];
     case "t3_project_create": {

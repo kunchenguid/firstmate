@@ -544,7 +544,13 @@ test_resolve_selection_uses_t3_catalog() {
   mcp resolve-selection --harness codex --instance codex --model default --effort default --project no-such-project
   expect_code 4 "$RC" "a default model on a project T3 does not list is refused"
   assert_equals project_not_found "$(field "$OUT" error.code)" "the refusal names the missing project"
-  t3_fake_set 'w.providers = [{ providerInstanceId: "codex", driverKind: "codex", constraints: ["Provider instance is disabled."], models: [] }]'
+  t3_fake_set 'w.shortList = 1'
+  mcp resolve-selection --harness codex --instance codex --model gpt-6-luna --effort high --project "$project"
+  expect_code 0 "$RC" "a model T3 leaves out of its short list is found by searching its slug: $ERR"
+  assert_equals '{"search":"gpt-6-luna"}' "$(t3_fake_calls orchestrator_capabilities | tail -1)" "the omitted model is looked up by slug"
+  mcp resolve-selection --harness codex --instance codex --model no-such-model --effort default --project "$project"
+  expect_code 4 "$RC" "a model the search does not find either is refused"
+  t3_fake_set 'delete w.shortList; w.providers = [{ providerInstanceId: "codex", driverKind: "codex", constraints: ["Provider instance is disabled."], models: [] }]'
   mcp resolve-selection --harness codex --instance codex --model gpt-5.6-sol --effort default --project "$project"
   expect_code 4 "$RC" "a disabled instance is refused"
   assert_contains "$ERR" "Provider instance is disabled." "the refusal carries T3's constraint"
@@ -614,7 +620,11 @@ test_t3_0_1_0_tool_names_still_drive_the_backend() {
   mcp respond --thread "$thread" --request req-q --answers-file "$TMP_ROOT/answers"
   expect_code 0 "$RC" "respond against the 0.1.0 tool names: $ERR"
   assert_equals "{\"threadId\":\"$thread\",\"requestId\":\"req-q\",\"answers\":{\"q1\":\"a\"}}" "$(t3_fake_calls t3_pending_request_respond)" "the answers reach t3_pending_request_respond"
-  pass "fm-t3-mcp: a T3 0.1.0 server's t3_thread_configuration and t3_pending_request_* tools pass the gate and are driven by name"
+  mcp resolve-selection --harness claude --instance claudeAgent --model claude-haiku-5-5 --effort max
+  expect_code 0 "$RC" "an effort is checked against the 0.1.0 option descriptors: $ERR"
+  mcp resolve-selection --harness claude --instance claudeAgent --model claude-haiku-5-5 --effort ultra
+  expect_code 4 "$RC" "an effort the 0.1.0 descriptors do not list is refused"
+  pass "fm-t3-mcp: a T3 0.1.0 server's t3_thread_configuration, t3_pending_request_* tools, and option descriptors are still driven"
 }
 
 test_watch_is_event_driven_and_bounded() {
