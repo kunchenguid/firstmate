@@ -618,6 +618,7 @@ test_stale_no_mistakes_daemon() {
     sleep 300 &
     daemon_pid=$!
     [ "$exe" = current ] && exe=$(readlink -f "$fakebin/no-mistakes")
+    # shellcheck disable=SC2016 # $4 expands in the generated fake lsof.
     printf '#!/bin/sh\nprintf "p%%s\\nftxt\\nn%%s\\n" "$4" "%s"\n' "$exe" > "$fakebin/lsof"
     chmod +x "$fakebin/lsof"
     expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) runs a different build than the installed no-mistakes; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
