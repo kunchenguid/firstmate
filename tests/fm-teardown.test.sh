@@ -3319,6 +3319,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'local_done_head=%s\n' "$wt_head" >> "$case_dir/state/task-x1.meta"
   printf 'working: shipping\ndone: PR https://github.com/example/repo/pull/9 checks green\n' \
     > "$case_dir/state/task-x1.status"
   set +e
@@ -3343,6 +3344,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'local_done_head=%s\n' "$wt_head" >> "$case_dir/state/task-x1.meta"
   printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
   set +e
   FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
