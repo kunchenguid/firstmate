@@ -750,6 +750,10 @@ test_codex_account_list_leaves_secondmates_alone() {
   expect_code 0 "$rc" "a Codex secondmate should launch unchanged under a list: $out"
   assert_not_contains "$out" "account=" "a Codex secondmate never launches on a declared account"
   assert_absent "$CASE/codex-checks" "a Codex secondmate must not be sign-in checked against the list"
+  printf 'relative\n' > "$HOME_DIR/config/codex-accounts"
+  out=$(spawn_account_secondmate "$id-bad"); rc=$?
+  expect_code 0 "$rc" "a malformed Codex list must not block a Codex secondmate: $out"
+  assert_not_contains "$out" "account=" "a Codex secondmate under a malformed list launches unchanged"
   pass "a Codex list never chooses a secondmate's account and refuses --account for one"
 }
 

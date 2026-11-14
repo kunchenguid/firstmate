@@ -418,6 +418,8 @@ fm_worker_account_select() {
     fi
     return 1
   fi
+  # A secondmate without a pin file (Codex) never reads the ship list.
+  [ -n "$mate" ] && [ -z "$pin_file" ] && return 0
   listed=$(fm_worker_account_list "$harness" "$config") || return 1
   if [ -z "$listed" ] && [ -n "$account" ]; then
     echo "error: --account '$account' needs config/$list_file, which this home does not declare" >&2

@@ -46,7 +46,8 @@
 # credential, or changes any home or account file. bin/fm-spawn.sh runs the
 # sign-in check for the account a launch names.
 #
-# FM_ACCOUNT_QUOTA_SECONDS bounds each read (default 60).
+# FM_ACCOUNT_QUOTA_SECONDS bounds each read (default 60); for Claude, the older
+# FM_CLAUDE_ACCOUNT_QUOTA_SECONDS is honored when FM_ACCOUNT_QUOTA_SECONDS is unset.
 
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-worker-account-lib.sh"
@@ -54,7 +55,9 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-quota-axi-lib.sh"
 
 fm_account_quota_report() {
-  local harness=$1 config=$2 model=$3 file var listed work entry root error rc=0
+  local harness=$1 config=$2 model=$3 file var listed work entry root error rc=0 seconds=60
+  [ "$harness" != claude ] || seconds=${FM_CLAUDE_ACCOUNT_QUOTA_SECONDS:-60}
+  seconds=${FM_ACCOUNT_QUOTA_SECONDS:-$seconds}
   file=$(fm_worker_account_list_file "$harness") || {
     printf 'error: %s has no declared account list\n' "$harness" >&2
     return 2
@@ -83,7 +86,7 @@ fm_account_quota_report() {
     root=$entry
     [ "$entry" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.$harness"
     error=
-    if fm_run_timed "${FM_ACCOUNT_QUOTA_SECONDS:-60}" env -u QUOTA_AXI_SNAPSHOT "$var=$root" \
+    if fm_run_timed "$seconds" env -u QUOTA_AXI_SNAPSHOT "$var=$root" \
         quota-axi --provider "$harness" --profile-only --json > "$work/snapshot.json" 2>/dev/null </dev/null; then
       fm_quota_json_valid < "$work/snapshot.json" || error="quota-axi returned an invalid snapshot"
     elif ! fm_quota_json_valid < "$work/snapshot.json"; then
