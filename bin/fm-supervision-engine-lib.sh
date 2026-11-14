@@ -27,6 +27,9 @@
 # the primary-harness pin, and the report-turn id). The runner returns the
 # process exit status; the host separately requires a complete successful
 # result, a durable report, and acknowledgement before counting a wake handled.
+# Claude uses --output-format json with --settings '{"verbose":false}' so
+# user verbosity cannot replace the single result object with an event array.
+# fm_supervision_engine_result below owns result validation and usage parsing.
 # The turn is bounded by fm_exec_timed
 # (bin/fm-timeout-lib.sh), and the engine's descendants are snapshotted once a
 # second while it runs, because an engine CLI runs every tool command in a
@@ -350,8 +353,6 @@ fm_supervision_engine_turn() {
     claude)
       # The prompt is the first positional argument, ahead of the variadic
       # tool and directory options that would otherwise absorb it.
-      # Pin verbose off so user settings cannot turn the JSON result into
-      # an array of every event in the conversation.
       # shellcheck disable=SC2054 # Bash,Read is one --tools value.
       args=(-p "$(cat "$message")" --safe-mode --system-prompt-file "$prompt"
         --tools Bash,Read --permission-mode dontAsk --allowedTools Bash Read

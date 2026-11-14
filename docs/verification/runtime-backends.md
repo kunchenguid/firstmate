@@ -3144,7 +3144,7 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 ## Claude supervision engine JSON
 
 Verified on 2026-11-14 with Claude Code `2.1.322 (Claude Code)` on Linux x86_64.
-The [engine library header](../../bin/fm-supervision-engine-lib.sh) owns the output settings and result contract.
+The [engine library](../../bin/fm-supervision-engine-lib.sh) owns the output settings and result contract.
 The live guard enables verbose output in its disposable project's settings, exercises the production engine argv, and requires a single successful result object before handling and resuming two host wakes.
 It uses the existing Claude login without editing user settings.
 
