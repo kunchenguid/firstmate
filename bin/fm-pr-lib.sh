@@ -1129,13 +1129,13 @@ fm_pr_write_author_check() {  # <pr-url>
     FM_PR_WRITE_REFUSAL="no task of this home opened $url, and its author can only be read on GitHub"
     return 1
   fi
-  if ! account=$(fm_pr_github_host_export "$FM_PR_HOST" && gh api user --jq .login 2>/dev/null) \
+  if ! account=$(fm_pr_github_host_export "$FM_PR_HOST" && GH_HOST=$FM_PR_HOST gh api user --jq .login 2>/dev/null) \
     || [ -z "$account" ]; then
     FM_PR_WRITE_REFUSAL="could not read the account gh is signed in as on $FM_PR_HOST"
     return 1
   fi
   if ! author=$(fm_pr_github_host_export "$FM_PR_HOST" \
-      && gh api "repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" --jq .user.login 2>/dev/null) \
+      && GH_HOST=$FM_PR_HOST gh api "repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" --jq .user.login 2>/dev/null) \
     || [ -z "$author" ]; then
     FM_PR_WRITE_REFUSAL="could not read the author of $url"
     return 1
