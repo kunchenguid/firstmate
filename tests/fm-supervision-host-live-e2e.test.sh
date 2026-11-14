@@ -12,6 +12,8 @@
 # lab home fires inside the engine. A second wake then resumes the same engine
 # conversation. Claude keeps its existing managed authentication; the engine's
 # own session files land in Claude's project store for the lab directory.
+# The lab enables verbose output in project settings; an engine probe must
+# still emit a single result object before the host handles its two wakes.
 # No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # single-quoted scripts expand inside their own shells
 set -u
@@ -57,6 +59,8 @@ git -C "$FM" init -q -b main
 git -C "$FM" add -A >/dev/null
 git -C "$FM" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -q -m lab
 mkdir -p "$FM/state" "$FM/config" "$LAB/tmuxbin"
+mkdir -p "$FM/.claude"
+printf '{"verbose":true}\n' > "$FM/.claude/settings.local.json"
 : > "$FM/config/supervision-host"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$LAB/tmuxbin/tmux"
 chmod +x "$LAB/tmuxbin/tmux"
@@ -67,6 +71,26 @@ FM_HOME="$FM" "$FM/bin/fm-afk-contract.sh" enter --words 'Watch the fleet. Merge
 export FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999
 unset FM_SUPERVISION_ENGINE_CLAUDE_BIN FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID
 unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE PI_CODING_AGENT
+
+# Exercise the production argv against real Claude with verbose enabled in
+# the disposable project, preserving the user's settings and authentication.
+printf 'Reply exactly OK without using tools.\n' > "$LAB/probe-prompt"
+printf 'Reply exactly OK.\n' > "$LAB/probe-message"
+(
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$ROOT/bin/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$ROOT/bin/fm-supervision-engine-lib.sh"
+  FM_ROOT=$FM FM_HOME=$FM STATE=$FM/state
+  fm_supervision_engine_turn claude sonnet "$LAB/probe-prompt" "$LAB/probe-message" \
+    "$(node -e 'console.log(require("node:crypto").randomUUID())')" new 180 "$LAB/probe-result.json" "$LAB/probe-errors"
+) || fail "the verbose-settings engine probe failed ($CLAUDE_VERSION): $(cat "$LAB/probe-errors")"
+node -e 'const j = require(process.argv[1]);
+  if (Array.isArray(j) || j.type !== "result" || j.subtype !== "success" || j.is_error !== false) process.exit(1);' \
+  "$LAB/probe-result.json" || fail "verbose project settings changed the engine output shape ($CLAUDE_VERSION)"
+printf '# engine JSON with verbose project settings: single success result (%s)\n' "$CLAUDE_VERSION"
 
 FM_HOME="$FM" PATH="$LAB/tmuxbin:$PATH" "$FAKE_CLAUDE" -c '
   printf "%s\n" "$$" > "$FM_HOME/state/.lock"

@@ -3141,6 +3141,30 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Claude supervision engine JSON
+
+Verified on 2026-11-14 with Claude Code `2.1.322 (Claude Code)` on Linux x86_64.
+The [engine library header](../../bin/fm-supervision-engine-lib.sh) owns the output settings and result normalization contract.
+The live guard enables verbose output in its disposable project's settings, exercises the production engine argv, and requires a single successful result object before handling and resuming two host wakes.
+It uses the existing Claude login without editing user settings.
+
+```sh
+FM_SUPERVISION_HOST_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-supervision-host-live-e2e.test.sh
+```
+
+Relevant exact output:
+
+```text
+# engine JSON with verbose project settings: single success result (2.1.322 (Claude Code))
+ok - supervision host live (2.1.322 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=37010
+```
+
+The argv and parser are shared by Claude engines beside Claude, Cursor, OpenCode, omp, Grok, Codex, and agy primaries; the live result above exercises the Claude primary.
+Pi and pi-signed use their in-process branch instead of this engine.
+The engine launches as a bounded local subprocess, independent of the endpoint runtime backend; no backend-specific launch or transport behavior changes here.
+Portable shape and usage regressions live in `tests/fm-supervision-host.test.sh`, and warm compaction uses the same engine turn and result parser (`tests/fm-warm-compact.test.sh`).
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
