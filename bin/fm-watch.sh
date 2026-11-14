@@ -3057,7 +3057,7 @@ $(printf '%s\n' "$out" | awk -F, -v today="$today" '
   /^  [A-Za-z0-9._-]+,/ {
     id = $1; sub(/^ +/, "", id)
     kind = $(NF - 2); until = $(NF - 1)
-    if (kind == "captain" && until ~ /^[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]$/ && until <= today)
+    if ($2 != "done" && kind == "captain" && until ~ /^[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]$/ && until <= today)
       printf "%s\t%s\n", id, until
   }')
 EOF

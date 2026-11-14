@@ -376,6 +376,17 @@ test_captain_hold_due_wakes_once() {
   pass "an arrived captain-hold date wakes once per task and date, undated and other kinds stay quiet"
 }
 
+test_captain_hold_done_row_stays_quiet() {
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return; }
+  reset_case
+  seed_hold_backlog
+  printf -- '- [x] done-e - Answered (since 2026-11-01) (hold: pick) (hold-kind: captain) (hold-until: 2026-11-10)\n' >> "$TMP_ROOT/data/backlog.md"
+  touch "$CONFIG/open-decision-reminders"
+  captain_hold_due_tick 1794614400
+  [ "$(count_wakes)" = 0 ] || fail "an answered (Done) captain hold queued a wake"
+  pass "a Done captain hold whose date has passed stays quiet"
+}
+
 test_captain_hold_redate_fires_again() {
   command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return; }
   reset_case
@@ -399,4 +410,4 @@ fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct
   test_resolved_same_text_reopen_starts_fresh test_republish_updates_until_date \
   test_unknown_times_and_keyless test_timed_fold_is_incremental \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop \
-  test_captain_hold_due_wakes_once test_captain_hold_redate_fires_again
+  test_captain_hold_due_wakes_once test_captain_hold_done_row_stays_quiet test_captain_hold_redate_fires_again
