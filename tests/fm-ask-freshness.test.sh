@@ -211,7 +211,7 @@ test_input_errors_exit_two() {
 }
 
 # A block that starts immediately after a table ends its body. Without that
-# rule the heading (or fence, or thematic break) was read as a table row with
+# rule the heading (or fence, thematic break, or list item) was read as a table row with
 # no timestamp cell, so a wholly fresh report failed with exit 1.
 test_a_block_after_a_table_ends_the_body_instead_of_becoming_a_row() {
   local report out rc=0
@@ -235,15 +235,22 @@ test_a_block_after_a_table_ends_the_body_instead_of_becoming_a_row() {
     printf '%s\n' '| break case | 2026-11-13T11:45Z |'
     printf '%s\n' '---'
     printf '%s\n' 'After the break.'
+    printf '%s\n' ''
+    printf '%s\n' '| item | checked_at |'
+    printf '%s\n' '| --- | --- |'
+    printf '%s\n' '| list case | 2026-11-13T11:50Z |'
+    printf '%s\n' '- follow up note'
+    printf '%s\n' '1. second'
   } > "$report"
   out=$(run_gate "$report") || rc=$?
   expect_code 0 "$rc" "a block starting right after a table must not be read as a row"$'\n'"$out"
   assert_contains "$out" "line 3: fresh age 30m" "the row before the heading must be checked"
   assert_contains "$out" "line 9: fresh age 20m" "the row before the fence must be checked"
   assert_contains "$out" "line 16: fresh age 15m" "the row before the thematic break must be checked"
-  assert_contains "$out" "all 3 rows are within 2h" "only the dated rows are counted"
+  assert_contains "$out" "line 22: fresh age 10m" "the row before the list must be checked"
+  assert_contains "$out" "all 4 rows are within 2h" "only the dated rows are counted"
   assert_not_contains "$out" "UNREADABLE" "a block is not an undated row"
-  pass "a heading, fence or thematic break right after a table ends its body"
+  pass "a heading, fence, thematic break or list right after a table ends its body"
 }
 
 # The same rule must not stop short rows being checked: a table whose short

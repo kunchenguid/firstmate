@@ -11,7 +11,7 @@
 # column, matched case-insensitively with surrounding backticks or emphasis
 # ignored. A table's body runs to the next blank line or to whatever starts a
 # new markdown block there (an ATX heading, a fence, a thematic break, a
-# blockquote, or an HTML block), so a short row with no outer pipes or fewer
+# blockquote, a list item, or an HTML block), so a short row with no outer pipes or fewer
 # cells than the header is still checked, while the block that follows a table
 # directly is not mistaken for a row. A missing timestamp cell is unreadable.
 # Every table must have that column: a table
@@ -179,6 +179,7 @@ def normalize(name):
 HEADING = re.compile(r"#{1,6}(?:\s|$)")
 FENCE = re.compile(r"(?:`{3,}|~{3,})")
 THEMATIC = re.compile(r"(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})")
+LIST_ITEM = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?:\s|$)")
 HTML_BLOCK = re.compile(r"(?:<!--|<[A-Za-z][A-Za-z0-9-]*(?:\s|>|/))")
 
 
@@ -192,7 +193,7 @@ def starts_new_block(line):
         return True
     if THEMATIC.fullmatch(stripped):
         return True
-    if stripped.startswith(">"):
+    if stripped.startswith(">") or LIST_ITEM.match(stripped):
         return True
     return bool(HTML_BLOCK.match(stripped))
 
