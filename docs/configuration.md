@@ -2519,7 +2519,7 @@ github.com/acme/app github-actions pull_request test (ubuntu-latest)
 
 A declared check must have succeeded at the pull request's verified head: a check run completed with success, neutral, or skipped.
 Only runs from the declared app and event count, so a same-named run from another app or event never stands in for it.
-Among the runs that count, a newer run replaces an older one by the rule the merge script's header owns, so a successful re-run of the declared event satisfies the check.
+Among the runs that count, a newer run replaces an older one by the rule the merge script's `github_checks_not_green` owns, so a successful re-run of the declared event satisfies the check.
 A declared check that has not reported, is still running, or failed refuses the merge, including under standing or away merge authority, and the attended `--allow-missing` and `--allow-red` waivers apply to it by name.
 Judging a declared check reads the head's check runs and GitHub Actions workflow runs, so the `gh` login needs read access to the repository's Actions; a failed read refuses.
 The [park-on-review](#park-on-review) gate applies the same declarations, and they do not apply to GitLab or Forgejo merges, which already require the head pipeline or commit status to succeed.
