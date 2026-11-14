@@ -95,6 +95,7 @@ Active-command and result waits use a separate sampling interval; the [`fm-remot
 On macOS, worker repair serializes the replacement decision and LaunchAgent reload with other callers, including its bounded startup wait.
 A live process tracked by launchd gets time to publish readiness even if the caller that started it disconnected before publication.
 Reload waits for launchd to finish removing the old service before bootstrap, with at most 100 sleeps of 0.1 seconds plus command and scheduling time; a timeout fails the repair instead of bootstrapping during removal.
+After removal, bootstrap retries only a transient `Input/output error` while the GUI domain remains live and the label drains; every other refusal fails immediately, and [`configuration.md`](configuration.md#environment-variables) owns the retry limits.
 A verified lock owner running stale code or no longer tracked by launchd is stopped identity-safely before launchd starts the current worker.
 If readiness remains stale while a verified current, launchd-tracked lock owner is alive, the command fails with `remote-job: ready heartbeat stale while verified worker lock owner is alive` rather than reloading that worker merely for the stale heartbeat.
 The repair invariant is implemented in [`fm_remote_job_repair_launchagent`](../bin/fm-remote-job-lib.sh); heartbeat ownership and cadence are documented in the worker header above.
