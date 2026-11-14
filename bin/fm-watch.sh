@@ -221,7 +221,9 @@
 # Inherited stdio never stays attached to a pipe whose reader can die and wedge
 # a write, or whose writer can stay silent and wedge a read: at runtime start
 # stdin becomes /dev/null, and a pipe stdout or stderr is appended to the
-# size-capped state/.watch-runtime.log. Heartbeat remains state/.last-watcher-beat;
+# size-capped state/.watch-runtime.log. Capping that log rewrites the existing
+# inode so those redirected descriptors keep writing the visible file.
+# Heartbeat remains state/.last-watcher-beat;
 # the actionable reason still goes to stdout when that is already a file (the
 # arm's capture) and to the delivery ledger in every case. bin/fm-watch-arm.sh
 # owns the matching child launch (stdin closed) and the owned-child stale-beacon
@@ -3735,9 +3737,12 @@ watch_runtime_log_trim() {
   esac
   [ "$size" -ge "$WATCH_RUNTIME_LOG_MAX_BYTES" ] || return 0
   tmp="$WATCH_RUNTIME_LOG.trim.$$"
+  # Rewrite the existing inode (copytruncate) so any stdout/stderr already
+  # redirected onto this path keep writing the visible log. Replacing the
+  # file would leave those fds on the unlinked original.
   tail -n "$WATCH_RUNTIME_LOG_KEEP_LINES" "$WATCH_RUNTIME_LOG" 2>/dev/null \
     | tail -c "$WATCH_RUNTIME_LOG_MAX_BYTES" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$WATCH_RUNTIME_LOG" 2>/dev/null
+    && cat "$tmp" > "$WATCH_RUNTIME_LOG"
   rm -f "$tmp" 2>/dev/null || true
 }
 
@@ -3751,8 +3756,10 @@ watch_isolate_stdio() {
   fi
 }
 
-watch_isolate_stdio
+# Trim first so isolate opens the capped file; copytruncate above also keeps
+# later trims safe if this watcher already redirected onto the log.
 watch_runtime_log_trim
+watch_isolate_stdio
 
 # FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS is validated here, at arm time, and an
 # unusable value refuses to arm. This is deliberately NOT symmetry with the

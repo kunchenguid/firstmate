@@ -213,6 +213,18 @@ ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # The beacon age at which the watcher's own re-arm evicts a live holder; an
 # attached arm follows a slow holder up to it (attach_and_wait).
 STALL_BOUND=$(fm_watcher_stall_bound)
+# After this arm has confirmed its own child, a live child whose beacon is
+# stale past this bound is a wedge and is reaped here. A healthy cycle may
+# wait a full POLL between beats, so the default is the poll-derived grace
+# (fm_poll_derived_grace in bin/fm-wake-lib.sh; docs/turnend-guard.md "Guard
+# grace and the poll cadence"), not the honesty-gate's 300s floor. Explicit
+# FM_WATCHER_STALE_GRACE or FM_GUARD_GRACE still wins. 0 keeps the watchdog
+# off: that means "beacons are never fresh", not "kill the child at once".
+OWNED_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}}
+case "$OWNED_STALE_GRACE" in
+  ''|*[!0-9]*) OWNED_STALE_GRACE=$(fm_poll_derived_grace) ;;
+  *) OWNED_STALE_GRACE=$((10#$OWNED_STALE_GRACE)) ;;
+esac
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -738,12 +750,13 @@ fi
 # inherited stdio pipes onto state/.watch-runtime.log (bin/fm-watch.sh header),
 # so a dead reader in this arm's restart chain cannot wedge the watcher's
 # heartbeat. After this arm has confirmed its own child, a live child whose
-# beacon is stale past GRACE is reaped and replaced here: that is a wedge, not
-# a slow cycle (a healthy cycle refreshes every POLL, and GRACE is many times
-# that). The replacement must pass the same honesty gate before this arm
-# continues; it never reports started/attached/healthy off the stale beacon.
-# GRACE 0 still means "beacons are never fresh", not "kill the child at once",
-# so the watchdog is off in that fixture.
+# beacon is stale past OWNED_STALE_GRACE is reaped and replaced here: that is
+# a wedge, not a slow cycle. A healthy cycle may wait a full POLL between
+# beats, so that bound is the poll-derived grace unless FM_WATCHER_STALE_GRACE
+# or FM_GUARD_GRACE is set. The replacement must pass the same honesty gate
+# before this arm continues; it never reports started/attached/healthy off the
+# stale beacon. OWNED_STALE_GRACE 0 still means "beacons are never fresh", not
+# "kill the child at once", so the watchdog is off in that fixture.
 child=
 child_out=
 cleanup_child() {
@@ -884,9 +897,9 @@ supervise_owned_child() {
   local age rc
   while :; do
     while fm_pid_alive "$child"; do
-      if [ "$GRACE" -gt 0 ]; then
+      if [ "$OWNED_STALE_GRACE" -gt 0 ]; then
         age=$(fm_path_age "$BEAT")
-        if [ "$age" -ge "$GRACE" ]; then
+        if [ "$age" -ge "$OWNED_STALE_GRACE" ]; then
           if ! restart_wedged_owned_child; then
             return "${OWNED_CHILD_CYCLE_RC:-1}"
           fi

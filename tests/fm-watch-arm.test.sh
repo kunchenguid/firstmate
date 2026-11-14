@@ -1573,6 +1573,57 @@ path_mtime() {  # <path>
   fi
 }
 
+set_mtime() {  # <epoch> <path>
+  perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"
+}
+
+# True when the lock names this live pid with a matching home, script path, and
+# pid-identity. That is the public identity gate fm_watcher_healthy uses before
+# it considers beacon age.
+lock_identity_matches() {  # <state> <pid> <home>
+  local state=$1 pid=$2 home=$3 identity current
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || return 1
+  [ "$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)" = "$home" ] || return 1
+  [ "$(cat "$state/.watch.lock/watcher-path" 2>/dev/null || true)" = "$WATCH" ] || return 1
+  [ -s "$state/.watch.lock/pid-identity" ] || return 1
+  identity=$(cat "$state/.watch.lock/pid-identity")
+  current=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  [ "$identity" = "$current" ]
+}
+
+wait_for_lock_identity() {  # <state> <pid> <home> <polls>
+  local state=$1 pid=$2 home=$3 limit=$4 i=0
+  while [ "$i" -lt "$limit" ]; do
+    lock_identity_matches "$state" "$pid" "$home" && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Wait until a different live pid holds the lock with matching identity and a
+# beacon newer than min-mtime and still inside grace. Sets REPLACED_PID.
+REPLACED_PID=
+wait_for_fresh_replacement() {  # <state> <home> <old-pid> <grace> <min-mtime> <polls>
+  local state=$1 home=$2 old=$3 grace=$4 min_mtime=$5 limit=$6 i=0 pid age mtime
+  REPLACED_PID=
+  while [ "$i" -lt "$limit" ]; do
+    pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$pid" != "$old" ] && is_live_non_zombie "$pid" \
+      && lock_identity_matches "$state" "$pid" "$home"; then
+      mtime=$(path_mtime "$state/.last-watcher-beat") || true
+      age=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_age "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.last-watcher-beat") || age=999999
+      if [ -n "$mtime" ] && [ "$mtime" -gt "$min_mtime" ] && [ "$age" -lt "$grace" ]; then
+        REPLACED_PID=$pid
+        return 0
+      fi
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_for_newer_mtime() {  # <path> <old-mtime> <polls>
   local path=$1 old=$2 limit=$3 i=0 now
   while [ "$i" -lt "$limit" ]; do
@@ -1652,25 +1703,46 @@ test_dead_pipe_reader_does_not_wedge_watch() {
   pass "watch-arm: killing the stdio pipe readers leaves the beat updating without a human kill"
 }
 
-# Confirm-time honesty gate: a live pid with a stale beacon is not a watcher.
-# The arm must FAIL and must not print started/attached/healthy.
+# Confirm-time honesty gate: a live identity-matched watcher with a stale
+# beacon is not healthy. The arm must FAIL and must not print started/attached/
+# healthy, and must leave that holder running.
 test_arm_honesty_gate_refuses_stale_beacon() {
-  local dir state fakebin armout live armpid status
+  local dir home state fakebin out armout armpid status now i
   dir=$(make_case honesty-stale-beacon)
+  home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
+  out="$dir/watch.out"
   armout="$dir/arm.out"
-  sleep 300 &
-  live=$!
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$live" > "$state/.watch.lock/pid"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
+  mkdir -p "$home/data"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  SEED_PID=$!
+  wait_for_lock_identity "$state" "$SEED_PID" "$home" 80 \
+    || fail "seed watcher did not publish a matching lock identity"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || fail "seed watcher did not publish a beat"
+  kill -STOP "$SEED_PID" 2>/dev/null \
+    || fail "could not freeze the seed watcher beat"
+  now=$(date +%s)
+  set_mtime $((now - 20)) "$state/.last-watcher-beat" \
+    || fail "could not age the seed watcher beat"
+  lock_identity_matches "$state" "$SEED_PID" "$home" \
+    || fail "freezing the seed dropped its lock identity"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_GUARD_GRACE=5 FM_WATCHER_STALL_BOUND=600 FM_ARM_CONFIRM_TIMEOUT=3 \
     "$WATCH_ARM" > "$armout" &
   armpid=$!
   wait_for_exit "$armpid" 120
   status=$?
+  kill -CONT "$SEED_PID" 2>/dev/null || true
   [ "$status" -ne 124 ] || fail "arm never returned for a stale-beacon holder"
   [ "$status" -ne 0 ] || fail "arm exited zero off a stale beacon: $(cat "$armout")"
   grep -F 'watcher: FAILED' "$armout" >/dev/null \
@@ -1679,16 +1751,18 @@ test_arm_honesty_gate_refuses_stale_beacon() {
     || fail "arm reported attached/healthy off a stale beacon: $(cat "$armout")"
   ! grep -qF 'watcher: started' "$armout" \
     || fail "arm reported started off a stale beacon: $(cat "$armout")"
-  is_live_non_zombie "$live" || fail "arm killed the unrelated live lock holder"
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  is_live_non_zombie "$SEED_PID" || fail "arm killed the live identity-matched holder"
+  kill -TERM "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
   pass "watch-arm: stale-beacon honesty gate refuses false health"
 }
 
 # An owned child that stops beating past GRACE is reaped and replaced by the
-# same arm. The STOP'd child's stale beacon must never be reported as healthy.
+# same arm. Recovery is proven only once the replacement publishes matching
+# identity and a fresh, advancing beacon. The STOP'd child's stale beacon must
+# never be reported as healthy.
 test_owned_child_stale_beat_is_reaped_and_replaced() {
-  local dir home state fakebin armout watch_pid next_pid i
+  local dir home state fakebin armout watch_pid frozen_mtime i
   dir=$(make_case owned-child-wedge)
   home="$dir/home"
   state="$dir/state"
@@ -1697,7 +1771,7 @@ test_owned_child_stale_beat_is_reaped_and_replaced() {
   mkdir -p "$home/data"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_GUARD_GRACE=3 FM_ARM_CONFIRM_TIMEOUT=15 FM_ARM_ATTACH_POLL=0.1 \
+    FM_GUARD_GRACE=5 FM_ARM_CONFIRM_TIMEOUT=15 FM_ARM_ATTACH_POLL=0.1 \
     "$WATCH_ARM" > "$armout" 2>&1 &
   ARM_PID=$!
   i=0
@@ -1713,38 +1787,100 @@ test_owned_child_stale_beat_is_reaped_and_replaced() {
   if [ -z "$watch_pid" ] || ! is_live_non_zombie "$watch_pid"; then
     fail "started watcher pid $watch_pid is not live"
   fi
+  wait_for_lock_identity "$state" "$watch_pid" "$home" 80 \
+    || fail "started watcher did not publish a matching lock identity"
+  frozen_mtime=$(path_mtime "$state/.last-watcher-beat") || frozen_mtime=0
   kill -STOP "$watch_pid" 2>/dev/null \
     || fail "could not stop the owned watcher to freeze its beat"
 
-  i=0
-  next_pid=
-  while [ "$i" -lt 200 ]; do
-    next_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-    if [ -n "$next_pid" ] && [ "$next_pid" != "$watch_pid" ] && is_live_non_zombie "$next_pid"; then
-      break
-    fi
-    is_live_non_zombie "$ARM_PID" || break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if [ -z "$next_pid" ] || [ "$next_pid" = "$watch_pid" ] || ! is_live_non_zombie "$next_pid"; then
-    fail "arm did not replace the STOP'd owned child: lock=$next_pid old=$watch_pid armout=$(cat "$armout")"
-  fi
-  is_live_non_zombie "$ARM_PID" \
-    || fail "arm exited while replacing a wedged child: $(cat "$armout")"
+  wait_for_fresh_replacement "$state" "$home" "$watch_pid" 5 "$frozen_mtime" 200 \
+    || fail "arm did not replace the STOP'd owned child with a fresh identity-matched beacon: lock=$(cat "$state/.watch.lock/pid" 2>/dev/null) old=$watch_pid armout=$(cat "$armout")"
   ! is_live_non_zombie "$watch_pid" \
     || fail "STOP'd owned child $watch_pid was left running"
-  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$next_pid" ] \
-    || fail "lock pid moved after replacement: $(cat "$state/.watch.lock/pid" 2>/dev/null)"
   grep -c '^watcher: started pid=' "$armout" | grep -qx 1 \
     || fail "arm reprinted started while replacing a wedged child: $(cat "$armout")"
   ! grep -qE 'watcher: (healthy|attached)' "$armout" \
     || fail "arm reported attached/healthy off the STOP'd child's stale beacon: $(cat "$armout")"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    grep -qE '^(signal|stale|check):' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
   ! grep -qF 'watcher: FAILED' "$armout" \
     || fail "arm reported FAILED while replacing a wedged child: $(cat "$armout")"
   grep -q 'reason=owned-child-wedged' "$state/.watch-cycle-exits.log" \
     || fail "wedge reap was not classified in the lifecycle ledger"
+  if is_live_non_zombie "$ARM_PID"; then
+    is_live_non_zombie "$REPLACED_PID" \
+      || fail "replacement $REPLACED_PID died while the arm was still following it: $(cat "$armout")"
+  else
+    grep -qE '^(signal|stale|check):' "$armout" \
+      || fail "arm exited after replacement without a wake: $(cat "$armout")"
+  fi
   pass "watch-arm: an owned child whose beat goes stale is reaped and replaced without false health"
+}
+
+# With FM_POLL past the 300s honesty floor and no FM_GUARD_GRACE, a live owned
+# child whose beacon is older than 300s but younger than the poll-derived grace
+# must keep running. Aging that same beacon past the derived grace then reaps
+# and replaces it. Uses set_mtime so a healthy wait is not confused with STOP.
+test_owned_child_survives_a_healthy_long_poll_wait() {
+  local dir home state fakebin armout watch_pid now i
+  dir=$(make_case owned-child-long-poll)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=15 FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -q '^watcher: started pid=' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "arm did not start a long-poll watcher: $(cat "$armout")"
+  watch_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -1)
+  if [ -z "$watch_pid" ] || ! is_live_non_zombie "$watch_pid"; then
+    fail "started long-poll watcher pid $watch_pid is not live"
+  fi
+  wait_for_lock_identity "$state" "$watch_pid" "$home" 80 \
+    || fail "long-poll watcher did not publish a matching lock identity"
+  now=$(date +%s)
+  set_mtime $((now - 400)) "$state/.last-watcher-beat" \
+    || fail "could not age the long-poll beat past 300s"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    is_live_non_zombie "$ARM_PID" || fail "arm exited during a healthy long-poll wait: $(cat "$armout")"
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watch_pid" ] \
+      || fail "arm reaped a healthy long-poll watcher: lock=$(cat "$state/.watch.lock/pid" 2>/dev/null) armout=$(cat "$armout")"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$watch_pid" \
+    || fail "healthy long-poll watcher $watch_pid died before the poll-derived grace"
+  ! grep -q 'reason=owned-child-wedged' "$state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "healthy long-poll wait was classified as a wedge"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm reported FAILED during a healthy long-poll wait: $(cat "$armout")"
+  now=$(date +%s)
+  set_mtime $((now - 700)) "$state/.last-watcher-beat" \
+    || fail "could not age the long-poll beat past the derived grace"
+  wait_for_fresh_replacement "$state" "$home" "$watch_pid" 300 $((now - 700)) 200 \
+    || fail "arm did not reap after the poll-derived grace: lock=$(cat "$state/.watch.lock/pid" 2>/dev/null) old=$watch_pid armout=$(cat "$armout")"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "arm exited while replacing a long-poll wedge: $(cat "$armout")"
+  grep -q 'reason=owned-child-wedged' "$state/.watch-cycle-exits.log" \
+    || fail "poll-derived wedge reap was not classified in the lifecycle ledger"
+  pass "watch-arm: a healthy long-poll wait is not reaped before the poll-derived grace"
 }
 
 # Start a real watcher through the real arm for a temporary home and set
@@ -2154,6 +2290,7 @@ test_arm_refuses_a_disposable_validation_checkout
 test_dead_pipe_reader_does_not_wedge_watch
 test_arm_honesty_gate_refuses_stale_beacon
 test_owned_child_stale_beat_is_reaped_and_replaced
+test_owned_child_survives_a_healthy_long_poll_wait
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_attached_arm_exits_when_its_root_is_removed

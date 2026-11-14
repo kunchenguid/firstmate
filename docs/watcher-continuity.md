@@ -426,10 +426,10 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 ### Grace, beacon, and stop signals
 
-The default 300-second grace is unchanged.
+The honesty-gate default remains the 300-second `FM_GUARD_GRACE` floor.
 Only the watcher process touches `state/.last-watcher-beat`.
 No helper process can make a wedged watcher appear healthy.
-An owned child whose beacon is stale past that grace is reaped and replaced by the same arm.
+An owned child is reaped only after its beacon is stale past the poll-derived grace (`fm_poll_derived_grace`; [Guard grace and the poll cadence](turnend-guard.md#guard-grace-and-the-poll-cadence)), so a healthy wait of one `FM_POLL` is not treated as a wedge.
 The replacement has to pass the honesty gate.
 The arm never reports started, attached, or healthy off the stale beacon.
 The watcher detaches inherited stdio pipes onto `state/.watch-runtime.log` so a dead reader in the arm chain cannot freeze the beat.
@@ -522,7 +522,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
 - A dead stdio pipe reader in the arm restart chain cannot freeze the beat.
-- The confirm-time stale-beacon honesty gate, and an owned child whose beat goes stale being reaped and replaced without a false health report.
+- The confirm-time stale-beacon honesty gate against a real identity-matched watcher, an owned child whose beat goes stale being reaped and replaced only after the replacement publishes identity and a fresh beacon, and a healthy long-poll wait not being reaped before the poll-derived grace.
 
 `tests/fm-watch-recovery-loop.test.sh` covers:
 
