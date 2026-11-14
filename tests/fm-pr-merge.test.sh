@@ -321,6 +321,14 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_RUNS"
         exit $?
         ;;
+      *" repos/"*"/actions/runs"*)
+        case "$*" in
+          *"head_sha=$(cat "$FM_TEST_GH_HEAD")"*) ;;
+          *) exit 1 ;;
+        esac
+        cat "$FM_TEST_GH_WORKFLOW_RUNS"
+        exit $?
+        ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
         if [ -f "${FM_TEST_GH_REQUIRED_RULES_FAIL:-}" ]; then
@@ -761,6 +769,7 @@ run_pr_merge() {
   FM_TEST_GH_TEXT_JSON="$case_dir/github-text.json" \
   FM_TEST_GH_MERGE_ARGS="$case_dir/github-merge-args" \
   FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
+  FM_TEST_GH_WORKFLOW_RUNS="$case_dir/github-workflow-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
@@ -5052,6 +5061,343 @@ test_app_bound_required_status_context_matches_by_name() {
   pass "fm-pr-merge matches an app-bound required commit status by name"
 }
 
+# GitHub's answer to a branch-rules read on a private repository whose plan
+# cannot expose branch rules. Args: case_dir
+write_github_rules_hidden_on_plan() {
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)\n' \
+    > "$1/github-required-rules-fail"
+}
+
+# The home's config/github-required-checks, one line per argument.
+# Args: case_dir [line]...
+write_required_check_declarations() {
+  local case_dir=$1
+  shift
+  printf '%s\n' "$@" > "$case_dir/home/config/github-required-checks"
+}
+
+# The check runs GitHub's REST API reports at <head>. Each spec is
+# name|status|conclusion|started_at|app_slug|app_id|suite_id, with "-" for a
+# null conclusion or start time. Args: case_dir head [spec]...
+write_github_check_runs() {
+  local case_dir=$1 head=$2 spec
+  shift 2
+  for spec in "$@"; do printf '%s\n' "$spec"; done | jq -Rsc --arg head "$head" '
+    split("\n") | map(select(length > 0) | split("|")
+      | {name: .[0], status: .[1],
+         conclusion: (if .[2] == "-" then null else .[2] end),
+         started_at: (if .[3] == "-" then null else .[3] end),
+         app: {id: (.[5] | tonumber), slug: .[4]},
+         check_suite: {id: (.[6] | tonumber)}, head_sha: $head})
+    | {total_count: length, check_runs: .}' > "$case_dir/github-runs.json"
+}
+
+# The GitHub Actions workflow runs at <head>, each spec suite_id:event.
+# Args: case_dir head [spec]...
+write_github_workflow_runs() {
+  local case_dir=$1 head=$2 spec
+  shift 2
+  for spec in "$@"; do printf '%s\n' "$spec"; done | jq -Rsc --arg head "$head" '
+    split("\n") | map(select(length > 0) | split(":")
+      | {check_suite_id: (.[0] | tonumber), event: .[1], head_sha: $head})
+    | {total_count: length, workflow_runs: .}' > "$case_dir/github-workflow-runs.json"
+}
+
+# A private repository on GitHub Free cannot report its branch rules, so the
+# forge's required set is empty and a head that carries no check at all - a
+# commit marked [skip ci] - would merge. A check the home declares for that
+# repository must still have reported success at the head.
+test_declared_required_check_refuses_a_head_without_checks() {
+  local case_dir head variant
+  head=d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
+  for variant in undeclared declared waived; do
+    case_dir=$(make_case "declared-skip-ci-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head"
+    write_github_rules_hidden_on_plan "$case_dir"
+    write_github_check_runs "$case_dir" "$head"
+    write_github_workflow_runs "$case_dir" "$head"
+    [ "$variant" = undeclared ] || write_required_check_declarations "$case_dir" \
+      'github.com/example/repo github-actions pull_request build'
+    if [ "$variant" = waived ]; then
+      run_required_case "$case_dir" 120 --allow-missing build
+    else
+      run_required_case "$case_dir" 120
+    fi
+    case "$variant" in
+      undeclared)
+        expect_code 0 "$RC" "skip-ci-undeclared: without a declaration the merge must behave as before: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 120 example/repo --squash
+        assert_no_grep 'check-runs' "$case_dir/gh.log" "skip-ci-undeclared: an undeclared repository read check runs"
+        assert_no_grep 'actions/runs' "$case_dir/gh.log" "skip-ci-undeclared: an undeclared repository read workflow runs"
+        ;;
+      declared)
+        expect_code 1 "$RC" "skip-ci-declared: a head without the declared check must refuse"
+        assert_grep "declared required check 'build' (github-actions, pull_request) has not reported at head $head" \
+          "$case_dir/stderr" "skip-ci-declared: the unreported declared check was not named"
+        assert_grep 'these required checks have not reported: build' "$case_dir/stderr" \
+          "skip-ci-declared: the unreported summary did not name the declared check"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" "skip-ci-declared: gh pr merge ran"
+        ;;
+      waived)
+        expect_code 0 "$RC" "skip-ci-waived: a named attended waiver must merge: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 120 example/repo --squash
+        ;;
+    esac
+  done
+  pass "fm-pr-merge refuses a free-plan head without the declared check, unless that check is waived, and changes nothing undeclared"
+}
+
+# The rollup judges a check by its newest run of the same name, so a later
+# workflow_dispatch run on the pull request's branch replaces a failed
+# pull_request run there. A declared check counts only runs from its own app
+# and triggering event.
+test_declared_required_check_ignores_a_same_named_run_from_another_event() {
+  local case_dir head variant event slug app
+  head=d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2
+  for variant in undeclared dispatch rerun other-app waived; do
+    case_dir=$(make_case "declared-event-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head" \
+      "$(check_run build COMPLETED FAILURE 2026-11-14T10:00:00Z 2026-11-14T10:02:00Z)" \
+      "$(check_run build COMPLETED SUCCESS 2026-11-14T10:05:00Z 2026-11-14T10:07:00Z)"
+    write_github_rules_hidden_on_plan "$case_dir"
+    event=workflow_dispatch slug=github-actions app=15368
+    [ "$variant" != rerun ] || event=pull_request
+    [ "$variant" != other-app ] || { event=pull_request slug=other-ci app=42; }
+    write_github_check_runs "$case_dir" "$head" \
+      'build|completed|failure|2026-11-14T10:00:00Z|github-actions|15368|1' \
+      "build|completed|success|2026-11-14T10:05:00Z|$slug|$app|2"
+    write_github_workflow_runs "$case_dir" "$head" '1:pull_request' "2:$event"
+    [ "$variant" = undeclared ] || write_required_check_declarations "$case_dir" \
+      'github.com/example/repo github-actions pull_request build'
+    if [ "$variant" = waived ]; then
+      run_required_case "$case_dir" 121 --allow-red build
+    else
+      run_required_case "$case_dir" 121
+    fi
+    case "$variant" in
+      undeclared|rerun|waived)
+        expect_code 0 "$RC" "event-$variant: the merge should succeed: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 121 example/repo --squash
+        ;;
+      dispatch|other-app)
+        expect_code 1 "$RC" "event-$variant: a same-named run from another source must not satisfy the declared check"
+        assert_grep "declared required check 'build' (github-actions, pull_request) has not succeeded at head $head" \
+          "$case_dir/stderr" "event-$variant: the failed declared check was not named"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" "event-$variant: gh pr merge ran"
+        ;;
+    esac
+  done
+  pass "fm-pr-merge judges a declared check only by runs from its app and triggering event"
+}
+
+# Declarations stand in only for rules the plan hides: when GitHub reports the
+# branch rules, those rules alone decide, and a repository the file does not
+# name is untouched.
+test_required_check_declarations_apply_only_where_the_plan_hides_rules() {
+  local case_dir head variant
+  head=d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3
+  for variant in rules-reported rules-missing other-repository other-host; do
+    case_dir=$(make_case "declared-scope-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    case "$variant" in
+      rules-reported)
+        write_github_required "$case_dir" ruleset:ci
+        write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions pull_request build'
+        ;;
+      rules-missing)
+        write_github_required "$case_dir" ruleset:validate
+        write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions pull_request build'
+        ;;
+      other-repository)
+        write_github_rules_hidden_on_plan "$case_dir"
+        write_required_check_declarations "$case_dir" 'github.com/example/other github-actions pull_request build'
+        ;;
+      other-host)
+        write_github_rules_hidden_on_plan "$case_dir"
+        write_required_check_declarations "$case_dir" 'github.example/example/repo github-actions pull_request build'
+        ;;
+    esac
+    run_required_case "$case_dir" 122
+    if [ "$variant" = rules-missing ]; then
+      expect_code 1 "$RC" "scope-rules-missing: the reported rule must still refuse"
+      assert_grep "required check 'validate' has not reported" "$case_dir/stderr" \
+        "scope-rules-missing: the reported rule was not enforced"
+      assert_no_grep "'build'" "$case_dir/stderr" \
+        "scope-rules-missing: a declaration was enforced although GitHub reported the rules"
+    else
+      expect_code 0 "$RC" "scope-$variant: the declaration must not apply: $(cat "$case_dir/stderr")"
+      assert_logged_gh_merge "$case_dir" 122 example/repo --squash
+    fi
+    assert_no_grep 'check-runs' "$case_dir/gh.log" "scope-$variant: check runs were read for an inapplicable declaration"
+    assert_no_grep 'actions/runs' "$case_dir/gh.log" "scope-$variant: workflow runs were read for an inapplicable declaration"
+  done
+  pass "fm-pr-merge applies declarations only to the named repository while its plan hides the branch rules"
+}
+
+# Required checks belong to the repository rather than the home, so a
+# secondmate home inherits the primary's declarations and a merge from that
+# home enforces them too.
+test_secondmate_home_inherits_declared_required_checks() {
+  local case_dir head primary
+  head=d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5
+  case_dir=$(make_case declared-secondmate)
+  primary="$case_dir/primary/config"
+  mkdir -p "$primary"
+  printf '%s\n' 'github.com/example/repo github-actions pull_request build' > "$primary/github-required-checks"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+  write_github_rules_hidden_on_plan "$case_dir"
+  write_github_check_runs "$case_dir" "$head"
+  write_github_workflow_runs "$case_dir" "$head"
+  bash -c '. "$1/bin/fm-config-inherit-lib.sh" && propagate_inheritable_config "$2" "$3"' \
+    _ "$ROOT" "$primary" "$case_dir/home/config" > "$case_dir/inherit.out" 2>&1 \
+    || fail "secondmate-inherit: propagation failed: $(cat "$case_dir/inherit.out")"
+  cmp -s "$primary/github-required-checks" "$case_dir/home/config/github-required-checks" \
+    || fail "secondmate-inherit: the secondmate home did not receive the primary's declarations"
+  run_required_case "$case_dir" 124
+  expect_code 1 "$RC" "secondmate-inherit: a merge from the secondmate home must enforce the inherited declaration"
+  assert_grep "declared required check 'build' (github-actions, pull_request) has not reported at head $head" \
+    "$case_dir/stderr" "secondmate-inherit: the inherited declaration was not enforced"
+  pass "a secondmate home inherits the primary's declared required checks and its merges enforce them"
+}
+
+# The declaration file's sources and failures: commit statuses, app ids,
+# checks from apps without a triggering event, pending runs, unreadable reads,
+# and a malformed or unreadable file, which refuses rather than dropping a
+# requirement.
+test_declared_required_check_sources_and_errors() {
+  local case_dir head label expected message config
+  head=d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
+  for label in status-green status-absent status-from-check-run status-pending \
+    app-id any-event pending runs-unreadable workflow-runs-unreadable stale-runs \
+    selector-case malformed malformed-other-repository status-with-event unreadable \
+    unsearchable; do
+    case_dir=$(make_case "declared-source-$label")
+    config="$case_dir/home/config/github-required-checks"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rules_hidden_on_plan "$case_dir"
+    write_github_check_runs "$case_dir" "$head" \
+      'build|completed|success|2026-11-14T10:00:00Z|github-actions|15368|1'
+    write_github_workflow_runs "$case_dir" "$head" '1:pull_request'
+    expected=1 message=
+    case "$label" in
+      status-*)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo - - ci/local-gate'
+        ;;
+    esac
+    case "$label" in
+      status-green)
+        write_github_rollup_json "$case_dir" "$head" "$(check_run ci COMPLETED SUCCESS)" \
+          "$(status_context ci/local-gate SUCCESS)"
+        expected=0
+        ;;
+      status-absent)
+        message="declared required check 'ci/local-gate' (commit status) has not reported at head $head"
+        ;;
+      status-from-check-run)
+        write_github_rollup_json "$case_dir" "$head" "$(check_run ci/local-gate COMPLETED SUCCESS)"
+        message="declared required check 'ci/local-gate' (commit status) has not reported at head $head"
+        ;;
+      status-pending)
+        write_github_rollup_json "$case_dir" "$head" "$(check_run ci COMPLETED SUCCESS)" \
+          "$(status_context ci/local-gate PENDING)"
+        message="declared required check 'ci/local-gate' (commit status) has not succeeded at head $head"
+        ;;
+      app-id)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo 15368 pull_request build'
+        expected=0
+        ;;
+      any-event)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo other-ci - lint'
+        write_github_check_runs "$case_dir" "$head" \
+          'lint|completed|neutral|2026-11-14T10:00:00Z|other-ci|42|7'
+        rm "$case_dir/github-workflow-runs.json"
+        expected=0
+        ;;
+      pending)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions pull_request build'
+        write_github_check_runs "$case_dir" "$head" \
+          'build|in_progress|-|2026-11-14T10:00:00Z|github-actions|15368|1'
+        message="declared required check 'build' (github-actions, pull_request) has not succeeded at head $head"
+        ;;
+      runs-unreadable|workflow-runs-unreadable|stale-runs)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions pull_request build'
+        ;;
+    esac
+    case "$label" in
+      runs-unreadable)
+        rm "$case_dir/github-runs.json"
+        message="the check runs at head $head could not be read, so a declared required check cannot be judged"
+        ;;
+      workflow-runs-unreadable)
+        rm "$case_dir/github-workflow-runs.json"
+        message="the workflow runs at head $head could not be read, so a declared required check cannot be judged"
+        ;;
+      stale-runs)
+        write_github_check_runs "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+          'build|completed|success|2026-11-14T10:00:00Z|github-actions|15368|1'
+        message="the check runs at head $head could not be read, so a declared required check cannot be judged"
+        ;;
+      selector-case)
+        write_required_check_declarations "$case_dir" '# the free-plan repository' '' \
+          '  GitHub.com/Example/Repo   github-actions   pull_request   e2e tests  '
+        message="declared required check 'e2e tests' (github-actions, pull_request) has not reported at head $head"
+        ;;
+      malformed)
+        write_required_check_declarations "$case_dir" \
+          'github.com/example/repo github-actions pull_request build' \
+          'github.com/example/repo github-actions'
+        message="line 2 of $config is not a valid required-check declaration, so a required check that has not reported cannot be ruled out"
+        ;;
+      malformed-other-repository)
+        write_required_check_declarations "$case_dir" \
+          'github.com/example/repo github-actions pull_request build' \
+          'example/other github-actions pull_request build'
+        message="line 2 of $config is not a valid required-check declaration"
+        ;;
+      status-with-event)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo - pull_request ci/local-gate'
+        message="line 1 of $config is not a valid required-check declaration"
+        ;;
+      unreadable)
+        mkdir "$config"
+        message="the required-check declarations in $config could not be read, so a required check that has not reported cannot be ruled out"
+        ;;
+      unsearchable)
+        # A directory that cannot be searched hides whether a declaration
+        # exists, so it must not read as no declaration.
+        write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions pull_request build'
+        chmod 000 "$case_dir/home/config"
+        message="the required-check declarations in $config could not be read"
+        ;;
+    esac
+    # A waiver names one check, so it never stands in for declarations that
+    # could not be read or judged.
+    case "$label" in
+      malformed*|status-with-event|unreadable|unsearchable|*-unreadable|stale-runs)
+        run_required_case "$case_dir" 123 --allow-missing build ;;
+      *) run_required_case "$case_dir" 123 ;;
+    esac
+    [ "$label" != unsearchable ] || chmod 755 "$case_dir/home/config"
+    expect_code "$expected" "$RC" "source-$label: $(cat "$case_dir/stderr")"
+    if [ "$expected" = 0 ]; then
+      assert_logged_gh_merge "$case_dir" 123 example/repo --squash
+    else
+      assert_grep "$message" "$case_dir/stderr" "source-$label: the refusal did not say: $message"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "source-$label: gh pr merge ran"
+    fi
+    case "$label" in
+      status-*|malformed*|unreadable|unsearchable)
+        assert_no_grep 'check-runs' "$case_dir/gh.log" "source-$label: check runs were read without a declared check run" ;;
+      any-event)
+        assert_no_grep 'actions/runs' "$case_dir/gh.log" "source-$label: workflow runs were read without a declared event" ;;
+    esac
+  done
+  pass "fm-pr-merge judges declared statuses, app ids, eventless apps, and pending runs, and refuses unreadable reads and declarations"
+}
+
 test_required_partial_reads_report_all_failures() {
   local case_dir head variant
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
@@ -5545,6 +5891,11 @@ test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
+test_declared_required_check_refuses_a_head_without_checks
+test_declared_required_check_ignores_a_same_named_run_from_another_event
+test_required_check_declarations_apply_only_where_the_plan_hides_rules
+test_declared_required_check_sources_and_errors
+test_secondmate_home_inherits_declared_required_checks
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo

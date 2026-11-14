@@ -54,9 +54,16 @@ make_world() {
   cat > "$fakebin/gh" <<SH
 #!/usr/bin/env bash
 # The base branch's required checks: gh.branch.json (unprotected by default,
-# gh.branch.fail fails the read), with no rulesets.
+# gh.branch.fail fails the read), with no rulesets; gh.rules.plan answers the
+# rules read the way a plan without branch rules does. The REST check runs and
+# workflow runs at the head come from gh.check-runs.json and
+# gh.workflow-runs.json.
 case "\$*" in
-  *"/rules/branches/"*) echo '[]'; exit 0 ;;
+  *"/rules/branches/"*)
+    [ ! -e "$world/gh.rules.plan" ] || { echo 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)' >&2; exit 1; }
+    echo '[]'; exit 0 ;;
+  *"/check-runs"*) cat "$world/gh.check-runs.json"; exit \$? ;;
+  *"/actions/runs"*) cat "$world/gh.workflow-runs.json"; exit \$? ;;
   *"/branches/"*) [ ! -e "$world/gh.branch.fail" ] || exit 1; cat "$world/gh.branch.json" 2>/dev/null || echo '{"protected":false}'; exit 0 ;;
 esac
 # Serves gh.<n>.json for the n-th GraphQL read, repeating the last one.
@@ -275,6 +282,38 @@ test_github_gate_refuses_until_every_required_check_reports() {
   : > "$w/gh.branch.fail"
   expect_unclean "$w" required-unreadable "the required checks of the base branch could not be read"
   pass "github gate refuses while a required check of the base branch has not reported on the head, or the requirement cannot be read"
+}
+
+# On a plan that hides branch rules, the gate reads the home's declared
+# required checks through the merge guard's reading: a declared check that has
+# not reported, or whose own app and event have not succeeded, keeps the lane
+# unclean even when a same-named run from another event passed.
+test_github_gate_enforces_declared_required_checks_without_branch_rules() {
+  local w head
+  w=$(make_world gh-declared "$GH_URL")
+  head=$(cat "$w/head")
+  gh_fixture "$w/gh.1.json"
+  : > "$w/gh.rules.plan"
+  printf '%s\n' 'github.com/example/repo github-actions pull_request build' > "$w/config/github-required-checks"
+  printf '{"check_runs":[]}\n' > "$w/gh.check-runs.json"
+  printf '{"workflow_runs":[]}\n' > "$w/gh.workflow-runs.json"
+  expect_unclean "$w" declared-unreported "required check(s) build have not reported on head"
+  jq -nc --arg h "$head" '{check_runs: [
+      {name: "build", status: "completed", conclusion: "failure", started_at: "2026-11-14T10:00:00Z",
+       app: {id: 15368, slug: "github-actions"}, check_suite: {id: 1}, head_sha: $h},
+      {name: "build", status: "completed", conclusion: "success", started_at: "2026-11-14T10:05:00Z",
+       app: {id: 15368, slug: "github-actions"}, check_suite: {id: 2}, head_sha: $h}]}' > "$w/gh.check-runs.json"
+  jq -nc --arg h "$head" '{workflow_runs: [
+      {check_suite_id: 1, event: "pull_request", head_sha: $h},
+      {check_suite_id: 2, event: "workflow_dispatch", head_sha: $h}]}' > "$w/gh.workflow-runs.json"
+  expect_unclean "$w" declared-other-event "required check(s) build have not succeeded on head"
+  jq -nc --arg h "$head" '{workflow_runs: [
+      {check_suite_id: 1, event: "pull_request", head_sha: $h},
+      {check_suite_id: 2, event: "pull_request", head_sha: $h}]}' > "$w/gh.workflow-runs.json"
+  expect_clean "$w" declared-succeeded
+  rm "$w/gh.workflow-runs.json"
+  expect_unclean "$w" declared-unreadable "the required checks of the base branch could not be read"
+  pass "github gate enforces declared required checks by app and event on a plan without branch rules"
 }
 
 test_github_gate_waits_for_review_bots_or_quiet_window() {
@@ -1204,6 +1243,7 @@ test_land_waits_for_an_action_under_way() {
 fm_test_run \
   test_github_gate_clean_and_each_unclean_condition \
   test_github_gate_refuses_until_every_required_check_reports \
+  test_github_gate_enforces_declared_required_checks_without_branch_rules \
   test_github_gate_waits_for_review_bots_or_quiet_window \
   test_gitlab_gate_clean_and_unclean_conditions \
   test_park_stops_agent_records_lane_and_leases_slot \
