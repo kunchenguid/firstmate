@@ -101,6 +101,7 @@ spawn_mate() {  # <case> <id> <harness> <sleeper-dir> <shim-dir>
   mkdir -p "$case_dir" "$user_home"
   fm_test_spawn_home "$primary" "$harness"
   seed_home "$sm" "$id"
+  fm_register_secondmate "$primary/data/secondmates.md" "$id" "$sm"
   FM_BACKEND=tmux FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" \
     HOME="$user_home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$primary/state" FM_DATA_OVERRIDE="$primary/data" \

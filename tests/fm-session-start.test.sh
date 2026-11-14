@@ -624,6 +624,10 @@ EOF
     printf 'harness=pi\n'
     printf 'home=%s\n' "$mate"
   } > "$home/state/$id.meta"
+  # Recovery relaunches through a --secondmate spawn, which refuses unless this
+  # home's own registry binds the id to that home, exactly as bin/fm-home-seed.sh
+  # writes it before the first launch.
+  fm_register_secondmate "$home/data/secondmates.md" "$id" "$mate"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
@@ -673,6 +677,8 @@ EOF
     printf 'herdr_tab_id=t-old\n'
     printf 'herdr_pane_id=p-old\n'
   } > "$home/state/$id.meta"
+  # Same registry precondition as the tmux fixture above.
+  fm_register_secondmate "$home/data/secondmates.md" "$id" "$mate"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
