@@ -22,7 +22,8 @@ fm_hermes_profile_home() {
   fi
   local args=()
   [ -z "$profile" ] || args=(-p "$profile")
-  config=$("$binary" "${args[@]}" config path) || return 1
+  # bash 3.2 (macOS) treats an empty array as unbound under set -u.
+  config=$("$binary" ${args[@]+"${args[@]}"} config path) || return 1
   case "$config" in
     /*/config.yaml) printf '%s' "${config%/config.yaml}" ;;
     *) echo 'error: hermes config path did not return an absolute config.yaml path' >&2; return 1 ;;
