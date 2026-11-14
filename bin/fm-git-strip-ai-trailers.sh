@@ -185,8 +185,11 @@ write_executable() {
 # when the lookup still names this launch's own hooks dir, meaning those files
 # point here, so the wrapper cannot recurse into itself. An empty
 # core.hooksPath makes that lookup fail, but plain git reads it as "no hooks",
-# so the wrapper runs none; any other failure reruns the lookup to show git's
-# error and refuses.
+# so the wrapper runs none. A relative value that git cannot resolve from a
+# linked worktree (its .git is a file) is resolved against the main worktree,
+# the parent of the common dir, and chained to when that is a directory. Any
+# other failure reruns the lookup to show git's error and refuses, naming a
+# relative value, its origin, and the unset command.
 runtime_chain_body() {
   local ours=$1
   cat <<EOF
@@ -211,9 +214,32 @@ orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-
   if hooks_path=\$(unset GIT_CONFIG_PARAMETERS; git config --get --type=path core.hooksPath 2>/dev/null) && [ -z "\$hooks_path" ]; then
     exit 0
   fi
-  (unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks >/dev/null)
-  echo "fm-git-strip-ai-trailers: cannot resolve this repository's hooks directory; refusing to skip its \$name hook" >&2
-  exit 1
+  main=
+  case \$hooks_path in
+  '' | /*) ;;
+  *)
+    if common=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+      main=\${common%/*}
+      if [ -d "\$main/\$hooks_path" ]; then
+        orig=\$main/\$hooks_path
+      fi
+    fi
+    ;;
+  esac
+  if [ -z "\$orig" ]; then
+    (unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-path hooks >/dev/null)
+    echo "fm-git-strip-ai-trailers: cannot resolve this repository's hooks directory; refusing to skip its \$name hook" >&2
+    case \${hooks_path:-} in
+    '' | /*) ;;
+    *)
+      echo "fm-git-strip-ai-trailers: core.hooksPath is the relative value '\$hooks_path', which git resolves per worktree and which is not a directory in the main worktree \${main:-(unknown)}" >&2
+      echo "fm-git-strip-ai-trailers: where it is set (git config --show-origin --get-all core.hooksPath):" >&2
+      (unset GIT_CONFIG_PARAMETERS; git config --show-origin --get-all core.hooksPath 2>&1 | sed 's/^/  /' >&2)
+      echo "fm-git-strip-ai-trailers: to clear it: git -C \"\${main:-.}\" config --local --unset-all core.hooksPath" >&2
+      ;;
+    esac
+    exit 1
+  fi
 }
 if [ "\$orig" = "\$ours" ]; then
   exit 0

@@ -253,10 +253,104 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+# A repository-local core.hooksPath that is relative, or absolute but missing,
+# is shared by every linked worktree of the project and breaks or silently
+# disables its hooks. Spawn warns, naming the value with its origin, and still
+# launches; a usable absolute directory draws no warning.
+spawn_with_shared_hookspath() {  # <case-name> <id> <value>
+  local rec
+  rec=$(make_settle_case "$1" "$2" 0)
+  read_settle_record "$rec"
+  git -C "$PROJ_DIR" config core.hooksPath "$3"
+  run_settle_spawn "$2"
+}
+
+test_relative_shared_hookspath_warns_at_spawn() {
+  local id out status
+  id=hookspath-relative-z6
+  out=$(spawn_with_shared_hookspath hookspath-relative "$id" .git/worktrees/wt/hooks)
+  status=$?
+  expect_code 0 "$status" "a relative shared core.hooksPath should warn, not refuse"$'\n'"$out"
+  assert_contains "$out" "shared relative core.hooksPath (.git/worktrees/wt/hooks)" "spawn did not warn about the relative value"
+  assert_contains "$out" "file:.git/config"$'\t'".git/worktrees/wt/hooks" "spawn did not print the value's origin"
+  assert_contains "$out" "config --local --unset-all core.hooksPath" "spawn did not name the unset command"
+  assert_contains "$out" "spawned $id" "the warning stopped the spawn"
+  pass "a relative shared core.hooksPath draws a spawn warning with its origin and still launches"
+}
+
+test_missing_absolute_shared_hookspath_warns_at_spawn() {
+  local id out status
+  id=hookspath-missing-z7
+  out=$(spawn_with_shared_hookspath hookspath-missing "$id" "$TMP_ROOT/no-such-hooks-dir")
+  status=$?
+  expect_code 0 "$status" "a missing shared core.hooksPath should warn, not refuse"$'\n'"$out"
+  assert_contains "$out" "does not exist ($TMP_ROOT/no-such-hooks-dir)" "spawn did not warn about the missing directory"
+  assert_contains "$out" "file:.git/config" "spawn did not print the value's origin"
+  assert_contains "$out" "spawned $id" "the warning stopped the spawn"
+  pass "an absolute but missing shared core.hooksPath draws a spawn warning"
+}
+
+test_usable_shared_hookspath_draws_no_warning() {
+  local id out status
+  id=hookspath-usable-z8
+  mkdir -p "$TMP_ROOT/usable-hooks"
+  out=$(spawn_with_shared_hookspath hookspath-usable "$id" "$TMP_ROOT/usable-hooks")
+  status=$?
+  expect_code 0 "$status" "a usable shared core.hooksPath should spawn"$'\n'"$out"
+  assert_not_contains "$out" "core.hooksPath" "spawn warned about a usable absolute core.hooksPath"
+  pass "an existing absolute shared core.hooksPath draws no spawn warning"
+}
+
+# git config --local skips config includes, so a value set by a file that
+# .git/config includes must still be found and warned about.
+test_included_relative_shared_hookspath_warns_at_spawn() {
+  local id out status rec
+  id=hookspath-included-z9
+  rec=$(make_settle_case hookspath-included "$id" 0)
+  read_settle_record "$rec"
+  printf '[core]\n\thooksPath = included/relative/hooks\n' > "$TMP_ROOT/hookspath-included/extra.gitconfig"
+  git -C "$PROJ_DIR" config --local include.path "$TMP_ROOT/hookspath-included/extra.gitconfig"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "an included shared core.hooksPath should warn, not refuse"$'\n'"$out"
+  assert_contains "$out" "shared relative core.hooksPath (included/relative/hooks)" "spawn missed a core.hooksPath set by an included file"
+  assert_contains "$out" "extra.gitconfig" "spawn did not print the included file as the value's origin"
+  assert_contains "$out" "spawned $id" "the warning stopped the spawn"
+  pass "a shared core.hooksPath set through a config include draws a spawn warning"
+}
+
+# The printed repair command is meant to be copied, so a project path with a
+# space must come out quoted and the command must work as printed.
+test_hookspath_repair_command_survives_a_path_with_a_space() {
+  local id out status rec cmd
+  id=hookspath-space-z10
+  rec=$(make_settle_case hookspath-space "$id" 0)
+  read_settle_record "$rec"
+  git -C "$PROJ_DIR" config core.hooksPath .git/worktrees/wt/hooks
+  # Only the project path needs the space; the settled worktree path does not.
+  ln -s "$PROJ_DIR" "$TMP_ROOT/hookspath-space/project with space"
+  PROJ_DIR="$TMP_ROOT/hookspath-space/project with space"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a spaced project path should still warn and spawn"$'\n'"$out"
+  cmd=$(printf '%s\n' "$out" | sed -n 's/^  to clear it: //p')
+  [ -n "$cmd" ] || fail "spawn printed no repair command"$'\n'"$out"
+  bash -c "$cmd" || fail "the printed repair command failed as copied: $cmd"
+  if git -C "$PROJ_DIR" config --local --get core.hooksPath >/dev/null 2>&1; then
+    fail "the printed repair command did not clear core.hooksPath: $cmd"
+  fi
+  pass "the printed core.hooksPath repair command runs as copied for a path with a space"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
+test_relative_shared_hookspath_warns_at_spawn
+test_missing_absolute_shared_hookspath_warns_at_spawn
+test_usable_shared_hookspath_draws_no_warning
+test_included_relative_shared_hookspath_warns_at_spawn
+test_hookspath_repair_command_survives_a_path_with_a_space
 
 echo "# all fm-spawn-worktree-settle tests passed"
