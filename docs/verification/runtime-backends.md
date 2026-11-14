@@ -2804,7 +2804,9 @@ That run drove `bin/fm-t3-mcp.mjs` directly against a scratch project and one sc
 T3 0.1.9 offers 68 tools to a full-access `mcp-client`, and three things the helper reads differ from 0.1.0:
 
 - `t3_thread_configuration` is now `t3_thread_configure`, and `t3_pending_request_list`, `_read`, and `_respond` are one `t3_pending_request` taking `action`; their reply shapes are unchanged, and every other tool the helper calls keeps its 0.1.0 name.
-- An `orchestrator_capabilities` option descriptor is `{id, values, default}`, where 0.1.0 gave a typed `select` with `options` or a typed `boolean`.
+- An `orchestrator_capabilities` option descriptor is `{id, values}` with no `type`, where 0.1.0 gave a typed `select` with `options` or a typed `boolean`.
+  The string options (`effort`, `reasoningEffort`, `serviceTier`) also carry a `default`.
+  A boolean option lists JSON booleans and carries no `default`: the reply gave `{"id":"fastMode","values":[false,true]}` on `claudeAgent` model `claude-opus-5-5`, and `{"id":"ultracode","values":[false,true]}` on `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2`, and `claude-haiku-5-5`.
 - `orchestrator_capabilities` lists only a short list of each instance's models and counts the rest in `omittedModels`; a call with `search` set to a model slug lists the matching models instead.
 
 ```sh
