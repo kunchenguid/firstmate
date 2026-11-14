@@ -1034,6 +1034,18 @@ test_tern_family_selection() {
   pass "fm-test-run: family tern selects the tern suite and smoke test, and the lane coverage guard accepts them"
 }
 
+test_paradev_family_selection() {
+  local listed families
+  families=$("$RUNNER" --list-families)
+  printf '%s\n' "$families" | grep -qx paradev || fail "--list-families must name the paradev family"
+  listed=$("$RUNNER" --list --family paradev)
+  assert_contains "$listed" "tests/fm-backend-paradev.test.sh" "family paradev must select the fake-CLI suite"
+  assert_contains "$listed" "tests/fm-backend-paradev-smoke.test.sh" "family paradev must select the real-Paradev smoke test"
+  assert_not_contains "$listed" "tests/fm-backend-orca.test.sh" "family paradev must not absorb the orca suite"
+  "$RUNNER" --list-lanes >/dev/null || fail "--list-lanes failed with the paradev suite present"
+  pass "fm-test-run: family paradev selects the paradev suite and smoke test, and the lane coverage guard accepts them"
+}
+
 test_list_scheduled_proven_isolated_uses_serial_weights() {
   local tmp
   tmp=$(fm_test_tmproot fm-test-run-proven-schedule)
@@ -1946,6 +1958,7 @@ test_live_guards_expect_a_capability_skip_class
 test_fail_on_gate_skip_token
 test_exclude_family
 test_tern_family_selection
+test_paradev_family_selection
 test_list_scheduled_proven_isolated_uses_serial_weights
 test_list_scheduled_non_lane_selections_use_serial_weights
 test_portable_shard_union_and_coverage_guard

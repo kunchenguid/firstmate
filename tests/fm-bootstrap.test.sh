@@ -847,6 +847,36 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
 }
 
+test_paradev_backend_requires_superset_and_jq_only() {
+  local case_dir fakebin out
+  # Paradev owns its worktrees and terminals: it needs the superset CLI and jq,
+  # never tmux or treehouse (a lease-less treehouse must stay silent too).
+  case_dir="$TMP_ROOT/paradev-backend-deps"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' paradev > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" superset jq
+  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" treehouse)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=paradev with superset and jq present must not require tmux or treehouse, got: $out"
+
+  case_dir="$TMP_ROOT/paradev-backend-missing-cli"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' paradev > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" jq
+  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" superset)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING_MANUAL: superset (instructions: https://docs.paradev.com/cli/cli-reference" \
+    "backend=paradev must name the missing superset CLI with manual guidance"
+  assert_not_contains "$out" "MISSING: tmux" "backend=paradev must not demand tmux"
+  pass "bootstrap: backend=paradev requires superset + jq, never tmux or treehouse"
+}
+
 # Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
 # plus jq added, so a backend that must NOT require tmux can be proven silent
 # with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
@@ -962,7 +992,7 @@ test_unknown_backend_reports_invalid_configuration() {
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux paseo rex t3code tern hc)" \
+  assert_contains "$out" "BACKEND_INVALID: bogus (known: tmux herdr zellij orca cmux paseo rex t3code tern hc paradev)" \
     "bootstrap should report an unknown resolved backend"
   assert_not_contains "$out" "MISSING: tmux" "an unknown backend should not silently fall back to tmux dependencies"
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
@@ -1937,6 +1967,7 @@ test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
+test_paradev_backend_requires_superset_and_jq_only
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count

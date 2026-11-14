@@ -422,14 +422,35 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid tern endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = "9007199254740993:9223372036854775807" ] || fail "tern endpoint validation changed the 64-bit ids"
 
-  for backend in tmux herdr zellij orca cmux paseo rex tern; do
+  id=paradev-task
+  paradev_meta() {  # <terminal> <workspace>
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=$1" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=paradev" \
+      "paradev_workspace_id=$2" "paradev_project_id=b9858b1a-100c-47b1-8304-a268c314eca6"
+  }
+  paradev_meta 86221aff-2041-4f7f-9a50-9dbbde70e05f:43cf75c5-4b3b-4b72-9d64-013ebb326040 86221aff-2041-4f7f-9a50-9dbbde70e05f
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Paradev endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_BACKEND:$FM_BACKEND_VALIDATED_TARGET" = \
+    "paradev:86221aff-2041-4f7f-9a50-9dbbde70e05f:43cf75c5-4b3b-4b72-9d64-013ebb326040" ] \
+    || fail "Paradev validation did not select its workspace:terminal target"
+  paradev_meta 99999999-0000-4000-8000-000000000000:43cf75c5-4b3b-4b72-9d64-013ebb326040 86221aff-2041-4f7f-9a50-9dbbde70e05f
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a Paradev terminal= that names another workspace than paradev_workspace_id must refuse"
+  fi
+  paradev_meta 43cf75c5-4b3b-4b72-9d64-013ebb326040 86221aff-2041-4f7f-9a50-9dbbde70e05f
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "a Paradev terminal= without its workspace half must refuse"
+  fi
+
+  for backend in tmux herdr zellij orca cmux paseo rex tern paradev; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, Rex, and tern records validate, inconsistent Rex records refuse, and every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, Rex, tern, and Paradev records validate, inconsistent Rex and Paradev records refuse, and every empty backend target refuses"
 }
 
 test_orca_composite_worktree_id_validates() {
@@ -1561,6 +1582,39 @@ test_orca_close_failure_refuses_even_under_force() {
   pass "fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal"
 }
 
+test_paradev_close_failure_refuses_even_under_force() {
+  local dir superset_free id=paradev-strand rc
+  dir=$(make_case paradev-close-failure)
+  superset_free=$(fm_test_base_path_sans "$PATH" superset)
+  ! PATH="$dir/fakebin:$superset_free" command -v superset >/dev/null 2>&1 \
+    || fail "the superset-free search path still resolved superset"
+  # Archiving a Paradev workspace deletes its worktree folder even while a
+  # terminal is live, so a close that cannot be proven must stop cleanup
+  # before the archive, with or without --force.
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" \
+    "terminal=86221aff-2041-4f7f-9a50-9dbbde70e05f:43cf75c5-4b3b-4b72-9d64-013ebb326040" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "backend=paradev" "paradev_workspace_id=86221aff-2041-4f7f-9a50-9dbbde70e05f" \
+    "paradev_project_id=b9858b1a-100c-47b1-8304-a268c314eca6" "kind=ship" "mode=no-mistakes"
+
+  set +e
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$superset_free" "$TEARDOWN" "$id" --force \
+    > "$dir/paradev-forced.out" 2> "$dir/paradev-forced.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a forced Paradev cleanup continued past a close that never happened: $(cat "$dir/paradev-forced.err")"
+  assert_grep "could not be closed" "$dir/paradev-forced.err" \
+    "the forced Paradev run did not report the close it could not make"
+  assert_no_grep "--force authorizes continuing" "$dir/paradev-forced.err" \
+    "the forced Paradev run announced a continue it cannot carry out"
+  assert_present "$dir/home/state/$id.meta" \
+    "the forced Paradev refusal removed the only durable record naming the workspace"
+  pass "fm-teardown: a Paradev close that cannot be proven refuses even under --force, before any archive"
+}
+
 test_already_gone_endpoint_still_completes_without_a_refusal() {
   local dir socket session='already gone' id=gone-task
   [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
@@ -1618,6 +1672,7 @@ test_forced_teardown_continues_past_a_close_it_could_not_make
 test_unreadable_close_read_refuses_while_a_definitive_absence_completes
 test_forced_secondmate_child_close_failure_still_refuses
 test_orca_close_failure_refuses_even_under_force
+test_paradev_close_failure_refuses_even_under_force
 test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task

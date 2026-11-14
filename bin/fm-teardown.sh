@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# worktree or archive the Paradev workspace, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -179,11 +179,14 @@
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
-# Orca is not a pool slot and proves its path through
-# require_orca_worktree_path_match instead.
-# Orca tasks use the same safety checks, then close the recorded terminal and
-# remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
+# A worktree-owning backend (Orca, Paradev; bin/fm-backend.sh's
+# fm_backend_owns_worktree) is not a pool slot and proves its path through
+# require_app_worktree_path_match instead.
+# Those tasks use the same safety checks, then close the recorded terminal and
+# release the recorded worktree through the backend (`orca worktree rm`, or
+# `superset workspaces archive` for the recorded Paradev workspace); teardown
+# never guesses a target from ambient CLI state, and never selects a Paradev
+# workspace by its display tag.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -588,7 +591,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
   if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
-     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
+     && ! fm_backend_owns_worktree "$TEARDOWN_LOCK_BACKEND" \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
     TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
@@ -726,7 +729,7 @@ case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
     esac
     ;;
 esac
-if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
+if ! fm_backend_owns_worktree "$TEARDOWN_CLEANUP_RECOVERY"; then
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
     TEARDOWN_BACKLOG_APPLIES=1
   else
@@ -1277,7 +1280,7 @@ fi
 # validator rather than probing or closing an ambient current window.
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
-T_ORCA=
+T_APP=
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
@@ -1285,7 +1288,7 @@ else
   fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   T=$FM_BACKEND_VALIDATED_TARGET
-  [ "$BACKEND" != orca ] || T_ORCA=$T
+  ! fm_backend_owns_worktree "$BACKEND" || T_APP=$T
 fi
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
@@ -1309,14 +1312,14 @@ BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
 fi
-ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
-ORCA_PATH_MATCH_VERIFIED=0
+APP_WORKTREE_ID=
+APP_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
 TEARDOWN_POOL_SLOT_LOST=0
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+if [ "$KIND" != secondmate ] && ! fm_backend_owns_worktree "$BACKEND" \
    && fm_treehouse_pool_slot "$PROJ" "$WT"; then
   EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
     echo "REFUSED: cannot resolve the shared Treehouse project lock for ${PROJ:-<missing>}; nothing was changed" >&2
@@ -1543,30 +1546,24 @@ $(fm_control_harness_wiring_paths "$(meta_value "$META" harness)" "$wt" "$STATE"
 EOF
 }
 
-require_orca_worktree_id() {
-  local meta=$1 id
-  id=$(meta_value "$meta" orca_worktree_id)
+require_app_worktree_id() {  # <meta> <backend>
+  local meta=$1 backend=$2 key id
+  key=$(fm_backend_worktree_id_key "$backend") || {
+    echo "error: backend $backend does not own task worktrees; cannot remove its worktree" >&2
+    return 1
+  }
+  id=$(meta_value "$meta" "$key")
   if [ -z "$id" ]; then
-    echo "error: missing orca_worktree_id in $meta; cannot remove Orca worktree" >&2
+    echo "error: missing $key in $meta; cannot remove $(fm_backend_worktree_owner_label "$backend") worktree" >&2
     return 1
   fi
   printf '%s\n' "$id"
 }
 
-require_orca_terminal() {
-  local meta=$1 terminal
-  terminal=$(meta_value "$meta" terminal)
-  if [ -z "$terminal" ]; then
-    echo "error: missing terminal in $meta; cannot close Orca terminal" >&2
-    return 1
-  fi
-  printf '%s\n' "$terminal"
-}
-
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
-  T_ORCA=$(meta_value "$META" terminal)
-  [ -z "$T_ORCA" ] || T=$T_ORCA
+if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
+  APP_WORKTREE_ID=$(require_app_worktree_id "$META" "$BACKEND") || exit 1
+  T_APP=$(meta_value "$META" terminal)
+  [ -z "$T_APP" ] || T=$T_APP
 fi
 
 # Where a harness's firstmate-owned global turn-end registry entry lives is
@@ -1882,7 +1879,7 @@ backlog_done_args() {
 backlog_refresh_reminder() {
   local backlog_display root backend=markdown
   [ "$KIND" = secondmate ] && return 0
-  [ "$CLEANUP_RECOVERY" = orca ] && return 0
+  fm_backend_owns_worktree "$CLEANUP_RECOVERY" && return 0
   if root=$(fm_backlog_root "$DATA"); then
     backend=$(fm_tasks_axi_backend "$root") || return 2
   fi
@@ -2622,10 +2619,11 @@ EOF
   return 1
 }
 
-require_orca_worktree_path_match() {
-  local worktree_id=$1 inspected=$2 resolved inspected_abs resolved_abs
-  resolved=$(fm_backend_worktree_path orca "$worktree_id") || {
-    echo "REFUSED: cannot resolve Orca worktree id $worktree_id to a path; preserving metadata." >&2
+require_app_worktree_path_match() {  # <backend> <worktree-id> <inspected-path>
+  local backend=$1 worktree_id=$2 inspected=$3 resolved inspected_abs resolved_abs label
+  label=$(fm_backend_worktree_owner_label "$backend") || label=$backend
+  resolved=$(fm_backend_worktree_path "$backend" "$worktree_id") || {
+    echo "REFUSED: cannot resolve $label worktree id $worktree_id to a path; preserving metadata." >&2
     return 1
   }
   inspected_abs=$(canonical_existing_dir "$inspected") || {
@@ -2633,20 +2631,20 @@ require_orca_worktree_path_match() {
     return 1
   }
   resolved_abs=$(canonical_existing_dir "$resolved") || {
-    echo "REFUSED: Orca worktree id $worktree_id resolved to uninspectable path ${resolved:-<missing>}; preserving metadata." >&2
+    echo "REFUSED: $label worktree id $worktree_id resolved to uninspectable path ${resolved:-<missing>}; preserving metadata." >&2
     return 1
   }
   if [ "$resolved_abs" != "$inspected_abs" ]; then
-    echo "REFUSED: Orca worktree id $worktree_id resolves to $resolved_abs, not inspected worktree $inspected_abs." >&2
-    echo "Cannot verify dirty or unlanded work for the worktree Orca would remove; preserving metadata." >&2
+    echo "REFUSED: $label worktree id $worktree_id resolves to $resolved_abs, not inspected worktree $inspected_abs." >&2
+    echo "Cannot verify dirty or unlanded work for the worktree $label would remove; preserving metadata." >&2
     return 1
   fi
 }
 
-require_orca_worktree_path_match_if_present() {
-  local worktree_id=$1 inspected=$2
+require_app_worktree_path_match_if_present() {  # <backend> <worktree-id> <inspected-path>
+  local backend=$1 worktree_id=$2 inspected=$3
   [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
-  require_orca_worktree_path_match "$worktree_id" "$inspected"
+  require_app_worktree_path_match "$backend" "$worktree_id" "$inspected"
 }
 
 # The task's own live slot, canonicalized, or empty when this record has no slot
@@ -3283,7 +3281,7 @@ preflight_descendant_treehouse_slots() {
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+    if [ "$kind" = secondmate ] || fm_backend_owns_worktree "$backend"; then
       continue
     fi
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
@@ -3316,7 +3314,7 @@ preflight_descendant_treehouse_slots() {
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+    if [ "$kind" = secondmate ] || fm_backend_owns_worktree "$backend"; then
       continue
     fi
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
@@ -3334,7 +3332,7 @@ preflight_descendant_treehouse_slots() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_app_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3353,12 +3351,12 @@ validate_firstmate_home_children_removal() {
       [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
-    elif [ "$child_backend" = orca ]; then
-      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+    elif fm_backend_owns_worktree "$child_backend"; then
+      child_app_worktree_id=$(require_app_worktree_id "$child_meta" "$child_backend") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+        require_app_worktree_path_match "$child_backend" "$child_app_worktree_id" "$child_wt" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
@@ -3510,15 +3508,16 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # about its own close is bin/fm-backend.sh's fm_backend_kill contract.
 #
 # Returns 0 when the caller must continue anyway and 1 when it must stop.
-# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca/non-T3
-# close, where --force is the operator's existing authority to discard this
-# task's records deliberately AND continuing is actually reachable: the
-# worktree is already returned by then and nothing after it needs the backend
-# that could not close.
-# It is 0 everywhere else. The Orca site refuses under --force too, because
-# the step immediately after it removes the Orca worktree through the same CLI
-# whose absence is the only thing that arm ever reports, so a forced continue
-# would die there having removed nothing while this message claimed otherwise.
+# <honors-force> is 1 at exactly one site, the generic close for a backend that
+# is not Herdr, T3, or worktree-owning (Orca, Paradev), where --force is the
+# operator's existing authority to discard this task's records deliberately
+# AND continuing is actually reachable: the worktree is already returned by
+# then and nothing after it needs the backend that could not close.
+# It is 0 everywhere else. The worktree-owning site refuses under --force too,
+# because the step immediately after it removes the worktree through the same
+# CLI whose failure that close reports, so a forced continue would die there
+# having removed nothing while this message claimed otherwise (and for Paradev
+# would archive a workspace whose terminal may still be live).
 # The T3 site refuses under --force because stop and archive must succeed before
 # its worktree or home can be released (see the native cleanup site below).
 # The two forced secondmate child sites refuse because that path is only ever
@@ -3546,7 +3545,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_app_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3557,13 +3556,13 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
-    if [ "$child_backend" = orca ]; then
+    if fm_backend_owns_worktree "$child_backend"; then
       child_t=$(meta_value "$child_meta" terminal)
     else
       child_t=$(fm_backend_target_of_meta "$child_meta")
     fi
-    if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
-      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+    if fm_backend_owns_worktree "$child_backend" && [ "$child_kind" != secondmate ]; then
+      child_app_worktree_id=$(require_app_worktree_id "$child_meta" "$child_backend") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
@@ -3607,13 +3606,13 @@ cleanup_firstmate_home_children() {
         cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
       fi
-    elif [ "$child_backend" = orca ]; then
+    elif fm_backend_owns_worktree "$child_backend"; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+      fm_backend_remove_worktree "$child_backend" "$child_app_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
       # slot reassigned to another task is not this child's to kill, reset,
@@ -3802,14 +3801,14 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
-    echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
+    echo "REFUSED: $(fm_backend_worktree_owner_label "$BACKEND") ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
     exit 1
   fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
+  require_app_worktree_path_match "$BACKEND" "$APP_WORKTREE_ID" "$WT" || exit 1
+  APP_PATH_MATCH_VERIFIED=1
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -4031,8 +4030,8 @@ teardown_legacy_stamp_rollback() {
     exit 1
   fi
 else
-  if [ "$CLEANUP_RECOVERY" = orca ]; then
-    BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
+  if fm_backend_owns_worktree "$CLEANUP_RECOVERY"; then
+    BACKLOG_SKIP_REASON="$(fm_backend_worktree_owner_label "$CLEANUP_RECOVERY") cleanup recovery is not a launched backlog worker"
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
@@ -4065,10 +4064,10 @@ if [ "$BACKEND" = t3code ]; then
   }
 fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
+if fm_backend_owns_worktree "$BACKEND" && [ "$KIND" != secondmate ]; then
+  if [ "$APP_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_app_worktree_path_match_if_present "$BACKEND" "$APP_WORKTREE_ID" "$WT" || exit 1
+    APP_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -4082,11 +4081,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
     remove_harness_worktree_wiring "$WT"
   fi
-  if [ -n "$T_ORCA" ]; then
+  if [ -n "$T_APP" ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  fm_backend_remove_worktree "$BACKEND" "$APP_WORKTREE_ID" || {
+    echo "error: could not release the $(fm_backend_worktree_owner_label "$BACKEND") worktree $APP_WORKTREE_ID for $ID; preserving the task record for retry" >&2
+    exit 1
+  }
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
@@ -4135,7 +4137,7 @@ if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" 
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
-elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+elif ! fm_backend_owns_worktree "$BACKEND" && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
   # a stale request. A task with no cached record costs nothing.

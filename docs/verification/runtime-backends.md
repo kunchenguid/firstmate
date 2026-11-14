@@ -330,6 +330,7 @@ tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
 tests/fm-backend-tern.test.sh
+tests/fm-backend-paradev.test.sh
 ```
 
 Bounded output from the 2026-07-28 incident regression (pre-tern):
@@ -345,6 +346,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch, and now covers tern as well once the parent records a green portable run; do not treat the pre-tern transcript above as proof of the tern fixture.
+Paradev joined the metadata-only validation later: its fixture validates a consistent record and refuses a `terminal=` without its workspace half or naming a different workspace than `paradev_workspace_id=`, reported by the case `cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, Rex, tern, and Paradev records validate, inconsistent Rex and Paradev records refuse, and every empty backend target refuses`.
 `tests/fm-backend-t3code.test.sh` covers T3 thread bindings.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
@@ -379,6 +381,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
 | tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
+| paradev | 0, silent, for a terminal its inventory re-read no longer lists or a workspace already gone | 1 when the terminal is still listed after the close, the inventory re-read cannot run, or `superset` is not on the path; portable fixtures only (`tests/fm-backend-paradev.test.sh`, `tests/fm-teardown-endpoint-safety.test.sh`), contract in [paradev-backend.md](../paradev-backend.md#cleanup) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
@@ -389,7 +392,7 @@ Any other read failure - a momentarily unresponsive server, or a teardown PATH w
 
 Two bounds of the refusal are known and deliberately not closed here.
 
-`--force` overrides it at exactly one site, the generic close for backends other than Herdr, Orca, and T3 Code.
+`--force` overrides it at exactly one site, the generic close for backends other than Herdr, Orca, Paradev, and T3 Code.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
 It states what `--force` authorizes rather than what will have happened, because the later inactive-reconcile delivery gate can still stop it with every record retained.
@@ -397,6 +400,7 @@ T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-an
 
 The Orca close refuses under `--force` too.
 The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
+The Paradev close refuses under `--force` for a stronger reason: the step after it archives the workspace, which deletes the worktree folder, so it must never run past a terminal it could not prove closed; `fm-teardown: a Paradev close that cannot be proven refuses even under --force, before any archive` pins it.
 The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
 [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header and `endpoint_close_refusal` comment own cleanup ordering and the limits of record retention after a close refusal.
@@ -2366,6 +2370,98 @@ Without `tmux -u`, tmux's non-UTF-8 client output sanitized a multiline UTF-8 va
 `show-environment -t =<session>` reported the automatically populated `SSH_AUTH_SOCK`, which the snapshot excludes because only allowlisted names are read.
 A name present only in the server-global environment, or only as text inside another value, was refused.
 The fake-Orca cases execute the real staged launch file under synthetic personal credentials and cover refusal before allocation, file privacy and deletion, deletion-failure refusal that keeps the interactive pane with and without errexit, reclaiming a launch file the pane never ran while the terminal stays open, reclaiming it when HUP, INT or TERM interrupts the spawn after the file is published but before the launch command is sent, during the consume wait, or between text delivery and Enter, a pane that wins the deadline unlink race, and the missing-source warning.
+
+## Paradev
+
+The adapter was verified on 2026-11-13 and 2026-11-14 against `superset` 2.0.8, the CLI that ships with the Paradev desktop app, on macOS 26.7.3 (arm64).
+Every call ran with `--local --json`; inside a Paradev terminal the CLI turns `--json` on by itself, and `--field` then printed the whole object, so the adapter never relies on `--field` or human output.
+
+### Readiness
+
+```sh
+superset projects list --local --json
+superset status --json
+```
+
+```text
+projects list: a JSON array of {id, name, path, repo}
+status: running=false stale=true, while every other call, hook delivery included, worked
+```
+
+That is why readiness is a real `projects list` call and never `status`.
+The project id is looked up by an exact `path` match; an unregistered path is refused with the registration command rather than registered.
+
+### Response shapes the adapter accepts
+
+```sh
+superset workspaces create --local --project <project> --name fm-<id> --branch <branch> --skip-branch-prefix --tag <tag> --json
+superset workspaces get <workspace> --local --json
+superset terminals create --local --workspace <workspace> --json
+superset terminals list --local --workspace <workspace> --json
+superset terminals read --local --workspace <workspace> --terminal <terminal> --max-lines <n> --json
+superset terminals send --local --workspace <workspace> --terminal <terminal> --text=<text> [--no-submit] --json
+superset terminals send --local --workspace <workspace> --terminal <terminal> --keys esc|enter|ctrl+c|ctrl+u --json
+superset terminals close --local --workspace <workspace> --terminal <terminal> --json
+superset agents explain --local --workspace <workspace> --terminal <terminal> --json
+superset workspaces archive <workspace> --local --json
+```
+
+```text
+workspaces create: {workspace: {id, projectId, branch, type: "worktree", ...}, terminals, agents, alreadyExists, url, webUrl}; tags null, no worktreePath
+workspaces get: {id, name, branch, projectId, type, worktreePath, worktreeExists, ...}; no archivedAt key; an archived id fails with "Workspace not found on host"
+terminals create: {terminalId, ...}
+terminals list: {sessions: [{terminalId, workspaceId, exited, exitCode, attached, title, customTitle, createdAt}]}
+terminals read: {terminalId, cols, rows, text}; text is the visible screen, bottom-padded, not scrollback
+terminals close: {terminalId, status: "disposed"}, also for a terminal that was already closed
+agents explain: {terminalId, state, because, lastEventType, ...}; a plain shell terminal reports state "none"
+workspaces archive: {deleted, notFound, failed, warnings}; repeating it reports deleted again
+```
+
+The adapter refuses `alreadyExists: true` instead of adopting the workspace, reads the worktree path back by id because the create reply has none, takes `terminalId` as the terminal half of `terminal=`, and requires archive to name the id under `deleted` or `notFound` with an empty `failed`.
+The CLI rejects a separate `--text` value that starts with `-` (`Option --text requires a value`), so text rides as `--text=<value>`; `--dash`, `a=b=c`, and quoted spaces arrived literally.
+A Paradev workspace's worktree is a linked git worktree whose common git directory is the registered project's, which is the shape the spawn-time Claude workspace-trust check requires.
+
+### Lifecycle facts
+
+| Guarantee | Observed |
+| --- | --- |
+| Native state reaches Firstmate | With Paradev's hooks loaded in Claude's active config directory, `agents explain` reported `working` (`Start`) then `idle` (`Stop`) for two workspaces created in parallel; `blocked` (`PermissionRequest`) and `exited` were also observed |
+| Hooks missing | With `CLAUDE_CONFIG_DIR` pointing at a directory without Paradev's hooks, the state stayed `starting` / `Attached` while Claude ran |
+| Interrupt | Esc and a single Ctrl-C both ended a working turn as `idle` / `Stop`, indistinguishable from a finished turn |
+| Idle is not a free composer | A Claude exit-confirmation dialog read as `idle`, not `blocked` |
+| Close vs archive | `terminals close` kept the workspace, tag, and worktree; `workspaces archive` deleted the worktree folder, uncommitted file included, with no warning and with a live terminal inside, and kept the branch |
+| Tag | Only `workspaces list` shows tags; `workspaces update --tag` replaces the whole tag set |
+
+### Regression
+
+```sh
+bash bin/fm-test-run.sh --family paradev
+tests/fm-backend.test.sh
+tests/fm-bootstrap.test.sh
+tests/fm-busy-state.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
+```
+
+```text
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=70880
+FM_TEST_SUMMARY_FAMILY family=paradev count=1 duration_ms=68751 failed=0
+```
+
+That 2026-11-14 run of `tests/fm-backend-paradev.test.sh` reported 46 ok cases against a keyed fake `superset`: readiness, project lookup, create and partial-create cleanup, refusal of an existing workspace, send and key mapping, capture and composer state, the proven close, exact-id archive, native busy mapping, metadata routing, and scout and ship teardown including id-path mismatch, missing ids, a terminal from another workspace, unlanded work, and a failed archive.
+`tests/fm-backend.test.sh` proves Paradev is never auto-detected from `SUPERSET_WORKSPACE_ID` while `FM_BACKEND=paradev` and `config/backend` select it.
+`tests/fm-backend-paradev-smoke.test.sh` is the opt-in real-binary smoke: it runs only with `FM_PARADEV_SMOKE_PROJECT` set to a registered Paradev project and otherwise records a gate skip, so CI runners, which have no Paradev host, skip it.
+A 2026-11-14 run against superset 2.0.8 passed both family scripts:
+
+```text
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=86111
+FM_TEST_SUMMARY_FAMILY family=paradev count=2 duration_ms=83936 failed=0
+```
+
+It proved, through the adapter primitives `fm-spawn.sh` and `fm-teardown.sh` call: two crewmates get distinct workspaces, branches, and worktrees that `worktree_path` reads back by id; a second create on a live crewmate's branch refuses and leaves it intact; a cross-workspace `terminal=` fails validation; each shell starts in its own worktree; `send_literal` stages without submitting and `send_key Enter` submits; dash-leading and `=` text arrive literally; `C-c` interrupts a foreground command and `Escape` and `C-u` are accepted; a plain shell reads busy state `unknown`; close is proved by the inventory re-read, keeps the worktree, and repeats safely; archive removes the folder and repeats as `notFound`; tearing one crewmate down leaves the other answering.
+A send issued right after `terminals create` reached the shell in each observed run, 3 to 4 seconds from create to output; that is an observation, not a guarantee for a slow shell start.
+Cleanup removed every smoke workspace and branch after an injected assertion failure and after `SIGTERM` with both crewmates live.
+It launches no agent, so Paradev's native `working` and `idle` states for a real harness are outside it.
+No real-binary smoke runs in CI.
 
 ## cmux
 
