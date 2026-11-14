@@ -106,6 +106,7 @@ FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_WRITE_REFUSAL=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -1102,6 +1103,46 @@ fm_pr_github_read_record() {  # <host> <owner> <repo> <number>
   fi
   command -v gh-axi >/dev/null 2>&1 || return 1
   fm_pr_github_read_record_with_gh_axi "$@"
+}
+
+# Author check before a write on a pull request, run by bin/fm-pr-write.sh.
+# Without config/pr-author-write-guard every write is allowed. With it, a write
+# is allowed on a PR that a task of this home recorded as pr=, or on a GitHub PR
+# whose author is the account gh is signed in as on that host. Every other PR,
+# including one whose author or account cannot be read, is refused and
+# FM_PR_WRITE_REFUSAL names why.
+fm_pr_write_author_check() {  # <pr-url>
+  local url=${1-} home=${FM_HOME:-$_FM_PR_LIB_ROOT} meta line account author
+  FM_PR_WRITE_REFUSAL=
+  [ -f "${FM_CONFIG_OVERRIDE:-$home/config}/pr-author-write-guard" ] || return 0
+  if ! fm_pr_url_parse "$url"; then
+    FM_PR_WRITE_REFUSAL="$url is not a recognized pull request URL"
+    return 1
+  fi
+  for meta in "${FM_STATE_OVERRIDE:-$home/state}"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ "$line" != "pr=$url" ] || return 0
+    done < "$meta"
+  done
+  if [ "$FM_PR_PROVIDER" != github ]; then
+    FM_PR_WRITE_REFUSAL="no task of this home opened $url, and its author can only be read on GitHub"
+    return 1
+  fi
+  if ! account=$(fm_pr_github_host_export "$FM_PR_HOST" && gh api user --jq .login 2>/dev/null) \
+    || [ -z "$account" ]; then
+    FM_PR_WRITE_REFUSAL="could not read the account gh is signed in as on $FM_PR_HOST"
+    return 1
+  fi
+  if ! author=$(fm_pr_github_host_export "$FM_PR_HOST" \
+      && gh api "repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" --jq .user.login 2>/dev/null) \
+    || [ -z "$author" ]; then
+    FM_PR_WRITE_REFUSAL="could not read the author of $url"
+    return 1
+  fi
+  [ "$author" != "$account" ] || return 0
+  FM_PR_WRITE_REFUSAL="$url is by $author, not $account, and no task of this home opened it"
+  return 1
 }
 
 # GitHub required-check reading shared by bin/fm-pr-merge.sh and

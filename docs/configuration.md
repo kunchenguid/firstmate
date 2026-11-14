@@ -835,6 +835,15 @@ The flag takes effect on the next contribution poll and is not inherited by seco
 The observer's existing `bin/fm-contributions.sh arm` command enables polling when it is not already armed.
 The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) owns when a forge event may settle a question.
 
+## PR author write guard (config/pr-author-write-guard)
+
+The optional local, gitignored `config/pr-author-write-guard` presence flag makes `bin/fm-pr-write.sh` check who authored a PR before it runs a write on it.
+With the flag present, a write runs only on a PR that a task of this home recorded as `pr=`, or on a GitHub PR whose author is the account `gh` is signed in as on that host.
+Any other PR, including one whose author or account cannot be read, is refused with exit 3, and the refusal is an owner decision to park.
+With the file absent, `bin/fm-pr-write.sh` runs every write unchecked.
+Merges are outside this guard because `bin/fm-pr-merge.sh` owns their checks.
+The flag takes effect on the next write and is not inherited by secondmate homes.
+
 ## Park on review
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
