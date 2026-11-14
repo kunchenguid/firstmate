@@ -1479,6 +1479,124 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
+test_keyed_answer_cap_is_one_visible_limit() {
+  local home out show limit at over cjk rc
+  set +e
+  home=$(make_home answer-cap)
+  limit=$(run_captain "$home" answer-limit) || fail "answer-limit was not published"
+  [ "$limit" = 6000 ] || fail "the published answer limit is not 6000 bytes: $limit"
+  at=$(printf 'a%.0s' $(seq 1 6000))
+  over=$(printf 'a%.0s' $(seq 1 6001))
+  cjk=$(printf '\xe4\xb8\xad%.0s' $(seq 1 2001))
+  local id
+  for id in cap-at cap-over cap-cjk cap-blank cap-ctl; do
+    tasks_in "$home" add "$id" "Cap fixture $id" --kind ship --repo sample >/dev/null
+    run_captain "$home" hold "$id" --reason "captain call needed" >/dev/null
+  done
+  out=$(printf 'cap-at\t%s\t\n' "$at" | run_captain "$home" answers --source "cap fixture") \
+    || fail "an answer of exactly 6000 bytes was refused"
+  assert_contains "$out" "closed: cap-at" "the 6000-byte answer did not close"
+  show=$(tasks_in "$home" show cap-at --full)
+  assert_contains "$show" "$at" "the 6000-byte answer was not recorded whole"
+  out=$(printf 'cap-over\t%s\t\n' "$over" | run_captain "$home" answers --source "cap fixture" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an answer over the cap was not reported as skipped"
+  assert_contains "$out" "refused: cap-over (answer exceeds 6000 bytes)" "the over-cap refusal was not visible"
+  show=$(tasks_in "$home" show cap-over --full)
+  assert_contains "$show" "held: yes" "the over-cap answer lifted the hold"
+  out=$(printf 'cap-cjk\t%s\t\n' "$cjk" | run_captain "$home" answers --source "cap fixture" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a multi-byte answer over 6000 bytes was accepted (cap counts bytes)"
+  assert_contains "$out" "cap-cjk (answer exceeds" "the multi-byte over-cap refusal was not visible"
+  out=$(printf 'cap-blank\t \t\n' | run_captain "$home" answers --source "cap fixture" 2>&1) || true
+  show=$(tasks_in "$home" show cap-blank --full)
+  assert_contains "$show" "held: yes" "a whitespace-only answer closed the hold"
+  out=$(printf 'cap-ctl\ta\001b\tL\n' | run_captain "$home" answers --source "cap fixture") \
+    || fail "an answer with a control character was refused"
+  show=$(tasks_in "$home" show cap-ctl --full)
+  assert_contains "$show" "Answer: ab" "control characters were not stripped from the answer"
+  # The label keeps its own 512 cut.
+  tasks_in "$home" add cap-label "Cap label" --kind ship --repo sample >/dev/null
+  run_captain "$home" hold cap-label --reason "captain call needed" >/dev/null
+  printf 'cap-label\tgo\t%s\n' "$(printf 'L%.0s' $(seq 1 700))" \
+    | run_captain "$home" answers --source "cap fixture" >/dev/null
+  show=$(tasks_in "$home" show cap-label --full)
+  assert_contains "$show" "$(printf 'L%.0s' $(seq 1 512))" "the label lost its 512 characters"
+  case "$show" in *"$(printf 'L%.0s' $(seq 1 513))"*) fail "the label was not cut to 512" ;; esac
+}
+
+test_replay_matches_records_written_before_the_cap_change() {
+  local home out show id
+  home=$(make_home legacy-replay)
+  for id in legacy-sel legacy-spaced; do
+    tasks_in "$home" add "$id" "Legacy fixture $id" --kind ship --repo sample >/dev/null
+    run_captain "$home" hold "$id" --reason "captain call needed" >/dev/null
+  done
+  # Fixture: the earlier board stored only the selected option when the captain
+  # also typed a note, while the label still showed both.
+  printf 'legacy-sel\tyes\tPick -> yes - reason\n' \
+    | run_captain "$home" answers --source "legacy fixture" >/dev/null \
+    || fail "could not write the selection-only record"
+  show=$(tasks_in "$home" show legacy-sel --full)
+  assert_contains "$show" "Answer: yes" "the fixture record was not written"
+  out=$(printf 'legacy-sel\tyes - reason\tPick -> yes - reason\n' \
+    | run_captain "$home" answers --source "legacy fixture") \
+    || fail "replaying a selection plus note against a selection-only record did not exit 0"
+  assert_contains "$out" "closed: legacy-sel" "the selection-plus-note replay was reported as a skip"
+  if printf 'legacy-sel\tno - reason\tPick -> yes - reason\n' \
+    | run_captain "$home" answers --source "legacy fixture" >/dev/null 2>&1; then
+    fail "a different selection was accepted against the closed record"
+  fi
+  # Fixture: a decision file as the earlier build wrote it, keeping the
+  # answer's surrounding spaces.
+  printf 'Captain answered this call through legacy fixture.\nTask: legacy-spaced\nAnswer:  yes \n' \
+    > "$home/spaced-decision.txt"
+  run_captain "$home" answer legacy-spaced --decision-file "$home/spaced-decision.txt" >/dev/null \
+    || fail "could not write the spaced record"
+  out=$(printf 'legacy-spaced\t yes \t\n' | run_captain "$home" answers --source "legacy fixture") \
+    || fail "replaying a spaced answer did not exit 0"
+  assert_contains "$out" "closed: legacy-spaced" "the spaced replay was reported as a skip"
+  pass "replay still matches a selection-only record and a record that kept its spaces"
+}
+
+test_send_resolve_key_refuses_over_cap_before_sending() {
+  local home id out rc
+  home=$(make_home send-cap)
+  id=sample-send-cap
+  tasks_in "$home" add "$id" "Send cap" --kind ship --repo sample >/dev/null
+  write_origin_meta "$home" "$id" ship
+  run_captain "$home" hold "$id" --reason "captain call needed" >/dev/null
+  out=$(env FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-send.sh" "$id" --resolve-key "$id" \
+    "$(printf 'a%.0s' $(seq 1 6001))" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an over-cap resolve-key steer was not refused"
+  assert_contains "$out" "6000-byte limit" "the over-cap steer was refused for another reason"
+  [ ! -e "$home/state/$id.inbox" ] || [ -z "$(ls "$home/state/$id.inbox" 2>/dev/null)" ] \
+    || fail "an over-cap resolve-key steer was delivered before refusal"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: yes" "the refused steer closed the hold"
+}
+
+test_full_answer_replay_matches_a_512_cut_record() {
+  local home out long cut
+  home=$(make_home cut-replay)
+  long=$(printf 'r%.0s' $(seq 1 2000))
+  cut=$(printf 'r%.0s' $(seq 1 512))
+  tasks_in "$home" add cut-replay "Cut replay" --kind ship --repo sample >/dev/null
+  run_captain "$home" hold cut-replay --reason "captain call needed" >/dev/null
+  # Close with the answer cut to 512, as the pre-cap code recorded it.
+  printf 'cut-replay\t%s\t\n' "$cut" | run_captain "$home" answers --source "cut fixture" >/dev/null \
+    || fail "could not close with the cut answer"
+  out=$(printf 'cut-replay\t%s\t\n' "$long" | run_captain "$home" answers --source "cut fixture") \
+    || fail "replaying the full answer after a 512-cut close did not exit 0"
+  assert_contains "$out" "closed: cut-replay" "the full-answer replay was not reported closed"
+  # A genuinely different answer is still refused.
+  if printf 'cut-replay\t%s\t\n' "different $long" | run_captain "$home" answers --source "cut fixture" >/dev/null 2>&1; then
+    fail "a different long answer was accepted against a closed hold"
+  fi
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate fakebin origin json
   parent=$(make_home main-routing)
@@ -5140,6 +5258,10 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_completion_keeps_an_armed_pr_identity_last
 test_completion_replaces_a_pair_recorded_after_pr
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_keyed_answer_cap_is_one_visible_limit
+test_send_resolve_key_refuses_over_cap_before_sending
+test_full_answer_replay_matches_a_512_cut_record
+test_replay_matches_records_written_before_the_cap_change
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement

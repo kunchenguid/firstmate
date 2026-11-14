@@ -801,9 +801,10 @@ cmd_choice_rows() {
         next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
           || !defined($note) || ref($note);
         next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
-        next unless length($note) <= 512;
         next unless length($selected) || length($note);
-        $answer = length($selected) ? $selected : $note;
+        # A selection with a note keeps the whole note in the answer; the
+        # label is only the 512-cut display text.
+        $answer = length($selected) ? (length($note) ? "$selected - $note" : $selected) : $note;
         $legacy = 0;
       # Time-limited compatibility for captures from pre-change boards; remove
       # once no board carrying the old question/answer context can remain armed.
@@ -812,7 +813,7 @@ cmd_choice_rows() {
         $key = $data->{question};
         $answer = $data->{answer};
         next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
-        next unless length($answer) && length($answer) <= 512;
+        next unless length($answer);
         next if $answer eq "reconcile" || index($answer, "reconcile - ") == 0;
         $selected = "";
         $note = "";
@@ -840,7 +841,9 @@ cmd_choice_rows() {
     for my $choice (grep { defined } @choices) {
       if ($selection eq "reconciles") {
         next if $choice->{legacy};
-        if ($choice->{selection} eq "reconcile") {
+        # A reconcile request keeps its 512-character note bound: an
+        # over-long one is dropped, exactly as before the answer cap moved.
+        if ($choice->{selection} eq "reconcile" && length($choice->{note}) <= 512) {
           print length($choice->{note})
             ? "$choice->{key}\t$choice->{note}\n"
             : "$choice->{key}\n";

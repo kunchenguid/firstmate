@@ -2,7 +2,10 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html>
+// Usage: node board-render-harness.mjs <built-board.html> [<submissions-json>]
+// An optional submissions array [{index, selection, note}] fills in and submits
+// the index-th decision form after the render; the result then carries
+//   submits:[{queued:[{prompt,text,data}], alert, alert_visible}]
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error }
@@ -25,6 +28,7 @@ class Node {
     this.value = "";
     this.checked = false;
     this.classList = {
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); },
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
       toggle: (c, force) => {
@@ -44,7 +48,7 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(type, fn) { (this.listeners ??= {})[type] = fn; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -85,7 +89,24 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+const queuedPrompts = [];
+globalThis.window = {
+  lavish: { queuePrompt: (prompt, opts) => queuedPrompts.push({ prompt, text: opts.text, data: opts.data }) },
+};
+globalThis.FormData = class {
+  constructor(form) {
+    this.values = new Map();
+    const walk = (n) => {
+      for (const c of n.children) {
+        if (c.tagName === "input" && c.type === "radio" && c.checked) this.values.set(c.name, c.value);
+        if (c.tagName === "input" && c.type === "text") this.values.set(c.name, c.value);
+        walk(c);
+      }
+    };
+    walk(form);
+  }
+  get(name) { return this.values.has(name) ? this.values.get(name) : null; }
+};
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
@@ -132,5 +153,32 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
+const submits = [];
+if (process.argv[3]) {
+  const forms = [];
+  const find = (n) => { for (const c of n.children) { if (c.tagName === "form") forms.push(c); find(c); } };
+  find(byId.get("bb-call") || new Node("div"));
+  for (const sub of JSON.parse(process.argv[3])) {
+    const form = forms[sub.index];
+    const inputs = [];
+    const gather = (n) => { for (const c of n.children) { if (c.tagName === "input") inputs.push(c); gather(c); } };
+    gather(form);
+    for (const i of inputs) {
+      if (i.type === "radio") i.checked = i.value === sub.selection;
+      if (i.type === "text") i.value = sub.note ?? "";
+    }
+    const before = queuedPrompts.length;
+    form.listeners.submit({ preventDefault() {} });
+    const limit = [];
+    const seek = (n) => { for (const c of n.children) { if (c.className.split(/\s+/).includes("bb-limit")) limit.push(c); seek(c); } };
+    seek(form);
+    submits.push({
+      queued: queuedPrompts.slice(before),
+      alert: limit[0]?.textContent ?? "",
+      alert_visible: limit[0]?.classList.contains("is-visible") ?? false,
+    });
+  }
+}
+
 process.stdout.write(
-  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText, submits }) + "\n");
