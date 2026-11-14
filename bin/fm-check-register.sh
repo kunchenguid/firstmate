@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
+# Registration also normalizes the check to mode 0700, so a freshly written
+# 0600 check cannot be left armed but unregistered (the watcher refuses any
+# check that is not mode 0700 with a matching trust record); every refusal
+# names the reason on stderr.
 # Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.
 set -u
 
@@ -25,14 +29,62 @@ TRUST="$STATE/$ID.check-trust"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
+[ "$(fm_pr_file_device "$CHECK")" = "$STATE_DEVICE" ] && [ "$(fm_pr_file_link_count "$CHECK")" = 1 ] \
+  || { echo "error: custom check state/$ID.check.sh must be a single-link file on the state device; not registered, the watcher will refuse it" >&2; exit 1; }
+TMP=
+trap '[ -z "$TMP" ] || rm -f -- "$TMP"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "$(fm_pr_file_mode "$CHECK")" != 700 ]; then
+  if ! perl -MFile::Temp -MFcntl=O_RDONLY,O_NOFOLLOW,O_NONBLOCK -e '
+    my ($tmp, $cleanup);
+    END { unlink $tmp if $cleanup && defined $tmp; }
+    $cleanup = 1;
+    $SIG{HUP} = sub { exit 129; };
+    $SIG{INT} = sub { exit 130; };
+    $SIG{TERM} = sub { exit 143; };
+    my ($out, $name) = File::Temp::tempfile(
+      ".fm-custom-check.XXXXXX", DIR => $ARGV[1], UNLINK => 0, PERMS => 0700,
+    );
+    $tmp = $name;
+    chmod 0700, $out or exit 1;
+    sysopen(my $in, $ARGV[0], O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;
+    my @state = stat($ARGV[1]);
+    my @input = stat($in);
+    @state && @input && ($input[2] & 0170000) == 0100000 && $input[0] == $state[0] && $input[3] == 1 or exit 1;
+    binmode $in or exit 1;
+    binmode $out or exit 1;
+    my $previous = select($out);
+    $| = 1;
+    select($previous);
+    while (1) {
+      my $length = read($in, my $bytes, 8192);
+      defined $length or exit 1;
+      last if !$length;
+      print {$out} $bytes or exit 1;
+    }
+    close $in or exit 1;
+    my @file = stat($out);
+    my @path = lstat($tmp);
+    @file && @path && $file[0] == $path[0] && $file[1] == $path[1] && $path[3] == 1 or exit 1;
+    rename $tmp, $ARGV[0] or exit 1;
+    my @published = lstat($ARGV[0]);
+    @file && @published && $file[0] == $published[0] && $file[1] == $published[1] && $published[3] == 1 or exit 1;
+    close $out or exit 1;
+    $cleanup = 0;
+  ' "$CHECK" "$STATE"; then
+    echo "error: could not set mode 0700 on state/$ID.check.sh; not registered, the watcher will refuse it" >&2
+    exit 1
+  fi
+fi
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
-  || { echo "error: custom check is unavailable" >&2; exit 1; }
+  || { echo "error: custom check state/$ID.check.sh is not a private mode-0700 file; not registered, the watcher will refuse it" >&2; exit 1; }
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" \
   || { echo "error: custom check trust path is unavailable" >&2; exit 1; }
 HASH=$(fm_custom_check_sha256 "$CHECK") || { echo "error: custom check hash is unavailable" >&2; exit 1; }
 umask 077
 TMP=$(mktemp "$STATE/.fm-custom-check-trust.XXXXXX") || exit 1
-trap '[ -z "$TMP" ] || rm -f -- "$TMP"' EXIT HUP INT TERM
 printf '%s\n%s\n' fm-custom-check-v1 "$HASH" > "$TMP" || exit 1
 chmod 0600 "$TMP" || exit 1
 fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1

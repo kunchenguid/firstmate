@@ -410,7 +410,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-check-unregister.test.sh|fm-park.test.sh|fm-pipeline-spend.test.sh|fm-pr-check-security.test.sh|\
+    fm-check-register.test.sh|fm-check-unregister.test.sh|fm-park.test.sh|fm-pipeline-spend.test.sh|fm-pr-check-security.test.sh|\
     fm-pr-health.test.sh|fm-pr-merge.test.sh|fm-pr-reviewers.test.sh|fm-pr-state.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
@@ -773,6 +773,7 @@ tests/fm-calm-claude-mod.test.sh 2527
 tests/fm-calm-pi-extension.test.sh 56463
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
 tests/fm-capacity-auto.test.sh 36243
+tests/fm-check-register.test.sh 400
 tests/fm-check-unregister.test.sh 469
 tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
