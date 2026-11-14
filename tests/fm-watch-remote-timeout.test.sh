@@ -188,6 +188,7 @@ test_stuck_hosts_share_one_cycle_budget() {
       remote_backend=herdr remote_herdr_session=fm-remote remote_target=fm-remote:w1:p1 \
       "home=/remote/rsm$n-home" > "$w/home/state/rsm$n.meta"
   done
+  # shellcheck disable=SC2016 # literal text for the fake ssh script
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf "%s %s\n" "$(date +%s)" "$*" >> "${FM_FAKE_SSH_LOG:?}"' \
     'exec sleep 30' > "$w/fakebin/ssh"
@@ -222,6 +223,7 @@ test_stuck_hosts_share_one_cycle_budget() {
 test_remote_exit_before_the_bound_is_not_a_timeout() {
   local w rc want
   w=$(make_world remote-exit)
+  # shellcheck disable=SC2016 # literal text for the fake ssh script
   printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "${FM_FAKE_SSH_LOG:?}"' \
     'exit "${FM_FAKE_SSH_RC:?}"' > "$w/fakebin/ssh"
   for want in 124 137; do
