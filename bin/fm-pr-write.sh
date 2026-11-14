@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run one write on a pull request after checking who authored it.
+# Run one write on a GitHub pull request after checking who authored it.
+# Writes on other forges keep their existing path and are refused here with exit 2.
 #
 # Usage: fm-pr-write.sh <pr-url> <action> [options]
 #   edit [--title <text>] [--body-file <path>]

@@ -841,6 +841,7 @@ The optional local, gitignored `config/pr-author-write-guard` presence flag make
 With the flag present, a write runs only on a PR that a task of this home recorded as `pr=`, or on a GitHub PR whose author is the account `gh` is signed in as on that host.
 Any other PR, including one whose author or account cannot be read, is refused with exit 3, and the refusal is an owner decision to park.
 With the file absent, `bin/fm-pr-write.sh` runs the same actions (`edit`, `comment`, `review`, `resolve-thread`) without the author check.
+The script accepts GitHub PR URLs only; writes on other forges keep their existing path.
 The script builds each `gh` call from the checked URL; `resolve-thread` is refused when the thread belongs to another PR.
 Merges are outside this guard because `bin/fm-pr-merge.sh` owns their checks.
 The flag takes effect on the next write and is not inherited by secondmate homes.
