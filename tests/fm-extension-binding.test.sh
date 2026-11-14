@@ -732,7 +732,8 @@ def run_case(kind):
                 command = ["node", str(host), "process-event", "ext-sleep", "source.poll",
                     "--source-id", "sleep-source", "--config-ref", f"active-block|{marker}|{release}", *expected]
             process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            wait_for(marker.exists)
+            # Opening the marker creates it before the PID is written.
+            wait_for(lambda: marker.exists() and marker.stat().st_size > 0)
             if kind == "launch":
                 group = int(marker.read_text())
             else:

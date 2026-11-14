@@ -471,7 +471,9 @@ test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out() {
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
   local home
   home=$(make_primary_home hook-turns-main-only)
-  turn_main_only_at_second_offer "$home"
+  # Change eligibility without a new status event that could legitimately
+  # close the successor before the liveness assertion.
+  turn_main_only_at_second_offer "$home" quiet
   start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "hook turns-main-only: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
