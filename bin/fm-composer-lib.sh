@@ -81,7 +81,7 @@
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
+#                glyph and no side border. Normally provable only with a live agent
 #                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
@@ -90,6 +90,8 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
+#                For Pi's status-only exception after a Codex usage-limit
+#                error, see bin/fm-composer-pi-adapter.sh (issue #5000).
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -180,6 +182,13 @@
 #
 # Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
+
+# The named, version-pinned Pi rendered-screen adapter (VISION.md) owns the
+# Pi banner recognition used by the separated-shape classifier below. Every
+# consumer that ships or links this library must ship the adapter beside it.
+# shellcheck source=bin/fm-composer-pi-adapter.sh
+FM_COMPOSER_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd) || return 1
+. "$FM_COMPOSER_LIB_DIR/fm-composer-pi-adapter.sh" || return 1
 
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
@@ -2538,15 +2547,24 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   fi
 }
 
+# _fm_composer_pi_terminal_banner_above: thin wrapper over the named Pi adapter.
+# The adapter owns the version pin and the banner/hint recognition.
+_fm_composer_pi_terminal_banner_above() {  # <screen>
+  fm_composer_pi_adapter_terminal_banner_above "$1"
+}
+
+
 # The pi separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# live pi state; an empty composer normally requires an idle/done pi. A blocked
 # pi is parked on an interactive prompt waiting for a human keystroke: its menu
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
-# cannot disprove that, so a blocked pi defers rather than claiming empty.
+# alone cannot disprove that. The sole status exception is owned by
+# bin/fm-composer-pi-adapter.sh; it never relaxes the identity, valid-pair, or
+# pending-input checks here, and does not apply to Polytoken.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -2582,6 +2600,12 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   case "$agent_status" in
     idle|done) printf 'empty' ;;
-    *) printf 'unknown' ;;
+    *)
+      if [ "$agent" = pi ] && _fm_composer_pi_terminal_banner_above "$screen"; then
+        printf 'empty'
+      else
+        printf 'unknown'
+      fi
+      ;;
   esac
 }

@@ -2375,8 +2375,8 @@ fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
 #                 stability across a server restart"), and what a future
 #                 `resume_agents_on_restore = false` restore would produce too
 #                 (a plain shell, never an agent).
-#   stale-agent - `agent get` reports a registered agent_status (working, idle,
-#                 done, or blocked) but fm_backend_herdr_pane_process_state
+#   stale-agent - `agent get` still reports a registration, but
+#                 fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
 #                 has exited and Herdr kept its registration (issue #4115;
 #                 Herdr does not release a Pi registration on TUI shutdown when
@@ -2386,10 +2386,9 @@ fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
 #                 running agent. No registered status outranks the process
 #                 view, because a killed mid-turn agent leaves `working`
 #                 behind just as a quit one leaves `idle`.
-#   live        - `agent get` succeeds with a registered agent_status and the
-#                 process-level view is `agent` or `other`: a harness process
-#                 is running, or something that is not a bare shell is, so the
-#                 registration keeps its authority. An idle or blocked agent
+#   live        - the registration has the process evidence required by
+#                 docs/herdr-backend.md "Stale agent registrations".
+#                 An idle or blocked agent
 #                 is still a genuine, still-registered agent, not a restored
 #                 husk, so it is never a close-and-replace candidate.
 #   unknown     - anything else: an unparseable/unexpected response from
@@ -2420,6 +2419,18 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
     working|idle|done|blocked) ;;
+    unknown)
+      if printf '%s' "$out" | jq -e '.result.agent.agent == "pi"' >/dev/null 2>&1; then
+        case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
+          agent) printf 'live' ;;
+          shell) printf 'stale-agent' ;;
+          *) printf 'unknown' ;;
+        esac
+      else
+        printf 'unknown'
+      fi
+      return 0
+      ;;
     *) printf 'unknown'; return 0 ;;
   esac
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in

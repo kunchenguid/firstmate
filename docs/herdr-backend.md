@@ -766,14 +766,15 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - Bordered boxes.
 - Bare agent-glyph rows, including muse's `⟩`, which the adapter's retired local pattern silently omitted.
 - opencode's left bar.
-- The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+- The identity-corroborated Pi separator region described under [Pi composer states](#pi-composer-states).
 - Cortex Code's titled rounded top rule, admitted only when native `agent get` identity is exactly `cortex`, which the adapter reads lazily and only when the classifier answers `need-identity` for a titled rounded box holding an agent prompt glyph; the same box on any other pane stays ambiguous, and Cortex is [verified](verification/cortex.md) on Herdr for crewmates and scouts only.
 
 ### Pi composer states
 
-A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
-That state defers instead of proving emptiness.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+An empty separator region normally requires exact native Pi identity with an idle or done state.
+A blocked Pi may be waiting on an interactive prompt above that region, so a blank composer alone cannot prove it is free.
+The [version-pinned Pi banner adapter](../bin/fm-composer-pi-adapter.sh) owns the sole status exception after a Codex usage-limit error, including its exact banner and optional hint bounds.
+That exception can settle a stale working, blocked, or unknown state, but pending input, missing or foreign identity, an incomplete separator pair, and an over-tall candidate still prevent an empty verdict.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ### Placeholder and ghost text
@@ -838,7 +839,8 @@ In that case `agent get` still reports `agent=pi` with its last status.
 That nested shell is the shape the interactive `treehouse get` leaves behind; fresh Herdr spawns lease durably instead (see [Restart recovery](#restart-recovery)), but older or hand-driven panes can still have it (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
-It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
+It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with.
+For a registration reporting `working`, `idle`, `done`, or `blocked`, the verdicts are:
 
 | What the process view shows | Verdict |
 | --- | --- |
@@ -846,6 +848,10 @@ It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, 
 | A foreground that is nothing but shells, with no harness descendant | A `stale-agent` pane: agent-free, with that explicit reason. |
 | A foreground holding anything else | The registration stays live, but only after the same bounded settle window the idle-shell proof uses. |
 | An unreadable process view | The pane is `unknown`, trusting neither the registration nor its absence. |
+
+A Pi registration with `agent_status=unknown` counts as live only when the process view positively identifies a harness.
+A proven shell-only view maps that registration to `stale-agent`, so recovery can confirm the agent stopped without permitting pane closure.
+An unrelated foreground tool or an unreadable process view keeps that registration `unknown`.
 
 The settle window exists because an idle shell transiently hosts prompt helpers such as starship in its foreground group.
 The first agent or shell sample in that window decides.
