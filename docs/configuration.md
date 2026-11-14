@@ -13,9 +13,23 @@ Start with the directory layout, then use the setting reference for the behavior
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
+| Local commit and log drafts | [Local text helper](#local-text-helper-configlocal-llmjson) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
+
+## Local text helper (config/local-llm.json)
+
+`bin/fm-local-llm.py` is optional help for workers drafting a commit message or summarising a test log before reading it in full.
+It does not make implementation or safety decisions, and workers review its output before use.
+Create the private, gitignored `local-llm.json` in the effective config directory, which is `FM_CONFIG_OVERRIDE` when set and `$FM_HOME/config` otherwise:
+
+```json
+{"base_url":"http://llm-box:8000/v1","model":"nvidia/Qwen3.8-27B-NVFP4"}
+```
+
+Use `bin/fm-local-llm.py` to draft a conventional commit message from a diff or to summarise a test log; its command help owns the input forms and exact commands.
+The helper requires Python 3, sends requests without an API key, disables model thinking, and exits unsuccessfully without stdout when configuration, the endpoint, or a complete valid response is unavailable.
 
 ## FM_HOME
 
