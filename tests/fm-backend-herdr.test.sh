@@ -569,6 +569,61 @@ shell_only_process_info() {  # <shell-pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"],"cmdline":"-zsh"}]}}}' "$1" "$1" "$1"
 }
 
+test_unknown_pi_status_requires_positive_process_evidence_for_recovery() (
+  . "$ROOT/bin/backends/herdr.sh"
+  pane_reply='{"result":{"pane":{"pane_id":"w1:p2"}}}'
+  agent_reply='{"result":{"agent":{"agent":"pi","agent_status":"unknown"}}}'
+  process_reply='{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi","argv":["pi"]}]}}}'
+  process_rc=0
+  export FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1
+  fm_backend_herdr_cli() {
+    case "$2 $3" in
+      'pane get') printf '%s' "$pane_reply" ;;
+      'agent get') printf '%s' "$agent_reply" ;;
+      'pane process-info') printf '%s' "$process_reply"; return "$process_rc" ;;
+      'status --json') printf '{"server":{"running":true}}' ;;
+      *) return 1 ;;
+    esac
+  }
+  out=$(fm_backend_herdr_pane_agent_state fmtest w1:p2)
+  [ "$out" = live ] || fail "an unknown Pi status with a live process must classify as live, got '$out'"
+  out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+  [ "$out" = alive ] || fail "a registered Pi with an unknown status and live process must recover as alive, got '$out'"
+  if fm_backend_herdr_tab_is_husk fmtest w1:p2; then
+    fail "a live Pi with an unknown status must never license closing its pane"
+  fi
+  for agent_reply in \
+    '{"result":{"agent":{"agent":"codex","agent_status":"unknown"}}}' \
+    '{"result":{"agent":{"agent":"pi"}}}' \
+    '{"result":{"agent":{"agent":"pi","agent_status":"unrecognized"}}}' \
+    'not json'; do
+    out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+    [ "$out" = unreadable ] || fail "an absent, foreign or malformed Pi identity must refuse recovery, got '$out'"
+  done
+  agent_reply='{"error":{"code":"agent_not_found"}}'
+  out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+  [ "$out" = dead ] || fail "an absent registration must not be promoted to alive, got '$out'"
+  agent_reply='{"result":{"agent":{"agent":"pi","agent_status":"unknown"}}}'
+  process_rc=1
+  out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+  [ "$out" = unreadable ] || fail "a failed process read must refuse recovery, got '$out'"
+  process_rc=0
+  for process_reply in \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv":["node","app.js"]}]}}}' \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"other","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"pi","argv":["pi"]}]}}}' \
+    'not json'; do
+    out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+    [ "$out" = unreadable ] || fail "an unknown Pi status without positive process evidence must refuse recovery, got '$out'"
+  done
+  pane_reply='{"result":{"pane":{"pane_id":"other"}}}'
+  out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+  [ "$out" = unreadable ] || fail "a mismatched pane must refuse recovery, got '$out'"
+  pane_reply='{"error":{"code":"pane_not_found"}}'
+  out=$(fm_backend_herdr_agent_state fmtest:w1:p2)
+  [ "$out" = missing ] || fail "a missing pane must not be promoted to alive, got '$out'"
+  pass "herdr recovery: an unknown Pi status needs a present pane, readable Pi identity and positive process evidence; pane closing stays strict"
+)
+
 test_stale_registration_over_a_shell_only_pane_is_agent_free() {
   local sleep_bin shell_pid out
   sleep_bin=$(command -v sleep) || fail "sleep not found"
@@ -587,7 +642,7 @@ test_stale_registration_ignores_status_and_reads_the_process() {
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   "$sleep_bin" 300 &
   shell_pid=$!
-  for status in working 'done' blocked; do
+  for status in working 'done' blocked unknown; do
     out=$(stale_registration_case "shell-only-$status" "$status" "$(shell_only_process_info "$shell_pid")")
     [ "$out" = "stale-agent dead refused" ] \
       || { kill "$shell_pid" 2>/dev/null; fail "a lingering '$status' record over a shell-only pane must still read stale-agent/dead, got '$out'"; }
@@ -6544,6 +6599,7 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
+test_unknown_pi_status_requires_positive_process_evidence_for_recovery
 test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
