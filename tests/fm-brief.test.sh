@@ -393,7 +393,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "COMMITTING IS NOT DONE." "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -482,6 +482,59 @@ test_pr_based_dod_requires_non_draft() {
       "$mode: a deliberate draft must declare a wait instead of done"
   done
   pass "fm-brief.sh: PR-based done requires a non-draft PR; a deliberate draft declares a wait"
+}
+
+# Direct-PR crews pattern-matched "complete when committed" over the pipeline
+# contract (2026-11-14). The no-mistakes Definition of done must lead with
+# COMMITTING IS NOT DONE; the direct-PR variant must not gain that lead.
+test_no_mistakes_dod_leads_with_committing_is_not_done() {
+  local home brief dod first_human
+  home="$TMP_ROOT/nm-lead-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-nm-lead some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes brief should scaffold"
+  brief="$home/data/brief-nm-lead/brief.md"
+  dod=$(awk '/^# Definition of done$/ { emit=1 } emit { print }' "$brief")
+  [ -n "$dod" ] || fail "no-mistakes brief emitted no Definition of done"
+  assert_contains "$dod" "COMMITTING IS NOT DONE." \
+    "no-mistakes DoD must contain COMMITTING IS NOT DONE"
+  assert_contains "$dod" "done means a checks-green PR only." \
+    "no-mistakes DoD must say done is a checks-green PR only"
+  # shellcheck disable=SC2016  # backticks are the rendered Markdown the worker must see
+  assert_contains "$dod" 'You drive the pipeline (`no-mistakes axi run` / `respond`' \
+    "no-mistakes DoD must tell the worker to drive axi run/respond"
+  first_human=$(printf '%s\n' "$dod" | awk '
+    /^# Definition of done$/ { next }
+    /^Delivery contract:/ { next }
+    /^Ship branch:/ { next }
+    { print; exit }
+  ')
+  [ "$first_human" = "COMMITTING IS NOT DONE." ] \
+    || fail "COMMITTING IS NOT DONE was not the first worker-facing DoD line after the contract (got: $first_human)"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DoD still tells the worker to stop and wait for a pipeline instruction"
+  assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+    "no-mistakes DoD still leads with the direct-PR complete-when-committed stop"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-dp-lead some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR brief should scaffold"
+  brief="$home/data/brief-dp-lead/brief.md"
+  assert_no_grep "COMMITTING IS NOT DONE" "$brief" \
+    "direct-PR DoD must not gain the no-mistakes committing-is-not-done lead"
+  assert_grep "The task is complete only when committed on your branch." "$brief" \
+    "direct-PR DoD lost its complete-when-committed contract"
+  assert_no_grep "done means a checks-green PR only." "$brief" \
+    "direct-PR DoD gained the no-mistakes checks-green-PR-only lead"
+  # shellcheck disable=SC2016  # backticks are the rendered Markdown the worker must see
+  assert_no_grep 'You drive the pipeline (`no-mistakes axi run` / `respond`' "$brief" \
+    "direct-PR DoD gained the no-mistakes pipeline-driving lead"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-lo-lead some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "local-only brief should scaffold"
+  assert_no_grep "COMMITTING IS NOT DONE" "$home/data/brief-lo-lead/brief.md" \
+    "local-only DoD must not gain the no-mistakes committing-is-not-done lead"
+  pass "fm-brief.sh: no-mistakes DoD leads with COMMITTING IS NOT DONE; direct-PR does not"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -1701,6 +1754,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_no_mistakes_dod_leads_with_committing_is_not_done
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
