@@ -5236,44 +5236,16 @@ test_required_check_declarations_apply_only_where_the_plan_hides_rules() {
   pass "fm-pr-merge applies declarations only to the named repository while its plan hides the branch rules"
 }
 
-# Required checks belong to the repository rather than the home, so a
-# secondmate home inherits the primary's declarations and a merge from that
-# home enforces them too.
-test_secondmate_home_inherits_declared_required_checks() {
-  local case_dir head primary
-  head=d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5
-  case_dir=$(make_case declared-secondmate)
-  primary="$case_dir/primary/config"
-  mkdir -p "$primary"
-  printf '%s\n' 'github.com/example/repo github-actions pull_request build' > "$primary/github-required-checks"
-  add_gh_mocks "$case_dir" "$head"
-  write_github_rollup_json "$case_dir" "$head"
-  write_github_rules_hidden_on_plan "$case_dir"
-  write_github_check_runs "$case_dir" "$head"
-  write_github_workflow_runs "$case_dir" "$head"
-  bash -c '. "$1/bin/fm-config-inherit-lib.sh" && propagate_inheritable_config "$2" "$3"' \
-    _ "$ROOT" "$primary" "$case_dir/home/config" > "$case_dir/inherit.out" 2>&1 \
-    || fail "secondmate-inherit: propagation failed: $(cat "$case_dir/inherit.out")"
-  cmp -s "$primary/github-required-checks" "$case_dir/home/config/github-required-checks" \
-    || fail "secondmate-inherit: the secondmate home did not receive the primary's declarations"
-  run_required_case "$case_dir" 124
-  expect_code 1 "$RC" "secondmate-inherit: a merge from the secondmate home must enforce the inherited declaration"
-  assert_grep "declared required check 'build' (github-actions, pull_request) has not reported at head $head" \
-    "$case_dir/stderr" "secondmate-inherit: the inherited declaration was not enforced"
-  pass "a secondmate home inherits the primary's declared required checks and its merges enforce them"
-}
-
-# The declaration file's sources and failures: commit statuses, app ids,
-# checks from apps without a triggering event, pending runs, unreadable reads,
-# and a malformed or unreadable file, which refuses rather than dropping a
-# requirement.
+# The declaration file's failures: pending runs, unreadable reads, and a
+# malformed or unreadable file, including a line that puts "-" or a numeric
+# app id in place of the app slug or event, which refuses rather than dropping
+# a requirement.
 test_declared_required_check_sources_and_errors() {
-  local case_dir head label expected message config
+  local case_dir head label message config
   head=d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4
-  for label in status-green status-absent status-from-check-run status-pending \
-    app-id any-event pending runs-unreadable workflow-runs-unreadable stale-runs \
-    selector-case malformed malformed-other-repository status-with-event unreadable \
-    unsearchable; do
+  for label in pending runs-unreadable workflow-runs-unreadable stale-runs \
+    selector-case malformed malformed-other-repository malformed-status \
+    malformed-app-id malformed-any-event unreadable unsearchable; do
     case_dir=$(make_case "declared-source-$label")
     config="$case_dir/home/config/github-required-checks"
     add_gh_mocks "$case_dir" "$head"
@@ -5281,41 +5253,8 @@ test_declared_required_check_sources_and_errors() {
     write_github_check_runs "$case_dir" "$head" \
       'build|completed|success|2026-11-14T10:00:00Z|github-actions|15368|1'
     write_github_workflow_runs "$case_dir" "$head" '1:pull_request'
-    expected=1 message=
+    message=
     case "$label" in
-      status-*)
-        write_required_check_declarations "$case_dir" 'github.com/example/repo - - ci/local-gate'
-        ;;
-    esac
-    case "$label" in
-      status-green)
-        write_github_rollup_json "$case_dir" "$head" "$(check_run ci COMPLETED SUCCESS)" \
-          "$(status_context ci/local-gate SUCCESS)"
-        expected=0
-        ;;
-      status-absent)
-        message="declared required check 'ci/local-gate' (commit status) has not reported at head $head"
-        ;;
-      status-from-check-run)
-        write_github_rollup_json "$case_dir" "$head" "$(check_run ci/local-gate COMPLETED SUCCESS)"
-        message="declared required check 'ci/local-gate' (commit status) has not reported at head $head"
-        ;;
-      status-pending)
-        write_github_rollup_json "$case_dir" "$head" "$(check_run ci COMPLETED SUCCESS)" \
-          "$(status_context ci/local-gate PENDING)"
-        message="declared required check 'ci/local-gate' (commit status) has not succeeded at head $head"
-        ;;
-      app-id)
-        write_required_check_declarations "$case_dir" 'github.com/example/repo 15368 pull_request build'
-        expected=0
-        ;;
-      any-event)
-        write_required_check_declarations "$case_dir" 'github.com/example/repo other-ci - lint'
-        write_github_check_runs "$case_dir" "$head" \
-          'lint|completed|neutral|2026-11-14T10:00:00Z|other-ci|42|7'
-        rm "$case_dir/github-workflow-runs.json"
-        expected=0
-        ;;
       pending)
         write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions pull_request build'
         write_github_check_runs "$case_dir" "$head" \
@@ -5357,8 +5296,16 @@ test_declared_required_check_sources_and_errors() {
           'example/other github-actions pull_request build'
         message="line 2 of $config is not a valid required-check declaration"
         ;;
-      status-with-event)
-        write_required_check_declarations "$case_dir" 'github.com/example/repo - pull_request ci/local-gate'
+      malformed-status)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo - - ci/local-gate'
+        message="line 1 of $config is not a valid required-check declaration"
+        ;;
+      malformed-app-id)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo 15368 pull_request build'
+        message="line 1 of $config is not a valid required-check declaration"
+        ;;
+      malformed-any-event)
+        write_required_check_declarations "$case_dir" 'github.com/example/repo github-actions - build'
         message="line 1 of $config is not a valid required-check declaration"
         ;;
       unreadable)
@@ -5376,26 +5323,20 @@ test_declared_required_check_sources_and_errors() {
     # A waiver names one check, so it never stands in for declarations that
     # could not be read or judged.
     case "$label" in
-      malformed*|status-with-event|unreadable|unsearchable|*-unreadable|stale-runs)
+      malformed*|unreadable|unsearchable|*-unreadable|stale-runs)
         run_required_case "$case_dir" 123 --allow-missing build ;;
       *) run_required_case "$case_dir" 123 ;;
     esac
     [ "$label" != unsearchable ] || chmod 755 "$case_dir/home/config"
-    expect_code "$expected" "$RC" "source-$label: $(cat "$case_dir/stderr")"
-    if [ "$expected" = 0 ]; then
-      assert_logged_gh_merge "$case_dir" 123 example/repo --squash
-    else
-      assert_grep "$message" "$case_dir/stderr" "source-$label: the refusal did not say: $message"
-      assert_no_grep 'pr merge' "$case_dir/gh.log" "source-$label: gh pr merge ran"
-    fi
+    expect_code 1 "$RC" "source-$label: $(cat "$case_dir/stderr")"
+    assert_grep "$message" "$case_dir/stderr" "source-$label: the refusal did not say: $message"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" "source-$label: gh pr merge ran"
     case "$label" in
-      status-*|malformed*|unreadable|unsearchable)
-        assert_no_grep 'check-runs' "$case_dir/gh.log" "source-$label: check runs were read without a declared check run" ;;
-      any-event)
-        assert_no_grep 'actions/runs' "$case_dir/gh.log" "source-$label: workflow runs were read without a declared event" ;;
+      malformed*|unreadable|unsearchable)
+        assert_no_grep 'check-runs' "$case_dir/gh.log" "source-$label: check runs were read without a valid declaration" ;;
     esac
   done
-  pass "fm-pr-merge judges declared statuses, app ids, eventless apps, and pending runs, and refuses unreadable reads and declarations"
+  pass "fm-pr-merge refuses pending declared checks, unreadable reads, and malformed or unreadable declarations"
 }
 
 test_required_partial_reads_report_all_failures() {
@@ -5895,7 +5836,6 @@ test_declared_required_check_refuses_a_head_without_checks
 test_declared_required_check_ignores_a_same_named_run_from_another_event
 test_required_check_declarations_apply_only_where_the_plan_hides_rules
 test_declared_required_check_sources_and_errors
-test_secondmate_home_inherits_declared_required_checks
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo

@@ -1293,9 +1293,9 @@ EOF
 $missing
 EOF
   fi
-  if ! github_declared_checks_unmet "$live_head" "$json"; then
+  if ! github_declared_checks_unmet "$live_head"; then
     FM_PR_GITHUB_OTHER_REFUSAL=true
-    refusals="$refusals  - ${FM_PR_GITHUB_DECLARED_ERROR:-the GitHub pull request check rollup could not be read}, so a declared required check cannot be judged
+    refusals="$refusals  - $FM_PR_GITHUB_DECLARED_ERROR, so a declared required check cannot be judged
 "
   else
     while IFS=$'\t' read -r verdict name source; do

@@ -2504,28 +2504,26 @@ Without the file, or without a line for the repository, merges behave exactly as
 Each line declares one check:
 
 ```text
-# <host>/<owner>/<repo> <app> <event> <check name>
+# <host>/<owner>/<repo> <app-slug> <event> <check name>
 github.com/acme/app github-actions pull_request build
 github.com/acme/app github-actions pull_request test (ubuntu-latest)
-github.com/acme/app other-ci - lint
-github.com/acme/app - - ci/local-gate
 ```
 
 - The repository is the pull request URL's host, owner, and repository, matched without regard to case.
-- The app is the slug or numeric id of the GitHub App that produces the check run, such as `github-actions`; `-` declares a commit status, which has no app.
-- The event is the GitHub Actions event that triggered the workflow run the check run belongs to, such as `pull_request`, `push`, or `workflow_dispatch`.
-- An event of `-` binds no event, for a check from an app other than GitHub Actions; a commit status always uses `-`.
-- The check name is the rest of the line, matched exactly: the check run's name, which for GitHub Actions is the job name, or the status context, the same name branch rules and `--allow-red` use.
+- The app is the slug of the GitHub App that produces the check run, such as `github-actions`.
+- The event is the GitHub Actions event that triggered the workflow run the check run belongs to, such as `pull_request`, `push`, or `workflow_dispatch`, and is required; a check run that belongs to no GitHub Actions workflow run has no event, so it never satisfies a declaration.
+- The check name is the rest of the line, matched exactly: the check run's name, which for GitHub Actions is the job name, the same name branch rules and `--allow-red` use.
 - Blank lines and lines starting with `#` are ignored, and repeated lines count once.
+- A line in any other form, such as one with `-` or a numeric app id in place of the app slug or event, is malformed.
 - A malformed line anywhere in the file, even one for another repository, or a present file that cannot be read, refuses every merge on a plan that hides branch rules and names the file and line, so a typo never drops a requirement.
 
-A declared check must have succeeded at the pull request's verified head: a check run completed with success, neutral, or skipped, or a commit status of success.
-Only runs from the declared app, and from the declared event when one is named, count, so a same-named run from another app or event never stands in for it.
+A declared check must have succeeded at the pull request's verified head: a check run completed with success, neutral, or skipped.
+Only runs from the declared app and event count, so a same-named run from another app or event never stands in for it.
 Among the runs that count, a newer run replaces an older one by the rule the merge script's header owns, so a successful re-run of the declared event satisfies the check.
 A declared check that has not reported, is still running, or failed refuses the merge, including under standing or away merge authority, and the attended `--allow-missing` and `--allow-red` waivers apply to it by name.
-Judging a check run reads the head's check runs, and judging an event also reads the head's GitHub Actions workflow runs, so the `gh` login needs read access to the repository's Actions; a failed read refuses.
+Judging a declared check reads the head's check runs and GitHub Actions workflow runs, so the `gh` login needs read access to the repository's Actions; a failed read refuses.
 The [park-on-review](#park-on-review) gate applies the same declarations, and they do not apply to GitLab or Forgejo merges, which already require the head pipeline or commit status to succeed.
-The file is inherited by secondmate homes under the primary-authoritative contract, because required checks belong to the repository rather than the home, so declare them in the primary home.
+The file is local to each home and not part of secondmate inherited configuration, so a home that merges a repository on its own, such as a secondmate, declares that repository's checks in its own copy.
 [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) owns the parsing and matching.
 
 ## External review tool (config/external-review.md, config/external-review-url, config/external-review-backup)

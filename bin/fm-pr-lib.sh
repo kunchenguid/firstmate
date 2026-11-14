@@ -1174,9 +1174,9 @@ github_read_required_check_declarations() {
         | ([$line | capture("^(?<repo>[^ \t]+)[ \t]+(?<app>[^ \t]+)[ \t]+(?<event>[^ \t]+)[ \t]+(?<context>.+)$")] | .[0]) as $m
         | if $m != null
              and ($m.repo | test("^[^/]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
-             and ($m.app | test("^(-|[0-9]+|[A-Za-z0-9][A-Za-z0-9-]*)$"))
-             and ($m.event | test("^(-|[a-z_]+)$"))
-             and ($m.app != "-" or $m.event == "-")
+             and ($m.app | test("^[A-Za-z0-9][A-Za-z0-9-]*$"))
+             and ($m.app | test("^[0-9]+$") | not)
+             and ($m.event | test("^[a-z_]+$"))
              and ($m.context | explode | any(. < 32 or . == 127) | not)
           then {repo: ($m.repo | ascii_downcase), context: $m.context,
                 app: ($m.app | ascii_downcase), event: $m.event}
@@ -1305,88 +1305,70 @@ github_read_required_producers() {  # <head>
 # FM_PR_GITHUB_DECLARED_UNMET to one "<verdict>\t<context>\t<source>" line per
 # declared check that has not succeeded, where verdict is unreported, pending,
 # or failed and source names the declared app and event for messages. A
-# declared check run counts only runs at <head> with its name, from its app
-# (slug, or id when all digits), and, unless its event is "-", whose check
-# suite belongs to a GitHub Actions workflow run of that event, so a same-named
-# run from another app or event never stands in for it. Among those runs the
-# current one decides, by the supersession rule bin/fm-pr-merge.sh's
-# github_checks_not_green documents, and green means completed with success,
-# neutral, or skipped. A declared commit status (app "-") is the rollup's
-# status context of that name. The check runs, and the workflow runs when an
-# event is declared, are read only when a check run is declared; a failed or
-# malformed read returns 1 with FM_PR_GITHUB_DECLARED_ERROR set, and an
-# unreadable rollup returns 1 with it empty.
+# declared check counts only check runs at <head> with its name, from its app
+# slug, whose check suite belongs to a GitHub Actions workflow run of its
+# event, so a same-named run from another app or event never stands in for it.
+# Among those runs the current one decides, by the supersession rule
+# bin/fm-pr-merge.sh's github_checks_not_green documents, and green means
+# completed with success, neutral, or skipped. Any failure, including a failed
+# or malformed read of the check runs or workflow runs, returns 1 with
+# FM_PR_GITHUB_DECLARED_ERROR set.
 FM_PR_GITHUB_DECLARED_UNMET=
-github_declared_checks_unmet() {  # <head> <live-pr-json>
-  local head=$1 json=$2 raw runs='[]' events='{}'
+github_declared_checks_unmet() {  # <head>
+  local head=$1 raw runs events
   FM_PR_GITHUB_DECLARED_UNMET=
   FM_PR_GITHUB_DECLARED_ERROR=
   case "$FM_PR_GITHUB_DECLARED" in
     '' | '[]') return 0 ;;
   esac
-  if printf '%s' "$FM_PR_GITHUB_DECLARED" | jq -e 'any(.[]; .app != "-")' >/dev/null; then
-    if ! raw=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs?filter=all&per_page=100" 2>/dev/null) \
-      || [ -z "$raw" ] \
-      || ! runs=$(printf '%s' "$raw" | jq -sc --arg head "$head" '
-        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
-          | if (.name | type) == "string" and (.app.id | type) == "number"
-               and (.app.slug | type) == "string" and (.check_suite.id | type) == "number"
-               and (.status | type) == "string" and .head_sha == $head
-            then {name, app_id: .app.id, app_slug: (.app.slug | ascii_downcase),
-                  suite: (.check_suite.id | tostring), status: (.status | ascii_downcase),
-                  conclusion: ((.conclusion // "") | ascii_downcase), started_at}
-            else error("invalid check run") end ]' 2>/dev/null); then
-      FM_PR_GITHUB_DECLARED_ERROR="the check runs at head $head could not be read"
-      return 1
-    fi
+  if ! raw=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs?filter=all&per_page=100" 2>/dev/null) \
+    || [ -z "$raw" ] \
+    || ! runs=$(printf '%s' "$raw" | jq -sc --arg head "$head" '
+      [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+        | if (.name | type) == "string" and (.app.slug | type) == "string"
+             and (.check_suite.id | type) == "number"
+             and (.status | type) == "string" and .head_sha == $head
+          then {name, app_slug: (.app.slug | ascii_downcase),
+                suite: (.check_suite.id | tostring), status: (.status | ascii_downcase),
+                conclusion: ((.conclusion // "") | ascii_downcase), started_at}
+          else error("invalid check run") end ]' 2>/dev/null); then
+    FM_PR_GITHUB_DECLARED_ERROR="the check runs at head $head could not be read"
+    return 1
   fi
-  if printf '%s' "$FM_PR_GITHUB_DECLARED" | jq -e 'any(.[]; .app != "-" and .event != "-")' >/dev/null; then
-    if ! raw=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/actions/runs?head_sha=$head&per_page=100" 2>/dev/null) \
-      || [ -z "$raw" ] \
-      || ! events=$(printf '%s' "$raw" | jq -sc --arg head "$head" '
-        [ .[] | if (.workflow_runs | type) == "array" then .workflow_runs[] else error("invalid workflow runs") end
-          | if (.check_suite_id | type) == "number" and (.event | type) == "string" and .head_sha == $head
-            then {key: (.check_suite_id | tostring), value: .event} else error("invalid workflow run") end ]
-        | from_entries' 2>/dev/null); then
-      FM_PR_GITHUB_DECLARED_ERROR="the workflow runs at head $head could not be read"
-      return 1
-    fi
+  if ! raw=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/actions/runs?head_sha=$head&per_page=100" 2>/dev/null) \
+    || [ -z "$raw" ] \
+    || ! events=$(printf '%s' "$raw" | jq -sc --arg head "$head" '
+      [ .[] | if (.workflow_runs | type) == "array" then .workflow_runs[] else error("invalid workflow runs") end
+        | if (.check_suite_id | type) == "number" and (.event | type) == "string" and .head_sha == $head
+          then {key: (.check_suite_id | tostring), value: .event} else error("invalid workflow run") end ]
+      | from_entries' 2>/dev/null); then
+    FM_PR_GITHUB_DECLARED_ERROR="the workflow runs at head $head could not be read"
+    return 1
   fi
-  FM_PR_GITHUB_DECLARED_UNMET=$(printf '%s' "$json" | jq -r \
+  if ! FM_PR_GITHUB_DECLARED_UNMET=$(jq -nr \
     --argjson declared "$FM_PR_GITHUB_DECLARED" --argjson runs "$runs" --argjson events "$events" '
     def settled_at:
       if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
       then . else null end;
-    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | .statusCheckRollup as $rollup
-    | $declared[] as $d
-    | if $d.app == "-" then
-        [$rollup[] | select(.__typename == "StatusContext" and .context == $d.context) | .state] as $states
-        | if ($states | length) == 0 then "unreported"
-          elif all($states[]; . == "SUCCESS") then empty
-          elif any($states[]; . == "PENDING" or . == "EXPECTED") then "pending"
-          else "failed" end
-      else
-        [$runs[]
-          | select(.name == $d.context
-              and (if ($d.app | test("^[0-9]+$")) then .app_id == ($d.app | tonumber) else .app_slug == $d.app end)
-              and ($d.event == "-" or $events[.suite] == $d.event))
-          | {completed: (.status == "completed"),
-             ok: (.status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped")),
-             at: (.started_at | settled_at)}] as $candidates
-        | ([$candidates[] | select(.ok) | .at | select(. != null)] | max) as $newest_green
-        | [$candidates[] | select(.ok | not)
-            | select($newest_green == null or (.completed | not) or .at == null or .at >= $newest_green)] as $blocking
-        | if ($candidates | length) == 0 then "unreported"
-          elif ($blocking | length) == 0 then empty
-          elif any($blocking[]; .completed | not) then "pending"
-          else "failed" end
-      end
-    | [., $d.context,
-       (if $d.app == "-" then "commit status"
-        elif $d.event == "-" then "\($d.app), any event"
-        else "\($d.app), \($d.event)" end)]
-    | join("\t")' 2>/dev/null) || return 1
+    $declared[] as $d
+    | [$runs[]
+        | select(.name == $d.context and .app_slug == $d.app and $events[.suite] == $d.event)
+        | {completed: (.status == "completed"),
+           ok: (.status == "completed" and (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped")),
+           at: (.started_at | settled_at)}] as $candidates
+    | ([$candidates[] | select(.ok) | .at | select(. != null)] | max) as $newest_green
+    | [$candidates[] | select(.ok | not)
+        | select($newest_green == null or (.completed | not) or .at == null or .at >= $newest_green)] as $blocking
+    | if ($candidates | length) == 0 then "unreported"
+      elif ($blocking | length) == 0 then empty
+      elif any($blocking[]; .completed | not) then "pending"
+      else "failed" end
+    | [., $d.context, "\($d.app), \($d.event)"]
+    | join("\t")' 2>/dev/null); then
+    FM_PR_GITHUB_DECLARED_UNMET=
+    FM_PR_GITHUB_DECLARED_ERROR="the check runs at head $head could not be matched"
+    return 1
+  fi
 }
 
 # Reads one merge request's state and its own head commit (the MR's sha, never
