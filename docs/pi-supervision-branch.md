@@ -46,7 +46,7 @@ Some wakes stay on main:
 - Every watcher-failure alarm also stays on main.
 
 All of that describes the attended posture.
-The away posture, recorded by `state/.afk-contract`, hands every row to the branch and parks main (see "Postures" below).
+The away posture, recorded by `state/.afk-contract`, hands eligible wakes to the branch and parks main between [MAIN handbacks](#while-the-record-exists).
 
 ### How outcomes reach main
 
@@ -102,7 +102,7 @@ What is never offered, or falls back to main:
 - When a triggering close has no acceptor (extension absent, branch broken), it keeps today's wake-to-main path.
 - Watcher-failure alarms always go to main, because only main can repair the watcher cycle.
 
-Under the away-posture record, the check-kind and decision-owned exclusions lift and every actionable row is offered ("Postures" below).
+Under the away-posture record, the check-kind and decision-owned exclusions lift except for [Firstmate-owned handoffs](#while-the-record-exists).
 The no-acceptor fallback and the alarms still reach main in that posture.
 
 #### Decision-owned rows
@@ -577,9 +577,10 @@ A leftover `state/.afk` flag declines nothing.
   - A watcher-failure alarm is delivered to main as always, because `fm_watch_arm_pi` lives there.
   - A wake the branch declines or cannot take (a broken branch inside its cooldown, an unresolvable or corrupt scan) falls back to main exactly as attended.
   - A structured `firstmate` outcome queues a durable main-owned check through `bin/fm-branch-outcome.sh handoff`.
-    The dispatcher excludes that check from branch claims in both postures, and the supervision host also hands back immediately after its turn reports one.
-    Main handles its still-open Firstmate-owned decisions in that turn under standing authority, including entries under OPEN DECISIONS, and acknowledges the wake through the ordinary drain.
-    This path never advances the captain-only processed marker or grants new authority.
+    MAIN receives that `check: firstmate-outcome: ...` or the host's `supervision-host: firstmate-outcome: ...` handback in either posture.
+    An unread handoff keeps the close on MAIN even when branch-eligible rows share the queue, and the supervision host hands back immediately after its turn reports one.
+    MAIN runs `bin/fm-wake-drain.sh`, checks current task state, decides still-open Firstmate-owned work under its existing standing authority in that turn, including entries under OPEN DECISIONS, and acknowledges the wake through the ordinary drain.
+    This is automatic supervision, not the captain's return: captain-only acts stay held, and this path never advances their processed marker or grants new authority.
 
   Parking is a cost and chat-cleanliness measure.
   Supervision continuity is the safety property, and the return brief's health section reads any gap.
@@ -592,7 +593,7 @@ A leftover `state/.afk` flag declines nothing.
   While the record exists, processing messages are filtered from request-local context, including earlier stored copies, without deleting session history or acknowledging outcomes.
   The first run boundary after the record is archived, ordinarily the captain's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
-- Main's standing authority relocates to the branch, and nothing more.
+- The branch uses main's standing authority through opted-in guarded scripts, while main retains it for handed-back work.
   [Authority relocation](#authority-relocation) below gives the details.
 - The branch prompt's fixed "Postures" section states these rules once per firstmate version, so the prefix stays byte-stable.
   The per-wake tail is the only dynamic content.
