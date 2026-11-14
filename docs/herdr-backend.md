@@ -839,8 +839,7 @@ In that case `agent get` still reports `agent=pi` with its last status.
 That nested shell is the shape the interactive `treehouse get` leaves behind; fresh Herdr spawns lease durably instead (see [Restart recovery](#restart-recovery)), but older or hand-driven panes can still have it (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
-It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with.
-For a registration reporting `working`, `idle`, `done`, or `blocked`, the verdicts are:
+It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:
 
 | What the process view shows | Verdict |
 | --- | --- |
@@ -848,10 +847,6 @@ For a registration reporting `working`, `idle`, `done`, or `blocked`, the verdic
 | A foreground that is nothing but shells, with no harness descendant | A `stale-agent` pane: agent-free, with that explicit reason. |
 | A foreground holding anything else | The registration stays live, but only after the same bounded settle window the idle-shell proof uses. |
 | An unreadable process view | The pane is `unknown`, trusting neither the registration nor its absence. |
-
-A Pi registration with `agent_status=unknown` counts as live only when the process view positively identifies a harness.
-A proven shell-only view maps that registration to `stale-agent`, so recovery can confirm the agent stopped without permitting pane closure.
-An unrelated foreground tool or an unreadable process view keeps that registration `unknown`.
 
 The settle window exists because an idle shell transiently hosts prompt helpers such as starship in its foreground group.
 The first agent or shell sample in that window decides.
