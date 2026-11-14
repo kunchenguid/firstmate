@@ -19,7 +19,7 @@
 #                 "RECORD_HYGIENE: <record inconsistency found in this home>"
 #                 (only with config/record-hygiene present),
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
-#                 "STALE_DAEMON: no-mistakes daemon (pid <pid>) started before the installed no-mistakes was replaced; ...",
+#                 "STALE_DAEMON: no-mistakes daemon (pid <pid>) runs a different build than the installed no-mistakes; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -69,10 +69,10 @@
 #          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          STALE_DAEMON is read-only: the running no-mistakes daemon started
-#          before the installed no-mistakes binary on PATH was last replaced
-#          (inode change time), so its next pipeline run can fail on config only the new build knows.
+#          from a different executable than the no-mistakes binary now on PATH, so
+#          its next pipeline run can fail on config only the new build knows.
 #          It names the supervisor remedy and never restarts the daemon; it is
-#          silent when no daemon runs or its pid or start time cannot be read.
+#          silent when no daemon runs or its executable cannot be read.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there.
 #          Missing or board-incompatible lavish-axi reports PRESENTATION_UNAVAILABLE;
@@ -1530,28 +1530,18 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   fi
 fi
 
-# A daemon outlives a binary upgrade, so compare its start time with the
-# installed binary's inode change time (Nix pins mtime to 1); both are readable on macOS and Linux.
-etime_seconds() {
-  local etime=$1 days=0 a b c h=0 m s
-  case "$etime" in *-*) days=${etime%%-*}; etime=${etime#*-} ;; esac
-  IFS=: read -r a b c <<< "$etime"
-  if [ -n "${c:-}" ]; then h=$((10#$a)); m=$((10#$b)); s=$((10#$c)); else m=$((10#$a)); s=$((10#$b)); fi
-  echo $((10#$days * 86400 + h * 3600 + m * 60 + s))
-}
-
+# A daemon outlives a binary upgrade, so compare the executable it runs with
+# the one PATH now resolves to.
 detect_stale_no_mistakes_daemon() {
-  local bin pid etime age ctime
+  local bin pid running
   bin=$(command -v no-mistakes 2>/dev/null) || return 0
-  pid=$(no-mistakes daemon status 2>/dev/null | sed -n 's/.*daemon running (pid \([0-9][0-9]*\)).*/\1/p' | head -n 1)
+  pid=$(fm_run_timed 3 no-mistakes daemon status 2>/dev/null | sed -n 's/.*daemon running (pid \([0-9][0-9]*\)).*/\1/p' | head -n 1)
   [ -n "$pid" ] || return 0
-  etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
-  [ -n "$etime" ] || return 0
-  age=$(etime_seconds "$etime" 2>/dev/null) || return 0
-  ctime=$(stat -L -c %Z "$bin" 2>/dev/null || stat -L -f %c "$bin" 2>/dev/null) || return 0
-  [ -n "$ctime" ] || return 0
-  if [ $(( $(date +%s) - age )) -lt "$ctime" ]; then
-    echo "STALE_DAEMON: no-mistakes daemon (pid $pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
+  running=$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+  [ -n "$running" ] || return 0
+  bin=$(readlink -f "$bin" 2>/dev/null || echo "$bin")
+  if [ "$running" != "$bin" ]; then
+    echo "STALE_DAEMON: no-mistakes daemon (pid $pid) runs a different build than the installed no-mistakes; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
   fi
 }
 

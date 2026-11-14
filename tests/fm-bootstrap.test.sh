@@ -98,6 +98,7 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
+  [ -z "${FM_FAKE_NM_DAEMON_HANG:-}" ] || sleep 30
   printf '%s\n' "${FM_FAKE_NM_DAEMON_STATUS:-daemon not running}"
   exit 0
 fi
@@ -605,48 +606,37 @@ ROWS
 }
 
 test_stale_no_mistakes_daemon() {
-  local label status order mode etime case_dir fakebin out expect n daemon_pid
+  local label status exe mode hang case_dir fakebin out expect n daemon_pid
   n=0
-  while IFS='^' read -r label status order mode etime; do
+  while IFS='^' read -r label status exe mode hang; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/nm-daemon-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    if [ "$order" = binary_first ]; then
-      touch -d @1 "$fakebin/no-mistakes"
-      sleep 3
-    fi
     sleep 300 &
     daemon_pid=$!
-    if [ -n "$etime" ]; then
-      printf '#!/bin/sh\necho "%s"\n' "$etime" > "$fakebin/ps"
-      chmod +x "$fakebin/ps"
-    fi
-    if [ "$order" = daemon_first ]; then
-      sleep 3
-      touch -d @1 "$fakebin/no-mistakes"
-    fi
-    expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
+    [ "$exe" = current ] && exe=$(readlink -f "$fakebin/no-mistakes")
+    printf '#!/bin/sh\nprintf "p%%s\\nftxt\\nn%%s\\n" "$4" "%s"\n' "$exe" > "$fakebin/lsof"
+    chmod +x "$fakebin/lsof"
+    expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) runs a different build than the installed no-mistakes; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_DAEMON_STATUS="${status//PID/$daemon_pid}" "$ROOT/bin/fm-bootstrap.sh")
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_DAEMON_HANG="$hang" FM_FAKE_NM_DAEMON_STATUS="${status//PID/$daemon_pid}" "$ROOT/bin/fm-bootstrap.sh")
     kill "$daemon_pid" 2>/dev/null
     case "$mode" in
       silent) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
       stale) [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-binary installed before the daemon start stays silent despite epoch mtime^daemon running (pid PID)^binary_first^silent
-binary installed after the daemon start reports despite epoch mtime^daemon running (pid PID)^daemon_first^stale
-no daemon running stays silent^daemon not running^daemon_first^silent
-unreadable daemon pid stays silent^daemon running (pid 99999999)^daemon_first^silent
-unparseable daemon status stays silent^something else entirely^daemon_first^silent
-hours with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^08:09:09
-days with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^2-08:09:09
-minutes with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^09:08
+daemon running the installed executable stays silent^daemon running (pid PID)^current^silent
+daemon running a replaced executable reports^daemon running (pid PID)^/nix/store/old/bin/no-mistakes^stale
+no daemon running stays silent^daemon not running^/nix/store/old/bin/no-mistakes^silent
+unreadable daemon pid stays silent^daemon running (pid 99999999)^/nix/store/old/bin/no-mistakes^silent
+unparseable daemon status stays silent^something else entirely^/nix/store/old/bin/no-mistakes^silent
+unresponsive daemon status stays silent^daemon running (pid PID)^/nix/store/old/bin/no-mistakes^silent^1
 ROWS
-  pass "bootstrap reports a no-mistakes daemon older than the installed binary"
+  pass "bootstrap reports a no-mistakes daemon running a replaced executable"
 }
 
 test_gh_axi_min_version() {
