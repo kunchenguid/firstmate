@@ -286,7 +286,7 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
-    fm-brief.test.sh|fm-dod-lib.test.sh|fm-merge-local.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-brief.test.sh|fm-dod-lib.test.sh|fm-merge-local.test.sh|fm-vendor-auth-probe.test.sh|fm-provider-reach-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -960,6 +960,8 @@ tests/fm-turnend-foreign-owner-arm-fix.test.sh 5575
 tests/fm-turnend-guard.test.sh 34727
 tests/fm-update.test.sh 11894
 tests/fm-vendor-auth-probe.test.sh 43278
+# Provider probe measured 58.7s locally on 2026-11-14 (fake curl, resolvers, loopback listeners).
+tests/fm-provider-reach-probe.test.sh 58740
 tests/fm-voice-relay.test.sh 28917
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7345
 tests/fm-wake-drain-open-decisions-cursor.test.sh 47677
@@ -1844,7 +1846,7 @@ families_for_changed_path() {
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-captain-hold.sh|bin/fm-hold-reason-lib.sh|bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
-    bin/fm-vendor-auth-probe.sh|\
+    bin/fm-vendor-auth-probe.sh|bin/fm-provider-reach-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-forge-detect.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
