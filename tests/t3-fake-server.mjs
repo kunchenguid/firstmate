@@ -5,8 +5,12 @@
 // It serves T3's headless OAuth sign-in (/oauth/mcp/register, /decision,
 // /token) and the Orchestrator V2 `/mcp` streamable-HTTP endpoint with the
 // tool subset bin/fm-t3-mcp.mjs drives. Shapes follow T3 main 50647de0 and
-// 0.0.46 nightly as recorded in docs/verification/runtime-backends.md,
-// including the protocol facts a simpler fake would hide:
+// 0.0.46 nightly as recorded in docs/verification/runtime-backends.md, under
+// the tool names of T3 0.1.9 (t3_thread_configure, and one t3_pending_request
+// taking `action`) unless the world sets legacyTools, which offers the 0.1.0
+// names instead (t3_thread_configuration and t3_pending_request_list, _read,
+// and _respond). A call to a tool the server does not offer is refused. The
+// protocol facts a simpler fake would hide:
 //   - t3_thread_list pages by cursor (default 50, at most 100) and reports
 //     each thread's relationshipToParent (fork or subagent);
 //   - t3_thread_read caps limit at 100;
@@ -18,7 +22,7 @@
 //   - archive is distinct from run end: the active run ends asynchronously;
 //   - a send is committed before its reply, which dropReplyTools can lose;
 //   - pendingRequestCount counts every pending runtime request, while the
-//     t3_pending_request_* tools see only user-input questions.
+//     pending-request tools see only user-input questions.
 //
 // Usage: t3-fake-server.mjs --case-file <file> --port-file <file> [--parent-pid <pid>]
 // <case-file> holds the path of the current case directory. Every request
@@ -26,7 +30,8 @@
 // one JSON line to <case-dir>/requests.jsonl, so a test can switch cases and
 // edit the world between calls. World keys (all optional):
 //   tokens (accepted bearers; sign-in appends), environmentId, serverVersion,
-//   tools (array of names; default all), revoked (every /mcp call is 401),
+//   tools (array of names; default all), legacyTools (offer the 0.1.0 tool
+//   names), revoked (every /mcp call is 401),
 //   sse (SSE replies), expiresIn (seconds), bindWorktree, bindInstance,
 //   bindRuntimeMode, bindModel, bindOptions (override what a launch binds),
 //   archiveKeepsRun (archive never ends the run), interruptStuck or
@@ -59,12 +64,14 @@ import path from "node:path";
 const args = {};
 for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].slice(2)] = process.argv[i + 1];
 
-const ALL_TOOLS = [
+const SHARED_TOOLS = [
   "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_wait", "t3_thread_interrupt",
-  "t3_thread_organize", "t3_thread_list", "t3_thread_configuration", "t3_project_list", "t3_project_create",
-  "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond",
+  "t3_thread_organize", "t3_thread_list", "t3_project_list", "t3_project_create",
   "orchestrator_capabilities", "t3_environment_read",
 ];
+const ALL_TOOLS = [...SHARED_TOOLS, "t3_thread_configure", "t3_pending_request"];
+const LEGACY_TOOLS = [...SHARED_TOOLS, "t3_thread_configuration", "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"];
+const offeredTools = (w) => w.tools ?? (w.legacyTools ? LEGACY_TOOLS : ALL_TOOLS);
 const ACTIVE = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted", "rolled_back"]);
 const select = (id, values) => ({ id, label: id, type: "select", options: values.map((v) => ({ id: v, label: v })) });
@@ -186,6 +193,9 @@ function listItem(x) {
 
 // Returns [result, changed].
 async function callTool(w, name, a) {
+  if (!offeredTools(w).includes(name)) return [err("unknown_tool", `no tool ${name}`), false];
+  const legacyAction = name.match(/^t3_pending_request_(list|read|respond)$/)?.[1];
+  const action = legacyAction ?? a.action;
   const fail = (w.failTools ?? {})[name];
   if (fail) return [err(fail.code, fail.message), false];
   const threads = (w.threads = w.threads ?? {});
@@ -260,6 +270,7 @@ async function callTool(w, name, a) {
       const nextCursor = cursor + page.length < list.length ? cursor + page.length : null;
       return [ok({ projectId: a.projectId, currentThreadId: null, threads: page.map(listItem), nextCursor, total: list.length }), false];
     }
+    case "t3_thread_configure":
     case "t3_thread_configuration": {
       if (!t) return [notFound(a.threadId), false];
       const modelSelection = t.modelSelection ?? { instanceId: t.providerInstanceId, model: t.model };
@@ -296,16 +307,16 @@ async function callTool(w, name, a) {
       }
       return [ok({ threadId: t.threadId, action: a.action }), true];
     }
-    case "t3_pending_request_list": {
-      if (!t) return [notFound(a.threadId), false];
-      return [ok({ requestIds: pendingRequests(t).filter((r) => r.kind === "user_input").map((r) => r.id) }), false];
-    }
+    case "t3_pending_request":
+    case "t3_pending_request_list":
     case "t3_pending_request_read":
     case "t3_pending_request_respond": {
       if (!t) return [notFound(a.threadId), false];
+      if (action === "list") return [ok({ requestIds: pendingRequests(t).filter((r) => r.kind === "user_input").map((r) => r.id) }), false];
+      if (action !== "read" && action !== "respond") return [err("invalid_request", `action must be list, read, or respond, not ${action}`), false];
       const q = pendingRequests(t).find((r) => r.id === a.requestId && r.kind === "user_input");
       if (!q) return [err("request_not_found", `Request ${a.requestId} is not a pending question in thread ${a.threadId}.`), false];
-      if (name === "t3_pending_request_read") return [ok({ requestId: q.id, questions: q.questions ?? [] }), false];
+      if (action === "read") return [ok({ requestId: q.id, questions: q.questions ?? [] }), false];
       q.status = "resolved";
       q.answers = a.answers;
       return [ok({ sequence: 1 }), true];
@@ -363,7 +374,7 @@ async function mcp(req, res) {
     res.writeHead(202);
     return res.end();
   } else if (msg.method === "tools/list") {
-    result = { tools: (w.tools ?? ALL_TOOLS).map((name) => ({ name, inputSchema: { type: "object" } })) };
+    result = { tools: offeredTools(w).map((name) => ({ name, inputSchema: { type: "object" } })) };
   } else if (msg.method === "tools/call") {
     let changed = settle(w);
     let mutated;
