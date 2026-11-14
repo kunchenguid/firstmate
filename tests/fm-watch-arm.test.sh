@@ -1565,6 +1565,188 @@ test_arm_refuses_a_disposable_validation_checkout() {
   pass "watch-arm: a disposable validation checkout refuses to arm"
 }
 
+path_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+wait_for_newer_mtime() {  # <path> <old-mtime> <polls>
+  local path=$1 old=$2 limit=$3 i=0 now
+  while [ "$i" -lt "$limit" ]; do
+    now=$(path_mtime "$path") || true
+    [ -n "$now" ] && [ "$now" -gt "$old" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The arm's restart chain feeds the watcher inherited stdio pipes (harness
+# stdout/stderr/stdin). Killing those pipe readers used to wedge the watch in
+# pipe_read/pipe_write so the beat froze until a human killed the watch pid.
+# After isolation (and owned-child stale-beacon reap as backup), the beat must
+# resume without anyone signalling the watch pid.
+test_dead_pipe_reader_does_not_wedge_watch() {
+  command -v mkfifo >/dev/null 2>&1 || { printf 'skip: mkfifo not found\n'; return 0; }
+  local dir home state fakebin armout armerr beat out_reader err_reader in_writer
+  local watch_pid after_pid old_mtime i
+  dir=$(make_case dead-pipe-reader)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armerr="$dir/arm.err"
+  beat="$state/.last-watcher-beat"
+  mkdir -p "$home/data"
+  mkfifo "$dir/out.pipe" "$dir/err.pipe" "$dir/in.pipe"
+
+  cat "$dir/out.pipe" > "$armout" &
+  out_reader=$!
+  cat "$dir/err.pipe" > "$armerr" &
+  err_reader=$!
+  sleep 1000 > "$dir/in.pipe" &
+  in_writer=$!
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_GUARD_GRACE=5 FM_ARM_CONFIRM_TIMEOUT=15 FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" --restart <"$dir/in.pipe" >"$dir/out.pipe" 2>"$dir/err.pipe" &
+  ARM_PID=$!
+
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -q '^watcher: started pid=' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "arm did not start a watcher on piped stdio: $(cat "$armout" 2>/dev/null; cat "$armerr" 2>/dev/null)"
+  watch_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -1)
+  if [ -z "$watch_pid" ] || ! is_live_non_zombie "$watch_pid"; then
+    fail "started watcher pid $watch_pid is not live"
+  fi
+  [ -e "$beat" ] || fail "started watcher did not publish a beat"
+  old_mtime=$(path_mtime "$beat") || fail "could not read beat mtime"
+
+  kill "$out_reader" "$err_reader" 2>/dev/null || true
+  wait "$out_reader" "$err_reader" 2>/dev/null || true
+
+  wait_for_newer_mtime "$beat" "$old_mtime" 150 \
+    || fail "beat did not resume after the pipe readers died (mtime stayed $old_mtime)"
+  after_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$after_pid" \
+    || fail "no live watcher after the pipe readers died"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "arm exited after the pipe readers died: $(cat "$armout" 2>/dev/null; cat "$armerr" 2>/dev/null)"
+  ! grep -qE 'watcher: (healthy|attached)' "$armout" \
+    || fail "arm reported attached/healthy off a pipe-wedge: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm reported FAILED after the pipe readers died: $(cat "$armout")"
+
+  kill "$in_writer" 2>/dev/null || true
+  wait "$in_writer" 2>/dev/null || true
+  pass "watch-arm: killing the stdio pipe readers leaves the beat updating without a human kill"
+}
+
+# Confirm-time honesty gate: a live pid with a stale beacon is not a watcher.
+# The arm must FAIL and must not print started/attached/healthy.
+test_arm_honesty_gate_refuses_stale_beacon() {
+  local dir state fakebin armout live armpid status
+  dir=$(make_case honesty-stale-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
+    "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_exit "$armpid" 120
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm never returned for a stale-beacon holder"
+  [ "$status" -ne 0 ] || fail "arm exited zero off a stale beacon: $(cat "$armout")"
+  grep -F 'watcher: FAILED' "$armout" >/dev/null \
+    || fail "arm did not print a typed FAILED line off a stale beacon: $(cat "$armout")"
+  ! grep -qE 'watcher: (healthy|attached)' "$armout" \
+    || fail "arm reported attached/healthy off a stale beacon: $(cat "$armout")"
+  ! grep -qF 'watcher: started' "$armout" \
+    || fail "arm reported started off a stale beacon: $(cat "$armout")"
+  is_live_non_zombie "$live" || fail "arm killed the unrelated live lock holder"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch-arm: stale-beacon honesty gate refuses false health"
+}
+
+# An owned child that stops beating past GRACE is reaped and replaced by the
+# same arm. The STOP'd child's stale beacon must never be reported as healthy.
+test_owned_child_stale_beat_is_reaped_and_replaced() {
+  local dir home state fakebin armout watch_pid next_pid i
+  dir=$(make_case owned-child-wedge)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_GUARD_GRACE=3 FM_ARM_CONFIRM_TIMEOUT=15 FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -q '^watcher: started pid=' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "arm did not start a watcher: $(cat "$armout")"
+  watch_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*/\1/p' "$armout" | head -1)
+  if [ -z "$watch_pid" ] || ! is_live_non_zombie "$watch_pid"; then
+    fail "started watcher pid $watch_pid is not live"
+  fi
+  kill -STOP "$watch_pid" 2>/dev/null \
+    || fail "could not stop the owned watcher to freeze its beat"
+
+  i=0
+  next_pid=
+  while [ "$i" -lt 200 ]; do
+    next_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$next_pid" ] && [ "$next_pid" != "$watch_pid" ] && is_live_non_zombie "$next_pid"; then
+      break
+    fi
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ -z "$next_pid" ] || [ "$next_pid" = "$watch_pid" ] || ! is_live_non_zombie "$next_pid"; then
+    fail "arm did not replace the STOP'd owned child: lock=$next_pid old=$watch_pid armout=$(cat "$armout")"
+  fi
+  is_live_non_zombie "$ARM_PID" \
+    || fail "arm exited while replacing a wedged child: $(cat "$armout")"
+  ! is_live_non_zombie "$watch_pid" \
+    || fail "STOP'd owned child $watch_pid was left running"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$next_pid" ] \
+    || fail "lock pid moved after replacement: $(cat "$state/.watch.lock/pid" 2>/dev/null)"
+  grep -c '^watcher: started pid=' "$armout" | grep -qx 1 \
+    || fail "arm reprinted started while replacing a wedged child: $(cat "$armout")"
+  ! grep -qE 'watcher: (healthy|attached)' "$armout" \
+    || fail "arm reported attached/healthy off the STOP'd child's stale beacon: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm reported FAILED while replacing a wedged child: $(cat "$armout")"
+  grep -q 'reason=owned-child-wedged' "$state/.watch-cycle-exits.log" \
+    || fail "wedge reap was not classified in the lifecycle ledger"
+  pass "watch-arm: an owned child whose beat goes stale is reaped and replaced without false health"
+}
+
 # Start a real watcher through the real arm for a temporary home and set
 # WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
 # so the watcher's own exit reason, which it logs to stderr, is readable there.
@@ -1969,6 +2151,9 @@ test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
+test_dead_pipe_reader_does_not_wedge_watch
+test_arm_honesty_gate_refuses_stale_beacon
+test_owned_child_stale_beat_is_reaped_and_replaced
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_attached_arm_exits_when_its_root_is_removed

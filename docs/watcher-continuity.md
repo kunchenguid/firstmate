@@ -429,6 +429,11 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`.
 No helper process can make a wedged watcher appear healthy.
+An owned child whose beacon is stale past that grace is reaped and replaced by the same arm.
+The replacement has to pass the honesty gate.
+The arm never reports started, attached, or healthy off the stale beacon.
+The watcher detaches inherited stdio pipes onto `state/.watch-runtime.log` so a dead reader in the arm chain cannot freeze the beat.
+The [arm](../bin/fm-watch-arm.sh) and [watcher](../bin/fm-watch.sh) headers own those mechanics.
 An arm whose own script path sits under a disposable no-mistakes validation checkout (`.no-mistakes/worktrees/`) refuses with the typed failure line before touching any state, because a watcher started there outlives the validation step and keeps writing the real home's state from a checkout about to be deleted.
 Once per poll the watcher checks that its home, its state directory, and its own code root still exist, and exits with a logged reason when one is gone, scoped to itself alone, so a torn-down temporary home or a discarded checkout never leaves an orphan watcher behind.
 The arm applies the same rule to its own ground: when its script, its state directory, or an `FM_HOME` that existed at start disappears, it fails with `watcher: FAILED - arm ground removed: <path> no longer exists` instead of polling on; the `bin/fm-watch-arm.sh` header owns the timing bound.
@@ -516,6 +521,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
+- A dead stdio pipe reader in the arm restart chain cannot freeze the beat.
+- The confirm-time stale-beacon honesty gate, and an owned child whose beat goes stale being reaped and replaced without a false health report.
 
 `tests/fm-watch-recovery-loop.test.sh` covers:
 
