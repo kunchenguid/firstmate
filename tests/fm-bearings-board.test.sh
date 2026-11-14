@@ -737,6 +737,28 @@ test_every_decision_card_carries_the_reconcile_choice() {
   pass "every decision card carries exactly one reconcile choice"
 }
 
+test_a_link_card_is_published_answer_less_and_dropped_once_its_pr_lands() {
+  local home data board
+  home=$(make_home link-card)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call += [
+        {key: "contribution.main.t.open", type: "link", repo: "sample", title: "sample #4",
+         about: "waiting on the captain", pr_url: "https://github.com/example/sample/pull/4", options: []},
+        {key: "contribution.main.t.shipped", type: "link", repo: "sample", title: "sample #5",
+         about: "waiting on the captain", pr_url: "https://github.com/example/sample/pull/5", options: []}]
+      | .landed = [{id: "l5", what: "shipped five", owner: "(main)",
+                    repo: "sample", pr_url: "https://github.com/example/sample/pull/5"}]' \
+    "$data" > "$data.new" && mv "$data.new" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the link-card build failed"
+  extract_payload "$board" | jq -e '
+    ([.captains_call[] | select(.type == "link") | .key] == ["contribution.main.t.open"])
+    and (.captains_call[] | select(.type == "link") | .options == [])
+  ' >/dev/null || fail "a link card gained options, or a link card for a landed PR was kept"
+  pass "a link card is published without reconcile or answer options and dropped once its PR landed"
+}
+
 test_build_refuses_a_payload_that_occupies_the_reconcile_value() {
   local home data rc out
   home=$(make_home reconcile-reserved)
@@ -785,5 +807,6 @@ test_build_drops_decision_cards_whose_subject_already_landed
 test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
+test_a_link_card_is_published_answer_less_and_dropped_once_its_pr_lands
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
