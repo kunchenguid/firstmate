@@ -17,7 +17,13 @@ def valid_record:
     and all(.seen[]; type == "string")
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
     and ((.threads // []) | type == "array" and all(.[]; (.key | type == "string")
-      and (.raised == null or (.raised | fromdateiso8601 | type == "number"))))
+      and (.raised == null or (.raised | fromdateiso8601 | type == "number"))
+      and (.acked == null or (.acked | fromdateiso8601 | type == "number"))))
+    and ((.unanswered // null) == null or (.unanswered | type == "object"
+      and (.source | type == "string") and (.author | type == "string")
+      and (.at | fromdateiso8601 | type == "number")
+      and (.raised == null or (.raised | fromdateiso8601 | type == "number"))
+      and (.acked == null or (.acked | fromdateiso8601 | type == "number"))))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
     and (.retired == null or (.retired | (.actor == "captain")
@@ -43,12 +49,14 @@ def tracked_threads($previous; $events; $new_tokens; $now_iso):
     | (.token | split(":") | .[:2] | join(":")) as $key
     | {key:$key,type,source,author,at:(.at // null),
        raised:(([$previous[]? | select(.key == $key) | .raised] | first)
-         // (if .token | IN($new_tokens[]) then $now_iso else null end))}
+         // (if .token | IN($new_tokens[]) then $now_iso else null end)),
+       acked:([$previous[]? | select(.key == $key) | .acked] | first // null)}
       + (if .review_bot == true then {review_bot:true} else {} end)];
 def due_threads($threads; $now; $age):
   [$threads[] | (.at | try fromdateiso8601 catch null) as $at
-    | select($at != null and ($now - $at) >= $age
-      and (.raised == null or ($now - (.raised | fromdateiso8601)) >= $age))];
+    | (([(.acked | try fromdateiso8601 catch null), (.raised | try fromdateiso8601 catch null)] | map(select(. != null)) | max) // null) as $ref
+    | ($ref == null or ($now - $ref) >= $age) as $snoozed
+    | select($at != null and ($now - $at) >= $age and $snoozed)];
 def reraise_event($thread; $now; $now_iso):
   duration_text($now - ($thread.at | fromdateiso8601)) as $age
   | {token:("unanswered:" + $thread.key + ":" + $now_iso),type:"unanswered",thread:$thread.key,
