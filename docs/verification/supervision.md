@@ -176,7 +176,7 @@ SECONDMATE_SYNC: secondmate ios: skipped: remote tracked-file sync failed on rem
 SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-mac:
 ```
 
-The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
+The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued startup-network check wake once the worker finished.
 
 Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude, Codex exec, and Pi adapter and is the command that refreshes their record.
 Cursor's separate primary live guard covers its source-free session-open transport but does not claim this detached-worker measurement.
