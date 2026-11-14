@@ -244,7 +244,7 @@ Destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, the green default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` and `validation-supervision` before deciding or answering any ask-user finding; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
-Run every other write on a PR - a review-thread resolve, a body or title edit, a comment, or a review - through `bin/fm-pr-write.sh`, and park its refusal as a captain decision rather than retrying the write another way.
+Run every other write on a PR - a review-thread resolve, a body or title edit, a comment, or a review - through `bin/fm-pr-write.sh <pr-url> edit|comment|review|resolve-thread`, and park its refusal as a captain decision rather than retrying the write another way.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate
