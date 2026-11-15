@@ -364,6 +364,92 @@ test_harness_at_namespace_pid1_is_examined() {
   pass "a harness that is pid 1 of its own namespace is examined, not skipped"
 }
 
+# --- 5b. A markerless harness far up its own process tree -------------------
+
+# Codex publishes no marker, so the native codex process in the ancestry is the
+# only evidence its sessions have. Codex runs its SessionStart hook chain - hook
+# shell, stop-park wrapper, session-start runner, and the digest's own bounded
+# child - nine parents below that process, and the digest's later probes sit
+# deeper still. A walk shorter than that reported a Codex primary as unknown
+# while the session lock, which walks sixteen processes, still named it.
+#
+# The probe measures its own distance to the named ancestor before becoming
+# fm-harness.sh (same pid), so every depth asserted below is a depth actually
+# built, and a chain that silently came out shallower fails rather than passing.
+deep_harness_probe() {  # <named-executable> <depth> [VAR=VAL ...] [-- harness args]
+  local bin=$1 depth=$2 dir
+  shift 2
+  local -a assignments=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    assignments+=("$1")
+    shift
+  done
+  [ "${1:-}" = -- ] && shift
+  dir="$TMP_ROOT/deep-probe"
+  mkdir -p "$dir"
+  # Each level forks one plain bash child and waits, so the level count really
+  # is process depth.
+  cat > "$dir/level.sh" <<'SH'
+if [ "$FM_TEST_LEFT" -le 1 ]; then
+  r=$("$FM_TEST_PROBE" "$@")
+else
+  r=$(FM_TEST_LEFT=$((FM_TEST_LEFT - 1)) bash "$FM_TEST_LEVEL" "$@")
+fi
+printf '%s' "$r"
+SH
+  cat > "$dir/probe.sh" <<'SH'
+#!/usr/bin/env bash
+pid=$$
+n=0
+while [ "$n" -le 40 ]; do
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+  [ "$(basename -- "$comm")" = "$FM_TEST_NAME" ] && break
+  pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$pid" in ''|*[!0-9]*) n=none; break ;; esac
+  [ "$pid" -ge 1 ] || { n=none; break; }
+  n=$((n + 1))
+done
+printf '%s|' "$n"
+exec "$FM_TEST_HARNESS" "$@"
+SH
+  chmod +x "$dir/probe.sh"
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS -u FM_HERMES_HARNESS \
+    -u FM_SUPERVISION_ACTOR -u FM_SUPERVISION_PRIMARY_HARNESS ${assignments[@]+"${assignments[@]}"} \
+    FM_TEST_LEFT="$depth" FM_TEST_LEVEL="$dir/level.sh" FM_TEST_PROBE="$dir/probe.sh" \
+    FM_TEST_HARNESS="$HARNESS" FM_TEST_NAME="$(basename -- "$bin")" \
+    "$bin" "$dir/level.sh" "$@"
+}
+
+test_markerless_harness_is_found_at_session_start_depth() {
+  local bin got depth
+  bin=$(named_bin "$TMP_ROOT/deep-codex" codex)
+  # 7 is the deepest the shorter walk reached, 9 is the Codex SessionStart
+  # digest, and 15 is the last process the sixteen-process walk examines.
+  for depth in 1 7 9 15; do
+    got=$(deep_harness_probe "$bin" "$depth")
+    [ "$got" = "$depth|codex" ] \
+      || fail "a markerless codex $depth parents up resolved '$got', expected '$depth|codex'"
+    # A retained foreign marker still loses to the structural ancestor at depth.
+    got=$(deep_harness_probe "$bin" "$depth" CLAUDECODE=1)
+    [ "$got" = "$depth|codex" ] \
+      || fail "a codex $depth parents up holding a retained CLAUDECODE resolved '$got', expected '$depth|codex'"
+  done
+  got=$(deep_harness_probe "$bin" 15 -- ancestry)
+  [ "$got" = "15|comm codex" ] \
+    || fail "the codex ancestor at the walk's last examined process must decide at comm strength, got '$got'"
+
+  # The walk stays bounded: one process past its reach, ancestry proves nothing
+  # and the marker layer answers alone, exactly as with ancestry blinded.
+  got=$(deep_harness_probe "$bin" 16)
+  [ "$got" = "16|unknown" ] \
+    || fail "a codex beyond the walk's reach resolved '$got', expected '16|unknown'"
+  got=$(deep_harness_probe "$bin" 16 CLAUDECODE=1)
+  [ "$got" = "16|claude" ] \
+    || fail "a codex beyond the walk's reach with a retained CLAUDECODE resolved '$got', expected '16|claude'"
+  pass "a markerless harness is found as deep as Codex runs its session start, and no deeper"
+}
+
 # --- 6. The vantage point a probe asks from decides what strength it can see --
 
 # The shipped guarantee is a strength claim, not just an identity one: detect_own
@@ -834,6 +920,7 @@ test_pi_signed_survives_agreeing_ancestry
 test_interpreter_args_match_does_not_outrank_a_marker
 test_native_child_of_an_interpreter_shim_decides_at_comm_strength
 test_harness_at_namespace_pid1_is_examined
+test_markerless_harness_is_found_at_session_start_depth
 test_descent_probe_reaches_a_strength_the_top_of_session_cannot
 test_descent_probe_ignores_a_sibling_branch_the_walk_cannot_reach
 test_descent_probe_tolerates_an_args_only_foreign_verdict_at_the_deepest_vantage
