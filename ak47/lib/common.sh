@@ -113,13 +113,19 @@ ak47_cache_age() {
 # killed by the unit's start timeout before it wrote its line - the loop went
 # silent for hours and nothing else noticed, because the tick IS the sampler. A
 # bounded tick may not call an unbounded sampler, so the walk is given its own
-# budget (AK47_DU_BUDGET, default 90 s) and a walk that overruns falls back to the
+# budget (AK47_DU_BUDGET, default 300 s) and a walk that overruns falls back to the
 # last known value. The age of that value is what tells a reader whether the
 # fallback is fine or the tree is now permanently too big to measure.
+#
+# 2026-11-15: one `du` over the whole tree is all-or-nothing, so a tree that takes
+# longer than the budget yields nothing at all and the number never refreshes.
+# The walk now measures the top-level entries in batches and stops when the
+# budget is spent, so a partial answer with its coverage recorded beats no
+# answer. `tmp_gb_partial` holds "<entries measured>/<entries present>".
 ak47_tmp_gb() {
-  local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-90} v
+  local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-300} v
   local retry=${AK47_DU_RETRY:-900} marker="$AK47_STATE/.tmp-gb-walk-failed" retrying=0
-  # A failed walk is remembered for a while. Retrying a 90 s timeout on every
+  # A failed walk is remembered for a while. Retrying a 300 s timeout on every
   # call is how the tick spent its whole interval failing to measure: the retry
   # interval is deliberate, not a sigh of relief.
   if [ -r "$marker" ]; then
@@ -134,11 +140,26 @@ ak47_tmp_gb() {
   # The retry window owns the failed walk: once it has elapsed the walk is due
   # even though the fallback value is still cached.
   if [ "$retrying" -eq 0 ] && v=$(ak47_cache_get tmp_gb "$ttl"); then printf '%s' "$v"; return 0; fi
+  # One walk over the whole tree is the cheap case and the accurate one: on the
+  # 2026-11-15 box (108 GB, 129k entries) it takes 3m34s, inside the 300 s budget.
   v=$(timeout "$budget" du -sx --block-size=1G "${AK47_TMP_ROOT:-/tmp}" 2>/dev/null | cut -f1)
   case "${v:-}" in
+    ''|*[!0-9]*) v="" ;;
+  esac
+  if [ -n "$v" ]; then
+    rm -f "$marker" 2>/dev/null || true
+    ak47_cache_put tmp_gb "$v"
+    ak47_cache_put tmp_gb_ok "$(ak47_epoch)"
+    printf '%s' "$v"
+    return 0
+  fi
+  # The whole-tree walk did not finish. Measure what fits in half the budget and
+  # report the coverage, so the number is a real lower bound instead of nothing.
+  v=$(ak47_tmp_gb_walk $(( budget / 2 )))
+  case "${v:-}" in
     ''|*[!0-9]*)
-      # The walk did not finish. Keep the last real measurement rather than
-      # inventing one, and re-stamp it so the next run does not pay the same
+      # The walk produced nothing at all. Keep the last real measurement rather
+      # than inventing one, and re-stamp it so the next run does not pay the same
       # timeout again: at 698 GB the walk costs its whole budget every time.
       # `tmp_gb_ok` records when the tree was last measured for real, which is
       # the number that tells a reader whether the value is merely old or the
@@ -153,10 +174,66 @@ ak47_tmp_gb() {
       fi
       return 0 ;;
   esac
-  rm -f "$marker" 2>/dev/null || true
+  # A partial walk: the number is a real lower bound over the entries it reached,
+  # so it is worth caching, but it is NOT a measurement of the tree. Leaving
+  # `tmp_gb_ok` alone is what keeps the staleness finding honest, and the marker
+  # keeps the next run from paying the same budget again immediately.
+  mkdir -p "$AK47_STATE" 2>/dev/null || true
+  ak47_epoch >"$marker" 2>/dev/null || true
   ak47_cache_put tmp_gb "$v"
-  ak47_cache_put tmp_gb_ok "$(ak47_epoch)"
   printf '%s' "$v"
+}
+
+# ak47_tmp_gb_walk <budget-seconds> - measure the tree in batches, stop at the
+# budget, and say how much of the tree the number covers.
+#
+# One `du` per batch of top-level entries, not one per entry: a per-entry fork
+# over 130k entries is the 38-minute loop the captain hit on 2026-11-10. The
+# batch size is small enough that a single huge directory cannot eat the whole
+# budget before anything is counted, and the elapsed check runs between batches
+# so the walk always returns.
+#
+# Returns 0 when every entry was measured, 1 when the budget ran out first. In
+# both cases the partial total is printed and tmp_gb_partial records the coverage.
+ak47_tmp_gb_walk() {
+  local budget=${1:-300} root=${AK47_TMP_ROOT:-/tmp} start elapsed
+  local list total=0 covered=0 entries=0 kb rc batch=()
+  start=$(ak47_epoch)
+  list=$(mktemp) || return 1
+  find "$root" -mindepth 1 -maxdepth 1 -print0 >"$list" 2>/dev/null || true
+  entries=$(tr -cd '\0' <"$list" | wc -c)
+  entries=${entries:-0}
+  while IFS= read -r -d '' p; do
+    batch+=("$p")
+    if [ "${#batch[@]}" -ge 25 ]; then
+      elapsed=$(( $(ak47_epoch) - start ))
+      kb=$( { timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
+             | awk '{s+=$1} END{print s+0}'; exit "${PIPESTATUS[0]}"; } )
+      rc=$?
+      # A batch that failed or was cut off may have measured only some of its
+      # entries: its total is still a lower bound, but it cannot count as full
+      # coverage or a walk that never finished could claim the whole tree.
+      [ -n "${kb:-}" ] && [ "${kb:-0}" -gt 0 ] || { batch=(); break; }
+      total=$(( total + kb ))
+      [ "$rc" -eq 0 ] && covered=$(( covered + ${#batch[@]} ))
+      batch=()
+      [ $(( $(ak47_epoch) - start )) -ge "$budget" ] && break
+    fi
+  done <"$list"
+  if [ "${#batch[@]}" -gt 0 ]; then
+    elapsed=$(( $(ak47_epoch) - start ))
+    kb=$( { timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
+           | awk '{s+=$1} END{print s+0}'; exit "${PIPESTATUS[0]}"; } )
+    rc=$?
+    if [ -n "${kb:-}" ] && [ "${kb:-0}" -gt 0 ]; then
+      total=$(( total + kb ))
+      [ "$rc" -eq 0 ] && covered=$(( covered + ${#batch[@]} ))
+    fi
+  fi
+  rm -f "$list" 2>/dev/null || true
+  ak47_cache_put tmp_gb_partial "$covered/$entries"
+  printf '%s' $(( total / 1048576 ))
+  [ "$covered" -ge "$entries" ]
 }
 
 # ak47_swap_pct - swap used as a whole percentage.

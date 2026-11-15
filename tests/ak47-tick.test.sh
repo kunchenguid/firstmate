@@ -250,6 +250,9 @@ test_an_unmeasurable_tree_is_a_finding_not_silence() {
   mkdir -p "$slow"
   printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
   chmod +x "$slow/du"
+  # A tree with something in it: an empty tree is measurable (0 GB) and would
+  # never exercise the walk at all.
+  mkdir -p "$AK47_TMP_ROOT/uvn-old"; head -c 200000 /dev/zero >"$AK47_TMP_ROOT/uvn-old/blob"
   # A successful measurement from long ago, and a walk that no longer finishes.
   printf 'tmp_gb\t%s\t999\n' $(( $(date +%s) - 100000 )) >"$AK47_STATE/sample.cache"
   printf 'tmp_gb_ok\t%s\t%s\n' $(( $(date +%s) - 100000 )) $(( $(date +%s) - 100000 )) >>"$AK47_STATE/sample.cache"
@@ -266,6 +269,7 @@ test_a_failed_size_walk_is_retried_once_its_window_elapses() {
   mkdir -p "$slow"
   printf '#!/bin/sh\necho x >>"%s/du-calls"\nexit 1\n' "$slow" >"$slow/du"
   chmod +x "$slow/du"
+  mkdir -p "$AK47_TMP_ROOT/uvn-old"; head -c 200000 /dev/zero >"$AK47_TMP_ROOT/uvn-old/blob"
   PATH="$slow:$PATH" AK47_DU_BUDGET=2 "$TICK" --apply >/dev/null 2>&1 \
     || fail "the tick exited non-zero when the first size walk failed"
   [ "$(wc -l <"$slow/du-calls")" -ge 1 ] || fail "the first failed walk was not attempted"
@@ -704,3 +708,173 @@ test_swap_is_restored_even_when_the_reclaim_fails
 test_swap_privilege_probes_the_granted_command
 test_an_unprivileged_tick_says_so_instead_of_failing_to_swap
 test_a_privileged_tick_rings_the_reclaim_and_does_not_swap_inline
+
+# --- one finding per episode, not one per tick ------------------------------------
+# 2026-11-15: the health beat pruned every key in $AK47_STATE/keys that was not
+# one of its own, so the tick's tmp-gb-stale key was deleted every five minutes
+# and the finding re-paged on every tick - 59 notes in a day. The tick now owns
+# its episode: it reports once, stays quiet while the key stands, and clears the
+# key when the tree is measurable again so the next episode reports immediately.
+
+test_a_stale_size_walk_is_reported_once_per_episode() {
+  reset_tree
+  # A successful delivery is what commits the episode key; without it the tick
+  # correctly re-files every run. Do not depend on an earlier test's fake inbox.
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FM_HOME/bin/fm-inbox.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
+  local slow=$SANDBOX/slowbin-ep
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  mkdir -p "$AK47_TMP_ROOT/uvn-old"; head -c 200000 /dev/zero >"$AK47_TMP_ROOT/uvn-old/blob"
+  # A real measurement from long ago, and a walk that no longer finishes.
+  printf 'tmp_gb\t%s\t999\n' $(( $(date +%s) - 100000 )) >"$AK47_STATE/sample.cache"
+  printf 'tmp_gb_ok\t%s\t%s\n' $(( $(date +%s) - 100000 )) $(( $(date +%s) - 100000 )) >>"$AK47_STATE/sample.cache"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_TTL=60 AK47_DU_RETRY=0 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the first stale tick exited non-zero"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_TTL=60 AK47_DU_RETRY=0 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the second stale tick exited non-zero"
+  local n; n=$(grep -c tmp-gb-stale "$AK47_STATE/findings.log" 2>/dev/null || echo 0)
+  [ "$n" -eq 1 ] || fail "a stale size walk was reported $n times in two ticks; it must report once per episode"
+  pass "a stale size walk is reported once per episode, not once per tick"
+}
+
+test_a_measurable_tree_ends_the_episode() {
+  reset_tree
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FM_HOME/bin/fm-inbox.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
+  local slow=$SANDBOX/slowbin-ep2
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  mkdir -p "$AK47_TMP_ROOT/uvn-old"; head -c 200000 /dev/zero >"$AK47_TMP_ROOT/uvn-old/blob"
+  printf 'tmp_gb\t%s\t999\n' $(( $(date +%s) - 100000 )) >"$AK47_STATE/sample.cache"
+  printf 'tmp_gb_ok\t%s\t%s\n' $(( $(date +%s) - 100000 )) $(( $(date +%s) - 100000 )) >>"$AK47_STATE/sample.cache"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=2 AK47_DU_TTL=60 AK47_DU_RETRY=0 "$TICK" --apply >/dev/null 2>&1 \
+    || fail "the stale tick exited non-zero"
+  [ -f "$AK47_STATE/keys/tmp-gb-stale" ] || fail "the stale episode left no key, so it would re-page every tick"
+  # The tree is measurable again: a real walk stamps tmp_gb_ok and the key goes.
+  printf 'tmp_gb\t%s\t5\n' "$(date +%s)" >"$AK47_STATE/sample.cache"
+  printf 'tmp_gb_ok\t%s\t%s\n' "$(date +%s)" "$(date +%s)" >>"$AK47_STATE/sample.cache"
+  AK47_DU_TTL=60 "$TICK" --apply >/dev/null 2>&1 || fail "the healthy tick exited non-zero"
+  [ ! -f "$AK47_STATE/keys/tmp-gb-stale" ] \
+    || fail "the episode key survived a measurable tree; the next episode would be silenced for six hours"
+  pass "a measurable tree ends the episode so the next one reports at once"
+}
+
+# --- the walk is bounded and says how much of the tree it covered -----------------
+# A single `du` over the whole tree is all-or-nothing: on a tree too big to finish
+# inside the budget it yields nothing, so the number never refreshes. The walk now
+# measures top-level entries in batches and records its coverage.
+
+test_a_partial_size_walk_records_its_coverage() {
+  reset_tree
+  local i
+  # More entries than one batch (25), so the budget can only reach the first.
+  for i in $(seq 1 30); do mkdir -p "$AK47_TMP_ROOT/d$i"; head -c 20000 /dev/zero >"$AK47_TMP_ROOT/d$i/blob"; done
+  local slow=$SANDBOX/slowbin-part
+  mkdir -p "$slow"
+  # The whole-tree walk never finishes; the batched walk works but costs a
+  # second per batch, so a 1 s budget can only reach the first batch.
+  printf '#!/bin/sh\nif [ $# -gt 1 ]; then sleep 1; exec /usr/bin/du "$@"; fi\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=1 AK47_DU_TTL=0 bash -c \
+    '. "$1/ak47/lib/common.sh"; ak47_tmp_gb >/dev/null' _ "$ROOT" \
+    || fail "the bounded walk exited non-zero"
+  local cov; cov=$(awk -F'\t' '$1=="tmp_gb_partial"{print $3}' "$AK47_STATE/sample.cache" 2>/dev/null)
+  [ -n "$cov" ] || fail "a partial walk recorded no coverage; a reader cannot tell a partial number from a whole one"
+  case "$cov" in
+    [0-9]*/[0-9]*) ;;
+    *) fail "the coverage record is not <measured>/<present>: $cov" ;;
+  esac
+  pass "a partial size walk records how much of the tree it covered"
+}
+
+test_a_partial_walk_does_not_claim_the_tree_was_measured() {
+  reset_tree
+  local i
+  # More entries than one batch (25), so the budget can only reach the first.
+  for i in $(seq 1 30); do mkdir -p "$AK47_TMP_ROOT/d$i"; head -c 20000 /dev/zero >"$AK47_TMP_ROOT/d$i/blob"; done
+  local slow=$SANDBOX/slowbin-part2
+  mkdir -p "$slow"
+  printf '#!/bin/sh\nif [ $# -gt 1 ]; then sleep 1; exec /usr/bin/du "$@"; fi\nexec sleep 300\n' >"$slow/du"
+  chmod +x "$slow/du"
+  PATH="$slow:$PATH" AK47_DU_BUDGET=1 AK47_DU_TTL=0 bash -c \
+    '. "$1/ak47/lib/common.sh"; ak47_tmp_gb >/dev/null' _ "$ROOT" \
+    || fail "the bounded walk exited non-zero"
+  local ok; ok=$(awk -F'\t' '$1=="tmp_gb_ok"{print $3}' "$AK47_STATE/sample.cache" 2>/dev/null)
+  [ -z "$ok" ] || fail "a partial walk stamped tmp_gb_ok, so the staleness finding would go quiet on a number that covers part of the tree"
+  pass "a partial walk does not claim the tree was measured"
+}
+
+# --- the health beat must not clear the tick's keys -------------------------------
+# The two producers share $AK47_STATE/keys. The beat prunes keys for findings that
+# went away, and it only knows its own findings, so pruning the whole directory
+# deleted the tick's keys and made every tick re-page.
+
+test_the_health_beat_prunes_only_its_own_keys() {
+  local h=$ROOT/ak47/hdevops/ansible/playbooks/templates/ak47-health.sh
+  local home=$SANDBOX/health-home bin=$SANDBOX/health-bin sd
+  rm -rf "$home" "$bin"
+  mkdir -p "$home/.local/state/ak47" "$home/fmhome/bin" "$home/fmhome/state" "$bin"
+  sd=$home/.local/state/ak47
+  cat >"$home/fmhome/bin/fm-inbox.sh" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$home/fmhome/bin/fm-inbox.sh"
+  # Keep the beat off the real box: no Wi-Fi, sensors, failed units, agents, or
+  # /tmp walk. A fresh state directory has no devops.log, so devops-absent is a
+  # deterministic finding that must be delivered and keyed.
+  cat >"$bin/du" <<'SH'
+#!/bin/sh
+printf '1\t/tmp\n'
+SH
+  cat >"$bin/sudo" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  cat >"$bin/ip" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  cat >"$bin/sensors" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  cat >"$bin/systemctl" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  cat >"$bin/pgrep" <<'SH'
+#!/bin/sh
+case "$*" in *-c*) echo 0 ;; esac
+exit 0
+SH
+  cat >"$bin/notify-send" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$bin"/*
+  mkdir -p "$sd/keys"
+  printf 'tick\n' >"$sd/keys/tmp-gb-stale"
+  HOME="$home" FM_HOME="$home/fmhome" AK47_USER_SLICE="$home/no-slice" \
+    PATH="$bin:$PATH" bash "$h" >/dev/null 2>&1 || fail "the health beat exited non-zero"
+  [ -f "$sd/keys/health/devops-absent" ] \
+    || fail "a delivered finding did not commit its key under keys/health"
+  printf 'old\n' >"$sd/keys/health/old-finding"
+  HOME="$home" FM_HOME="$home/fmhome" AK47_USER_SLICE="$home/no-slice" \
+    PATH="$bin:$PATH" bash "$h" >/dev/null 2>&1 || fail "the health beat exited non-zero"
+  [ -e "$sd/keys/health/old-finding" ] \
+    && fail "the health beat did not prune a stale key of its own"
+  [ -e "$sd/keys/tmp-gb-stale" ] \
+    || fail "the health beat pruned the tick's key"
+  [ -e "$sd/keys/health/devops-absent" ] \
+    || fail "the health beat pruned the key for a finding it still reports"
+  pass "the health beat prunes only its own keys, so the tick keeps its episodes"
+}
+test_a_stale_size_walk_is_reported_once_per_episode
+test_a_measurable_tree_ends_the_episode
+test_a_partial_size_walk_records_its_coverage
+test_a_partial_walk_does_not_claim_the_tree_was_measured
+test_the_health_beat_prunes_only_its_own_keys

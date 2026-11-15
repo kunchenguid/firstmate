@@ -179,12 +179,25 @@ five hours with no `devops.log` line, and nothing watching the tick's silence
 closely enough to notice. The tick is the sampler, so a sampler that can hang is
 a loop that can die.
 
-The walk now runs under `timeout` (`AK47_DU_BUDGET`, default 90 s). If it does
-not finish, the budget scores the last known size, and once that size is older
-than two refresh intervals the tick files `tmp-gb-stale` instead of letting a
-stale picture drive the sweep. The rule this leaves behind: **a budget metric
-whose sample is unbounded must return a number or say it could not measure** —
-never block, and never invent.
+The walk now runs under `timeout` (`AK47_DU_BUDGET`, default 300 s): one
+whole-tree `du` is tried first, and if it does not finish the walk measures the
+top-level entries in batches within half the budget, so a tree too big to finish
+still yields a real lower bound with its coverage recorded in `tmp_gb_partial`
+(`<entries measured>/<entries present>`) rather than nothing at all. A partial
+walk caches its number but does **not** stamp `tmp_gb_ok`: only a walk that
+reached every entry counts as a measurement. If the tree stays unmeasured for
+longer than two refresh intervals the tick files `tmp-gb-stale` instead of
+letting a stale picture drive the sweep. The rule this leaves behind: **a budget
+metric whose sample is unbounded must return a number or say it could not
+measure** — never block, and never invent.
+
+That finding is one per **episode**, not one per tick. The 6 h key spaces
+repeats, and the key is cleared the moment the tree is measurable again, so a
+new episode reports immediately instead of waiting out the old window. The
+health beat keeps its own keys in `$AK47_STATE/keys/health/` and prunes only
+those: on 2026-11-15 it was pruning every key in `$AK47_STATE/keys`, which
+deleted the tick's `tmp-gb-stale` key every five minutes and re-paged the same
+finding 59 times in a day.
 
 The delete path had the same shape and the same cure. `safe-delete.sh` used
 `lsof -t +D` to prove nothing held a quarantined entry; that scan is recursive,
@@ -530,7 +543,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-116 tests across seven files: the budget, the census, the guards, the guarded
+121 tests across seven files: the budget, the census, the guards, the guarded
 delete, the big-entry take-down, the tick, and the weekly review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as
 `pure-contract-unit` in `bin/fm-test-run.sh`.

@@ -32,7 +32,7 @@
 # Usage: ak47-health.sh [--print] [--no-notify]
 set -u
 export FM_HOME=${FM_HOME:-/home/aaron/Projects/firstmate}
-SD=$HOME/.local/state/ak47; mkdir -p "$SD/snaps" "$SD/keys"
+SD=$HOME/.local/state/ak47; mkdir -p "$SD/snaps" "$SD/keys" "$SD/keys/health"
 LOG=$SD/health.log
 CORES=$(nproc)
 SPIKE=$((CORES * 3 / 2))
@@ -207,13 +207,17 @@ fi
 new=(); newkeys=()
 if [ "$NOTIFY" = 1 ]; then
   for f in "${finds[@]}"; do
-    k=${f%%|*}; kf=$SD/keys/$k
+    k=${f%%|*}; kf=$SD/keys/health/$k
     if [ ! -f "$kf" ] || [ $(( $(date +%s) - $(stat -c %Y "$kf") )) -gt 21600 ]; then
       new+=("${f#*|}"); newkeys+=("$kf"); echo "$now FIND $k ${f#*|}" >>"$LOG"
     fi
   done
-  # clear keys for findings that went away, so a recurrence reports again
-  for kf in "$SD"/keys/*; do [ -e "$kf" ] || continue; k=$(basename "$kf"); printf '%s\n' "${finds[@]}" | grep -q "^$k|" || rm -f "$kf"; done
+  # clear keys for findings that went away, so a recurrence reports again. Only
+  # this beat's own keys: the tick keeps its keys in $SD/keys and prunes them
+  # itself. 2026-11-15 - pruning the whole directory here deleted the tick's
+  # tmp-gb-stale key every five minutes, so that finding re-paged on every tick
+  # (59 notes in a day) instead of once per episode.
+  for kf in "$SD"/keys/health/*; do [ -e "$kf" ] || continue; k=$(basename "$kf"); printf '%s\n' "${finds[@]}" | grep -q "^$k|" || rm -f "$kf"; done
 fi
 if [ "$NOTIFY" = 1 ] && [ ${#new[@]} -gt 0 ]; then
   # a page is delivered like a note but also leaves a durable page record and a

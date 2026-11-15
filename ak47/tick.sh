@@ -435,7 +435,14 @@ printf '%s %s\n' "$(ak47_epoch)" "$sample" >>"$AK47_STATE/samples.log" 2>/dev/nu
 # no longer the tree, and that is exactly how a hygiene loop goes wrong quietly.
 tmp_age=$(ak47_cache_age tmp_gb_ok 2>/dev/null) || tmp_age=""
 if [ -n "$tmp_age" ] && [ "$tmp_age" -gt $(( 2 * ${AK47_DU_TTL:-1800} )) ]; then
-  finding tmp-gb-stale "/tmp has not been measured for $(( tmp_age / 60 )) min: the ${AK47_DU_BUDGET:-90}s size walk did not finish, so the budget is scoring a stale number. Measure by hand: find /tmp -maxdepth 1 -type d -printf '%p\\0' | xargs -0 du -sx --block-size=1M | sort -rn | head -20"
+  # One finding per episode, not one per tick. The 6 h key below already spaces
+  # repeats, but the key is cleared the moment the tree is measurable again, so a
+  # new episode reports immediately instead of waiting out the old window.
+  covered=$(ak47_cache_get tmp_gb_partial 345600 2>/dev/null) || covered=""
+  finding tmp-gb-stale "/tmp has not been measured for $(( tmp_age / 60 )) min: the ${AK47_DU_BUDGET:-300}s size walk did not finish${covered:+ (covered $covered entries)}, so the budget is scoring a stale number. Measure by hand: find /tmp -maxdepth 1 -type d -printf '%p\\0' | xargs -0 du -sx --block-size=1M | sort -rn | head -20"
+else
+  # Measurable again: end the episode so the next one is not silenced by it.
+  rm -f "$AK47_STATE/keys/tmp-gb-stale" 2>/dev/null || true
 fi
 
 # Per-class counts, so the line says what moved without reading reap.log.
