@@ -143,6 +143,30 @@ matrix_case A34 allow 'command -V cd'
 matrix_case A35 allow 'command -pv cd'
 matrix_case A36 allow 'command -vp cd'
 
+# HOME: the one allowed cd target is a single literal absolute path that
+# resolves, symlinks included, to the primary checkout itself; a child, sibling,
+# parent, pushd, option-bearing, unexpanded, or glob target stays denied.
+HOME_LINK="$TMP_ROOT/primary-link"
+ln -s "$PRIMARY" "$HOME_LINK"
+mkdir -p "$TMP_ROOT/primary-sibling/child"
+ln -s "$TMP_ROOT/primary-sibling/child" "$PRIMARY/escape-link"
+matrix_case H01 allow "cd $PRIMARY"
+matrix_case H02 allow "cd $PRIMARY/"
+matrix_case H03 allow "cd \"$PRIMARY\""
+matrix_case H04 allow "cd -- $PRIMARY"
+matrix_case H05 allow "cd $PRIMARY/bin/.."
+matrix_case H06 allow "cd $HOME_LINK"
+matrix_case H07 allow "cd $PRIMARY && git status"
+matrix_case H08 deny "cd $PRIMARY/bin"
+matrix_case H09 deny "cd $TMP_ROOT/primary-sibling"
+matrix_case H10 deny "cd $TMP_ROOT"
+matrix_case H11 deny "cd $PRIMARY && cd projects/foo"
+matrix_case H12 deny "pushd $PRIMARY"
+matrix_case H13 deny "cd -P $PRIMARY"
+matrix_case H14 deny 'cd "$PWD"'
+matrix_case H15 deny "cd $PRIMARY/*"
+matrix_case H16 deny "cd $PRIMARY/escape-link/.."
+
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
 
@@ -368,6 +392,10 @@ test_policy_cli_direct() {
     || fail "policy CLI must allow a subshell-local cd"
   [ "$(node "$policy")" = allow ] \
     || fail "policy CLI must allow when no command is supplied"
+  [ "$(node "$policy" --home "$PRIMARY" --command "cd $PRIMARY")" = allow ] \
+    || fail "policy CLI must allow a literal absolute cd to the --home path"
+  [ "$(node "$policy" --command "cd $PRIMARY" | cut -f1)" = deny ] \
+    || fail "policy CLI without --home must exempt no cd target"
   pass "cd-guard: fm-cd-command-policy.mjs CLI honors the deny/allow output contract"
 }
 
