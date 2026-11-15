@@ -1655,19 +1655,50 @@ fm_lock_parent_gone() {  # <lockdir>
   [ ! -d "$parent" ]
 }
 
+# Print holder evidence, including hidden nested owner records on Git Bash.
+# Missing evidence is explicit; this diagnostic never removes lock contents.
+fm_lock_wait_error() {  # <reason> <lockdir>
+  local reason=$1 lockdir=$2 owner pid
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  printf 'error: %s %s; holder pid=%s; inspect contents and permissions\n' \
+    "$reason" "$lockdir" "${pid:-unknown}" >&2
+  for owner in "$lockdir/${lockdir##*/}.owner."*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    printf '  owner=%s holder pid=%s\n' "$owner" "${pid:-unknown}" >&2
+  done
+}
+
 # Wait for a lock without a contention deadline. The 0.1s retry serves short
 # critical sections, where a wider interval would delay every handoff between
 # the watcher and its writers. It returns 1 within 0.2s of its parent's removal
 # (fm_lock_parent_gone) instead of polling for a lock that can never exist.
-# Callers that handle failure may opt into --refuse-unreapable to refuse a
-# stale real directory that cannot be removed, naming its exact path. The
-# ordinary wait and live contention retain their behavior without a deadline.
+# --refuse-unreapable refuses an unremovable stale real directory immediately.
+# Git Bash's ordinary wait retries that removal for at most two seconds before
+# the same named refusal: Windows can retain an owner subdirectory indefinitely.
+# POSIX ordinary waits and live contention retain their existing semantics.
 fm_lock_acquire_wait() {
-  local lockdir=$1 refuse_unreapable=${2:-}
+  local lockdir=$1 refuse_unreapable=${2:-} reclaim_path='' reclaim_deadline=0
   while ! fm_lock_try_acquire "$lockdir"; do
-    if [ "$refuse_unreapable" = --refuse-unreapable ] && [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
-      echo "error: cannot reclaim lock directory $FM_LOCK_RECLAIM_FAILED_PATH; inspect its contents and permissions" >&2
-      return 1
+    if [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
+      if [ "$refuse_unreapable" = --refuse-unreapable ]; then
+        fm_lock_wait_error 'cannot reclaim lock directory' "$FM_LOCK_RECLAIM_FAILED_PATH"
+        return 1
+      fi
+      case "$_FM_UNAME" in
+        CYGWIN*|MINGW*|MSYS*)
+          if [ "$reclaim_path" != "$FM_LOCK_RECLAIM_FAILED_PATH" ]; then
+            reclaim_path=$FM_LOCK_RECLAIM_FAILED_PATH
+            reclaim_deadline=$((SECONDS + 2))
+          fi
+          if [ "$SECONDS" -ge "$reclaim_deadline" ]; then
+            fm_lock_wait_error 'cannot reclaim lock directory' "$reclaim_path"
+            return 1
+          fi
+          ;;
+      esac
+    else
+      reclaim_path=''
     fi
     ! fm_lock_parent_gone "$lockdir" || return 1
     sleep 0.1

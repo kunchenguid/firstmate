@@ -88,6 +88,66 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+test_origin_metadata_lock_deadline() {
+  local home
+  home=$(make_home origin-metadata-deadline)
+  python3 - "$ROOT" "$home" "$BASH" <<'PY' || fail "origin metadata lock deadline"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, home = map(Path, sys.argv[1:3])
+bash = sys.argv[3]
+state = home / 'state'
+meta = state / 'sample-origin.meta'
+original = 'decisions_reviewed=1\ndecision_keys=\n'
+meta.write_text(original)
+lock = state / '.meta-sample-origin.lock'
+lock.mkdir()
+holder = subprocess.Popen([bash, '-c', 'echo "$$"; read -r _'],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+try:
+    pid = holder.stdout.readline().strip()
+    assert pid.isdigit(), pid
+    for shape in ('direct', 'nested'):
+        owner = lock if shape == 'direct' else lock / (lock.name + '.owner.fixture')
+        owner.mkdir(exist_ok=True)
+        (owner / 'pid').write_text(pid + '\n')
+        os.utime(owner, (1, 1))
+        os.utime(lock, (1, 1))
+        for command in ('complete', 'verify'):
+            args = [bash, (root / 'bin/fm-captain-hold.sh').as_posix(), command, 'sample-origin']
+            if command == 'complete':
+                args += ['--none']
+            result = subprocess.run(args, env=dict(os.environ, FM_HOME=home.as_posix(),
+                FM_STATE_OVERRIDE=state.as_posix(), FM_DATA_OVERRIDE=(home / 'data').as_posix(),
+                FM_CONFIG_OVERRIDE=(home / 'config').as_posix(), FM_CAPTAIN_META_LOCK_BOUND='1',
+                FM_LOCK_STALE_AFTER='2'), capture_output=True, text=True, timeout=20)
+            if command == 'complete':
+                assert result.returncode == 1, (shape, command, result)
+                assert 'origin metadata lock acquisition failed' in result.stderr, result.stderr
+                assert lock.as_posix() in result.stderr, result.stderr
+                assert 'holder pid=' + pid in result.stderr, result.stderr
+                if shape == 'nested':
+                    assert owner.as_posix() in result.stderr, result.stderr
+            else:
+                # Teardown invokes this read-only command while holding the
+                # origin metadata lock itself. Never wait on that parent.
+                assert result.returncode == 0, (shape, command, result)
+                assert 'verified: sample-origin' in result.stdout, result
+            assert meta.read_text() == original
+            assert (owner / 'pid').read_text() == pid + '\n'
+            assert not (state / 'sample-origin.status').exists()
+        (owner / 'pid').unlink()
+        if owner != lock:
+            owner.rmdir()
+finally:
+    holder.communicate('\n', timeout=10)
+PY
+  pass "complete refuses held origin metadata by deadline with holder evidence; verify remains lock-free"
+}
+
 # Completes <id>'s captain-call inventory through a separate held task, because
 # the origin task is never accepted as its own inventory entry.
 complete_through_sibling() {  # <home> <origin-id>
@@ -5119,6 +5179,7 @@ EOF
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
+test_origin_metadata_lock_deadline
 test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry

@@ -161,6 +161,13 @@
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still satisfy the same durability and origin checks as `complete`,
 # and no keyed status decision may be open.
+# Origin metadata acquisition for `complete` is bounded by
+# FM_CAPTAIN_META_LOCK_BOUND (positive integer seconds, default 10), plus the
+# unpublished-owner freshness allowance owned by fm_lock_acquire_wait_max.
+# Failure refuses the command before metadata reads/writes, naming the lock
+# and its holder evidence (including hidden nested owner directories).
+# `verify` remains a lock-free reader: teardown already holds the origin's
+# metadata lock when invoking it, so taking that lock here would deadlock.
 # `complete` and `verify` also read an entry that markdown Done retention moved
 # into the configured Done archive, where it counts only through a recorded
 # resolution; no other subcommand reads the archive.
@@ -2096,6 +2103,22 @@ reconcile_note() {
   printf 'still-open: %s\n' "$id"
 }
 
+captain_meta_lock_acquire() {
+  local meta=$1 bound=${FM_CAPTAIN_META_LOCK_BOUND:-10}
+  case "$bound" in
+    ''|*[!0-9]*) fail "FM_CAPTAIN_META_LOCK_BOUND must be positive integer seconds" ;;
+  esac
+  bound=$((10#$bound))
+  [ "$bound" -gt 0 ] || fail "FM_CAPTAIN_META_LOCK_BOUND must be positive integer seconds"
+  CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
+  if ! fm_lock_acquire_wait_max "$CAPTAIN_META_LOCK" "$bound"; then
+    fm_lock_wait_error "origin metadata lock acquisition failed after ${bound}s:" "$CAPTAIN_META_LOCK"
+    exit 1
+  fi
+  CAPTAIN_META_LOCK_HELD=1
+  [ -f "$meta" ] || fail "task metadata disappeared while acquiring $CAPTAIN_META_LOCK"
+}
+
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
   local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' tmp
@@ -2105,10 +2128,7 @@ command_complete() {
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] && has_meta=1
   if [ "$has_meta" = 1 ]; then
-    CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
-    fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
-    CAPTAIN_META_LOCK_HELD=1
-    [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
+    captain_meta_lock_acquire "$meta"
   fi
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
