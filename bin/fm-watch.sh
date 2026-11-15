@@ -3921,7 +3921,10 @@ if [ -z "$FM_WATCH_DELIVERY_IDENTITY" ] \
 fi
 
 # A bounded startup recovery-lock failure reports the typed line the arm relays; a
-# transient or dead holder keeps the legacy stderr diagnostic.
+# transient or dead holder keeps the legacy stderr diagnostic. A typed refusal
+# can end the startup recovery-lock wait before the poll loop runs its teardown
+# check, so a state directory replaced since the claim (a changed identity with
+# the singleton lock gone) reports the same teardown reason here.
 startup_lock_failed() {
   local state_devino_now
   if [ ! -e "$WATCH_LOCK/pid" ] && [ -n "$WATCH_STATE_DEVINO" ] \
