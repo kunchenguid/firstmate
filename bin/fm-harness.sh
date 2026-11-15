@@ -261,7 +261,9 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy|antigravity|exe)
-      if fm_agy_process_matches "$comm" "${args%% *}"; then
+      # argv0 is the unflattened argv[0] read above, so an install path with
+      # spaces keeps its antigravity-cli or agy evidence.
+      if fm_agy_process_matches "$comm" "$argv0"; then
         echo "comm agy"
         return
       fi

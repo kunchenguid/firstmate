@@ -99,7 +99,9 @@ fm_ps_ppid() {  # <pid> -> parent pid
 }
 
 # True when the process described by command name $1 and full argument string $2
-# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# is a verified harness. Optional $3 is the structured argv[0] (FM_PROC_ARGV0),
+# which survives spaces in an install path that the flattened $2 splits.
+# Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
 # Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
@@ -115,8 +117,8 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #   6. agy's structural identity, owned by bin/fm-agy-process-lib.sh, which
 #      covers the `antigravity` and sandbox-init `exe` process names.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [argv0]
+  local comm=$1 args=$2 real_argv0=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -143,7 +145,7 @@ fm_harness_process_matches() {  # <comm> <args>
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   fm_omp_process_matches "$comm" "$args" && return 0
-  fm_agy_process_matches "$comm" "$argv0" && return 0
+  fm_agy_process_matches "$comm" "${real_argv0:-$argv0}" && return 0
   return 1
 }
 
@@ -442,7 +444,8 @@ _fm_ps_exec_denied() {
 }
 
 # Read the identity fields of pid $1 into FM_PROC_COMM, FM_PROC_ARGS, and
-# FM_PROC_PPID.
+# FM_PROC_PPID, plus FM_PROC_ARGV0: the unflattened argv[0] from procfs when it
+# is readable, otherwise empty so the matcher falls back to splitting args.
 #
 # ps stays primary everywhere it runs: while it executes, its output is
 # used verbatim, so behavior is byte-identical to every session that ever
@@ -459,6 +462,15 @@ _fm_ps_exec_denied() {
 # Returning 1 means "no route can read this pid", which stops a walk
 # exactly as a dead pid always has: nothing here ever fabricates a field.
 fm_proc_info() {  # <pid>
+  FM_PROC_ARGV0=''
+  _fm_proc_info_fields "$1" || return 1
+  if [ -r "${FM_PROC_ROOT_OVERRIDE:-/proc}/$1/cmdline" ]; then
+    IFS= read -r -d '' FM_PROC_ARGV0 < "${FM_PROC_ROOT_OVERRIDE:-/proc}/$1/cmdline" || true
+  fi
+  return 0
+}
+
+_fm_proc_info_fields() {  # <pid>
   local pid=$1 rc=0 out comm args ppid
   FM_PROC_COMM='' FM_PROC_ARGS='' FM_PROC_PPID=''
   out=$(ps -o comm= -p "$pid" 2>/dev/null) || rc=$?
@@ -589,7 +601,7 @@ fm_harness_ancestry_pids() {
   local pid=$$ extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     fm_proc_info "$pid" || break
-    if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+    if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$FM_PROC_ARGV0"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -667,7 +679,7 @@ fm_session_lock_pid_verdict() {
   if winpid=$(fm_win_untag_pid "$pid"); then
     comm=$(fm_win_command "$winpid") || rc=$?
     case $rc in
-      0) FM_PROC_COMM=$comm FM_PROC_ARGS=$comm FM_PROC_PPID=; FM_SESSION_LOCK_PID_VERDICT=readable ;;
+      0) FM_PROC_COMM=$comm FM_PROC_ARGS=$comm FM_PROC_PPID='' FM_PROC_ARGV0=''; FM_SESSION_LOCK_PID_VERDICT=readable ;;
       1) FM_SESSION_LOCK_PID_VERDICT=dead ;;
     esac
     return 0
@@ -706,7 +718,7 @@ fm_session_lock_pid_verdict() {
 fm_harness_pid_alive() {
   fm_session_lock_pid_verdict "$1"
   [ "$FM_SESSION_LOCK_PID_VERDICT" = readable ] || return 1
-  fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"
+  fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$FM_PROC_ARGV0"
 }
 
 # Liveness and identity of a session-lock pid for readers outside this file:
@@ -763,7 +775,7 @@ fm_session_lock_pid_blocks_reclaim() {
     dead) return 1 ;;
     unreadable) return 0 ;;
     unknown) return 1 ;;
-    readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" ;;
+    readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$FM_PROC_ARGV0" ;;
   esac
 }
 
@@ -809,7 +821,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
     case "$pid" in
       "$claude_pid")
         fm_proc_info "$pid" || return 1
-        fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" || return 1
+        fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$FM_PROC_ARGV0" || return 1
         ;;
       "$FM_WIN_PID_PREFIX$claude_pid")
         fm_harness_pid_alive "$pid" || return 1
@@ -971,7 +983,7 @@ fm_session_lock_inspect() {  # <state>
       FM_LOCK_INSPECT_LIVE_HARNESS=false
       ;;
     readable)
-      if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+      if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$FM_PROC_ARGV0"; then
         # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
         FM_LOCK_INSPECT_STATE=held
         # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.

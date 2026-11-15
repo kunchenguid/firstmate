@@ -101,37 +101,39 @@ SH
 # `agy` a symlink to it, so Linux can name the process `antigravity`; agy's
 # Linux command sandbox re-executes its jail init through /proc/self/exe, so
 # that process is named `exe` while argv[0] is still the antigravity binary.
+# These are real processes under an install path containing a space, because
+# the flattened ps args line splits such a path before its CLI evidence and
+# only the structured argv[0] keeps it.
+agy_spaced_install() {  # <case-dir> -> install dir with a space in its path
+  local dir="$1/home/John Doe/.local/share/mise/installs/antigravity-cli/1.5.6"
+  mkdir -p "$dir"
+  cp "$(command -v bash)" "$dir/antigravity"
+  cp "$(command -v bash)" "$dir/exe"
+  printf '%s\n' "$dir"
+}
+
+agy_harness_under() {  # <argv0> <executable> -> fm-harness.sh verdict
+  # shellcheck disable=SC2016 # The child shell expands $1 and $r at runtime.
+  ( exec -a "$1" env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+      "$2" -c 'r=$("$1"); printf "%s" "$r"' _ "$HARNESS" )
+}
+
 test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init() {
-  local fakebin out
-  fakebin=$(fm_fakebin "$TMP_ROOT/anc-antigravity")
-  cat > "$fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
-  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
-esac
-exit 1
-SH
-  chmod +x "$fakebin/ps"
-
-  out=$(FAKE_PS_COMM=antigravity \
-    FAKE_PS_ARGS='/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  local dir out
+  dir=$(agy_spaced_install "$TMP_ROOT/anc-antigravity")
+  out=$(agy_harness_under "$dir/antigravity" "$dir/antigravity")
   [ "$out" = agy ] \
-    || fail "comm=antigravity must be detected as agy, got '$out'"
+    || fail "comm=antigravity under a spaced install path must be detected as agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=exe \
-    FAKE_PS_ARGS='/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_under "$dir/antigravity" "$dir/exe")
   [ "$out" = agy ] \
-    || fail "a sandbox init (comm=exe, argv0=.../antigravity) must be detected as agy, got '$out'"
+    || fail "a sandbox init (comm=exe, argv0=.../antigravity) under a spaced install path must be detected as agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=antigravity \
-    FAKE_PS_ARGS='/home/u/.local/share/mise/installs/antigravity-cli/latest/agy' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_under "${dir%/1.5.6}/latest/agy" "$dir/antigravity")
   [ "$out" = agy ] \
     || fail "comm=antigravity with an argv[0] named agy must be detected as agy, got '$out'"
-  pass "fm-harness.sh: ancestry detects the antigravity binary and its sandbox init"
+  pass "fm-harness.sh: ancestry detects the antigravity binary and its sandbox init under a spaced path"
 }
 
 test_agy_ancestry_rejects_unrelated_mentions() {
@@ -338,6 +340,30 @@ test_agy_session_lock_ancestry_recognizes_antigravity() {
       || fail "session-lock ancestry must not claim any comm under an antigravity-cli directory"
   ) || exit 1
   pass "fm-session-lock-lib.sh: ancestry recognizes the agy CLI and its sandbox init, never the IDE"
+}
+
+# The session lock reads each live pid itself, so the agy CLI under an install
+# path with a space must still prove its identity from the structured argv[0].
+test_agy_session_lock_reads_argv0_under_a_spaced_path() {
+  local dir pid args
+  dir=$(agy_spaced_install "$TMP_ROOT/lock-spaced")
+  for exe in antigravity exe; do
+    ( exec -a "$dir/antigravity" "$dir/$exe" -c 'sleep 30; :' ) &
+    pid=$!
+    sleep 0.3
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    case "${args%% *}" in
+      */antigravity-cli/*) kill "$pid" 2>/dev/null; fail "fixture args no longer split before the CLI evidence: '$args'" ;;
+    esac
+    (
+      # shellcheck source=/dev/null
+      . "$ROOT/bin/fm-session-lock-lib.sh"
+      fm_harness_pid_alive "$pid"
+    ) || { kill "$pid" 2>/dev/null; fail "session lock must recognize comm=$exe under a spaced agy install path"; }
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
+  pass "fm-session-lock-lib.sh: agy under a spaced install path is a live harness"
 }
 
 # Canned `pane process-info` bodies for the herdr fixtures. The shared
@@ -1049,6 +1075,7 @@ test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
 test_agy_tmux_names_the_native_binary_an_agent
 test_agy_session_lock_ancestry_recognizes_antigravity
+test_agy_session_lock_reads_argv0_under_a_spaced_path
 test_herdr_done_with_live_registry_stays_live
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
 test_herdr_shell_first_with_live_registry_stays_live
