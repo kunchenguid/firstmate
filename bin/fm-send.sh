@@ -53,8 +53,10 @@
 # bin/fm-task-inbox-lib.sh owns the record format, doorbell line, and retry and
 # escalation policy for ordinary and fire-and-forget records.
 # On pane backends, the composer pre-check before the ring is ADVISORY only: when
-# the composer visibly holds pending text the ring is skipped with a notice and
-# the watcher re-rings an ordinary record later; no composer verdict is
+# the composer visibly holds pending text, the ring captures it, clears the
+# composer, rings, and types the text back (fm_task_inbox_ring); only when it
+# cannot be cleared is the ring skipped with a notice and the watcher re-rings
+# an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
 #
 # TYPED - the LOCAL text submitted directly instead of through the inbox. On a
@@ -1228,7 +1230,9 @@ else
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
+    FM_TASK_INBOX_RING_NOTE=
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    [ -z "$FM_TASK_INBOX_RING_NOTE" ] || echo "fm-send: $FM_TASK_INBOX_RING_NOTE" >&2
     ring_retry="the watcher will re-ring"
     if [ -n "$FIRE_AND_FORGET_ID" ] \
       && [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wait-no-turns" ]; then

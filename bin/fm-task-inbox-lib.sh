@@ -391,7 +391,8 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
+# fm_task_inbox_ring wraps this so foreign pending text never blocks a ring.
+fm_task_inbox_ring_core() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
@@ -425,12 +426,86 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
-# Whether the composer's content, ignoring line wrapping, is exactly <line>.
-fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
+# Clear the composer's draft: Ctrl-U presses sized from the draft length (one
+# wrapped row per press on some harnesses), then Backspace presses for a short
+# leftover a harness's Ctrl-U did not take. 0 only when the composer reads empty.
+fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-label]
+  local backend=$1 target=$2 held=$3 label=${4:-} presses i=0 bs=backspace
+  [ "$backend" != tmux ] || bs=BSpace
+  presses=$(( ${#held} / 40 + 2 ))
+  [ "$presses" -le 12 ] || presses=12
+  while [ "$i" -lt "$presses" ]; do
+    fm_backend_send_key "$backend" "$target" C-u "$label" >/dev/null 2>&1 || break
+    i=$((i + 1))
+    [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != empty ] || return 0
+  done
+  if [ "${#held}" -le 80 ]; then
+    i=0
+    while [ "$i" -lt "${#held}" ]; do
+      fm_backend_send_key "$backend" "$target" "$bs" "$label" >/dev/null 2>&1 || break
+      i=$((i + 1))
+    done
+    [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != empty ] || return 0
+  fi
+  return 1
+}
+
+# Ring the doorbell without ever being blocked by someone else's composer text.
+# fm_task_inbox_ring_core defers (rc 1) when the composer PROVENLY holds other
+# pending text, which let a single stray character swallow every steer. Here
+# that text is captured, the composer cleared, the doorbell rung, and the text
+# typed back unsubmitted, so a half-typed draft survives the ring and the
+# worker still hears the bell. Local and remote endpoints share this path (the
+# remote leg rings through its host's backend). When the draft cannot be read,
+# the backend has no literal-send primitive, or the clear fails, the ring still
+# defers as before and sets FM_TASK_INBOX_RING_NOTE. After a ring that left
+# our own doorbell unsubmitted, that doorbell is cleared before the draft is
+# restored so the two never run together; a failed restore is reported, with
+# the captured text, in the note.
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
+  local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line
+  fm_task_inbox_ring_core "$@" || rc=$?
+  [ "$rc" = 1 ] || return "$rc"
+  held=$(fm_task_inbox_composer_text "$backend" "$target" "$label") || return 1
+  [ -n "$held" ] || return 1
+  line=$(fm_task_inbox_doorbell_line "$rec") || return 1
+  if ! fm_task_inbox_composer_clear "$backend" "$target" "$held" "$label"; then
+    # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
+    FM_TASK_INBOX_RING_NOTE="the composer holds other pending text that could not be cleared"
+    return 1
+  fi
+  rc=0
+  fm_task_inbox_ring_core "$@" || rc=$?
+  if [ "$rc" != 3 ]; then
+    sleep "${FM_TASK_INBOX_RESTORE_SETTLE:-0.3}"
+    if fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label"; then
+      fm_task_inbox_composer_clear "$backend" "$target" "$line" "$label" || true
+    fi
+  fi
+  if [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" = empty ] \
+    && fm_backend_send_literal "$backend" "$target" "$held" "$label" >/dev/null 2>&1; then
+    FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring and restored"
+  else
+    # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
+    FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring but could not be restored: $held"
+  fi
+  return "$rc"
+}
+
+# The composer's content as the shared extractor normalizes it (single-spaced,
+# never multi-line), so it can be typed back verbatim.
+fm_task_inbox_composer_text() {  # <backend> <target> [expected-label]
   local cap held
   fm_backend_source "$1" || return 1
-  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${3:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
+  printf '%s' "$held"
+}
+
+# Whether the composer's content, ignoring line wrapping, is exactly <line>.
+fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
+  local held
+  held=$(fm_task_inbox_composer_text "$1" "$2" "${4:-}") || return 1
   [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
 }
 
