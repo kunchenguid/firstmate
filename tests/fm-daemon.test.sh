@@ -3578,14 +3578,272 @@ test_discover_supervisor_hc() {
     HC_TERMINAL_ID=t9 HC_TERMINAL_SOCKET=/tmp/fm-test.sock discover_supervisor_backend)
   [ "$out" = herdr ] || fail "herdr markers nested in an hc terminal must keep herdr: $out"
 
-  # The resolution is deliberately fail-closed: the away daemon's supported
-  # list does not name hc, so it refuses at startup with the supported set
-  # rather than silently steering the tmux fallback.
-  if fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" hc; then
-    fail "the away daemon must not list hc as a supported supervisor backend"
-  fi
+  fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" hc \
+    || fail "the away daemon must list hc as a supported supervisor backend"
 
-  pass "discover_supervisor_{target,backend}: hc markers resolve <session>:<address> + hc; bare id, nested tmux/herdr keep their verdicts; supported list stays closed to hc"
+  pass "discover_supervisor_{target,backend}: hc markers resolve <session>:<address> + hc; bare id, nested tmux/herdr keep their verdicts; hc is a supported supervisor backend"
+}
+
+# --- hc supervisor injection ----------------------------------------------------
+# The hc supervisor path runs the real adapter (bin/backends/hc.sh) through the
+# dispatcher against a fake herdr-core, behind a real listening unix socket that
+# stands in for the core: the daemon reads an hc endpoint only while its core
+# accepts connections, because any hc call starts a missing core.
+#
+# hc_supercase <name>: a supercase plus a fake herdr-core and a short socket dir
+# (AF_UNIX paths cap near 104 bytes). Sets HC_CASE_DIR, HC_CASE_FB, HC_CASE_RUN
+# (an XDG_RUNTIME_DIR whose herdr-core/<session>.sock is hc's own layout) and
+# HC_CASE_STATE. The fake answers `get` from <dir>/<address>.json (exit 3 when
+# absent), `read` from <dir>/screen.txt, and `send` from <dir>/send.json or
+# with exit <dir>/send.exit; every call is logged with its session and socket.
+hc_supercase() {  # <name>
+  local fb
+  HC_CASE_DIR=$(make_supercase "$1")
+  HC_CASE_STATE="$HC_CASE_DIR/state"
+  fb="$HC_CASE_DIR/hcbin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr-core" <<'SH'
+#!/usr/bin/env bash
+set -u
+D="${FAKE_HC_DIR:?}"
+{
+  printf 'HC_SESSION=%s HC_SOCKET=%s' "${HC_SESSION:-}" "${HC_SOCKET:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$D/log"
+last=""
+for a in "$@"; do last=$a; done
+case "${1:-}" in
+  --version) printf 'hc 0.1.14\n' ;;
+  get)
+    [ -f "$D/$last.json" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
+    cat "$D/$last.json"
+    ;;
+  read) cat "$D/screen.txt" 2>/dev/null ;;
+  send)
+    if [ -f "$D/send.exit" ]; then
+      printf '{"error":{"kind":"blocked"}}\n' >&2
+      exit "$(cat "$D/send.exit")"
+    fi
+    cat "$D/send.json" 2>/dev/null || printf '{"started":true,"wait":{"status":"working"}}\n'
+    ;;
+  *) printf '{}\n' ;;
+esac
+SH
+  chmod +x "$fb/herdr-core"
+  HC_CASE_FB=$fb
+  HC_CASE_RUN=$(mktemp -d /tmp/fm-dhc.XXXXXX) || fail "mktemp for the hc socket dir failed"
+  mkdir -p "$HC_CASE_RUN/herdr-core"
+  HC_CASE_PIDS=""
+}
+
+# hc_case_live_core <session>: park a listening socket at hc's own path for
+# <session>, so the core reads as live.
+hc_case_live_core() {  # <session>
+  local sock="$HC_CASE_RUN/herdr-core/$1.sock" pid tries=50
+  python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(300)' "$sock" >/dev/null 2>&1 &
+  pid=$!
+  HC_CASE_PIDS="$HC_CASE_PIDS $pid"
+  while [ ! -S "$sock" ] && [ "$tries" -gt 0 ]; do sleep 0.05; tries=$((tries - 1)); done
+  [ -S "$sock" ] || fail "the stand-in core socket for $1 never bound"
+}
+
+hc_case_cleanup() {
+  local pid
+  for pid in $HC_CASE_PIDS; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  rm -rf "$HC_CASE_RUN"
+}
+
+# hc_case_terminal <address> <status>: a live terminal whose native agent
+# status.state is <status> ("" for none).
+hc_case_terminal() {  # <address> <status>
+  jq -n --arg a "$1" --arg st "$2" \
+    '{address: $a, state: "live", status: (if $st == "" then null else {state: $st} end),
+      foreground: {name: "claude", argv: ["claude"], pid: 1}}' > "$HC_CASE_DIR/$1.json"
+}
+
+# hc_case_env <cmd...>: run <cmd> against the fake core.
+hc_case_env() {
+  FAKE_HC_DIR=$HC_CASE_DIR FM_HC_BIN="$HC_CASE_FB/herdr-core" XDG_RUNTIME_DIR=$HC_CASE_RUN \
+    FM_STATE_OVERRIDE=$HC_CASE_STATE FM_DAEMON_PRIMARY_HARNESS=claude "$@"
+}
+
+HC_CLAUDE_IDLE=$'transcript line\n────────────────────────\n❯\xc2\xa0\n────────────────────────\n  bypass permissions'
+HC_CLAUDE_TYPED=$'transcript line\n────────────────────────\n❯ fix the login bug\n────────────────────────'
+
+test_hc_supervisor_identity_and_live_core() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc adapter needs it"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the live-socket probe needs it"; return; }
+  local out sock other
+  hc_supercase hc-identity
+  hc_case_live_core default
+  hc_case_live_core other
+  sock="$HC_CASE_RUN/herdr-core/default.sock"
+  other="$HC_CASE_RUN/herdr-core/other.sock"
+
+  # The composed target names this terminal only when its socket is the core
+  # the target's session resolves to.
+  out=$(HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$sock" HC_SESSION='' hc_case_env fm_supervisor_hc_identity_check default:t4) \
+    || fail "a default-session terminal on the default core must pass the identity check: $out"
+  out=$(HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$other" HC_SESSION=other hc_case_env fm_supervisor_hc_identity_check other:t4) \
+    || fail "a named-session terminal on its own core must pass the identity check: $out"
+  if out=$(HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$sock" HC_SESSION=other hc_case_env fm_supervisor_hc_identity_check other:t4); then
+    fail "a terminal on the default core must not claim session other's t4"
+  fi
+  assert_contains "$out" "would reach another terminal" "the identity refusal must say why the address is not trusted"
+  if out=$(HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$sock" HC_SESSION='' FM_HC_SOCKET="$other" \
+    hc_case_env fm_supervisor_hc_identity_check default:t4); then
+    fail "a terminal off the FM_HC_SOCKET-pinned core must fail the identity check"
+  fi
+  if out=$(HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$HC_CASE_RUN/herdr-core/dead.sock" HC_SESSION=dead \
+    hc_case_env fm_supervisor_hc_identity_check dead:t4); then
+    fail "a terminal whose core socket is not listening must fail the identity check"
+  fi
+  assert_contains "$out" "not accepting connections" "a dead core must be named as such"
+
+  # Existence is read only behind a live core: a gone core never reaches hc.
+  hc_case_terminal t4 idle
+  hc_case_env supervisor_target_exists hc default:t4 || fail "a live terminal on a live core must exist"
+  : > "$HC_CASE_DIR/log"
+  if hc_case_env supervisor_target_exists hc gone:t4; then
+    fail "a target whose core is not listening must read as gone"
+  fi
+  [ ! -s "$HC_CASE_DIR/log" ] || fail "a gone core must be judged without any hc call (which would start it): $(cat "$HC_CASE_DIR/log")"
+  if hc_case_env supervisor_target_exists hc default:t9; then
+    fail "an absent terminal on a live core must read as gone"
+  fi
+  hc_case_cleanup
+  pass "hc supervisor: identity requires the terminal's own live core; existence never contacts a dead core"
+}
+
+test_inject_msg_hc_busy_guard_defers() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc adapter needs it"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the live-socket probe needs it"; return; }
+  hc_supercase inject-hc-busy
+  hc_case_live_core default
+  afk_enter "$HC_CASE_STATE"
+  hc_case_terminal t4 working
+  printf '%s\n' "$HC_CLAUDE_IDLE" > "$HC_CASE_DIR/screen.txt"
+  if FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET=default:t4 hc_case_env inject_msg hello "$HC_CASE_STATE"; then
+    fail "inject_msg should defer while hc reports the supervisor agent working"
+  fi
+  assert_contains "$INJECT_LAST_FAILURE" "supervisor pane busy" "the busy guard must be what deferred"
+  assert_not_contains "$(cat "$HC_CASE_DIR/log")" $'\x1fsend\x1f' "a busy hc supervisor must receive no send"
+  hc_case_cleanup
+  pass "inject_msg: hc native busy state defers before any submit"
+}
+
+test_inject_msg_hc_composer_guard_defers() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc adapter needs it"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the live-socket probe needs it"; return; }
+  hc_supercase inject-hc-typed
+  hc_case_live_core default
+  afk_enter "$HC_CASE_STATE"
+  hc_case_terminal t4 idle
+  printf '%s\n' "$HC_CLAUDE_TYPED" > "$HC_CASE_DIR/screen.txt"
+  if FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET=default:t4 hc_case_env inject_msg hello "$HC_CASE_STATE"; then
+    fail "inject_msg should defer when the hc supervisor composer holds typed text"
+  fi
+  assert_contains "$INJECT_LAST_FAILURE" "composer not confirmed-empty" "the composer guard must be what deferred typed text"
+  assert_not_contains "$(cat "$HC_CASE_DIR/log")" $'\x1fsend\x1f' "a composer holding text must receive no send"
+  printf 'nothing a composer reader recognizes\n$ \n' > "$HC_CASE_DIR/screen.txt"
+  if FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET=default:t4 hc_case_env inject_msg hello "$HC_CASE_STATE"; then
+    fail "inject_msg should defer when the hc supervisor screen is not a provably empty composer"
+  fi
+  assert_contains "$INJECT_LAST_FAILURE" "state=unknown" "the composer guard must be what deferred an unproven screen"
+  assert_not_contains "$(cat "$HC_CASE_DIR/log")" $'\x1fsend\x1f' "an unproven screen must receive no send"
+  hc_case_cleanup
+  pass "inject_msg: hc composer guard defers on typed text and on an unproven screen"
+}
+
+test_inject_msg_hc_core_gone_defers() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc adapter needs it"; return; }
+  hc_supercase inject-hc-gone
+  afk_enter "$HC_CASE_STATE"
+  hc_case_terminal t4 idle
+  printf '%s\n' "$HC_CLAUDE_IDLE" > "$HC_CASE_DIR/screen.txt"
+  if FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET=default:t4 hc_case_env inject_msg hello "$HC_CASE_STATE"; then
+    fail "inject_msg should defer when the hc supervisor core is not listening"
+  fi
+  assert_contains "$INJECT_LAST_FAILURE" "supervisor target default:t4 not found on hc" "the existence check must be what deferred"
+  [ ! -s "$HC_CASE_DIR/log" ] || fail "a gone hc core must not be contacted (an hc call starts one): $(cat "$HC_CASE_DIR/log")"
+  hc_case_cleanup
+  pass "inject_msg: an hc supervisor whose core is gone defers without contacting hc"
+}
+
+test_inject_msg_hc_submits_through_send_wait() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc adapter needs it"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the live-socket probe needs it"; return; }
+  local sends
+  hc_supercase inject-hc-submit
+  hc_case_live_core default
+  afk_enter "$HC_CASE_STATE"
+  hc_case_terminal t4 idle
+  printf '%s\n' "$HC_CLAUDE_IDLE" > "$HC_CASE_DIR/screen.txt"
+  printf '{"started":true,"status":"working","turn":2}\n' > "$HC_CASE_DIR/send.json"
+  FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET=default:t4 hc_case_env inject_msg hello "$HC_CASE_STATE" \
+    || fail "inject_msg should succeed when hc send --wait reports the started turn"
+  sends=$(grep $'\x1fsend\x1f' "$HC_CASE_DIR/log")
+  [ "$(printf '%s\n' "$sends" | wc -l | tr -d ' ')" = 1 ] || fail "the digest must be sent exactly once: $sends"
+  assert_contains "$sends" "HC_SESSION=default HC_SOCKET=" "the send must pin the target's session and drop any inherited socket"
+  assert_contains "$sends" $'\x1fsend\x1f--json\x1ft4\x1f--wait\x1f' "the digest must go through one send --wait on the target"
+  assert_contains "$sends" $'\x1f--\x1f' "the digest must follow the -- delimiter"
+  printf '%s\n' "${sends##*$'\x1f'}" > "$HC_CASE_DIR/sent.log"
+  delivered_digest "$HC_CASE_DIR/sent.log" | grep -F 'hello' >/dev/null \
+    || fail "the sent text must carry the digest: $sends"
+  assert_not_contains "$(cat "$HC_CASE_DIR/log")" $'\x1fkeys\x1f' "a natively confirmed submit needs no Enter retry"
+
+  # A blocked terminal refuses the send before typing; the daemon never forces it.
+  : > "$HC_CASE_DIR/log"
+  printf '9\n' > "$HC_CASE_DIR/send.exit"
+  if FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET=default:t4 hc_case_env inject_msg hello "$HC_CASE_STATE"; then
+    fail "inject_msg must not report delivery to a blocked hc terminal"
+  fi
+  [ "$INJECT_LAST_VERDICT" = unknown ] || fail "a blocked hc terminal must read unknown, got '$INJECT_LAST_VERDICT'"
+  assert_not_contains "$(cat "$HC_CASE_DIR/log")" $'\x1fkeys\x1f' "a blocked hc terminal must never be keyed"
+  hc_case_cleanup
+  pass "inject_msg: hc submits once through send --wait, confirms the started turn, and never forces a blocked terminal"
+}
+
+test_afk_start_hc_supervisor_startup() {
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc adapter needs it"; return; }
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the live-socket probe needs it"; return; }
+  local out status cfg
+  hc_supercase afk-start-hc
+  hc_case_live_core default
+  hc_case_live_core other
+  cfg="$HC_CASE_DIR/config"
+  mkdir -p "$cfg"
+
+  # Auto-discovered from a terminal whose markers name another core: refused
+  # before any target read, naming the identity mismatch.
+  out=$(hc_case_env env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLOCK \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u FM_BACKEND -u HC_SOCKET -u HC_SCOPE \
+    FM_HOME="$HC_CASE_DIR" FM_BACKEND_CONFIG_DIR="$cfg" TERM_PROGRAM=ghostty \
+    HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$HC_CASE_RUN/herdr-core/other.sock" HC_SESSION='' \
+    "$AFK_START" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the daemon must refuse an hc target that names another core"
+  assert_not_contains "$out" "does not support supervisor backend" "hc must pass the supported-backend check"
+  assert_contains "$out" "is not provably this hc terminal" "the startup refusal must name the hc identity mismatch"
+
+  # The terminal's own core, but no such terminal: identity passes and the
+  # startup existence check refuses on the hc backend.
+  out=$(hc_case_env env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLOCK \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND -u FM_BACKEND -u HC_SOCKET -u HC_SCOPE \
+    FM_HOME="$HC_CASE_DIR" FM_BACKEND_CONFIG_DIR="$cfg" TERM_PROGRAM=ghostty \
+    HC_TERMINAL_ID=t4 HC_TERMINAL_SOCKET="$HC_CASE_RUN/herdr-core/default.sock" HC_SESSION='' \
+    "$AFK_START" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the daemon must refuse an hc target that does not exist"
+  assert_not_contains "$out" "is not provably this hc terminal" "the terminal's own core must pass the identity check"
+  assert_contains "$out" "supervisor target 'default:t4' does not resolve to a hc pane" "an absent hc terminal must refuse at the startup existence check"
+  assert_contains "$(grep $'\x1fget\x1f' "$HC_CASE_DIR/log")" "HC_SESSION=default" "the existence read must reach the composed session"
+  hc_case_cleanup
+  pass "fm-afk-start.sh: an hc supervisor passes the supported-backend check, refuses another core's address, and validates existence on its own core"
 }
 
 # --- t3code supervisor discovery and busy verdict --------------------------
@@ -4023,6 +4281,12 @@ test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_discover_supervisor_hc
+test_hc_supervisor_identity_and_live_core
+test_inject_msg_hc_busy_guard_defers
+test_inject_msg_hc_composer_guard_defers
+test_inject_msg_hc_core_gone_defers
+test_inject_msg_hc_submits_through_send_wait
+test_afk_start_hc_supervisor_startup
 test_discover_supervisor_t3code_after_env_tmux_and_herdr
 test_pane_is_busy_t3code_trusts_native_verdict_without_capture
 test_pane_is_busy_herdr_native_busy_state
