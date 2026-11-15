@@ -175,11 +175,11 @@ fm_path_mtime() {
 # safe: a genuine first write in that same second is not counted either, so
 # that launch gets the one ordinary start wake instead of a missed one.
 fm_start_check_launch_epoch() {  # <state-dir> <task-id>
-  local now newest m file
+  local now newest m marker
   fm_epoch_seconds_to now
   newest=0
-  for file in "$1/$2.status" "$1/$2.turn-ended"; do
-    m=$(fm_path_mtime "$file") || continue
+  for marker in "$1/$2.status" "$1/$2.turn-ended"; do
+    m=$(fm_path_mtime "$marker") || continue
     [ "$m" -le "$newest" ] || newest=$m
   done
   [ "$newest" -lt "$now" ] || now=$((newest + 1))
