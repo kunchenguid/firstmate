@@ -351,8 +351,10 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
-  || die "another lifecycle action is already running for task $ID"
+if ! fm_lock_try_acquire "$CONTROL_LOCK"; then
+  [ "$FM_LOCK_OUTCOME" != refused ] || die "cannot acquire lock $CONTROL_LOCK: $FM_LOCK_CAUSE"
+  die "another lifecycle action is already running for task $ID"
+fi
 CONTROL_LOCK_HELD=1
 # do_exit runs in a command substitution. That subshell does not run this
 # EXIT trap, so the parent has to hold the path the trap removes. Set it

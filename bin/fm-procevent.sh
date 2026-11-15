@@ -2496,8 +2496,10 @@ cmd_binding_retirement_preflight() {
     [ -f "$rec" ] && [ ! -L "$rec" ] || die "binding retirement found unsafe registration state"
     id=${rec##*/}; id=${id%.source}
     fm_procevent_source_id_valid "$id" || die "binding retirement found malformed registration state"
-    fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")" \
-      || die "binding still owns process-event registration: $id"
+    if ! fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"; then
+      [ "$FM_LOCK_OUTCOME" != refused ] || die "cannot acquire process-event registration lock for $id: $FM_LOCK_CAUSE"
+      die "binding still owns process-event registration: $id"
+    fi
     fm_procevent_extension_registration_load_locked "$STATE" "$id"
     owner_state=$?
     fm_lock_release "$(fm_procevent_source_lock_path "$id")"

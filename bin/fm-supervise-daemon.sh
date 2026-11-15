@@ -2090,6 +2090,10 @@ fm_super_main() {
 
   # --- single instance (portable lock, no flock dependency) ------------------
   if ! fm_lock_try_acquire "$LOCK"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire supervise-daemon lock $LOCK: $FM_LOCK_CAUSE" >&2
+      exit 1
+    fi
     if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
       echo "error: another fm-supervise-daemon is already running (pid $FM_LOCK_HELD_PID, lock $LOCK held)" >&2
     else

@@ -134,6 +134,7 @@ fm_afk_flag_write() {  # <state-dir> [mode]
       rm -f "$pending" 2>/dev/null || true
       return "$status"
     fi
+    [ "$FM_LOCK_OUTCOME" != refused ] || break
     [ "$attempt" -lt 50 ] && sleep 0.1
   done
   rm -f "$pending" 2>/dev/null || true

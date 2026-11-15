@@ -3769,6 +3769,10 @@ fm_backend_herdr_kill() {  # <target>
         lock_held=1
         break
       fi
+      if [ "$FM_LOCK_OUTCOME" = refused ]; then
+        echo "warning: cannot acquire lock $lock_path: $FM_LOCK_CAUSE" >&2
+        break
+      fi
       sleep 0.1
       attempt=$((attempt + 1))
     done

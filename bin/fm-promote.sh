@@ -211,6 +211,10 @@ promote_cleanup() {
 }
 trap promote_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" || {
+  if [ "$FM_LOCK_OUTCOME" = refused ]; then
+    echo "error: cannot acquire lock $CONTROL_LOCK: $FM_LOCK_CAUSE" >&2
+    exit 1
+  fi
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
 }

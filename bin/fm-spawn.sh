@@ -1360,6 +1360,10 @@ spawn_remote_secondmate() {
   }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $SPAWN_TASK_LOCK: $FM_LOCK_CAUSE" >&2
+      return 1
+    fi
     echo "error: another spawn is already creating task $id" >&2
     return 1
   fi
@@ -2099,6 +2103,7 @@ spawn_herdr_presentation_order_lock_acquire() {
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
     fi
+    [ "$FM_LOCK_OUTCOME" != refused ] || return 1
     sleep 0.1
     attempt=$((attempt + 1))
   done
@@ -2309,6 +2314,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $SPAWN_CONTROL_LOCK: $FM_LOCK_CAUSE" >&2
+      exit 1
+    fi
     echo "error: another lifecycle action is already running for task $ID" >&2
     exit 1
   fi
@@ -2344,6 +2353,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $SPAWN_TASK_SET_LOCK: $FM_LOCK_CAUSE" >&2
+      exit 1
+    fi
     case "$(fm_lock_role "$SPAWN_TASK_SET_LOCK" 2>/dev/null || true)" in
       task-spawn)
         echo "error: this home's task set is locked by another spawn; refusing to create task $ID rather than racing it" >&2
@@ -2444,6 +2457,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  if [ "$FM_LOCK_OUTCOME" = refused ]; then
+    echo "error: cannot acquire lock $SPAWN_TASK_LOCK: $FM_LOCK_CAUSE" >&2
+    exit 1
+  fi
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
 fi
@@ -4265,6 +4282,10 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $SPAWN_TREEHOUSE_PROJECT_LOCK: $FM_LOCK_CAUSE" >&2
+      exit 1
+    fi
     if [ "$BACKEND" = orca ]; then
       echo "error: another spawn or cleanup holds the shared project lock for $PROJ_ABS; refusing to race its capacity admission" >&2
     else

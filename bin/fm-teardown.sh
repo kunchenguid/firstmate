@@ -596,6 +596,10 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
       exit 1
     }
     fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+      if [ "$FM_LOCK_OUTCOME" = refused ]; then
+        echo "REFUSED: cannot acquire lock $TREEHOUSE_PROJECT_LOCK: $FM_LOCK_CAUSE; nothing was changed" >&2
+        exit 1
+      fi
       echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
       exit 1
     }
@@ -655,6 +659,10 @@ teardown_release_locks() {
 }
 trap teardown_release_locks EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" || {
+  if [ "$FM_LOCK_OUTCOME" = refused ]; then
+    echo "error: cannot acquire lock $CONTROL_LOCK: $FM_LOCK_CAUSE" >&2
+    exit 1
+  fi
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
 }
@@ -686,6 +694,10 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 # removed with the route instead of surviving for a reused id.
 if [ "$TEARDOWN_META_KIND" = secondmate ]; then
   fm_lock_try_acquire "$STATE/.secondmate-liveness-$ID.lock" || {
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $STATE/.secondmate-liveness-$ID.lock: $FM_LOCK_CAUSE; nothing was changed" >&2
+      exit 1
+    fi
     echo "error: a secondmate liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
     exit 1
   }
@@ -3181,6 +3193,10 @@ collect_descendant_task_locks() {
     return 1
   }
   if ! fm_lock_try_acquire "$task_set_lock"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "REFUSED: cannot acquire lock $task_set_lock: $FM_LOCK_CAUSE" >&2
+      return 1
+    fi
     echo "REFUSED: secondmate home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
     return 1
   fi
@@ -3241,11 +3257,19 @@ preflight_descendant_task_locks() {
       return 1
     }
     if ! fm_lock_try_acquire "$control_lock"; then
+      if [ "$FM_LOCK_OUTCOME" = refused ]; then
+        echo "REFUSED: cannot acquire lock $control_lock: $FM_LOCK_CAUSE" >&2
+        return 1
+      fi
       echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
       return 1
     fi
     DESCENDANT_LOCK_PATHS+=("$control_lock")
     if ! fm_lock_try_acquire "$meta_lock"; then
+      if [ "$FM_LOCK_OUTCOME" = refused ]; then
+        echo "REFUSED: cannot acquire lock $meta_lock: $FM_LOCK_CAUSE" >&2
+        return 1
+      fi
       echo "REFUSED: descendant task $task_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
       return 1
     fi
@@ -3300,6 +3324,10 @@ preflight_descendant_treehouse_slots() {
     done
     if [ "$held" = 0 ]; then
       fm_lock_try_acquire "$lock_path" || {
+        if [ "$FM_LOCK_OUTCOME" = refused ]; then
+          echo "REFUSED: cannot acquire lock $lock_path: $FM_LOCK_CAUSE; forced teardown changed nothing" >&2
+          return 1
+        fi
         echo "REFUSED: another Treehouse slot allocation or return is in progress for child $task_id; forced teardown changed nothing" >&2
         return 1
       }
@@ -3467,6 +3495,10 @@ $session	$lock_path"
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
       return 0
+    fi
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $lock_path: $FM_LOCK_CAUSE; nothing was changed" >&2
+      return 1
     fi
     sleep 0.1
     attempt=$((attempt + 1))

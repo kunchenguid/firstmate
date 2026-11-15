@@ -362,6 +362,10 @@ fm_backend_paseo_workspace_lock() {
   mkdir -p "${lock%/*}" 2>/dev/null || return 1
   while [ "$attempt" -lt "$FM_BACKEND_PASEO_LOCK_ATTEMPTS" ]; do
     fm_lock_try_acquire "$lock" && return 0
+    if [ "${FM_LOCK_OUTCOME:-}" = refused ]; then
+      echo "error: cannot acquire lock $lock: $FM_LOCK_CAUSE" >&2
+      return 1
+    fi
     sleep 0.1
     attempt=$((attempt + 1))
   done
