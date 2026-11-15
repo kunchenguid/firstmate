@@ -20,7 +20,8 @@
 #      leaks into a worker whose ancestry holds no omp.
 #   3. Every omp launch clears foreign markers, carries the tracked posture
 #      overlay, --auto-approve, --cwd, and (for a crewmate) one -e pointing at
-#      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
+#      state/<id>.omp-ext.ts; a secondmate launch names that same busy -e and
+#      nothing else, leaving its primary extensions to auto-discovery.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
@@ -45,6 +46,7 @@ set -u
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-omp-harness)
+fm_git_identity fmtest fmtest@example.invalid
 export NODE_NO_WARNINGS=1
 
 # A process whose kernel-recorded identity is the bare name `omp`: a SYMLINK to
@@ -52,10 +54,12 @@ export NODE_NO_WARNINGS=1
 # signing). macOS reports the symlink name through `ps -o comm=`, which is the
 # exact signal under test. Every `-c` body below ends in a no-op so bash does
 # not exec-optimize the single command away and replace the named process.
+# The `claude` shell gives a no-omp case its own nearest harness ancestor, so
+# the verdict never depends on the harness that runs this suite.
 make_named_shells() {  # <dir> -> echoes <bindir>
   local dir=$1 name
   mkdir -p "$dir"
-  for name in omp ompd comp; do
+  for name in omp ompd comp claude; do
     ln -sf /bin/bash "$dir/$name"
   done
   printf '%s' "$dir"
@@ -64,7 +68,7 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin blind_bin out
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
@@ -84,8 +88,18 @@ test_detection_anchored_name_and_marker_precedence() {
   # ...and is inert when it leaks into a worker with no omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    "$bin/claude" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
+  # Hide ancestry so a named parent cannot mask an incorrectly trusted marker.
+  # With no ancestry to outrank them, the gemini and rovo markers that
+  # harness_marker checks before CLAUDECODE must be cleared too, so an
+  # inherited one cannot decide this case.
+  blind_bin=$(fm_fakebin "$TMP_ROOT/blind-ancestry")
+  fm_fake_blind_ancestry "$blind_bin"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI \
+    PATH="$blind_bin:$PATH" CLAUDECODE=1 FM_OMP_HARNESS=omp "$HARNESS")
+  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS with ancestry hidden must not override CLAUDECODE, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
@@ -104,16 +118,101 @@ test_lock_identity_and_liveness_classification() {
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
 }
 
+# The bun global package install: `~/.bun/bin/omp` is a `#!/usr/bin/env bun`
+# script, so the process is named `bun` and only the argument right after bun
+# says omp. Shells named `bun` run script files laid out like that install.
+make_bun_shapes() {  # <dir> -> echoes <dir>
+  local dir=$1 script
+  mkdir -p "$dir/bin" "$dir/scripts/Agent Tools/bin"
+  ln -sf /bin/bash "$dir/bin/bun"
+  ln -sf /bin/bash "$dir/bin/claude"
+  for script in omp ompd comp prompt.sh "Agent Tools/bin/omp" "Agent Tools/bin/ompd"; do
+    # shellcheck disable=SC2016 # the body expands inside the script that runs it
+    printf '%s\n' 'printf "%s\n" "$$" > "$1"; shift; "$@"; :' > "$dir/scripts/$script"
+  done
+  printf '%s' "$dir"
+}
+
+# Runs <claude shell> -> <bun shell running a script> -> probe, and records what
+# the probe saw. The claude shell is the nearest other harness, so a shape that
+# is not omp resolves there instead of walking into the harness running this suite.
+run_bun_shape() {  # <dir> <name> <script>: the script path is $dir/scripts/<script>
+  local dir=$1 name=$2 script=$3 home
+  home="$dir/home-$name"
+  mkdir -p "$home/state"
+  git init -q "$home"
+  git -C "$home" commit -q --allow-empty -m init
+  : > "$home/AGENTS.md"
+  cat > "$dir/probe-$name.sh" <<SH
+printf '%s\n' "\$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \\
+  '$HARNESS')" > '$home/harness.out'
+env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID FM_HOME='$home' '$ROOT/bin/fm-lock.sh' > '$home/lock.out' 2>&1
+printf '%s\n' "\$?" > '$home/lock.rc'
+SH
+  # shellcheck disable=SC2016 # the quoted body expands inside the claude shell
+  env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    "$dir/bin/claude" -c 'printf "%s\n" "$$" > "$1"; shift; "$@"; :' _ "$home/claude.pid" \
+    "$dir/bin/bun" "$dir/scripts/$script" "$home/shape.pid" bash "$dir/probe-$name.sh"
+  printf '%s' "$home"
+}
+
+test_bun_package_omp_is_identified_and_owns_the_lock() {
+  local dir home shape
+  dir=$(make_bun_shapes "$TMP_ROOT/bun-shapes")
+  for shape in omp "Agent Tools/bin/omp"; do
+    home=$(run_bun_shape "$dir" "pos-${shape//[\/ ]/_}" "$shape")
+    [ "$(cat "$home/harness.out")" = omp ] || fail "bun running $shape must detect as omp, got '$(cat "$home/harness.out")'"
+    [ "$(cat "$home/lock.rc")" = 0 ] || fail "bun running $shape must let the session lock be acquired: $(cat "$home/lock.out")"
+    [ "$(sed -n 1p "$home/state/.lock")" = "$(cat "$home/shape.pid")" ] \
+      || fail "the lock for bun running $shape must name the bun-run omp process, got '$(sed -n 1p "$home/state/.lock")'"
+  done
+  for shape in ompd comp prompt.sh "Agent Tools/bin/ompd"; do
+    home=$(run_bun_shape "$dir" "neg-${shape//[\/ ]/_}" "$shape")
+    [ "$(cat "$home/harness.out")" = claude ] || fail "bun running $shape must not detect as omp, got '$(cat "$home/harness.out")'"
+    [ "$(sed -n 1p "$home/state/.lock")" = "$(cat "$home/claude.pid")" ] \
+      || fail "the lock for bun running $shape must not name the bun process"
+  done
+  pass "fm-harness and fm-lock: a bun-run omp script owns the session; ompd, comp, and other scripts do not"
+}
+
+test_bun_package_omp_identity_unit_shapes() {
+  fm_omp_process_matches bun 'bun /home/u/.bun/bin/omp' || fail "bun omp launcher must match"
+  fm_omp_process_matches /opt/homebrew/bin/bun '/opt/homebrew/bin/bun /x/omp --cwd /y' || fail "omp then arguments must match"
+  ! fm_omp_process_matches bun 'bun /x/ompd' || fail "ompd must not match"
+  ! fm_omp_process_matches bun 'bun /x/comp' || fail "comp must not match"
+  ! fm_omp_process_matches bun 'bun /x/script.js omp' || fail "a later omp argument must not match"
+  local spaced="$TMP_ROOT/spaced omp/bin"
+  mkdir -p "$spaced"
+  : > "$spaced/omp"
+  : > "$spaced/ompd"
+  fm_omp_process_matches bun "bun $spaced/omp" || fail "a script path with spaces must match"
+  fm_omp_process_matches bun "bun $spaced/omp --cwd /y" || fail "a spaced path then arguments must match"
+  ! fm_omp_process_matches bun "bun $spaced/ompd" || fail "a spaced ompd path must not match"
+  : > "$TMP_ROOT/other.js"
+  ! fm_omp_process_matches bun "bun $TMP_ROOT/other.js $spaced/omp" || fail "an existing script followed by a spaced omp argument must not match"
+  ! fm_omp_process_matches bun 'bun' || fail "bare bun must not match"
+  ! fm_omp_process_matches node 'node /x/omp' || fail "only bun may run the omp script"
+  pass "fm_omp_process_matches: the bun shape is anchored on the argument right after bun"
+}
+
 # --- 2. Launch ---------------------------------------------------------------
 
 # A fake omp that answers `models --json` with a two-provider catalog and exits
 # 0 for everything else (the launch itself is only recorded by the fake tmux).
 make_fake_omp() {  # <fakebin>
+  # A leading --profile <name> selects that profile's catalog, which also lists
+  # one model of its own, so a catalog check read under the wrong profile shows.
   cat > "$1/omp" <<'SH'
 #!/usr/bin/env bash
+profile=
+if [ "${1:-}" = --profile ]; then profile=$2; shift 2; fi
 case "$1" in
   models)
-    printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"ollama","id":"qwen3:8b","selector":"ollama/qwen3:8b"}]}'
+    if [ -n "$profile" ]; then
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"openai-codex","id":"gpt-6-'"$profile"'","selector":"openai-codex/gpt-6-'"$profile"'"}]}'
+    else
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"ollama","id":"qwen3:8b","selector":"ollama/qwen3:8b"}]}'
+    fi
     ;;
 esac
 exit 0
@@ -210,9 +309,9 @@ test_spawn_model_validation_scoped_to_listed_providers() {
 
 test_secondmate_launch_relies_on_discovery() {
   # A seeded secondmate home, launched for real through fm-spawn on omp: the
-  # launch must carry the posture overlay and pin --cwd to the home, and must
-  # name NO -e, because omp auto-discovers the home's tracked .omp/extensions
-  # and a file named both ways loads twice.
+  # launch must carry the posture overlay and pin --cwd to the home. Its only
+  # -e is the state-resident busy extension: omp auto-discovers the home's
+  # tracked .omp/extensions, and a file named both ways loads twice.
   local world home fakebin launchlog out status launch
   world="$TMP_ROOT/secondmate"
   home="$world/sm"
@@ -238,14 +337,14 @@ test_secondmate_launch_relies_on_discovery() {
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
   launch=$(cat "$launchlog")
-  case "$launch" in
-    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
-  esac
+  [ "$(printf '%s\n' "$launch" | grep -o ' -e ' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an omp secondmate launch must name exactly one -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch"
+  assert_contains "$launch" "-e '$world/home/state/sm.omp-ext.ts'" "an omp secondmate launch must load the parent-home busy extension: $launch"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
-  assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
-  pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
+  assert_present "$world/home/state/sm.omp-ext.ts" "a secondmate must receive the per-task busy extension"
+  pass "fm-spawn: a real omp secondmate launch loads only the busy -e and auto-discovers its primary extensions"
 }
 
 test_secondmate_config_pinned_model_is_validated() {
@@ -280,6 +379,100 @@ test_secondmate_config_pinned_model_is_validated() {
   assert_absent "$world/home/state/sm.meta" "a refused secondmate spawn must publish no sm.meta"
   [ ! -s "$launchlog" ] || fail "a refused secondmate spawn must record no launch: $(cat "$launchlog")"
   pass "fm-spawn: the config/secondmate-harness model pin is validated against the omp catalog before launch"
+}
+
+make_omp_secondmate_world() {  # <name> -> echoes <world>; seeded home at <world>/sm, fakebin at <world>/fake/fakebin
+  local world=$TMP_ROOT/$1 home fakebin
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  : > "$world/launch.log"
+  printf '%s\n' "$world"
+}
+
+run_omp_secondmate_spawn() {  # <world> <spawn-args...>
+  local world=$1
+  shift
+  # FM_BACKEND=tmux pins the fake tmux, as in the discovery case above.
+  PATH="$world/fake/fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$world/launch.log" \
+    "$ROOT/bin/fm-spawn.sh" sm "$world/sm" "$@" 2>&1
+}
+
+test_secondmate_omp_profile_pin() {
+  # A pinned local omp secondmate launches under its own omp profile: the flag
+  # follows the executable, the catalog check reads that profile (the model
+  # below is listed only there), and the record and spawned line carry it.
+  local world fakebin out status launch
+  world=$(make_omp_secondmate_world secondmate-omp-profile)
+  fakebin="$world/fake/fakebin"
+  mkdir -p "$world/home/config/secondmate-accounts/sm"
+  printf 'speak4\n' > "$world/home/config/secondmate-accounts/sm/omp-profile"
+  out=$(run_omp_secondmate_spawn "$world" omp --secondmate --model openai-codex/gpt-6-speak4)
+  status=$?
+  expect_code 0 "$status" "a pinned omp secondmate spawn should succeed under its profile's catalog: $out"
+  launch=$(cat "$world/launch.log")
+  assert_contains "$launch" "OMP_SKIP_SETUP=1 '$fakebin/omp' --profile 'speak4' --config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$world/sm'" \
+    "a pinned omp secondmate launch must carry --profile right after the executable: $launch"
+  [ "$(printf '%s\n' "$launch" | grep -o -- '--profile' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a pinned omp secondmate launch must name --profile exactly once: $launch"
+  assert_grep 'omp_profile=speak4' "$world/home/state/sm.meta" "the task record must carry the omp profile pin"
+  assert_contains "$out" " omp_profile=speak4" "the spawned line must report the omp profile pin: $out"
+  pass "fm-spawn: a pinned local omp secondmate launches with --profile and validates its model under that profile"
+}
+
+test_secondmate_omp_profile_absent_or_foreign_adds_nothing() {
+  # No pin for this mate - none at all, then only another mate's - adds no flag
+  # and no record field, and the default catalog stays the one consulted.
+  local world out status launch variant
+  for variant in absent foreign; do
+    world=$(make_omp_secondmate_world "secondmate-omp-profile-$variant")
+    if [ "$variant" = foreign ]; then
+      mkdir -p "$world/home/config/secondmate-accounts/other"
+      printf 'speak4\n' > "$world/home/config/secondmate-accounts/other/omp-profile"
+    fi
+    out=$(run_omp_secondmate_spawn "$world" omp --secondmate)
+    status=$?
+    expect_code 0 "$status" "an unpinned ($variant) omp secondmate spawn should succeed: $out"
+    launch=$(cat "$world/launch.log")
+    [ -n "$launch" ] || fail "the $variant case recorded no launch, so its absence assertions would be vacuous"
+    assert_not_contains "$launch" "--profile" "an unpinned ($variant) omp secondmate launch must carry no --profile: $launch"
+    assert_contains "$launch" "OMP_SKIP_SETUP=1 '$world/fake/fakebin/omp' --config" "an unpinned ($variant) launch must keep the executable directly before --config: $launch"
+    if grep -q '^omp_profile=' "$world/home/state/sm.meta"; then
+      fail "an unpinned ($variant) omp secondmate must record no omp_profile: $(cat "$world/home/state/sm.meta")"
+    fi
+    assert_not_contains "$out" "omp_profile=" "an unpinned ($variant) spawned line must report no omp profile: $out"
+  done
+  pass "fm-spawn: an absent pin, or only another secondmate's pin, leaves the omp launch unchanged"
+}
+
+test_secondmate_omp_profile_malformed_refuses() {
+  # A malformed pin, including a name omp rejects as a Windows reserved device
+  # name, refuses before any record or launch, naming the file.
+  local world out status pin n=0
+  for pin in 'Speak4; rm -rf /' aux nul.x com7; do
+    n=$((n + 1))
+    world=$(make_omp_secondmate_world "secondmate-omp-profile-bad-$n")
+    mkdir -p "$world/home/config/secondmate-accounts/sm"
+    printf '%s\n' "$pin" > "$world/home/config/secondmate-accounts/sm/omp-profile"
+    out=$(run_omp_secondmate_spawn "$world" omp --secondmate)
+    status=$?
+    expect_code 1 "$status" "a malformed omp profile pin ($pin) must refuse the spawn: $out"
+    assert_contains "$out" "$world/home/config/secondmate-accounts/sm/omp-profile must hold one omp profile name" \
+      "the refusal must name the malformed pin file ($pin): $out"
+    assert_absent "$world/home/state/sm.meta" "a refused spawn ($pin) must publish no sm.meta"
+    [ ! -s "$world/launch.log" ] || fail "a refused spawn ($pin) must record no launch: $(cat "$world/launch.log")"
+  done
+  pass "fm-spawn: a malformed or reserved omp profile pin refuses before any record or launch"
 }
 
 # --- 3. Busy state -------------------------------------------------------------
@@ -451,7 +644,7 @@ install_omp_extension_fixture() {  # <repo>
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$repo/bin/"
   chmod +x "$repo/bin/fm-operational-input.sh"
   printf '{"name":"typebox","type":"module","exports":"./index.js"}\n' > "$repo/node_modules/typebox/package.json"
   printf 'export const Type = { Object(p) { return { type: "object", properties: p }; } };\n' > "$repo/node_modules/typebox/index.js"
@@ -581,13 +774,22 @@ EOF
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
-test_watch_extension_runs_the_supervision_host() {
-  local repo home log out status
-  repo="$TMP_ROOT/watch-host/repo"; home="$TMP_ROOT/watch-host/home"; log="$TMP_ROOT/watch-host/arm.log"
+test_watch_extension_runs_the_supervision_host() {  # [away|quiet]
+  local kind=${1:-away} repo home log out status f
+  repo="$TMP_ROOT/watch-host-$kind/repo"; home="$TMP_ROOT/watch-host-$kind/home"; log="$TMP_ROOT/watch-host-$kind/arm.log"
   install_omp_extension_fixture "$repo"
   mkdir -p "$home/state" "$home/config"
   : > "$home/config/supervision-host"
-  : > "$home/state/.afk-contract"
+  if [ "$kind" = quiet ]; then
+    # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+    # QUIET): the extension asks the record owner, so the same handback carries
+    # no away note.
+    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
+    FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+      || fail "fixture: could not record quiet mode"
+  else
+    : > "$home/state/.afk-contract"
+  fi
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
@@ -612,7 +814,7 @@ sleep 30
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
-    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+    RECORD_KIND="$kind" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { writeFileSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -641,9 +843,12 @@ for (const needle of [
   "signal: omp-host done",
   "supervision-host: the away session could not take this wake: fixture; this wake is yours",
   "supervision-host: outcome 1 for demo [captain]: fixture",
-  "not from the captain: it is not a return",
 ]) {
   if (!sent[0].m.includes(needle)) throw new Error(`the follow-up lacks '${needle}': ${sent[0].m}`);
+}
+const awayNote = sent[0].m.includes("not from the captain: it is not a return");
+if (process.env.RECORD_KIND === "quiet" ? awayNote : !awayNote) {
+  throw new Error(`the away note must appear exactly under an away record (${process.env.RECORD_KIND}): ${sent[0].m}`);
 }
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
 await handlers.get("session_shutdown")({}, {});
@@ -651,9 +856,64 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "omp watch extension host mode: $out"
+  expect_code 0 "$status" "omp watch extension host mode ($kind record): $out"
   [ -z "$out" ] || fail "omp watch extension host test printed output: $out"
-  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line"
+  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line ($kind record)"
+}
+
+# The omp owner stays file-gated: a home without config/supervision-host, or
+# one opted out by config/supervision-host-off, spawns the plain arm and never the host.
+test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
+  local line label repo home log out status
+  for line in - off; do
+    label=${line#-}; label=${label:-absent}
+    repo="$TMP_ROOT/watch-host-gate-$label/repo"; home="$TMP_ROOT/watch-host-gate-$label/home"; log="$TMP_ROOT/watch-host-gate-$label/arm.log"
+    install_omp_extension_fixture "$repo"
+    mkdir -p "$home/state" "$home/config"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'plain-arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 30
+SH
+    cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 30
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+      EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, writeFileSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null;
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage() { return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && !existsSync(process.env.FM_ARM_LOG); i += 1) await new Promise((r) => setTimeout(r, 100));
+const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+if (rows.length === 0 || !rows.every((row) => row.startsWith("plain-arm="))) {
+  throw new Error(`a home that does not run the host must spawn only the plain arm: ${rows.join(" | ")}`);
+}
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp watch extension gate ($label): $out"
+    [ -z "$out" ] || fail "omp watch extension gate test printed output ($label): $out"
+  done
+  pass ".omp watch extension: a home without config/supervision-host or with an off file keeps the plain arm"
 }
 
 # A host cycle boundary can close with only a "supervision-host:" line; left
@@ -795,15 +1055,22 @@ EOF
 
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
+test_bun_package_omp_identity_unit_shapes
+test_bun_package_omp_is_identified_and_owns_the_lock
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
+test_secondmate_omp_profile_pin
+test_secondmate_omp_profile_absent_or_foreign_adds_nothing
+test_secondmate_omp_profile_malformed_refuses
 test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
 test_watch_extension_runs_the_supervision_host
+test_watch_extension_runs_the_supervision_host quiet
+test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole

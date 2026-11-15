@@ -31,10 +31,13 @@ git init -q "$PRIMARY_ROOT"
 : > "$PRIMARY_ROOT/AGENTS.md"
 ln -s "$ROOT/bin" "$PRIMARY_ROOT/bin"
 
-make_home() {  # <name> [opted-in: 1|0]
+make_home() {  # <name> [1 (empty config/supervision-host) | 0 (none) | off (config/supervision-host-off)]
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/config"
-  [ "${2:-1}" != 1 ] || : > "$home/config/supervision-host"
+  case "${2:-1}" in
+    1) : > "$home/config/supervision-host" ;;
+    off) : > "$home/config/supervision-host-off" ;;
+  esac
   printf '%s\n' "$home"
 }
 
@@ -87,12 +90,13 @@ main|cursor main" "$out" "every tracked registration must write its captain prom
   pass "mirror: the Claude and Cursor registrations each write the captain's prompt and main's reply"
 }
 
-# Non-host invariance: on a home without config/supervision-host, every tracked
-# mirror registration prints nothing and leaves the home's state byte-for-byte
-# as it was, even for the lock-owning primary session in a primary checkout.
-test_home_without_the_flag_is_untouched() {
+# Non-host invariance: on a home opted out by config/supervision-host-off, every
+# tracked mirror registration prints nothing and leaves the home's state
+# byte-for-byte as it was, even for the lock-owning primary session in a
+# primary checkout.
+test_home_that_opted_out_is_untouched() {
   local home before after
-  home=$(make_home without-flag 0)
+  home=$(make_home opted-out off)
   printf 'working: demo\n' > "$home/state/demo.status"
   # The fixture's own session lock is written by as_session, not by a writer.
   snapshot() { (cd "$1/state" && find . -type f ! -name .lock | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(cksum < "$f")"; done); }
@@ -106,26 +110,48 @@ test_home_without_the_flag_is_untouched() {
     run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"prompt\":\"hello\",\"cursor_version\":\"x\"}"
     run "$CLAUDE_STOP" "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"hi\"}"
     run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"text\":\"hi\",\"cursor_version\":\"x\"}"
-  ' > "$home/writers.out" 2>&1 || fail "a mirror registration failed on a home without the flag: $(cat "$home/writers.out")"
-  [ ! -s "$home/writers.out" ] || fail "a mirror registration printed on a home without the flag: $(cat "$home/writers.out")"
+  ' > "$home/writers.out" 2>&1 || fail "a mirror registration failed on a home that opted out: $(cat "$home/writers.out")"
+  [ ! -s "$home/writers.out" ] || fail "a mirror registration printed on a home that opted out: $(cat "$home/writers.out")"
   after=$(snapshot "$home")
-  assert_equals "$before" "$after" "a mirror writer changed the state of a home without the flag"
-  pass "mirror: a home without the flag is untouched by every tracked mirror registration"
+  assert_equals "$before" "$after" "a mirror writer changed the state of a home that opted out"
+  pass "mirror: a home opted out by config/supervision-host-off is untouched by every tracked mirror registration"
 }
 
-test_writers_are_inert_without_the_opt_in() {
+# Default-on for Claude: with no config/supervision-host, the Claude
+# registrations write the mirror, while Cursor's stay file-gated and write
+# nothing.
+test_home_without_the_file_mirrors_only_claude() {
+  local home out
+  home=$(make_home without-file 0)
+  CLAUDE_PROMPT=$(claude_cmd UserPromptSubmit) CLAUDE_STOP=$(claude_cmd Stop) \
+  CURSOR_PROMPT=$(cursor_cmd beforeSubmitPrompt) CURSOR_RESPONSE=$(cursor_cmd afterAgentResponse) \
+  as_session "$home" '
+    run() { printf "%s" "$2" | env CLAUDE_PROJECT_DIR="$PRIMARY_ROOT" CURSOR_PROJECT_DIR="$PRIMARY_ROOT" \
+      bash -c "cd \"$PRIMARY_ROOT\" && $1"; }
+    run "$CLAUDE_PROMPT" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"c1\",\"prompt\":\"claude captain\"}"
+    run "$CLAUDE_STOP" "{\"hook_event_name\":\"Stop\",\"prompt_id\":\"c1\",\"last_assistant_message\":\"claude main\"}"
+    run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"generation_id\":\"u1\",\"prompt\":\"cursor captain\",\"cursor_version\":\"x\"}"
+    run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"generation_id\":\"u1\",\"text\":\"cursor main\",\"cursor_version\":\"x\"}"
+  ' || fail "a tracked mirror hook failed"
+  out=$(entries "$home")
+  assert_equals "captain|claude captain
+main|claude main" "$out" "only the Claude registrations may write the mirror on a home without the file"
+  pass "mirror: without config/supervision-host the Claude registrations write the mirror and Cursor's stay inert"
+}
+
+test_writers_are_inert_on_a_home_that_opted_out() {
   local home crew out
-  home=$(make_home no-opt-in 0)
+  home=$(make_home opted-out-writer off)
   as_session "$home" '
     printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hello\"}" | "$MIRROR" hook claude
   ' || fail "an inert writer failed"
-  assert_absent "$home/state/.host-mirror.jsonl" "a home without config/supervision-host must mirror nothing"
+  assert_absent "$home/state/.host-mirror.jsonl" "a home opted out by config/supervision-host-off must mirror nothing"
   crew="$TMP_ROOT/crew-worktree"
   mkdir -p "$crew"
   out=$(printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"hello"}' | FM_HOME="$crew" "$MIRROR" hook claude 2>&1)
   [ -z "$out" ] || fail "an inert writer printed: $out"
-  assert_absent "$crew/state" "an inert writer must create nothing in a home without config/"
-  pass "mirror: writers stay silent and write nothing on a home that did not opt in"
+  assert_absent "$crew/state" "an inert writer must create nothing in a home without config/ or state/"
+  pass "mirror: writers stay silent and write nothing on a home that opted out or has no state"
 }
 
 test_operational_foreign_and_unowned_input_is_dropped() {
@@ -200,16 +226,74 @@ test_a_different_reply_under_the_same_id_is_recorded() {
   local home
   home=$(make_home same-id-reply)
   as_session "$home" "$SAY"'
-    say captain "ship it" p1
+    say captain "the real final answer" p1
     say main "interim reply before the guard blocked" p1
     say main "the real final answer" p1
     say main "the real final answer" p1
+    say main "the real final answer" p2
   ' || fail "a writer failed"
-  assert_equals "captain|ship it
+  assert_equals "captain|the real final answer
 main|interim reply before the guard blocked
+main|the real final answer
 main|the real final answer" "$(entries "$home")" \
-    "a different reply under the same id must be recorded, and an identical repeat only once"
-  pass "mirror: a later different reply under the same id is recorded, while an identical repeat is recorded once"
+    "deduplication must preserve different text, tags, and ids, while recording an identical repeat only once"
+  pass "mirror: reply deduplication preserves different text, tags, and ids, while recording an identical repeat once"
+}
+
+# Presentation can be identical while the uncapped reply changes. Exercise
+# both tracked writers, including the transition from records without a raw
+# identity, after the first reply has already advanced the feed cursor.
+test_equal_capped_replies_keep_their_uncapped_identity() {
+  local harness legacy home mirror
+  for harness in claude cursor; do
+    for legacy in no yes; do
+      home=$(make_home "raw-identity-$harness-$legacy")
+      mirror="$home/state/.host-mirror.jsonl"
+      HARNESS=$harness LEGACY=$legacy \
+      RESPONSE_CMD=$(if [ "$harness" = claude ]; then claude_cmd Stop; else cursor_cmd afterAgentResponse; fi) \
+      as_session "$home" '
+        run() {
+          env CLAUDE_PROJECT_DIR="$PRIMARY_ROOT" CURSOR_PROJECT_DIR="$PRIMARY_ROOT" \
+            bash -c "$RESPONSE_CMD" < "$FM_HOME/$1.json"
+        }
+        for middle in A B; do
+          jq -cn --arg middle "$middle" --arg harness "$HARNESS" '\''
+            ("H" * 2500 + $middle * 1000 + "T" * 2500) as $text
+            | if $harness == "claude" then
+                {hook_event_name: "Stop", prompt_id: "same-id", last_assistant_message: $text}
+              else
+                {hook_event_name: "afterAgentResponse", generation_id: "same-id", text: $text, cursor_version: "x"}
+              end'\'' > "$FM_HOME/$middle.json"
+        done
+        run A
+        if [ "$LEGACY" = yes ]; then
+          jq -c "{seq, epoch, key, id, tag, text}" "$FM_HOME/state/.host-mirror.jsonl" > "$FM_HOME/legacy.jsonl"
+          mv "$FM_HOME/legacy.jsonl" "$FM_HOME/state/.host-mirror.jsonl"
+        fi
+        "$MIRROR" check || exit 1
+        "$MIRROR" feed s1 new > "$FM_HOME/feed.first" && "$MIRROR" commit || exit 1
+        run B
+        "$MIRROR" feed s1 resume > "$FM_HOME/feed.final" && "$MIRROR" commit || exit 1
+        # Trailing whitespace is normalized before reply identity is compared.
+        jq '\''if .text then .text += " \n\t" else .last_assistant_message += " \n\t" end'\'' \
+          "$FM_HOME/B.json" > "$FM_HOME/repeat.json"
+        run repeat
+        "$MIRROR" check || exit 1
+        "$MIRROR" feed s1 resume > "$FM_HOME/feed.repeat"
+      ' || fail "$harness writer or feed failed with legacy=$legacy"
+      assert_equals "2" "$(jq -s 'length' "$mirror")" \
+        "$harness must retain both uncapped replies and suppress an identical final callback with legacy=$legacy"
+      jq -se 'all(.tag == "main" and .id == "same-id" and (.text | length) == 4000)
+        and (.[0].text == .[1].text)' "$mirror" >/dev/null \
+        || fail "$harness replies must have identical capped text with legacy=$legacy"
+      [ -s "$home/feed.first" ] || fail "$harness first reply must remain feedable with legacy=$legacy"
+      assert_equals "$(cat "$home/feed.first")" "$(cat "$home/feed.final")" \
+        "$harness must feed the distinct final event even when its capped text is unchanged with legacy=$legacy"
+      assert_contains "$(cat "$home/feed.final")" "[mirror truncated:" "the feed must preserve capping"
+      assert_equals "" "$(cat "$home/feed.repeat")" "$harness must not feed the identical final callback twice"
+    done
+  done
+  pass "mirror: Claude and Cursor keep distinct uncapped replies, deduplicate normalized repeats, and conservatively accept legacy records"
 }
 
 # A hook id names an entry only within one main session: a later session
@@ -217,12 +301,12 @@ main|the real final answer" "$(entries "$home")" \
 test_a_later_session_may_reuse_an_entry_id() {
   local home
   home=$(make_home reused-id)
-  as_session "$home" "$SAY"'say captain "asked in the first session" p1' || fail "the first session failed"
+  as_session "$home" "$SAY"'say captain "the same ask" p1' || fail "the first session failed"
   as_session "$home" "$SAY"'
-    say captain "asked in the second session" p1
+    say captain "the same ask" p1
     "$MIRROR" feed s1 new > "$FM_HOME/feed.second"
   ' || fail "the second session failed"
-  assert_equals "[captain] asked in the second session" "$(cat "$home/feed.second")" \
+  assert_equals "[captain] the same ask" "$(cat "$home/feed.second")" \
     "a later session's entry must be recorded even when an earlier session used its id"
   pass "mirror: an entry id already recorded by an earlier main session does not drop a later session's dialog"
 }
@@ -432,13 +516,15 @@ test_only_proven_writers_are_verified() {
 }
 
 test_every_harness_registration_writes_the_mirror
-test_writers_are_inert_without_the_opt_in
+test_writers_are_inert_on_a_home_that_opted_out
 test_only_proven_writers_are_verified
-test_home_without_the_flag_is_untouched
+test_home_that_opted_out_is_untouched
+test_home_without_the_file_mirrors_only_claude
 test_operational_foreign_and_unowned_input_is_dropped
 test_internal_whitespace_is_recorded_verbatim
 test_entries_are_deduplicated_and_capped
 test_a_different_reply_under_the_same_id_is_recorded
+test_equal_capped_replies_keep_their_uncapped_identity
 test_a_later_session_may_reuse_an_entry_id
 test_a_failed_append_leaves_the_mirror_valid
 test_mirror_is_owner_only_under_an_open_umask

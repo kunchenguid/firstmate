@@ -887,6 +887,48 @@ fm_procevent_claim_mark_terminal_locked() {
   fi
 }
 
+# Point this live claim at a replacement registration the same runner still owns.
+# Pid, token, and process identity stay put, so a live claim remains one owner
+# and reconcile does not start a second poll. Caller holds the source lock.
+fm_procevent_claim_adopt_registration_locked() {  # <source-id> <home> <pid> <token> <registration-identity>
+  local id=$1 home=$2 pid=$3 token=$4 reg_identity=$5 claim root tmp
+  case "$reg_identity" in *[!0-9:]*) return 1 ;; esac
+  case "$reg_identity" in *:*) ;; *) return 1 ;; esac
+  claim=$(fm_procevent_claim_path "$id")
+  fm_procevent_claim_load_locked "$id" \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
+    && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TERMINAL" = active ] || return 1
+  root=$(fm_procevent_claim_root)
+  tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || return 1
+  if [ -n "$FM_PROCEVENT_CLAIM_STATE_ROOT" ]; then
+    if printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n%s\n%s\n%s\n%s\n%s\n' \
+      "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
+      "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" "$reg_identity" \
+      "$FM_PROCEVENT_CLAIM_STATE_ROOT" "$FM_PROCEVENT_CLAIM_STATE_DEVICE" \
+      "$FM_PROCEVENT_CLAIM_STATE_INODE" "$FM_PROCEVENT_CLAIM_STATE_OWNER" \
+      "$FM_PROCEVENT_CLAIM_STATE_MODE" > "$tmp" \
+      && chmod 0600 "$tmp" \
+      && mv -f -- "$tmp" "$claim"; then
+      FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
+      return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n' \
+    "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
+    "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" "$reg_identity" > "$tmp" \
+    && chmod 0600 "$tmp" \
+    && mv -f -- "$tmp" "$claim"; then
+    FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 # fm_procevent_claim_release_locked <source-id> <home> <pid> <token>
 # The live owner uses this path for its own release. Reservation cleanup must
 # succeed normally; stale-generation relaxation is never consulted.

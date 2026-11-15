@@ -3,28 +3,48 @@
 # set of LOCAL (gitignored) config items down into each secondmate home's
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
-# profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
+# profile rules and primary config/dispatch-never-send keeps the same values
+# out of its dispatch resolver requests, primary config/crew-harness=codex makes a secondmate's crewmates
 # spawn on codex too, primary config/backlog-backend=manual makes that home
 # hand-edit backlog files too, primary config/backend pins that home's local
 # runtime-backend default for future spawns, primary config/startup-memory-budget
-# bounds that home's startup-memory curation, and primary
+# bounds that home's startup-memory curation, primary config/firstmate-role
+# carries the primary's resolved firstmate-repository role with a
+# proof-of-state receipt (so a secondmate inherits only what the primary
+# resolves), and primary
 # config/herdr-presentation-spaces carries the same Herdr presentation-projection
 # preference - an absent primary file and an absent destination file both mean
 # the same unconfigured default, so the generic absence mirror below converges
 # a secondmate without deciding the release-dependent floor; explicit "on" and
-# "off" preferences propagate as files. Primary
+# "off" preferences propagate as files. Primary config/herdr-project-groups
+# carries the opt-in Herdr project-group rules, because the agents view they
+# sort is one per Herdr server and every home's tasks share it. Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
 # Primary config/lavish-axi-host carries the one per-machine Lavish server address
 # to every worker so a worker never starts a second server on another interface.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
-# Primary config/claude-permission-mode is a captain-wide safety preference
-# (bypass or auto for every claude launch), so it flows down too and a
-# secondmate's own claude crewmates launch on the same permission posture.
+# Primary approval-mode settings follow the same inheritance rules as other
+# declared configuration.
+# Primary config/t3code-instances selects the T3 provider account for each
+# harness, so secondmates inherit it rather than falling back to a default.
+# Primary config/keep-ai-trailers is a home-wide commit-attribution choice, so
+# a secondmate's own crewmates keep AI co-author trailers too.
+# Primary config/supervision-host-off is the fleet's supervision-host opt-out,
+# so a primary that opts out opts every secondmate home out too, while each
+# home's config/supervision-host engine line stays its own.
 # It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
+# Shared-captain convergence records the SHA-256 of the last successfully
+# published destination generation beside that copy. A destination whose bytes
+# still match that receipt is replaced quietly when the primary source advances.
+# A destination that differs from the receipt, or that has no usable receipt, is
+# quarantined before replacement so genuine local edits and interrupted
+# publication keep a recovery copy, and primary absence always quarantines
+# before removing. The receipt is written only after the destination file
+# matches the intended generation.
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -54,10 +74,15 @@
 # so a new inheritable item cannot be accepted by one side and refused by the
 # other. A local and remote code root that disagree about this list must be
 # reconciled by the ordinary remote sync/update path before the transfer
-# succeeds; there is no separate allowlist version negotiation.
+# succeeds; there is no separate allowlist version negotiation. The one
+# exception is an item the primary does not have: an older receiver that does
+# not declare it refuses its absent record, and the sender counts that refusal
+# as unchanged, since that code root cannot read the item anyway.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-role-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-role-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -68,7 +93,21 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
+
+# firstmate-role additionally carries a proof-of-state receipt: a scoped role
+# grant (or its recorded absence) authorizes a secondmate home only while
+# config/.fm-inherit-firstmate-role.generation there proves the exact bytes the
+# primary last published, so revocation converges and a grant without a matching
+# receipt is dead on arrival. The receipt proves consistency, not provenance;
+# deliberately forged local records are out of scope. Both routes publish the
+# primary's resolved role (fm_role_inherit_payload) rather than its raw file, so
+# a primary file its own resolver rejects propagates as an absence, never as a
+# grant. The remote route's receiver already writes that same receipt through
+# its generation machinery; the local route commits
+# it in propagate_secondmate_inheritance, and a failed propagation removes it
+# rather than leaving a stale proof. bin/fm-role-lib.sh owns how the grant and
+# receipt are interpreted.
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -131,13 +170,16 @@ fm_inherit_file_link_count() {
 }
 
 fm_inherit_sha256() {
+  local digest
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    digest=$(shasum -a 256 "$1" 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    digest=$(sha256sum "$1" 2>/dev/null | awk '{print $1}')
   else
     return 1
   fi
+  [ -n "$digest" ] || return 1
+  printf '%s\n' "$digest"
 }
 
 copy_inheritable_file() {
@@ -202,8 +244,100 @@ destination_allows_inherited_item() {
 # error, such as copy or remove failure, occurs.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
+  if [ "$item" = firstmate-role ] && [ -n "${FM_INHERIT_DEST_CONFIG:-}" ]; then
+    # The inherited role grant is provable only through its receipt: write it
+    # for converged outcomes that produced a destination state (a copied grant
+    # or a mirrored absence), and drop it for every outcome that wrote nothing,
+    # so a stale positive proof never outlives the propagation that failed to
+    # prove the parent's current value. An unchanged outcome with no
+    # destination file is a no-op state - no receipt is written and none needs
+    # to exist.
+    case $status in
+    pushed)
+      if ! fm_inherit_role_receipt_commit "$FM_INHERIT_DEST_CONFIG"; then
+        status=error
+        reason="could not commit the role inheritance receipt"
+        warn_inheritable_config_error "$item" "$FM_INHERIT_DEST_CONFIG/firstmate-role" "$reason"
+        FM_INHERIT_ROLE_RECEIPT_FAILED=1
+      fi
+      ;;
+    unchanged)
+      if [ -f "$FM_INHERIT_DEST_CONFIG/firstmate-role" ] && [ ! -L "$FM_INHERIT_DEST_CONFIG/firstmate-role" ]; then
+        if ! fm_inherit_role_receipt_commit "$FM_INHERIT_DEST_CONFIG"; then
+          status=error
+          reason="could not commit the role inheritance receipt"
+          warn_inheritable_config_error "$item" "$FM_INHERIT_DEST_CONFIG/firstmate-role" "$reason"
+          FM_INHERIT_ROLE_RECEIPT_FAILED=1
+        fi
+      else
+        rm -f "$FM_INHERIT_DEST_CONFIG/.fm-inherit-firstmate-role.generation" 2>/dev/null || true
+      fi
+      ;;
+    *)
+      rm -f "$FM_INHERIT_DEST_CONFIG/.fm-inherit-firstmate-role.generation" 2>/dev/null || true
+      ;;
+    esac
+  fi
   [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0
   printf '%s\t%s\t%s\n' "$item" "$status" "$reason" >> "$FM_CONFIG_INHERIT_REPORT" 2>/dev/null || true
+}
+
+# fm_inherit_role_receipt_commit <dest-config-dir> - commit the post-propagation
+# proof of the role item's destination state in the same 4-line record the
+# remote receiver's generation file carries: <generation> <bytes> <sha256>
+# <put|absent>. The generation continues the receipt's own sequence (prior
+# value + 1, or 1), so a local commit never outpaces the remote route's
+# monotonic counter with an unrelated clock value and later remote pushes are
+# not refused as superseded. Written atomically at mode 0600 like the
+# receiver's own commit_generation, so a torn or world-readable proof can
+# never land.
+fm_inherit_role_receipt_commit() {
+  local dest_config=$1 dest receipt gen bytes sha cmd tmp prior_gen
+  dest=$dest_config/firstmate-role
+  receipt=$dest_config/.fm-inherit-firstmate-role.generation
+  [ -d "$dest_config" ] && [ ! -L "$dest_config" ] || return 1
+  gen=1
+  if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
+    IFS= read -r prior_gen <"$receipt" 2>/dev/null || prior_gen=
+    case $prior_gen in
+    '' | *[!0-9]*) ;;
+    *) gen=$((prior_gen + 1)) ;;
+    esac
+  fi
+  tmp=$(umask 077 && mktemp "$dest_config/.inherit-role-receipt.XXXXXX" 2>/dev/null) || return 1
+  if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+    cmd=put
+    bytes=$(wc -c <"$dest" 2>/dev/null | tr -d '[:space:]') || {
+      rm -f "$tmp" 2>/dev/null
+      return 1
+    }
+    sha=$(fm_inherit_sha256 "$dest") || {
+      rm -f "$tmp" 2>/dev/null
+      return 1
+    }
+  else
+    cmd=absent
+    bytes=0
+    # The staged temp is still empty, so hashing it yields the empty-payload
+    # digest the remote receiver requires on an absent record.
+    sha=$(fm_inherit_sha256 "$tmp") || {
+      rm -f "$tmp" 2>/dev/null
+      return 1
+    }
+  fi
+  printf '%s\n%s\n%s\n%s\n' "$gen" "$bytes" "$sha" "$cmd" >"$tmp" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  chmod 600 "$tmp" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$tmp" "$receipt" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  return 0
 }
 
 inheritable_config_skip_reason() {
@@ -256,6 +390,69 @@ restore_shared_captain_readonly() {
   [ -e "$dest" ] || [ -L "$dest" ] || return 0
   shared_captain_file_safe_existing "$dest" || return 1
   chmod "$FM_SHARED_CAPTAIN_MODE" "$dest" 2>/dev/null || return 1
+}
+
+shared_captain_inherited_receipt_path() {
+  printf '%s/.%s.inherited\n' "$1" "$FM_SHARED_CAPTAIN_FILE"
+}
+
+# Prints the recorded SHA-256 when the receipt is a safe ordinary file containing
+# exactly one 64-hex digest. Returns 1 for every other receipt state, which the
+# callers treat as "no usable receipt" and answer by quarantining first.
+shared_captain_read_inherited_hash() {
+  local parent=$1 path hash
+  path=$(shared_captain_inherited_receipt_path "$parent")
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 1
+  fi
+  shared_captain_file_safe_existing "$path" || return 1
+  hash=$(awk '
+    NR == 1 { digest = $0; next }
+    { extra = 1 }
+    END { if (extra || NR != 1) exit 1; print digest }
+  ' "$path" 2>/dev/null) || return 1
+  case "$hash" in
+    *[!a-f0-9]*) return 1 ;;
+  esac
+  [ "${#hash}" -eq 64 ] || return 1
+  printf '%s\n' "$hash"
+}
+
+shared_captain_write_inherited_hash() {
+  local parent=$1 hash=$2 path tmp
+  shared_captain_dir_safe "$parent" || return 1
+  path=$(shared_captain_inherited_receipt_path "$parent")
+  tmp=$(mktemp "$parent/.fm-captain-shared-inherited.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$hash" > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  shared_captain_file_safe_existing "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  if mv -f -- "$tmp" "$path" 2>/dev/null; then
+    shared_captain_file_safe_existing "$path" || return 1
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+shared_captain_remove_inherited_receipt() {
+  local parent=$1 path
+  path=$(shared_captain_inherited_receipt_path "$parent")
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  shared_captain_file_safe_existing "$path" || return 1
+  rm -f -- "$path" 2>/dev/null
+}
+
+# Record hash after the destination already matches that generation. Skip a
+# rewrite when the receipt already names the same digest.
+shared_captain_record_inherited_hash() {
+  local parent=$1 hash=$2 current
+  if current=$(shared_captain_read_inherited_hash "$parent" 2>/dev/null); then
+    [ "$current" = "$hash" ] && return 0
+  fi
+  shared_captain_write_inherited_hash "$parent" "$hash"
 }
 
 shared_captain_quarantine_existing_for_hash() {
@@ -330,7 +527,8 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc missing
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home
+  local quarantine inherited_hash reason rc missing
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -373,12 +571,14 @@ propagate_shared_captain_preferences() {
         restore_shared_captain_readonly "$dest" || true
         return 1
       }
+      inherited_hash=$(shared_captain_read_inherited_hash "$dest_parent" 2>/dev/null) || inherited_hash=
       if [ "$src_hash" = "$dest_hash" ]; then
-        if restore_shared_captain_readonly "$dest"; then
+        if restore_shared_captain_readonly "$dest" \
+          && shared_captain_record_inherited_hash "$dest_parent" "$dest_hash"; then
           record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" unchanged ""
           return 0
         fi
-        reason="failed to restore read-only mode"
+        reason="failed to restore read-only mode or record inherited generation"
         warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
         record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
         return 1
@@ -390,14 +590,16 @@ propagate_shared_captain_preferences() {
         restore_shared_captain_readonly "$dest" || true
         return 1
       fi
-      if ! quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
-        reason="failed to quarantine divergent destination"
-        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
-        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
-        restore_shared_captain_readonly "$dest" || true
-        return 1
+      if [ "$dest_hash" != "$inherited_hash" ]; then
+        if ! quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
+          reason="failed to quarantine divergent destination"
+          warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+          record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+          restore_shared_captain_readonly "$dest" || true
+          return 1
+        fi
+        printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
       fi
-      printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
     elif ! shared_captain_dir_safe "$dest_parent"; then
       reason="unsafe destination directory"
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest_parent" "$reason"
@@ -405,10 +607,17 @@ propagate_shared_captain_preferences() {
       return 1
     fi
     if copy_shared_captain_file "$src" "$dest"; then
-      if [ -n "${quarantine:-}" ]; then
-        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "quarantined local drift at $quarantine"
+      if shared_captain_record_inherited_hash "$dest_parent" "$src_hash"; then
+        if [ -n "${quarantine:-}" ]; then
+          record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "quarantined local drift at $quarantine"
+        else
+          record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed ""
+        fi
       else
-        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed ""
+        reason="failed to record inherited generation"
+        warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$dest" "$reason"
+        record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
+        rc=1
       fi
     else
       reason="failed to copy"
@@ -431,6 +640,7 @@ propagate_shared_captain_preferences() {
       return 1
     fi
     if quarantine=$(quarantine_shared_captain_dest "$dest" "$dest_parent"); then
+      shared_captain_remove_inherited_receipt "$dest_parent" || true
       printf 'SECONDMATE_SYNC: secondmate home %s: quarantined %s drift at %s\n' "$dest_home" "$FM_SHARED_CAPTAIN_REL" "$quarantine"
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" pushed "mirrored primary absence after quarantining local copy at $quarantine"
     else
@@ -441,6 +651,7 @@ propagate_shared_captain_preferences() {
       rc=1
     fi
   else
+    shared_captain_remove_inherited_receipt "$dest_parent" || true
     record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" unchanged ""
   fi
   return "$rc"
@@ -453,19 +664,28 @@ propagate_secondmate_inheritance() {
   [ -n "$src_config" ] || src_config="$src_home/config"
   [ -n "$src_data" ] || src_data="$src_home/data"
   rc=0
-  propagate_inheritable_config "$src_config" "$dest_home/config" || rc=1
+  propagate_inheritable_config "$src_config" "$dest_home/config" "$src_home" || rc=1
   propagate_shared_captain_preferences "$src_data" "$dest_home/data" || rc=1
   return "$rc"
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest source_present reason rc
+  local src_config=$1 dest_config=$2 src_home=${3:-${1%/*}} item src dest source_present reason rc
+  local prior_dest_config=${FM_INHERIT_DEST_CONFIG-} role_stage=
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
+  # Dest dir the per-item outcome recorder uses for firstmate-role receipt
+  # bookkeeping; restored on return so nested callers keep their own.
+  FM_INHERIT_DEST_CONFIG=$dest_config
+  FM_INHERIT_ROLE_RECEIPT_FAILED=
   for item in $FM_INHERITABLE_CONFIG; do
     case "$item" in
-      ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
+      ''|/*|.|..|../*|*/../*|*/..)
+        FM_INHERIT_DEST_CONFIG=$prior_dest_config
+        [ -z "$role_stage" ] || rm -rf "$role_stage"
+        return 1
+        ;;
     esac
     if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ] && fm_config_inherit_item_session_scoped "$item"; then
       record_inheritable_config_result "$item" unchanged "session-scoped"
@@ -473,6 +693,17 @@ propagate_inheritable_config() {
     fi
     src="$src_config/$item"
     dest="$dest_config/$item"
+    if [ "$item" = firstmate-role ]; then
+      if ! role_stage=$(mktemp -d "${TMPDIR:-/tmp}/fm-inherit-role.XXXXXX" 2>/dev/null) ||
+        ! fm_role_inherit_payload "$src_home" "$src_config" "$role_stage/$item"; then
+        reason="cannot resolve the primary role"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+      src="$role_stage/$item"
+    fi
     if ! source_present=$(fm_config_source_present "$src"); then
       reason="cannot inspect primary source"
       warn_inheritable_config_error "$item" "$src" "$reason"
@@ -565,6 +796,9 @@ propagate_inheritable_config() {
       record_inheritable_config_result "$item" unchanged ""
     fi
   done
+  FM_INHERIT_DEST_CONFIG=$prior_dest_config
+  [ -z "$role_stage" ] || rm -rf "$role_stage"
+  [ -z "${FM_INHERIT_ROLE_RECEIPT_FAILED:-}" ] || rc=1
   return "$rc"
 }
 

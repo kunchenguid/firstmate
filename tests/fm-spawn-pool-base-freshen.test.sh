@@ -6,6 +6,12 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, launches a clean origin-less
 # pool as-is, or stops when a configured origin is unusable.
+# A home that opts in with config/spawn-base-primary-checkout starts a
+# local-only ship or a scout from the primary checkout's default branch when it
+# strictly contains origin's tip; the opt-in cases below also prove that a
+# publishing mode, a named base branch, a diverged or trailing primary, and an
+# unclean slot keep the rules above, and that the review starts where the slot
+# was planted.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -722,6 +728,10 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
   assert_contains "$out" "could not claim Treehouse pool slot" \
     "spawn did not name the unclaimable slot as the reason"
+  assert_contains "$out" "inspect window" \
+    "a non-polytoken unclaimable-slot refusal must keep its window pointer"
+  assert_not_contains "$out" "is closed on exit" \
+    "a non-polytoken refusal must not claim its window was closed"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
@@ -743,10 +753,643 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A stateful terminal and pool stand-in for the refused-launch sequence. Each
+# window is a file recording its stable id and the path its shell sits in; a
+# `treehouse get` typed into a window moves it into the lowest slot no live
+# window sits in, and a slot stays leased exactly while that window lives -
+# the process lease real Treehouse keeps for an interactive acquire.
+install_pool_world_tmux() {  # <fakebin> <world-dir> <slot-root>
+  local fakebin=$1 world=$2 slots=$3
+  mkdir -p "$world"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+world='$world'
+slots='$slots'
+SH
+  cat >> "$fakebin/tmux" <<'SH'
+window_name() {  # <target>
+  local t=${1#=}
+  t=${t#*:}
+  t=${t#=}
+  case "$t" in
+    @*) grep -lxF -- "$t" "$world"/*.id 2>/dev/null | head -n 1 | sed 's|.*/||; s|\.id$||' ;;
+    *) printf '%s' "$t" ;;
+  esac
+}
+target= name= cwd= fmt= text=
+cmd=${1:-}
+[ "$#" -eq 0 ] || shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -t) target=$2; shift 2 ;;
+    -n) name=$2; shift 2 ;;
+    -c) cwd=$2; shift 2 ;;
+    -F) fmt=$2; shift 2 ;;
+    -*) shift ;;
+    *) text="$text${text:+ }$1"; shift ;;
+  esac
+done
+case "$cmd" in
+  display-message)
+    case "$text" in
+      *pane_current_path*) cat "$world/$(window_name "$target").path" 2>/dev/null ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    ;;
+  list-windows)
+    for f in "$world"/*.id; do [ -e "$f" ] || continue; f=${f##*/}; printf '%s\n' "${f%.id}"; done
+    ;;
+  new-window)
+    n=$(( $(cat "$world/.next" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$n" > "$world/.next"
+    printf '@%s\n' "$n" > "$world/$name.id"
+    printf '%s\n' "$cwd" > "$world/$name.path"
+    printf '@%s\n' "$n"
+    ;;
+  kill-window)
+    w=$(window_name "$target")
+    rm -f "$world/$w.id" "$world/$w.path"
+    ;;
+  send-keys)
+    if [ "$text" = "treehouse get Enter" ]; then
+      w=$(window_name "$target")
+      for slot in "$slots"/*/project; do
+        grep -qxF -- "$slot" "$world"/*.path 2>/dev/null && continue
+        printf '%s\n' "$slot" > "$world/$w.path"
+        break
+      done
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# A launch refused after it claimed its slot must leave the pool and the task
+# records exactly as it found them, so a retry of the same task and a later
+# second task each land on a slot of their own. The refusal here is a polytoken
+# launch into a project that tracks its own .polytoken/hooks.json.
+test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task() {
+  local rec id other out status slot_root world claim1 claim2
+  id='pool-refused-retry-r1'
+  other='pool-refused-second-r1'
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$other"
+  rec=$(make_case refused-retry "$id")
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$other"
+  mkdir -p "$CASE_DIR/publisher/.polytoken"
+  printf '[]\n' > "$CASE_DIR/publisher/.polytoken/hooks.json"
+  git -C "$CASE_DIR/publisher" add .polytoken/hooks.json
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm project-hooks
+  git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1" "$slot_root/2"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$slot_root/2/project" "$INITIAL_SHA"
+  printf '{"worktrees":[{"name":"1","path":"%s"},{"name":"2","path":"%s"}]}\n' \
+    "$slot_root/1/project" "$slot_root/2/project" > "$slot_root/treehouse-state.json"
+  claim1="$slot_root/1/.fm-slot-owner"
+  claim2="$slot_root/2/.fm-slot-owner"
+  world="$CASE_DIR/tmux-world"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$world" "$slot_root"
+  cat > "$FAKEBIN_DIR/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/polytoken"
+
+  out=$(run_spawn "$id" --harness polytoken --model zai/glm-5.3-flash --effort low --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a polytoken launch into a project with its own hook layer should refuse"
+  assert_contains "$out" "not firstmate's to clobber" "the refusal message changed"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused launch published a task record"
+  [ ! -e "$world/fm-$id.id" ] \
+    || fail "the refused launch left its window open, still leasing $(cat "$world/fm-$id.path")"
+  [ ! -e "$claim1" ] && [ ! -e "$claim2" ] || fail "the refused launch left a slot claim behind"
+  [ ! -e "/tmp/fm-$id" ] || fail "the refused launch left its task temp root behind"
+
+  out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the retry of the refused task should launch"$'\n'"$out"
+  assert_grep "worktree=$slot_root/1/project" "$HOME_DIR/state/$id.meta" \
+    "the retry did not land on the slot the refused launch returned"
+
+  out=$(run_spawn "$other" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a second task spawned after the retry should launch"$'\n'"$out"
+  assert_grep "worktree=$slot_root/2/project" "$HOME_DIR/state/$other.meta" \
+    "the second task was handed the retried task's slot"
+  grep -Fxq -- "task=$id" "$claim1" || fail "slot 1 is not claimed by the retried task: $(cat "$claim1" 2>/dev/null)"
+  grep -Fxq -- "task=$other" "$claim2" || fail "slot 2 is not claimed by the second task: $(cat "$claim2" 2>/dev/null)"
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$other" "/tmp/fm-$id+"* "/tmp/fm-$other+"*
+  pass "a launch refused after its slot claim leaves the pool for a retry and a second task"
+}
+
+# A refused polytoken launch removes its per-id paths only under the per-id
+# spawn lock. Here a retry of the same id takes that lock while the abort is
+# still closing the window, so the abort must leave the task temp root the
+# retry may already be reusing, while still closing the window and returning
+# the slot.
+test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock() {
+  local rec id out status slot_root world holder_pid
+  id='pool-refused-contended-r1'
+  rm -rf "/tmp/fm-$id"
+  rec=$(make_case refused-contended "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/publisher/.polytoken"
+  printf '[]\n' > "$CASE_DIR/publisher/.polytoken/hooks.json"
+  git -C "$CASE_DIR/publisher" add .polytoken/hooks.json
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm project-hooks
+  git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  world="$CASE_DIR/tmux-world"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$world" "$slot_root"
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux.world"
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = kill-window ] && [ ! -e '$CASE_DIR/holder.pid' ]; then
+  FM_HOME='$HOME_DIR' nohup bash -c '. "\$1"; fm_lock_try_acquire "\$2" || exit 1; : > "\$3"; exec /bin/sleep 60' _ \\
+    '$ROOT/bin/fm-wake-lib.sh' '$HOME_DIR/state/.spawn-$id.lock' '$CASE_DIR/holder.ready' \\
+    >/dev/null 2>&1 &
+  printf '%s\n' "\$!" > '$CASE_DIR/holder.pid'
+  n=0
+  while [ ! -e '$CASE_DIR/holder.ready' ] && [ "\$n" -lt 100 ]; do /bin/sleep 0.05; n=\$((n + 1)); done
+fi
+exec '$FAKEBIN_DIR/tmux.world' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  cat > "$FAKEBIN_DIR/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/polytoken"
+
+  out=$(run_spawn "$id" --harness polytoken --model zai/glm-5.3-flash --effort low --mode no-mistakes --yolo off)
+  status=$?
+  holder_pid=$(cat "$CASE_DIR/holder.pid" 2>/dev/null || true)
+  [ -z "$holder_pid" ] || kill "$holder_pid" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "a polytoken launch into a project with its own hook layer should refuse"
+  [ -e "$CASE_DIR/holder.ready" ] || fail "the stand-in retry never took the per-id spawn lock"$'\n'"$out"
+  assert_contains "$out" "another spawn of $id holds its spawn lock" \
+    "the abort did not report skipping its per-id cleanup"$'\n'"$out"
+  [ -d "/tmp/fm-$id" ] || fail "the abort removed the task temp root while another spawn held the per-id lock"
+  [ ! -e "$world/fm-$id.id" ] || fail "the contended abort left its window open"
+  [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the contended abort left its slot claim behind"
+  rm -rf "/tmp/fm-$id"
+  pass "a refused polytoken launch leaves its per-id paths alone while another spawn holds the per-id lock"
+}
+
+# A launch on any harness other than polytoken keeps main's abort behavior: its
+# pre-publication claim is dropped under the allocation lock, but the window
+# it opened, and with it the slot's lease, stays for the operator to inspect.
+test_non_polytoken_refused_launch_keeps_its_window() {
+  local rec id out status slot_root world
+  id='pool-refused-codex-r1'
+  rec=$(make_originless_case refused-codex "$id")
+  read_case_record "$rec"
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  git -C "$slot_root/1/project" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  world="$CASE_DIR/tmux-world"
+  install_pool_world_tmux "$FAKEBIN_DIR" "$world" "$slot_root"
+
+  out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a codex launch on a slot with an unusable origin should refuse"
+  assert_contains "$out" "could not fetch origin" "the codex refusal message changed"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused codex launch published a task record"
+  [ -e "$world/fm-$id.id" ] || fail "a non-polytoken refusal closed its window, unlike main"
+  [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the refused codex launch left its slot claim"
+  pass "a non-polytoken launch refused after its slot claim keeps main's abort behavior"
+}
+
+# install_isolation_flip_git <fakebin> <worktree>: a git that answers every
+# command truthfully except `rev-parse --show-toplevel` on <worktree>, which
+# reports a foreign root from its third read on - after the discovery poll's
+# two agreeing reads adopted the slot, so only the post-poll isolation check
+# sees the worktree stop being isolated.
+install_isolation_flip_git() {  # <fakebin> <worktree>
+  local fakebin=$1 wt=$2 real_git
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -C ] && [ "\$2" = '$wt' ] && [ "\$3" = rev-parse ] && [ "\$4" = --show-toplevel ]; then
+  n=\$(cat '$fakebin/.toplevel-reads' 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > '$fakebin/.toplevel-reads'
+  if [ "\$n" -gt 2 ]; then
+    printf '%s\n' '$fakebin'
+    exit 0
+  fi
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# The post-poll treehouse-get isolation refusal points the operator at the
+# window only when that window survives the abort: every harness but polytoken
+# keeps main's `Inspect target <window>`, and a fresh polytoken spawn, whose
+# window is closed on exit, names the worktree and says so instead.
+test_treehouse_isolation_refusal_points_at_what_survives() {
+  local rec id out status
+  id='pool-isolation-codex-r1'
+  rec=$(make_case isolation-codex "$id")
+  read_case_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  install_isolation_flip_git "$FAKEBIN_DIR" "$POOL_DIR"
+  out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a codex spawn whose slot stopped being isolated should refuse"
+  assert_contains "$out" "treehouse get did not yield an isolated worktree" \
+    "the codex spawn did not refuse on the post-poll isolation check"$'\n'"$out"
+  assert_contains "$out" "refusing to launch to avoid tangling the primary checkout. Inspect target firstmate:fm-$id" \
+    "a non-polytoken isolation refusal must keep main's window pointer"$'\n'"$out"
+  assert_not_contains "$out" "is closed on exit" \
+    "a non-polytoken isolation refusal must not claim its window was closed"
+
+  id='pool-isolation-polytoken-r1'
+  rec=$(make_case isolation-polytoken "$id")
+  read_case_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  install_isolation_flip_git "$FAKEBIN_DIR" "$POOL_DIR"
+  cat > "$FAKEBIN_DIR/polytoken" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"print models"*) printf 'zai/glm-5.3-flash\nzai/glm-5.3-flash(low)\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/polytoken"
+  out=$(run_spawn "$id" --harness polytoken --model zai/glm-5.3-flash --effort low --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a polytoken spawn whose slot stopped being isolated should refuse"
+  assert_contains "$out" "treehouse get did not yield an isolated worktree" \
+    "the polytoken spawn did not refuse on the post-poll isolation check"$'\n'"$out"
+  assert_contains "$out" "pool (window firstmate:fm-$id is closed on exit" \
+    "a fresh polytoken isolation refusal must name the worktree and the closed window"$'\n'"$out"
+  assert_not_contains "$out" "Inspect target firstmate:fm-$id" \
+    "a fresh polytoken isolation refusal must not point at its closed window"
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$id+"*
+  pass "the treehouse-get isolation refusal points only at what survives the abort"
+}
+
+publish_feature_branch() { # <branch>
+  git -C "$CASE_DIR/publisher" checkout --quiet -b "$1"
+  printf 'only on %s\n' "$1" > "$CASE_DIR/publisher/feature-only.txt"
+  git -C "$CASE_DIR/publisher" add feature-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+  git -C "$CASE_DIR/publisher" push --quiet origin "$1"
+}
+
+brief_with_base() { # <id> <base> [<intent>]
+  fm_test_spawn_brief "$HOME_DIR" "$1" ${3:+"$3"}
+  printf '\n# Setup\nYou are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: %s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
+}
+
+test_named_base_branch_starts_from_that_branch() {
+  local rec id out status kind
+  for kind in ship scout; do
+    id="pool-named-base-$kind-r1"
+    rec=$(make_case "named-base-$kind" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    brief_with_base "$id" feature/hub
+    if [ "$kind" = ship ]; then
+      out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch feature/hub)
+    else
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+    fi
+    status=$?
+    expect_code 0 "$status" "a $kind spawn with a matching base branch should launch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+      || fail "the $kind copy did not start from origin/feature/hub"
+    assert_grep 'only on feature/hub' "$POOL_DIR/feature-only.txt" \
+      "the $kind copy is missing the base branch content"
+    assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" \
+      "the $kind spawn did not record its base branch"
+  done
+
+  id='pool-named-base-missing-r1'
+  rec=$(make_case named-base-missing "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/missing
+  out=$(run_spawn "$id" --scout --base-branch feature/missing)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch origin lacks should refuse the spawn"
+  assert_contains "$out" "origin/feature/missing" "the refusal did not name the missing base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused base-branch spawn published task metadata"
+
+  id='pool-named-base-local-only-r1'
+  rec=$(make_case named-base-local-only "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch feature/hub)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
+  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+  pass "--base-branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+}
+
+test_base_branch_must_agree_with_the_brief() {
+  local rec id out status case_name
+  for case_name in flag-only line-only task-decoy; do
+    id="pool-base-agree-$case_name-r1"
+    rec=$(make_case "base-agree-$case_name" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    case "$case_name" in
+    flag-only)
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    line-only)
+      brief_with_base "$id" feature/hub
+      out=$(run_spawn "$id" --scout)
+      ;;
+    task-decoy)
+      brief_with_base "$id" feature/hub $'You are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: decoy'
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "a $case_name base-branch disagreement should refuse the spawn"
+    assert_contains "$out" "Base branch" "the $case_name refusal did not name the Base branch line"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused $case_name spawn published task metadata"
+  done
+  pass "a spawn refuses when --base-branch and the brief's Base branch lines disagree"
+}
+
+# A Base branch line quoted in the captain's intent is prose: it neither blocks
+# a spawn nor redirects it.
+test_prose_base_branch_line_is_ignored() {
+  local rec id out status
+  id='pool-base-prose-none-r1'
+  rec=$(make_case base-prose-none "$id")
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id" $'Fix the release.\nBase branch: release/1.2'
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a no-base brief quoting a Base branch line should launch"$'\n'"$out"
+  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" "prose recorded a base branch"
+
+  id='pool-base-prose-flag-r1'
+  rec=$(make_case base-prose-flag "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  brief_with_base "$id" feature/hub $'Fix the release.\nBase branch: release/1.2'
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  expect_code 0 "$status" "a flagged spawn whose intent names another branch should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+    || fail "the prose branch redirected the copy away from origin/feature/hub"
+  assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" "the flag's base was not recorded"
+  pass "a Base branch line in the captain's intent neither blocks nor redirects a spawn"
+}
+
+# A named base is validated against the project's registered forge for scouts
+# too, so a scout that promotion could never ship is refused at spawn.
+test_scout_base_branch_refused_on_gerrit_forge() {
+  local rec id out status
+  id='pool-base-gerrit-scout-r1'
+  rec=$(make_case base-gerrit-scout "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  printf '%s\n' '- project [no-mistakes forge=gerrit] - fixture (added 2026-01-01)' > "$HOME_DIR/data/projects.md"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a based scout on a forge=gerrit project should refuse the spawn"
+  assert_contains "$out" "forge=gerrit" "the gerrit refusal did not explain itself"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused gerrit scout spawn published task metadata"
+  pass "a based scout on a forge=gerrit project is refused at spawn"
+}
+
+# A local-only project lands work with bin/fm-merge-local.sh: the primary
+# checkout's default branch advances and nothing is pushed, so origin stays at
+# the tip the slot was allocated from while that branch moves on.
+make_local_landing_case() { # <name> <id> <landings>
+  local name=$1 id=$2 landings=$3 case_dir home project origin pool fakebin frozen n
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  frozen=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$frozen"
+
+  n=1
+  while [ "$n" -le "$landings" ]; do
+    printf 'landed locally %s\n' "$n" > "$project/landed-$n.txt"
+    git -C "$project" add "landed-$n.txt"
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "land $n"
+    n=$((n + 1))
+  done
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$frozen|main"
+}
+
+opt_in_primary_checkout_base() {
+  : > "$HOME_DIR/config/spawn-base-primary-checkout"
+}
+
+# Push a commit to origin that the primary checkout never pulls.
+push_forge_only_commit() {
+  local publisher="$CASE_DIR/forge-publisher"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$publisher"
+  printf 'pushed straight to the forge\n' > "$publisher/forge-only.txt"
+  git -C "$publisher" add forge-only.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm forge-only
+  git -C "$publisher" push --quiet origin main
+}
+
+spawn_delivery() { # <id> <no-mistakes|direct-PR|local-only|scout>
+  if [ "$2" = scout ]; then
+    run_spawn "$1" --scout
+  else
+    run_spawn "$1" --mode "$2" --yolo off
+  fi
+}
+
+# Without the opt-in the refresh is the origin reset pinned above, even for the
+# two deliveries the opt-in moves: a local-only ship and a scout still start
+# from origin's tip however far the primary checkout's branch has moved.
+test_default_keeps_origin_tip_while_the_primary_leads() {
+  local rec id out status contract
+  for contract in local-only scout; do
+    id="pool-default-$contract-r1"
+    rec=$(make_local_landing_case "default-$contract" "$id" 3)
+    read_case_record "$rec"
+
+    out=$(spawn_delivery "$id" "$contract")
+    status=$?
+    expect_code 0 "$status" "a $contract spawn without the opt-in should launch"$'\n'"$out"
+    [ "$(git -C "$PROJECT_DIR" rev-parse main)" != "$INITIAL_SHA" ] \
+      || fail "fixture did not advance the primary checkout past origin's tip"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+      || fail "without the opt-in a $contract spawn moved off origin's tip"
+    [ ! -e "$POOL_DIR/landed-3.txt" ] \
+      || fail "without the opt-in a $contract spawn started from the primary checkout's branch"
+    assert_not_contains "$out" "note: pooled worktree" \
+      "without the opt-in the $contract refresh printed a base note"
+  done
+  pass "without the opt-in a local-only ship or a scout still starts from origin's tip while the primary leads"
+}
+
+# With the opt-in the base follows the delivery: a local-only ship or a scout
+# starts from the primary checkout's branch when it strictly contains origin's
+# tip, and every other case keeps origin's tip - either publishing mode, a
+# primary that has diverged (reported in a note), and a primary that trails
+# origin. The slot's base and the commit the captain's review starts from must
+# be the same commit, so each case also commits on the slot and runs the
+# opted-in review.
+test_opt_in_base_follows_the_delivery_and_the_review_follows_the_base() {
+  local shape contract publishes id rec out status head expected review base_line review_start landings
+  for shape in leading diverged trailing; do
+    for contract in no-mistakes direct-PR local-only scout; do
+      id="pool-opt-in-$shape-$contract-r1"
+      publishes=0
+      case $contract in no-mistakes | direct-PR) publishes=1 ;; esac
+      landings=2
+      [ "$shape" != trailing ] || landings=0
+      rec=$(make_local_landing_case "opt-in-$shape-$contract" "$id" "$landings")
+      read_case_record "$rec"
+      opt_in_primary_checkout_base
+      [ "$shape" = leading ] || push_forge_only_commit
+
+      out=$(spawn_delivery "$id" "$contract")
+      status=$?
+      expect_code 0 "$status" "$shape/$contract: an opted-in spawn should launch"$'\n'"$out"
+      head=$(git -C "$POOL_DIR" rev-parse HEAD)
+      if [ "$shape" = leading ] && [ "$publishes" = 0 ]; then
+        expected=$(git -C "$PROJECT_DIR" rev-parse main)
+        [ "$expected" != "$INITIAL_SHA" ] || fail "$shape/$contract: fixture did not advance the primary checkout"
+      else
+        expected=$(git -C "$POOL_DIR" rev-parse origin/main)
+      fi
+      [ "$head" = "$expected" ] || fail "$shape/$contract: the slot started at $head, not $expected"
+      if [ "$shape" = diverged ] && [ "$publishes" = 0 ]; then
+        assert_contains "$out" "main in the primary checkout has diverged from origin/main (ahead by 2, behind by 1); starting from origin's tip" \
+          "$shape/$contract: the spawn did not report the divergence it set aside"
+      else
+        assert_not_contains "$out" "note: pooled worktree" "$shape/$contract: the spawn printed a base note"
+      fi
+
+      git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+      printf 'the work under review\n' > "$POOL_DIR/task-change.txt"
+      git -C "$POOL_DIR" add task-change.txt
+      git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'task work'
+      review=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+        "$ROOT/bin/fm-review-diff.sh" "$id" --stat 2>/dev/null)
+      base_line=$(printf '%s\n' "$review" | sed -n 's/^diff base: //p')
+      [ -n "$base_line" ] || fail "$shape/$contract: the review printed no base"
+      review_start=$(git -C "$POOL_DIR" merge-base "$base_line" "fm/$id" 2>/dev/null) \
+        || fail "$shape/$contract: the review base '$base_line' shares no history with the branch"
+      [ "$review_start" = "$head" ] \
+        || fail "$shape/$contract: the slot started at $head but the review starts at $review_start (anchored on $base_line)"
+      assert_contains "$review" 'task-change.txt' "$shape/$contract: the review lost the task's own work"
+      assert_not_contains "$review" 'landed-' "$shape/$contract: the review carries a local landing the task never authored"
+      assert_not_contains "$review" 'forge-only.txt' "$shape/$contract: the review carries an origin commit the task never authored"
+      if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+        printf '# opted-in %s/%s: slot=%s review base=%s\n' "$shape" "$contract" "$head" "$base_line"
+      fi
+    done
+  done
+  pass "with the opt-in only a local-only ship or a scout leaves origin's tip, for a primary that strictly contains it, and the review starts where the slot did"
+}
+
+# A named base branch is delivered against origin, so the opt-in leaves it on
+# origin's copy even when the primary checkout's branch of that name is ahead.
+test_opt_in_keeps_a_named_base_branch_on_origin() {
+  local rec id out status parent local_tip
+  id='pool-opt-in-named-base-r1'
+  rec=$(make_case opt-in-named-base "$id")
+  read_case_record "$rec"
+  opt_in_primary_checkout_base
+  publish_feature_branch feature/hub
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  parent=$(git -C "$PROJECT_DIR" rev-parse origin/feature/hub)
+  local_tip=$(git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit-tree "$parent^{tree}" -p "$parent" -m 'local only on feature/hub')
+  git -C "$PROJECT_DIR" update-ref refs/heads/feature/hub "$local_tip"
+  brief_with_base "$id" feature/hub
+
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  expect_code 0 "$status" "an opted-in scout on a named base should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+    || fail "the opt-in moved a named base branch off origin/feature/hub"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$local_tip" ] \
+    || fail "the opt-in started a named base branch from the primary checkout's copy"
+  pass "with the opt-in a named base branch still starts from origin's copy"
+}
+
+# The clean-slot refusal still comes first: an unclean slot is refused as
+# uncommitted work, untouched, before any base is chosen or reported.
+test_opt_in_still_refuses_an_unclean_slot_first() {
+  local rec id out status before
+  id='pool-opt-in-dirty-r1'
+  rec=$(make_local_landing_case opt-in-dirty "$id" 2)
+  read_case_record "$rec"
+  opt_in_primary_checkout_base
+  push_forge_only_commit
+  printf 'work the captain has not committed\n' > "$POOL_DIR/uncommitted.txt"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an opted-in spawn launched from an unclean slot"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "the unclean slot was not refused as uncommitted work"
+  assert_not_contains "$out" "has diverged" \
+    "the unclean slot was reported as a divergence instead of as uncommitted work"
+  assert_grep 'work the captain has not committed' "$POOL_DIR/uncommitted.txt" \
+    "the opted-in spawn discarded uncommitted work"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "the opted-in spawn moved an unclean slot's base"
+  pass "with the opt-in an unclean slot is still refused, untouched, before any base is chosen"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
+test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
+test_non_polytoken_refused_launch_keeps_its_window
+test_treehouse_isolation_refusal_points_at_what_survives
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
+test_named_base_branch_starts_from_that_branch
+test_base_branch_must_agree_with_the_brief
+test_prose_base_branch_line_is_ignored
+test_scout_base_branch_refused_on_gerrit_forge
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
@@ -763,5 +1406,9 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_default_keeps_origin_tip_while_the_primary_leads
+test_opt_in_base_follows_the_delivery_and_the_review_follows_the_base
+test_opt_in_keeps_a_named_base_branch_on_origin
+test_opt_in_still_refuses_an_unclean_slot_first
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

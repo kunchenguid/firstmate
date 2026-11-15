@@ -22,22 +22,25 @@
 # submits its Stop-hook rewake inside <task-notification>, with no other field
 # to tell it from a typed prompt (tests/fm-host-mirror-live-e2e.test.sh proves
 # it).
-# Every writer is a silent no-op unless this home opted into the supervision
-# host (config/supervision-host, checked before anything else runs), the hook
-# runs in a genuine primary checkout, and this session holds the fleet lock, so
-# a home without the file, a crewmate worktree, and a read-only second session
-# write nothing and print nothing.
+# Every writer is a silent no-op unless this home runs the supervision host
+# for the writer's primary (fm_supervision_host_enabled, checked before
+# anything else runs: by default on Claude, never with an `off` file), the
+# hook runs in a genuine primary checkout, and this session holds the fleet
+# lock, so a home that opted out or never opted in, a crewmate worktree, and a
+# read-only second session write nothing and print nothing.
 #
 # FILE. $STATE/.host-mirror.jsonl, one JSON object per line:
 #   {"seq":N,"epoch":N,"key":"<main session>","id":"<source id>",
-#    "tag":"captain"|"main","text":"..."}
+#    "tag":"captain"|"main","text":"...","text_sha256":"<uncapped text digest>"}
 # key is the current main-session key (fm_supervision_host_main_key,
 # bin/fm-supervision-engine-lib.sh). id is the writer's own identity for the
 # entry when it has one (a prompt id or a generation id); an entry whose id and
-# text are already recorded for the same main session and tag is not appended
-# again, so a surface that fires twice mirrors each entry once, while a
-# different text under the same id is recorded. Each text is capped at
-# 4000 characters, its truncation note included (head and tail kept, as the Pi
+# uncapped text digest are already recorded for the same main session and tag
+# is not appended again, so a surface that fires twice mirrors each entry once, while a
+# different text under the same id is recorded. The digest covers the text
+# after trailing whitespace is trimmed, before capping. Legacy entries without
+# a digest remain feedable but cannot suppress a new entry. Each text is capped
+# at 4000 characters, its truncation note included (head and tail kept, as the Pi
 # mirror caps); when the file exceeds 300 entries it is trimmed to its newest
 # 200. New entries continue above both the committed and staged
 # cursor after file recreation so a later commit cannot skip them. An append
@@ -73,11 +76,15 @@
 #   fm-host-mirror.sh hook <harness>        a prompt-submit or turn-end hook payload on stdin
 #   fm-host-mirror.sh feed <session> new|resume
 #   fm-host-mirror.sh commit
+#   fm-host-mirror.sh check
 #   fm-host-mirror.sh verified <harness>
 # hook and commit always exit 0 and print nothing; feed exits 1 when
 # the mirror is missing, could not be read, or holds an invalid entry, or the
 # main session cannot be identified, and prints nothing when there is nothing
-# to feed; verified exits 0 or 1 and prints nothing.
+# to feed; check (bin/fm-afk-launch.sh quiet-check's mirror test) exits 1 when
+# the mirror is missing, could not be read, or holds an invalid entry, and
+# otherwise 0, printing nothing and staging no cursor; verified exits 0 or 1
+# and prints nothing.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,6 +98,9 @@ MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
 
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+
 usage() {
   sed -n '/^# Usage:/,/^# hook and commit/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
   exit 2
@@ -103,24 +113,22 @@ case "${1:-}" in
     exit 1
     ;;
   hook)
-    # The opt-in gate runs before anything is sourced or created, so a home
-    # without the file, and a crewmate worktree with no config/, stay inert.
-    [ -f "$CONFIG/supervision-host" ] || exit 0
+    # The home gate runs before anything else is sourced or created, so a
+    # home that does not run the host stays inert.
+    fm_supervision_host_enabled "$CONFIG" "${2:-}" || exit 0
     ;;
-  feed|commit) ;;
+  feed|commit|check) ;;
   -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) usage ;;
 esac
 
 if ! command -v jq >/dev/null 2>&1 || [ ! -d "$STATE" ]; then
-  [ "$1" != feed ] || exit 1
+  case "$1" in feed|check) exit 1 ;; esac
   exit 0
 fi
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-supervision-engine-lib.sh
-. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
 umask 077
 MIRROR="$STATE/.host-mirror.jsonl"
@@ -156,7 +164,7 @@ operational() {  # <text>
 # Returns 1 when the entry could not be recorded; an entry dropped by design
 # (injected, operational, or already recorded) returns 0.
 append_entry() {  # <captain|main> <text> [<id>]
-  local tag=$1 text=$2 id=${3:-} key last seq tmp record lines=0 recorded=/dev/null
+  local tag=$1 text=$2 id=${3:-} key last seq tmp record digest lines=0 recorded=/dev/null
   if [ "$tag" = captain ]; then
     case "${text#"${text%%[![:space:]]*}"}" in
       '<task-notification>'*) return 0 ;;
@@ -164,6 +172,19 @@ append_entry() {  # <captain|main> <text> [<id>]
     ! operational "$text" || return 0
   fi
   key=$(fm_supervision_host_main_key "$STATE") || return 1
+  # Keep dialog off process argument lists and refuse an unavailable digest
+  # rather than using a lossy presentation as reply identity.
+  digest=$(
+    set -o pipefail
+    if command -v shasum >/dev/null 2>&1; then
+      printf '%s' "$text" | shasum -a 256 | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+      printf '%s' "$text" | sha256sum | awk '{print $1}'
+    else
+      exit 1
+    fi
+  ) 2>/dev/null || return 1
+  [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   fm_lock_acquire_wait "$LOCK" || return 1
   [ ! -f "$MIRROR" ] || recorded=$MIRROR
   last=$(jq -Rn '[inputs | fromjson? | select(type == "object") | .seq | numbers] | max // 0' "$MIRROR" 2>/dev/null)
@@ -179,7 +200,7 @@ append_entry() {  # <captain|main> <text> [<id>]
   done
   seq=$((last + 1))
   record=$(printf '%s' "$text" | jq -cRs --argjson seq "$seq" --argjson epoch "$(date +%s)" --arg key "$key" \
-    --arg id "$id" --arg tag "$tag" --argjson cap "$MIRROR_CAP" --rawfile recorded "$recorded" '
+    --arg id "$id" --arg tag "$tag" --arg digest "$digest" --argjson cap "$MIRROR_CAP" --rawfile recorded "$recorded" '
       . as $text
       | def note($n): "\n[mirror truncated: \($n) characters omitted]\n";
       def capped: if length <= $cap then .
@@ -187,9 +208,9 @@ append_entry() {  # <captain|main> <text> [<id>]
           | ($cap - (note($len - $cap + (note($len - $cap) | length)) | length)) as $keep
           | .[0:($keep / 2 | ceil)] + note($len - $keep) + .[$len - ($keep / 2 | floor):]
         end;
-      {seq: $seq, epoch: $epoch, key: $key, id: $id, tag: $tag, text: ($text | capped)} as $entry
+      {seq: $seq, epoch: $epoch, key: $key, id: $id, tag: $tag, text: ($text | capped), text_sha256: $digest} as $entry
       | if $id != "" and any($recorded | split("\n")[] | fromjson? | select(type == "object");
-          .id == $id and .tag == $tag and .key == $key and .text == $entry.text)
+          .id == $id and .tag == $tag and .key == $key and .text_sha256 == $digest)
         then empty else $entry end' 2>/dev/null) \
     || { fm_lock_release "$LOCK"; return 1; }
   if [ -z "$record" ]; then
@@ -255,6 +276,14 @@ case "$1" in
     mv -f "$STAGED" "$CURSOR" 2>/dev/null || true
     fm_lock_release "$LOCK"
     exit 0
+    ;;
+  check)
+    [ "$#" -eq 1 ] || usage
+    [ -f "$MIRROR" ] && fm_lock_acquire_wait "$LOCK" || exit 1
+    rc=0
+    jq -Rs "$ENTRIES" "$MIRROR" >/dev/null 2>&1 || rc=1
+    fm_lock_release "$LOCK"
+    exit "$rc"
     ;;
 esac
 

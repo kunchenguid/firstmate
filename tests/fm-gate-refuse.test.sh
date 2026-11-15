@@ -158,7 +158,7 @@ run_guard_lib_home() {
 }
 
 test_helper_lab_home_admits() {
-  local lab plain out rc
+  local lab plain out rc value name dir
   lab=$("$LABHOME" create "$TMP/lab-home") || fail "lab-home create failed"
   plain="$TMP/plain-home"; mkdir -p "$plain"
 
@@ -173,16 +173,110 @@ test_helper_lab_home_admits() {
   expect_code 3 "$rc" "helper: gate + unmarked home must still refuse"
   assert_contains "$out" "$ENV_MSG" "helper: unmarked-home refusal message"
 
-  # gate + marked lab + an FM_*_OVERRIDE -> refused: the allowance requires
-  # the stock layout so an override cannot split state onto the real fleet.
-  out=$(run_guard_lib_home "$NORMAL_CWD" "$lab" NO_MISTAKES_GATE=1 FM_STATE_OVERRIDE="$lab/state"); rc=$?
-  expect_code 3 "$rc" "helper: lab home driven through FM_STATE_OVERRIDE must refuse"
-  assert_contains "$out" "$ENV_MSG" "helper: override refusal message"
+  # Production Pi supplies the tracked root and the stock state/config paths.
+  out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$lab/state" FM_CONFIG_OVERRIDE="$lab/config"); rc=$?
+  expect_code 0 "$rc" "helper: production branch paths in a marked lab must be permitted"
+
+  for name in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE; do
+    for value in "$plain" "$lab/../plain-home" "$lab/state/.."; do
+      out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 "$name=$value"); rc=$?
+      expect_code 3 "$rc" "helper: relocated or noncanonical $name must refuse"
+    done
+  done
+  for name in FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_UNKNOWN_OVERRIDE; do
+    out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 "$name=$lab/data"); rc=$?
+    expect_code 3 "$rc" "helper: unsupported $name must refuse"
+  done
+  ln -s "$lab" "$TMP/lab-alias"
+  for value in "$TMP/lab-alias" "$lab/."; do
+    out=$(run_guard_lib_home "$GATE_WT" "$value" NO_MISTAKES_GATE=1 FM_ROOT_OVERRIDE="$ROOT"); rc=$?
+    expect_code 3 "$rc" "helper: noncanonical home must refuse"
+  done
+  for dir in state config data projects; do
+    mv "$lab/$dir" "$lab/$dir.saved"
+    ln -s "$plain" "$lab/$dir"
+    out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 FM_ROOT_OVERRIDE="$ROOT"); rc=$?
+    expect_code 3 "$rc" "helper: symlinked stock $dir must refuse"
+    rm "$lab/$dir"
+    mv "$lab/$dir.saved" "$lab/$dir"
+  done
+  mv "$lab/.fm-lab-home" "$lab/marker.saved"
+  ln -s "$lab/marker.saved" "$lab/.fm-lab-home"
+  out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "helper: symlinked lab identity must refuse"
+  rm "$lab/.fm-lab-home"
+  printf 'invalid lab identity\n' > "$lab/.fm-lab-home"
+  out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "helper: invalid lab identity must refuse"
+  mv "$lab/marker.saved" "$lab/.fm-lab-home"
 
   # no gate signal + lab home -> still a normal no-op.
   out=$(run_guard_lib_home "$NORMAL_CWD" "$lab"); rc=$?
   expect_code 0 "$rc" "helper: lab home outside a gate must not refuse"
-  pass "fm-gate-refuse-lib: marked lab home permitted in a gate; unmarked home or an override stay refused"
+  pass "fm-gate-refuse-lib: production lab paths permitted; relocated paths and invalid identities refused"
+}
+
+test_lab_home_private_tmux_socket_survives_deep_paths() {
+  local root=$TMP/deep lab socket_dir ready socket_path depth=0
+  local real_tmux
+  real_tmux=$(command -v tmux) || fail "tmux is required for the lab socket behavioral test"
+  while [ "${#root}" -le 150 ]; do
+    root="$root/long-directory-segment"
+    depth=$((depth + 1))
+  done
+  mkdir -p "$root"
+  lab="$root/lab-home"
+  lab=$("$LABHOME" create "$lab") || fail "could not create lab home under a long path"
+  socket_dir=$("$LABHOME" tmux-dir "$lab") || fail "could not create the lab's private tmux directory"
+  socket_path="$socket_dir/tmux-$(id -u)/fm-lab"
+  ready="$lab/state/primary-started"
+  [ "${#lab}" -gt 120 ] || fail "lab path was not deliberately long enough"
+  [ "${#socket_path}" -lt 60 ] || fail "tmux socket path is not short: $socket_path"
+  local mode owner
+  case "$(uname -s)" in
+    Darwin) mode=$(stat -f '%Lp' "$socket_dir"); owner=$(stat -f '%u' "$socket_dir") ;;
+    *) mode=$(stat -c '%a' "$socket_dir"); owner=$(stat -c '%u' "$socket_dir") ;;
+  esac
+  [ "$mode" = 700 ] || fail "private tmux directory mode is not 0700"
+  [ "$owner" = "$(id -u)" ] || fail "private tmux directory is not owned by the current user"
+  [ "${socket_dir#/tmp/fml.}" != "$socket_dir" ] || fail "socket directory is not under the short /tmp/fml prefix"
+
+  cleanup_deep_lab() {
+    # The explicit socket, only while it exists: TMUX_TMPDIR alone falls back
+    # to /tmp/tmux-<uid> once the private directory is gone.
+    [ ! -S "$socket_path" ] || "$real_tmux" -S "$socket_path" kill-server >/dev/null 2>&1 || true
+    "$LABHOME" teardown "$lab" >/dev/null 2>&1 || true
+    fm_test_cleanup
+  }
+  trap cleanup_deep_lab EXIT
+  # shellcheck disable=SC2016 # The fake primary expands $1 in its own sh process.
+  env TMUX_TMPDIR="$socket_dir" "$real_tmux" -L fm-lab -f /dev/null new-session -d -s primary \
+    /bin/sh -c 'printf started > "$1"; exec sleep 60' sh "$ready" \
+    || fail "tmux could not start the fake primary through the lab socket"
+  [ -S "$socket_path" ] || fail "tmux did not create its socket in the private short directory"
+  local attempts=0
+  while [ ! -f "$ready" ] && [ "$attempts" -lt 20 ]; do sleep 0.05; attempts=$((attempts + 1)); done
+  [ -f "$ready" ] || fail "fake primary did not start"
+  "$real_tmux" -S "$socket_path" has-session -t primary \
+    || fail "primary session is not reachable through the lab socket"
+  if "$LABHOME" teardown "$lab" >/dev/null 2>&1; then
+    fail "lab teardown removed the directory while its server was running"
+  fi
+  [ -d "$socket_dir" ] || fail "refused active-server teardown removed the socket directory"
+  "$real_tmux" -S "$socket_path" kill-server \
+    || fail "could not stop the isolated lab tmux server"
+  mkdir -p "$TMP/failing-tmux-bin"
+  printf '#!/bin/sh\necho "tmux: probe failed" >&2\nexit 1\n' > "$TMP/failing-tmux-bin/tmux"
+  chmod +x "$TMP/failing-tmux-bin/tmux"
+  if PATH="$TMP/failing-tmux-bin:$PATH" "$LABHOME" teardown "$lab" >/dev/null 2>&1; then
+    fail "lab teardown removed the directory when its tmux probe failed"
+  fi
+  [ -d "$socket_dir" ] || fail "failed-probe teardown removed the socket directory"
+  "$LABHOME" teardown "$lab" || fail "lab tmux directory teardown failed"
+  [ ! -e "$socket_dir" ] || fail "lab teardown left the private tmux directory behind"
+  trap fm_test_cleanup EXIT
+  pass "fm-lab-home: a primary starts on a private short tmux socket from a long lab path and teardown removes it"
 }
 
 test_lab_home_helper() {
@@ -472,6 +566,7 @@ test_helper_path_backstop_refuses
 test_helper_normal_is_noop
 test_helper_lab_home_admits
 test_lab_home_helper
+test_lab_home_private_tmux_socket_survives_deep_paths
 test_spawn_refuses_and_admits
 test_send_refuses_and_admits
 test_teardown_refuses_and_admits

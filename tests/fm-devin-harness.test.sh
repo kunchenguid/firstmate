@@ -88,6 +88,20 @@ jq -e '.attribution == false and .read_config_from.claude == false' "$config" >/
   || fail 'an absent user config must still disable attribution and Claude hook import'
 pass "worker config forces attribution off and Claude Code hook import off"
 
+# With config/keep-ai-trailers, fm-spawn passes FM_KEEP_AI_TRAILERS=1: the
+# worker config leaves Devin's attribution as the source had it (absent means
+# Devin's default, on) while Claude hook import stays off.
+FM_KEEP_AI_TRAILERS=1 "$ROOT/bin/fm-devin-config.sh" "$state" worker "$gen" "$TMP_ROOT/opted-in.json" || fail 'config writer failed'
+jq -e '.attribution == true and .read_config_from.claude == false' "$config" >/dev/null \
+  || fail 'keep-ai-trailers must leave the source attribution on and still disable Claude hook import'
+FM_KEEP_AI_TRAILERS=1 "$ROOT/bin/fm-devin-config.sh" "$state" worker "$gen" /nonexistent/config.json || fail 'absent source refused'
+jq -e 'has("attribution") | not' "$config" >/dev/null \
+  || fail 'keep-ai-trailers must not write attribution=false for an absent user config'
+FM_KEEP_AI_TRAILERS=0 "$ROOT/bin/fm-devin-config.sh" "$state" worker "$gen" "$TMP_ROOT/opted-in.json" || fail 'config writer failed'
+jq -e '.attribution == false' "$config" >/dev/null \
+  || fail 'FM_KEEP_AI_TRAILERS=0 must still force attribution off'
+pass "keep-ai-trailers leaves Devin attribution on"
+
 case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
 fm_fake_exit0 "$fakebin" devin

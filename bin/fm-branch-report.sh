@@ -19,7 +19,7 @@
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine fleet outcome.
+# or captain"); --silent true is legal only for a routine outcome.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -29,16 +29,18 @@
 # store refused or failed (nothing recorded), 2 usage, 3 refused (actor, turn,
 # or scope).
 #
-# A row an away turn recorded after the captain returned (the turn record
-# says posture=away, or predates the posture field, and the away-posture
-# record is gone) may be missing from the return brief, so it is also queued
+# A non-silent row an away turn recorded after the captain returned (the turn
+# record says posture=away, or predates the posture field, and no away record
+# remains: none, or quiet mode's, whose captain is present; bin/fm-afk-contract.sh
+# AWAY OR QUIET) may be missing from the return brief, so it is also queued
 # for MAIN as a durable check wake keyed supervision-host-return:<seq>,
 # presented by the drain until MAIN acknowledges it. bin/fm-afk-return.sh
 # archives the record before it reads the store and this check follows the
-# append, so every row is in the brief, queued, or both: the relay does not
-# depend on the host surviving its turn or on its owner delivering the host's
-# own handback. An attended turn queues nothing: its captain rows reach MAIN
-# through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
+# append, so every visible row is in the brief, queued, or both: the relay does
+# not depend on the host surviving its turn or on its owner delivering the
+# host's own handback. Silent outcomes remain in the store but are not queued
+# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u
 
@@ -48,6 +50,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 TURN_FILE="$STATE/.supervision-host-turn"
 RECEIPTS="$STATE/.supervision-host-receipts"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 usage() {
   sed -n '/^# Usage:/,/^# --wake/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
@@ -80,8 +84,8 @@ if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
   echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
   exit 2
 fi
-if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
-  echo "invalid report: --silent true is only for a routine fleet outcome" >&2
+if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
+  echo "invalid report: --silent true requires the routine verdict" >&2
   exit 2
 fi
 
@@ -123,15 +127,19 @@ printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
+if [ "$SILENT" = true ]; then
+  printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
+  exit 0
+fi
 if [ "$(turn_field posture)" = attended ]; then
-  if [ "$VERDICT" = captain ] && [ ! -f "$STATE/.afk-contract" ]; then
+  if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
     printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
   else
     printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
   fi
   exit 0
 fi
-if [ ! -f "$STATE/.afk-contract" ]; then
+if ! fm_afk_contract_away_present "$STATE"; then
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if ! fm_wake_append check "supervision-host-return:$SEQ" \

@@ -11,12 +11,13 @@
 #   <path>
 #   <number>
 #   <authority>                 away | attended
-# While the away-posture record exists every merge runs under away authority
-# (the record's presence is the whole mechanical fact; which merge the captain's
-# away words meant is the supervision session's reading); without it the merge
-# is attended. The retired values yolo and away-grant are still accepted when an
-# existing record is read, so a merge persisted before the words model landed is
-# still consumed, but they are never written again.
+# While an away record exists every merge runs under away authority (the
+# record's presence is the whole mechanical fact; which merge the captain's
+# away words meant is the supervision session's reading); without one, or while
+# the record is quiet mode's (bin/fm-afk-contract.sh mode: the captain is
+# present), the merge is attended. The retired values yolo and away-grant are
+# still accepted when an existing record is read, so a merge persisted before
+# the words model landed is still consumed, but they are never written again.
 # The identity comes from the merge run's immutable canonical URL parse;
 # persistence revalidates the task's current pr= metadata under its metadata
 # and lifecycle locks and refuses a mismatch. The file is atomically published,
@@ -64,6 +65,11 @@ fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
     "$_FM_MERGE_AUTHORITY_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
     FM_MERGE_AUTHORITY_REASON='record-unreadable'
     return 1
+  fi
+  if ! fm_afk_contract_away_present "$state"; then
+    FM_MERGE_AUTHORITY='attended'
+    FM_MERGE_AUTHORITY_REASON='attended'
+    return 0
   fi
   FM_MERGE_AUTHORITY='away'
   # shellcheck disable=SC2034 # Public results consumed by sourcing callers.

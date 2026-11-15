@@ -72,7 +72,7 @@ new_world() {
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -295,11 +295,10 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: the window inventory contains only
+# the given live target's window.
 make_fake_tmux() {
-  local fakebin=$1 live=$2
+  local fakebin=$1 live=$2 live_window=${2#*:}
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -313,6 +312,10 @@ case "\${1:-}" in
     done
     [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
     exit 1
+    ;;
+  list-windows)
+    printf '%s\n' "$live_window"
+    exit 0
     ;;
 esac
 exit 1
@@ -488,16 +491,64 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
-# make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only
-# for the given pane id - the exact primitive fm_backend_target_exists uses
-# for a herdr endpoint liveness read. No version/server-start calls: a
+# make_fake_herdr <fakebin> <live-pane> [odd-status-pane]: `herdr pane get
+# <pane>` succeeds only for the given pane id - the exact primitive
+# fm_backend_target_exists uses for a herdr endpoint liveness read. An
+# optional second pane id answers with exit 4, the shape backend probes
+# produce for a gone surface without normalising to 1 (jq -e on empty input,
+# orca's ok:false, a missing tmux binary). No version/server-start calls: a
 # liveness check must never auto-start a server (fm-backend.sh's contract).
 make_fake_herdr() {
-  local fakebin=$1 live=$2
+  local fakebin=$1 live=$2 odd=${3:-}
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  [ -n "$odd" ] && [ "\${3:-}" = "$odd" ] && exit 4
+  [ "\${3:-}" = "$live" ] && exit 0
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+}
+
+# make_fake_herdr_deadly_read <fakebin> <live-pane> <kill-pane>: like
+# make_fake_herdr, but `pane get <kill-pane>` KILLs the shell running the
+# endpoint read. The read's shell is the fake's grandparent (fm_backend_herdr_cli's
+# stderr-capture subshell sits in between), so the fake walks one /proc hop
+# above $PPID. This is the digest-death shape: a per-task herdr liveness
+# read whose process died mid-read, which used to take the whole
+# session-start digest with it.
+make_fake_herdr_deadly_read() {
+  local fakebin=$1 live=$2 killpane=$3
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  if [ "\${3:-}" = "$killpane" ]; then
+    read_shell=\$(sed 's/^[^)]*) //' /proc/\$PPID/stat 2>/dev/null | awk '{print \$2}')
+    kill -KILL "\$read_shell" 2>/dev/null
+    exit 0
+  fi
+  [ "\${3:-}" = "$live" ] && exit 0
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+}
+
+# make_fake_herdr_hanging_read <fakebin> <live-pane> <hang-pane>: like
+# make_fake_herdr, but `pane get <hang-pane>` never returns - the backend-CLI
+# hang shape the per-task read bound must turn into an error line.
+make_fake_herdr_hanging_read() {
+  local fakebin=$1 live=$2 hangpane=$3
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
+  [ "\${3:-}" = "$hangpane" ] && sleep 300
   [ "\${3:-}" = "$live" ] && exit 0
   exit 1
 fi
@@ -746,6 +797,7 @@ EOF
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
+  assert_contains "$out" "fm-role: user (default)" "digest did not report the home's firstmate-repository role"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
@@ -888,6 +940,23 @@ EOF
   pass "locked session start freezes trace context and lock refusal leaves it unchanged"
 }
 
+# Wait until <dir> holds <count> entries. Forty workers poll this at once, so
+# the count is a builtin glob rather than a find pipeline (no process per
+# poll), and the wait ends early once the directory is gone, the suite has
+# died, or FM_TEST_STUB_MAX_BLOCK_SECONDS has passed, so an interrupted run
+# cannot leave forty pollers spinning under init.
+lock_concurrency_barrier() {  # <dir> <count>
+  local dir=$1 want=$2 start=$SECONDS entries
+  while [ -d "$dir" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+    && [ $((SECONDS - start)) -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+    entries=("$dir"/*)
+    [ -e "${entries[0]}" ] || entries=()
+    [ "${#entries[@]}" -lt "$want" ] || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
@@ -936,18 +1005,14 @@ SH
       harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
-      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_concurrency_barrier "$ready" 40
       if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
       : > "$completed/$i"
-      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_concurrency_barrier "$completed" 40
     ) &
     pids="$pids $!"
     i=$((i + 1))
@@ -1359,16 +1424,220 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_herdr "$fakebin" "p-live"
+  make_fake_herdr "$fakebin" "p-live" "p-odd"
 
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
+  printf 'window=sess:p-odd\nkind=ship\nbackend=herdr\n' > "$home/state/task-odd.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-odd)" \
+    "a probe exiting 4 for a gone surface was not reported dead"
+  assert_not_contains "$out" "endpoint: error (backend=herdr window=sess:p-odd" \
+    "a probe exiting 4 was mislabelled as a failed read"
 
-  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+  pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, dead for any other probe status"
+}
+
+test_endpoint_read_death_is_isolated_and_reported() {
+  local rec root home fakebin out status=0
+  [ -r /proc/self/stat ] || { echo "skip: /proc not readable (the read-death shape needs process ancestry)"; return 0; }
+  rec=$(new_world endpoint-death)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_deadly_read "$fakebin" "p-live" "p-doom"
+
+  printf 'window=sess:p-doom\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-doom.meta"
+  printf 'working: doomed task marker\n' > "$home/state/task-a-doom.status"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+
+  out=$(FM_SESSION_START_ENDPOINT_TIMEOUT=bogus run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "one killed endpoint read must not fail the digest"
+  assert_contains "$out" \
+    "endpoint: error (backend=herdr window=sess:p-doom - the endpoint read died or hit its 10s bound; the digest continued past it)" \
+    "a killed endpoint read was not reported as that task's own error line"
+  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" \
+    "the digest did not continue past the killed read to the next task"
+  assert_contains "$out" "working: doomed task marker" \
+    "the doomed task's status tail was lost along with its endpoint read"
+  assert_contains "$out" "$(printf '\nCONTEXT\n')" \
+    "a killed endpoint read cost the digest its context section"
+  assert_contains "$out" "NEXT STEP" \
+    "a killed endpoint read cost the digest its closing reminder"
+  assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START" \
+    "an isolated endpoint-read death raised the truncation banner"
+  assert_present "$home/state/.session-start-complete" \
+    "a digest that survived a killed endpoint read did not record completion"
+
+  pass "a killed per-task endpoint read becomes that task's error line and the digest completes"
+}
+
+test_endpoint_read_hang_is_bounded_and_reported() {
+  local rec root home fakebin out status=0 stray
+  rec=$(new_world endpoint-hang)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
+
+  printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+
+  # The same fake hangs the side-band home summary before the endpoint section.
+  # Bound that unrelated refresh at 5s instead of paying its production 60s;
+  # the endpoint's own 2s bound and descendant-cleanup assertions stay real.
+  out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a hung endpoint read must not fail the digest"
+  assert_contains "$out" \
+    "endpoint: error (backend=herdr window=sess:p-slow - the endpoint read died or hit its 2s bound; the digest continued past it)" \
+    "a hung endpoint read was not bounded into that task's own configured bound"
+  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" \
+    "the digest did not continue past the hung read to the next task"
+  assert_contains "$out" "$(printf '\nCONTEXT\n')" \
+    "a hung endpoint read cost the digest its context section"
+  assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START" \
+    "a bounded endpoint-read hang raised the whole-digest truncation banner"
+
+  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$stray" -eq 0 ] || fail "the per-task read bound left $stray hung herdr process(es) behind"
+
+  pass "a hung per-task endpoint read hits its configured bound, reports the task, and leaves nothing stuck"
+}
+
+test_endpoint_bound_rejects_padded_zero() {
+  local rec root home fakebin out status=0 stray
+  rec=$(new_world endpoint-padded-zero)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_herdr_hanging_read "$fakebin" "p-live" "p-slow"
+
+  printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
+
+  # Only the unrelated summary gets a shorter fixture budget. The invalid
+  # endpoint value must still fall back to the real 10s production bound.
+  out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=00 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a padded-zero per-read bound must not fail the digest"
+  assert_contains "$out" \
+    "endpoint: error (backend=herdr window=sess:p-slow - the endpoint read died or hit its 10s bound; the digest continued past it)" \
+    "a padded-zero bound did not fall back to the 10s default, so the hung read went unbounded"
+  assert_contains "$out" "$(printf '\nCONTEXT\n')" \
+    "a padded-zero bound cost the digest its context section"
+
+  stray=$(pgrep -f "$fakebin/herdr" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$stray" -eq 0 ] || fail "the fallback bound left $stray hung herdr process(es) behind"
+
+  pass "a padded-zero per-read bound falls back to the 10s default instead of removing the bound"
+}
+
+test_perl_timeout_fallback_reports_signal_death_nonzero() {
+  local toolbin cmd rc=0
+  command -v perl >/dev/null 2>&1 || { echo "skip: perl not found (this case pins the perl mechanism only)"; return 0; }
+  toolbin=$(mktemp -d "${TMPDIR:-/tmp}/fm-perl-timeout.XXXXXX")
+  for cmd in bash perl sleep kill cat rm mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 && ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
+  done
+  PATH="$toolbin" bash -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    [ "$(fm_timeout_mechanism)" = perl ] || { echo "mechanism: $(fm_timeout_mechanism)" >&2; exit 99; }
+    fm_run_timed 5 bash -c "kill -KILL \$\$"
+  ' _ "$ROOT" || rc=$?
+  rm -rf "$toolbin"
+  expect_code 137 "$rc" "the perl timeout fallback did not report a SIGKILLed child as 128+9"
+
+  pass "the perl timeout fallback reports a signal death as a nonzero status"
+}
+
+test_abnormal_digest_death_banners_and_exits_zero() {
+  local rec root home fakebin out status=0
+  [ -r /proc/self/stat ] || { echo "skip: /proc not readable (the digest-death shape needs process ancestry)"; return 0; }
+  rec=$(new_world digest-death-banner)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # Replace the harness ps with one that TERMs the digest process itself when
+  # fm-lock.sh invokes it: the shape where the digest child dies mid-stage
+  # from something other than its runtime bound, which the parent used to
+  # swallow silently (no banner, exit 0, rest of the digest gone).
+  # ps sits below fm-lock.sh below the digest bash, so walk /proc upward.
+  # Flattened cmdline matching alone is useless: timeout's bash -c inner shell
+  # and the timeout wrapper carry the script path as an ARGV element, and the
+  # lock stage's own command substitution leaves a subshell whose argv is
+  # still `fm-session-start.sh` - only the topmost match is the digest bash
+  # itself. That digest child is the topmost ancestor whose ENVIRON carries
+  # FM_SESSION_START_STAGE_FILE: the parent wrapper mktemps the file and hands
+  # it over with env (which never keeps it for itself), the bash -c inner
+  # shell and timeout sit BELOW env, and the parent wrapper never holds it -
+  # so the env marker stops the walk above the digest child and below the
+  # wrapper whose death would skip the banner entirely. Kill that topmost
+  # marker carrier: the digest bash whose death the parent must banner.
+  mv "$fakebin/ps" "$fakebin/ps.real"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$(tr '\\0' ' ' < /proc/\$PPID/cmdline 2>/dev/null)" in
+  *fm-lock.sh*)
+    pid=\$PPID
+    target=
+    matched=0
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      [ -n "\$pid" ] && [ "\$pid" != 1 ] || break
+      if tr '\\0' '\\n' < /proc/\$pid/environ 2>/dev/null | grep -q '^FM_SESSION_START_STAGE_FILE=' \
+        && case "\$(tr '\\0' ' ' < /proc/\$pid/cmdline 2>/dev/null)" in *fm-session-start.sh*) true ;; *) false ;; esac; then
+        target=\$pid
+        matched=1
+      elif [ "\$matched" -eq 1 ]; then
+        break
+      fi
+      pid=\$(sed 's/^[^)]*) //' /proc/\$pid/stat 2>/dev/null | awk '{print \$2}')
+    done
+    [ -n "\$target" ] && kill -TERM "\$target" 2>/dev/null
+    ;;
+esac
+exec "$fakebin/ps.real" "\$@"
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a digest child that died mid-stage must still let the session open (parent exits 0)"
+  assert_contains "$out" \
+    "STARTUP TRUNCATED - SESSION START DIED UNEXPECTEDLY (exit 143, not its runtime bound)" \
+    "a digest child killed mid-stage did not name its abnormal death"
+  assert_contains "$out" 'stopped during the "lock" stage' \
+    "the abnormal-death banner did not name the stage that never finished"
+  assert_contains "$out" \
+    "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
+    "the abnormal-death banner did not list every stage that never ran"
+  assert_not_contains "$out" "RUNTIME BOUND" \
+    "an abnormal death was misreported as the runtime bound firing"
+  assert_contains "$out" "report the exit status and the stage" \
+    "the abnormal-death banner did not tell the reader to report the exit status"
+  assert_not_contains "$out" "raise FM_SESSION_START_TIMEOUT" \
+    "the abnormal-death banner advised raising a bound that did not fire"
+  assert_not_contains "$out" "NEXT STEP" \
+    "a digest that died mid-stage claimed to have reached its closing reminder"
+  assert_absent "$home/state/.session-start-complete" \
+    "a digest that died mid-stage recorded itself as complete"
+
+  pass "a digest child killed mid-stage is bannered by the parent, which still exits 0"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------
@@ -1451,6 +1720,9 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  # A Claude home runs the supervision host by default and then presents its
+  # outcomes; this case pins a home that does not run it.
+  : > "$home/config/supervision-host-off"
 
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-b --verdict captain --summary 'unread Pi branch outcome' >/dev/null \
@@ -1465,6 +1737,33 @@ EOF
   [ -e "$home/state/.lease-task-dead" ] || fail "non-Pi session swept a Pi branch lease"
   [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "non-Pi session marked a Pi branch outcome read"
   pass "non-Pi session start neither sweeps nor replays Pi branch state"
+}
+
+test_session_start_seeds_the_outcome_display_tail_while_away() {
+  local rec root home fakebin out store tail
+  rec=$(new_world outcome-tail-seed)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  store="$home/state/branch-outcomes.jsonl"
+  tail="$home/state/.branch-outcomes-tail.jsonl"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict captain --summary 'decision still waiting' >/dev/null \
+    || fail "could not store the captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "could not mark the outcome read"
+  rm -f "$tail"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'away for the afternoon' >/dev/null \
+    || fail "could not record the away posture"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "away posture recorded" "the digest did not report the away posture"
+  [ -f "$tail" ] || fail "session start did not seed the display tail copy of an existing outcome store while away"
+  [ "$(cat "$tail")" = "$(cat "$store")" ] || fail "the seeded display tail is not the store's rows verbatim"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "seeding the display tail moved the read cursor"
+  [ ! -e "$home/state/.branch-outcomes-processed" ] || fail "seeding the display tail acknowledged the captain outcome"
+  pass "session start seeds an existing outcome store's absent display tail copy while away, moving no marker"
 }
 
 # --- deferred network stage -------------------------------------------------
@@ -2104,6 +2403,31 @@ SH
 
 # --- context re-emit (--reemit) ----------------------------------------------
 
+test_reemit_cue_survives_the_hook_output_preview() {
+  local rec root home fakebin reemit normal head2k
+  rec=$(new_world reemit-cue)
+  IFS='|' read -r root home fakebin <<FIXTURE
+$rec
+FIXTURE
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$home/data"
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "preference line %04d padding padding padding\n", i }' > "$home/data/captain.md"
+
+  normal=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$normal" "RE-EMIT CUE" "a normal start printed the re-emit cue"
+
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+  [ "${#reemit}" -gt 10000 ] || fail "re-emit fixture did not exceed the hook output limit"
+  head2k=$(printf '%s' "$reemit" | head -c 2000)
+  assert_contains "$head2k" "RE-EMIT CUE" "the re-emit cue is not inside the first 2000 characters"
+  assert_contains "$head2k" "Full output saved to" "the re-emit cue does not point at the saved output"
+
+  pass "--reemit puts its read cue in the first 2000 characters and a normal start omits it"
+}
+
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
   local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
@@ -2456,6 +2780,35 @@ EOF
   pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
 }
 
+# A restart under daemon-backed quiet mode must not read the quiet record as
+# hold-for-return: the captain is present and requested actions proceed, while
+# an away record keeps its hold-for-return line.
+test_quiet_record_digest_holds_nothing_for_a_return() {
+  local rec root home fakebin out
+  rec=$(new_world quiet-record-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  FM_AFK_MODE=quiet FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null 2>&1 || fail "quiet entry failed"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "present - quiet mode recorded at" "AFK digest did not name the quiet record"
+  assert_contains "$out" "nothing is held for a return" "AFK digest did not say the quiet record holds nothing"
+  assert_contains "$out" "the quiet daemon owns the watcher" "AFK digest lost the quiet daemon line"
+  assert_not_contains "$out" "hold-for-return" "AFK digest read the quiet record as hold-for-return"
+
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null 2>&1 || fail "away entry over quiet failed"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "present - away posture recorded at" "AFK digest did not name the away record"
+  assert_contains "$out" "hold-for-return only" "AFK digest lost hold-for-return for an away record"
+
+  pass "the AFK digest reads a quiet record as a present captain holding nothing, and an away record as hold-for-return"
+}
+
 test_next_step_afk_legacy_empty_flag_defaults_away() {
   local rec root home fakebin out
   rec=$(new_world next-step-afk-legacy)
@@ -2622,10 +2975,48 @@ EOF
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp supervision block missing"
   assert_contains "$out" "Mode: omp (Oh My Pi) extension background wake." "omp snippet missing from session start"
   assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp extension load diagnostic missing"
-  assert_contains "$out" "so $root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  assert_contains "$out" "$root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'exit omp and relaunch through `fm <project>` (the launcher sets FM_HOME and --cwd)' "omp diagnostic for a non-checkout home must direct to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp diagnostic omits the bare omp warning"
+  assert_not_contains "$out" "restart omp with this home as its working directory" "omp diagnostic still tells a non-checkout home to restart omp inside it"
   assert_not_contains "$out" "PI_WATCH_EXTENSION" "omp primary must not receive the Pi diagnostic"
   assert_not_contains "$out" "project trust" "omp diagnostic must not carry Pi's trust prerequisite"
   pass "session start emits the omp block and reports omp extension load state"
+}
+
+test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause() {
+  local rec root home fakebin out
+  rec=$(new_world omp-checkout-home)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+  mkdir -p "$root/state" "$root/data" "$root/config"
+
+  # Home is the checkout, FM_HOME exported, no marker: today's wording, no cause line.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT FM_FAKE_HARNESS=omp \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp diagnostic named the launcher for the checkout home"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause that no fact establishes"
+
+  # FM_HOME unset in the process environment.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u FM_HOME FM_FAKE_HARNESS=omp \
+    FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost the checkout wording with FM_HOME unset"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause for the checkout home with FM_HOME unset"
+
+  # Marker names a pid that is not this session.
+  install_omp_extension_fixtures "$root"
+  write_omp_loaded_markers "$root" "$root" 424242
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT FM_FAKE_HARNESS=omp \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "stale-pid marker must still report not loaded"
+  assert_contains "$out" "OMP_WATCH_CAUSE: the extension marker $root/state/.omp-watch-extension-loaded names pid 424242, which is not this session" "omp diagnostic did not name the foreign marker pid"
+  assert_not_contains "$out" "FM_HOME is unset" "omp diagnostic named an unset FM_HOME cause"
+  pass "omp diagnostic keeps today's wording for the checkout home and names the establishable cause"
 }
 
 test_omp_diagnostic_accepts_prelock_loaded_marker() {
@@ -2727,9 +3118,15 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_read_death_is_isolated_and_reported
+test_endpoint_read_hang_is_bounded_and_reported
+test_endpoint_bound_rejects_padded_zero
+test_perl_timeout_fallback_reports_signal_death_nonzero
+test_abnormal_digest_death_banners_and_exits_zero
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
+test_session_start_seeds_the_outcome_display_tail_while_away
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
@@ -2738,6 +3135,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
+test_quiet_record_digest_holds_nothing_for_a_return
 test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
@@ -2745,6 +3143,7 @@ test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_rejects_handoff_generation_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_omp_supervision_block_and_diagnostic
+test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause
 test_omp_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
@@ -2753,6 +3152,7 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

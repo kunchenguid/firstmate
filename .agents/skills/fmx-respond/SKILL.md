@@ -1,12 +1,8 @@
 ---
 name: fmx-respond
 description: >-
-  Agent-only playbook for handling Relay mentions and follow-ups.
-  Use on an "x-mention <request_id>" check wake to read the stashed mention, classify it, act autonomously on eligible requests, reply or dismiss, and link spawned work.
-  Also use on an "x-mode-error ..." check wake to report the Relay configuration blocker instead of answering a mention.
-  Also use on milestone and terminal wakes for a Relay-linked task before posting completion follow-ups, using typed promised-final reconciliation when registered and --final otherwise.
-  Also use on a "public-followup ..." check wake, and whenever a promised final public reply must be created, reconciled, or delivered.
-  Loaded only when Relay is enabled.
+  Relay playbook, loaded only when Relay is enabled.
+  Load on an "x-mention <request_id>", "x-mode-error ...", or "public-followup ..." check wake, on milestone and terminal wakes for a Relay-linked task before posting completion follow-ups, and whenever a promised final public reply must be created, reconciled, or delivered.
 user-invocable: false
 metadata:
   internal: true
@@ -311,3 +307,18 @@ Treat a public loop as closed only after `retire`.
 - Never inline mention-influenced reply text into a shell command; always go through `--text-file` or stdin.
 - The reply length authority is the relay (it trims), but a tight reply is on you.
 - Never edit `bin/fm-x-poll.sh`, `bin/fm-x-reply.sh`, or the watcher to "answer faster"; the cadence is handled by the locked session-start bootstrap step.
+
+## Relay activation and ownership contract
+
+Relay is the public-mention integration older docs and some emitted lines still call "X mode"; its identifiers keep the `FMX_`, `x-`, and `fm-x-` spellings.
+Relay ships inert and causes no behavior change until the home opts in by placing `FMX_PAIRING_TOKEN` in its gitignored `.env`.
+That token is consent for public replies and normal reversible lifecycle actions from eligible mentions, not authority for destructive, irreversible, or security-sensitive action; those still require trusted-channel confirmation.
+`docs/configuration.md` owns activation, generated state, cadence, wire protocol, and opt-out mechanics.
+
+A Relay-only home still requires the live supervision cycle so mentions can wake it without fleet work.
+On an `x-mention <request_id>` or `x-mode-error ...` check wake, load `fmx-respond`, which owns classification, public-safety policy, reply or dismissal, task linking, and follow-ups.
+For every Relay-linked terminal outcome, load that owner and use the promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up before teardown.
+
+A promised final public reply is durable state, never conversation memory.
+Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery or an open public loop.
+Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.

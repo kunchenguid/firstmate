@@ -16,6 +16,14 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-unread-status-tests)
 
+# These regressions exercise status presentation on a home that does not run
+# the supervision host, so its BRANCH OUTCOMES section stays out of the drain;
+# the explicit off file pins that posture on every primary instead of reading
+# the code root's config (bin/fm-supervision-engine-lib.sh owns the gate).
+mkdir -p "$TMP_ROOT/config"
+: > "$TMP_ROOT/config/supervision-host-off"
+export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
+
 # Establish the durable last-presentation cursor by draining once over a
 # bootstrap line so later appends are "new since last drain".
 prime_cursor() {  # <state> <status-file>

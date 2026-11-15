@@ -13,9 +13,9 @@ fm_live_gate opt-in FM_AFK_INJECT_CLAUDE_LIVE herdr jq claude
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 [ -x "$HERDR_LAB_HELPER" ] || { echo "not ok - missing guarded Herdr lab helper" >&2; exit 1; }
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-afk-inject-flicker)
+HERDR_LAB_SESSION=${HERDR_LAB_SESSION:-$("$HERDR_LAB_HELPER" name fm-afk-inject-flicker)}
 ORIGINAL_PATH=$PATH
-LAB_DIR=$(mktemp -d "$ROOT/.afk-claude-live.XXXXXX")
+LAB_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-claude-live.XXXXXX")
 DAEMON_PID=
 
 cleanup() {
@@ -25,7 +25,9 @@ cleanup() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || rc=1
+  if [ "${FM_AFK_LIVE_PREPROVISIONED:-0}" != 1 ]; then
+    PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || rc=1
+  fi
   rm -rf "$LAB_DIR"
   exit "$rc"
 }
@@ -54,7 +56,9 @@ cat > "$LAB_DIR/project/.claude/settings.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"FM_HOME=$LAB_DIR/home $ROOT/bin/fm-turnend-guard.sh --claude"}]}]}}
 EOF
 
-"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab"
+if [ "${FM_AFK_LIVE_PREPROVISIONED:-0}" != 1 ]; then
+  "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab"
+fi
 export PATH="$LAB_DIR/bin:$ORIGINAL_PATH"
 lab() { env PATH="$ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 ws=$(lab workspace create --cwd "$LAB_DIR/project" --label afk-claude-live --no-focus) \

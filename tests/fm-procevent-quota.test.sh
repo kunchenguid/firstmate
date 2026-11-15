@@ -7,16 +7,37 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BIN="$FM_ROOT/bin"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-procevent-quota.XXXXXX")
 FAKEBIN="$LAB/fakebin"
+NO_QUOTA_BIN="$LAB/no-quota-bin"
 COUNT="$LAB/count"
+VERSION_COUNT="$LAB/version-count"
 
 cleanup() { rm -rf "$LAB"; }
 trap cleanup EXIT
-mkdir -p "$FAKEBIN"
+mkdir -p "$FAKEBIN" "$NO_QUOTA_BIN"
+for command_name in dirname jq mkdir sleep; do
+  ln -s "$(command -v "$command_name")" "$NO_QUOTA_BIN/$command_name"
+done
 
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
-  printf 'quota-axi 0.1.51\n'
+  vcount=0
+  [ -z "${QUOTA_AXI_VERSION_COUNT:-}" ] || [ ! -f "$QUOTA_AXI_VERSION_COUNT" ] || read -r vcount < "$QUOTA_AXI_VERSION_COUNT"
+  vcount=$((vcount + 1))
+  [ -z "${QUOTA_AXI_VERSION_COUNT:-}" ] || printf '%s\n' "$vcount" > "$QUOTA_AXI_VERSION_COUNT"
+  if [ -n "${QUOTA_AXI_VERSION_OK_COUNT:-}" ] && [ "$vcount" -gt "$QUOTA_AXI_VERSION_OK_COUNT" ]; then
+    case "${QUOTA_AXI_VERSION_LATER:-fail}" in
+      slow) sleep 10 ;;
+      *) exit 42 ;;
+    esac
+  fi
+  if [ "${QUOTA_AXI_SLOW_VERSION:-0}" = 1 ]; then
+    sleep 10
+  fi
+  if [ "${QUOTA_AXI_VERSION_FAIL:-0}" = 1 ]; then
+    exit 42
+  fi
+  printf 'quota-axi %s\n' "${QUOTA_AXI_VERSION:-0.1.51}"
   exit 0
 fi
 case "${QUOTA_AXI_MALFORMED:-}" in
@@ -84,10 +105,40 @@ if [ "${QUOTA_AXI_UNKNOWN_EXHAUSTED:-0}" = 1 ]; then
   printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]}}]}\n'
   exit 0
 fi
+if [ "${QUOTA_AXI_ALWAYS_SLOW:-0}" = 1 ] && [ "${1:-}" != "--version" ]; then
+  sleep 10
+fi
 count=0
 [ ! -f "$QUOTA_AXI_COUNT" ] || read -r count < "$QUOTA_AXI_COUNT"
 count=$((count + 1))
 printf '%s\n' "$count" > "$QUOTA_AXI_COUNT"
+if [ "${QUOTA_AXI_SLOW_FIRST:-0}" = 1 ] && [ "$count" -eq 1 ] && [ "${1:-}" != "--version" ]; then
+  sleep 10
+fi
+# Two immediate JSON failures, then one timeout: wording must not claim three slow reads.
+if [ "${QUOTA_AXI_FAIL_THEN_SLOW:-0}" = 1 ] && [ "${1:-}" != "--version" ]; then
+  if [ "$count" -le 2 ]; then
+    exit 42
+  fi
+  sleep 10
+fi
+# Reset-streak sequence: timeouts on 1/2/4/5, healthy on 3, exhausted on 6+.
+# Without consecutive_failures=0 after a good read, poll 4 would go terminal.
+if [ "${QUOTA_AXI_RESET_STREAK:-0}" = 1 ]; then
+  case "$count" in
+    1|2|4|5)
+      sleep 10
+      ;;
+    3)
+      printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":20,"runway":{"status":"through_reset"}}]}}]}\n'
+      exit 0
+      ;;
+    *)
+      printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}\n'
+      exit 0
+      ;;
+  esac
+fi
 if [ "${QUOTA_AXI_UNKNOWN_FIRST:-0}" = 1 ] && [ "$count" -eq 1 ]; then
   printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}\n'
   exit 0
@@ -107,6 +158,19 @@ if [ "${QUOTA_AXI_AT_THRESHOLD:-0}" = 1 ]; then
     remaining=9
   fi
   printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"runway":{"status":"through_reset"}}]}}]}\n' "$remaining"
+  exit 0
+fi
+# After a first timed-out slow read (count already advanced), the next read is
+# healthy and the one after that exhausts so the poll can prove it stayed live.
+if [ "${QUOTA_AXI_SLOW_FIRST:-0}" = 1 ]; then
+  if [ "$count" -eq 2 ]; then
+    model_remaining=20
+    runway=through_reset
+  else
+    model_remaining=0
+    runway=exhausted_now
+  fi
+  printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":20,"runway":{"status":"through_reset"}},{"scope":"model:codex_bengalfox","status":"known","effectivePercentRemaining":%s,"runway":{"status":"%s"}}]}}]}\n' "$model_remaining" "$runway"
   exit 0
 fi
 if [ "$count" -eq 1 ]; then
@@ -283,5 +347,153 @@ out=$(QUOTA_AXI_KNOWN_UNKNOWN_FIRST=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$P
 printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "known semantics with unknown headroom did not continue polling"
 printf '%s\n' "$out" | grep -qx 'condition_polls: 2' || fail "known semantics with unknown headroom stopped early"
 ok "poll preserves unknown headroom under known semantics"
+
+# One slow (timed-out) read then a good read must keep the watch live.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_SLOW_FIRST=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' \
+  || fail "one slow read then a good read did not stay live: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 3' \
+  || fail "one slow read then a good read used unexpected poll count: $out"
+ok "one slow read then a good read stays live"
+
+# N consecutive timed-out reads go terminal with distinct slow-read detail.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_ALWAYS_SLOW=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "consecutive slow reads did not go terminal: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 3' \
+  || fail "consecutive slow reads used unexpected poll count: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read timed out' \
+  || fail "consecutive slow reads omitted slow-read detail: $out"
+printf '%s\n' "$out" | grep -Fq 'missing/incompatible' \
+  && fail "consecutive slow reads still used the missing/incompatible detail: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive slow reads' \
+  && fail "consecutive slow reads still claimed the whole streak was slow: $out"
+ok "N consecutive slow reads go terminal with slow-read detail"
+
+# A missing quota-axi still reports missing (distinct from a slow read).
+rm -f "$COUNT"
+out=$(PATH="$NO_QUOTA_BIN" QUOTA_AXI_COUNT="$COUNT" "$BASH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "missing quota-axi did not go terminal: $out"
+printf '%s\n' "$out" | grep -qx 'detail: quota-axi is missing' \
+  || fail "missing quota-axi did not report missing: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 1' \
+  || fail "missing quota-axi was not reported immediately: $out"
+printf '%s\n' "$out" | grep -Fq 'timed out' \
+  && fail "missing quota-axi was mislabeled as a slow read: $out"
+ok "missing quota-axi reports missing immediately"
+
+# An incompatible quota-axi reports incompatible (distinct from missing and slow).
+rm -f "$COUNT"
+out=$(QUOTA_AXI_VERSION=0.1.50 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "incompatible quota-axi did not go terminal: $out"
+printf '%s\n' "$out" | grep -qx 'detail: quota-axi is incompatible' \
+  || fail "incompatible quota-axi did not report incompatible: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 1' \
+  || fail "incompatible quota-axi was not reported immediately: $out"
+printf '%s\n' "$out" | grep -Fq 'missing' \
+  && fail "incompatible quota-axi was mislabeled as missing: $out"
+printf '%s\n' "$out" | grep -Fq 'timed out' \
+  && fail "incompatible quota-axi was mislabeled as a slow read: $out"
+ok "incompatible quota-axi reports incompatible immediately"
+
+# A healthy read must reset the consecutive-failure streak: two timeouts, one
+# healthy, two more timeouts, then exhausted reaches the sixth poll.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_RESET_STREAK=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' \
+  || fail "reset-streak sequence did not stay live through six polls: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 6' \
+  || fail "reset-streak sequence used unexpected poll count: $out"
+ok "a healthy read resets the consecutive-failure streak"
+
+# A slow --version probe is a timeout, not an incompatible tool.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_SLOW_VERSION=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "slow version probe did not go terminal: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read timed out' \
+  || fail "slow version probe omitted timeout detail: $out"
+printf '%s\n' "$out" | grep -Fq 'incompatible' \
+  && fail "slow version probe was mislabeled as incompatible: $out"
+ok "slow version probe reports timeout not incompatible"
+
+# A failing --version probe is an execution failure, not an incompatible tool.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_VERSION_FAIL=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "failing version probe did not go terminal: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read failed' \
+  || fail "failing version probe omitted failure detail: $out"
+printf '%s\n' "$out" | grep -Fq 'incompatible' \
+  && fail "failing version probe was mislabeled as incompatible: $out"
+printf '%s\n' "$out" | grep -Fq 'timed out' \
+  && fail "failing version probe was mislabeled as a timeout: $out"
+ok "failing version probe reports failure not incompatible"
+
+rm -f "$COUNT"
+out=$(QUOTA_AXI_VERSION_FAIL=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "untimed failing version probe did not go terminal: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 3' \
+  || fail "untimed failing version probe used unexpected poll count: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read failed' \
+  || fail "untimed failing version probe omitted failure detail: $out"
+printf '%s\n' "$out" | grep -Fq 'incompatible' \
+  && fail "untimed failing version probe was mislabeled as incompatible: $out"
+ok "untimed failing version probe reports failure not incompatible"
+
+# Mixed streak: two immediate JSON failures then one timeout - wording names the
+# streak and the last cause, without calling every failure a slow read.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_FAIL_THEN_SLOW=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "mixed failure streak did not go terminal: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read timed out' \
+  || fail "mixed failure streak omitted last-cause detail: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive slow reads' \
+  && fail "mixed failure streak claimed three slow reads: $out"
+ok "mixed failure streak names the last cause without calling all reads slow"
+
+# First poll-time --version succeeds (plus a healthy JSON read); later version
+# probes fail. Exactly one version launch per poll: a later execution failure
+# must stay "failed", never "incompatible".
+rm -f "$COUNT" "$VERSION_COUNT"
+out=$(QUOTA_AXI_VERSION_OK_COUNT=1 QUOTA_AXI_VERSION_LATER=fail \
+  QUOTA_AXI_COUNT="$COUNT" QUOTA_AXI_VERSION_COUNT="$VERSION_COUNT" \
+  PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "later version failure did not go terminal: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 4' \
+  || fail "later version failure used unexpected poll count: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read failed' \
+  || fail "later version failure omitted failure detail: $out"
+printf '%s\n' "$out" | grep -Fq 'incompatible' \
+  && fail "later version failure was mislabeled as incompatible: $out"
+# One successful poll-time version + three failing ones; no second probe per poll.
+[ "$(cat "$VERSION_COUNT")" = 4 ] \
+  || fail "expected exactly four version launches across the streak, got $(cat "$VERSION_COUNT" 2>/dev/null)"
+ok "later version probe failure reports failed not incompatible"
+
+# Same shape with a later slow version probe: timeout, not incompatible, and
+# still exactly one version launch per poll.
+rm -f "$COUNT" "$VERSION_COUNT"
+out=$(QUOTA_AXI_VERSION_OK_COUNT=1 QUOTA_AXI_VERSION_LATER=slow \
+  QUOTA_AXI_COUNT="$COUNT" QUOTA_AXI_VERSION_COUNT="$VERSION_COUNT" \
+  PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' \
+  || fail "later slow version probe did not go terminal: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 4' \
+  || fail "later slow version probe used unexpected poll count: $out"
+printf '%s\n' "$out" | grep -Fq '3 consecutive read failures; last quota-axi read timed out' \
+  || fail "later slow version probe omitted timeout detail: $out"
+printf '%s\n' "$out" | grep -Fq 'incompatible' \
+  && fail "later slow version probe was mislabeled as incompatible: $out"
+[ "$(cat "$VERSION_COUNT")" = 4 ] \
+  || fail "expected exactly four version launches across the slow streak, got $(cat "$VERSION_COUNT" 2>/dev/null)"
+ok "later slow version probe reports timeout not incompatible"
 
 printf '# all fm-procevent-quota tests passed\n'

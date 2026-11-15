@@ -9,7 +9,7 @@ set -u
 
 # A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set that
 # override themselves, so drop the inherited one before any git command.
-unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -234,6 +234,226 @@ test_pane_hookspath_does_not_reroute_another_repository() {
   pass "a pane GIT_CONFIG hooksPath still chains the repository git is actually in"
 }
 
+test_empty_project_hookspath_runs_no_repository_hook() {
+  local repo hooks err
+  repo="$TMP_ROOT/empty-hookspath"
+  make_repo "$repo"
+  write_marker_hook "$repo/.git/hooks/pre-commit" default-pre-commit
+  git -C "$repo" config core.hooksPath ''
+  hooks="$TMP_ROOT/hooks-empty"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed with an empty core.hooksPath"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  err=$(with_hooks_env "$hooks" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: empty hooksPath' 2>&1) ||
+    fail "a commit in a repo with an empty core.hooksPath was refused: $err"
+  assert_equals "" "$err" "an empty core.hooksPath commit printed errors"
+  [ -f "$repo/default-pre-commit.ran" ] && fail "a repository hook ran although core.hooksPath is empty"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "Co-authored-by: Cursor" \
+    "Cursor trailer survived an empty-hooksPath commit"
+  pass "an empty project core.hooksPath runs no repository hook and still strips the trailer"
+}
+
+test_unresolvable_project_hookspath_still_refuses() {
+  local repo hooks head err
+  repo="$TMP_ROOT/unresolvable-hookspath"
+  make_repo "$repo"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" config core.hooksPath '~fm-no-such-user-6171/hooks'
+  hooks="$TMP_ROOT/hooks-unresolvable"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed with an unresolvable core.hooksPath"
+  head=$(git -C "$repo" rev-parse HEAD)
+  err=$(with_hooks_env "$hooks" git -C "$repo" commit -q -m 'fix: unresolvable hooksPath' 2>&1) &&
+    fail "a commit succeeded although the repository's hooks directory cannot be resolved"
+  assert_contains "$err" "refusing to skip its pre-commit hook" "the refusal did not name the skipped hook"
+  assert_equals 1 "$(printf '%s\n' "$err" | grep -c 'failed to expand user dir')" "git's lookup error was not shown exactly once"
+  assert_equals "$head" "$(git -C "$repo" rev-parse HEAD)" "a refused commit still moved HEAD"
+  pass "an unresolvable project core.hooksPath still refuses the commit"
+}
+
+test_valueless_project_hookspath_still_refuses() {
+  local repo hooks head err
+  repo="$TMP_ROOT/valueless-hookspath"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-valueless"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed before the valueless key is written"
+  head=$(git -C "$repo" rev-parse HEAD)
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  printf '[core]\n\thooksPath\n' >>"$repo/.git/config"
+  err=$(with_hooks_env "$hooks" git -C "$repo" commit -q -m 'fix: valueless hooksPath' 2>&1) &&
+    fail "a commit succeeded although core.hooksPath has no value"
+  assert_contains "$err" "refusing to skip its pre-commit hook" "the refusal did not name the skipped hook"
+  assert_equals 1 "$(printf '%s\n' "$err" | grep -c "missing value for 'core.hookspath'")" "git's lookup error was not shown exactly once"
+  assert_equals "$head" "$(git -C "$repo" -c core.hooksPath=x rev-parse HEAD)" "a refused commit still moved HEAD"
+  pass "a valueless project core.hooksPath still refuses the commit"
+}
+
+write_refusing_pre_push() {  # <path> <marker>
+  cat >"$1" <<SH
+#!/usr/bin/env bash
+printf 'ran\n' >> "$2"
+exit 1
+SH
+  chmod 700 "$1"
+}
+
+# A publish guard installed as the repository's pre-push must run however the
+# pane's hooksPath reaches git: the pane export, git -c (GIT_CONFIG_PARAMETERS),
+# or a child process that inherits either one.
+test_repository_pre_push_runs_on_every_override_channel() {
+  local repo remote hooks marker label child_push
+  # shellcheck disable=SC2016 # the child shell expands its own positional args
+  child_push='git -C "$1" push -q origin "HEAD:refs/heads/$2"'
+  repo="$TMP_ROOT/guarded-push"
+  remote="$TMP_ROOT/guarded-remote.git"
+  make_repo "$repo"
+  git init -q --bare "$remote"
+  git -C "$repo" remote add origin "$remote"
+  marker="$TMP_ROOT/guarded-push.pre-push"
+  write_refusing_pre_push "$repo/.git/hooks/pre-push" "$marker"
+  hooks="$TMP_ROOT/hooks-guarded"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  for label in env param env+param child-env child-param; do
+    rm -f "$marker"
+    case "$label" in
+    env) with_hooks_env "$hooks" git -C "$repo" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    param) git -C "$repo" -c core.hooksPath="$hooks" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    env+param) with_hooks_env "$hooks" git -C "$repo" -c core.hooksPath="$hooks" push -q origin "HEAD:refs/heads/$label" 2>/dev/null ;;
+    child-env) with_hooks_env "$hooks" sh -c "$child_push" _ "$repo" "$label" 2>/dev/null ;;
+    child-param) git -C "$repo" -c core.hooksPath="$hooks" -c "alias.guarded-push=!git push -q origin HEAD:refs/heads/$label" guarded-push 2>/dev/null ;;
+    esac && fail "push via $label succeeded past the repository's refusing pre-push hook"
+    [ -f "$marker" ] || fail "the repository's pre-push hook did not run via $label"
+    git -C "$remote" rev-parse -q --verify "refs/heads/$label" >/dev/null &&
+      fail "push via $label reached the remote despite the refusing pre-push hook"
+  done
+  pass "the repository's pre-push runs and can refuse under every hooksPath override channel"
+}
+
+test_git_c_override_still_strips_and_chains_commit_hooks() {
+  local repo hooks
+  repo="$TMP_ROOT/param-commit"
+  make_repo "$repo"
+  write_marker_hook "$repo/.git/hooks/pre-commit" param-pre-commit
+  hooks="$TMP_ROOT/hooks-param-commit"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  git -C "$repo" -c core.hooksPath="$hooks" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: git -c override'
+  [ -f "$repo/param-pre-commit.ran" ] || fail "the project's pre-commit hook did not run under git -c core.hooksPath"
+  assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "Co-authored-by: Cursor" \
+    "Cursor trailer survived a git -c core.hooksPath commit"
+  pass "a git -c hooksPath override still strips the trailer and chains the project's hooks"
+}
+
+# A pane carries inherited GIT_CONFIG entries, such as a scoped HTTPS
+# credential.helper, next to the appended hooksPath entry. The repository's own
+# hook (git-lfs pre-push, a husky pre-commit) must still see them, wherever the
+# hooksPath entry sits and however many times a relaunch appended it.
+test_repository_hook_keeps_inherited_git_config() {
+  local repo hooks layout record helpers
+  repo="$TMP_ROOT/inherited-config"
+  make_repo "$repo"
+  record="$TMP_ROOT/inherited-config.record"
+  cat >"$repo/.git/hooks/pre-commit" <<SH
+#!/usr/bin/env bash
+{ git config --get-all credential.helper; printf 'hooksPath=%s\\n' "\$(git config --get-all core.hooksPath)"; } >"$record"
+SH
+  chmod 700 "$repo/.git/hooks/pre-commit"
+  hooks="$TMP_ROOT/hooks-inherited-config"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  hooks=$(cd "$hooks" && pwd -P)
+  for layout in last middle relaunched; do
+    rm -f "$record"
+    printf '%s\n' "$layout" >>"$repo/README.md"
+    git -C "$repo" add README.md
+    case "$layout" in
+    last)
+      GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+        GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1='!gh auth git-credential' \
+        GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2="$hooks" \
+        git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m "fix: $layout"
+      ;;
+    middle)
+      GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+        GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1="$hooks" \
+        GIT_CONFIG_KEY_2=credential.helper GIT_CONFIG_VALUE_2='!gh auth git-credential' \
+        git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m "fix: $layout"
+      ;;
+    relaunched)
+      GIT_CONFIG_COUNT=4 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+        GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1='!gh auth git-credential' \
+        GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2="$hooks" \
+        GIT_CONFIG_KEY_3=core.hooksPath GIT_CONFIG_VALUE_3="$hooks" \
+        git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m "fix: $layout"
+      ;;
+    esac || fail "commit failed with the hooksPath entry $layout"
+    [ -f "$record" ] || fail "the repository's pre-commit hook did not run with the hooksPath entry $layout"
+    helpers=$(sed '$d' "$record")
+    [ "$(printf '%s\n' "$helpers" | tail -n 2)" = $'\n!gh auth git-credential' ] ||
+      fail "the repository hook lost the inherited credential helpers with the hooksPath entry $layout: $helpers"
+    [ "$(tail -n 1 "$record")" = "hooksPath=" ] ||
+      fail "the repository hook still saw this launch's hooksPath with the entry $layout: $(tail -n 1 "$record")"
+    assert_not_contains "$(git -C "$repo" log -1 --format=%B)" "Co-authored-by: Cursor" \
+      "Cursor trailer survived with the hooksPath entry $layout"
+  done
+  pass "the repository's own hook keeps inherited GIT_CONFIG entries such as a scoped credential helper"
+}
+
+# env-file may be handed a symlinked spelling of the hooks directory. The
+# wrapper must still recognise its own entry, or the repository hook is skipped.
+test_env_file_canonicalizes_hooks_dir() {
+  local repo hooks link env_file record
+  repo="$TMP_ROOT/env-file-symlink"
+  make_repo "$repo"
+  record="$TMP_ROOT/env-file-symlink.record"
+  cat >"$repo/.git/hooks/pre-commit" <<SH
+#!/usr/bin/env bash
+git config --get-all credential.helper >"$record"
+SH
+  chmod 700 "$repo/.git/hooks/pre-commit"
+  hooks="$TMP_ROOT/hooks-env-file-symlink"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  link="$TMP_ROOT/hooks-env-file-link"
+  ln -s "$hooks" "$link"
+  env_file="$TMP_ROOT/env-file-symlink.sh"
+  GIT_CONFIG_COUNT=2 "$STRIP" env-file "$link" "$env_file" || fail "env-file should succeed through a symlinked hooks path"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+    GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1='!gh auth git-credential' \
+    sh -c '. "$1" && exec git -C "$2" commit -q -m "fix: symlinked hooks path"' _ "$env_file" "$repo" ||
+    fail "commit failed through the symlinked hooks path"
+  [ -f "$record" ] || fail "the repository's pre-commit hook was skipped for a symlinked hooks path"
+  [ "$(cat "$record")" = $'\n!gh auth git-credential' ] ||
+    fail "the repository hook lost the inherited credential helpers for a symlinked hooks path: $(cat "$record")"
+  pass "env-file writes the canonical hooks path so wrappers still chain the repository hook"
+}
+
+test_cortex_attribution_does_not_reach_the_commit_object() {
+  local repo hooks body
+  repo="$TMP_ROOT/cortex-object"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-cortex"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  # The exact message Cortex Code 1.1.104 produced live: its typed -m body,
+  # a Generated with link line, then the Co-authored-by trailer.
+  with_hooks_env "$hooks" git -C "$repo" commit -q \
+    -m 'probe commit' \
+    -m 'Generated with [Snowflake CoCo](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code)' \
+    -m 'Co-authored-by: Snowflake CoCo <noreply@snowflake.com>' \
+    -m 'Co-authored-by: Jane Doe <jane@snowflake.com>' \
+    -m 'Generated with care by a human, no link'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "Snowflake CoCo" "Cortex attribution reached the commit object"
+  assert_not_contains "$body" "noreply@snowflake.com" "Cortex bot address reached the commit object"
+  assert_contains "$body" "probe commit" "subject was rewritten"
+  assert_contains "$body" "Co-authored-by: Jane Doe <jane@snowflake.com>" "a human at the vendor domain was stripped"
+  assert_contains "$body" "Generated with care by a human, no link" "an unrelated Generated with line was stripped"
+  pass "Cortex Code's Generated with line and co-author trailer are stripped; a human at its vendor domain is kept"
+}
 
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
@@ -245,7 +465,62 @@ test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   pass "commit-msg file mode strips the trailer and keeps the subject"
 }
 
+test_commandcode_trailer_is_stripped() {
+  local msg
+  msg="$TMP_ROOT/commandcode-msg.txt"
+  printf '%s\n' 'Add computed sum to answer.txt' '' 'Co-authored-by: CommandCodeBot <noreply@commandcode.ai>' >"$msg"
+  "$STRIP" "$msg" || fail "strip should succeed"
+  assert_not_contains "$(cat "$msg")" "CommandCodeBot" "strip left the Command Code trailer in the file"
+  assert_contains "$(cat "$msg")" "Add computed sum to answer.txt" "strip dropped the subject"
+  pass "the Command Code trailer a worker writes into its own message is stripped"
+}
+
+test_no_strip_keeps_the_message_and_still_chains() {
+  local repo hooks orig body
+  repo="$TMP_ROOT/no-strip"
+  make_repo "$repo"
+  orig="$repo/.git/hooks"
+  mkdir -p "$orig"
+  cat >"$orig/commit-msg" <<'SH'
+#!/usr/bin/env bash
+printf 'ran\n' > "$(dirname "$1")/orig-commit-msg.ran"
+SH
+  chmod 700 "$orig/commit-msg"
+  hooks="$TMP_ROOT/hooks-no-strip"
+  "$STRIP" install --no-strip "$hooks" "$repo" || fail "install --no-strip should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  with_hooks_env "$hooks" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: kept trailer'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_contains "$body" "cursoragent@cursor.com" "install --no-strip still stripped the trailer"
+  assert_present "$repo/.git/orig-commit-msg.ran" "install --no-strip did not chain the repository's commit-msg hook"
+  pass "install --no-strip leaves commit messages untouched while still chaining"
+}
+
+test_push_guard_install_runs_the_guard_before_chaining() {
+  local repo hooks guard bare out rc
+  repo="$TMP_ROOT/push-guard"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-origin.git"
+  git init -q --bare "$bare"
+  git -C "$repo" remote add origin "file://$bare"
+  guard="$TMP_ROOT/push-guard-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  [ ! -w "$hooks/pre-push" ] || fail "the guarded pre-push wrapper is writable"
+  [ ! -w "$hooks/fm-push-guard" ] || fail "the installed guard record is writable"
+  out=$(with_hooks_env "$hooks" git -C "$repo" push origin HEAD:refs/heads/main 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the guarded pre-push let a push to origin through"
+  assert_contains "$out" "fm-git-push-guard: refused:" "the guarded pre-push did not run the guard"
+  "$STRIP" install --push-guard "$TMP_ROOT/no-such-guard" "$TMP_ROOT/hooks-missing-guard" "$repo" 2>/dev/null \
+    && fail "install accepted a missing guard file"
+  pass "install --push-guard writes a read-only pre-push that runs the guard before chaining"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
+test_commandcode_trailer_is_stripped
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept
 test_hook_manager_cannot_displace_the_strip
@@ -255,6 +530,16 @@ test_relative_project_hookspath_still_runs
 test_inherited_hookspath_env_does_not_decide_the_chain
 test_project_hook_generated_after_install_still_runs
 test_pane_hookspath_does_not_reroute_another_repository
+test_empty_project_hookspath_runs_no_repository_hook
+test_unresolvable_project_hookspath_still_refuses
+test_valueless_project_hookspath_still_refuses
+test_repository_pre_push_runs_on_every_override_channel
+test_git_c_override_still_strips_and_chains_commit_hooks
+test_repository_hook_keeps_inherited_git_config
+test_env_file_canonicalizes_hooks_dir
+test_cortex_attribution_does_not_reach_the_commit_object
 test_strip_msgfile_alone_does_not_rewrite_author_fields
+test_no_strip_keeps_the_message_and_still_chains
+test_push_guard_install_runs_the_guard_before_chaining
 
 echo "# all fm-git-strip-ai-trailers tests passed"

@@ -732,4 +732,38 @@ ok "schema 6 TOON with the accountKey column is accepted"
 [ "$(wc -l < "$CALLS" | tr -d '[:space:]')" = 1 ] || fail "helper took an additional quota snapshot"
 ok "helper reuses the captured quota snapshot"
 
+lookup_err=$(bash -c '
+  trap "" PIPE
+  . "$1/fm-quota-axi-lib.sh"
+  for _ in $(seq 200); do
+    for harness in claude codex grok kimi cursor agy muse; do
+      fm_quota_single_provider_for_harness "$harness" >/dev/null
+    done
+  done
+' _ "$BIN" 2>&1 >/dev/null)
+[ -z "$lookup_err" ] || fail "provider-table lookup wrote to stderr with SIGPIPE ignored: $lookup_err"
+ok "provider-table lookup writes nothing to stderr when SIGPIPE is ignored"
+
+# Pausing the table writer after its first row makes the race deterministic:
+# a lookup that stops reading at the claude row closes the pipe before the rest
+# of the table is written.
+lookup_err=$(bash -c '
+  trap "" PIPE
+  . "$1/fm-quota-axi-lib.sh"
+  table=$(fm_quota_single_provider_table)
+  fm_quota_single_provider_table() {
+    sed -n 1p <<<"$table"
+    sleep 0.2
+    sed 1d <<<"$table"
+  }
+  [ "$(fm_quota_single_provider_for_harness claude)" = claude ] || echo "lookup did not print claude"
+' _ "$BIN" 2>&1)
+[ -z "$lookup_err" ] || fail "provider-table lookup with a slow table writer wrote to stderr: $lookup_err"
+ok "provider-table lookup reads the whole table before answering"
+
+out=$(bash -c 'set -e; . "$1/fm-quota-axi-lib.sh"; fm_quota_single_provider_for_harness claude' _ "$BIN") \
+  || fail "provider-table lookup exited nonzero under set -e"
+[ "$out" = claude ] || fail "provider-table lookup under set -e printed: $out"
+ok "provider-table lookup prints the provider when called directly under set -e"
+
 printf '# all fm-quota-choose tests passed\n'
