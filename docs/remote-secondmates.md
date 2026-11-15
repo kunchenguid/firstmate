@@ -142,7 +142,7 @@ It never touches a worker whose checkout still exists.
 
 Remote job execution never runs a login or interactive shell.
 So `~/.profile`, `~/.bashrc`, and `~/.zshrc` never contribute to the job worker's runtime `PATH`.
-`bin/fm-remote-job-lib.sh` is the single owner of the worker `PATH`.
+The [`bin/fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns the child environment contract and worker `PATH`.
 It builds the `PATH` by filesystem discovery rather than by evaluating shell startup files.
 
 ### Worker PATH order
