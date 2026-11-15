@@ -1048,7 +1048,7 @@ _fm_lock_retire_generation() {  # <lockdir> <generation>
     { [ ! -e "$file" ] && [ ! -L "$file" ]; } || return 1
   done
   rm -rf "$generation" 2>/dev/null
-  rmdir "$lockdir" 2>/dev/null || true
+  rmdir "$lockdir" 2>/dev/null || return 2
 }
 
 # Remove a directory record. A caller that captured the owner and pid before
@@ -1057,19 +1057,36 @@ _fm_lock_retire_generation() {  # <lockdir> <generation>
 # successor (regression: test_dirlock_d4c_orphan_husk_cleanup_preserves_successor
 # in tests/fm-watcher-lock.test.sh).
 _fm_lock_dir_remove_path() {  # <lockdir> [<captured-owner> <captured-pid>]
-  local lockdir=$1 ownerdir=${2:-} pid=${3:-}
+  local lockdir=$1 ownerdir=${2:-} pid=${3:-} directory_identity rc
+  local -a identity_stat
+  if [ "$_FM_UNAME" = Darwin ]; then
+    identity_stat=(/usr/bin/stat -f '%d:%i')
+  else
+    identity_stat=(stat -c '%d:%i')
+  fi
+  directory_identity=$("${identity_stat[@]}" "$lockdir" 2>/dev/null) || return 1
   if [ -z "$ownerdir" ]; then
     ownerdir=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 1
     pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fi
   if [ "$ownerdir" != "$lockdir" ]; then
-    _fm_lock_retire_generation "$lockdir" "$ownerdir"
-  elif [ -n "$pid" ]; then
-    fm_lock_clean_known_files "$lockdir"
-    rmdir "$lockdir" 2>/dev/null
+    if _fm_lock_retire_generation "$lockdir" "$ownerdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 2 ] || return 1
   else
-    rmdir "$lockdir" 2>/dev/null
+    if [ -n "$pid" ]; then
+      fm_lock_clean_known_files "$lockdir"
+    fi
+    rmdir "$lockdir" 2>/dev/null && return 0
   fi
+  if [ ! -L "$lockdir" ] && [ -d "$lockdir" ] \
+    && [ "$directory_identity" = "$("${identity_stat[@]}" "$lockdir" 2>/dev/null)" ]; then
+    FM_LOCK_RECLAIM_FAILED_PATH=$lockdir
+  fi
+  return 1
 }
 
 # A directory record with a generation classifies a missing pid without the

@@ -2474,6 +2474,49 @@ PY
   pass "a live nested owner blocks reclamation even in an old directory"
 }
 
+test_directory_fallback_named_refusal() {
+  local dir
+  dir=$(make_case directory-fallback-refusal)
+  printf '#!/usr/bin/env bash\nexec cp -R "$2" "$3"\n' > "$dir/fakebin/ln"
+  chmod +x "$dir/fakebin/ln"
+  PATH="$dir/fakebin:$PATH" python3 - "$LIB" "$dir" "$(dead_pid)" <<'PY' || fail "fallback directory-lock refusal"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+lib, root, dead = sys.argv[1:]
+for mode in ('generation', 'raw', 'husk'):
+    for suffix in (('',) if mode == 'raw' else ('', '.steal')):
+        state = Path(root) / (mode + suffix)
+        state.mkdir()
+        lock = state / '.lock.acquire'
+        wedged = Path(str(lock) + suffix)
+        env = dict(os.environ, FM_STATE_OVERRIDE=str(state), FM_LOCK_STALE_AFTER='0')
+        for record in dict.fromkeys((lock, wedged)):
+            if mode == 'generation':
+                subprocess.run(['bash', '-c', '. "$1"; fm_lock_try_create "$2"', '_', lib, str(record)],
+                               env=env, check=True, capture_output=True, timeout=10)
+                assert not record.is_symlink()
+            else:
+                record.mkdir()
+                if mode == 'raw':
+                    (record / 'pid').write_text(dead + '\n')
+            os.utime(record, (1, 1))
+        unknown = wedged / 'unrecognized-record'
+        unknown.write_text('preserve me\n')
+        os.utime(wedged, (1, 1))
+        result = subprocess.run(
+            ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable', '_', lib, str(lock)],
+            env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 1, result
+        expected = f'error: cannot reclaim lock directory {wedged}; inspect its contents and permissions\n'
+        assert result.stderr == expected, result.stderr
+        assert unknown.read_text() == 'preserve me\n'
+PY
+  pass "fallback generation, raw and husk locks refuse unreapable directories by exact path"
+}
+
 test_lock_real_directory_named_refusal() {
   python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "named directory-lock refusal"
 import os
@@ -4117,6 +4160,7 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes
 test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_real_directory_residue
 test_lock_real_directory_live_nested_owner
+test_directory_fallback_named_refusal
 test_lock_real_directory_named_refusal
 test_lock_real_directory_permission_refusal
 test_lock_inaccessible_directory_replacement_is_retriable
