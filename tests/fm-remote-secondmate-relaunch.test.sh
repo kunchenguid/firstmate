@@ -227,7 +227,7 @@ printf 'schema=fm-remote-reply-cursor.v1\noffset=18\nprefix_sha256=%s\n' "$old_h
 printf 'working: old host\n' > "$HOME_DIR/state/.remote-reply-mirrored-ios"
 OUT=$(FM_FAKE_REPLY_LOG=$'note: new host\nworking: old host\n' run_relaunch ios claude claude-opus-5-5 medium); RC=$?
 expect_code 0 "$RC" "a relaunch onto a replaced desk should succeed"$'\n'"$OUT"
-assert_contains "$OUT" "rebased: remote-reply-ios new_lines=1 reason=prefix-changed" \
+assert_contains "$OUT" "rebased: remote-reply-ios reason=prefix-changed" \
   "a relaunch onto a replaced desk did not rebase its reply channel"
 assert_absent "$HOME_DIR/state/remote-replies/ios.cursor" \
   "the rebase kept the cursor that belonged to the old log"

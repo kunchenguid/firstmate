@@ -398,7 +398,15 @@ if [ -n "$REMOTE_HOST" ]; then
     alive)
       if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-procevent-remote-reply.sh" registered "$ID" >/dev/null 2>&1; then
-        emit blocked remote-endpoint "remote reply channel for $ID is not registered, so its replies are not being collected; recover with bin/fm-procevent-remote-reply.sh rebase $ID${SEP}remote endpoint alive on $REMOTE_HOST"
+        REPLY_RECOVERY="bin/fm-procevent-remote-reply.sh rebase $ID"
+        for REPLY_CAPTURE in "$STATE/procevent-inbox/remote-reply-$ID".*.result; do
+          [ -f "$REPLY_CAPTURE" ] && [ ! -e "${REPLY_CAPTURE%.result}.handled" ] || continue
+          REPLY_SEQ=${REPLY_CAPTURE%.result}
+          REPLY_SEQ=${REPLY_SEQ##*.}
+          REPLY_RECOVERY="bin/fm-procevent-remote-reply.sh handle $ID $REPLY_SEQ $REPLY_CAPTURE, then rebase $ID"
+          break
+        done
+        emit blocked remote-endpoint "remote reply channel for $ID is not registered, so its replies are not being collected; recover with $REPLY_RECOVERY${SEP}remote endpoint alive on $REMOTE_HOST"
       fi
       if [ -n "$LOG_VERB" ]; then
         LOG_STATE=$(map_log_state "$LOG_LINE")

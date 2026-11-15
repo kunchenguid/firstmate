@@ -29,12 +29,10 @@
 # `rebase` is the recovery for a remote log that was replaced, as when the
 # desk's host or home is rebuilt: under one lifecycle lock it retires the source
 # and arms it again from offset zero. It refuses, touching nothing, while a
-# captured result is still unhandled. Before re-arming it reads the whole remote
-# log once and prints `rebased: <id> new_lines=<n>`, the number of lines the
-# replay identity (state/.remote-reply-mirrored-<id>) will let through; a line
-# offering a document can still be skipped when its rewritten form is already
-# present, so <n> is an upper bound, and `unknown` when the read failed. Lines
-# already mirrored are never appended again. A successful rebase resolves the
+# captured result is still unhandled. It prints `rebased: <id>`, followed by
+# ` reason=<reason>` when the continuity break reason is known. The replay
+# identity (state/.remote-reply-mirrored-<id>) makes the full re-read safe:
+# lines already mirrored are never appended again. A successful rebase resolves the
 # open `remote-reply-continuity-<id>` decision, because the channel it reported
 # is collecting again. `--if-moved` first reads the remote log at the committed
 # cursor and rebases only when that read reports a continuity break; a route
@@ -878,10 +876,6 @@ source_registered() { # <id>
   [ -f "$STATE/procevent/$(source_id "$1").source" ]
 }
 
-# How many sequential reads a rebase preview may make. Each returns at most the
-# reader's payload bound (64 KiB by default), so the default covers a 4 MiB log.
-REBASE_PREVIEW_MAX_READS=${FM_REMOTE_REPLY_REBASE_PREVIEW_MAX_READS:-64}
-
 # One zero-wait read of the remote log at <offset>/<hash> into <output>. Sets
 # PROBE_CLASS to delta, empty, continuity-broken, or unavailable, and
 # PROBE_REASON to the reader's break reason.
@@ -903,48 +897,6 @@ probe_remote_log() { # <id> <offset> <hash> <output>
       PROBE_REASON=$(result_field "$4" reason 2>/dev/null || true)
       ;;
   esac
-}
-
-# Read the whole remote log from offset zero, without ingesting it, and count
-# the lines the replay identity and the status stream do not already hold.
-# Sets REBASE_NEW_LINES, or returns 1 when the log cannot be read completely.
-rebase_preview() { # <id> <staging-dir>
-  local id=$1 dir=$2 offset=0 hash reads=0 to to_hash blank
-  REBASE_NEW_LINES=''
-  hash=$(empty_hash) || return 1
-  : > "$dir/lines" || return 1
-  while :; do
-    [ "$reads" -lt "$REBASE_PREVIEW_MAX_READS" ] || return 1
-    reads=$((reads + 1))
-    probe_remote_log "$id" "$offset" "$hash" "$dir/read"
-    case "$PROBE_CLASS" in
-      empty) break ;;
-      delta) ;;
-      *) return 1 ;;
-    esac
-    to=$(result_field "$dir/read" to_offset) || return 1
-    to_hash=$(result_field "$dir/read" to_prefix_sha256) || return 1
-    case "$to" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$to" -gt "$offset" ] || return 1
-    blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$dir/read")
-    case "$blank" in ''|*[!0-9]*) return 1 ;; esac
-    tail -n "+$((blank + 1))" "$dir/read" > "$dir/payload" || return 1
-    normalize_payload "$dir/payload" "$dir/normalized" || return 1
-    cat "$dir/normalized" >> "$dir/lines" || return 1
-    offset=$to
-    hash=$to_hash
-  done
-  REBASE_NEW_LINES=$(LC_ALL=C awk -v source_record="$(mirrored_source_path "$id")" \
-    -v status_file="$STATE/$id.status" '
-    BEGIN {
-      while ((getline line < source_record) > 0) seen[line] = 1
-      close(source_record)
-      while ((getline line < status_file) > 0) seen[line] = 1
-      close(status_file)
-    }
-    $0 != "" && !($0 in seen) { seen[$0] = 1; count++ }
-    END { print count + 0 }
-  ' "$dir/lines") || return 1
 }
 
 # Close the adapter's own continuity decision once a rebase has the channel
@@ -984,10 +936,10 @@ cmd_rebase_locked() {
     cmd_arm_locked "$id" >/dev/null 2>&1 || true
     die "remote reply rebase could not stop the current source for $id"
   fi
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-rebase.XXXXXX") \
-    || { cmd_arm_locked "$id" >/dev/null 2>&1 || true; die "cannot create rebase staging directory"; }
-  INGEST_TMP=$tmp
   if [ "$mode" = --if-moved ]; then
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-rebase.XXXXXX") \
+      || { cmd_arm_locked "$id" >/dev/null 2>&1 || true; die "cannot create rebase staging directory"; }
+    INGEST_TMP=$tmp
     read_cursor "$id"
     probe_remote_log "$id" "$CURSOR_OFFSET" "$CURSOR_HASH" "$tmp/probe"
     case "$PROBE_CLASS" in
@@ -1004,15 +956,11 @@ cmd_rebase_locked() {
     esac
   fi
   cmd_retire_finalize_locked "$id" ''
-  if ! rebase_preview "$id" "$tmp"; then
-    REBASE_NEW_LINES=unknown
-  fi
   cmd_arm_locked "$id" >/dev/null \
     || die "remote reply source for $id was retired but could not be armed again; run: $0 arm $id"
   resolve_continuity_decision "$id" "${reason:-operator rebase}" \
     || printf 'warning: could not resolve the continuity decision for %s\n' "$id" >&2
-  printf 'rebased: %s new_lines=%s%s\n' "$sid" "$REBASE_NEW_LINES" \
-    "${reason:+ reason=$reason}"
+  printf 'rebased: %s%s\n' "$sid" "${reason:+ reason=$reason}"
 }
 
 cmd_rebase() {

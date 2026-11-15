@@ -3565,6 +3565,28 @@ test_remote_alive_without_reply_source_is_blocked() {
   pass "fm-crew-state remote: a live endpoint with no registered reply source reads blocked"
 }
 
+test_remote_alive_without_reply_source_names_pending_capture() {
+  reset_fakes
+  local d out rc
+  d=$(setup_remote_case remote-alive-unregistered-pending)
+  make_fakebin "$d" >/dev/null
+  rm -f "$d/state/procevent/remote-reply-rsm.source"
+  mkdir -p "$d/state/procevent-inbox"
+  printf 'schema=fm-remote-delta.v1\n' > "$d/state/procevent-inbox/remote-reply-rsm.7.result"
+  printf 'adapter=remote-reply\n' > "$d/state/procevent-inbox/remote-reply-rsm.7.adapter"
+  out=$(FM_FAKE_REMOTE_STATE_OUT=alive FM_FAKE_SSH_RC=0 run_remote_crew_state "$d" rsm); rc=$?
+  expect_code 0 "$rc" "remote alive with a pending capture exits 0"
+  assert_contains "$out" "state: blocked" "a live remote mate with no reply source must read blocked"
+  assert_contains "$out" "fm-procevent-remote-reply.sh handle rsm 7 $d/state/procevent-inbox/remote-reply-rsm.7.result, then rebase rsm" \
+    "the blocker must name handling the pending capture before rebase"
+  : > "$d/state/procevent-inbox/remote-reply-rsm.7.handled"
+  out=$(FM_FAKE_REMOTE_STATE_OUT=alive FM_FAKE_SSH_RC=0 run_remote_crew_state "$d" rsm); rc=$?
+  expect_code 0 "$rc" "remote alive with a handled capture exits 0"
+  assert_contains "$out" "recover with bin/fm-procevent-remote-reply.sh rebase rsm" \
+    "a handled capture must leave rebase as the recovery"
+  pass "fm-crew-state remote: an unhandled capture is named as the recovery before rebase"
+}
+
 test_remote_dead_reports_remote_verdict() {
   reset_fakes
   local d out rc
@@ -6880,6 +6902,7 @@ test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
 test_remote_alive_without_reply_source_is_blocked
+test_remote_alive_without_reply_source_names_pending_capture
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta

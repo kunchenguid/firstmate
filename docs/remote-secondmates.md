@@ -623,7 +623,7 @@ A line written before that position was recorded does not match, so the next bre
 
 A break also drops the reply source's registration, so nothing collects that mate's replies until the channel is rebased.
 A `resolved` line closes the decision but does not bring the channel back.
-While an alive remote mate has no registered reply source, `bin/fm-crew-state.sh` reports it as blocked and names the recovery.
+While an alive remote mate has no registered reply source, `bin/fm-crew-state.sh` reports it as blocked and names the recovery: handling a captured result that is still unhandled, otherwise `rebase`.
 
 The recovery for a replaced log, such as one on a desk whose host or home was rebuilt, is:
 
@@ -632,7 +632,7 @@ bin/fm-procevent-remote-reply.sh rebase <id>
 ```
 
 It retires the source and arms it again from the start of the remote log under one lifecycle lock, and refuses without changing anything while a captured result is still unhandled.
-The [replay identity](#replay-identity) makes that full re-read safe: only lines the parent has not already mirrored are appended, and the command prints how many that is before it re-arms.
+The [replay identity](#replay-identity) makes that full re-read safe: only lines the parent has not already mirrored are appended.
 A successful rebase resolves the open continuity decision.
 `bin/fm-remote-secondmate-relaunch.sh` and `bin/fm-remote-home-seed.sh` run `rebase <id> --if-moved` after they succeed, which rebases only when the remote log no longer continues the parent's cursor.
 The [adapter header](../bin/fm-procevent-remote-reply.sh) owns the exact output and refusal rules.

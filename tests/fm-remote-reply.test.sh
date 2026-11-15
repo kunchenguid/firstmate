@@ -1555,8 +1555,8 @@ pass "rebase refuses while a captured result is unhandled"
 
 before_first=$(grep -cF 'working: first host is up' "$MEGA_STATUS")
 out=$(remote_env "$ADAPTER" rebase mega --if-moved)
-assert_contains "$out" "rebased: $MEGA_SID new_lines=2 reason=prefix-changed" \
-  "rebase did not report the lines the replay identity lets through"
+assert_contains "$out" "rebased: $MEGA_SID reason=prefix-changed" \
+  "rebase did not report the rebased source and its break reason"
 remote_env "$ADAPTER" registered mega || fail "rebase left the reply source unregistered"
 mega_continuity_open && fail "rebase left the continuity decision open"
 await_mega mega_status_has 'working: caught up after the move' \
