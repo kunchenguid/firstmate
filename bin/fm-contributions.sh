@@ -23,7 +23,8 @@
 # task already has a record for that URL and fails when that record is
 # retired, so a retirement is never undone by rediscovery.
 # owned prints the supported PR URLs this home owns as a JSON array of
-# {url,tasks,final}, where final means a saved observation is merged or closed.
+# {url,tasks,recorded,final}, where recorded names the tasks holding a durable
+# record for the URL and final means a saved observation is merged or closed.
 # It is read-only and never contacts a forge.
 # Only canonical PR and issue URLs on the exact github.com host are supported;
 # other accepted URLs remain visibly unmeasured.
@@ -96,6 +97,14 @@
 # structural check that refused the observation. A later good read clears the
 # record's error, so the unavailable line is the copy that outlives it.
 # FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# config/hold-pr-settle opts into applying declared captain-hold PR policies
+# after terminal observation, including retained final observations. The policy
+# and evidence transition are owned by fm-captain-hold.sh; a settlement prints
+# nothing, and a policy that could not be applied prints one diagnostic line.
+# Unmerged closure of a PR owned by a task that is still an open captain hold
+# becomes one durable `closed` pending event per owner, acknowledged like a review.
+# With the flag absent, neither settlement nor this extra notification runs.
+#
 # A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
@@ -223,7 +232,7 @@ jq_lib() { # jq options/program via final argument
 
 read_saved() {
   local file dir task
-  : > "$TMP/saved.jsonl"
+  local -a files=() tasks=()
   ERRORS=0
   if [ -L "$DATA" ]; then
     ERRORS=1; printf '[]\n' > "$TMP/saved.json"; return 0
@@ -232,19 +241,37 @@ read_saved() {
     [ -e "$file" ] || [ -L "$file" ] || continue
     fm_dirname_to dir "$file"
     fm_basename_to task "$dir"
-    if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] \
-      || [ "$(wc -c < "$file")" -gt 1048576 ] \
-      || ! jq_lib -ne --slurpfile record "$file" '($record | length) == 1 and ($record[0] | valid_record)' >/dev/null 2>&1; then
+    if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] || [ "$(wc -c < "$file")" -gt 1048576 ]; then
       ERRORS=$((ERRORS + 1))
       continue
     fi
-    # A file's task identity must match its durable directory, not arbitrary JSON.
-    if ! jq -e --arg task "$task" '.task == $task' "$file" >/dev/null; then
-      ERRORS=$((ERRORS + 1)); continue
-    fi
-    jq -c . "$file" >> "$TMP/saved.jsonl"
+    files+=("$file"); tasks+=("$task")
   done
-  jq -s . "$TMP/saved.jsonl" > "$TMP/saved.json"
+  # Validate records in bounded jq batches: one process per file outgrows the
+  # watcher's check timeout, and one process for all files outgrows ARG_MAX.
+  [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
+  local batch=100 start n=0
+  local -a args=() part=()
+  for ((start = 0; start < ${#files[@]}; start += batch)); do
+    part=("${tasks[@]:start:batch}")
+    printf '%s\0' "${part[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
+    args=()
+    for i in "${!part[@]}"; do args+=(--rawfile "rec$i" "${files[start + i]}"); done
+    jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
+      [range(0; $tasks[0] | length) as $i
+        | [try ($ARGS.named["rec\($i)"] | fromjson) catch empty] as $parsed
+        | if ($parsed | length) == 1
+            and (try ($parsed[0] | valid_record) catch false)
+            and $parsed[0].task == $tasks[0][$i]
+          then $parsed[0] else null end] as $checked
+      | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
+      > "$TMP/checked.$n.json"
+    n=$((n + 1))
+  done
+  jq -s '{records: (map(.records) | add), errors: (map(.errors) | add)}' "$TMP"/checked.*.json > "$TMP/checked.json"
+  rm -f "$TMP"/checked.[0-9]*.json
+  ERRORS=$((ERRORS + $(jq '.errors' "$TMP/checked.json")))
+  jq '.records' "$TMP/checked.json" > "$TMP/saved.json"
 }
 
 get_input() {
@@ -541,6 +568,36 @@ publish_pending() { # task canonical-url record-file
     | [.token, .type, (.source // "-"), (.age // "-")] | @tsv' "$record")
 }
 
+terminal_hold_event() { # task canonical-url
+  local task=$1 url=$2 policy="$DATA/$1/hold-pr-policy.json" err
+  [ -f "$CONFIG/hold-pr-settle" ] || return 0
+  jq -e --arg url "$url" '.records[] | select(.url == $url and .kind == "pr"
+    and .error == null and .retired == null and (.observation.state | IN("merged","closed")))' \
+    "$DATA/$task/contributions.json" > "$TMP/terminal.json" || return 0
+  if [ -f "$policy" ]; then
+    # The watcher discards a check's stderr, so the cause rides the poll line.
+    if err=$("$SCRIPT_DIR/fm-captain-hold.sh" settle-pr "$task" "$url" 2>&1 >/dev/null); then
+      # A removed policy means no open hold remains to report the closure to.
+      [ -f "$policy" ] || return 0
+    else
+      printf 'contributions: PR hold settlement failed for %s %s: %s\n' "$task" "$url" "${err##*$'\n'}"
+    fi
+  fi
+  # Closure is actionable even when no policy says it answers the question.
+  jq --arg task "$task" --slurpfile input "$TMP/input.json" '
+    select(.observation.state == "closed" and (.seen | index("closed")) == null
+      and any($input[0].backlog.records[]?; .structured == true and .id == $task and .hold_bucket != null))
+    | .seen += ["closed"]
+    | .pending += [{token:"closed",type:"closed",source:.url,head:.observation.head,body:"PR closed without merging"}]' \
+    "$TMP/terminal.json" > "$TMP/terminal-event.json"
+  [ -s "$TMP/terminal-event.json" ] || return 0
+  # The held list is the poll-start snapshot; a settlement earlier in this poll
+  # may have closed or released this task since.
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" 2>/dev/null || return 0
+  write_record "$task" "$TMP/terminal-event.json"
+  publish_pending "$task" "$url" "$TMP/terminal-event.json"
+}
+
 settle_final() { # canonical-url task... : copy the URL's final observation to every owner
   local url=$1 task
   shift
@@ -554,7 +611,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)' > "$TMP/row.json"
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired) | .seen -= ["closed"]' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
@@ -581,7 +638,7 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why
+  local task url old kind error observed why unreported=$'\n'
   local -a row
   acquire
   get_input
@@ -589,23 +646,44 @@ poll() {
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   clear_unsupported_errors
   # Only supported URLs enter final settlement and the forge-read rotation.
-  # One line per distinct URL: the URL, then every owning task.
+  # One line per distinct URL: its settlement, the URL, then every owning task.
+  # A contribution with a final observation is not re-read for any owner; it
+  # is settled once every owner holds that final observation without an error.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
     known($input[0];$saved[0]) | map(select(.url | supported_url))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
-    | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
+    | .[] | . as $known
+    | [$known.tasks[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $known.url)] | first
+      | if . != null and (.observation.state | IN("merged","closed")) then .error == null else null end] as $final
+    | [(if all($final[]; .) then "settled" elif any($final[]; . != null) then "final" else "live" end), $known.url]
+      + $known.tasks | @tsv' > "$TMP/known.tsv"
   : > "$TMP/live.tsv"
+  # One pass picks the retained closures still owed to an open captain hold, so
+  # a home's settled history costs no process per row.
+  if [ -f "$CONFIG/hold-pr-settle" ]; then
+    unreported+=$(jq -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+      [$input[0].backlog.records[]? | select(.structured == true and .hold_bucket != null) | .id] as $held
+      | $saved[0][] | .task as $task | select($held | index($task) != null) | .records[]
+      | select(.kind == "pr" and .error == null and .retired == null
+          and .observation.state == "closed" and (.seen | index("closed")) == null)
+      | "\($task)\t\(.url)"')$'\n'
+  fi
   while IFS=$'\t' read -r -a row; do
-    [ "${#row[@]}" -ge 2 ] || continue
-    url=${row[0]}
-    # A contribution with a final observation is not re-read for any owner.
-    if jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
-      'any($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
-        . != null and (.observation.state | IN("merged","closed")))' "${row[@]:1}" >/dev/null; then
-      settle_final "$url" "${row[@]:1}"
-    else
-      (IFS=$'\t'; printf '%s\n' "${row[*]}") >> "$TMP/live.tsv"
-    fi
+    [ "${#row[@]}" -ge 3 ] || continue
+    case "${row[0]}" in
+      settled|final)
+        [ "${row[0]}" != final ] || settle_final "${row[@]:1}"
+        [ -f "$CONFIG/hold-pr-settle" ] || continue
+        for task in "${row[@]:2}"; do
+          case "${row[0]}:$unreported" in
+            final:*|*$'\n'"$task"$'\t'"${row[1]}"$'\n'*) ;;
+            *) [ -f "$DATA/$task/hold-pr-policy.json" ] || continue ;;
+          esac
+          terminal_hold_event "$task" "${row[1]}"
+        done
+        ;;
+      *) (IFS=$'\t'; printf '%s\n' "${row[*]:1}") >> "$TMP/live.tsv" ;;
+    esac
   done < "$TMP/known.tsv"
   jq -Rnr --argjson bucket "$((EPOCH / 300))" '
     [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
@@ -663,6 +741,7 @@ poll() {
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
+      terminal_hold_event "$task" "$url"
     done
   done < "$TMP/known.tsv"
 }
@@ -713,7 +792,8 @@ case "${1:-}" in
     jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
       [$saved[0][] | .records[] | select(.error == null and (.observation.state | IN("merged","closed"))) | .url] as $final
       | known($input[0];$saved[0]) | map(select((.url | supported_url) and (.url | contains("/pull/"))))
-      | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique),final:(.[0].url | IN($final[]))})'
+      | group_by(.url) | map(.[0].url as $url | {url:$url,tasks:(map(.task) | unique),
+        recorded:([$saved[0][] | select(any(.records[]; .url == $url)) | .task] | unique),final:($url | IN($final[]))})'
     ;;
   enroll)
     [ "$#" -eq 3 ] || fail 'enroll needs a task and a PR URL'

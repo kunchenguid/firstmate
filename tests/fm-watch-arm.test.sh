@@ -1612,7 +1612,10 @@ test_watcher_exits_when_its_state_directory_is_removed() {
   mkdir -p "$home/data"
   start_owned_watcher "$home" "$state" "$fakebin" "$armout"
 
-  rm -rf "$state"
+  # Unlink the watched pathname atomically: recursive deletion races the live
+  # watcher's state writes and can leave the directory present (ENOTEMPTY).
+  # Reclaim the renamed tree only after the watcher and arm have stopped.
+  mv "$state" "$dir/removed-state" || fail "could not remove the state pathname"
   wait_for_pid_gone "$WATCH_PID" 400 \
     || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted state directory"; }
   wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
@@ -1620,6 +1623,7 @@ test_watcher_exits_when_its_state_directory_is_removed() {
     || fail "watcher did not log the state-gone exit reason: $(cat "$armout")"
   ! grep -q '^signal:\|^check:\|^stale:\|^heartbeat' "$armout" \
     || fail "a state-gone exit was reported as an actionable wake: $(cat "$armout")"
+  rm -rf "$dir/removed-state"
   pass "watch-arm: a watcher exits when its state directory is removed"
 }
 
@@ -1635,7 +1639,7 @@ test_watcher_exits_when_its_home_is_removed() {
   mkdir -p "$home/data"
   start_owned_watcher "$home" "$state" "$fakebin" "$armout"
 
-  rm -rf "$home"
+  mv "$home" "$dir/removed-home" || fail "could not remove the home pathname"
   wait_for_pid_gone "$WATCH_PID" 400 \
     || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted home"; }
   wait_for_exit "$ARM_PID" 100 >/dev/null 2>&1 || true
@@ -1643,6 +1647,7 @@ test_watcher_exits_when_its_home_is_removed() {
     || fail "watcher did not log the home-gone exit reason: $(cat "$armout")"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$WATCH_PID" ] \
     || fail "the exited watcher left its lock in place"
+  rm -rf "$dir/removed-home"
   pass "watch-arm: a watcher exits when its home is removed"
 }
 
@@ -1672,7 +1677,9 @@ test_attached_arm_exits_when_its_root_is_removed() {
   wait_for_file_text "$armout" "watcher: attached pid=$WATCH_PID" \
     || fail "second arm did not attach to the live watcher: $(cat "$armout")"
 
-  rm -rf "$repo"
+  # This root also contains live state writers; retire its pathname before
+  # deleting its contents, just as in the state-directory removal case.
+  mv "$repo" "$dir/removed-repo" || fail "could not remove the repository pathname"
   # One 0.1s attach poll plus the 0.2s recheck, with headroom for a busy host;
   # far short of the 60s successor window the arm used to poll through.
   wait_for_exit "$attached" 50
@@ -1681,6 +1688,9 @@ test_attached_arm_exits_when_its_root_is_removed() {
   expect_code 1 "$status" "an arm whose root was removed must exit 1: $(cat "$armout")"
   grep -qF "watcher: FAILED - arm ground removed: $repo/bin/fm-watch-arm.sh no longer exists" "$armout" \
     || fail "arm did not report its removed ground: $(cat "$armout")"
+  wait_for_pid_gone "$WATCH_PID" 400 \
+    || { kill -TERM "$WATCH_PID" 2>/dev/null; fail "watcher pid $WATCH_PID outlived its deleted repository"; }
+  rm -rf "$dir/removed-repo"
   pass "watch-arm: an attached arm exits within its bound when its root is removed"
 }
 

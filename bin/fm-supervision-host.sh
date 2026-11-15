@@ -14,7 +14,8 @@
 # (bin/fm-turnend-guard-cursor.sh), the OpenCode TUI plugin
 # (.opencode/plugins/fm-primary-watch-arm.js), the omp watch extension
 # (.omp/extensions/fm-primary-omp-watch.ts), Grok's model-owned background arm
-# (docs/supervision-protocols/grok.md), and Codex's foreground checkpoint
+# (docs/supervision-protocols/grok.md), Codex's opt-in native Stop park
+# (bin/fm-codex-stop-park.sh), and Codex's foreground checkpoint
 # (bin/fm-watch-checkpoint.sh). To that owner it IS an arm: it prints the
 # arm's own lines and exits only when main is needed, and stays parked across
 # every close it handled itself. Each owner passes its harness as
@@ -122,7 +123,10 @@
 # 27000, under the tracked 28800-second registration) it stops this home's
 # watcher and exits with one "supervision-host: cycle boundary" line, which the
 # owner delivers as an ordinary wake; main drains, acknowledges, and ends its
-# turn, and that turn end starts the next park. The boundary is checked on
+# turn, and that turn end starts the next park. The verified Codex asynchronous owner sets
+# FM_CODEX_MODEL_FREE_PARK=1: its boundary resets the quiet timer while keeping
+# the watcher and recovery generation alive, with no output to the model.
+# All other owners keep the bounded lifecycle. The boundary is checked on
 # every loop pass, however many closes are already waiting, and an away close
 # whose engine turn could still be running at the turn limit (the turn bound
 # plus the engine grace), judged when the close arrives and again just before
@@ -520,12 +524,24 @@ park_elapsed() {  # Sets PARK_ELAPSED without a production clock/helper fork.
 
 boundary_reached() {
   park_elapsed
+  # The verified Codex async owner has no short hook deadline. Its quiet
+  # checkpoint keeps the same watcher alive; stopping it would create a real
+  # downtime generation and force an otherwise empty model turn.
+  if [ "$PRIMARY" = codex ] && [ "${FM_CODEX_MODEL_FREE_PARK:-0}" = 1 ] \
+    && [ "$PARK_ELAPSED" -ge "$PARK_SECONDS" ]; then
+    log_line "quiet-boundary\tafter ${PARK_ELAPSED}s; watcher retained"
+    HOST_STARTED_SECONDS=$SECONDS
+    PARK_ELAPSED=0
+    WARM_COMPACT_LAST_TICK=-1
+    return 1
+  fi
   [ "$PARK_ELAPSED" -ge "$PARK_SECONDS" ]
 }
 
 # True when an engine turn started now could still be running at the turn
 # limit (the boundary unless the owner set a later one).
 turn_crosses_boundary() {
+  if [ "$PRIMARY" = codex ] && [ "${FM_CODEX_MODEL_FREE_PARK:-0}" = 1 ]; then return 1; fi
   park_elapsed
   [ $((PARK_ELAPSED + TURN_TIMEOUT + ENGINE_GRACE)) -ge "$PARK_LIMIT" ]
 }

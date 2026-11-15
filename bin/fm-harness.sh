@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
@@ -79,11 +79,18 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-hermes-process-lib.sh
+. "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
+# shellcheck source=bin/fm-omp-process-lib.sh
+. "${SCRIPT_DIR:-/}/fm-omp-process-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
 # decides whether that claim survives contradicting ancestry.
 harness_marker() {
+  if [ "${FM_HERMES_HARNESS:-}" = hermes ] && [ "$(harness_ancestry | awk '{print $2}')" = hermes ]; then
+    echo hermes; return
+  fi
   # Cursor is tested BEFORE claude, deliberately. cursor-agent does NOT clear an
   # inherited CLAUDECODE, so a cursor session started by hand from a claude
   # primary carries BOTH markers and whichever is tested first wins. This
@@ -146,7 +153,7 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, agy, devin, commandcode, polytoken, and cortex publish no harness-identity marker at all, so
+  # codex, opencode, kimi, muse, agy, devin, commandcode, polytoken, cortex, and kiro publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
@@ -158,14 +165,16 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an omp process sits within eight parents of this one. The same
+# identity as the ancestry walk below (bin/fm-omp-process-lib.sh), kept separate
+# so the marker precedence above can demand real process evidence before
+# trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    fm_omp_process_matches "$comm" "$args" && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -190,6 +199,20 @@ harness_process_verdict() {  # <pid>
   fi
   if fm_gemini_path_is_gemini "$comm"; then
     echo "comm gemini"
+    return
+  fi
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+  if fm_hermes_process_matches "$args" "$pid"; then
+    echo "comm hermes"
+    return
+  fi
+  # omp, compiled binary or bun package (bin/fm-omp-process-lib.sh owns both
+  # shapes). It sits above the node*|python* interpreter fallback deliberately:
+  # the optional claude-bridge extension runs a nested executable literally
+  # named `claude` with its own node child, and that fallback's *claude* args
+  # glob would otherwise claim it if that subtree were ever walked.
+  if fm_omp_process_matches "$comm" "$args"; then
+    echo "comm omp"
     return
   fi
   case "$(basename -- "$comm")" in
@@ -223,15 +246,6 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
-    # omp is a Bun-compiled single binary whose process name is exactly `omp`
-    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
-    # It sits above the node*|python* interpreter fallback deliberately: the
-    # optional claude-bridge extension runs a nested executable literally
-    # named `claude` with its own node child, and that fallback's *claude*
-    # args glob would otherwise claim it if that subtree were ever walked.
-    omp) echo "comm omp"; return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
@@ -261,11 +275,24 @@ harness_process_verdict() {  # <pid>
     # marker a parent harness could not also carry, so like devin it is
     # detected by anchored ancestry alone.
     cortex) echo "comm cortex"; return ;;
+    hermes) echo "comm hermes"; return ;;
     # Command Code runs as a node bundle that sets its own process title, so
     # the kernel process name is exactly `command-code` (verified, Command Code
     # 1.74.1: comm=command-code and the rewritten argv is the same word).
     # Anchored, so an unrelated command containing that fragment never matches.
     command-code) echo "comm commandcode"; return ;;
+    # kiro (Kiro CLI) publishes no harness-identity marker of its own (a live
+    # 2.21.4 tool subprocess carries no KIRO_* identity variable; KIRO_HOME is
+    # a firstmate-set config-relocation path, not an identity), so like muse
+    # and agy it is detected by ancestry alone. The installed command is a
+    # toolbox/aim-sandbox wrapper whose foreground process name is exactly
+    # `kiro-cli` (verified, kiro-cli 2.21.4: `ps -o comm=` and tmux
+    # #{pane_current_command} both report kiro-cli; the aim-sandbox and the
+    # compiled bun/node binary run as descendants). Anchored, never *kiro*, so
+    # unrelated commands cannot be misread as this harness. kiro is a
+    # crewmate/scout adapter only and is never a primary or secondmate, so
+    # this arm only lets a kiro crewmate identify its own harness.
+    kiro-cli) echo "comm kiro"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -424,7 +451,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|hermes)
       printf '%s\n' "$pin"
       ;;
     *)

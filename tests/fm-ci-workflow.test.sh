@@ -332,7 +332,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # one-off number the policy removed.
 FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate full-suite'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
-HEAVY_TIER_JOBS='tests-herdr'
+HEAVY_TIER_JOBS='tests-herdr tests-hc'
 
 # Print the one timeout every listed job shares; fail on any disagreement.
 tier_timeout() {  # <tier> <job>...
@@ -606,22 +606,30 @@ test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
     || fail "heavy tier backstop ($heavy) must exceed the normal tier ($normal)"
   [ "$heavy" -ge 60 ] && [ "$heavy" -le 75 ] \
     || fail "heavy tier backstop must stay a 60-75 minute last resort, got $heavy"
-  step=$(ruby -ryaml -e '
+  # Each heavy lane's family-run step owns the same 20-minute tripwire shape:
+  # its own timeout, an always() cleanup step that must come after it, and a
+  # bound below the shared job backstop.
+  while read -r lane run_step cleanup_step; do
+    step=$(ruby -ryaml -e '
 steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("steps")
-index = steps.index { |s| s["id"] == "run-real-herdr-family" }
-raise "no run-real-herdr-family step" unless index
-teardown = steps.index { |s| s["id"] == "cleanup-herdr-lab-sessions" }
-raise "no cleanup-herdr-lab-sessions step" unless teardown
+index = steps.index { |s| s["id"] == ARGV[2] }
+raise "no #{ARGV[2]} step" unless index
+teardown = steps.index { |s| s["id"] == ARGV[3] }
+raise "no #{ARGV[3]} step" unless teardown
 raise "teardown must follow the family-run step" unless teardown > index
 raise "teardown must run under always()" unless steps[teardown]["if"].to_s.strip == "always()"
 puts steps[index].fetch("timeout-minutes", "none")
-' "$CI_WORKFLOW" tests-herdr) || fail "could not read the Herdr family-run step"
-  case "$step" in ''|*[!0-9]*) fail "the Herdr family-run step needs its own timeout-minutes, got $step" ;; esac
-  [ "$step" = 20 ] \
-    || fail "the Herdr family-run step must be the 20-minute tripwire, got $step"
-  [ "$step" -lt "$heavy" ] \
-    || fail "the Herdr step tripwire ($step) must stay below the job backstop ($heavy)"
-  pass "Herdr keeps a $step minute step tripwire under a $heavy minute job backstop"
+' "$CI_WORKFLOW" "$lane" "$run_step" "$cleanup_step") || fail "could not read the $lane family-run step"
+    case "$step" in ''|*[!0-9]*) fail "the $lane family-run step needs its own timeout-minutes, got $step" ;; esac
+    [ "$step" = 20 ] \
+      || fail "the $lane family-run step must be the 20-minute tripwire, got $step"
+    [ "$step" -lt "$heavy" ] \
+      || fail "the $lane step tripwire ($step) must stay below the job backstop ($heavy)"
+  done <<'LANES'
+tests-herdr run-real-herdr-family cleanup-herdr-lab-sessions
+tests-hc run-real-hc-family cleanup-hc-lab-sessions
+LANES
+  pass "each heavy lane keeps a 20 minute step tripwire under a $heavy minute job backstop"
 }
 
 # The fork opt-out is opt-in: with neither variable set every job runs on both

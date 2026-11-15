@@ -4,10 +4,12 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned provider response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
-# network, and the absent-key case proves the tool makes no call
-# at all.
+# A fake quota-axi serves the selected schema-5 fixture. A fake security and a
+# fake uname stand in for the macOS Keychain, so no case reads the real one.
+# No case touches the network, and the absent-key case proves the tool makes
+# no call at all.
 set -u
+unset TYPESAFE_BASE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -17,16 +19,27 @@ TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 NO_CURL_BIN="$TMP_ROOT/no-curl-bin"
+NO_SECURITY_BIN="$TMP_ROOT/no-security-bin"
+NO_JQ_BIN="$TMP_ROOT/no-jq-bin"
 LOG="$TMP_ROOT/log"
 BRIEF="$TMP_ROOT/brief.md"
 BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
-mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
+mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN" "$NO_SECURITY_BIN" "$NO_JQ_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
+  ln -s "$(command -v "$command_name")" "$NO_SECURITY_BIN/$command_name"
 done
+# The minimal PATHs that simulate one missing command: no security, or no jq.
+# Both keep the fake macOS uname, and the no-jq one keeps the fake security.
+for command_name in bash chmod cp dirname mktemp rm; do
+  ln -s "$(command -v "$command_name")" "$NO_JQ_BIN/$command_name"
+done
+ln -s "$FAKEBIN/uname" "$NO_SECURITY_BIN/uname"
+ln -s "$FAKEBIN/uname" "$NO_JQ_BIN/uname"
+ln -s "$FAKEBIN/security" "$NO_JQ_BIN/security"
 
 cat > "$BRIEF" <<'MD'
 # Task
@@ -119,6 +132,16 @@ if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
 fi
+# With a canary file named, also look for the canary's VALUE in this process's
+# environment and in the directories the test lists, where the tool's own
+# files live while the request is in flight.
+if [ -n "${FAKE_CANARY_FILE:-}" ]; then
+  canary=$(cat "$FAKE_CANARY_FILE")
+  env | grep -qF -- "$canary" && printf 'curl:canary-in-env\n' >> "${CHILD_ENV_LOG:?}"
+  for dir in ${FAKE_CANARY_DIRS:-}; do
+    grep -rqF -- "$canary" "$dir" 2>/dev/null && printf 'curl:canary-in-file\n' >> "${CHILD_ENV_LOG:?}"
+  done
+fi
 out=''
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -151,6 +174,9 @@ if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
 fi
+if [ -n "${FAKE_CANARY_FILE:-}" ] && env | grep -qF -- "$(cat "$FAKE_CANARY_FILE")"; then
+  printf 'quota-axi:canary-in-env\n' >> "${CHILD_ENV_LOG:?}"
+fi
 printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
 [ "${1:-}" = --json ] || exit 2
@@ -158,8 +184,60 @@ cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+cat > "$FAKEBIN/security" <<'SH'
+#!/usr/bin/env bash
+# Fake security: the Keychain stand-in. It answers only an exact
+# `find-generic-password -s <service> [-a <account>] -w` query, from the item
+# file FAKE_SECURITY_STORE/<service>, and records argv and whether a key
+# variable reached its environment. FAKE_SECURITY_EXIT fails the query after
+# printing the item to stdout and stderr as a decoy, and FAKE_SECURITY_HANG
+# names a file to receive its pid before it stops answering.
+set -u
+printf '%s\n' "$*" >> "${FAKE_SECURITY_LOG:?}"
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
+  printf 'security:secret-present\n' >> "${CHILD_ENV_LOG:?}"
+else
+  printf 'security:clean\n' >> "${CHILD_ENV_LOG:?}"
+fi
+[ "${1:-}" = find-generic-password ] || exit 2
+shift
+service='' wants_password=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s) [ $# -ge 2 ] || exit 2; service=$2; shift 2 ;;
+    -a) { [ $# -ge 2 ] && [ -n "$2" ]; } || exit 2; shift 2 ;;
+    -w) wants_password=1; shift ;;
+    *) exit 2 ;;
+  esac
+done
+[ -n "$service" ] && [ "$wants_password" = 1 ] || exit 2
+if [ -n "${FAKE_SECURITY_HANG:-}" ]; then
+  printf '%s\n' "$$" > "$FAKE_SECURITY_HANG"
+  exec sleep 60
+fi
+item="${FAKE_SECURITY_STORE:?}/$service"
+if [ -n "${FAKE_SECURITY_EXIT:-}" ]; then
+  if [ -r "$item" ]; then
+    cat "$item"
+    printf 'security: could not use the item holding %s\n' "$(cat "$item")" >&2
+  fi
+  exit "$FAKE_SECURITY_EXIT"
+fi
+[ -r "$item" ] || exit 44
+cat "$item"
+SH
+chmod +x "$FAKEBIN/security"
+
+cat > "$FAKEBIN/uname" <<'SH'
+#!/usr/bin/env bash
+# Fake uname: the host is macOS unless FAKE_UNAME names another system.
+printf '%s\n' "${FAKE_UNAME:-Darwin}"
+SH
+chmod +x "$FAKEBIN/uname"
+
 RESPONSE="$TMP_ROOT/response.json"
-export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
+export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env" FAKE_SECURITY_LOG="$LOG/security.argv"
 
 reset_log() {
   rm -rf "$LOG"
@@ -182,6 +260,18 @@ run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
   _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _code=$?
+  printf -v "$__exit" '%s' "$_code"
+  printf -v "$__out" '%s' "$_out"
+  printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
+}
+
+# run_on_path <path> <exit-var> <out-var> <err-var> [args...]: the tool on a
+# caller-built PATH, for the cases that simulate a missing command.
+run_on_path() {
+  local __path=$1 __exit=$2 __out=$3 __err=$4 _out _code
+  shift 4
+  _out=$(PATH="$__path" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -333,13 +423,14 @@ assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "rule and confidence line"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "argmax picks the highest spendPriority"
+assert_absent "$TMP_ROOT/dispatch-resolution.json" "a brief outside data/<id>/ writes no task record"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "every candidate is accounted for"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
 assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear results flag eligible unranked candidates once"
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request defaults to the typesafe.ai endpoint"
 assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
@@ -358,6 +449,127 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# --- TypeSafe base: default, environment/.env precedence, and safe URLs ------
+while IFS='|' read -r base endpoint; do
+  reset_log
+  TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "custom TypeSafe base resolves"
+  assert_contains "$out" '  status: clear' "custom TypeSafe base keeps the typed response contract"
+  assert_equals "$endpoint" "$(grep -E '^https?://' "$LOG/argv")" "custom base has exactly one endpoint suffix"
+  # curl argv is the external request contract: --globoff makes punctuation literal.
+  assert_contains "$(cat "$LOG/argv")" $'--globoff\n' "custom base disables curl URL expansion"
+  assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "custom base keeps the fd header transport"
+  assert_not_contains "$(cat "$LOG/argv")" "$KEY" "custom base keeps the key out of argv"
+  assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "custom base keeps the key out of child environments"
+done <<'BASE_ENDPOINTS'
+https://gateway.example/typesafe/|https://gateway.example/typesafe/v1/systemone
+http://localhost:8080/proxy///|http://localhost:8080/proxy/v1/systemone
+http://typesafe_gateway:8080|http://typesafe_gateway:8080/v1/systemone
+https://[::1]:8443/typesafe/|https://[::1]:8443/typesafe/v1/systemone
+https://gateway.example:1/tenant/{a,b}/|https://gateway.example:1/tenant/{a,b}/v1/systemone
+https://gateway.example:65535/|https://gateway.example:65535/v1/systemone
+http://127.0.0.1:8080/|http://127.0.0.1:8080/v1/systemone
+https://[2001:db8::abcd]/|https://[2001:db8::abcd]/v1/systemone
+https://[2001:db8:0:1:2:3:4:5]/|https://[2001:db8:0:1:2:3:4:5]/v1/systemone
+https://[::ffff:192.0.2.1]/|https://[::ffff:192.0.2.1]/v1/systemone
+BASE_ENDPOINTS
+printf '%s\n' 'TYPESAFE_BASE=https://dotenv.example/typesafe/' > "$HOME_DIR/.env"
+reset_log
+FM_DISPATCH_PROVIDER=typesafe TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://dotenv.example/typesafe/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" ".env supplies the TypeSafe base"
+reset_log
+TYPESAFE_BASE=https://environment.example/gateway/ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://environment.example/gateway/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "environment base wins over .env"
+rm -f "$HOME_DIR/.env"
+for base in \
+  ftp://gateway.example/typesafe \
+  gateway.example/typesafe \
+  https:///typesafe \
+  https://user:password@gateway.example/typesafe \
+  https://gateway.example/typesafe?key=value \
+  https://gateway.example/typesafe? \
+  https://gateway.example/typesafe#fragment \
+  https://gateway.example/typesafe# \
+  https://gateway.example:0 \
+  https://gateway.example:65536 \
+  https://gateway.example:999999999999999999999999999999 \
+  https://gateway.example:abc \
+  https://gateway.example: \
+  'https://[abc]' \
+  'https://[1:2:3:4:5:6:7]' \
+  'https://[1:2:3:4:5:6:7:8:9]' \
+  'https://[1:2:3:4:5:6:7::8]' \
+  'https://[1::2::3]' \
+  'https://[:::1]' \
+  'https://[12345::1]' \
+  'https://[::ffff:192.0.2.999]' \
+  https://::1 \
+  'https://gateway.example/tenant[1-2]' \
+  'https://gateway.example/tenant[' \
+  'https://gateway.example/tenant]' \
+  'https://gateway.example/bad path' \
+  $'https://gateway.example/\n' \
+  $'https://gateway.example/\npath'; do
+  reset_log
+  TYPESAFE_BASE=$base TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "invalid TypeSafe base is a configuration error"
+  assert_contains "$err" 'TYPESAFE_BASE' "invalid base names the setting"
+  assert_equals '' "$out" "invalid base never produces a fallback profile"
+  assert_absent "$LOG/argv" "invalid base never sends a request"
+  assert_absent "$LOG/quota-axi.calls" "invalid base never reads quota"
+done
+printf '%s\n' 'TYPESAFE_BASE=https://user:password@dotenv.example' > "$HOME_DIR/.env"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "invalid .env base is a configuration error"
+assert_contains "$err" 'TYPESAFE_BASE' "invalid .env base names the setting"
+assert_not_contains "$err" 'password' "invalid base diagnostic does not echo credentials"
+assert_absent "$LOG/argv" "invalid .env base never sends a request"
+reset_log
+run code out err "$BRIEF"
+expect_code 2 "$code" "invalid base is actionable even without a key"
+assert_absent "$LOG/argv" "invalid base without a key never sends a request"
+reset_log
+TYPESAFE_BASE=https://environment.example TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 'https://environment.example/v1/systemone' "$(grep -E '^https?://' "$LOG/argv")" "valid environment base overrides an invalid .env base"
+rm -f "$HOME_DIR/.env"
+
+# The configuration contract precedes both off and declared-key selection.
+# Invalid addresses must never reach Keychain, curl, or quota, for either
+# provider spelling and either configuration source. Literal errors are the
+# oracle; returning off or an HTTP error would violate that contract.
+for base in https://gateway.example:99999 'https://[abc]' \
+  'https://gateway.example/tenant[1-2]' 'https://gateway.example/tenant[' 'https://gateway.example/tenant]'; do
+  for provider in '' typesafe; do
+    for source in environment dotenv; do
+      for credential in absent environment declared; do
+        reset_log
+        configured_base=$base
+        configured_key=''
+        [ "$credential" != environment ] || configured_key=$KEY
+        if [ "$source" = dotenv ]; then
+          printf 'TYPESAFE_BASE=%s\n' "$base" > "$HOME_DIR/.env"
+          configured_base=''
+        fi
+        if [ "$credential" = declared ]; then
+          printf '%s\n' '{"typesafe":{"source":"macos-keychain","service":"must-not-be-read"}}' > "$HOME_DIR/config/dispatch-credential-sources.json"
+        fi
+        FM_DISPATCH_PROVIDER=$provider TYPESAFE_BASE=$configured_base TYPESAFE_API_KEY=$configured_key run code out err "$BRIEF"
+        expect_code 2 "$code" "invalid address fails before credential selection"
+        assert_contains "$err" 'TYPESAFE_BASE' "invalid address reports a configuration error"
+        assert_equals '' "$out" "invalid address emits no resolution"
+        assert_not_contains "$err" "$base" "invalid address is not echoed"
+        assert_not_contains "$err" "$KEY" "invalid address error keeps credentials private"
+        assert_absent "$LOG/security.argv" "invalid address never looks up credentials"
+        assert_absent "$LOG/argv" "invalid address never sends a request"
+        assert_absent "$LOG/quota-axi.calls" "invalid address never reads quota"
+        rm -f "$HOME_DIR/.env" "$HOME_DIR/config/dispatch-credential-sources.json"
+      done
+    done
+  done
+done
+pass "TypeSafe base supports environment and .env overrides and rejects unsafe URLs before sending"
+
 # --- OpenRouter uses the same Choice validation and resolution path ---------
 OR_KEY='test-openrouter-key-never-in-child-env-or-argv'
 OR_RESPONSE="$TMP_ROOT/openrouter-response.json"
@@ -373,7 +585,7 @@ assert_equals '' "$out" "an OpenRouter key alone does not select the provider"
 assert_contains "$err" 'TYPESAFE_API_KEY absent' "unset provider retains the typesafe off gate"
 assert_absent "$LOG/argv" "an OpenRouter key alone sends nothing"
 reset_log
-FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+TYPESAFE_BASE=invalid-but-unused FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
   OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "OpenRouter clear exits 0"
 assert_contains "$out" '  status: clear' "OpenRouter clear status"
@@ -437,6 +649,292 @@ expect_code 2 "$code" "unknown provider is a configuration error"
 assert_contains "$err" 'unknown FM_DISPATCH_PROVIDER' "unknown provider is actionable"
 pass "OpenRouter ambiguous, malformed, HTTP, and missing-model paths are handled"
 
+# --- credential source declaration: where a key lives, never the key -----------
+# $CONFIG/dispatch-credential-sources.json names a source per provider. It is
+# read only when neither the environment nor .env supplied a key. The fake
+# Keychain holds one item file per service name.
+SECRET='kc-typesafe-4d7a1e90-never-on-argv'
+KC_OR_SECRET='kc-openrouter-8b21f6c3-never-on-argv'
+EFFECTIVE_SECRET='kc-effective-c07e5a12-never-on-argv'
+STORE="$TMP_ROOT/keychain"
+CRED="$HOME_DIR/config/dispatch-credential-sources.json"
+mkdir -p "$STORE"
+printf '%s\n' "$SECRET" > "$STORE/typesafe-svc"
+printf '%s\n' "$KC_OR_SECRET" > "$STORE/openrouter-svc"
+printf '%s\n' "$EFFECTIVE_SECRET" > "$STORE/effective-svc"
+: > "$STORE/empty-svc"
+export FAKE_SECURITY_STORE="$STORE"
+
+# declare_source <file> <provider> <service> [<account>]: add or replace one
+# provider's macos-keychain entry, keeping the other providers' entries.
+declare_source() {
+  local file=$1 provider=$2 service=$3 account=${4:-}
+  [ -f "$file" ] || printf '{}\n' > "$file"
+  jq --arg p "$provider" --arg s "$service" --arg a "$account" \
+    '.[$p] = ({source: "macos-keychain", service: $s} + (if $a == "" then {} else {account: $a} end))' \
+    "$file" > "$file.next" && mv "$file.next" "$file"
+}
+
+# mapping: the declared service and optional account become the lookup
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+declare_source "$CRED" typesafe typesafe-svc mike
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a declared source resolves"
+assert_contains "$out" '  status: clear' "a declared source turns the tool on"
+assert_equals 'find-generic-password -s typesafe-svc -a mike -w' "$(cat "$LOG/security.argv")" "the declared service and account are the whole Keychain lookup"
+assert_equals "Authorization: Bearer $SECRET" "$(cat "$LOG/header")" "the declared key reaches curl on the fd header"
+rm -f "$CRED"
+declare_source "$CRED" typesafe typesafe-svc
+reset_log
+run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "a declaration without an account resolves"
+assert_equals 'find-generic-password -s typesafe-svc -w' "$(cat "$LOG/security.argv")" "an omitted account is omitted from the lookup"
+pass "mapping: a declared macos-keychain service and optional account become the lookup, and the key rides the fd header"
+
+# precedence: environment, then .env, then the declared source
+reset_log
+TYPESAFE_API_KEY=env-wins run code out err "$BRIEF" --project pager
+assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "the environment key wins over a declared source"
+assert_absent "$LOG/security.argv" "the environment key wins before the declared source is read"
+printf '%s\n' 'TYPESAFE_API_KEY=dotenv-wins' > "$HOME_DIR/.env"
+reset_log
+run code out err "$BRIEF" --project pager
+assert_equals 'Authorization: Bearer dotenv-wins' "$(cat "$LOG/header")" ".env key wins over a declared source"
+assert_absent "$LOG/security.argv" ".env key wins before the declared source is read"
+rm -f "$HOME_DIR/.env" "$CRED"
+printf '%s\n' '{"typesafe":' > "$CRED"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a key from the environment never consults an invalid declaration"
+assert_contains "$out" '  status: clear' "an unread declaration cannot break a configured resolver"
+assert_absent "$LOG/security.argv" "an invalid declaration is not read when the environment has the key"
+rm -f "$CRED"
+pass "precedence: environment, then .env, then the declared source, which is read only when needed"
+
+# provider isolation: each provider reads only its own entry, and an entry never selects a provider
+rm -f "$CRED"
+declare_source "$CRED" typesafe typesafe-svc
+reset_log
+write_openrouter_response rule_4 0.9
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 FAKE_CURL_RESPONSE=$OR_RESPONSE \
+  run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a typesafe declaration leaves OpenRouter off"
+assert_equals '' "$out" "an OpenRouter run never uses a typesafe declaration"
+assert_contains "$err" 'dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and' "OpenRouter without its own declaration is off"
+assert_absent "$LOG/security.argv" "a typesafe declaration is never read for OpenRouter"
+assert_absent "$LOG/argv" "OpenRouter without a key never calls curl"
+rm -f "$CRED"
+declare_source "$CRED" openrouter openrouter-svc
+reset_log
+run code out err "$BRIEF" --project pager
+assert_equals '' "$out" "an OpenRouter declaration neither selects OpenRouter nor feeds typesafe"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "typesafe without its own declaration is off"
+assert_absent "$LOG/security.argv" "an OpenRouter declaration is never read for typesafe"
+declare_source "$CRED" typesafe typesafe-svc
+reset_log
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 FAKE_CURL_RESPONSE=$OR_RESPONSE \
+  run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "OpenRouter resolves from its own declared source"
+assert_equals 'find-generic-password -s openrouter-svc -w' "$(cat "$LOG/security.argv")" "OpenRouter reads only its own declared service"
+assert_equals "Authorization: Bearer $KC_OR_SECRET" "$(cat "$LOG/header")" "OpenRouter's declared key reaches curl, not typesafe's"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter's declared key goes to OpenRouter's endpoint"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+FM_DISPATCH_PROVIDER=typesafe run code out err "$BRIEF" --project pager
+assert_equals 'find-generic-password -s typesafe-svc -w' "$(cat "$LOG/security.argv")" "typesafe reads only its own declared service"
+assert_equals "Authorization: Bearer $SECRET" "$(cat "$LOG/header")" "typesafe's declared key reaches curl, not OpenRouter's"
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "typesafe's declared key goes to the typesafe.ai endpoint"
+rm -f "$CRED"
+pass "provider isolation: each provider reads only its own declared service, and a declaration never selects a provider"
+
+# effective-home isolation: the effective config directory's declaration, and no other
+declare_source "$CRED" typesafe typesafe-svc
+OTHER_HOME="$TMP_ROOT/other-home"
+mkdir -p "$OTHER_HOME/config"
+cp "$BASE_RULES" "$OTHER_HOME/config/crew-dispatch.json"
+PRIMARY_HOME=$HOME_DIR
+HOME_DIR=$OTHER_HOME
+reset_log
+run code out err "$BRIEF" --project pager
+HOME_DIR=$PRIMARY_HOME
+assert_equals '' "$out" "a declaration in another home is not consulted"
+assert_contains "$err" "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $OTHER_HOME/.env)" "a home with no declaration is off"
+assert_absent "$LOG/security.argv" "another home's declaration is never read"
+EFFECTIVE_CONFIG="$TMP_ROOT/effective-config"
+mkdir -p "$EFFECTIVE_CONFIG"
+cp "$BASE_RULES" "$EFFECTIVE_CONFIG/crew-dispatch.json"
+declare_source "$EFFECTIVE_CONFIG/dispatch-credential-sources.json" typesafe effective-svc
+reset_log
+FM_CONFIG_OVERRIDE=$EFFECTIVE_CONFIG run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "an overridden config directory supplies its own declaration"
+assert_equals 'find-generic-password -s effective-svc -w' "$(cat "$LOG/security.argv")" "only the effective directory's declaration is read"
+assert_equals "Authorization: Bearer $EFFECTIVE_SECRET" "$(cat "$LOG/header")" "the effective directory's key is the one sent"
+rm -f "$EFFECTIVE_CONFIG/dispatch-credential-sources.json"
+reset_log
+FM_CONFIG_OVERRIDE=$EFFECTIVE_CONFIG run code out err "$BRIEF" --project pager
+assert_equals '' "$out" "the home's own config declaration is ignored when another directory is effective"
+assert_absent "$LOG/security.argv" "a declaration outside the effective directory is never read"
+rm -f "$CRED"
+pass "effective-home isolation: only the effective config directory's declaration is consulted"
+
+# failure distinctions: off, a configuration error, and an unavailable source are three different things
+printf '{}\n' > "$CRED"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "a declaration with no entries is off"
+assert_equals '' "$out" "off prints nothing on stdout"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "off says so on stderr"
+assert_absent "$LOG/security.argv" "an empty declaration never reaches the Keychain"
+assert_absent "$LOG/argv" "off never calls curl"
+
+for bad in \
+  '{"typesafe":|not JSON' \
+  '|must hold exactly one JSON object' \
+  '[]|top-level value must be an object keyed by provider' \
+  '{"typsafe":{"source":"macos-keychain","service":"s"}}|unknown provider typsafe (expected typesafe or openrouter)' \
+  '{"typesafe":"kc-planted-value"}|typesafe must be an object with a source' \
+  '{"typesafe":{"service":"s"}}|typesafe needs a source' \
+  '{"typesafe":{"source":"kc-planted-value","service":"s"}}|typesafe source must be one of macos-keychain' \
+  '{"typesafe":{"source":"macos-keychain"}}|typesafe service must be a non-empty string without control characters' \
+  '{"typesafe":{"source":"macos-keychain","service":""}}|typesafe service must be a non-empty string without control characters' \
+  '{"typesafe":{"source":"macos-keychain","service":7}}|typesafe service must be a non-empty string without control characters' \
+  '{"typesafe":{"source":"macos-keychain","service":"a\nb"}}|typesafe service must be a non-empty string without control characters' \
+  '{"typesafe":{"source":"macos-keychain","service":"s","account":""}}|typesafe account must be a non-empty string without control characters when present' \
+  '{"typesafe":{"source":"macos-keychain","service":"s","key":"kc-planted-value"}}|typesafe has unknown field key (allowed: source, service, account); credential values do not belong in this file' \
+  '{"openrouter":{"source":"macos-keychain","service":"s","token":"kc-planted-value"}}|openrouter has unknown field token (allowed: source, service, account); credential values do not belong in this file'; do
+  printf '%s\n' "${bad%%|*}" > "$CRED"
+  reset_log
+  run code out err "$BRIEF" --project pager
+  expect_code 2 "$code" "an invalid declaration exits 2: ${bad#*|}"
+  assert_contains "$err" "malformed credential source declaration: $CRED - ${bad#*|}" "the problem is named: ${bad#*|}"
+  assert_not_contains "$err" 'kc-planted-value' "an invalid declaration never echoes a declared value"
+  assert_equals '' "$out" "an invalid declaration prints nothing on stdout: ${bad#*|}"
+  assert_equals '1' "$(grep -c . <<<"$err")" "an invalid declaration is one diagnostic line: ${bad#*|}"
+  assert_absent "$LOG/security.argv" "an invalid declaration never reaches the Keychain: ${bad#*|}"
+  assert_absent "$LOG/argv" "an invalid declaration never reaches the network: ${bad#*|}"
+done
+rm -f "$CRED"
+ln -s "$TMP_ROOT/missing-declaration.json" "$CRED"
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 2 "$code" "a broken declaration symlink exits 2"
+assert_contains "$err" "credential source declaration not readable: $CRED" "an unreadable declaration is named"
+rm -f "$CRED"
+declare_source "$CRED" typesafe typesafe-svc
+reset_log
+run_on_path "$NO_JQ_BIN" code out err "$BRIEF" --project pager
+expect_code 2 "$code" "a declaration cannot be read without jq"
+assert_contains "$err" 'error: jq required' "missing jq is named"
+assert_absent "$LOG/security.argv" "missing jq never reaches the Keychain"
+
+# expect_unavailable <label> <reason>: a declared source that cannot supply the key
+expect_unavailable() {
+  local label=$1 reason=$2
+  expect_code 0 "$code" "$label exits 0"
+  assert_contains "$out" '  status: error' "$label is a structured error outcome"
+  assert_contains "$out" "  reason: $reason" "$label names the source and why on stdout"
+  assert_contains "$err" "dispatch-resolve: error ($reason)" "$label reports the same reason on stderr"
+  assert_not_contains "$err" 'dispatch-resolve: off' "$label is not mistaken for an unconfigured resolver"
+  assert_absent "$LOG/argv" "$label never calls curl"
+  assert_absent "$LOG/quota-axi.calls" "$label never reads quota"
+  assert_not_contains "$out$err" "$SECRET" "$label never prints a stored key"
+}
+UNAVAILABLE='credential source macos-keychain declared for typesafe is unavailable; nothing sent'
+UNSUPPORTED='credential source macos-keychain declared for typesafe is not supported on this host; nothing sent'
+declare_source "$CRED" typesafe absent-svc mike
+reset_log
+run code out err "$BRIEF" --project pager
+expect_unavailable "a declared item that is not in the Keychain" "$UNAVAILABLE"
+assert_equals 'find-generic-password -s absent-svc -a mike -w' "$(cat "$LOG/security.argv")" "the missing item was looked up once, by its declared identity"
+declare_source "$CRED" typesafe empty-svc
+reset_log
+run code out err "$BRIEF" --project pager
+expect_unavailable "a declared item with an empty secret" "$UNAVAILABLE"
+declare_source "$CRED" typesafe typesafe-svc
+reset_log
+FAKE_SECURITY_EXIT=36 run code out err "$BRIEF" --project pager
+expect_unavailable "a Keychain that refuses with the item in its output" "$UNAVAILABLE"
+assert_not_contains "$out$err" 'could not use the item' "the tool's own output is never relayed"
+reset_log
+FAKE_UNAME=Linux run code out err "$BRIEF" --project pager
+expect_unavailable "a declared macOS source on another system" "$UNSUPPORTED"
+assert_absent "$LOG/security.argv" "an unsupported host never runs the credential tool"
+reset_log
+run_on_path "$NO_SECURITY_BIN" code out err "$BRIEF" --project pager
+expect_unavailable "a declared source whose tool is missing" "$UNSUPPORTED"
+reset_log
+started=$SECONDS
+FAKE_SECURITY_HANG="$LOG/hang.pid" run code out err "$BRIEF" --project pager
+elapsed=$((SECONDS - started))
+expect_unavailable "a declared source that never answers" 'credential source macos-keychain declared for typesafe did not answer in time; nothing sent'
+[ "$elapsed" -lt 30 ] || fail "an unanswered Keychain read held the resolver for ${elapsed}s"
+[ -s "$LOG/hang.pid" ] || fail "the fake security that never answers was not started"
+hang_pid=$(cat "$LOG/hang.pid")
+for _ in $(seq 1 50); do
+  kill -0 "$hang_pid" 2>/dev/null || break
+  sleep 0.1
+done
+! kill -0 "$hang_pid" 2>/dev/null || fail "the unanswered Keychain read was left running"
+rm -f "$CRED"
+declare_source "$CRED" openrouter absent-svc
+reset_log
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 run code out err "$BRIEF" --project pager
+expect_unavailable "OpenRouter's declared item that is not in the Keychain" 'credential source macos-keychain declared for openrouter is unavailable; nothing sent'
+rm -f "$CRED"
+pass "failure distinctions: off, a configuration error, and an unavailable source each read differently and send nothing"
+
+# secret containment: the key lives in one private variable and reaches curl on fd 3 only
+declare_source "$CRED" typesafe typesafe-svc mike
+SCAN_TMP="$TMP_ROOT/scan-tmp"
+mkdir -p "$SCAN_TMP"
+printf '%s' "$SECRET" > "$TMP_ROOT/canary"
+reset_log
+TMPDIR=$SCAN_TMP FAKE_CANARY_FILE="$TMP_ROOT/canary" FAKE_CANARY_DIRS="$SCAN_TMP $HOME_DIR" \
+  run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "the containment run resolves"
+assert_equals "Authorization: Bearer $SECRET" "$(cat "$LOG/header")" "the key arrives only as the bearer header on the descriptor"
+assert_not_contains "$out" "$SECRET" "the key never reaches stdout"
+assert_not_contains "$err" "$SECRET" "the key never reaches stderr"
+assert_not_contains "$(cat "$LOG/argv")" "$SECRET" "the key never appears on curl argv"
+assert_not_contains "$(cat "$LOG/security.argv")" "$SECRET" "the key never appears on security argv"
+assert_not_contains "$(cat "$LOG/body")" "$SECRET" "the key never rides in the request body"
+assert_equals $'security:clean\ncurl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the key is in no child environment, and in no file the tool holds while the request is in flight"
+! grep -rqF -- "$SECRET" "$HOME_DIR" || fail "the key was written under the home"
+! grep -rqF -- "$SECRET" "$SCAN_TMP" || fail "the key was left in the temporary directory"
+rm -f "$CRED"
+pass "secret containment: the declared key is on no argv, in no output, environment, or file, and only on the fd header"
+
+# capability probe: a supported/unsupported answer that reads no declaration and runs no credential tool
+printf '%s\n' '{"typesafe":' > "$CRED"
+reset_log
+run code out err --supports-credential-source macos-keychain
+expect_code 0 "$code" "macos-keychain is supported on a macOS host with security"
+assert_equals 'supported' "$out" "the probe answers supported"
+assert_equals '' "$err" "the probe prints nothing on stderr, and an invalid declaration does not matter to it"
+assert_absent "$LOG/security.argv" "the probe never runs security, so it retrieves no credential"
+assert_absent "$LOG/argv" "the probe never calls curl"
+FAKE_UNAME=Linux run code out err --supports-credential-source macos-keychain
+expect_code 1 "$code" "macos-keychain is unsupported on another system"
+assert_equals 'unsupported' "$out" "the probe answers unsupported"
+run_on_path "$NO_SECURITY_BIN" code out err --supports-credential-source macos-keychain
+expect_code 1 "$code" "macos-keychain is unsupported without security"
+assert_equals 'unsupported' "$out" "the probe answers unsupported without the tool"
+run code out err --supports-credential-source vault
+expect_code 1 "$code" "an unknown source is unsupported"
+assert_equals 'unsupported' "$out" "the probe answers unsupported for an unknown source"
+run_on_path "$NO_JQ_BIN" code out err --supports-credential-source macos-keychain
+expect_code 0 "$code" "the probe needs no jq"
+run code out err --supports-credential-source
+expect_code 2 "$code" "the probe without a source is a usage error"
+assert_contains "$err" '--supports-credential-source needs a value' "the usage error is named"
+run code out err --help
+assert_contains "$out" '--supports-credential-source <source>' "--help documents the probe"
+assert_contains "$out" 'dispatch-credential-sources.json' "--help names the declaration file"
+assert_absent "$LOG/security.argv" "no probe or help request ran security"
+rm -f "$CRED"
+pass "capability probe: supported or unsupported, with no declaration read and no credential tool run"
+
 # --- off stays off: no provider and no typesafe key, whatever else is set ----
 reset_log
 FM_DISPATCH_BASE_URL=http://127.0.0.1:8080 FM_DISPATCH_API_KEY=unused OPENAI_API_KEY=unused \
@@ -461,6 +959,7 @@ assert_contains "$out" '  status: clear' "systemone clear status"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "systemone uses the shared quota argmax"
 assert_contains "$(cat "$LOG/argv")" 'http://127.0.0.1:8080/v1/systemone' "systemone posts to <base>/v1/systemone with a trailing slash trimmed"
 assert_contains "$(cat "$LOG/argv")" $'--max-time\n10' "systemone timeout"
+assert_contains "$(cat "$LOG/argv")" $'--globoff\n' "the keyless request path also disables curl URL expansion"
 assert_not_contains "$(cat "$LOG/argv")" '@/dev/fd/3' "systemone without a key sends no Authorization header"
 assert_equals 'fd3 unreadable' "$(cat "$LOG/header")" "systemone without a key opens no header descriptor"
 assert_equals "$(jq -Sc 'del(.model)' "$TMP_ROOT/typesafe-body.json")" "$(jq -Sc 'del(.model)' "$LOG/body")" "systemone sends the unchanged System One request"
@@ -599,6 +1098,15 @@ openai_rejects() {  # <response-json> <label>
 openai_rejects '{"answers":[{"type":"refusal","name":"rule"}]}' "an openai refusal"
 openai_rejects '{"answers":{"rule":{"choice":"rule_4"}}}' "an openai answers object"
 openai_rejects '{"answers":[]}' "an openai response without the rule answer"
+OA_VALID_RULE='{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_1","probability":0.01},{"value":"rule_2","probability":0.01},{"value":"rule_3","probability":0.01},{"value":"rule_4","probability":0.96},{"value":"default","probability":0.01}]}'
+# The array check must guard the whole rule check, on every supported jq:
+# jq 1.7 and 1.8 group an unparenthesized `A and B as $x | C` differently.
+openai_rejects "{\"answers\":{\"only\":$OA_VALID_RULE}}" "an otherwise valid openai rule outside an answers array"
+reset_log
+printf '{"answers":[{"type":"text","name":"note"},%s]}\n' "$OA_VALID_RULE" > "$OA_RESPONSE"
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a valid openai rule in an answers array is accepted beside other answers"
 openai_rejects 'not json' "a non-JSON openai response"
 openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_4","probability":0.5},{"value":"rule_4","probability":0.5}]}]}' "duplicate openai option values"
 openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_4","probability":0.99},{"value":"default","probability":0.01}]}]}' "openai probabilities missing options"
@@ -778,6 +1286,54 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
 assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
+write_agy_tiers() {  # <path> <gemini row JSON or ""> <claude_gpt row JSON or "">
+  jq -n --argjson g "${2:-null}" --argjson c "${3:-null}" '{
+    generatedAt: "2030-01-01T00:00:00Z",
+    schemaVersion: 5,
+    providers: [{ provider: "agy", state: { status: "fresh" }, quotaSemantics: { status: "known", effectiveAvailability: ([$g, $c] | map(select(. != null))) } }]
+  }' > "$1"
+}
+AGY_GEMINI='{"scope":"gemini","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.5}}'
+AGY_CLAUDE_GPT_OK='{"scope":"claude_gpt","status":"known","effectivePercentRemaining":55,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.2}}'
+AGY_CLAUDE_GPT_ZERO_PCT='{"scope":"claude_gpt","status":"known","effectivePercentRemaining":0,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.2}}'
+AGY_CLAUDE_GPT_ZERO='{"scope":"claude_gpt","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"},"selection":{"spendPriority":-1}}'
+QUOTA_SCOPE_RULE='{"rules":[{"when":"Agy work.","use":{"harness":"agy","quota_scope":"claude_gpt"}}]}'
+cp "$QUOTA" "$QUOTA.base"
+
+printf '%s\n' '{"rules":[{"when":"Agy work.","use":{"harness":"agy"}}]}' > "$RULES"
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" "$AGY_CLAUDE_GPT_ZERO"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  -> eligible, unranked: no applicable quota row for provider agy: disclosed uncertainty' "without quota_scope an agy tier row stays unbound, even when exhausted"
+
+printf '%s\n' "$QUOTA_SCOPE_RULE" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at claude_gpt' "a declared exhausted tier row blocks the candidate"
+
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" "$AGY_CLAUDE_GPT_ZERO_PCT"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=0%' "a declared 0% tier row is read with a non-exhausted runway"
+assert_contains "$out" '-> not eligible' "a declared 0% tier row blocks the candidate without an exhausted runway"
+assert_not_contains "$out" '  profile:' "a declared 0% tier row emits no profile"
+
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" "$AGY_CLAUDE_GPT_OK"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=55%  spendPriority=0.2  runway=through_reset  -> eligible' "a declared healthy tier row ranks the candidate on that row alone"
+assert_contains "$out" "  profile: --harness 'agy'" "the healthy declared tier resolves"
+
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" ""
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=-%  spendPriority=-  runway=-  -> eligible, unranked: declared quota_scope claude_gpt has no quota row for provider agy: not rankable: disclosed uncertainty' "a declared tier row missing from the snapshot is eligible with disclosed uncertainty"
+assert_not_contains "$out" 'not eligible' "a missing declared tier row never blocks the candidate"
+
+cp "$QUOTA.base" "$QUOTA"
+cp "$BASE_RULES" "$RULES"
+pass "quota_scope binds an agy candidate to its declared tier row"
+
 GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
 printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$GEMINI_RULE"
 cp "$GEMINI_RULE" "$RULES"
@@ -809,6 +1365,53 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
+
+# --- task record: data/<id>/dispatch-resolution.json for fm-spawn ---------------
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+TASK_RECORD="$HOME_DIR/data/pager-fix/dispatch-resolution.json"
+mkdir -p "$(dirname "$TASK_BRIEF")"
+cp "$BRIEF" "$TASK_BRIEF"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the task brief resolves clear"
+assert_equals '{"task":"pager-fix","status":"clear","profile":{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}}' \
+  "$(jq -c '{task, status, profile: (.profile | {harness, model, effort})}' "$TASK_RECORD")" \
+  "a clear run records the task, status, and the printed profile with an unset effort as null"
+reset_log
+write_response "$RESPONSE" rule_4 0.41
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'ambiguous null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" \
+  "a later non-clear run replaces the clear selection, so the manual intake is not bound to it"
+reset_log
+run code out err "$TASK_BRIEF" --project pager
+assert_contains "$err" 'dispatch-resolve: off (' "the keyless run is off"
+assert_equals 'off null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" "an off run records off so fm-spawn accepts the manual intake"
+mv "$RULES" "$RULES.keep"
+printf '{"broken":\n' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+expect_code 2 "$code" "malformed rules exit 2"
+assert_absent "$TASK_RECORD" "a configuration error leaves no task record to act on"
+mv "$RULES.keep" "$RULES"
+pass "task record: every exit-0 outcome records its decision for data/<id>/brief.md, and exit 2 records none"
+
+# A home with FM_DATA_OVERRIDE keeps briefs outside $FM_HOME/data; fm-spawn.sh
+# reads the record there, so the resolver must write it there too.
+OVERRIDE_DATA="$TMP_ROOT/custom-records"
+mkdir -p "$OVERRIDE_DATA/pager-fix" "$TMP_ROOT/data/pager-fix"
+cp "$BRIEF" "$OVERRIDE_DATA/pager-fix/brief.md"
+cp "$BRIEF" "$TMP_ROOT/data/pager-fix/brief.md"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+FM_DATA_OVERRIDE=$OVERRIDE_DATA TYPESAFE_API_KEY=$KEY run code out err "$OVERRIDE_DATA/pager-fix/brief.md" --project pager
+assert_equals 'pager-fix clear cursor' \
+  "$(jq -r '"\(.task) \(.status) \(.profile.harness)"' "$OVERRIDE_DATA/pager-fix/dispatch-resolution.json")" \
+  "a brief under FM_DATA_OVERRIDE records its decision beside it"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/data/pager-fix/brief.md" --project pager
+assert_absent "$TMP_ROOT/data/pager-fix/dispatch-resolution.json" "a data/<id>/ directory outside the configured data root writes no task record"
+pass "task record: the configured data root, including FM_DATA_OVERRIDE, decides where the record goes"
 
 # --- per-rule confidence floor ------------------------------------------------
 write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>
@@ -862,10 +1465,11 @@ assert_not_contains "$out" '  fallback:' "a picked rule that clears its own floo
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the picked rule resolves at probability 0.35 over floor 0.3"
 
 reset_log
-write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
+# 0.3 prints the same on jq 1.6 through 1.8; a trailing zero in 0.30 does not.
+write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.3 0.05
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
-assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.3 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
 
 reset_log
 write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
@@ -1346,6 +1950,11 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
+  '{"rules":[{"when":"x","use":{"harness":"agy","quota_scope":""}}]}|each use profile quota_scope must be a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"agy","quota_scope":7}}]}|each use profile quota_scope must be a non-empty string when present' \
+  '{"rules":[{"when":"x","use":["codex"]}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":["codex"]}|each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"agy"}}],"default":{"harness":"agy","quota_scope":["gemini"]}}|each default profile quota_scope must be a non-empty string when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \

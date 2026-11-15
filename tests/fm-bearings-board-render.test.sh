@@ -94,12 +94,12 @@ require_listener_reached_poll() {  # <home>
 
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [calls-json]
   local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+    --argjson more "$more" --argjson warning_more "$warning_more" --argjson calls "${6:-[]}" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:$calls, underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -266,6 +266,36 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_full_snapshot_question_reaches_the_rendered_decision() {
+  local home a b reason snapshot calls out
+  home=$(make_home full-decision-question)
+  a='A: retain the existing workflow through the complete staged verification and preserve all current integrations until each dependency has reported its result.'
+  b='B: defer the independent migration until the remaining review has finished, keeping the full fallback route and the final café / 東京 approval.'
+  reason="Which route should proceed? $a $b"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] scope-call - Choose rollout scope (repo: sample) (kind: captain) (hold: $reason) (hold-kind: captain)
+
+## Done
+EOF
+  snapshot=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "the decision snapshot failed"
+  # Composition consumes the complete recorded question directly. Options are
+  # authored explicitly here, never inferred by parsing the stored prose.
+  calls=$(printf '%s' "$snapshot" | jq '[.decisions_open[] | {
+    key:.key,type:"decision",repo:"sample",title:"Rollout scope",decide:.question,
+    options:[{value:"a",label:"Retain the workflow"},{value:"b",label:"Defer the migration"}]}]')
+  out=$(render_board "$home" '[]' '[]' 0 0 "$calls")
+  printf '%s' "$out" | jq -e --arg question "Choose rollout scope: $reason" --arg a "$a" --arg b "$b" '
+    .error == "" and (.captains_call | length) == 1
+      and (.captains_call[0] | contains($question) and contains($a) and contains($b))
+  ' >/dev/null || fail "the rendered call lost its full question or final option: $out"
+  pass "the complete snapshot question and options reach rendered decision text"
+}
+
+test_full_snapshot_question_reaches_the_rendered_decision
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
