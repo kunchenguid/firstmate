@@ -1014,6 +1014,7 @@ tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-groups.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-inject-claude-live-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
