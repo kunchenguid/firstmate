@@ -39,6 +39,13 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 
+# Pin the primary harness and supervision model instead of letting every send
+# detect them by walking the live process ancestry through bin/fm-harness.sh.
+# That walk cost several seconds per send, enough to stall this suite for
+# minutes on a loaded macOS host, and it made the result depend on whichever
+# agent happened to launch the run.
+export FM_TEST_HARNESS=unknown FM_SUPERVISION_MODEL=persistent
+
 TMP_ROOT=$(fm_test_tmproot fm-send-inbox)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
