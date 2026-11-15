@@ -1,1 +1,0 @@
-../../../.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts
