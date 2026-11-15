@@ -35,7 +35,8 @@
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
 # observation, verdict, seen event tokens, pending events, notified tokens,
-# unanswered threads, and retired provenance once retired.
+# unanswered-thread and pull-request re-raise state, and retired provenance
+# once retired.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -139,8 +140,9 @@
 # config/contribution-reraise-interval, or FM_CONTRIBUTIONS_REPLY_AGE is
 # set; 0 or off disables), even if an earlier signal was acknowledged; ack
 # restarts the snooze until the next interval from the acknowledgement.
-# Review thread reminders keep their own snooze, so they never delay this
-# pull request comment reminder.
+# Review-thread and pull-request reminders keep separate snoozes.
+# When a review-thread reminder is due in a poll, that poll emits it instead of
+# adding the pull-request reminder; the pull-request reminder remains due.
 # A verdict recording actor nobody (e.g. thanks-only) for that comment clears
 # it. The condition clears automatically once we reply or push after it (push
 # evidence tied to this pull request's head sha changing). The wake text names
