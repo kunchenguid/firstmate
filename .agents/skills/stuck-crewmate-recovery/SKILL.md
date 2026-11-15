@@ -12,6 +12,8 @@ metadata:
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 A stale or dead-endpoint report for a worker whose pull request has already landed is not a recovery case: the work is finished, so close the task through ordinary teardown (`AGENTS.md` section 7 for firstmate, the landed-work rule in `bin/fm-branch-prompt.sh` for the supervision branch) instead of this playbook, never with `--force`.
 
+A lane parked on review (`bin/fm-crew-state.sh` reads `source: review-park`) stopped its agent on purpose and is not a recovery case; relaunch it only through `bin/fm-park.sh resume`.
+
 Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
 
 Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
@@ -39,7 +41,7 @@ Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
-Use `treehouse status` for treehouse-backed tmux, herdr, zellij, cmux, Paseo, Rex, t3code, or tern tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
+Use `treehouse status` for treehouse-backed tmux, herdr, zellij, cmux, Paseo, Rex, t3code, tern, or hc tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.

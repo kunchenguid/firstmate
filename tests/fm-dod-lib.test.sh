@@ -62,6 +62,231 @@ test_remote_containing_named_head_is_accepted() {
   pass "named head on a remote-tracking ref is accepted"
 }
 
+test_gate_mirror_only_named_head_is_refused() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/mirror-repo"
+  wt="$TMP_ROOT/mirror-wt"
+  fm_git_worktree "$repo" "$wt" fm/mirror
+  git -C "$wt" commit -q --allow-empty -m 'fix pushed only to the local gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  # The local no-mistakes gate mirror lives on this machine, so a head that
+  # only reached it has not left the machine.
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror "$sha"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head only on the no-mistakes gate mirror was accepted (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "gate-mirror refusal did not name the commit: $reason" ;;
+  esac
+  # A refresh fetches origin, which does not hold the head, and never counts
+  # the mirror, so the refusal stands with no refresh failure to report.
+  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head only on the gate mirror was accepted after a refresh (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "gate-mirror refusal after a refresh changed its reason: $reason" ;;
+  esac
+  git -C "$wt" update-ref refs/remotes/origin/fm/mirror "$sha"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/4 checks green" >/dev/null \
+    || fail "named head on origin beside the gate mirror was refused"
+  pass "named head only on the no-mistakes gate mirror is refused, even after a refresh; on origin it is accepted"
+}
+
+test_head_pushed_from_gate_clone_is_accepted_after_refresh() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/gate-push-repo"
+  wt="$TMP_ROOT/gate-push-wt"
+  origin="$repo.origin.git"
+  fm_git_worktree "$repo" "$wt" fm/gate-push
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/gate-push "$sha"
+  # The pipeline pushes from its own gate clone, so origin holds the head while
+  # neither the copy nor the project clone has fetched it.
+  git -C "$origin" fetch -q "$wt" "fm/gate-push:refs/heads/fm/gate-push"
+  [ "$(git -C "$origin" rev-parse refs/heads/fm/gate-push)" = "$sha" ] \
+    || fail "fixture: origin does not hold the gate clone's push"
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/gate-push >/dev/null \
+    || fail "fixture: the copy already tracks origin's branch"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unfetched refusal without a refresh did not name the commit: $reason" ;;
+  esac
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/gate-push >/dev/null \
+    || fail "a caller that does not refresh fetched anyway"
+  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
+    || fail "head origin holds through the gate clone was refused after a refresh"
+  [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/gate-push)" = "$sha" ] \
+    || fail "the refresh did not leave origin's head in the copy's refs"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/5 checks green" >/dev/null \
+    || fail "a caller that does not refresh refused the head a refresh already fetched"
+  pass "head origin holds through the gate clone is accepted after a refresh, and later reads see it"
+}
+
+test_passed_refresh_deadline_refuses_with_last_known_refs() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/deadline-passed-repo"
+  wt="$TMP_ROOT/deadline-passed-wt"
+  origin="$repo.origin.git"
+  fm_git_worktree "$repo" "$wt" fm/deadline-passed
+  git -C "$wt" commit -q --allow-empty -m 'fix origin holds while the copy has not fetched it'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/deadline-passed:refs/heads/fm/deadline-passed"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/8 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy; could not refresh remote: origin, so this verdict used the last-known refs"*) ;;
+    *) fail "a refusal past the refresh deadline did not say it used the last-known refs: $reason" ;;
+  esac
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/deadline-passed >/dev/null \
+    || fail "a refresh past its deadline fetched anyway"
+  pass "past the refresh deadline nothing is fetched and the refusal says it used the last-known refs"
+}
+
+test_separate_project_clone_is_refreshed() {
+  local repo wt origin sha reason rc
+  repo="$TMP_ROOT/separate-project-repo"
+  wt="$TMP_ROOT/separate-project-wt"
+  origin="$repo.origin.git"
+  fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$origin"
+  # The copy is a repository of its own whose only remote is the project clone,
+  # so only a refresh of the project clone reaches the origin holding the head.
+  git clone -q "$repo" "$wt"
+  git -C "$wt" checkout -q -b fm/separate
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/separate:refs/heads/fm/separate"
+  [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture: the copy shares the project clone's git directory"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a caller that does not refresh accepted an unfetched head (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unfetched refusal without a refresh did not name the commit: $reason" ;;
+  esac
+  FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/7 checks green" >/dev/null \
+    || fail "head the project clone's origin holds was refused after a refresh"
+  [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/separate)" = "$sha" ] \
+    || fail "the refresh did not fetch the project clone's origin"
+  ! git -C "$wt" rev-parse -q --verify refs/remotes/origin/fm/separate >/dev/null \
+    || fail "fixture: the copy's own remote held the head"
+  pass "a project clone with its own git directory is refreshed too, and its origin's head is accepted"
+}
+
+test_failed_refresh_refuses_with_last_known_refs() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/refresh-fail-repo"
+  wt="$TMP_ROOT/refresh-fail-wt"
+  fm_git_worktree "$repo" "$wt" fm/refresh-fail
+  git -C "$wt" commit -q --allow-empty -m 'fix behind an unreachable remote'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$repo" remote set-url origin "file://$TMP_ROOT/refresh-fail-missing.git"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/6 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "named head was accepted although the refresh failed (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy; could not refresh remote: origin, so this verdict used the last-known refs"*) ;;
+    *) fail "failed-refresh refusal did not say it used the last-known refs: $reason" ;;
+  esac
+  [ "$(printf '%s\n' "$reason" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "failed-refresh refusal is not one line: $reason"
+  pass "a failed refresh still refuses and says the verdict used the last-known refs"
+}
+
+test_remote_hanging_before_origin_leaves_origin_its_refresh() {
+  local repo wt origin fakebin sha start
+  repo="$TMP_ROOT/hang-first-repo"
+  wt="$TMP_ROOT/hang-first-wt"
+  origin="$repo.origin.git"
+  fakebin="$TMP_ROOT/hang-first-bin"
+  fm_git_worktree "$repo" "$wt" fm/hang-first
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/hang-first:refs/heads/fm/hang-first"
+  # backup sorts before origin and never answers a fetch.
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "$fakebin/git-remote-hang"
+  chmod +x "$fakebin/git-remote-hang"
+  git -C "$repo" remote add backup hang::backup
+  [ "$(git -C "$wt" remote | head -1)" = backup ] \
+    || fail "fixture: the hanging remote is not listed before origin"
+  FM_DOD_REFRESH_FAILED=
+  start=$(date +%s)
+  PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 4)) \
+    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/9 checks green" >/dev/null \
+    || fail "a remote hanging before origin under a short refresh deadline kept origin's head from being accepted"
+  [ "$(git -C "$wt" rev-parse refs/remotes/origin/fm/hang-first)" = "$sha" ] \
+    || fail "origin was not fetched behind a remote that hangs"
+  [ "$FM_DOD_REFRESH_FAILED" = backup ] \
+    || fail "the hanging remote was not named as not refreshed: '$FM_DOD_REFRESH_FAILED'"
+  [ "$(date +%s)" -le $((start + 6)) ] || fail "the refresh outlived its deadline"
+  pass "a remote that hangs and sorts before origin cannot take origin's refresh; origin's head is accepted and the hanging remote is named"
+}
+
+test_hanging_copy_remote_leaves_the_project_clone_its_refresh() {
+  local repo wt origin fakebin sha reason rc start
+  repo="$TMP_ROOT/copy-hang-repo"
+  wt="$TMP_ROOT/copy-hang-wt"
+  origin="$repo.origin.git"
+  fakebin="$TMP_ROOT/copy-hang-bin"
+  fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$origin"
+  # A standalone copy whose origin is the project clone and whose second remote
+  # never answers a fetch; only the project clone's origin holds the head.
+  git clone -q "$repo" "$wt"
+  git -C "$wt" checkout -q -b fm/copy-hang
+  git -C "$wt" commit -q --allow-empty -m 'fix the pipeline pushed from its gate clone'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$origin" fetch -q "$wt" "fm/copy-hang:refs/heads/fm/copy-hang"
+  mkdir -p "$fakebin"
+  printf '%s\n' '#!/bin/sh' 'exec sleep 30' > "$fakebin/git-remote-hang"
+  chmod +x "$fakebin/git-remote-hang"
+  git -C "$wt" remote add fork hang::fork
+  [ "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture: the copy shares the project clone's git directory"
+  reason=$(FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=1 accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a head was accepted although the refresh deadline had passed (exit $rc)"
+  case "$reason" in
+    *"could not refresh remote: origin, fork, origin (project clone), so this verdict used the last-known refs"*) ;;
+    *) fail "the refusal did not tell the copy's remotes from the project clone's: $reason" ;;
+  esac
+  FM_DOD_REFRESH_FAILED=
+  start=$(date +%s)
+  PATH="$fakebin:$PATH" FM_DOD_REFRESH_REMOTES=1 FM_DOD_REFRESH_DEADLINE=$((start + 6)) \
+    accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/g/r/-/merge_requests/10 checks green" >/dev/null \
+    || fail "a hanging remote in the copy kept the project clone's origin head from being accepted"
+  [ "$(git -C "$repo" rev-parse refs/remotes/origin/fm/copy-hang)" = "$sha" ] \
+    || fail "the project clone's origin was not fetched behind the copy's hanging remote"
+  [ "$FM_DOD_REFRESH_FAILED" = fork ] \
+    || fail "the hanging remote was not named as not refreshed: '$FM_DOD_REFRESH_FAILED'"
+  [ "$(date +%s)" -le $((start + 8)) ] || fail "the refresh outlived its deadline"
+  pass "a hanging remote in a standalone copy cannot take the project clone's refresh; its origin's head is accepted and failed remotes name their repository"
+}
+
+test_local_only_branch_beside_gate_mirror_is_accepted() {
+  local repo wt sha
+  repo="$TMP_ROOT/mirror-local-repo"
+  wt="$TMP_ROOT/mirror-local-wt"
+  fm_git_worktree "$repo" "$wt" fm/mirror-local
+  git -C "$wt" commit -q --allow-empty -m 'local-only work also on the gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/no-mistakes/fm/mirror-local "$sha"
+  accept_done ship local-only "$wt" "$repo" "done: ready in branch fm/mirror-local" >/dev/null \
+    || fail "local-only named branch in the project clone was refused beside a gate mirror ref"
+  pass "local-only named branch stays reachable when the gate mirror also holds it"
+}
+
 test_moved_branch_without_named_head_is_refused() {
   local repo wt main_sha fix_sha reason rc
   repo="$TMP_ROOT/moved-repo"
@@ -452,6 +677,14 @@ test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
+test_gate_mirror_only_named_head_is_refused
+test_head_pushed_from_gate_clone_is_accepted_after_refresh
+test_separate_project_clone_is_refreshed
+test_passed_refresh_deadline_refuses_with_last_known_refs
+test_failed_refresh_refuses_with_last_known_refs
+test_remote_hanging_before_origin_leaves_origin_its_refresh
+test_hanging_copy_remote_leaves_the_project_clone_its_refresh
+test_local_only_branch_beside_gate_mirror_is_accepted
 test_moved_branch_without_named_head_is_refused
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune

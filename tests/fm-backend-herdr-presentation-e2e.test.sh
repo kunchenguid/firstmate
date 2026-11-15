@@ -143,9 +143,32 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
   refusal_probe=1
   refusal_before=$(focus_snapshot || printf ambiguous/ambiguous)
 fi
+# An idle abort pane is removed through Herdr's pane-death path, which issues
+# no pane close; its removal is the first exact pane_not_found answer.
+abort_pane_probe=
+if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    abort_pane_probe=$3
+    break
+  done
+fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+if [ -n "$abort_pane_probe" ]; then
+  probe_err=$(mktemp "$TMP_ROOT/abort-pane-get.XXXXXX")
+  if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@" 2> "$probe_err"); then
+    status=0
+  else
+    status=$?
+  fi
+  if printf '%s\n%s' "$out" "$(cat "$probe_err")" | jq -e 'select(.error.code? == "pane_not_found")' >/dev/null 2>&1; then
+    printf 'pane-gone\t-\t-\t%s\n' "$abort_pane_probe" >> "$FOCUS_AUDIT_LOG"
+  fi
+  cat "$probe_err" >&2
+  rm -f "$probe_err"
+elif out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
   status=$?
@@ -211,6 +234,8 @@ set -u
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  # Fail the lease after the projected pane is created, exercising the
+  # post-create abort cleanup without consuming a real pool slot.
   exit 0
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
@@ -875,17 +900,17 @@ finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.ou
 # The forced foreground_cwd is a plain non-git directory, which the discovery
 # poll now screens out on every read rather than adopting, so the armed failure
 # arrives as the poll's own deadline refusal naming that path.
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+grep -F "treehouse get --lease did not report a worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+grep -F "treehouse get --lease did not report a worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  ($1 == "pane-close" || $1 == "pane-gone") && $4 == a && !closed_a++ { print "close-a" }
+  ($1 == "pane-close" || $1 == "pane-gone") && $4 == b && !closed_b++ { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
@@ -1587,9 +1612,9 @@ STATUS_JSON=$(lab status --json)
 HERDR_VERSION=$(printf '%s' "$STATUS_JSON" | jq -r '.client.version // "unknown"')
 PATH="$HERDR_ORIGINAL_PATH" \
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" \
-  || fail "guarded Herdr lab teardown or default-session tripwire verification failed"
+  || fail "guarded Herdr lab teardown or fleet-session tripwire verification failed"
 LAB_READY=0
-pass "real Herdr lab validation completed on Herdr $HERDR_VERSION with the default-session tripwire intact"
+pass "real Herdr lab validation completed on Herdr $HERDR_VERSION with the fleet-session tripwire intact"
 
 cleanup_all
 trap - EXIT

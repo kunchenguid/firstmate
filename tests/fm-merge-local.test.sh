@@ -161,7 +161,7 @@ test_snapshot_cannot_pin_a_replacement_task() {
   FM_HOME="$HOME_DIR" fm_dod_accept_ship_done ship local-only "$WT" "$PROJ" \
     'done: ready' "$HOME_DIR/state" local-task "$captured" >/dev/null 2>&1 \
     && fail 'a stale snapshot pinned a replacement task'
-  assert_no_grep '^local_done_head=' "$META" 'stale snapshot changed live readiness'
+  assert_no_regex '^local_done_head=' "$META" 'stale snapshot changed live readiness'
   pass 'captured metadata cannot pin a replacement task generation'
 }
 
