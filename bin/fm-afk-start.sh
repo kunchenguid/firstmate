@@ -57,6 +57,7 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
         "$state/.subsuper-escalations.since" \
         "$state/.subsuper-inject-wedged" \
         "$state/.subsuper-unknown-acked" \
+        "$state/.subsuper-session-seeded" \
         "$state"/.subsuper-stale-* \
         "$state"/.subsuper-reported-stale-* \
         "$state"/.subsuper-dialog-* \

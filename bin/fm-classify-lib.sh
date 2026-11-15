@@ -1679,6 +1679,8 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
+# Only <status-file>'s own manifest rows are validated: a malformed or duplicate
+# row fails that task alone, so other tasks keep their presented offsets.
 status_presentation_cursor_offset() {  # <status-file>
   local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
@@ -1690,15 +1692,13 @@ status_presentation_cursor_offset() {  # <status-file>
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
     while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
-      [ -n "$row_task" ] || continue
+      [ "$row_task" = "$task" ] || continue
       [ -z "$extra" ] || return 1
       case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
       [ -n "$legacy" ] && [ -n "$ident" ] || return 1
-      if [ "$row_task" = "$task" ]; then
-        [ -z "$offset" ] || return 1
-        offset=$legacy
-        cur_ident=$ident
-      fi
+      [ -z "$offset" ] || return 1
+      offset=$legacy
+      cur_ident=$ident
     done <<EOF
 $data
 EOF
@@ -1734,20 +1734,18 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
   backstop=0
   while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
-    [ -n "$row_task" ] || continue
+    [ "$row_task" = "$task" ] || continue
     [ -z "$extra" ] || return 1
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
     [ -n "$presented" ] && [ -n "$ident" ] || return 1
-    if [ "$row_task" = "$task" ]; then
-      _fm_status_read_ident_size "$f" || return 1
-      current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
-      case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$ident" = "$current" ] || { printf '0'; return 0; }
-      backstop=${row_backstop:-0}
-      [ "$backstop" -le "$size" ] || backstop=0
-      printf '%s' "$backstop"
-      return 0
-    fi
+    _fm_status_read_ident_size "$f" || return 1
+    current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ident" = "$current" ] || { printf '0'; return 0; }
+    backstop=${row_backstop:-0}
+    [ "$backstop" -le "$size" ] || backstop=0
+    printf '%s' "$backstop"
+    return 0
   done <<EOF
 $data
 EOF

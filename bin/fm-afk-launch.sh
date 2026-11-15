@@ -633,6 +633,7 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-session-seeded" \
     "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* \
     "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* \
     "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* \
@@ -641,7 +642,7 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$backup"/.subsuper-stale-* "$backup"/.subsuper-reported-stale-* "$backup"/.subsuper-dialog-* "$backup"/.subsuper-paused-* "$backup"/.subsuper-pause-until-due-*; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked .subsuper-session-seeded "$backup"/.subsuper-stale-* "$backup"/.subsuper-reported-stale-* "$backup"/.subsuper-dialog-* "$backup"/.subsuper-paused-* "$backup"/.subsuper-pause-until-due-*; do
     artifact=${artifact##*/}
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
@@ -803,7 +804,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked .subsuper-session-seeded "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; do
     artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
@@ -862,7 +863,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked .subsuper-session-seeded "$FM_AFK_LAUNCH_STATE"/.subsuper-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-reported-stale-* "$FM_AFK_LAUNCH_STATE"/.subsuper-dialog-* "$FM_AFK_LAUNCH_STATE"/.subsuper-paused-* "$FM_AFK_LAUNCH_STATE"/.subsuper-pause-until-due-*; do
     artifact=${artifact##*/}
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }

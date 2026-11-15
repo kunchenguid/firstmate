@@ -267,6 +267,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
+  : > "$st/state/.subsuper-session-seeded"
   : > "$st/state/.subsuper-stale-task1"
   : > "$st/state/.subsuper-reported-stale-task1"
   : > "$st/state/.subsuper-dialog-task1"
@@ -281,8 +282,9 @@ unit_clear_stale() {
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
-     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and unknown-wake acknowledgements"
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ] \
+     && [ ! -e "$st/state/.subsuper-session-seeded" ]; then
+    pass "clear-stale: removes escalation state and the presented-status baseline"
   else
     fail "clear-stale: stale artifacts survived"
   fi
