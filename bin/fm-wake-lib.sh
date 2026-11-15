@@ -1116,7 +1116,7 @@ _fm_lock_dir_release() {  # <lockdir> <current-pid>
 # addressed to them; a lock that vanished since has no owner to retire, and a
 # present record whose owner cannot be read is refused.
 _fm_lock_dir_steal() {  # <lockdir> <steal> <steal-owner>
-  local lockdir=$1 steal=$2 steal_owner=$3 owner='' cur recovered readable=true
+  local lockdir=$1 steal=$2 steal_owner=$3 marker_publish_bound=${4:-} owner='' cur recovered readable=true
   if { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
     && ! owner=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null); then
     readable=false
@@ -1134,9 +1134,13 @@ _fm_lock_dir_steal() {  # <lockdir> <steal> <steal-owner>
     [ -n "$recovered" ] || recovered=$(cat "$owner/pid" 2>/dev/null || true)
   fi
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
     fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
+    if [ -n "$marker_publish_bound" ]; then
+      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+    else
+      FM_LOCK_HELD_PID=$cur
+    fi
     FM_LOCK_OWNER_DIR=
     return 1
   fi
@@ -1840,7 +1844,7 @@ fm_lock_try_acquire() {
   fi
 
   if _fm_lock_is_directory_record "$lockdir"; then
-    _fm_lock_dir_steal "$lockdir" "$steal" "$steal_owner"
+    _fm_lock_dir_steal "$lockdir" "$steal" "$steal_owner" "$marker_publish_bound"
     return
   fi
   primary_owner=

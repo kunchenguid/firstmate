@@ -1166,6 +1166,63 @@ SH
   pass "copied-link fallback matches native acquire, re-entry, refusal, dead-owner recovery and release"
 }
 
+test_directory_watch_recovery_preserves_marker_bound() {
+  local dir
+  dir=$(make_case directory-watch-marker-bound)
+  printf '#!/usr/bin/env bash\nexec cp -R "$2" "$3"\n' > "$dir/fakebin/ln"
+  chmod +x "$dir/fakebin/ln"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" \
+    python3 - "$LIB" <<'PY' || fail "directory watcher recovery lost marker deadline or holder"
+import subprocess
+import sys
+
+lib = sys.argv[1]
+seed = r'''
+. "$1"
+fm_lock_try_create "$STATE/.watch.lock" || exit 1
+[ ! -L "$STATE/.watch.lock" ] || exit 2
+'''
+subprocess.run(["bash", "-c", seed, "_", lib], check=True, timeout=10)
+holder = subprocess.Popen(["bash", "-c", r'''
+. "$1"
+fm_lock_try_create "$STATE/.watcher-down.lock" || exit 1
+printf 'ready\n'
+IFS= read -r release
+fm_lock_release "$STATE/.watcher-down.lock"
+''', "_", lib], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+try:
+    assert holder.stdout.readline() == "ready\n"
+    refused = r'''
+. "$1"
+lock="$STATE/.watch.lock"
+dead=$(cat "$lock/pid")
+blocking=$(cat "$STATE/.watcher-down.lock/pid")
+if fm_lock_try_acquire "$lock" 1; then exit 10; fi
+[ "$FM_LOCK_HELD_PATH" = "$STATE/.watcher-down.lock" ] || exit 11
+[ "$FM_LOCK_HELD_PID" = "$blocking" ] || exit 12
+[ "$(cat "$lock/pid")" = "$dead" ] || exit 13
+[ ! -e "$lock.steal" ] || exit 14
+[ ! -e "$STATE/.watcher-down" ] || exit 15
+'''
+    subprocess.run(["bash", "-c", refused, "_", lib], check=True, timeout=10)
+finally:
+    holder.communicate("release\n", timeout=10)
+assert holder.returncode == 0
+recovered = r'''
+. "$1"
+lock="$STATE/.watch.lock"
+dead=$(cat "$lock/pid")
+fm_lock_try_acquire "$lock" 1 || exit 20
+[ "$FM_LOCK_RECOVERED_PID" = "$dead" ] || exit 21
+fm_recovery_marker_read "$STATE/.watcher-down" || exit 22
+fm_lock_release "$lock"
+[ ! -e "$lock" ] || exit 23
+'''
+subprocess.run(["bash", "-c", recovered, "_", lib], check=True, timeout=10)
+PY
+  pass "directory watcher recovery bounds marker refusal and recovers after release"
+}
+
 test_directory_lock_single_winner_under_load() {
   local dir state round i pids pid winners result
   dir=$(make_case directory-lock-contention)
@@ -4005,6 +4062,7 @@ test_direct_directory_lock_release_and_reap
 test_link_mode_layout_is_unchanged
 test_link_mode_removal_is_unchanged
 test_lock_without_real_symlinks
+test_directory_watch_recovery_preserves_marker_bound
 test_directory_lock_single_winner_under_load
 test_dirlock_identity_cases_per_shell
 test_dirlock_d1b_failed_claim_leaves_generation_to_retirement
