@@ -18,13 +18,15 @@
 # ignored, so a malformed file keeps the defaults.
 #
 # THE RECORD ($STATE/procevent/.<source-id>.failure-quiet) is two lines:
-#   v1 <reason> <window-start> <failures> <failing|recovered> <recovery-woke 0|1> <last-failure>
+#   v1 <reason> <window-start> <failures> <failing|recovered> <recovery-woke 0|1> <last-failure> <suppressed>
 #   <reason text, printable, bounded>
 # reason is a space-free token: launch-unconfirmed, launch-refused-<cksum>, or
 # cleanup-refused. window-start is the epoch of the failure wake that opened
 # the window. failures counts failed launches held back since that wake or the
 # last recovery. recovery-woke records that this window already sent its one
-# recovery wake. Epochs are seconds.
+# recovery wake. suppressed counts every failure held back in this window and
+# survives a recovery, so the fleet view keeps it until the window ends.
+# Epochs are seconds.
 #
 # THE LOG ($STATE/procevent/.failure-quiet.log) gets one line per held-back
 # failure and is trimmed to its last FM_PFW_LOG_KEEP lines once it passes
@@ -76,17 +78,17 @@ fm_pfw_text() {
 }
 
 # fm_pfw_record_read <file>: set FM_PFW_REC_REASON, _START, _FAILURES, _STATE,
-# _WOKE, _LAST, and _TEXT; fail when the record is absent or malformed.
+# _WOKE, _LAST, _SUPPRESSED, and _TEXT; fail when the record is absent or malformed.
 fm_pfw_record_read() {
-  local file=$1 head text version reason start failures state woke last extra
+  local file=$1 head text version reason start failures state woke last suppressed extra
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   { IFS= read -r head || return 1; IFS= read -r text || true; } < "$file"
-  read -r version reason start failures state woke last extra <<< "$head"
+  read -r version reason start failures state woke last suppressed extra <<< "$head"
   [ "$version" = v1 ] && [ -z "$extra" ] || return 1
   case "$reason" in launch-unconfirmed|cleanup-refused|launch-refused-[0-9]*) ;; *) return 1 ;; esac
   case "$reason" in launch-refused-*[!0-9]*) return 1 ;; esac
-  case "$start$failures$last" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$start" ] && [ -n "$failures" ] && [ -n "$last" ] || return 1
+  case "$start$failures$last$suppressed" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$start" ] && [ -n "$failures" ] && [ -n "$last" ] && [ -n "$suppressed" ] || return 1
   case "$state" in failing|recovered) ;; *) return 1 ;; esac
   case "$woke" in 0|1) ;; *) return 1 ;; esac
   FM_PFW_REC_REASON=$reason
@@ -95,15 +97,16 @@ fm_pfw_record_read() {
   FM_PFW_REC_STATE=$state
   FM_PFW_REC_WOKE=$woke
   FM_PFW_REC_LAST=$last
+  FM_PFW_REC_SUPPRESSED=$suppressed
   FM_PFW_REC_TEXT=$text
   return 0
 }
 
-# fm_pfw_record_write <file> <reason> <window-start> <failures> <state> <woke> <last> <text>
+# fm_pfw_record_write <file> <reason> <window-start> <failures> <state> <woke> <last> <suppressed> <text>
 fm_pfw_record_write() {
   local file=$1 tmp
   tmp=$(umask 077; mktemp "$file.XXXXXX") || return 1
-  if ! printf 'v1 %s %s %s %s %s %s\n%s\n' "$2" "$3" "$4" "$5" "$6" "$7" "$(fm_pfw_text "$8")" > "$tmp" \
+  if ! printf 'v1 %s %s %s %s %s %s %s\n%s\n' "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$(fm_pfw_text "$9")" > "$tmp" \
     || ! mv -f -- "$tmp" "$file"; then
     rm -f -- "$tmp"
     return 1
@@ -147,8 +150,10 @@ fm_pfw_snapshot_json() {
         jq -cn --arg source "$id" --arg reason "$FM_PFW_REC_REASON" --arg text "$FM_PFW_REC_TEXT" \
           --arg state "$FM_PFW_REC_STATE" --arg since "$(fm_pfw_utc "$FM_PFW_REC_START")" \
           --arg last "$(fm_pfw_utc "$FM_PFW_REC_LAST")" \
-          --argjson failures "$FM_PFW_REC_FAILURES" --argjson woke "$FM_PFW_REC_WOKE" \
+          --argjson failures "$FM_PFW_REC_FAILURES" --argjson suppressed "$FM_PFW_REC_SUPPRESSED" \
+          --argjson woke "$FM_PFW_REC_WOKE" \
           '{source:$source,reason:$reason,reason_text:$text,state:$state,held_failures:$failures,
+            suppressed_failures:$suppressed,
             window_start:$since,last_failure:$last,recovery_woke:($woke == 1)}' || return 1
       done
     fi

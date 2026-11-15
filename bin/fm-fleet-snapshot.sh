@@ -117,7 +117,9 @@
 #   procevent_failure_quiet[]: present only when config/procevent-failure-wakes
 #     exists. One row per process-event source whose failure wakes that gate is
 #     holding back: source, reason, reason_text, state (failing|recovered),
-#     held_failures counted without a wake, window_start, last_failure, and
+#     held_failures counted without a wake since the last wake or recovery,
+#     suppressed_failures counted without a wake in the whole window (kept
+#     after a recovery until the window ends), window_start, last_failure, and
 #     recovery_woke. bin/fm-procevent-failure-wakes-lib.sh owns the record.
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,

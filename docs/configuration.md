@@ -503,6 +503,7 @@ With the file present:
 - When the source is found owned or its launch confirms, and failures were counted since the last wake, one `check: process-event source started again` wake reports the count, at most once per window.
   Failures after that wake and before the window ends are counted again without a wake.
 - The heartbeat fleet view (`bin/fm-fleet-view.sh`, from the `procevent_failure_quiet` field of `bin/fm-fleet-snapshot.sh --json`) lists each source with counted failures, its state, its reason, and when its window started.
+  A recovered source keeps its row, with the failures counted without a wake in that window, until the window ends.
 
 So a source that fails every cycle for an hour produces one wake when it first fails and one when it starts again, and a flapping source produces at most two wakes per window.
 Reconcile keeps relaunching the source every cycle exactly as before; only the wakes change.

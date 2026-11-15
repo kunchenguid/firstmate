@@ -173,7 +173,8 @@ scenario_repeat_inside_window_and_recovery() {
   expect_wakes "$home" repeat-src 1 1 "a repeat after the recovery wake"
   view=$(fleet_view "$home")
   assert_contains "$view" "## Quiet Process-Event Failures" "the fleet view hides counted failures"
-  assert_contains "$view" "| repeat-src | failing | 1 |" "the fleet view does not count the held-back failure: $view"
+  # Three failing launches after the failure wake, one since the last recovery.
+  assert_contains "$view" "| repeat-src | failing | 1 | 3 |" "the fleet view does not count the held-back failures: $view"
   repair "$home" repeat-src
   pe "$home" retire repeat-src >/dev/null 2>&1 || true
   assert_absent "$home/state/procevent/.repeat-src.failure-quiet" "retire kept the quiet record"
@@ -187,7 +188,13 @@ scenario_repeat_after_window_wakes() {
   repair "$home" after-src
   reconcile_repaired "$home"
   wait_released after-src
+  assert_contains "$(fleet_view "$home")" "| after-src | recovered |" \
+    "a recovered source left the fleet view inside its window"
   sleep 3
+  reconcile_repaired "$home"
+  wait_released after-src
+  assert_contains "$(fleet_view "$home")" "No process-event failures are being counted without a wake." \
+    "a recovered source stayed in the fleet view after its window"
   damage "$home" after-src
   reconcile "$home" >/dev/null
   expect_wakes "$home" after-src 2 0 "a new failure after the window"
@@ -211,10 +218,15 @@ scenario_different_reason_wakes() {
 }
 
 scenario_recovered_wake_off() {
-  local home="$TMP_ROOT/norecover"
+  local home="$TMP_ROOT/norecover" view
   new_source "$home" norecover-src recovered-wake=off
   flapping_sequence "$home" norecover-src
   expect_wakes "$home" norecover-src 1 0 "recovered-wake=off"
+  # Two failing launches were held back after the one failure wake, and no
+  # wake reported them, so the fleet view still does after the recovery.
+  view=$(fleet_view "$home")
+  assert_contains "$view" "| norecover-src | recovered | 0 | 2 |" \
+    "the fleet view dropped the held-back failures on recovery: $view"
   pe "$home" retire norecover-src >/dev/null 2>&1 || true
 }
 

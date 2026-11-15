@@ -1786,7 +1786,7 @@ pfw_failure() {
     fi
     if [ "$same" -eq 1 ] && { [ $((now - FM_PFW_REC_START)) -lt "$FM_PFW_REPEAT" ] || [ "$would" -eq 0 ]; }; then
       fm_pfw_record_write "$rec" "$reason" "$FM_PFW_REC_START" $((FM_PFW_REC_FAILURES + 1)) failing \
-        "$FM_PFW_REC_WOKE" "$now" "$text" || return 1
+        "$FM_PFW_REC_WOKE" "$now" $((FM_PFW_REC_SUPPRESSED + 1)) "$text" || return 1
       fm_pfw_log "$REG" "$(fm_pfw_utc "$now") $id counted $reason: $(pfw_reason_label "$reason" "$text")" || true
       if [ "$would" -eq 1 ]; then
         # Record the episode as reported, so the end of the window does not
@@ -1804,7 +1804,7 @@ pfw_failure() {
   else
     report_extension_cleanup_failure "$id" || return 1
   fi
-  fm_pfw_record_write "$rec" "$reason" "$now" 0 failing 0 "$now" "$text"
+  fm_pfw_record_write "$rec" "$reason" "$now" 0 failing 0 "$now" 0 "$text"
 }
 
 # pfw_recovered <source-id>: the source was found owned or its launch confirmed.
@@ -1835,7 +1835,7 @@ pfw_recovered() {
     rm -f -- "$rec"
   elif [ "$FM_PFW_REC_STATE" != recovered ] || [ "$woke" != "$FM_PFW_REC_WOKE" ]; then
     fm_pfw_record_write "$rec" "$FM_PFW_REC_REASON" "$FM_PFW_REC_START" 0 recovered "$woke" \
-      "$FM_PFW_REC_LAST" "$FM_PFW_REC_TEXT"
+      "$FM_PFW_REC_LAST" "$FM_PFW_REC_SUPPRESSED" "$FM_PFW_REC_TEXT"
   fi
 }
 
