@@ -456,6 +456,62 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# The no-mistakes handoff `done: {summary}` is what firstmate reads to start the
+# pipeline, so it stays; but a worker that reads it as completion stops one wake
+# round short of its PR. Every no-mistakes shape must therefore say outright that
+# a commit does not complete the task, name its own completing report, and keep
+# stage reporting off `done:`. The handoff notice must stay verb-free: it names
+# the brief's existing status and declared-wait rules instead of restating their
+# verb, because bin/fm-classify-lib.sh owns that verb through
+# FM_CLASSIFY_PAUSED_VERB and a rendered literal would mislead a home that
+# aliases it.
+test_no_mistakes_dod_commit_is_not_completion() {
+  local home id flags label brief declared notice
+  home="$TMP_ROOT/commit-not-done-home"
+  mkdir -p "$home/data"
+  for spec in \
+    'nm-plain|--mode no-mistakes|pr' \
+    'nm-manual|--mode no-mistakes --pr manual|pr' \
+    'nm-gerrit|--mode no-mistakes --forge gerrit|change'; do
+    id=${spec%%|*}
+    spec=${spec#*|}
+    flags=${spec%|*}
+    label=${spec##*|}
+    # shellcheck disable=SC2086  # the flags must word-split into brief arguments
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $flags >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$label: brief was not scaffolded"
+    assert_grep "A commit on your branch does not complete this task" "$brief" \
+      "$label: DoD still reads a commit as completion"
+    assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+      "$label: DoD still says the task is complete when committed"
+    assert_grep "never reports this task complete: it only hands control to the pipeline" "$brief" \
+      "$label: DoD does not say the handoff done is not completion"
+    assert_grep "Before that handoff, report each stage as \`working:\`, never as \`done: {summary}\`" "$brief" \
+      "$label: DoD still lets a commit be reported as done"
+    assert_grep "While the pipeline runs, declare its intermediate stages and waits under this brief's existing status and declared-wait rules." "$brief" \
+      "$label: DoD does not point intermediate reporting at the brief's existing rules"
+    # The whole handoff notice must stay verb-free: bin/fm-classify-lib.sh owns
+    # the declared-wait verb through FM_CLASSIFY_PAUSED_VERB, so a literal here
+    # would drift from every home that aliases it.
+    notice="$home/$id-notice.txt"
+    sed -n '/never reports this task complete/,/declared-wait rules\./p' "$brief" >"$notice"
+    assert_grep "never reports this task complete" "$notice" \
+      "$label: the handoff notice was not located for the verb-free check"
+    assert_no_regex 'paused|awaiting|FM_CLASSIFY_PAUSED_VERB' "$notice" \
+      "$label: the handoff notice names the declared-wait verb"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    case "$label" in
+      pr) declared='The only `done:` that completes this task is `done: PR <url> checks green`' ;;
+      change) declared='The only `done:` that completes this task is `done: PR <change url> published for review`' ;;
+      *) fail "$label: test spec names no completing report" ;;
+    esac
+    assert_grep "$declared" "$brief" \
+      "$label: DoD does not name this shape's completing report"
+  done
+  pass "fm-brief.sh: no-mistakes DoDs make the pre-PR done a handoff, not completion"
+}
+
 # A PR-based ship must not report done on a draft, which cannot be merged; a
 # lane that deliberately holds a draft declares a wait instead. local-only opens
 # no PR, so it must not carry the requirement.
@@ -1703,6 +1759,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
+test_no_mistakes_dod_commit_is_not_completion
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
