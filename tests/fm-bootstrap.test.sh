@@ -261,6 +261,183 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
+# seed_record_hygiene_home <case_dir>: build <case_dir>/home with every record
+# inconsistency the hygiene report detects, plus a fake tasks-axi whose list
+# calls are appended to <case_dir>/tasks-axi-list.log. Prints the fake bin dir.
+seed_record_hygiene_home() {
+  local case_dir=$1 fakebin
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 0.2.6 ;;
+  update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
+  mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  list)
+    printf '%s\n' "$*" >> "${0%/*}/../tasks-axi-list.log"
+    case " $* " in *' --fields id '*) echo 'unsupported extra field: id' >&2; exit 2 ;; esac
+    printf 'count: 3\ntasks[1]{id}:\n  missing-record\ntasks[2]{id}:\n  "missing,record",extra\ntasks[3]{id}:\n  nested/task\n'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+  mkdir -p "$case_dir/home/state/nested"
+  printf '%s\n' 'kind=ship' > "$case_dir/home/state/nested/task.meta"
+  printf '%s\n' 'failed [at=1]: fixture orphan' > "$case_dir/home/state/orphan.status"
+  touch -t 202001010000 "$case_dir/home/state/orphan.status"
+  printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
+  printf '%s\n' 'pr=https://example.test/pull/99' > "$case_dir/home/state/middle.meta"
+  printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/no-window.meta"
+  printf 'backend=tmux\nwindow=outside:window\npr=https://example.test/pull/42\n' > "$case_dir/outside.meta"
+  ln -s "$case_dir/outside.meta" "$case_dir/home/state/linked.meta"
+  printf '%s\n' "$fakebin"
+}
+
+test_record_hygiene_archives_old_orphan_status() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  : > "$case_dir/home/config/record-hygiene"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not report an old orphan status log"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing-record' \
+    "bootstrap did not report an In-flight row without a task record"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing,record' \
+    "bootstrap truncated a comma-containing in-flight ID"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: nested/task' \
+    "bootstrap matched a nested metadata path as a top-level record"
+  assert_contains "$out" 'RECORD_HYGIENE: metadata has no tab: no-window' \
+    "bootstrap did not report metadata without a tab independently of backend state"
+  assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
+    "bootstrap did not report duplicate PR references"
+  assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
+  [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
+  [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
+  [ ! -e "$case_dir/home/state/.meta-orphan.lock" ] && [ ! -L "$case_dir/home/state/.meta-orphan.lock" ] \
+    || fail "successful archive left its metadata lock behind"
+  assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
+    "bootstrap lost duplicate PR detection across an intervening metadata record"
+  pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
+}
+
+test_record_hygiene_absent_flag_is_inert() {
+  local case_dir fakebin out_off out_on before after
+  case_dir="$TMP_ROOT/record-hygiene-off"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  before=$(cd "$case_dir/home" && ls -laR state data)
+  out_off=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  after=$(cd "$case_dir/home" && ls -laR state data)
+  assert_not_contains "$out_off" 'RECORD_HYGIENE' "bootstrap reported record hygiene without config/record-hygiene"
+  [ "$before" = "$after" ] || fail "bootstrap changed state or data records without config/record-hygiene"
+  [ -f "$case_dir/home/state/orphan.status" ] || fail "bootstrap archived an orphan status log without config/record-hygiene"
+  ! grep -q in_flight "$case_dir/tasks-axi-list.log" 2>/dev/null \
+    || fail "bootstrap read the In-flight backlog for record hygiene without config/record-hygiene"
+
+  # Opting in on the same home changes only the RECORD_HYGIENE lines.
+  : > "$case_dir/home/config/record-hygiene"
+  out_on=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out_on" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not report record hygiene once config/record-hygiene was created"
+  [ "$out_off" = "$(printf '%s\n' "$out_on" | grep -v '^RECORD_HYGIENE: ' || true)" ] \
+    || fail "bootstrap output without config/record-hygiene differs beyond the RECORD_HYGIENE lines"
+  pass "bootstrap without config/record-hygiene reports nothing, moves nothing, and reads no backlog for it"
+}
+
+test_record_hygiene_watcher_absent_flag_is_inert() {
+  local case_dir status
+  case_dir="$TMP_ROOT/record-hygiene-watcher-off"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/hygiene.meta"
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed without config/record-hygiene (exit=$status)"
+  sleep 2
+  [ -e "$case_dir/home/state/.last-heartbeat" ] || fail "watcher never reached a heartbeat"
+  for marker in .record-hygiene-running .record-hygiene-result .record-hygiene-result.tmp .record-hygiene-last; do
+    [ ! -e "$case_dir/home/state/$marker" ] || fail "watcher heartbeat ran record hygiene without config/record-hygiene ($marker)"
+  done
+  ! grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+    || fail "watcher queued a record hygiene wake without config/record-hygiene"
+  pass "watcher heartbeat without config/record-hygiene runs no hygiene scan"
+}
+
+test_record_hygiene_reclaims_stale_running_marker() {
+  local case_dir status tries
+  case_dir="$TMP_ROOT/record-hygiene-stale-marker"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  : > "$case_dir/home/config/record-hygiene"
+  printf '99999999 nonexistent-process-start-time\n' > "$case_dir/home/state/.record-hygiene-running"
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/hygiene.meta"
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 30 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed while reclaiming stale hygiene marker (exit=$status)"
+  tries=0
+  while [ ! -s "$case_dir/home/state/.record-hygiene-last" ] \
+      && ! grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+      && [ "$tries" -lt 30 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  [ -s "$case_dir/home/state/.record-hygiene-last" ] \
+    || grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+    || fail "replacement hygiene worker did not complete within 3s"
+  pass "watcher reclaims a stale hygiene marker and starts a worker"
+}
+
+test_record_hygiene_watcher_data_is_defined() {
+  local case_dir status
+  case_dir="$TMP_ROOT/record-hygiene-watcher-data"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  : > "$case_dir/home/config/record-hygiene"
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed during hygiene check (exit=$status)"
+  assert_not_contains "$(cat "$case_dir/err")" 'DATA: unbound variable' \
+    "watcher heartbeat called record hygiene without its data directory"
+  pass "watcher heartbeat supplies the home data directory to record hygiene"
+}
+
+test_record_hygiene_bounds_backlog_read() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene-timeout"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  : > "$case_dir/home/config/record-hygiene"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 0.2.6 ;;
+  update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
+  mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  list) sleep 5 ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog read timed out after 1s' \
+    "bootstrap did not report a bounded backlog read timeout"
+  pass "bootstrap bounds and reports backlog read timeout"
+}
+
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
 #   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
@@ -1539,7 +1716,212 @@ SH
   pass "bootstrap gates resolver fields and additive harnesses on the typed key or a declared typesafe source"
 }
 
+test_treehouse_pool_report_is_read_only_and_classifies_pools() {
+  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls i out
+  case_dir="$TMP_ROOT/pool-report"
+  home="$case_dir/home"
+  root="$case_dir/pools"
+  fakebin="$case_dir/bin"
+  registered="$home/projects/registered"
+  unregistered="$case_dir/unregistered"
+  missing_date="$case_dir/missing-date"
+  other_home_clone="$case_dir/other-home/projects/repo"
+  fractional_repo="$home/projects/fractional"
+  leased_repo="$home/projects/leased"
+  many_repo="$home/projects/many"
+  clone_one="$home/projects/clone-one"
+  clone_two="$home/projects/clone-two"
+  bare_repo="$case_dir/origin.git"
+  nested_slot="$home/projects/parent/nested-slot"
+  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/nested" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/empty-path" "$root/timestamp" "$root/leased" "$root/many" "$other_home_clone" "$missing_date" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" "$nested_slot"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q "$registered"
+  git init -q "$other_home_clone"
+  git init -q "$fractional_repo"
+  git init -q "$leased_repo"
+  git init -q "$many_repo"
+  git init -q "$home/projects/parent"
+  git -C "$registered" config user.email pool-test@example.invalid
+  git -C "$registered" config user.name pool-test
+  printf 'fixture\n' > "$registered/README"
+  git -C "$registered" add README
+  git -C "$registered" commit -qm fixture
+  git init -q --bare "$bare_repo"
+  git -C "$registered" remote add origin "$bare_repo"
+  git -C "$registered" push -q -u origin HEAD
+  git clone -q "$bare_repo" "$clone_one"
+  git clone -q "$bare_repo" "$clone_two"
+  git -C "$clone_one" remote set-url origin 'https://pool-user:pool-password@example.invalid/repo.git'
+  git -C "$clone_two" remote set-url origin 'https://pool-user:pool-password@example.invalid/repo.git'
+  real_jq=$(command -v jq)
+  jq_count_file="$case_dir/jq-count"
+  rm -f "$fakebin/treehouse"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+printf '.\n' >> "$FM_TEST_JQ_COUNT"
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  {
+    printf '{"worktrees":['
+    for ((i = 0; i < 64; i++)); do
+      [ "$i" -eq 0 ] || printf ','
+      printf '{"path":"%s"}' "$many_repo"
+    done
+    printf ']}\n'
+  } > "$root/many/treehouse-state.json"
+  cat > "$root/one/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$clone_one","created_at":"2020-01-01T00:00:00Z"},{"path":"$clone_one","created_at":"2020-01-01T00:00:00Z"},{"path":"$missing_date"}]}
+JSON
+  cat > "$root/two/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$clone_two","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/nested/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$nested_slot","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/orphan/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$unregistered","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/other-home/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$other_home_clone","owner_started_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/project-leftover/treehouse-state.json" <<'JSON'
+{"worktrees":[]}
+JSON
+  cat > "$root/empty-path/treehouse-state.json" <<'JSON'
+{"worktrees":[{"created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/timestamp/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$fractional_repo","created_at":"2026-07-30T23:29:43.458891-06:00"}]}
+JSON
+  cat > "$root/leased/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$leased_repo","created_at":"2020-01-01T00:00:00Z","leased":true,"lease_id":"lease-1","lease_holder":"secondmate-home","leased_at":"2026-10-01T00:00:00Z"}]}
+JSON
+  mkdir -p "$home/config"
+  : > "$home/config/treehouse-pool-report"
+  before=$(find "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
+  : > "$jq_count_file"
+  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" treehouse)" FM_TEST_JQ_COUNT="$jq_count_file" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  jq_calls=$(wc -l < "$jq_count_file")
+  after=$(find "$root" "$registered" "$bare_repo" "$clone_one" "$clone_two" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" "$home/projects/parent" -type f -exec shasum -a 256 {} \; | sort)
+  [ "$before" = "$after" ] || fail "pool report modified pool or repository files"
+  assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
+  assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
+  assert_contains "$out" "unregistered pool $root/nested" "a slot inside a parent repository was mistaken for its own checkout"
+  assert_contains "$out" "duplicate-clone pool $root/two (project $clone_two)" "separate clones with one origin were not reported with a local project path"
+  assert_not_contains "$out" "pool-user" "duplicate-pool report exposed the origin username"
+  assert_not_contains "$out" "pool-password" "duplicate-pool report exposed the origin password"
+  assert_not_contains "$out" "duplicate-clone pool $root/many" "sibling slots in one pool were reported as duplicate pools"
+  [ "$jq_calls" -le $((64 * 3)) ] || fail "pool scan used $jq_calls jq invocations for 64 slots; expected a linear bound"
+  assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
+  assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
+  assert_not_contains "$out" "unregistered pool $root/project-leftover" "empty worktrees array created a synthetic slot"
+  assert_not_contains "$out" "project path unavailable: )" "missing path was treated as a project"
+  assert_not_contains "$out" "duplicate-clone pool $root/empty-path" "missing path was resolved from bootstrap's working directory"
+  assert_contains "$out" "unowned slot older than 30d: $clone_one" "old created_at Z timestamp was not reported"
+  assert_contains "$out" "unowned slot older than 30d: $fractional_repo" "fractional timestamp with offset was not reported"
+  assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
+  assert_not_contains "$out" "unowned slot older than 30d: $leased_repo" "durably leased slot was reported stale"
+  pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
+}
+
+test_treehouse_pool_report_needs_its_flag() {
+  local case_dir home root fakebin real_jq jq_log out baseline
+  case_dir="$TMP_ROOT/pool-report-flag-absent"
+  home="$case_dir/home"
+  root="$case_dir/pools"
+  mkdir -p "$home/config" "$root/orphan" "$root/project-leftover"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  real_jq=$(command -v jq)
+  jq_log="$case_dir/jq-args"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_JQ_LOG"
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  cat > "$root/orphan/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$case_dir/missing","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  printf '%s\n' '{"worktrees":[]}' > "$root/project-leftover/treehouse-state.json"
+  : > "$jq_log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  ! grep -qF "$root" "$jq_log" || fail "bootstrap without config/treehouse-pool-report read Treehouse state: $(cat "$jq_log")"
+  baseline=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$case_dir/no-pools" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "TREEHOUSE_POOL_REPORT" "bootstrap printed a pool report without its flag"
+  assert_equals "$baseline" "$out" "bootstrap output with Treehouse pools differs from a home with none while the flag is absent"
+  : > "$home/config/treehouse-pool-report"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_LOG="$jq_log" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "TREEHOUSE_POOL_REPORT: test-leftover pool $root/project-leftover" "the same fixture did not report once the flag exists"
+  pass "bootstrap reads and reports Treehouse pools only when config/treehouse-pool-report exists"
+}
+
+test_record_hygiene_archives_old_orphan_status
+test_record_hygiene_old_orphan_skips_held_metadata_lock() {
+  local case_dir fakebin lock out
+  case_dir="$TMP_ROOT/record-hygiene-lock"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  : > "$case_dir/home/config/record-hygiene"
+  lock=$(FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_meta_lock_path "$2"' _ "$ROOT" "$case_dir/home/state/orphan.meta")
+  mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not scan the orphan status log while its metadata lock was held"
+  [ -f "$case_dir/home/state/orphan.status" ] || fail "bootstrap moved orphan status while metadata lock was held"
+  [ ! -e "$case_dir/home/data/orphan" ] || fail "bootstrap archived orphan status while metadata lock was held"
+  [ -d "$lock" ] || fail "bootstrap removed another holder's metadata lock"
+  pass "bootstrap skips archiving while the task metadata lock is held"
+}
+test_record_hygiene_old_orphan_survives_spawn_publication() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene-spawn-race"
+  fakebin=$(seed_record_hygiene_home "$case_dir")
+  # The mtime read follows the scan's first metadata-absence check, so a
+  # metadata write there is a spawn publishing between that check and the move.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_TEST_LIB_SOURCED=1 bash -c '
+    SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$SCRIPT_DIR/fm-classify-lib.sh"
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh"
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    # shellcheck source=bin/fm-record-hygiene-lib.sh
+    . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+    _fm_status_file_mtime() {
+      [ "${1##*/}" != orphan.status ] || [ -e "$STATE/orphan.meta" ] \
+        || printf "kind=ship\nwindow=fm:orphan\n" > "$STATE/orphan.meta"
+      echo 1577836800
+    }
+    record_hygiene_report
+  ' _ "$ROOT" "$case_dir/home" 2>&1) || fail "record hygiene pass failed: $out"
+  [ -f "$case_dir/home/state/orphan.meta" ] || fail "fixture did not publish metadata during the scan"
+  [ -f "$case_dir/home/state/orphan.status" ] || fail "record hygiene archived a status log whose metadata a spawn just published"
+  [ ! -e "$case_dir/home/data/orphan" ] || fail "record hygiene created an archive for a just-published worker"
+  pass "record hygiene keeps a status log whose metadata is published before the move"
+}
+test_record_hygiene_old_orphan_skips_held_metadata_lock
+test_record_hygiene_old_orphan_survives_spawn_publication
+test_record_hygiene_watcher_data_is_defined
+test_record_hygiene_reclaims_stale_running_marker
+test_record_hygiene_bounds_backlog_read
+test_record_hygiene_absent_flag_is_inert
+test_record_hygiene_watcher_absent_flag_is_inert
 test_bootstrap_reporting
+test_treehouse_pool_report_is_read_only_and_classifies_pools
+test_treehouse_pool_report_needs_its_flag
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
 test_gh_axi_min_version

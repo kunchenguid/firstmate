@@ -103,6 +103,9 @@ So `clear` or `compact` cannot skip startup sweeps after a truncated run.
 So a proven `clear` or `compact` re-emit re-verifies ownership and proceeds.
 A lock another live session took meanwhile still produces the ordinary read-only digest.
 
+The [`bin/fm-lock.sh` header](../bin/fm-lock.sh) owns claim-lock recovery and refusal behavior.
+If startup names an unreclaimable lock directory, inspect the reported path's contents and permissions before retrying.
+
 ### Nudge wrapper on a run-tier harness
 
 On a run-tier harness, only `resume`, `reload`, and `fork` are routed to the nudge wrapper.
