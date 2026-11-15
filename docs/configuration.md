@@ -1217,7 +1217,7 @@ A lane whose pool slot was reassigned to another task gets none of the cleanup.
 
 `config/build-output-root` holds one absolute directory on its first non-blank line that does not start with `#`.
 `FM_BUILD_OUTPUT_ROOT` overrides the file: an absolute path enables that root, `off`, `0`, `false`, or `no` disables it, and unset or empty defers to the file.
-A relative path, or one with a `.` or `..` component, warns and leaves the setting off.
+A relative path, `/` itself, or a path with a `.` or `..` component warns and leaves the setting off.
 Use a root dedicated to this home, because directories are named by task id alone.
 
 A fresh ship or scout spawn creates `<root>/<task-id>/`, records it as `build_output_dir=` in the task record, and exports these variables into the worker's launch:
