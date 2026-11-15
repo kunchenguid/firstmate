@@ -271,6 +271,10 @@ fi
 
 if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
   if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
+    if [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
+      echo "error: cannot reclaim lock directory $FM_LOCK_RECLAIM_FAILED_PATH; operate read-only until resolved" >&2
+      exit 1
+    fi
     if [ "$FM_LOCK_OUTCOME" = refused ]; then
       echo "error: cannot acquire session lock $CLAIM_LOCK: $FM_LOCK_CAUSE; operate read-only until resolved" >&2
       exit 1
