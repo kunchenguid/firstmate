@@ -49,11 +49,17 @@
 # another minute. The relaunch itself is `bin/fm-control.sh <id> relaunch
 # --note <text>` - the transaction the captain would run by hand - so the
 # endpoint, worktree, harness, model, and uncommitted work are preserved and the
-# note is the replacement agent's only carry-over context. The one exception is
-# an Orca terminal Orca no longer has (`missing`), where that in-place relaunch
-# is unproven and `bin/fm-spawn.sh <id> --relaunch` is the proven transaction:
-# it launches the replacement into a new terminal in the task's own recorded
-# Orca worktree and the note is delivered as one durable steer.
+# note is the replacement agent's only carry-over context. A gone endpoint is
+# the exception, because only the backends that can recreate one take it: a
+# tmux task reading `missing` (its recorded window is gone) and an Orca task
+# reading `missing` (Orca no longer has the terminal) or `dead` (Orca still
+# lists it, but a live scan below its pty found only shells) relaunch through
+# `bin/fm-spawn.sh <id> --relaunch`, the proven transaction. The tmux window is
+# recreated in the recorded session and worktree; the Orca replacement goes
+# into a new terminal in the task's own recorded Orca worktree. Either way the
+# note is delivered as one durable steer. Every other backend, herdr included,
+# keeps its ordinary in-place path, because none of them can recreate a gone
+# endpoint and fm-spawn refuses that state for them by construction.
 #
 # A REFUSED RELAUNCH IS NOT A RETRY. Some relaunches cannot succeed no matter
 # how often they run: the backend has no proven in-place relaunch, the endpoint
@@ -633,18 +639,19 @@ task_relaunch() {  # <id> <reason> <note> [model]
   local -a model_args=()
   [ -z "$model" ] || model_args=(--model "$model")
   backend=$(fm_backend_of_meta "$STATE/$id.meta" 2>/dev/null || true)
-  if [ "$backend" = orca ]; then
-    state=$(task_agent_state "$id" "$STATE/$id.meta")
-  else
-    state=''
-  fi
-  # Orca's in-place relaunch is unproven (bin/fm-control-lib.sh owns that
-  # table), but a terminal Orca itself reports gone provably hosts no agent, so
-  # the proven transaction there is bin/fm-spawn.sh --relaunch: it launches the
-  # replacement into a NEW terminal in the task's own recorded Orca worktree.
-  # Every other Orca endpoint still goes through fm-control, whose refusal is
-  # then recorded and escalated instead of retried.
-  if [ "$backend" = orca ] && [ "$state" = missing ]; then
+  state=$(task_agent_state "$id" "$STATE/$id.meta")
+  # A `missing` endpoint cannot be relaunched through fm-control, whose stop
+  # step dies before touching anything in that state, so the backends that can
+  # recreate a gone endpoint relaunch through bin/fm-spawn.sh --relaunch: a tmux
+  # window that is gone is recreated in the recorded session and worktree, an
+  # Orca terminal is replaced with a new one in the task's recorded Orca
+  # worktree. Orca also takes `dead` because Orca still lists that terminal,
+  # and a live scan below its pty found only shells - measured 2026-11-15 on six
+  # stopped lanes sitting at an empty prompt. Every other read, and every other
+  # backend, still goes through fm-control, whose refusal is then recorded and
+  # escalated instead of retried.
+  if { [ "$backend" = tmux ] && [ "$state" = missing ]; } \
+    || { [ "$backend" = orca ] && { [ "$state" = missing ] || [ "$state" = dead ]; }; }; then
     out=$(fm_run_timed "$RELAUNCH_TIMEOUT_SECS" "$SPAWN_BIN" "$id" --relaunch \
       ${model_args[@]+"${model_args[@]}"} 2>&1)
     rc=$?

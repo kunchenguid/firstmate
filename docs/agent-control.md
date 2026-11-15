@@ -69,7 +69,7 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the endpoint this transaction stopped and the recorded worktree instead of creating a new one, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -100,7 +100,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - `relaunch` additionally requires a proven in-place relaunch into the same endpoint, which orca does not have yet, so an Orca worker is stopped with `exit` and respawned instead.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free: `dead` on a backend with a proven in-place relaunch, `missing` on tmux (its recorded window is recreated in the recorded session under the recorded name), or `missing` or `dead` on orca (replaced by a new terminal in the task's recorded Orca worktree).
+  A backend that relaunches in place additionally requires its shell to be sitting in the recorded worktree, and a recreated tmux window is created there only once that worktree is proven free of any other live copy, so a replacement can never join a live agent or start outside the copy holding the work.
 
 ## Capability matrix
 

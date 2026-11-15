@@ -605,6 +605,62 @@ test_relaunch_replaces_a_gone_orca_terminal_with_a_new_one() {
   pass "fm-spawn --relaunch on Orca: a gone terminal is replaced by a new one in the recorded worktree"
 }
 
+test_relaunch_replaces_a_shell_only_orca_terminal_with_a_new_one() {
+  local id=orcarelaunchz3 out spinner
+  spawn_orca_task_for_relaunch "$id" relaunch-dead
+  reset_orca_responses
+  # A terminal Orca still lists, whose pty still exists, holding only a shell:
+  # the classifier's `dead`. The pty root is Orca's own wrapper and is never
+  # classified, so the shell has to be its CHILD - a shell-named root would
+  # leave an empty tree, which the empty-tree fallthrough also calls `dead`
+  # without ever exercising shell classification.
+  spinner="$TMP_ROOT/relaunch-dead-shell/zsh"
+  mkdir -p "${spinner%/*}"
+  ln -sf "$(command -v sleep)" "$spinner" 2>/dev/null || cp "$(command -v sleep)" "$spinner"
+  bash -c '"$1" 300 & wait' _ "$spinner" &
+  local spid=$!
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-old","ptyId":"wt-rl@@p1","worktreePath":"%s"}}}\n' "$RL_WT" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"sessions":[{"sessionId":"wt-rl@@p1","pid":%s}]}]}}\n' "$spid" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-rl","path":"%s"}}}\n' "$RL_WT" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-new"}}}\n' > "$RESP/4.out"
+  out=$(run_relaunch_spawn "$id" --relaunch)
+  local rc=$?
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+  expect_code 0 "$rc" "relaunching a task whose Orca terminal holds only a shell should succeed"$'\n'"$out"
+  assert_grep "terminal=term-new" "$RL_STATE/$id.meta" "the republished record should name the new terminal"
+  assert_grep "orca_worktree_id=wt-rl" "$RL_STATE/$id.meta" "the relaunch must keep the recorded Orca worktree"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "a relaunch must never remove the task's worktree"
+  rm -rf "$SPAWN_HOME/.cache/fm/$id"
+  pass "fm-spawn --relaunch on Orca: a shell-only terminal is replaced by a new one in the recorded worktree"
+}
+
+test_relaunch_refuses_a_live_orca_terminal() {
+  local id=orcarelaunchz4 out rc spinner
+  spawn_orca_task_for_relaunch "$id" relaunch-alive
+  reset_orca_responses
+  # The classifier reads the descendants of the pty root, so the agent has to
+  # be a child of it: an agent-named process waiting below a plain shell.
+  mkdir -p "$TMP_ROOT/relaunch-alive"
+  spinner="$TMP_ROOT/relaunch-alive/pi"
+  ln -sf "$(command -v sleep)" "$spinner" 2>/dev/null || cp "$(command -v sleep)" "$spinner"
+  bash -c '"$1" 300 & wait' _ "$spinner" &
+  local spid=$!
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-old","ptyId":"wt-rl@@p1","worktreePath":"%s"}}}\n' "$RL_WT" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"sessions":[{"sessionId":"wt-rl@@p1","pid":%s}]}]}}\n' "$spid" > "$RESP/2.out"
+  out=$(run_relaunch_spawn "$id" --relaunch); rc=$?
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+  expect_code 2 "$rc" "relaunching into a terminal with a live agent must refuse"$'\n'"$out"
+  assert_contains "$out" "reads 'alive'" "the refusal should name the live verdict"
+  assert_grep "terminal=term-old" "$RL_STATE/$id.meta" "a refused relaunch must leave the record untouched"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create' \
+    "a refused relaunch must not create a terminal"
+  rm -rf "$SPAWN_HOME/.cache/fm/$id"
+  pass "fm-spawn --relaunch on Orca: a terminal holding a live agent is still refused"
+}
+
 test_relaunch_refuses_while_the_orca_terminal_exists() {
   local id=orcarelaunchz2 out rc
   spawn_orca_task_for_relaunch "$id" relaunch-live
@@ -613,7 +669,8 @@ test_relaunch_refuses_while_the_orca_terminal_exists() {
   printf '{"ok":true,"result":{"worktrees":[]}}\n' > "$RESP/2.out"
   out=$(run_relaunch_spawn "$id" --relaunch); rc=$?
   [ "$rc" -ne 0 ] || fail "relaunch must refuse while Orca still has the terminal"$'\n'"$out"
-  assert_contains "$out" "only replaces a terminal Orca no longer has" "the refusal should name the missing-terminal rule"
+  assert_contains "$out" "provably hosts no agent" "the refusal should name the agent-free-terminal rule"
+  assert_contains "$out" "reads 'unreadable'" "the refusal should name the state it read"
   assert_grep "terminal=term-old" "$RL_STATE/$id.meta" "a refused relaunch must leave the record untouched"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create' \
     "a refused relaunch must not create a terminal"
@@ -1617,6 +1674,8 @@ test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_relaunch_replaces_a_gone_orca_terminal_with_a_new_one
+test_relaunch_replaces_a_shell_only_orca_terminal_with_a_new_one
+test_relaunch_refuses_a_live_orca_terminal
 test_relaunch_refuses_while_the_orca_terminal_exists
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready

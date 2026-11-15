@@ -26,6 +26,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-agent-proc-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-agent-proc-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -88,6 +90,11 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
+fm_backend_tmux_pin_window_name() {  # <window-id>
+  tmux set-window-option -t "$1" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$1" allow-rename off 2>/dev/null || true
+}
+
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
@@ -95,9 +102,79 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
-  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
-  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  fm_backend_tmux_pin_window_name "$wid"
   printf '%s\n' "$wid"
+}
+
+# fm_backend_tmux_ensure_task: recreate the task's recorded window in <session>
+# at <cwd> for a relaunch whose endpoint classifier proved the window gone. It
+# refuses an existing <window-name> so a stale `missing` read can never produce
+# a second copy of the task, and it recreates the recorded session itself (with
+# that window as its only window) when the whole session is gone. Prints the
+# created window's stable id, which the caller must prove the cwd against
+# rather than letting display-message fall back to the active client's window.
+fm_backend_tmux_ensure_task() {  # <session> <window-name> <cwd> -> prints window id
+  local ses=$1 wname=$2 cwd=$3 wid
+  if tmux has-session -t "=$ses" 2>/dev/null; then
+    wid=$(fm_backend_tmux_create_task "$ses" "$wname" "$cwd") || return 1
+    [ -n "$wid" ] || return 1
+    printf '%s\n' "$wid"
+    return
+  fi
+  if tmux list-windows -t "=$ses" -F '#{window_name}' 2>/dev/null | grep -qx "$wname"; then
+    echo "error: window $ses:$wname already exists" >&2
+    return 1
+  fi
+  wid=$(tmux new-session -dP -F '#{window_id}' -s "$ses" -n "$wname" -c "$cwd") || return 1
+  [ -n "$wid" ] || return 1
+  fm_backend_tmux_pin_window_name "$wid"
+  printf '%s\n' "$wid"
+}
+
+# fm_backend_tmux_worktree_occupants: describe every live copy of a task that
+# is already sitting in <cwd> of <session>. A name-absent inventory proves only
+# that the recorded window NAME is gone - `tmux rename-window` hides a running
+# agent from it - so a relaunch that would recreate a window must first prove
+# the worktree itself is free: no window of the session sits in <cwd>, and no
+# process with its working directory at or under <cwd> is anything but a plain
+# shell. The process side is bin/fm-agent-proc-lib.sh's table - /proc on Linux,
+# lsof elsewhere - and fails closed: identity is resolved through the shared
+# harness matcher and the gemini argument rule first, and every other
+# non-shell process - including a bare `node` that may be cursor-agent or gemini
+# - is an occupant, because a false "free" launches a duplicate agent. Prints
+# one line per occupant; empty output with status 0 means provably free, and
+# status 1 means the process scan could not be read, so absence is unproven.
+fm_backend_tmux_worktree_occupants() {  # <session> <cwd> -> occupants on stdout
+  local ses=$1 cwd=$2 real rows id name path pid comm args argv0
+  [ -n "$ses" ] && [ -n "$cwd" ] || return 1
+  [ -d "$cwd" ] || return 1
+  real=$(cd "$cwd" && pwd -P) || return 1
+  rows=$(LC_ALL=C tmux list-windows -t "=$ses" -F '#{window_id}|#{window_name}|#{pane_current_path}' 2>/dev/null) || rows=
+  while IFS='|' read -r id name path; do
+    [ -n "$id" ] || continue
+    [ -n "$path" ] || continue
+    path=${path%/}
+    case "$path" in
+      "$real"|"$real"/*)
+        printf 'window %s:%s is in %s\n' "$ses" "$name" "$path"
+        ;;
+    esac
+  done <<EOF
+$rows
+EOF
+  rows=$(fm_agent_proc_worktree_rows "$real") || return 1
+  while IFS=$'\t' read -r pid comm argv0 args; do
+    [ -n "$pid" ] || continue
+    [ "$pid" != "$$" ] || continue
+    if ! fm_harness_process_matches "${comm:-$argv0}" "${args:-}" \
+      && ! fm_gemini_args_are_gemini "${args:-}" \
+      && [ "$(fm_backend_tmux_classify_process_name "${comm:-$argv0}" "$argv0")" = shell ]; then
+      continue
+    fi
+    printf 'pid %s (%s) is working in %s\n' "$pid" "${comm:-$argv0}" "$real"
+  done <<EOF
+$rows
+EOF
 }
 
 # fm_backend_tmux_current_path: the live pane's current working directory, or

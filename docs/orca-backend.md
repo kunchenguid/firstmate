@@ -64,7 +64,7 @@ A terminal Orca itself reports gone is also `missing`: one whose record carries 
 That is the shape a closed Orca tab leaves behind, and reading it as `unreadable` left the endpoint permanently unreplaceable.
 A stop Orca could not verify, whether an `unknown` cause or its negative sentinel exit code, stays `unreadable` unless the record also reports itself neither connected nor writable, and a pty the sweep still names keeps the process-tree verdict, because a living process outranks a record.
 In-place `relaunch` stays refused on Orca until a replacement launch into the same terminal is proven.
-When Orca reports a task's terminal gone (`missing`, as after an Orca or host restart), `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live or shell-only terminal still refuses.
+When a task's terminal provably hosts no agent - `missing` (Orca no longer has the handle, as after an Orca or host restart) or `dead` (Orca still lists it, and the scan below its pty found only shells) - `bin/fm-spawn.sh <id> --relaunch` launches the replacement in a new terminal in the task's recorded Orca worktree and republishes the record with it; a live, ambiguous, or unreadable terminal still refuses.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
@@ -89,8 +89,8 @@ Neither path relaxes the dirty, unlanded, or force gates.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
-- `fm-control.sh relaunch` is unsupported; exit the worker and respawn the task instead, or use `fm-spawn.sh <id> --relaunch` once Orca no longer has the terminal.
-  A closed terminal now reads `missing`, so that respawn is the path the fleet watchdog takes on its own, and any other Orca endpoint still refuses with the concrete reason.
+- `fm-control.sh relaunch` is unsupported; exit the worker and respawn the task instead, or use `fm-spawn.sh <id> --relaunch` once the terminal provably hosts no agent.
+  A closed terminal reads `missing` and a terminal still listed with only a shell below it reads `dead`, so that respawn is the path the fleet watchdog takes on its own for both, and any other Orca endpoint still refuses with the concrete reason.
 - Firstmate does not gate on the version or capability list Orca reports, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.
