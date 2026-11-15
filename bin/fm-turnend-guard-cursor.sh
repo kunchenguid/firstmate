@@ -391,8 +391,15 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
 done
 
 # The need may have vanished while parked - the fleet was torn down, or Relay
-# was opted out. Nothing left to supervise, so end the turn quietly.
-if ! fm_supervision_needed "$STATE" "$GRACE"; then
+# was opted out. Nothing left to supervise, so end the turn quietly. The host's
+# captain-outcome hand-back is owed to main whatever the fleet now holds: the
+# engine's own handling can be what emptied it (it tears down a finished scout).
+CAPTAIN_OUTCOME=0
+if [ "$HOST_MODE" -eq 1 ] && [ -n "$ARM_OUT" ] \
+  && grep -q '^supervision-host: branch-outcome:' "$ARM_OUT" 2>/dev/null; then
+  CAPTAIN_OUTCOME=1
+fi
+if [ "$CAPTAIN_OUTCOME" -eq 0 ] && ! fm_supervision_needed "$STATE" "$GRACE"; then
   budget_reset_if_ours
   exit 0
 fi
