@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), [tiered status scanning](#tiered-status-scanning-configstatus-scan-tiers), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
@@ -981,6 +981,34 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Tiered status scanning (config/status-scan-tiers)
+
+Create the optional local, gitignored `config/status-scan-tiers` file to make an ordinary wake drain rescan only recently active status logs.
+Every drain reads every status file to build its UNREAD STATUS, outcome backstop, and OPEN DECISIONS sections, and on a home with many finished tasks that rescan dominates the drain's time.
+
+The feature is off when the file is absent, and every drain then scans every status file as before.
+The file is local to each home and is not inherited by secondmate homes.
+Each drain reads it, so creating or removing it needs no restart.
+
+The file may be empty or hold these lines, each optional:
+
+- `hot-seconds=<n>` is how recently a status file must have changed to count as hot (default 3600).
+- `cold-sweep=heartbeat` names when cold files are scanned (default and only value `heartbeat`): on drains that present a heartbeat wake, and on the session-start and away-mode return drains.
+
+Blank lines, lines without `=`, unknown keys, and unusable values keep the defaults.
+
+A status file is hot when any of these holds:
+
+- It changed within `hot-seconds`.
+- Its size or identity differs from its row in the presentation manifest, so a file with bytes not yet presented is always hot, whatever its age.
+- It has no manifest row yet.
+- A wake the drain presents names its task.
+
+Other drains scan hot files only, and keep each cold file's manifest row unchanged.
+A cold file's open decisions and unread lines are therefore never dropped: they are presented again on the next heartbeat, session-start, or away-mode return drain.
+A drain that skipped cold files prints one `STATUS SCAN: skipped <n> cold status file(s) ...` line.
+`bin/fm-wake-drain.sh` owns the drain selection, including its `--full-status-scan` flag, and `bin/fm-classify-lib.sh`'s `status_presentation_snapshot_tiered` owns the hot test, with coverage in [`tests/fm-status-scan-tiers.test.sh`](../tests/fm-status-scan-tiers.test.sh).
 
 ## Record hygiene report (config/record-hygiene)
 

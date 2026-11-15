@@ -1250,7 +1250,7 @@ scan_open_decisions() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
-    task=$(basename "$f"); task="${task%.status}"
+    task=${f##*/}; task=${task%.status}
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -1322,10 +1322,21 @@ EOF
 # drop an open decision - because a losing writer's offset can only ever be
 # equal to or behind an already-recorded byte position, and the next call
 # re-derives from whatever offset actually landed on disk.
+# Parameter expansion, not dirname/basename, because the drain resolves this
+# path several times per status file and each exec is slow on a loaded host.
 _fm_open_decisions_cursor_path() {  # <status-file>
   local f=$1 dir base
-  dir=$(dirname "$f")
-  base=$(basename "$f")
+  case "$f" in
+    */*) dir=${f%/*}; base=${f##*/} ;;
+    *) dir=.; base=$f ;;
+  esac
+  while :; do
+    case "$dir" in
+      */) [ "$dir" != / ] || break; dir=${dir%/} ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$dir" ] || dir=/
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
@@ -1576,7 +1587,7 @@ scan_open_decisions_incremental() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
-    task=$(basename "$f"); task="${task%.status}"
+    task=${f##*/}; task=${task%.status}
     open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -1589,21 +1600,191 @@ EOF
   return 0
 }
 
-status_presentation_snapshot() {  # <state>
-  local state=$1 f task size ident exclude
-  exclude=$(status_scan_parent_channel_exclude "$state")
+# One stat exec over every listed file. Sets _FM_BATCH_STAT_ROWS to one
+# "<size>\t<identity>\t<mtime>" line per file, in argument order, where size
+# and identity are exactly what _fm_status_stat_fields reads for that file.
+# Any unreadable file, or output that does not parse, fails the whole batch.
+_fm_status_batch_stat() {  # <file>...
+  local out line dev_ino size epoch birth mtime rest rows='' count=0 ident
+  _FM_BATCH_STAT_ROWS=
+  [ "$#" -gt 0 ] || return 0
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
+    out=$(LC_ALL=C /usr/bin/stat -f '%d:%i%t%z%t%B%t%FB%t%m' -- "$@" 2>/dev/null) || return 1
+  else
+    out=$(LC_ALL=C stat -c $'%d:%i\t%s\t%W\t%w\t%Y' -- "$@" 2>/dev/null) || return 1
+  fi
+  while IFS= read -r line; do
+    dev_ino=${line%%$'\t'*}; rest=${line#*$'\t'}
+    size=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    epoch=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    birth=${rest%%$'\t'*}; mtime=${rest#*$'\t'}
+    [ "$epoch" != 0 ] || birth=''
+    case "$dev_ino$birth" in *$'\t'*|'') return 1 ;; esac
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+    if [ -n "$birth" ]; then ident="strong:$dev_ino:$birth"; else ident="weak:$dev_ino"; fi
+    rows="$rows$size"$'\t'"$ident"$'\t'"$mtime"$'\n'
+    count=$((count + 1))
+  done <<EOF
+$out
+EOF
+  [ "$count" -eq "$#" ] || return 1
+  _FM_BATCH_STAT_ROWS=$rows
+}
+
+# Collect the presentation snapshot rows for <state> into _FM_SNAPSHOT_ROWS as
+# "<task>\t<size>\t<identity>\t<mtime>" lines in glob (task id) order. One stat
+# exec covers every file and the task id comes from parameter expansion, so the
+# cost no longer grows by several processes per status file. The mtime column
+# is filled only when <with-mtime> is 1 and is "-" otherwise. Injected test
+# readers keep the per-file readers so their contract holds.
+_fm_status_snapshot_collect() {  # <state> <exclude> <with-mtime>
+  local state=$1 exclude=$2 with_mtime=$3 f task size ident mtime rows=''
+  _FM_SNAPSHOT_ROWS=
+  set --
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
-    task=$(basename "$f"); task="${task%.status}"
-    size=$(_fm_status_file_size "$f") || return 1
-    size=${size//[[:space:]]/}
-    ident=$(_fm_open_decisions_file_ident "$f") || return 1
-    case "$size" in ''|*[!0-9]*) return 1 ;; esac
-    [ -n "$ident" ] || return 1
-    printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
+    set -- "$@" "$f"
   done
+  [ "$#" -gt 0 ] || return 0
+  if [ -n "${FM_STATUS_IDENTITY_READER:-}" ] || [ -n "${FM_STATUS_SIZE_READER:-}" ]; then
+    for f in "$@"; do
+      task=${f##*/}; task=${task%.status}
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ -n "$ident" ] || return 1
+      mtime=-
+      if [ "$with_mtime" = 1 ]; then
+        mtime=$(_fm_status_file_mtime "$f") || return 1
+        case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+      fi
+      rows="$rows$task"$'\t'"$size"$'\t'"$ident"$'\t'"$mtime"$'\n'
+    done
+    _FM_SNAPSHOT_ROWS=$rows
+    return 0
+  fi
+  _fm_status_batch_stat "$@" || return 1
+  while IFS=$'\t' read -r size ident mtime; do
+    [ -n "$size" ] || continue
+    f=$1; shift
+    task=${f##*/}; task=${task%.status}
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$with_mtime" = 1 ] || mtime=-
+    rows="$rows$task"$'\t'"$size"$'\t'"$ident"$'\t'"$mtime"$'\n'
+  done <<EOF
+$_FM_BATCH_STAT_ROWS
+EOF
+  _FM_SNAPSHOT_ROWS=$rows
+}
+
+# Print one "<task>\t<size>\t<identity>" row per presentable status file.
+status_presentation_snapshot() {  # <state>
+  local state=$1 exclude line
+  exclude=$(status_scan_parent_channel_exclude "$state")
+  _fm_status_snapshot_collect "$state" "$exclude" 0 || return 1
+  [ -n "$_FM_SNAPSHOT_ROWS" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "${line%$'\t'*}" || return 1
+  done <<EOF
+$_FM_SNAPSHOT_ROWS
+EOF
+}
+
+# --- opt-in tiered status scanning (config/status-scan-tiers) ---------------
+#
+# docs/configuration.md "Tiered status scanning" owns the setting. Absent, every
+# drain scans every status file exactly as before. Present, a drain that is not
+# a full sweep scans only hot files. A file is hot when its mtime is within
+# hot-seconds of now, when it has no presentation manifest row, when its size
+# or identity differs from that row (so a file with unpresented bytes is always
+# hot), or when the caller names it because a presented wake points at it. Cold
+# files keep their manifest rows unchanged, so the next full sweep still
+# presents every open decision they hold.
+FM_STATUS_SCAN_HOT_SECONDS_DEFAULT=3600
+FM_STATUS_SCAN_COLD_SWEEP_DEFAULT=heartbeat
+
+# status_scan_tiers_config <config-dir>: 0 and sets FM_STATUS_SCAN_HOT_SECONDS
+# and FM_STATUS_SCAN_COLD_SWEEP when the home opted in; 1 when it did not.
+# Blank lines, # comments, unknown keys, and unusable values keep the defaults.
+# shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
+status_scan_tiers_config() {  # <config-dir>
+  local file=$1/status-scan-tiers line key value
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  FM_STATUS_SCAN_HOT_SECONDS=$FM_STATUS_SCAN_HOT_SECONDS_DEFAULT
+  FM_STATUS_SCAN_COLD_SWEEP=$FM_STATUS_SCAN_COLD_SWEEP_DEFAULT
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *=*) ;; *) continue ;; esac
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      hot-seconds)
+        case "$value" in ''|0*|*[!0-9]*) ;; *) FM_STATUS_SCAN_HOT_SECONDS=$value ;; esac
+        ;;
+      cold-sweep)
+        case "$value" in heartbeat) FM_STATUS_SCAN_COLD_SWEEP=$value ;; esac
+        ;;
+    esac
+  done < "$file"
+  return 0
+}
+
+# Split <state>'s presentation snapshot into hot and cold files with no
+# per-file process. Sets STATUS_SNAPSHOT_HOT (rows in the
+# status_presentation_snapshot shape, newline-terminated),
+# STATUS_SNAPSHOT_COLD_TASKS (one cold task id per line), and
+# STATUS_SNAPSHOT_COLD_COUNT. Call it directly, not in a command substitution,
+# so the results reach the caller.
+STATUS_SNAPSHOT_HOT=
+STATUS_SNAPSHOT_COLD_TASKS=
+STATUS_SNAPSHOT_COLD_COUNT=0
+# shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
+status_presentation_snapshot_tiered() {  # <state> <hot-seconds> <now-epoch> [<forced-hot-task-ids>]
+  local state=$1 hot=$2 now=$3 forced=${4:-} exclude manifest data='' row task size ident mtime
+  local nl=$'\n' tab=$'\t' hot_rows='' cold_tasks='' cold_count=0 is_hot
+  STATUS_SNAPSHOT_HOT=
+  STATUS_SNAPSHOT_COLD_TASKS=
+  STATUS_SNAPSHOT_COLD_COUNT=0
+  case "$hot" in ''|*[!0-9]*) return 1 ;; esac
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  exclude=$(status_scan_parent_channel_exclude "$state")
+  _fm_status_snapshot_collect "$state" "$exclude" 1 || return 1
+  manifest="$state/.status-presentation-cursor"
+  if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ]; then
+    while IFS= read -r row || [ -n "$row" ]; do
+      data="$data$row$nl"
+    done < "$manifest"
+  fi
+  data="$nl$data"
+  while IFS=$'\t' read -r task size ident mtime; do
+    [ -n "$task" ] || continue
+    is_hot=1
+    if [ $((now - mtime)) -ge "$hot" ]; then
+      # Cold only when exactly one manifest row matches this identity and has
+      # presented every byte. A duplicate row stays hot so the ordinary
+      # presentation path reports the malformed manifest.
+      case "$data" in
+        *"$nl$task$tab"*"$nl$task$tab"*) ;;
+        *"$nl$task$tab$ident$tab$size$tab"*|*"$nl$task$tab$ident$tab$size$nl"*) is_hot=0 ;;
+      esac
+      case "$nl$forced$nl" in *"$nl$task$nl"*) is_hot=1 ;; esac
+    fi
+    if [ "$is_hot" -eq 1 ]; then
+      hot_rows="$hot_rows$task$tab$size$tab$ident$nl"
+    else
+      cold_tasks="$cold_tasks$task$nl"
+      cold_count=$((cold_count + 1))
+    fi
+  done <<EOF
+$_FM_SNAPSHOT_ROWS
+EOF
+  STATUS_SNAPSHOT_HOT=$hot_rows
+  STATUS_SNAPSHOT_COLD_TASKS=$cold_tasks
+  STATUS_SNAPSHOT_COLD_COUNT=$cold_count
 }
 
 # Read the latest non-blank event through one captured presentation endpoint.
@@ -2028,8 +2209,12 @@ $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
+# An optional <carry-task-ids> list (one id per line) names cold tasks a tiered
+# drain did not scan; their existing manifest rows are copied unchanged after
+# the snapshot rows, so skipping a file never moves or drops its cursor.
+status_commit_presentation_snapshot() {  # <state> <snapshot> [<carry-task-ids>]
+  local state=$1 snapshot=$2 carry=${3:-} task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
+  local manifest row_task row_ident row_offset row_backstop row_extra nl=$'\n'
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -2056,6 +2241,19 @@ EOF
   done <<EOF
 $snapshot
 EOF
+  if [ -n "$carry" ]; then
+    manifest="$state/.status-presentation-cursor"
+    [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || { rm -f "$tmp"; return 1; }
+    while IFS=$'\t' read -r row_task row_ident row_offset row_backstop row_extra || [ -n "$row_task" ]; do
+      [ -n "$row_task" ] || continue
+      case "$nl$carry$nl" in *"$nl$row_task$nl"*) ;; *) continue ;; esac
+      case "$nl$snapshot" in *"$nl$row_task"$'\t'*) continue ;; esac
+      [ -z "$row_extra" ] && [ -n "$row_ident" ] && [ -n "$row_offset" ] || { rm -f "$tmp"; return 1; }
+      case "$row_offset:$row_backstop" in *[!0-9:]*) rm -f "$tmp"; return 1 ;; esac
+      printf '%s\t%s\t%s\t%s\n' "$row_task" "$row_ident" "$row_offset" "${row_backstop:-0}" >> "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    done < "$manifest"
+  fi
   mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
 }
 
@@ -2237,7 +2435,7 @@ scan_unread_surface_lines() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
-    task=$(basename "$f"); task="${task%.status}"
+    task=${f##*/}; task=${task%.status}
     lines=$(status_new_lines_since_cursor "$f") || return 1
     [ -n "$lines" ] || continue
     while IFS= read -r line; do

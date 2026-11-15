@@ -14,6 +14,10 @@
 # .wake-queue.actor-view.*) is created and removed under the queue lock, so one
 # found while taking that lock was left by a drain that died mid-write; each
 # locked drain rotates such leftovers away before doing anything else.
+# --full-status-scan (session start, away-mode return) scans every status file
+# even when the home opted into tiered scanning with config/status-scan-tiers;
+# without that file the flag changes nothing (docs/configuration.md "Tiered
+# status scanning").
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
 set -u
@@ -225,8 +229,13 @@ presented_max_row() { # <rows-file>
   fi
 }
 
+FULL_STATUS_SCAN=false
 case "${1:-}" in
   '') ;;
+  --full-status-scan)
+    [ "$#" -eq 1 ] || { echo "wake drain: --full-status-scan takes no other arguments" >&2; exit 2; }
+    FULL_STATUS_SCAN=true
+    ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -236,7 +245,7 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--full-status-scan | --ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -762,8 +771,8 @@ cap_outcome_line() {  # <line> <max-bytes>
   OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 
-print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
+print_status_sections() {  # [<snapshot>] [<fully-presented>] [<cold-carry-tasks>]
+  local snapshot=${1:-} fully_presented=${2:-} carry=${3:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
@@ -784,16 +793,43 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
-  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged"; then
+  if ! status_commit_presentation_snapshot "$STATE" "$acknowledged" "$carry"; then
     rm -f -- "$prepared"
     return 1
   fi
   rm -f -- "$prepared"
 }
 
+# Opt-in tiered scanning (docs/configuration.md "Tiered status scanning"):
+# succeed when config/status-scan-tiers is present and this drain is not a full
+# sweep, setting TIER_NOW and TIER_FORCED_HOT for the tiered snapshot. A full
+# sweep is a drain started with --full-status-scan or one that presents a
+# heartbeat wake. Every task a presented signal wake names is hot.
+TIER_NOW=
+TIER_FORCED_HOT=
+status_scan_tiers_limits_this_drain() {  # [<deduped-raw-rows>]
+  local rows=${1:-} epoch seq kind key payload
+  TIER_NOW=
+  TIER_FORCED_HOT=
+  [ "$FULL_STATUS_SCAN" = false ] || return 1
+  status_scan_tiers_config "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || return 1
+  while IFS=$'\t' read -r epoch seq kind key payload; do
+    [ "$kind" != heartbeat ] || return 1
+    if [ "$kind" = signal ] && fm_wake_status_key_map "$key"; then
+      TIER_FORCED_HOT="$TIER_FORCED_HOT${FM_WAKE_STATUS_KEY%.status}"$'\n'
+    fi
+  done <<EOF
+$rows
+EOF
+  printf -v TIER_NOW '%(%s)T' -1 2>/dev/null || TIER_NOW=
+  case "$TIER_NOW" in ''|*[!0-9]*) TIER_NOW=$(date +%s) || return 1 ;; esac
+  case "$TIER_NOW" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0 carry=''
   local lock_rc holder_pid
+  STATUS_SNAPSHOT_COLD_COUNT=0
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
   else
@@ -807,10 +843,19 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
     return 1
   fi
-  snapshot=$(status_presentation_snapshot "$STATE") || {
-    printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
-    rc=1
-  }
+  if status_scan_tiers_limits_this_drain "$rows"; then
+    status_presentation_snapshot_tiered "$STATE" "$FM_STATUS_SCAN_HOT_SECONDS" "$TIER_NOW" "$TIER_FORCED_HOT" || {
+      printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
+      rc=1
+    }
+    snapshot=$STATUS_SNAPSHOT_HOT
+    carry=$STATUS_SNAPSHOT_COLD_TASKS
+  else
+    snapshot=$(status_presentation_snapshot "$STATE") || {
+      printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
+      rc=1
+    }
+  fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
@@ -818,7 +863,16 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then
+    print_status_sections "$snapshot" "$fully_presented" "$carry" || rc=1
+  elif [ "$rc" -eq 0 ] && [ -n "$carry" ]; then
+    # Every file was cold: the record check does not depend on status bytes.
+    print_record_divergence_section || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$STATUS_SNAPSHOT_COLD_COUNT" -gt 0 ]; then
+    printf 'STATUS SCAN: skipped %s cold status file(s) on this wake; the next heartbeat or session start scans them.\n' \
+      "$STATUS_SNAPSHOT_COLD_COUNT" || rc=1
+  fi
   fm_lock_release "$lock"
   return "$rc"
 }
