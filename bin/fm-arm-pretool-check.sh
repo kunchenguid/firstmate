@@ -157,16 +157,23 @@ fi
 # delegates to the classifier - the single owner of every decision. Any deeper
 # decode-required obfuscation stays the classifier's and the post-arm liveness
 # guards' responsibility.
-PREFILTER=$(printf '%s' "$CMD" | tr -d '\\"\047\n\r')
-case "$CMD" in
-  *"\$'"*|*'$"'*) ;;
-  *)
-    case "$PREFILTER" in
-      *fm-watch*) ;;
-      *) exit 0 ;;
-    esac
-    ;;
-esac
+#
+# The strip is one tr pass, not per-byte ${CMD//...} substitutions, because
+# those are superlinear on long text under bash 3.2 with a UTF-8 locale. The
+# fast path runs only after the strip succeeds: BSD tr rejects an illegal byte
+# sequence and may emit just a prefix, and a partial strip cannot prove fm-watch
+# is absent, so a failed strip delegates the unchanged command.
+if PREFILTER=$(set -o pipefail; printf '%s' "$CMD" | tr -d '\\"\047\n\r' 2>/dev/null); then
+  case "$CMD" in
+    *"\$'"*|*'$"'*) ;;
+    *)
+      case "$PREFILTER" in
+        *fm-watch*) ;;
+        *) exit 0 ;;
+      esac
+      ;;
+  esac
+fi
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0

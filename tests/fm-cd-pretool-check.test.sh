@@ -475,3 +475,165 @@ test_multibyte_prefilter_bounded() {
   pass "hook: large UTF-8 commands fast-allow and delegate within the bound"
 }
 test_multibyte_prefilter_bounded
+
+# --- a failed prefilter strip delegates the original command -----------------
+#
+# The node stand-in records each call's exact argv, NUL-separated, and then runs
+# the real classifier, so the policy owner still makes every decision.
+write_node_spy() { # <fakebin> <call-dir>
+  local real_node
+  real_node=$(command -v node) || return 1
+  mkdir -p "$1" "$2"
+  cat > "$1/node" <<EOF
+#!/bin/bash
+n=1
+while [ -e "$2/call-\$n" ]; do n=\$((n + 1)); done
+for arg in "\$@"; do printf '%s\\0' "\$arg"; done > "$2/call-\$n"
+exec "$real_node" "\$@"
+EOF
+  chmod +x "$1/node"
+}
+
+# A tr that fails the prefilter strip the way BSD tr does on an illegal byte
+# sequence - a partial prefix on stdout and a nonzero exit - on any platform.
+# Every other tr call runs the real tool.
+write_failing_strip_tr() { # <dir>
+  local tr_bin
+  tr_bin=$(command -v tr) || return 1
+  mkdir -p "$1"
+  cat > "$1/tr" <<EOF
+#!/bin/bash
+if [ "\${1:-}" = -d ]; then
+  head -c 3
+  exit 1
+fi
+exec "$tr_bin" "\$@"
+EOF
+  chmod +x "$1/tr"
+}
+
+# spied_check <case-dir> <locale-or-empty> <command> [<path-prefix>]
+# Runs the real hook in the primary fixture with the node spy; the exit status
+# is left in SPIED_RC.
+spied_check() {
+  local cdir=$1 locale_name=$2 command=$3 prefix=${4:-} path_value
+  write_node_spy "$cdir/fakebin" "$cdir/calls" || fail "Node is required for the delegation regressions"
+  path_value="$cdir/fakebin:$PATH"
+  [ -z "$prefix" ] || path_value="$prefix:$path_value"
+  if [ -n "$locale_name" ]; then
+    fm_run_timed 20 env LC_ALL="$locale_name" PATH="$path_value" \
+      /bin/bash "$CHECK" --command "$command" > "$cdir/out" 2> "$cdir/err"
+  else
+    fm_run_timed 20 env PATH="$path_value" \
+      /bin/bash "$CHECK" --command "$command" > "$cdir/out" 2> "$cdir/err"
+  fi
+  SPIED_RC=$?
+}
+
+# Exactly one classifier call, carrying the original command bytes.
+assert_one_exact_delegation() { # <case-dir> <command> <label>
+  local calls arg want=0 found=0
+  calls=$(($(find "$1/calls" -name 'call-*' | wc -l)))
+  [ "$calls" -eq 1 ] || fail "$3: expected one classifier call, got $calls"
+  while IFS= read -r -d '' arg; do
+    if [ "$want" -eq 1 ]; then
+      printf '%s' "$arg" > "$1/command.actual"
+      found=1
+      break
+    fi
+    [ "$arg" = --command ] && want=1
+  done < "$1/calls/call-1"
+  [ "$found" -eq 1 ] || fail "$3: the classifier call carried no --command"
+  printf '%s' "$2" > "$1/command.expected"
+  cmp -s "$1/command.expected" "$1/command.actual" \
+    || fail "$3: the classifier did not receive the original command bytes"
+}
+
+assert_spied_allow() { # <case-dir> <label>
+  [ "$SPIED_RC" -eq 0 ] || fail "$2 must allow, got exit $SPIED_RC: $(cat "$1/err")"
+  [ ! -s "$1/out" ] && [ ! -s "$1/err" ] || fail "$2 allow must be silent: $(cat "$1/out" "$1/err")"
+}
+
+assert_spied_deny() { # <case-dir> <label>
+  [ "$SPIED_RC" -eq 2 ] || fail "$2 must deny, got exit $SPIED_RC"
+  grep -q '\[persistent-cd\]' "$1/err" || fail "$2 lost the classifier's denial: $(cat "$1/err")"
+}
+
+test_strip_failure_delegates_original_command() {
+  local locale_name dir command
+  locale_name=$(utf8_locale) || { printf 'SKIP: UTF-8 locale unavailable\n'; return; }
+  dir=$(fm_test_tmproot cd-strip-failure)
+
+  # 0xc3 opens a UTF-8 sequence that never completes. BSD tr rejects it and can
+  # print only the prefix before it, which lacks the cd bytes, so the partial
+  # strip must not fast-allow.
+  command="printf '"$'\303'"'; cd projects/foo"
+  spied_check "$dir/protected" "$locale_name" "$command"
+  assert_spied_deny "$dir/protected" "invalid UTF-8 before cd"
+  assert_one_exact_delegation "$dir/protected" "$command" "invalid UTF-8 before cd"
+
+  # The same byte in an innocuous command keeps its allow.
+  command="printf '"$'\303'"'; ls -la"
+  spied_check "$dir/innocuous" "$locale_name" "$command"
+  assert_spied_allow "$dir/innocuous" "invalid UTF-8 innocuous command"
+  if printf 'a\303b' | LC_ALL="$locale_name" tr -d x >/dev/null 2>&1; then
+    # This host's tr strips bytes without validating them, so the strip
+    # succeeded and the fast path is legitimate.
+    [ -z "$(find "$dir/innocuous/calls" -name 'call-*')" ] \
+      || fail "a successful strip of an innocuous command must not invoke the classifier"
+    pass "cd-guard: invalid UTF-8 before cd delegates and denies; this tr strips it, so an innocuous one fast-allows"
+  else
+    assert_one_exact_delegation "$dir/innocuous" "$command" "invalid UTF-8 innocuous command"
+    pass "cd-guard: this tr rejects invalid UTF-8; the original command reaches the classifier, keeping deny and allow"
+  fi
+}
+test_strip_failure_delegates_original_command
+
+test_failed_strip_delegates_portably() {
+  local locale_name dir command
+  locale_name=$(utf8_locale) || locale_name=""
+  dir=$(fm_test_tmproot cd-forced-strip-failure)
+  write_failing_strip_tr "$dir/trfail" || fail "tr is required for the forced strip failure"
+  command='c""d projects/foo'
+  spied_check "$dir/protected" "$locale_name" "$command" "$dir/trfail"
+  assert_spied_deny "$dir/protected" "a protected command whose strip failed"
+  assert_one_exact_delegation "$dir/protected" "$command" "a protected command whose strip failed"
+  command='echo ok'
+  spied_check "$dir/innocuous" "$locale_name" "$command" "$dir/trfail"
+  assert_spied_allow "$dir/innocuous" "an innocuous command whose strip failed"
+  assert_one_exact_delegation "$dir/innocuous" "$command" "an innocuous command whose strip failed"
+  pass "cd-guard: a failed prefilter strip never fast-allows; the classifier decides on the original command"
+}
+test_failed_strip_delegates_portably
+
+test_prefilter_normalization_delegates_to_classifier() {
+  local locale_name dir i command expected actual
+  locale_name=$(utf8_locale) || locale_name=""
+  dir=$(fm_test_tmproot cd-prefilter-normalization)
+  local -a commands=(
+    'c""d projects/foo'
+    "c'd' projects/foo"
+    'c\d projects/foo'
+    $'c\\\nd projects/foo'
+    $'c\nd projects/foo'
+    $'c\rd projects/foo'
+    "\$'\\143d' projects/foo"
+    '$"cd" projects/foo'
+    'echo «ñ» — 🙂; c""d projects/foo'
+  )
+  for ((i = 0; i < ${#commands[@]}; i++)); do
+    command=${commands[$i]}
+    mkdir -p "$dir/case-$i"
+    spied_check "$dir/case-$i" "$locale_name" "$command"
+    assert_one_exact_delegation "$dir/case-$i" "$command" "normalization case $i"
+    expected=$(node "$PRIMARY/bin/fm-cd-command-policy.mjs" --home "$PRIMARY" --command "$command" | cut -f1)
+    case "$SPIED_RC" in
+      0) actual=allow ;;
+      2) actual=deny ;;
+      *) actual="exit $SPIED_RC" ;;
+    esac
+    [ "$actual" = "$expected" ] || fail "normalization case $i: hook gave $actual, classifier says $expected"
+  done
+  pass "cd-guard: quote, backslash, LF, CR, and decoder-marker variants still delegate with the classifier's decision"
+}
+test_prefilter_normalization_delegates_to_classifier
