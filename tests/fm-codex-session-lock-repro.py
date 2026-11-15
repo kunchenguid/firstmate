@@ -164,8 +164,8 @@ exec {shlex.quote(sys.executable)} "$@"
     start = '"$FM_HOME/bin/fm-session-start.sh"'
     lock = '"$FM_HOME/bin/fm-lock.sh"'
     own = '. "$FM_HOME/bin/fm-session-lock-lib.sh"; fm_session_lock_owned_by_self "$FM_HOME/state"'
-    # Contract: an unavailable argv reader must not turn positional prompt
-    # text into a native subcommand. Hide python3 while retaining lock tools.
+    # Hide python3 while retaining lock tools. A flattened app-server token
+    # after a split directory value or in prompt text must fail closed.
     no_python = home / 'no-python'
     no_python.mkdir()
     for name in ('bash', 'basename', 'dirname', 'cat', 'grep', 'tr', 'uname',
@@ -179,7 +179,24 @@ exec {shlex.quote(sys.executable)} "$@"
     saved_path = env['PATH']
     env['PATH'] = str(no_python)
     assert run('command -v python3', None).returncode == 1, 'python3 remained available'
-    env['FM_FIXTURE_SUBCOMMAND'] = '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership'
+    for arguments in (
+        "-C '/Users/me/My Home' app-server",
+        '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership',
+    ):
+        env['FM_FIXTURE_SUBCOMMAND'] = arguments
+        for identity in (None, OWNER, OTHER):
+            assert run(lock, identity).returncode == 1, 'missing-python ambiguous arguments granted PID-only ownership: ' + arguments
+        assert not (home / 'state/.lock').exists(), 'missing-python ambiguous arguments published a lock'
+        assert not (home / 'state/.lock-session').exists(), 'missing-python ambiguous arguments published an identity'
+        legacy = (str(os.getpid()) + '\n').encode()
+        (home / 'state/.lock').write_bytes(legacy)
+        assert run(own, OTHER).returncode == 1, 'missing-python ambiguous arguments trusted a legacy shared PID'
+        assert run(lock, OTHER).returncode == 1, 'missing-python ambiguous arguments claimed a legacy shared PID'
+        assert (home / 'state/.lock').read_bytes() == legacy, 'missing-python ambiguous arguments replaced the legacy owner'
+        assert not (home / 'state/.lock-session').exists(), 'missing-python ambiguous arguments fabricated a legacy owner identity'
+        (home / 'state/.lock').unlink()
+    print('ok - missing-python spaced directory and ambiguous prompt refuse PID-only ownership')
+    env['FM_FIXTURE_SUBCOMMAND'] = '-m gpt-5.5 --approve-for-me Inspect ownership'
     acquired = run(lock, None)
     assert acquired.returncode == 0, 'missing-python CLI could not acquire an empty home: ' + acquired.stdout + acquired.stderr
     assert (home / 'state/.lock').read_text().strip() == str(os.getpid()), 'missing-python CLI lost its PID anchor'
@@ -188,7 +205,7 @@ exec {shlex.quote(sys.executable)} "$@"
     assert run(own, None).returncode == 0, 'missing-python CLI lost ownership'
     (home / 'state/.lock').unlink()
     env['PATH'] = saved_path
-    print('ok - missing-python prompt text retains ordinary CLI lock ownership')
+    print('ok - missing-python CLI without an ambiguous server token retains lock ownership')
     # Contract: a shared server without identity cannot publish a PID-only
     # lock, even when a global directory value contains spaces.
     env['FM_FIXTURE_SUBCOMMAND'] = "-C '/Users/me/My Home' app-server"
@@ -360,11 +377,17 @@ exec {shlex.quote(sys.executable)} "$@"
         assert run(lock, OTHER).returncode == 1, 'identified native server accepted a competing session'
         (home / 'state/.lock').unlink()
         (home / 'state/.lock-session').unlink()
-    # The OS denies argv reads. A server in the subcommand position still
-    # cannot prove native identity from retained environment or hook IDs.
-    # Spaced option values are covered above with the argv reader available.
+    # The OS denies argv reads. A server token, including one hidden by a
+    # split option value, cannot prove identity from environment or hook IDs.
     env['FM_FIXTURE_ARGV_UNREADABLE'] = '1'
     for arguments in (
+        "-C '/Users/me/My Home' app-server",
+        "--cd '/Users/me/My Home' app-server",
+        "--cd='/Users/me/My Home' app-server",
+        "-C'/Users/me/My Home' app-server",
+        "-c 'note=\"split value\"' app-server",
+        '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership',
+        '-- app-server',
         'app-server --listen stdio://',
         '-c features.hooks=true app-server',
         '--config features.hooks=true app-server',

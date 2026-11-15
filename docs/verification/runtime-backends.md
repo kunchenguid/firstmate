@@ -3688,7 +3688,7 @@ This verifies the primary-session park, not a worker busy-state classifier or a 
 
 ## Native Codex session-lock identity
 
-Verified on 2026-11-06 with `codex-cli 0.167.0` on macOS 27.2.0, arm64.
+Verified on 2026-11-15 with `codex-cli 0.169.0` on macOS 27.2.1, arm64.
 One real `codex app-server` process opened two threads whose native SessionStart hooks ran `bin/fm-sessionstart-run.sh` in an isolated home.
 The two hook payloads carried distinct `session_id` values while every hook shell walked to the same server pid.
 The first thread acquired the lock with a `codex-native:<session_id>` sidecar, and the second thread received the read-only startup digest.
@@ -3704,10 +3704,10 @@ bash tests/fm-codex-session-identity-live-e2e.test.sh
 Observed output:
 
 ```text
-ok - fm-isolated-regression/0.167.0 (Mac OS 27.2.0; arm64) herdr/0.9.5 (fm-isolated-regression; 1): distinct native hook identities sharing one server preserve one lock owner
+ok - fm-isolated-regression/0.169.0 (Mac OS 27.2.1; arm64) dumb (fm-isolated-regression; 1): distinct native hook identities sharing one server preserve one lock owner
 ```
 
-A shell tool in a root `codex exec` thread on the same build received `CODEX_SESSION_ID` and `CODEX_THREAD_ID`, both set to that thread's session id.
+A shell tool in a root `codex exec` thread on `codex-cli 0.167.0` received `CODEX_SESSION_ID` and `CODEX_THREAD_ID`, both set to that thread's session id.
 That probe submits a prompt, so rerun it by hand after a Codex upgrade:
 
 ```sh
@@ -3715,6 +3715,7 @@ codex exec --skip-git-repo-check -s read-only 'Run exactly this shell command on
 ```
 
 `tests/fm-codex-session-lock.test.sh` covers startup, acquisition, ownership, Stop, and checkpoint behavior portably, including descendant threads whose `CODEX_THREAD_ID` differs from `CODEX_SESSION_ID`.
+The portable guard also checks spaced option values with an unreadable argv vector and with `python3` absent.
 That descendant case uses a fixture process table, while the installed-harness guard above exercises separate root sessions and their native hooks.
 [`bin/fm-session-lock-lib.sh`](../../bin/fm-session-lock-lib.sh) owns the native identity trust contract and the legacy pid-only lock boundary.
 
