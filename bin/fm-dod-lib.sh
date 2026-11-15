@@ -544,10 +544,9 @@ Delivery contract: mode=no-mistakes$suffix pr=manual
 Ship branch: $branch
 This project's pull-request text is written by hand: the pipeline's \`pr\` step would rewrite the title and body you write on every validated push, so **no-mistakes runs here as a validation pass that pushes the branch**, and you then open the PR yourself.
 Pass \`--skip pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, \`lint\`, and \`push\` still run, and \`ci\` has no pipeline-opened PR to watch.
-A commit on your branch does not complete this task: it is complete only once its pull request is open and its checks are green.
 When the work is committed, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and push, and you must resume and drive it through the push, the pull request, and that pull request's checks.
-That first \`done:\` is only the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
+Firstmate will then instruct you to run /no-mistakes to validate and push.
+That first \`done:\` is not a request to push from this copy.
 $(fm_dod_nm_handoff_notice pr)
 ${nm_base}
 EOF
@@ -616,10 +615,9 @@ Ship branch: $branch
 This project's review server is Gerrit: it has no pull requests and no forge CI the pipeline can watch, so **no-mistakes runs here as a review pass that ends at a ready branch**, and you then publish that branch as one change.
 Pass \`--skip push,pr,ci\` on every \`no-mistakes axi run\` for this task, and skip nothing else: \`review\`, \`test\`, \`document\`, and \`lint\` are the whole point of the run.
 Those three are the only steps that reach a forge, and skipping them is a supported outcome, not a degraded one.
-A commit on your branch does not complete this task: it is complete only once the change it carries is published for review.
 When the work is committed, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate, and you must resume, recover the pipeline's fixes, and publish the change.
-That first \`done:\` is only the handoff that starts the pipeline; it is not a request to publish.
+Firstmate will then instruct you to run /no-mistakes to validate.
+That first \`done:\` is not a request to publish.
 $(fm_dod_nm_handoff_notice change)
 
 EOF
@@ -711,10 +709,9 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
 Ship branch: $branch
-A commit on your branch does not complete this task: it is complete only once its pull request exists and its checks are green.
 When the work is committed, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR, and you must resume and drive it until that PR is green.
-That first \`done:\` is only the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+That first \`done:\` is not a request to push from this copy.
 $(fm_dod_nm_handoff_notice pr)
 ${nm_base}
 EOF

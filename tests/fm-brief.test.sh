@@ -458,15 +458,14 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 
 # The no-mistakes handoff `done: {summary}` is what firstmate reads to start the
 # pipeline, so it stays; but a worker that reads it as completion stops one wake
-# round short of its PR. Every no-mistakes shape must therefore say outright that
-# a commit does not complete the task, require the commit-time handoff without
-# calling that handoff completion, name its own completing report, and forbid
-# later stages from being reported as done. The handoff notice must stay
-# verb-free: bin/fm-classify-lib.sh owns the status verbs, and the declared-wait
-# verb is overridable through FM_CLASSIFY_PAUSED_VERB, so a rendered literal
-# would mislead a home that aliases it.
+# round short of its PR. Every no-mistakes shape must therefore render the shared
+# handoff notice, which says the handoff is not completion, names the shape's own
+# completing report, and forbids later stages from being reported as done. The
+# notice must stay verb-free: bin/fm-classify-lib.sh owns the status verbs, and
+# the declared-wait verb is overridable through FM_CLASSIFY_PAUSED_VERB, so a
+# rendered literal would mislead a home that aliases it.
 test_no_mistakes_dod_commit_is_not_completion() {
-  local home id flags label brief declared notice
+  local home id flags label brief declared notice count
   home="$TMP_ROOT/commit-not-done-home"
   mkdir -p "$home/data"
   for spec in \
@@ -481,8 +480,8 @@ test_no_mistakes_dod_commit_is_not_completion() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $flags >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$label: brief was not scaffolded"
-    assert_grep "A commit on your branch does not complete this task" "$brief" \
-      "$label: DoD still reads a commit as completion"
+    assert_no_grep "A commit on your branch does not complete this task" "$brief" \
+      "$label: DoD duplicates the notice's commit-is-not-completion semantics"
     assert_no_grep "The task is complete only when committed on your branch." "$brief" \
       "$label: DoD still says the task is complete when committed"
     assert_grep "When the work is committed, append \`done [at=<epoch>]: {summary}\` to the status file and stop." "$brief" \
@@ -514,6 +513,9 @@ test_no_mistakes_dod_commit_is_not_completion() {
     esac
     assert_grep "$declared" "$brief" \
       "$label: DoD does not name this shape's completing report"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    count=$(grep -F -c 'The only `done:` that completes this task is' "$brief") || true
+    [ "$count" = 1 ] || fail "$label: DoD defines its completing report $count times, not once"
   done
   pass "fm-brief.sh: no-mistakes DoDs make the pre-PR done a handoff, not completion"
 }
