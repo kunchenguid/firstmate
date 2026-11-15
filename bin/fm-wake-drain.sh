@@ -91,6 +91,9 @@ rotate_scratch_locked() {
   done
 }
 
+# Main reclaims stale grants. A branch drain uses the grant just published for
+# its turn, and its sandbox may not be able to inspect the host's PID via ps.
+# Reclaiming from that actor would delete its own snapshot before it can drain.
 reclaim_stale_branch_grant_locked() {
   [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
   if ! fm_wake_branch_grant_live "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"; then
@@ -541,8 +544,7 @@ print_record_divergence_section() {
   local diverged task origin key title line shown=0 omitted=0 bound
   local output='' used=0 bytes item_bytes=220 global_bytes=2000
 
-  # A non-positive bound is not a bound (bin/fm-timeout-lib.sh), so a bad
-  # override falls back to the default rather than disabling the deadline.
+  # Apply bin/fm-timeout-lib.sh's bound contract, defaulting a bad override.
   bound=${FM_DIVERGENCE_TIMEOUT:-20}
   case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
 
@@ -852,7 +854,7 @@ else
 fi
 DRAIN_LOCK_HELD=true
 rotate_scratch_locked
-reclaim_stale_branch_grant_locked || exit 1
+[ "$ACTOR" = branch ] || reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 

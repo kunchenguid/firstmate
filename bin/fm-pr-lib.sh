@@ -1104,11 +1104,154 @@ fm_pr_github_read_record() {  # <host> <owner> <repo> <number>
   fm_pr_github_read_record_with_gh_axi "$@"
 }
 
+# GitHub required-check reading shared by bin/fm-pr-merge.sh and
+# bin/fm-park.sh. These read the repository named by PR_OWNER and PR_REPO,
+# which the caller sets.
+github_urlencode_path_segment() {
+  local LC_ALL=C input=$1 encoded='' char octet hex
+  while [ -n "$input" ]; do
+    char=${input%"${input#?}"}
+    input=${input#?}
+    case "$char" in
+      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
+      *)
+        printf -v octet '%d' "'$char"
+        [ "$octet" -ge 0 ] || octet=$((octet + 256))
+        printf -v hex '%02X' "$octet"
+        encoded=$encoded%$hex
+        ;;
+    esac
+  done
+  printf '%s' "$encoded"
+}
+
+# Whether a failed branch-rules read (the gh stderr given) is GitHub's
+# plan-gated 403 ("Upgrade to GitHub Pro or make this repository public"),
+# which means the repository's plan cannot expose branch rules at all, on
+# GitHub or GitHub Enterprise Server - not that this script failed to read
+# them, and not that the token lacks a permission. Such a repository has no
+# active ruleset rule of any kind. Any other failure (auth, rate limit,
+# network, a 404, an unrelated 403) is not this and stays unreadable.
+github_branch_rules_unavailable_on_plan() {
+  case "$1" in
+    *"Upgrade to GitHub Pro or make this repository public"*) return 0 ;;
+  esac
+  return 1
+}
+
+FM_PR_GITHUB_REQUIRED=
+FM_PR_GITHUB_REQUIRED_ERROR=
+github_read_required_contexts() {
+  local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
+  FM_PR_GITHUB_REQUIRED='[]'
+  FM_PR_GITHUB_REQUIRED_ERROR=
+  branch_path=$(github_urlencode_path_segment "$base")
+
+  if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
+    || [ -z "$branch_json" ] \
+    || ! classic=$(printf '%s' "$branch_json" | jq -c '
+      if type != "object" or (.protected | type) != "boolean" then
+        error("branch payload is unreadable")
+      elif .protected == false then
+        empty
+      elif (.protection.required_status_checks | type) != "object" then
+        error("branch protection summary is unreadable")
+      else
+        .protection.required_status_checks
+        | ((.checks // []) | if type == "array" then .[] else error("invalid checks") end
+           | {context, app_id}),
+          ((.contexts // []) | if type == "array" then .[] else error("invalid contexts") end
+           | {context: ., app_id: null})
+        | if (.context | type) == "string" and (.context | length) > 0
+             and (.app_id == null or (.app_id | type) == "number")
+          then . else error("invalid required check") end
+        | if .app_id == -1 then .app_id = null else . end
+      end' 2>/dev/null); then
+    classic=''
+    FM_PR_GITHUB_REQUIRED_ERROR="the branch protection summary for base branch $base could not be read"
+  fi
+
+  if ! api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-required-rules.XXXXXX"); then
+    FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+  else
+    if ! rules_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" 2>"$api_err"); then
+      api_err_text=$(cat "$api_err" 2>/dev/null)
+      if ! github_branch_rules_unavailable_on_plan "$api_err_text"; then
+        FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+      fi
+    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -c '
+        if type != "array" then error("rules payload is unreadable") else .[] end
+        | select(type != "object" or .type == "required_status_checks")
+        | if type == "object" and (.parameters.required_status_checks | type) == "array"
+          then .parameters.required_status_checks[] else error("invalid required check rule") end
+        | if type == "object" and (.context | type) == "string" and (.context | length) > 0
+             and (.integration_id == null or (.integration_id | type) == "number")
+          then {context, app_id: .integration_id} else error("invalid required check rule") end
+        | if .app_id == -1 then .app_id = null else . end' 2>/dev/null); then
+      ruleset=''
+      FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+    fi
+    rm -f "$api_err"
+  fi
+
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+    unique_by([.context, .app_id]) | group_by(.context)
+    | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
+  [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
+}
+
+github_required_checks_missing() {
+  local json=$1 required=$2 producers=$3
+  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | .statusCheckRollup as $reported
+    | $required
+    | map(. as $requirement
+      | select(any($reported[];
+          if $requirement.app_id == null then
+            (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
+          elif .__typename == "CheckRun" then
+            .name == $requirement.context
+            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+          else
+            .context == $requirement.context
+          end) | not)
+      | .context) | unique[]
+  ' 2>/dev/null || return 1
+}
+
+# Reads the check runs at <head> with their producing app into
+# FM_PR_GITHUB_PRODUCERS, only when a required check in FM_PR_GITHUB_REQUIRED
+# names its app; '[]' otherwise or when the read fails, which returns 1.
+FM_PR_GITHUB_PRODUCERS='[]'
+github_read_required_producers() {  # <head>
+  local head=$1 runs
+  FM_PR_GITHUB_PRODUCERS='[]'
+  printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null || return 0
+  if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$head/check-runs" 2>/dev/null) \
+    || [ -z "$runs" ] \
+    || ! FM_PR_GITHUB_PRODUCERS=$(printf '%s' "$runs" | jq -sc --arg head "$head" '
+      [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+        | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
+          then . else error("invalid check producer") end ]' 2>/dev/null); then
+    # shellcheck disable=SC2034 # read by the callers
+    FM_PR_GITHUB_PRODUCERS='[]'
+    return 1
+  fi
+}
+
+# Reads one merge request's state and its own head commit (the MR's sha, never
+# a merge, squash, or merge-train commit, which is what lets bin/fm-teardown.sh
+# prove a squash-merged or merge-train-merged copy landed).
 fm_pr_gitlab_read_record() {  # <host> <path> <number>
   local host=$1 path=$2 number=$3 project_url json fields line
-  local total=0 named=0 state='' merged=''
+  local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
   command -v glab >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
   project_url="https://$host/$path"
@@ -1120,7 +1263,8 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
   if ! fields=$(printf '%s' "$json" | jq -r '
       if type == "object" and (.state | type == "string") and .state != "" then
         "state=" + .state,
-        "merged=" + (if .state == "merged" then "true" else "false" end)
+        "merged=" + (if .state == "merged" then "true" else "false" end),
+        "head=" + (if (.sha | type) == "string" then .sha else "" end)
       else
         error("invalid merge request state")
       end' 2>/dev/null); then
@@ -1131,13 +1275,14 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
     case "$line" in
       state=*) state=${line#state=} ;;
       merged=*) merged=${line#merged=} ;;
+      head=*) head=${line#head=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
     || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
     return 1
   fi
@@ -1145,9 +1290,12 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_STATE=$state
-  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
+  # Consumed by bin/fm-teardown.sh pr_is_merged; empty when the forge omitted it.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
 }
 
 # tea addresses a repo by slug only and takes the host from a named login, so
@@ -1592,4 +1740,132 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
+}
+
+# --- degraded ready-PR marker -------------------------------------------------
+# A ready PR/MR that degraded after its ready report - GitHub required checks
+# turning failing, GitLab leaving an active merge train or a failing head
+# pipeline - wakes once per observed head/pipeline identity. The marker below
+# carries the identity that last woke, so the same degraded state stays silent
+# on later polls while a changed identity (a new head, a new failing pipeline)
+# wakes again. The identity is what the static poll (bin/fm-pr-poll.sh) emits
+# after its "degraded " prefix, and both sides validate it so a forged or
+# malformed line can never enter the marker.
+fm_pr_poll_degraded_identity_valid() {  # <identity>
+  local identity=${1-} value
+  local LC_ALL=C
+  case $identity in
+    head=*)
+      value=${identity#head=}
+      [ "${#value}" -eq 40 ] || return 1
+      case $value in
+        *[!0-9a-f]*) return 1 ;;
+      esac
+      ;;
+    pipeline=*)
+      value=${identity#pipeline=}
+      case $value in
+        [1-9]*) ;;
+        *) return 1 ;;
+      esac
+      case $value in
+        *[!0-9]*) return 1 ;;
+      esac
+      [ "${#value}" -le 18 ] || return 1
+      ;;
+    train=on|train=dropped) ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_pr_poll_degraded_marker_matches() {  # <marker> <device> <provider> <host> <path> <number> <identity>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6 expected_identity=$7
+  local version provider host path number identity
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-degraded-notified-v1 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ] \
+    && [ "$identity" = "$expected_identity" ]
+}
+
+fm_pr_poll_degraded_already_notified() {  # <state> <id> <provider> <host> <path> <number> <identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 identity=$7 marker state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_degraded_identity_valid "$identity" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  if [ "$identity" = train=on ]; then
+    marker="$state/$id.pr-poll-train"
+  else
+    marker="$state/$id.pr-poll-degraded"
+  fi
+  fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
+    "$provider" "$host" "$path" "$number" "$identity"
+}
+
+fm_pr_poll_degraded_mark_notified() {  # <state> <id> <provider> <host> <path> <number> <identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 identity=$7 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_degraded_identity_valid "$identity" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  if [ "$identity" = train=on ]; then
+    marker="$state/$id.pr-poll-train"
+  else
+    marker="$state/$id.pr-poll-degraded"
+  fi
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-degraded.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-degraded-notified-v1 "$provider" "$host" "$path" "$number" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_degraded_marker_matches "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$identity" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$identity"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed at teardown alongside the other per-task PR-poll artifacts
+# (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
+fm_pr_poll_degraded_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-degraded"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker" || return 1
+  }
+  fm_pr_poll_train_clear "$state" "$id"
+}
+
+# Forgets that the merge request was seen on its merge train; the watcher calls
+# it after waking for a drop, so only a later re-queue arms the next drop wake.
+fm_pr_poll_train_clear() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-train"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker"
+  }
 }

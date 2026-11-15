@@ -3369,7 +3369,92 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_full_captain_questions_survive_local_and_secondmate_projection() {
+  local home mate fakebin title reason json expanded summary toon target
+  home=$(make_home full-captain-questions)
+  mate="$TMP_ROOT/full-question-mate"
+  make_valid_secondmate_home questions "$mate"
+  append_secondmate_registry "$home" questions "$mate"
+  title='Choose the rollout scope for the next release while preserving the complete operator question and every explicitly recorded alternative'
+  reason='Which route should proceed? A: retain the existing workflow until the staged verification has finished and every downstream dependency has reported its result. B: start the separate migration after the remaining review, preserving the fallback and the complete audit record. C: defer until the final café / 東京 review.'
+  for target in "$home" "$mate"; do
+    cat > "$target/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] full-call - $title (repo: sample) (kind: captain) (hold: $reason) (hold-kind: captain)
+- [ ] dated-call - $title (repo: sample) (kind: captain) (hold: $reason) (hold-kind: captain) (hold-until: 2026-08-01)
+- [ ] report-call - Review the proposal (repo: sample) (kind: captain) (hold: data/proposal/report.md) (hold-kind: captain)
+
+## Done
+- [x] answered-call - Answered choice (repo: sample) (kind: captain) (done 2026-07-10)
+EOF
+  done
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg question "$title: $reason" '
+    [.decisions_open[] | select(.id == "full-call" or .id == "questions/full-call")]
+    | length == 2 and all(.[]; .question == $question and (.summary | length) <= 91)
+  ' >/dev/null || fail "full local/secondmate question was lost: $json"
+  printf '%s' "$json" | jq -e '
+    [.decisions_open[].id] == ["full-call", "report-call", "questions/full-call", "questions/report-call"]
+    and ([.decisions_open[] | select(.id | endswith("report-call")) | .question]
+      == ["Review the proposal: data/proposal/report.md", "Review the proposal: data/proposal/report.md"])
+  ' >/dev/null || fail "question transport changed placement or report-only text: $json"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e --arg question "$title: $reason" '
+    (.decisions_open | any(.id == "full-call" and .question == $question
+      and (.summary | length) <= 161 and (.reason | length) <= 161))
+    and (.queued | any(.id == "dated-call" and .question == $question
+      and (.title | length) <= 121 and (.hold_reason | length) <= 161))
+  ' >/dev/null || fail "secondmate transport discarded the full question or expanded compact fields: $summary"
+  expanded=$(run "$home" "$fakebin" --json --all-decisions)
+  printf '%s' "$expanded" | jq -e --arg question "$title: $reason" '
+    [.decisions_open[] | select(.id == "dated-call" or .id == "questions/dated-call")]
+    | length == 2 and all(.[]; .question == $question)
+  ' >/dev/null || fail "revealed deferred questions were lost: $expanded"
+  toon=$(run "$home" "$fakebin" --all-decisions)
+  printf '%s' "$toon" | grep -F "$title: $reason" >/dev/null \
+    || fail "TOON decision presentation lost the full question: $toon"
+  pass "full captain questions survive local and generated secondmate projections"
+}
+
+test_supplied_secondmate_questions_and_legacy_optional_fields() {
+  local home remote fakebin reason json
+  home=$(make_home supplied-question-parent)
+  make_remote_ledger_fleet "$home" 1
+  remote="$TMP_ROOT/remote-ledger-home-1"
+  reason='A: keep all currently supported workflows and their existing contracts while the release verification runs to completion. B: wait for the independent migration and retain the rollback route through its full observation period. C: choose the final Unicode option café / 東京.'
+  jq --arg reason "$reason" '
+    .decisions_open = [
+      {id:"supplied",key:"supplied",verb:"captain-hold",source:"backlog",hold_bucket:"live",
+       summary:"Supplied question",reason:$reason},
+      {id:"minimal",verb:"captain-hold",source:"backlog",hold_bucket:"live"},
+      {id:"report",key:"report",verb:"captain-hold",source:"backlog",hold_bucket:"live",
+       summary:"Review report",reason:"data/supplied/report.md"}]
+    | .queued = [{id:"queued-only",title:"Deferred supplied question",hold_kind:"captain",
+        hold_bucket:"dated",hold_until:"2026-10-01",hold_reason:$reason}]
+    | .counts.decisions_open = 3 | .counts.queued = 1
+  ' "$remote/state/home-summary.json" > "$remote/state/full-summary.json"
+  mv "$remote/state/full-summary.json" "$remote/state/home-summary.json"
+  fakebin=$(make_remote_ledger_ssh "$home")
+  json=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_LEDGER_CALL_LOG="$home/ledger-calls.log" FM_SNAPSHOT_NOW_EPOCH=1000 \
+    "$BEARINGS" --json --all-decisions)
+  printf '%s' "$json" | jq -e --arg reason "$reason" '
+    [.decisions_open[].id] == ["ledger-1/supplied", "ledger-1/minimal", "ledger-1/report", "ledger-1/queued-only"]
+    and (.decisions_open | any(.id == "ledger-1/supplied" and .question == ("Supplied question: " + $reason)))
+    and (.decisions_open | any(.id == "ledger-1/minimal" and .question == "minimal: captain decision pending"))
+    and (.decisions_open | any(.id == "ledger-1/report" and .question == "Review report: data/supplied/report.md"))
+    and (.decisions_open | any(.id == "ledger-1/queued-only" and .question == ("Deferred supplied question: " + $reason)))
+  ' >/dev/null || fail "supplied secondmate question or legacy fallback was lost: $json"
+  pass "supplied secondmate questions preserve text with missing optional fields"
+}
+
 fm_test_run \
+  test_full_captain_questions_survive_local_and_secondmate_projection \
+  test_supplied_secondmate_questions_and_legacy_optional_fields \
   test_task_teardown_during_metadata_capture_does_not_abort_snapshot \
   test_current_state_uses_captured_status_observation \
   test_relaunched_task_does_not_inherit_reused_endpoint_state \

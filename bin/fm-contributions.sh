@@ -97,6 +97,14 @@
 # structural check that refused the observation. A later good read clears the
 # record's error, so the unavailable line is the copy that outlives it.
 # FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# config/hold-pr-settle opts into applying declared captain-hold PR policies
+# after terminal observation, including retained final observations. The policy
+# and evidence transition are owned by fm-captain-hold.sh; a settlement prints
+# nothing, and a policy that could not be applied prints one diagnostic line.
+# Unmerged closure of a PR owned by a task that is still an open captain hold
+# becomes one durable `closed` pending event per owner, acknowledged like a review.
+# With the flag absent, neither settlement nor this extra notification runs.
+#
 # A supported URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
@@ -560,6 +568,36 @@ publish_pending() { # task canonical-url record-file
     | [.token, .type, (.source // "-"), (.age // "-")] | @tsv' "$record")
 }
 
+terminal_hold_event() { # task canonical-url
+  local task=$1 url=$2 policy="$DATA/$1/hold-pr-policy.json" err
+  [ -f "$CONFIG/hold-pr-settle" ] || return 0
+  jq -e --arg url "$url" '.records[] | select(.url == $url and .kind == "pr"
+    and .error == null and .retired == null and (.observation.state | IN("merged","closed")))' \
+    "$DATA/$task/contributions.json" > "$TMP/terminal.json" || return 0
+  if [ -f "$policy" ]; then
+    # The watcher discards a check's stderr, so the cause rides the poll line.
+    if err=$("$SCRIPT_DIR/fm-captain-hold.sh" settle-pr "$task" "$url" 2>&1 >/dev/null); then
+      # A removed policy means no open hold remains to report the closure to.
+      [ -f "$policy" ] || return 0
+    else
+      printf 'contributions: PR hold settlement failed for %s %s: %s\n' "$task" "$url" "${err##*$'\n'}"
+    fi
+  fi
+  # Closure is actionable even when no policy says it answers the question.
+  jq --arg task "$task" --slurpfile input "$TMP/input.json" '
+    select(.observation.state == "closed" and (.seen | index("closed")) == null
+      and any($input[0].backlog.records[]?; .structured == true and .id == $task and .hold_bucket != null))
+    | .seen += ["closed"]
+    | .pending += [{token:"closed",type:"closed",source:.url,head:.observation.head,body:"PR closed without merging"}]' \
+    "$TMP/terminal.json" > "$TMP/terminal-event.json"
+  [ -s "$TMP/terminal-event.json" ] || return 0
+  # The held list is the poll-start snapshot; a settlement earlier in this poll
+  # may have closed or released this task since.
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" 2>/dev/null || return 0
+  write_record "$task" "$TMP/terminal-event.json"
+  publish_pending "$task" "$url" "$TMP/terminal-event.json"
+}
+
 settle_final() { # canonical-url task... : copy the URL's final observation to every owner
   local url=$1 task
   shift
@@ -573,7 +611,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)' > "$TMP/row.json"
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired) | .seen -= ["closed"]' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
@@ -600,7 +638,7 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why
+  local task url old kind error observed why unreported=$'\n'
   local -a row
   acquire
   get_input
@@ -620,11 +658,30 @@ poll() {
     | [(if all($final[]; .) then "settled" elif any($final[]; . != null) then "final" else "live" end), $known.url]
       + $known.tasks | @tsv' > "$TMP/known.tsv"
   : > "$TMP/live.tsv"
+  # One pass picks the retained closures still owed to an open captain hold, so
+  # a home's settled history costs no process per row.
+  if [ -f "$CONFIG/hold-pr-settle" ]; then
+    unreported+=$(jq -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+      [$input[0].backlog.records[]? | select(.structured == true and .hold_bucket != null) | .id] as $held
+      | $saved[0][] | .task as $task | select($held | index($task) != null) | .records[]
+      | select(.kind == "pr" and .error == null and .retired == null
+          and .observation.state == "closed" and (.seen | index("closed")) == null)
+      | "\($task)\t\(.url)"')$'\n'
+  fi
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 3 ] || continue
     case "${row[0]}" in
-      settled) ;;
-      final) settle_final "${row[@]:1}" ;;
+      settled|final)
+        [ "${row[0]}" != final ] || settle_final "${row[@]:1}"
+        [ -f "$CONFIG/hold-pr-settle" ] || continue
+        for task in "${row[@]:2}"; do
+          case "${row[0]}:$unreported" in
+            final:*|*$'\n'"$task"$'\t'"${row[1]}"$'\n'*) ;;
+            *) [ -f "$DATA/$task/hold-pr-policy.json" ] || continue ;;
+          esac
+          terminal_hold_event "$task" "${row[1]}"
+        done
+        ;;
       *) (IFS=$'\t'; printf '%s\n' "${row[*]:1}") >> "$TMP/live.tsv" ;;
     esac
   done < "$TMP/known.tsv"
@@ -684,6 +741,7 @@ poll() {
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
+      terminal_hold_event "$task" "$url"
     done
   done < "$TMP/known.tsv"
 }

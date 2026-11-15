@@ -180,7 +180,7 @@ Classify each wake this way, applying the steering-inbox exception before status
 - `signal` or `stale` whose latest status declares a wait, either a `paused:` external wait or a verified `captain-held` transfer, tracks the pause rather than a wedge whether its pane reads idle or busy.
   An unreported captain-relevant event in the newly classified span still escalates immediately while the current declaration independently keeps the pause cadence.
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
-  If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a captain-held transfer is never rechecked while the posture record exists.
+  If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window, unless the home's `config/pause-ceiling` flag turns an overdue pause into one keyed decision ([configuration](../../../docs/configuration.md#pause-ceiling-configpause-ceiling)); a captain-held transfer is never rechecked while the posture record exists.
   The window ages against the crew's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status, a bare legacy captain-relevant line, or an unrecognized status prefix such as `parked:` -> escalate.
@@ -235,8 +235,9 @@ The single-line format makes submission unambiguous across harnesses; the carrie
 ### Stale-artifact lifecycle
 
 Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-unknown-acked` as session-scoped delivery artifacts, not as the durable work record.
-Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
-Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush, clears it, and archives the posture record last.
+The per-task markers `state/.subsuper-stale-<task>`, `.subsuper-reported-stale-<task>`, `.subsuper-dialog-<task>`, `.subsuper-paused-<task>`, and `.subsuper-pause-until-due-<task>` are the same kind of session-scoped episode state: a still-true condition is re-derived fresh by the next session, and a declared wait spanning two away sessions restarts its recheck window at re-entry.
+Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts and markers only for a fresh entry and preserves the current session's buffer on refresh.
+Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush, clears it with the session's per-task markers, and archives the posture record last.
 `docs/herdr-backend.md` "Away-mode supervisor support" and `docs/t3code-backend.md` "Away mode" own the backend mechanisms, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
 
 ### Reliability properties

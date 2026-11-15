@@ -401,6 +401,40 @@ CFG
   pass "limits close lanes with named reasons, and --admit exits 0, 75, or 1"
 }
 
+# The fixed-cap path, pinned as explicit expected output: a cap with room under
+# its floors, a full cap whose floors are all breached, and the --admit exits.
+test_fixed_cap_scenarios() {
+  local home fakebin out rc
+  home=$(make_home fixed-scenarios 3 0)
+  fakebin=$(make_probes "$TMP_ROOT/p-fixed-scenarios" 6.50 41 18 209715200)
+  printf '%s\n' 51539607552 > "$fakebin/memsize"
+  printf '14\nmin-avail-gb 4\nmin-disk-gb 20\nmax-load1 24\n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin"); rc=$?
+  expect_code 0 "$rc" "a cap with room"
+  assert_equals 'capacity: free_lanes=11 reason=ok lanes=3 target=14 secondmates=0 load1=6.50 cores=18 mem_free_pct=41 disk_free_mb=204800' \
+    "$(printf '%s\n' "$out" | head -1)" "a cap of 14 with room under its floors must open 11 lanes"
+  assert_contains "$out" 'Lanes: 3 running of 14 target, 11 open.' "the summary must count the open lanes"
+  assert_not_contains "$out" 'Constrained:' "a cap with room must print no hold line"
+  assert_equals '[true,11,[],{"min_avail_gb":4,"min_disk_gb":20,"max_load1":24},{"target":14,"status":"ok"}]' \
+    "$(capacity_doc "$home" "$fakebin" | jq -c '[.verdict.admit, .verdict.free_lanes, .verdict.reasons, .limits, .cap]')" \
+    "the document must carry the admitting verdict and the limits"
+  out=$(run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "--admit with room"
+  assert_equals '' "$out" "--admit with room must print nothing"
+  printf '2\nmin-avail-gb 30\nmin-disk-gb 250\nmax-load1 6\n' > "$home/config/lane-capacity"
+  out=$(run_capacity "$home" "$fakebin"); rc=$?
+  expect_code 0 "$rc" "a full cap over its floors"
+  assert_equals 'capacity: free_lanes=0 reason=memory,disk,load lanes=3 target=2 secondmates=0 load1=6.50 cores=18 mem_free_pct=41 disk_free_mb=204800' \
+    "$(printf '%s\n' "$out" | head -1)" "a full cap of 2 with every floor breached must name the floors"
+  assert_contains "$out" 'Constrained: memory,disk,load - hold new dispatch until it clears.' "the hold line must name every breached floor"
+  out=$(run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 75 "$rc" "--admit over the floors"
+  assert_contains "$out" 'deferred: lane capacity of this home' "the deferral must print one deferred line"
+  assert_contains "$out" 'memory: no room for a 1 GB lane: 19.68 GB available, 30 GB kept; disk: home 200.0 GB free, under 250 GB; load: 6.50 over its max-load1 6' \
+    "the deferral must give every floor in words"
+  pass "fixed caps print pinned report, document, and --admit output with room and over their floors"
+}
+
 test_publish_document() {
   local home fakebin rc doc mode i
   home=$(make_home publish 2 1)
@@ -537,6 +571,7 @@ test_several_pressure_files
 test_beat_with_missing_fields
 test_cap_only_memory_rule_unchanged
 test_limits_and_admit
+test_fixed_cap_scenarios
 test_publish_document
 test_captain_and_quota
 test_watcher_publishes_only_when_opted_in

@@ -1598,6 +1598,9 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
+  # Earlier publication or cleanup can outlast the lease. Refresh at the owning
+  # caller's launch boundary, still excluding runners and their descendants.
+  owner_lease_refresh
   isolate_runner detach "$1"
 }
 
@@ -1868,6 +1871,14 @@ cmd_reconcile() {
   [ "$failed" -eq 0 ]
 }
 
+# A confirmation loop asks this before it touches the source lock. A runner
+# needs that lock to claim, so polling it while no claim exists gains nothing and
+# starves the very launch being confirmed: under host load that tripled the
+# runner's time to claim and pushed healthy launches past the confirm window.
+claim_recorded() {  # <source-id>
+  [ -e "$(fm_procevent_claim_path "$1")" ]
+}
+
 launch_entry_listed() {  # <entry> <newline-separated entries>
   local entry=$1 line
   while IFS= read -r line; do
@@ -1919,7 +1930,7 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
       identity=${rest%%$'\t'*}
       before=${rest#*$'\t'}
       state=1
-      if fm_procevent_source_lock_try_acquire "$id"; then
+      if claim_recorded "$id" && fm_procevent_source_lock_try_acquire "$id"; then
         fm_procevent_claim_state_locked "$id"
         state=$?
         fm_procevent_source_lock_release "$id"
@@ -1949,6 +1960,7 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
 # generation does, 1 otherwise.
 generation_is_listening() {  # <source-id> <registration-identity>
   local id=$1 identity=$2 state result=1
+  claim_recorded "$id" || return 1
   fm_procevent_source_lock_try_acquire "$id" || return 1
   fm_procevent_claim_state_locked "$id"
   state=$?

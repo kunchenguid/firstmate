@@ -144,7 +144,7 @@ for name in ['bin', 'state', 'docs', '.codex']:
 for name in ['fm-turnend-guard.sh', 'fm-operational-input.sh', 'fm-supervision-instructions.sh',
              'fm-harness.sh', 'fm-primary-scope-lib.sh', 'fm-supervision-lib.sh',
              'fm-supervision-engine-lib.sh', 'fm-wake-lib.sh', 'fm-path-lib.sh',
-             'fm-hook-host-lib.sh', 'fm-session-lock-lib.sh', 'fm-cursor-lib.sh',
+             'fm-hook-host-lib.sh', 'fm-session-lock-lib.sh', 'fm-omp-process-lib.sh', 'fm-cursor-lib.sh',
              'fm-hermes-process-lib.sh', 'fm-timeout-lib.sh']:
     shutil.copy2(root / 'bin' / name, primary / 'bin' / name)
 shutil.copytree(root / 'docs/supervision-protocols', primary / 'docs/supervision-protocols')
