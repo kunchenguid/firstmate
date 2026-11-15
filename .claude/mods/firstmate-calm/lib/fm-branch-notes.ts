@@ -1,7 +1,7 @@
 // Firstmate supervision notes for the Claude Code mod, kept free of the engine.
 //
-// Pi renders each supervision outcome in the transcript: a sailboat note for a visible
-// routine outcome and a sequence-keyed anchor entry for a captain outcome
+// Pi renders visible routine and captain outcomes in the transcript: a sailboat note
+// for a routine outcome and a sequence-keyed anchor entry for a captain outcome
 // (.pi/extensions/fm-branch-supervision.ts). This module owns the same lines for
 // Claude Code, read from the display tail copy of the one outcome store
 // (bin/fm-branch-outcome.sh owns every file format read here) and from the supervision

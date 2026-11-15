@@ -20,15 +20,16 @@
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict owner");
 # --silent true is legal only for a routine outcome. A firstmate outcome
-# queues a durable MAIN-owned check before the host receipt is written.
+# queues a durable MAIN-owned check in either posture before the host receipt
+# is written.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
 # must be "branch" and FM_BRANCH_REPORT_TURN must name the host's current turn
 # record ($STATE/.supervision-host-turn), so a report typed after its turn
-# ended, or from any other shell, is refused. Exit codes: 0 recorded, 1 the
-# store refused or failed (nothing recorded), 2 usage, 3 refused (actor, turn,
-# or scope).
+# ended, or from any other shell, is refused. Exit codes: 0 recorded, 1 a
+# storage or delivery step failed (an outcome may already be stored), 2 usage,
+# 3 refused (actor, turn, or scope).
 #
 # A non-silent row an away turn recorded after the captain returned (the turn
 # record says posture=away, or predates the posture field, and no away record
@@ -40,7 +41,7 @@
 # append, so every visible row is in the brief, queued, or both: the relay does
 # not depend on the host surviving its turn or on its owner delivering the
 # host's own handback. Silent outcomes remain in the store but are not queued
-# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# or relayed as notes. An attended turn's captain rows reach
 # MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u

@@ -1,0 +1,2 @@
+# Bash parses shell scripts with LF line endings on every supported platform.
+*.sh text eol=lf

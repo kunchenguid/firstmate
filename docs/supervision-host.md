@@ -220,9 +220,12 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 
 The section runs only for main on a home that runs the host and whose primary is not Pi, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
+Firstmate-owned decisions reach main through their queued checks, without a second listing in `BRANCH OUTCOMES`.
+The [outcome store header](../bin/fm-branch-outcome.sh) owns handoff recovery and its checkpoint.
+The drain runs recovery before its queue snapshot in either posture and again before advancing past unread Firstmate rows.
 On a Claude Code primary the Calm mod separately shows bounded, display-only supervision notes to the captain ([`calm.md`](calm.md#supervision-notes-on-claude-code)); it moves no outcome marker and adds nothing to main's context.
 A long away window no longer requires a drain per outcome: each task's captain outcomes collapse to one line, subject to the captain byte cap, and visible routine notes past the section's limit collapse into a count; after main acknowledges all captain outcomes no later drain shows anything from the window again.
-A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
+A drain that cannot read or project the store (jq missing included), recover a Firstmate handoff, print the section, or advance its read cursor says so and exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, including across an index repair or a switch to Pi; the absent-marker rule is owned by `bin/fm-branch-outcome.sh`.
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
@@ -310,10 +313,11 @@ So it never stops the owner's host or watcher or releases its leases.
 The host's owner retries it.
 Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
 The native Codex park reports the failure through its queue delivery and bounded retry owner.
-Before it arms, the next host does two things:
+Before it arms, the next host does three things:
 
 - It stops, by recorded identity, whatever its predecessor left running, including the engine descendants a killed turn recorded.
 - It removes that turn's files.
+- It applies the [outcome store's handoff recovery contract](../bin/fm-branch-outcome.sh), handing control to main if recovery fails.
 
 ## The park boundary
 
