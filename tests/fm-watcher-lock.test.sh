@@ -1169,6 +1169,7 @@ SH
 test_directory_watch_recovery_preserves_marker_bound() {
   local dir
   dir=$(make_case directory-watch-marker-bound)
+  # shellcheck disable=SC2016 # The shim expands its own arguments.
   printf '#!/usr/bin/env bash\nexec cp -R "$2" "$3"\n' > "$dir/fakebin/ln"
   chmod +x "$dir/fakebin/ln"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" \
@@ -2530,6 +2531,7 @@ PY
 test_directory_fallback_named_refusal() {
   local dir
   dir=$(make_case directory-fallback-refusal)
+  # shellcheck disable=SC2016 # The shim expands its own arguments.
   printf '#!/usr/bin/env bash\nexec cp -R "$2" "$3"\n' > "$dir/fakebin/ln"
   chmod +x "$dir/fakebin/ln"
   PATH="$dir/fakebin:$PATH" python3 - "$LIB" "$dir" "$(dead_pid)" <<'PY' || fail "fallback directory-lock refusal"
