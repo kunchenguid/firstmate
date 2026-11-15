@@ -241,6 +241,14 @@ esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
+# Recover store-first reports before taking the queue lock, in either posture.
+# Branch drains must never manufacture MAIN wakes or advance their delivery.
+if [ "$ACTOR" = main ] && [ -z "$ACK_THROUGH" ] \
+  && fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+  && [ -s "$STATE/branch-outcomes.jsonl" ]; then
+  "$SCRIPT_DIR/fm-branch-outcome.sh" recover-handoffs || BRANCH_OUTCOMES_RC=1
+fi
+
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
 # lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
@@ -617,6 +625,8 @@ EOF
 #     routine outcomes never appear. The newest visible rows that fit a byte
 #     cap are listed, and older visible rows collapse into a count, since
 #     bin/fm-branch-outcome.sh list keeps them all.
+#   - Unread Firstmate decisions are queued for MAIN before read advancement
+#     and presented here too, so a report interrupted before handoff is visible.
 # Once the section is printed, the store's read cursor advances through every
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped
@@ -627,9 +637,10 @@ EOF
 # (bin/fm-afk-return.sh) keeps its catch-up gated instead of clearing over
 # outcomes a later drain would present again.
 print_branch_outcomes_section() {
-  local config rows through captain routine line seq task task_line target i
+  local config rows through captain routine firstmate line seq task task_line target i
   local text='' used=0 shown=0 held=0 bytes item_bytes=600 captain_bytes=4000 routine_bytes=2000
   local routine_lines='' routine_count=0 routine_shown=0
+  local firstmate_count=0 firstmate_shown=0
   local -a captain_tasks=() captain_lines=() captain_line_bytes=()
   [ "$ACTOR" = main ] || return 0
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
@@ -646,6 +657,8 @@ print_branch_outcomes_section() {
   fi
   [ -n "$rows" ] || return 0
   if ! through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null) \
+    || ! firstmate=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "firstmate")) | .[]
+      | "\(.seq)\t[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
     || ! captain=$(printf '%s\n' "$rows" | jq -rs '
       map(select(.verdict == "captain")) | sort_by(.seq)
       | reduce .[] as $r ({count: {}, lines: []};
@@ -659,6 +672,32 @@ print_branch_outcomes_section() {
     return 1
   fi
 
+  # Include rows appended since the initial queue snapshot before advancing
+  # their read cursor. The checkpoint avoids re-queuing earlier handoffs.
+  if [ -n "$firstmate" ] && ! "$SCRIPT_DIR/fm-branch-outcome.sh" recover-handoffs; then
+    printf 'BRANCH OUTCOMES: a Firstmate handoff could not be queued; nothing was marked read.\n' >&2
+    return 1
+  fi
+  while IFS=$(printf '\t') read -r seq line; do
+    [ -n "$seq" ] || continue
+    firstmate_count=$((firstmate_count + 1))
+    cap_outcome_line "$line" $((item_bytes - 1))
+    [ $((used + OUTCOME_LINE_BYTES + 1)) -le "$captain_bytes" ] || continue
+    text="$text$OUTCOME_LINE
+"
+    used=$((used + OUTCOME_LINE_BYTES + 1))
+    firstmate_shown=$((firstmate_shown + 1))
+  done <<ROWS
+$firstmate
+ROWS
+  if [ -n "$text" ]; then
+    text="BRANCH OUTCOMES, FIRSTMATE (MAIN owns this decision: check current state and decide within standing authority this turn; the durable firstmate-outcome wakes remain queued until handled):
+$text"
+    [ "$firstmate_shown" -eq "$firstmate_count" ] || text="${text}BRANCH OUTCOMES, FIRSTMATE: $((firstmate_count - firstmate_shown)) further decision(s) are queued as firstmate-outcome wakes
+"
+  fi
+
+  used=0
   target=0
   while IFS=$(printf '\t') read -r seq task task_line; do
     case "$seq" in ''|*[!0-9]*) continue ;; esac
@@ -685,7 +724,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="${text}BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line

@@ -26,7 +26,7 @@ export type OutcomeRow = {
   readonly seq: number;
   readonly epoch: number;
   readonly task: string;
-  readonly verdict: "routine" | "captain";
+  readonly verdict: "routine" | "firstmate" | "captain";
   readonly summary: string;
   readonly silent: boolean;
 };
@@ -42,7 +42,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | undefined {
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return undefined;
   if (typeof row.epoch !== "number" || !Number.isSafeInteger(row.epoch) || row.epoch < 0) return undefined;
   if (typeof row.task !== "string" || row.task === "") return undefined;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return undefined;
+  if (row.verdict !== "routine" && row.verdict !== "firstmate" && row.verdict !== "captain") return undefined;
   if (typeof row.summary !== "string" || row.summary === "") return undefined;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return undefined;
   const silent = row.silent === true;
@@ -72,9 +72,9 @@ export function parseOutcomeMarker(text: string | undefined): number {
   return /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : 0;
 }
 
-/** Pi's transcript line for one row, on one line; a silent row has none. */
+/** Pi's transcript line for one row; silent routines and MAIN handoffs have none. */
 export function outcomeNoteLine(row: OutcomeRow): string | undefined {
-  if (row.silent) return undefined;
+  if (row.silent || row.verdict === "firstmate") return undefined;
   const summary = row.summary.replace(/\s*\n\s*/g, " ");
   return row.verdict === "captain"
     ? `${BRANCH_NOTE_ANCHOR} [seq ${row.seq}] ${row.task}: ${summary}`

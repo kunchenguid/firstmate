@@ -87,6 +87,15 @@
 #     The wake queue owns delivery and acknowledgement, independently of the
 #     captain-only processed marker, so handling it cannot acknowledge a held
 #     captain decision. Replays prefer duplicate delivery over loss.
+#   fm-branch-outcome.sh recover-handoffs
+#     Retry every unread firstmate row after a store-first interruption, before
+#     the supervision host starts its cycle or MAIN drains its wake queue.
+#     Leave the read cursor unchanged; delivery/presentation still owns it.
+#     $STATE/.branch-handoffs-recovered checkpoints the last recovered seq
+#     only after every earlier unread firstmate row was queued in order.
+#     An interrupted pass may duplicate delivery, never skip an unqueued row.
+#     This separate checkpoint keeps a held unread captain row from causing
+#     the same handled Firstmate wake to be re-queued on every host restart.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -154,6 +163,7 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
+RECOVERED="$STATE/.branch-handoffs-recovered"
 LOCK="$STATE/.branch-outcomes.lock"
 MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
@@ -172,7 +182,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|firstmate|captain --summary <text> [--wake <text>] [--silent true|false] | handoff --seq <seq> | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|firstmate|captain --summary <text> [--wake <text>] [--silent true|false] | handoff --seq <seq> | recover-handoffs | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -181,6 +191,16 @@ bounded_uint() {
   case "$value" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "${#value}" -le "${#MAX_SAFE_SEQ}" ] || return 1
   [ "$value" -le "$MAX_SAFE_SEQ" ]
+}
+
+read_recovered() {
+  local value=0
+  if [ -e "$RECOVERED" ] || [ -L "$RECOVERED" ]; then
+    [ -f "$RECOVERED" ] && [ ! -L "$RECOVERED" ] || return 1
+    value=$(cat "$RECOVERED") || return 1
+  fi
+  bounded_uint "$value" || { echo "error: malformed Firstmate recovery checkpoint" >&2; return 1; }
+  printf '%s\n' "$value"
 }
 
 json_escape() { # <text> -> escaped JSON string content on stdout
@@ -579,6 +599,35 @@ case "$CMD" in
     NOTE=$(printf '%s\n' "$ROW" | jq -r '"firstmate-outcome: seq \(.seq) for \(.task): \(.summary | gsub("[\\t\\n\\r]"; " "))"') || exit 1
     fm_wake_append check "firstmate-outcome:$2" \
       "check: $NOTE; MAIN owns this decision: check current state and decide within standing authority this turn, or escalate only an act reserved for the captain. Acknowledge this wake after handling it; do not defer a Firstmate-owned OPEN DECISIONS entry to the return brief."
+    ;;
+  recover-handoffs)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    RECOVERED_SEQ=$(read_recovered) || { fm_lock_release "$LOCK"; exit 1; }
+    LAST_SEQ=$(last_seq) || { fm_lock_release "$LOCK"; exit 1; }
+    [ "$RECOVERED_SEQ" -le "$LAST_SEQ" ] || {
+      fm_lock_release "$LOCK"
+      echo "error: Firstmate recovery checkpoint is ahead of the store" >&2
+      exit 1
+    }
+    fm_lock_release "$LOCK"
+    ROWS=$("$SCRIPT_DIR/fm-branch-outcome.sh" unread) || exit 1
+    SEQS=$(printf '%s\n' "$ROWS" | jq -r --argjson recovered "$RECOVERED_SEQ" \
+      'select(.verdict == "firstmate" and .seq > $recovered) | .seq') || exit 1
+    while IFS= read -r SEQ; do
+      [ -n "$SEQ" ] || continue
+      "$SCRIPT_DIR/fm-branch-outcome.sh" handoff --seq "$SEQ" || exit 1
+      fm_lock_acquire_wait "$LOCK"
+      RECOVERED_SEQ=$(read_recovered) || { fm_lock_release "$LOCK"; exit 1; }
+      if [ "$SEQ" -gt "$RECOVERED_SEQ" ]; then
+        TMP=$(mktemp "$STATE/.branch-handoffs-recovered.XXXXXX")
+        printf '%s\n' "$SEQ" > "$TMP"
+        mv -f -- "$TMP" "$RECOVERED"
+      fi
+      fm_lock_release "$LOCK"
+    done <<SEQUENCES
+$SEQS
+SEQUENCES
     ;;
   unread)
     [ "$#" -eq 0 ] || usage

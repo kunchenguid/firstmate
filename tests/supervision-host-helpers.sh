@@ -43,6 +43,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   captain     the same as handle, but report verdict captain naming the rows
 #               the drain presented
 #   firstmate   the same as handle, but report verdict firstmate for MAIN
+#   firstmate-before-handoff append a Firstmate outcome, then wait before its
+#               handoff so the test can kill the host in the store-first gap
 #   hold-lease  the same, but leave the lease held (the host must release it),
 #               logging its check line while held
 #   return      handle, but the captain returns (the record is archived) before
@@ -103,6 +105,14 @@ printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
 ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
+if [ "$mode" = firstmate-before-handoff ]; then
+  seq=$("$FM_REPO/bin/fm-branch-outcome.sh" append --task "$task" --verdict firstmate \
+    --summary 'saved design decision needs MAIN') || exit 1
+  printf '%s\n' "$seq" > "$FM_HOME/before-handoff"
+  sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS"
+  "$FM_REPO/bin/fm-branch-outcome.sh" handoff --seq "$seq"
+  exit 1
+fi
 verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in firstmate|mixed-firstmate) verdict=firstmate ;; esac

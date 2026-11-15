@@ -16,6 +16,51 @@ set -u
 # shellcheck source=tests/supervision-host-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
+test_saved_firstmate_outcome_survives_a_host_killed_before_handoff() {
+  local home recovery host engine drained unread
+  for recovery in restart drain; do
+    home=$(make_home "firstmate-crash-$recovery" away)
+    echo firstmate-before-handoff > "$home/stub-mode"
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict captain \
+      --summary 'red merge needs captain' >/dev/null || fail "crash: captain control append failed"
+    start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "crash: no watcher started"
+    append_status "$home" 'saved decision before host crash' blocked
+    wait_until_deadline 60 test -s "$home/before-handoff" || fail "crash: turn did not reach append/handoff gap"
+    [ "$(cat "$home/before-handoff")" = 2 ] || fail "crash: unexpected saved sequence"
+    assert_no_grep 'firstmate-outcome:' "$home/state/.wake-queue" "crash: handoff already happened"
+    host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+    engine=$(cut -f1 "$home/state/.supervision-host.engine-pid")
+    kill -KILL "$host"
+    wait_until 100 host_exited "$home" || fail "crash: host did not die"
+    wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$engine" || fail "crash: engine survived host"
+    assert_no_grep 'firstmate-outcome:' "$home/state/.wake-queue" "crash: engine queued after host death"
+    if [ "$recovery" = restart ]; then
+      echo handle > "$home/stub-mode"
+      rm -f -- "$home/host.rc"
+      start_host "$home"
+      wait_until_deadline 60 host_exited "$home" || fail "crash: recovery stayed parked"
+      assert_grep 'firstmate-outcome:2' "$home/state/.wake-queue" "crash: restart lost saved handoff"
+      [ "$(engine_calls "$home")" -eq 1 ] || fail "crash: saved decision ran another branch turn"
+    else
+      FM_HOME="$home" "$CONTRACT" archive >/dev/null || fail "crash: could not return to attended posture"
+    fi
+    drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1) || fail "crash: MAIN drain failed: $drained"
+    assert_contains "$drained" 'saved design decision needs MAIN' "crash: MAIN never saw the saved decision"
+    assert_contains "$drained" 'MAIN owns this decision' "crash: MAIN was not told to decide"
+    assert_grep 'firstmate-outcome:2' "$home/state/.wake-queue" "crash: no durable handoff before read advancement"
+    if [ "$recovery" = drain ]; then
+      unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "crash: unread lookup failed"
+      assert_not_contains "$unread" 'saved design decision needs MAIN' "crash: presented handoff was not marked read"
+    else
+      assert_not_contains "$drained" 'red merge needs captain' "crash: away recovery released the captain control"
+    fi
+    assert_absent "$home/state/.branch-outcomes-processed" "crash: recovery processed a captain decision"
+    stop_home_processes "$home"
+  done
+  pass "host: a crash between append and handoff recovers through restart or attended MAIN drain"
+}
+
 test_away_firstmate_decisions_wake_main_without_releasing_captain_outcomes() {
   local home kind drained scope offer handoff_seq branch_rows posture
   for kind in blocked paused; do
@@ -1017,6 +1062,7 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
 }
 
 fm_test_run \
+  test_saved_firstmate_outcome_survives_a_host_killed_before_handoff \
   test_away_firstmate_decisions_wake_main_without_releasing_captain_outcomes \
   test_away_captain_only_decision_stays_parked \
   test_mixed_firstmate_and_captain_outcomes_follow_current_posture \

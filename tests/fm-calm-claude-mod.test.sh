@@ -340,6 +340,9 @@ test_branch_notes_over_the_store_owner() {
   outcome seed-tail
   [ -s "$state/.branch-outcomes-tail.jsonl" ] || fail "seed-tail did not create the display tail copy"
   outcome mark-read --through 5
+  outcome append --task fm-main --verdict firstmate --summary 'MAIN decides inside scope'
+  outcome append --task fm-after --verdict routine --summary 'worker continues'
+  outcome mark-read --through 7
   cat >"$TMP_ROOT/notes.mjs" <<'JS'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -354,7 +357,14 @@ same(notes.firstmateStateDirectory({ FM_ROOT_OVERRIDE: "/r", FM_HOME: "/h" }, pl
 same(notes.firstmateStateDirectory({ FM_HOME: "/h", FM_STATE_OVERRIDE: "/s" }, plugin), "/s", "FM_STATE_OVERRIDE beats the home");
 // A torn last line, as a reader racing a writer that is not atomic would see, is skipped.
 const rows = notes.parseOutcomeTail(read(".branch-outcomes-tail.jsonl") + '{"seq":6,"epoch":');
-same(rows.map((row) => row.seq), [1, 2, 3, 4, 5], "rows the store owner wrote");
+const handoffRows = rows;
+same(handoffRows.map((row) => row.seq), [1, 2, 3, 4, 5, 6, 7], "all store verdicts remain in the tail");
+same(notes.newOutcomeNotes(handoffRows, 5), { lines: ["⛵ fm-after: worker continues"], lastSeen: 7 },
+  "a firstmate handoff neither renders a note nor creates false overflow");
+same(notes.newOutcomeNotes(handoffRows.slice(0, 6), 5), { lines: [], lastSeen: 6 }, "firstmate-only poll advances without a note");
+same(notes.replayOutcomeNotes(handoffRows, 5, 4), ["⛵ fm-after: worker continues"], "replay skips the handoff note");
+rows.splice(5);
+same(rows.map((row) => row.seq), [1, 2, 3, 4, 5], "earlier rows the store owner wrote");
 same(rows.map(notes.outcomeNoteLine), [
   '⛵ fm-a: worker healthy, "quoted"',
   undefined,

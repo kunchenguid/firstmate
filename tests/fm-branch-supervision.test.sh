@@ -414,7 +414,7 @@ test_outcome_startup_replay_stops_at_captain_barrier() {
 }
 
 test_firstmate_handoff_survives_startup_without_acknowledging_captain_rows() {
-  local home replay unread out rc
+  local home replay unread out rc queued
   home="$TMP_ROOT/store-firstmate-home"
   mkdir -p "$home/state"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict firstmate \
@@ -425,9 +425,21 @@ test_firstmate_handoff_survives_startup_without_acknowledging_captain_rows() {
   [ -z "$replay" ] || fail "startup replay crossed a firstmate handoff"
   unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "firstmate unread failed"
   assert_contains "$unread" '"seq":1' "startup lost the unqueued firstmate row"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff --seq 1 || fail "firstmate handoff failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs || fail "firstmate recovery failed"
   assert_grep 'firstmate-outcome:1' "$home/state/.wake-queue" "handoff did not queue MAIN's check"
   assert_grep 'arrange the approved closure review' "$home/state/.wake-queue" "handoff lost the decision"
+  queued=$(wc -l < "$home/state/.wake-queue")
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs || fail "repeated recovery failed"
+  [ "$(wc -l < "$home/state/.wake-queue")" -eq "$queued" ] || fail "recovery requeued an already recovered handoff"
+  assert_absent "$home/state/.branch-outcomes-cursor" "recovery silently read the held captain row"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-3 --verdict firstmate \
+    --summary 'release the approved run behind the held captain row' >/dev/null || fail "later firstmate append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs || fail "recovery behind a held captain failed"
+  assert_grep 'firstmate-outcome:3' "$home/state/.wake-queue" "held captain hid a later Firstmate decision"
+  queued=$(wc -l < "$home/state/.wake-queue")
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs || fail "repeated mixed recovery failed"
+  [ "$(wc -l < "$home/state/.wake-queue")" -eq "$queued" ] || fail "held captain caused repeated Firstmate wakes"
+  assert_no_grep 'firstmate-outcome:2' "$home/state/.wake-queue" "recovery queued the captain control"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" handoff --seq 2 2>&1); rc=$?
   expect_code 2 "$rc" "a captain verdict cannot become a firstmate handoff"
   assert_contains "$out" 'only a firstmate outcome' "captain handoff refusal lost diagnostic"
@@ -435,6 +447,20 @@ test_firstmate_handoff_survives_startup_without_acknowledging_captain_rows() {
     --summary 'cannot hide a decision' --silent true 2>&1); rc=$?
   expect_code 2 "$rc" "firstmate outcomes cannot be silent"
   assert_absent "$home/state/.branch-outcomes-processed" "handoff acknowledged a held captain decision"
+  home="$TMP_ROOT/store-firstmate-recovery-failure"
+  mkdir -p "$home/state/.wake-queue"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict firstmate \
+    --summary 'queue failure must remain retryable' >/dev/null || fail "failure fixture append failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "recovery accepted an unwritable queue"
+  assert_absent "$home/state/.branch-handoffs-recovered" "failed queue was checkpointed as delivered"
+  assert_absent "$home/state/.branch-outcomes-cursor" "failed queue advanced the read cursor"
+  rmdir "$home/state/.wake-queue"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs || fail "queue failure did not recover"
+  assert_grep 'queue failure must remain retryable' "$home/state/.wake-queue" "retry lost the decision"
+  printf 'malformed\n' > "$home/state/.branch-handoffs-recovered"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" recover-handoffs 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed recovery state was accepted"
   pass "firstmate handoffs survive startup and cannot release or silence captain decisions"
 }
 

@@ -1249,6 +1249,12 @@ trap 'exit 130' INT
 activate || { echo "supervision-host stood down: the host record could not be written"; exit 0; }
 log_line "start	gen=$GEN	primary=$PRIMARY"
 
+# Recover a report interrupted after its store append but before its MAIN
+# handoff. Queue it before arming so even a generic resurface stays MAIN-owned.
+if ! "$SCRIPT_DIR/fm-branch-outcome.sh" recover-handoffs; then
+  exit_to_main "saved Firstmate handoffs could not be recovered; run bin/fm-wake-drain.sh before continuing"
+fi
+
 # The first cycle.
 if [ "$FIRST_ARM_RESTART" -eq 1 ]; then
   start_arm "$OWNER_PREDECESSOR" --restart
