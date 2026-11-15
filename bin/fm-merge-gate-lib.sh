@@ -16,7 +16,11 @@
 #     named "PR must be raised via no-mistakes" on the current head;
 #   - the repository is in neither declared class, so QA coverage is unknown;
 #   - any check on the current head is red, except credit-approval-guard when
-#     the pull request author is adk47 (the by-design self-authorship check);
+#     the pull request author is adk47 (the by-design self-authorship check).
+#     A check name that ran more than once is read worst-wins, except that a
+#     CANCELLED run is dropped once any non-cancelled run of that name exists,
+#     and within one workflowName only the newest dated run counts; runs with
+#     no workflow name or no date keep worst-wins;
 #   - the pull request is a master/main twin in a declared twin repository whose
 #     develop/beta counterpart is not merged. The twin rule is GitHub-only and
 #     applies to core-backend and web-credits-next by default; elsewhere it is
@@ -132,7 +136,15 @@ fm_merge_gate_read_pr() {
   else
     command -v gh >/dev/null 2>&1 || return 1
     # One read, so the head and the checks that authorize it come from the same
-    # snapshot. The body is folded onto one line because the payload is parsed as
+    # snapshot. A check name that ran more than once on this head keeps its
+    # worst-wins reading (a pending re-run still outranks an older success), but
+    # a CANCELLED run is dropped once any non-cancelled run of the same name
+    # exists: a concurrency group cancelling the older of two runs, or a re-run,
+    # supersedes it, as the forge's own merge box reads it. Within ONE workflow
+    # (same workflowName) only the newest dated run of a check counts, so a
+    # re-run or a label-retriggered run that passed supersedes that workflow's
+    # own earlier failure; two different workflows that share a check name, or
+    # runs with no date, keep worst-wins. The body is folded onto one line because the payload is parsed as
     # key=value lines.
     if ! fields=$(gh pr view "$number" --repo "$repo" \
       --json headRefOid,author,baseRefName,headRefName,state,mergedAt,body,statusCheckRollup \
@@ -144,7 +156,16 @@ fm_merge_gate_read_pr() {
           ("state=" + (.state // "")),
           ("merged_at=" + ((.mergedAt // "") | tostring)),
           ("body=" + ((.body // "") | gsub("[\r\n]+"; " "))),
-          ((.statusCheckRollup // [])[] | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
+          (((.statusCheckRollup // [])
+            | group_by((.name // .context) // "")
+            | map(if any(.[]; ((.conclusion // .state) // "") != "CANCELLED")
+                  then map(select(((.conclusion // .state) // "") != "CANCELLED")) else . end)
+            | map(map(. + {__wf: (.workflowName // ""), __at: ((.startedAt // .completedAt // "") | tostring)})
+                  | (map(select(.__wf == "" or .__at == ""))
+                     + (map(select(.__wf != "" and .__at != "")) | group_by(.__wf)
+                        | map(sort_by(.__at) | last))))
+            | add // [])[]
+            | ("check=" + ((.name // .context) // "") + "\u001f" + ((.conclusion // .state) // "")))
         )' 2>/dev/null) || [ -z "$fields" ]; then
       return 1
     fi

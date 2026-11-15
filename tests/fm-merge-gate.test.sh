@@ -145,10 +145,17 @@ write_pr_view() {
   local IFS=,
   for pair in $checks; do
     [ -n "$pair" ] || continue
+    # pair = name:conclusion[@wf[#started]] - wf keys the workflow name,
+    # started orders that workflow's runs.
+    local extra='' run='' started=''
     name=${pair%%:*}
     conclusion=${pair#*:}
+    case "$conclusion" in *@*) run=${conclusion#*@}; conclusion=${conclusion%%@*} ;; esac
+    case "$run" in *#*) started=${run#*#}; run=${run%%#*} ;; esac
+    [ -n "$run" ] && extra="$extra,\"workflowName\":\"wf-$run\",\"detailsUrl\":\"https://github.com/o/r/actions/runs/$run/job/1\""
+    [ -n "$started" ] && extra="$extra,\"startedAt\":\"2026-11-15T$started:00Z\""
     [ -n "$rollup" ] && rollup="$rollup,"
-    rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"}"
+    rollup="$rollup{\"__typename\":\"CheckRun\",\"name\":\"$name\",\"status\":\"COMPLETED\",\"conclusion\":\"$conclusion\"$extra}"
   done
   unset IFS
   cat > "$case_dir/fixtures/pr-view.json" <<JSON
@@ -557,6 +564,68 @@ test_gate_null_pending_qa_before_success_refuses() {
   assert_contains "$(cat "$case_dir/err")" "qa-review verdict on head $HEAD is PENDING, not SUCCESS" \
     "the refusal must report the pending verdict, not the later success"
   pass "a null pending qa-review conclusion is not overwritten by a success"
+}
+
+# --- (u2) a cancelled duplicate is superseded by a later run ----------------
+
+test_gate_cancelled_duplicate_is_superseded() {
+  local case_dir rc
+  case_dir=$(make_case cancelled-dup)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,pr-title:CANCELLED,pr-title:SUCCESS,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a cancelled run superseded by a later run of the same check must not refuse"
+  pass "a cancelled duplicate check is superseded by its later run"
+}
+
+test_gate_only_cancelled_run_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case cancelled-only)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,pr-title:CANCELLED,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a check whose only run is cancelled is still red"
+  pass "a check with only a cancelled run still refuses"
+}
+
+test_gate_rerun_in_same_run_supersedes_failure() {
+  local case_dir rc
+  case_dir=$(make_case rerun-same-run)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,verify:FAILURE@11#07:43,verify:SUCCESS@11#12:06,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a later run of the same workflow that passed must supersede its earlier failure"
+  pass "a later run within one workflow supersedes its earlier failure"
+}
+
+test_gate_failure_in_other_run_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case other-run-failure)
+  write_pr_view "$case_dir" base=master headref=feature/x \
+    body='Closes #7.' checks='qa-review:SUCCESS,verify:FAILURE@11#07:43,verify:SUCCESS@12#12:06,unit-tests:SUCCESS'
+  printf '[]\n' > "$case_dir/fixtures/pr-list.json"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a failure in a different workflow sharing the check name is still red"
+  pass "a same-named failure in another workflow still refuses"
 }
 
 # --- (v) prose around develop/beta is not a twin reference -----------------
@@ -1028,6 +1097,10 @@ test_gate_refuses_unreadable_body_twin
 test_gate_duplicate_qa_reports_worst_conclusion
 test_gate_ignores_unrelated_issue_reference
 test_gate_null_pending_qa_before_success_refuses
+test_gate_cancelled_duplicate_is_superseded
+test_gate_only_cancelled_run_still_refuses
+test_gate_rerun_in_same_run_supersedes_failure
+test_gate_failure_in_other_run_still_refuses
 test_gate_ignores_develop_beta_prose
 test_gate_skipped_or_neutral_qa_outranks_success
 test_gate_muso_ai_without_qa_check_refuses
