@@ -140,6 +140,20 @@ SH
   pass "session-lock: a harness that is pid 1 of its own namespace is examined, not skipped"
 }
 
+test_bun_run_omp_is_identified_on_both_platforms() {
+  local comm fakebin
+  fakebin=$(fm_fakebin "$TMP_ROOT/bun-omp")
+  # macOS reports the executable path in comm, procps on Linux the exec name.
+  for comm in bun /Users/u/.bun/bin/bun /opt/homebrew/bin/bun; do
+    lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/omp'" \
+      || fail "$comm running the omp launcher must be identified"
+    if lib_eval "$fakebin" "fm_harness_process_matches '$comm' 'bun /Users/u/.bun/bin/ompd'"; then
+      fail "$comm running ompd was identified as a harness"
+    fi
+  done
+  pass "session-lock: a bun-run omp script is identified under both platforms' comm reporting"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -626,6 +640,84 @@ test_windows_tagged_holder_is_a_live_foreign_owner() {
   pass "session-lock: a live tagged lock holder is a live foreign owner to a second Windows session"
 }
 
+test_windows_tagged_lock_acquisition_uses_the_shared_owner_verdict() {
+  local dir fakebin home current_row live_table dead_table reused_table out status record
+  dir="$TMP_ROOT/win-lock-acquire"
+  fakebin=$(cygwin_fakebin "$dir")
+  home="$dir/home"
+  mkdir -p "$home/state" "$home/endpoints" "$home/bin" "$home/config"
+  git init -q "$home"
+  git -C "$home" commit -q --allow-empty -m fixture
+  : > "$home/AGENTS.md"
+  : > "$home/state/task.meta"
+  current_row='  4201600       0       0       7300  ?              0 22:30:00 C:\Users\u\.local\bin\claude.exe'
+  live_table="$WIN_TABLE
+$current_row"
+  dead_table=$current_row
+  reused_table="  4201508       0       0       7204  ?              0 22:24:48 C:\\Windows\\explorer.exe
+$current_row"
+
+  attempt_lock() {  # <caller-pid> <session-id> <windows-table> <table-fails> <local-ppid>
+    local caller_pid=$1 caller_session=$2 table=$3 table_fails=$4 local_ppid=$5
+    local -a assignments=()
+    assignments+=("PATH=$fakebin:$PATH" "FM_HOME=$home" "FM_TEST_WIN_TABLE=$table")
+    [ -z "$local_ppid" ] || assignments+=("FM_TEST_CYG_PPID=$local_ppid")
+    [ -z "$caller_pid" ] || assignments+=("CLAUDE_PID=$caller_pid" "CLAUDE_CODE_SESSION_ID=$caller_session")
+    [ "$table_fails" != 1 ] || assignments+=("FM_TEST_WIN_PS_FAIL=1")
+    env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID -u FM_TEST_WIN_PS_FAIL -u FM_TEST_CYG_PPID \
+      "${assignments[@]}" "$ROOT/bin/fm-lock.sh"
+  }
+  attempt_hook() {  # <script-name> <payload>
+    local script=$1 payload=$2
+    printf '%s' "$payload" | env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+      -u FM_TEST_WIN_PS_FAIL -u FM_TEST_CYG_PPID -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      FM_TEST_WIN_TABLE="$live_table" CLAUDE_PID=7300 CLAUDE_CODE_SESSION_ID=S2 \
+      "$ROOT/bin/$script"
+  }
+
+  printf 'win:7204\n' > "$home/state/.lock"
+  printf 'S1\n' > "$home/state/.lock-session"
+  if out=$(attempt_lock 7300 S2 "$live_table" 0 '' 2>&1); then status=0; else status=$?; fi
+  [ "$status" -eq 1 ] || fail "fm-lock.sh acquired a live tagged harness lock: $out"
+  case "$out" in *'another live firstmate session holds the lock'*) ;; *) fail "live tagged owner refusal was not reported: $out" ;; esac
+  [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "a live tagged owner lock was replaced"
+
+  if out=$(attempt_hook fm-claude-stop-autoarm.sh '' 2>&1); then status=0; else status=$?; fi
+  [ "$status" -eq 0 ] || fail "Stop recovery did not stand down for a live tagged owner: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "Stop recovery replaced a live tagged owner lock"
+  if out=$(attempt_hook fm-turnend-guard-cursor.sh '{"loop_count":0,"session_id":"S2"}' 2>&1); then status=0; else status=$?; fi
+  [ "$status" -eq 0 ] || fail "turn-end recovery did not stand down for a live tagged owner: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "turn-end recovery replaced a live tagged owner lock"
+
+  printf 'win:7204\n' > "$home/state/.lock"
+  printf 'S1\n' > "$home/state/.lock-session"
+  if out=$(attempt_lock '' '' "$live_table" 1 700 2>&1); then status=0; else status=$?; fi
+  [ "$status" -eq 1 ] || fail "fm-lock.sh acquired through an unreadable Windows process table: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "an unreadable Windows table allowed the tagged owner lock to be replaced"
+
+  printf 'win:7204\n' > "$home/state/.lock"
+  printf 'S1\n' > "$home/state/.lock-session"
+  if out=$(attempt_lock 7300 S2 "$dead_table" 0 '' 2>&1); then status=0; else status=$?; fi
+  [ "$status" -eq 0 ] || fail "fm-lock.sh refused a tagged owner absent from the Windows table: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7300' ] || fail "a dead tagged owner was not replaced by the current session"
+
+  printf 'win:7204\n' > "$home/state/.lock"
+  printf 'S1\n' > "$home/state/.lock-session"
+  if out=$(attempt_lock 7300 S2 "$reused_table" 0 '' 2>&1); then status=0; else status=$?; fi
+  [ "$status" -eq 0 ] || fail "fm-lock.sh refused a reused tagged pid naming a non-harness: $out"
+  [ "$(cat "$home/state/.lock")" = 'win:7300' ] || fail "a reused non-harness pid was not reclaimed"
+
+  for record in '' '   ' not-a-pid 0 00 000 0000 win: win:7abc; do
+    printf '%s\n' "$record" > "$home/state/.lock"
+    printf 'S1\n' > "$home/state/.lock-session"
+    if out=$(attempt_lock 7300 S2 "$dead_table" 0 '' 2>&1); then status=0; else status=$?; fi
+    [ "$status" -eq 0 ] || fail "fm-lock.sh refused non-owner record '$record': $out"
+    [ "$(cat "$home/state/.lock")" = 'win:7300' ] || fail "non-owner record '$record' was not replaced"
+  done
+  pass "session-lock: fm-lock.sh protects valid tagged owners and reclaims dead or malformed records"
+}
+
 test_windows_published_pid_needs_its_claude_session_id() {
   local dir fakebin got
   dir="$TMP_ROOT/win-session-id"
@@ -787,6 +879,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-omp-process-lib.sh" "$dir/bin/fm-omp-process-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
@@ -1566,6 +1659,7 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
+test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
@@ -1576,6 +1670,7 @@ test_windows_published_pid_is_confirmed_before_it_is_trusted
 test_windows_pid_is_never_resolved_as_a_cygwin_pid
 test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
 test_windows_tagged_holder_is_a_live_foreign_owner
+test_windows_tagged_lock_acquisition_uses_the_shared_owner_verdict
 test_windows_published_pid_needs_its_claude_session_id
 test_windows_clear_rekeys_the_lock_under_the_same_pid
 test_tagged_lock_is_inert_off_windows

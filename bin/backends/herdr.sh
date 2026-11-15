@@ -824,14 +824,23 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # -> /private/tmp cannot yield two lock identities for the same socket.
 # fm_backend_herdr_canonical_socket_path: normalize one absolute Unix-socket
 # path so two spellings of the same socket compare equal. Refuses a relative
-# or empty path. An unresolvable directory is left as-is rather than treated as
-# a failure, so a socket whose directory was removed still compares by its own
-# literal path. Single owner for every socket-identity comparison in this
-# adapter (the presentation session lock and the launcher-identity same-session
-# proof both use it).
+# or empty path. On native Windows the herdr server injects and reports
+# drive-letter paths (C:\...\herdr.sock); those are converted to their POSIX
+# spelling first so the launcher's claimed socket and the session list's
+# socket_path land in the same form before comparison. An unresolvable
+# directory is left as-is rather than treated as a failure, so a socket whose
+# directory was removed still compares by its own literal path. Single owner
+# for every socket-identity comparison in this adapter (the presentation
+# session lock and the launcher-identity same-session proof both use it).
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  case "$socket" in
+    [A-Za-z]:[\\/]*)
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      [ -n "$socket" ] || return 1
+      ;;
+  esac
   case "$socket" in
     /*) ;;
     *) return 1 ;;
@@ -2311,6 +2320,37 @@ $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
   }')
 EOF
   printf 'shell'
+}
+
+# fm_backend_herdr_pane_owns_session: 0 only when <pid> provably runs as
+# <pane_id>'s foreground occupant - the pane's own process-info shows a
+# shell_pid that is an ancestor-or-self of <pid> AND <pid>'s process group is
+# the pane's foreground process group. This is the herdr equivalent of the
+# tmux proof bin/fm-supervision-handoff.sh makes from pane_pid and tpgid: an
+# inherited pane id is only ever a hint, and delivery authority comes from the
+# process table, never from the pane naming a session. Every read failure,
+# malformed field, dead link in the ancestry chain, or disagreement between the
+# two records refuses.
+fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
+  local session=$1 pane_id=$2 pid=$3 info shell_pid fg_pgid ancestor pgid
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane_id" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  fg_pgid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  ancestor=$pid
+  while [ "$ancestor" != 1 ] && [ "$ancestor" != "$shell_pid" ]; do
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+    case "$ancestor" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  [ "$ancestor" = "$shell_pid" ] || return 1
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+  [ -n "$pgid" ] && [ "$pgid" = "$fg_pgid" ]
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of

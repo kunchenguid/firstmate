@@ -230,7 +230,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | omp | 18.1.11 | Extension `agent_start` / `agent_end` without `willContinue` | Live Herdr scout on `openai-codex/gpt-6-astra` (2026-09-05): the spawn seed `busy source=fm-spawn`, then `busy source=omp-ext event=agent-start`, then `idle source=omp-ext event=agent-end` at the natural end of the brief; a steer through `fm-send` reopened `busy … agent-start`, and a control-plane interrupt closed it with `idle … agent-end` (omp fires `agent_end` on an interrupted turn). `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end`. |
 | OpenCode | 2.0.21 | Plugin `session.execution.*` (OpenCode 1 `session.status`/`session.idle` retained as legacy inputs) | Verified on 2026-10-01 via `opencode run --standalone`: the live event stream delivered `session.execution.started` then `session.execution.succeeded` for a tool-using turn, and the plugin maps them to `busy`/`idle`; `tests/fm-busy-adapter-wiring.test.sh` pins both the legacy and the `session.execution.*` mappings and the latched-session scoping. |
-| Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
+| Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` was reproduced live on 2.1.317 (see [StopFailure auto-arm](#stopfailure-auto-arm)); `SessionEnd` remains wired from the hook names present in the installed binary without a live abnormal-path reproduction. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
@@ -747,6 +747,43 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+### StopFailure auto-arm
+
+A Claude turn that ends on an API error (`authentication_failed`, `connection_failed`, `server_error`, and similar) runs no `Stop` phase, so before this wiring an error-ended turn left watcher continuity with no hook.
+`StopFailure` semantics were reproduced live on 2026-11-03 with Claude Code 2.1.317 on macOS, in a disposable firstmate home cloned from the tracked tree and driven inside a named Herdr lab session (not tmux), with `ANTHROPIC_BASE_URL` pointed at a local server returning HTTP 401 to every request and `CLAUDE_CODE_MAX_RETRIES=2`.
+
+Command shape:
+
+```sh
+herdr workspace create --cwd <lab-home> --env FM_HOME=<lab-home> \
+  --env ANTHROPIC_BASE_URL=http://127.0.0.1:45679 --env CLAUDE_CODE_MAX_RETRIES=2 ...
+# pane w1:p1: interactive `claude` (pane foreground process name "2.1.317")
+# state/.lock = the pane's claude pid; one queued wake published .watcher-down
+herdr pane send-text w1:p1 'say the single word ahoy' && herdr pane send-keys w1:p1 enter
+```
+
+Observed result:
+
+- The prompt's turn ended on the forced API error; no `Stop` phase ran.
+- `StopFailure` fired with a payload carrying `session_id`, `transcript_path`, `cwd`, `prompt_id`, `error: "authentication_failed"`, and `last_assistant_message`.
+- The tracked `fm-claude-stop-autoarm.sh` registration under `StopFailure` (same `asyncRewake: true`, `timeout: 28800` entry as `Stop`) claimed the epoch, ran `fm-watch-arm.sh` in the foreground, closed actionable on the pending wake, and exited 2.
+- Claude honored the `StopFailure` exit 2 exactly like `Stop`: it queued the wake banner as an unprompted next turn (transcript `queue-operation` enqueue `2026-11-03T19:16:29Z`, `Stop hook blocking error from command "StopFailure:authentication_failed..."`), so the queued wake surfaced without typed input.
+- A real watcher was armed afterward and announced the downtime marker: `fm-watch.sh` ran under `state/.watch.lock`, and `.watcher-down` moved to `announced:downtime:<new generation>`.
+- The rewake turn also hit the forced error and ended on `StopFailure` again, so a second firing ran inside the first one's cooldown.
+  The build live-tested here dropped that second rewake (`outcome=rewake-suppressed`, exit 0), which could leave the home with no further hook firing.
+  This live result verifies event delivery and exit-2 semantics, not the current [paced continuation behavior](../watcher-continuity.md#claude-stop-hook); pacing, failure continuations, and post-wait AFK/need checks have deterministic coverage below but were not re-run live.
+- A synthetic earlier probe on the same version confirmed `asyncRewake: true` itself is honored under `StopFailure` and that a hook-launched detached child outlives the hook teardown.
+
+Deterministic entry point for the event-aware behavior:
+
+```sh
+tests/fm-claude-stop-autoarm.test.sh
+# Relevant assertions (not a new live result):
+# ok - auto-arm: StopFailure rewakes are paced to one per cooldown and never dropped
+# ok - auto-arm: StopFailure failure continuations are paced by the same cooldown
+# ok - auto-arm: a paced StopFailure rewake stands down when AFK or a lost need appears during its wait
+```
+
 ## Supervision host
 
 This pre-flip evidence supports [supervision-host.md](../supervision-host.md)'s Claude engine, away-wake path, and failure direction; its no-file baseline describes the earlier opt-in release, not the current Claude default.
@@ -931,6 +968,35 @@ tests/fm-supervision-host-park.test.sh
 tests/fm-supervision-host-hook.test.sh
 tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
+```
+
+### Acknowledged hand-back retry over herdr, 2026-11-09
+
+This supports [Reaching a lost Claude continuation](../supervision-host.md#reaching-a-lost-claude-continuation): the detached hand-back retry delivers to a Claude primary running in herdr through the inherited `HERDR_SESSION`/`HERDR_PANE_ID` pane identity, with the same ownership, idle, and composer guards as the verified tmux pane.
+It was measured on 2026-11-09 on macOS arm64 with Claude Code 2.1.321 (model `haiku`) in an isolated `fm-lab-*` herdr session; the default and `fm-remote` sessions were not touched.
+
+```text
+$ FM_SUPERVISION_HOST_HERDR_LIVE_E2E=1 tests/fm-supervision-host-herdr-live-e2e.test.sh
+# step 3: no Stop-hook rewake reached the transcript; owner 87432 alive on watcher 87805; pending host-83156-1794258417 unchanged
+# step 4: retry confirmed delivery - handoff log: 1794258429	retry	host-83156-1794258417	empty
+# step 5: pending marker removed only after the acknowledgement
+# step 6: turn end re-armed: 1794258437	start	gen=host-6155-1794258437; watcher 87805 under host 6155
+ok - herdr live e2e: a lost Claude hand-back is recovered by the detached retry, acknowledged, and supervision retained
+```
+
+| Case | Observed |
+| --- | --- |
+| Lost continuation | superseding the owning Stop hook's generation made it exit 0 with no exit-2, no banner, and no failure notice; the transcript shows no `firstmate watcher wake` between the hand-back and the doorbell |
+| Detached owner | stayed alive on the same pending token and kept a verified watcher |
+| Retry delivery | `retry <token> empty` in `.supervision-handoff.log`; the operational doorbell reached the inherited pane as a primary message |
+| Acknowledgement | the primary ran `bin/fm-wake-drain.sh` then `--ack-through 3 --recovery-generation <gen>`; the pending marker disappeared only after the ack |
+| After the acknowledged turn | the next Stop claimed a new generation, parked a host, and took over the detached owner's arm - one watcher retained |
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host-hook.test.sh
+tests/fm-backend-herdr.test.sh
 ```
 
 ## Wedge-alarm channels

@@ -125,6 +125,7 @@ bin/fm-test-run.sh --lane portable-serial   # portable serial remainder (watcher
 bin/fm-test-run.sh --list-lanes   # discover exact lane names, including the current CI serial shards
 bin/fm-test-run.sh --check-coverage   # prove portable shards + serial + serial shards + Herdr equal the full inventory
 bin/fm-test-run.sh --all   # deliberate complete regression (optional local full walk; not no-mistakes Test)
+bin/fm-test-linux.sh   # opt-in: run the tests changed on this branch in a Debian container with GNU userland (needs docker or podman)
 bin/fm-test-isolation-proof.sh --list   # proven portable parallel candidate set
 bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json   # re-run the portable candidate proof
 bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4   # re-run an admitted family proof
@@ -140,6 +141,8 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 Its header and `--help` own the flags, family labels, lanes, and changed-file map; this section only documents the entry points.
 `bin/fm-test-isolation-proof.sh` remains the single owner of the portable candidate proof and reusable family proof harness; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
+`bin/fm-test-linux.sh` is optional and never part of CI: on macOS, run it before publishing a branch whose tests depend on `stat`, `date`, or process behavior, because BSD and GNU tools differ.
+Its header owns selection, runtime detection, and exit codes.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
 CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 Pushing a new head to a pull request cancels that pull request's still-running CI so only the current head is validated, and a newer push to `main` cancels the older `main` run so only the newest merge's run finishes; the workflow owns that contract, the `full-ci` gate described under [The `full-ci` label](#the-full-ci-label), and their rationale.

@@ -28,7 +28,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
-| Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
+| Claude | `.claude/settings.json` Stop/StopFailure `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
@@ -43,6 +43,9 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+The actionable restoration path applies the same live-child check after readiness, so output retained by a dead child's descendant cannot satisfy successor verification.
+Pi also settles an arm child on its process exit event, not only on stdio close, so a child that dies while a descendant still holds its pipes takes the same bounded retry.
+If a complete actionable line arrives while those pipes drain after exit, it replaces the provisional failure retry and takes the ordinary actionable restoration path.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
@@ -82,20 +85,25 @@ It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning a
 
 ### Claude Stop hook
 
-Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
+Claude's `.claude/settings.json` Stop/StopFailure `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its park; its header and help own the invocation contract.
-The hook fires on every Stop.
-On each Stop, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
-If a session exits mid-cycle and leaves an orphaned Stop hook, the replacement session's first eligible Stop supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
+The hook fires on every Stop and StopFailure, covering API-error turn ends that skip Stop entirely.
+On either event, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
+If a session exits mid-cycle and leaves an orphaned auto-arm hook, the replacement session's first eligible Stop or StopFailure supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
 [`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns the open-claim definition.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+StopFailure-driven continuations are paced rather than dropped during persistent API errors; after waiting, the hook stands down silently if away mode appeared or supervision is no longer needed.
+The script header owns the storm-bound mechanics, [configuration](configuration.md#environment-variables) lists the cooldown override, and [StopFailure verification](verification/supervision.md#stopfailure-auto-arm) records the Herdr-hosted evidence and deterministic regression entry point.
 
 ### Claude session-lock ownership
 
 The hook handles the session lock as follows:
 
-- A session-lock owner, including a tagged `win:<pid>` holder on Windows/Git Bash, that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes.
-- A live owner the session does not own, an absent lock, or an unusable lock keeps the competing hook inert.
+- A well-formed session-lock owner is a numeric PID, or a tagged `win:<pid>` value on a Cygwin-family Git Bash host.
+  The shared `fm_session_lock_pid_blocks_reclaim` verdict in `bin/fm-session-lock-lib.sh` is the one decision every recovery caller applies to that identity: an all-zero, proven-dead, reused non-harness, or live-but-unsignalable record stays reclaimable, while a readable verified harness and a live owner whose identity cannot be read keep recovery inert.
+  That library also owns the process-info fallback used when the `ps` binary cannot execute.
+- An absent lock keeps the competing hook inert: with no recorded owner there is nothing stale to recover.
+- A malformed, empty, or otherwise unusable record is not an identity, so it never reaches that verdict: the competing hook stays inert, and a later `bin/fm-lock.sh` acquisition replaces the record.
 
 Whether the session owns that lock is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 That verdict accepts either of two cases:
@@ -141,6 +149,13 @@ After an actionable Pi, omp, or OpenCode child close, the adapter:
 A complete Pi reason line can be observed while the predecessor is still finishing durable cleanup.
 That line is retained for replacement handoff, but the adapter never treats that already-ready predecessor as its own successor.
 
+The successor start and the wake delivery are separate steps on Pi.
+A successor start never waits behind a wake delivery that is still in flight, so a close that arrives while an earlier wake is still being delivered to the supervision branch re-arms immediately instead of leaving the fleet unwatched for the length of that delivery.
+Delivery to the branch stays serialized: one wake is delivered at a time, each wake only after its own close's successor start has settled, and the deliveries keep their order.
+The handling handoff is confirmed inside the successor start, while that successor is still the live arm, and the delivery reads the confirmed outcome.
+A successor that a later close already replaced is therefore never confirmed as a failed handoff, and a healthy newer successor is never reported to main as a restoration failure.
+A verified successor that fails while a successor start or a wake delivery is in flight keeps its bounded retry for the end of that operation, and the operation that held the guard settles it.
+
 If the handoff confirmation fails, the adapter retries it once: Pi against that same token, omp and OpenCode against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error and surfaces exactly one typed message.
 Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
@@ -165,7 +180,7 @@ When restoration does not succeed, the model is never left blind.
 
 ### Claude handling successor
 
-Claude's Stop hook also starts one handling successor before notification.
+With the supervision host disabled, Claude's [auto-arm hook](#claude-stop-hook) also starts one handling successor before notification.
 After an actionable foreground close, including an attached peer cycle that ended, the hook:
 
 1. Launches `bin/fm-watch-arm.sh` with the closed arm's pid as `FM_WATCH_PREDECESSOR_ARM_PID`.
@@ -181,9 +196,9 @@ So that successor is the one deliberate detached launch in the continuity path:
 
 This is the shape `bin/fm-startup-network.sh` uses, and [`verification/supervision.md`](verification/supervision.md#detached-session-open-workers-survive-the-hook) verified that it survives the hook.
 
-The next Stop's foreground arm attaches to that live cycle.
+The next eligible auto-arm firing's foreground arm attaches to that live cycle.
 A successor that confirms no live watcher adds one line to the rewake banner and never withholds the wake.
-The next Stop then re-arms as before.
+The next eligible firing then re-arms as before.
 
 ### Durable queue and turn-end backstop
 
@@ -278,6 +293,7 @@ Every presented row is claimed to exactly one actor under the durable queue lock
   Publication is refused if main already claimed any requested row.
   Activation, publication, release, and deactivation exit nonzero if queue-lock acquisition fails, preserving both grant records and leaving another owner's lock intact.
 - A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
+  A branch drain never reclaims: it drains the grant just published for its turn, and its sandbox may be unable to inspect the host pid.
 - A main drain claims every currently unclaimed row and excludes an active branch grant from both presentation and acknowledgement.
 
 ### Lock deadlines during presentation
@@ -451,9 +467,14 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
-- Verifies single-flight behavior.
+- Holds one branch delivery open to prove successive actionable closes still restore their own successors, and that the queued wakes then arrive in order.
+- Proves a close whose delivery waits behind that held delivery keeps the handoff its own successor confirmed instead of reporting a healthy newer successor to main as a restoration failure.
+- Verifies single-flight behavior for the restoration pump and for delivery separately.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+- Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
+- Lets a verified Pi successor exit after delivery while a descendant holds its pipes to prove the exit alone schedules the bounded retry.
+- Delays a Pi arm's actionable line behind a descendant-held pipe until after its exit to prove that line still becomes the wake instead of a retry.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 
@@ -530,6 +551,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Supersession of a dead session's orphaned claim by the replacement session's first Stop, including a resumed session that carries the dead one's conversation id, and a claim with no readable session lock.
 - A recycled background bridge keeping its live claim on the trusted session id pinned to the lock holder's recorded session-lock identity.
 - The Windows/Git Bash session-lock readers for the supervision-host key, claim read-back, and mid-turn health, plus untagged-value parity with the numeric helpers, in `tests/fm-session-lock-windows-consumers.test.sh`.
+- The ps-free identity route and its fail-closed refusals when the `ps` binary cannot execute, in `tests/fm-session-lock-ps-denied.test.sh`.
 - Bounded failure retries.
 - Benign live-watcher cycle ends.
 - One-notice failure episodes.
@@ -538,7 +560,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - An unconfirmed successor reported in the banner without withholding the wake.
 - The [session-bound HUP/TERM/INT failure handoff](turnend-guard.md#failure-progression-and-block-budget) and replacement-session notice isolation.
 
-It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
+It also covers generation-claim single-flight, stuck-claim and earlier-session supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
 
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh`:
@@ -565,8 +587,8 @@ OpenCode support targets persistent TUI sessions rather than headless `opencode 
 
 The other harnesses rely on these mechanisms:
 
-- Claude normally depends on the Stop `asyncRewake` rewake.
-  The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) adds guarded tmux retries when that continuation is lost.
+- Claude normally depends on the [auto-arm hook's rewake](#claude-stop-hook).
+  The host's opt-in [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) owns guarded retries when that continuation is lost.
 - Cursor depends on its awaited stop-hook park.
 - Grok retains native background-completion notifications.
 - Codex retains bounded foreground checkpoints unless the home opts in to its [native Stop park](supervision-protocols/codex.md).

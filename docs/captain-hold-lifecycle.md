@@ -43,6 +43,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | `reconcile close`, `reconcile note`, `reconcile list` | Retire or list pending reconcile requests. | [Verifying and retiring a request](#verifying-and-retiring-a-request) |
 | `diverged` | Read-only report of a call whose two records disagree. | [Record divergence](#record-divergence) |
+| `pr-policy`, `settle-pr` | Declare and apply opt-in forge settlement. | [PR settlement](#pr-settlement) |
 
 ### Creating a hold (`hold`)
 
@@ -167,6 +168,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 
 - It records one `Deliverable of the finished work: ...` line at the end of the task body.
 - It copies a supported pull request or canonical `data/<id>/report.md` into the row's structured artifact fields.
+  A forced retention of a scout whose report was never written records no report, so the held row cannot read as a delivery.
   A Gerrit change or GitLab merge request URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
 - It runs `tasks-axi reopen`.
 
@@ -202,7 +204,7 @@ The refusal names the record and the validation reason, so the captain can repai
 ### What `--force` does not lift
 
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question.
-Only `answer` with the captain's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
+The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) owns the allowed answer and evidence-backed settlement paths.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
 
 ## Answer-time resolution
@@ -326,7 +328,22 @@ A successful normal answer also retires any pending request, because an answered
 
 Every retirement is checked.
 If request removal fails after an answer, close, or note is already durable, the durable outcome stands, but the command fails and leaves the pending request visible for retry.
-No path here closes a captain call without either the captain's words through `answer` or the evidence through `reconcile close`.
+Board-requested reconciliation remains separate from the opt-in forge path below.
+
+## PR settlement
+
+[PR hold settlement](configuration.md#pr-hold-settlement-confighold-pr-settle) connects the contribution observer to the hold lifecycle without changing cleanup or the merge poll.
+`bin/fm-captain-hold.sh --help` owns the declaration schema, supported events, and settlement commands.
+The observer invokes settlement for both fresh and retained terminal observations.
+It records evidence before applying the declared task transition, under the task's control lock.
+A retry uses that evidence to finish an interrupted transition without writing a second resolution.
+The existing parent channel receives the resolution before the declaration is retired.
+A `release` declaration follows the attended-only rule of [Answering a call](#answering-a-call-answer): while the home is away or the away-posture record is locked the hold stays unchanged, and a later poll applies the declaration after the captain returns.
+When another command holds the task, for example a captain answer in progress, settlement leaves the declaration unchanged and a later poll applies it.
+Linking a follow-up PR to the held task keeps its declaration valid.
+A declaration that can no longer settle is removed, and the observer prints one diagnostic line when the question changed or the PR ended in the other terminal state.
+A successful settlement prints nothing, so it causes no wake.
+`tests/fm-contributions.test.sh` exercises merged and unmerged closure, default-off behavior, unrelated work, superseded declarations, away deferral, busy-task deferral, follow-up links, closure reports for a task with two closed PRs, and interrupted settlement.
 
 ## Card hygiene: a landed subject is not a live call
 
@@ -404,6 +421,9 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 An available hold is therefore never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 
+Decision presentation uses the full-text field documented in [`bin/fm-bearings-snapshot.sh`](../bin/fm-bearings-snapshot.sh), preserving the recorded question and options while compact summaries remain overview-only.
+Older secondmate summaries without that field fall back to the title and reason text they retained.
+
 ### Accepted limits
 
 Three accepted limits remain deliberate:
@@ -437,7 +457,7 @@ The away-posture restriction on queued merges and its residual limits are owned 
 A captain call can have two records, and closing one does not close the other.
 The status-log fold is the open-decision set `bin/fm-classify-lib.sh` reads from a task's status log, where a keyed `needs-decision` or `blocked` line opens a decision.
 A `resolved [key=...]` line closes the status-log fold.
-The structured captain-held task closes only through `answer`.
+The structured captain-held task settles only through the [lifecycle policy's answer or evidence paths](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy).
 
 Until this guard existed, closing on the status side alone left no trace of the disagreement.
 The fold went quiet, the durable record kept saying the captain owed an answer, and nothing warned.
@@ -649,12 +669,13 @@ That suite drives its Lavish session through a protocol-shaped stub.
 It separates a resolution from the durable-transfer close and from a still-open key.
 It reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
-Projection regressions live in two suites:
+Projection and decision-text rendering regressions live in three suites:
 
 | Suite | What it covers |
 | --- | --- |
 | `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
-| `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links. |
+| `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, scout-report precedence over competing pull-request links, and full local and secondmate question transport with Unicode, report pointers, and legacy optional-field fallbacks. |
+| `tests/fm-bearings-board-render.test.sh` | Complete snapshot question and option text reaching the rendered decision card, including Unicode. |
 
 ### Refreshing this record
 
@@ -662,7 +683,7 @@ The exact commands and their summarized outputs are recorded in the shipping PR'
 To refresh this record, run:
 
 - The four suites above: `tests/fm-captain-hold-lifecycle.test.sh`, `tests/fm-classify-decision-key.test.sh`, `tests/fm-fleet-snapshot-view.test.sh`, and `tests/fm-bearings-snapshot.test.sh`.
-- `tests/fm-send-resolve-key.test.sh`, `tests/fm-bearings-board.test.sh`, and `tests/fm-procevent.test.sh`.
+- `tests/fm-send-resolve-key.test.sh`, `tests/fm-bearings-board.test.sh`, `tests/fm-bearings-board-render.test.sh`, and `tests/fm-procevent.test.sh`.
 - `bin/fm-lint.sh`.
 
 After a lavish-axi upgrade, run `FM_BEARINGS_LAVISH_LIVE=1 tests/fm-bearings-board-lavish-live-e2e.test.sh`.

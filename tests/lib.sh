@@ -167,6 +167,24 @@ fm_test_launch_git_prefix() {  # <launch>
   printf '%s env-file %s%s' "$helper" "$tail" "$end"
 }
 
+# The launch with its OSC 7501 reporter frame removed: the arm statement ending
+# the first line and the disarm line after the agent command. Suites asserting
+# the exact launch compare the rest in its one-line shape; an empty launch
+# stays empty so "nothing was sent" assertions still hold.
+fm_test_launch_unframe() {  # <launch>
+  local launch=$1 nl=$'\n' head body last
+  [ -n "$launch" ] || return 0
+  case "$launch" in
+    *fm-osc7501.sh*' arm --task '*" || true$nl"*"$nl"*fm-osc7501.sh*' disarm --state '*' || true'*) ;;
+    *) fail "launch has no OSC 7501 arm/disarm frame: $launch" ;;
+  esac
+  head=${launch%%"$nl"*}
+  body=${launch#*"$nl"}
+  last=${body##*"$nl"}
+  body=${body%"$nl"*}
+  printf '%s; %s%s' "${head%; *fm-osc7501.sh*}" "$body" "${last##*' || true'}"
+}
+
 # The command a pane runs after the launch's Git configuration prefix and its
 # leading export statements, for suites that split it into arguments.
 fm_test_launch_command() {  # <launch>
@@ -339,6 +357,21 @@ export FM_TEST_STUB_MAX_BLOCK_SECONDS
 FM_TEST_SUITE_PID=$$
 export FM_TEST_SUITE_PID
 
+# fm_test_nonplatform_binary <binary> <dir>: print a path that runs <binary> as
+# a non-platform process. macOS hides a platform binary's environment from
+# `ps -E`, so a holder whose environment a fixture must read cannot run Apple's
+# own copy, such as /usr/bin/jq. On Darwin this copies <binary> into <dir> and
+# ad-hoc signs the copy, which drops its platform identity; elsewhere it prints
+# <binary> unchanged.
+fm_test_nonplatform_binary() {
+  local bin=$1 dir=$2 copy
+  [ "$(uname -s)" = Darwin ] || { printf '%s\n' "$bin"; return 0; }
+  copy="$dir/$(basename "$bin")-nonplatform"
+  cp "$bin" "$copy" || return 1
+  codesign --force --sign - "$copy" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$copy"
+}
+
 # Remove a fixture tree even when it holds a read-only directory, such as the
 # spawn-owned state/<id>.git-hooks strip directory.
 fm_test_remove_tree() {
@@ -419,6 +452,9 @@ trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
 trap 'fm_test_cleanup; exit 129' HUP
 trap 'fm_test_cleanup; exit 131' QUIT
+
+TREEHOUSE_ROOT=$(fm_test_tmproot fm-treehouse-pool)
+export TREEHOUSE_ROOT
 
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a

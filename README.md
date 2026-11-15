@@ -69,7 +69,7 @@ Backend-specific setup is linked in [Documentation](#documentation).
 ### Recommended harnesses
 
 **Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session, with `pi-signed` supported as Pi's distinct signed-wrapper identity.
-Claude Code uses a tracked Stop hook for tokenless watcher re-arm and rewake, Grok uses background-notify wake cycles, and Pi uses its tracked primary watcher extension.
+Claude Code uses tracked Stop and StopFailure hooks for [tokenless watcher re-arm and rewake](docs/watcher-continuity.md#claude-stop-hook), including API-error turn ends, Grok uses background-notify wake cycles, and Pi uses its tracked primary watcher extension.
 All three have verified turn-end guard paths when launched with their documented setup.
 Pick whichever one matches your subscription and workflow.
 
@@ -189,6 +189,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/quiet`           | Keep routine wakes off main while staying and chatting; requested actions proceed now rather than waiting for your return. Where Pi's branch or an [attended supervision host](docs/supervision-host.md#quiet-mode) already does this, it only says so; otherwise it starts the quiet daemon, which stays active through ordinary chat until `/quiet off` |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers and measured follow-up for owned contributions; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
+| `/lavish-url <url> [--mobile]` | Capture an http or https page without URL credentials, public or local, into an annotatable Lavish review snapshot with `[Fix Layout]`, `[Update Text]`, and `[Mobile Bug]` chips and project-aware element labels; add `--mobile` for mobile emulation. Feedback returns as a notification and is filed to the backlog of the registered project that owns the site, or surfaced for a decision when the site's project is not certain |
 | `/updatefirstmate` | Guardedly update the running firstmate and its secondmates - fast-forward, or reconcile a redundant post-squash-merge divergence - then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 

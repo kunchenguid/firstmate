@@ -256,7 +256,8 @@ unit_stop_archives_the_record_last() {
 }
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the four stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the four delivery
+# artifacts plus the prior session's five per-task marker families.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -266,6 +267,12 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
+  : > "$st/state/.subsuper-stale-task1"
+  : > "$st/state/.subsuper-reported-stale-task1"
+  : > "$st/state/.subsuper-dialog-task1"
+  : > "$st/state/.subsuper-paused-task1"
+  : > "$st/state/.subsuper-pause-until-due-task1"
+  : > "$st/state/.subsuper-seen-status-task1"  # classification position must be kept
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -279,10 +286,113 @@ unit_clear_stale() {
   else
     fail "clear-stale: stale artifacts survived"
   fi
+  if ! compgen -G "$st/state/.subsuper-stale-*" >/dev/null \
+     && ! compgen -G "$st/state/.subsuper-reported-stale-*" >/dev/null \
+     && ! compgen -G "$st/state/.subsuper-dialog-*" >/dev/null \
+     && ! compgen -G "$st/state/.subsuper-paused-*" >/dev/null \
+     && ! compgen -G "$st/state/.subsuper-pause-until-due-*" >/dev/null; then
+    pass "clear-stale: removes the prior session's five per-task marker families"
+  else
+    fail "clear-stale: per-task session markers survived"
+  fi
+  if [ -e "$st/state/.subsuper-seen-status-task1" ]; then
+    pass "clear-stale: keeps the durable classification position"
+  else
+    fail "clear-stale: removed the classification position"
+  fi
   if [ -e "$st/state/.wake-queue" ]; then
     pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
   else
     fail "clear-stale: removed the durable wake-queue"
+  fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# The per-task away markers are session-scoped episode state: the return path
+# (fm_afk_launch_stop) and the fresh-entry cleanup must both drop all five
+# families, or the next session's first housekeeping reads a dead session's
+# idle clock as its own and reports a wedge whose duration never happened.
+# The last pass replays the implicit-state-machines audit's reproduction: a
+# hand-written prior-session clock, an idle pane read, delivery stubbed off.
+# ---------------------------------------------------------------------------
+unit_per_task_markers_session_scoped() {
+  local st state now
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-marker-scope.XXXXXX")
+  state="$st/state"
+  mkdir -p "$state"
+  now=$(date +%s)
+  # One finished ship task, as the audit's scratch home: a terminal status and
+  # a meta that still maps its window.
+  printf 'done [at=%s]: PR https://example.test/o/r/pull/1 checks green\n' "$now" > "$state/demo.status"
+  printf 'window=%s\nbackend=tmux\nharness=claude\n' 'fmaudit-none:fm-demo' > "$state/demo.meta"
+  printf '0:fixture\n' > "$state/.subsuper-seen-status-demo"
+  printf '%s\n' "$now" > "$state/.subsuper-last-scan"
+  seed_markers() {
+    # Same path and content as the daemon's stale_marker_record: the epoch the
+    # pane was first seen idle, mid-episode when the session ended.
+    printf '%s\n' $(( now - 172801 )) > "$state/.subsuper-stale-demo"
+    : > "$state/.subsuper-reported-stale-demo"
+    : > "$state/.subsuper-dialog-demo"
+    : > "$state/.subsuper-paused-demo"
+    : > "$state/.subsuper-pause-until-due-demo"
+  }
+  markers_gone() {
+    ! compgen -G "$state/.subsuper-stale-*" >/dev/null \
+      && ! compgen -G "$state/.subsuper-reported-stale-*" >/dev/null \
+      && ! compgen -G "$state/.subsuper-dialog-*" >/dev/null \
+      && ! compgen -G "$state/.subsuper-paused-*" >/dev/null \
+      && ! compgen -G "$state/.subsuper-pause-until-due-*" >/dev/null
+  }
+
+  # The return path drops the session's markers with the away flag.
+  seed_markers
+  : > "$state/.afk"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" "$LAUNCH" stop >/dev/null 2>&1
+  if markers_gone && [ ! -e "$state/.afk" ] && [ -e "$state/.subsuper-seen-status-demo" ]; then
+    pass "return: stop drops all five per-task marker families, keeps the classification position"
+  else
+    fail "return: per-task markers survived stop ($(compgen -G "$state/.subsuper-*" | tr '\n' ' '))"
+  fi
+
+  # The fresh-entry cleanup drops them alongside the delivery artifacts.
+  seed_markers
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$state"
+  if markers_gone; then
+    pass "entry: fresh-session cleanup drops all five per-task marker families"
+  else
+    fail "entry: per-task markers survived fresh-session cleanup ($(compgen -G "$state/.subsuper-*" | tr '\n' ' '))"
+  fi
+
+  # The audit narrative end to end: session one's clock goes through stop and
+  # the next entry's cleanup, then the new daemon's first housekeeping pass.
+  # Reset to the audit's repro shape first: ONLY the stale clock, because
+  # housekeeping's pause migration retires the episode before the wedge check
+  # whenever a paused marker is also present.
+  rm -f "$state"/.subsuper-stale-* "$state"/.subsuper-reported-stale-* \
+    "$state"/.subsuper-dialog-* "$state"/.subsuper-paused-* \
+    "$state"/.subsuper-pause-until-due-*
+  printf '%s\n' $(( now - 172801 )) > "$state/.subsuper-stale-demo"
+  : > "$state/.afk"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" "$LAUNCH" stop >/dev/null 2>&1
+  : > "$state/.afk"   # a fresh entry, two days later in the audit's telling
+  printf '%s\n' "$(date +%s)" > "$state/.subsuper-last-scan"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$state" FM_DAEMON_PRIMARY_HARNESS=claude \
+    bash -c '
+      . "$1"
+      stale_window_is_busy() { return 1; }
+      escalate_flush() { return 0; }
+      inject_msg() { return 0; }
+      inject_wedge_alarm() { return 0; }
+      housekeeping "$2"
+    ' _ "$ROOT/bin/fm-supervise-daemon.sh" "$state"
+  if ! grep -q 'possible wedge' "$state/.subsuper-escalations" 2>/dev/null; then
+    pass "session scope: a dead session's idle clock cannot report 'possible wedge' in the next session"
+  else
+    fail "session scope: first housekeeping reported a wedge that never happened ($(cat "$state/.subsuper-escalations"))"
   fi
   rm -rf "$st"
 }
@@ -1787,6 +1897,7 @@ e2e_rex() {
 }
 
 unit_clear_stale
+unit_per_task_markers_session_scoped
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon

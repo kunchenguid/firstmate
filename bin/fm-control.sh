@@ -967,7 +967,7 @@ do_stand_down() {
       case "$state" in
         dead) ;;
         alive)
-          result=$(do_exit)
+          result=$(do_exit) || die "task $ID's stand-down retry exit failed; refusing to publish an intentional no-worker state"
           case "$result" in
             stopped|already-stopped) ;;
             *) die "task $ID's stand-down retry exit reported '$result'; refusing to publish an intentional no-worker state" ;;
@@ -978,7 +978,7 @@ do_stand_down() {
       ;;
   esac
   if [ "$lifecycle" = active ] && [ "$state" = alive ]; then
-    result=$(do_exit)
+    result=$(do_exit) || die "task $ID's stand-down exit failed; refusing to publish an intentional no-worker state"
     case "$result" in
       stopped|already-stopped) ;;
       *) die "task $ID's stand-down exit reported '$result'; refusing to publish an intentional no-worker state" ;;
