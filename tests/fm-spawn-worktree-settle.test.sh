@@ -38,8 +38,7 @@ make_settle_fakebin() {
 #!/usr/bin/env bash
 set -u
 window_file="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}.window"
-case "$*" in
-  *"#{pane_current_path}"*)
+pane_path() {
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
@@ -50,8 +49,17 @@ case "$*" in
     else
       printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
     fi
-    exit 0
-    ;;
+}
+case "$*" in
+  *"#{pane_current_path}"*)
+    # The Windows regression keeps the process cwd stuck in the project even
+    # though Git inside the nested shell sees the correct isolated copy.
+    if [ "${FM_FAKE_PARENT_CWD_STUCK:-0}" = 1 ]; then
+      printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
+    else
+      pane_path
+    fi
+    exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -67,12 +75,31 @@ case "${1:-}" in
     exit 0 ;;
   kill-window) : > "$window_file"; exit 0 ;;
   has-session|new-session) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        'git rev-parse --show-toplevel > '*)
+          [ "${FM_FAKE_SHELL_SILENT:-0}" != 1 ] || exit 0
+          path=$(pane_path)
+          (cd "$path" && eval "$arg")
+          exit $? ;;
+      esac
+    done
+    exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  # A native Windows host uses its real path converter; simulated Windows on
+  # Unix already has shell-readable absolute paths.
+  if ! command -v cygpath >/dev/null 2>&1; then
+    cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$2"
+SH
+    chmod +x "$fakebin/cygpath"
+  fi
   printf '%s\n' "$fakebin"
 }
 
@@ -121,6 +148,9 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    OSTYPE="${SETTLE_OSTYPE:-$OSTYPE}" \
+    FM_FAKE_PARENT_CWD_STUCK="${SETTLE_PARENT_CWD_STUCK:-0}" \
+    FM_FAKE_SHELL_SILENT="${SETTLE_SHELL_SILENT:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -136,7 +166,7 @@ test_single_stale_first_read_is_not_accepted() {
 
   out=$(run_settle_spawn "$id")
   status=$?
-  expect_code 0 "$status" "spawn should succeed once the pane settles"
+  expect_code 0 "$status" "spawn should succeed once the pane settles"$'\n'"$out"
   assert_contains "$out" "spawned $id" "spawn did not report success"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the settled worktree"
@@ -253,10 +283,62 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+test_windows_nested_shell_ignores_parent_cwd() {
+  local rec id out status
+  id=settle-windows-nested-z6
+  rec=$(make_settle_case settle-windows-nested "$id" 0)
+  read_settle_record "$rec"
+  STALE_DIR=$PROJ_DIR
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(SETTLE_OSTYPE=msys SETTLE_PARENT_CWD_STUCK=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "Windows spawn should use Git inside the nested shell"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "Windows spawn did not record the shell-reported isolated worktree"
+  [ "$(cat "$COUNTFILE")" -eq 3 ] || fail "shell discovery did not retain the confirming read and launch-boundary check"
+  pass "Windows accepts a proven isolated worktree while the parent process cwd never moves"
+}
+
+test_windows_shell_primary_is_refused() {
+  local rec id out status
+  id=settle-windows-primary-z7
+  rec=$(make_primary_case settle-windows-primary "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(SETTLE_OSTYPE=msys SETTLE_PARENT_CWD_STUCK=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Windows shell probe accepted the primary checkout"$'\n'"$out"
+  assert_contains "$out" "repository's primary checkout" "Windows probe bypassed the isolation guard"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused Windows spawn published metadata"
+  pass "Windows refuses the primary checkout even when Git inside the shell reports it"
+}
+
+test_windows_missing_reply_never_uses_parent_cwd() {
+  local rec id out status
+  id=settle-windows-silent-z8
+  rec=$(make_settle_case settle-windows-silent "$id" 0)
+  read_settle_record "$rec"
+  # A valid-looking process cwd must not rescue a missing shell reply.
+  STALE_DIR=$WT_DIR
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(SETTLE_OSTYPE=msys SETTLE_PARENT_CWD_STUCK=1 SETTLE_SHELL_SILENT=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Windows spawn fell back to the parent cwd after no shell reply"$'\n'"$out"
+  assert_contains "$out" "did not enter an isolated worktree" "missing shell reply did not explain the refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "silent Windows spawn published metadata"
+  pass "Windows refuses a missing shell reply instead of trusting a stale process cwd"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
+test_windows_nested_shell_ignores_parent_cwd
+test_windows_shell_primary_is_refused
+test_windows_missing_reply_never_uses_parent_cwd
 
 echo "# all fm-spawn-worktree-settle tests passed"

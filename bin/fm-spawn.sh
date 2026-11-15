@@ -958,6 +958,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-spawn-path-lib.sh
+. "$SCRIPT_DIR/fm-spawn-path-lib.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -5503,6 +5505,13 @@ spawn_send_text_line() { # <target> <text>
   esac
 }
 spawn_current_path() { # <target>
+  # Windows process-cwd APIs can keep reporting the parent shell's directory
+  # after Treehouse enters a nested cmd.exe shell. Ask Git inside the endpoint
+  # instead, including at the final launch boundary and on relaunch. Never
+  # fall back to a stale process cwd when the shell does not answer.
+  case "$OSTYPE" in
+    msys*|cygwin*|win32*) fm_spawn_shell_worktree_path "$1"; return $? ;;
+  esac
   case "$BACKEND" in
   tmux) fm_backend_tmux_current_path "$1" ;;
   herdr) fm_backend_herdr_current_path "$1" ;;
@@ -6110,7 +6119,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   else
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Wait for the treehouse subshell: the pane enters the worktree. On Windows,
+    # spawn_current_path reads Git's root from inside that shell, not the
+    # parent's unchanged process cwd. Both paths retain the isolation screen.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
     # automatic-rename slips through), display-message -t <bad-name> falls back to the
     # active client's window, which would misread firstmate's OWN pane path as the
