@@ -381,6 +381,7 @@ Never merge a red PR under either setting; destructive, irreversible, and securi
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+`bin/fm-pr-merge.sh` refuses unless the declared coverage class is green on the current head (a `qa-review` GO, or the no-mistakes attestation for a declared no-QA repository) and refuses any red check other than the by-design self-authorship guard; `--override-gate <reason>` exists only for the captain's explicit word.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

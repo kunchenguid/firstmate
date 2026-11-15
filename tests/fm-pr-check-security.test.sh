@@ -127,6 +127,10 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  # The merge gate runs before every forge merge, so the repositories these
+  # fixtures merge are declared no-QA; the gh mock below serves the green
+  # no-mistakes attestation the gate requires on the current head.
+  printf '%s\n' 'o/r' 'my-org/repo_name.with-dots' > "$dir/home/config/merge-gate-no-qa-repos"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
@@ -146,6 +150,17 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *statusCheckRollup*)
+    printf 'head=%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    printf 'author=someone\n'
+    printf 'base=feature\n'
+    printf 'headref=feature/x\n'
+    printf 'state=OPEN\n'
+    printf 'merged_at=null\n'
+    printf 'body=Closes nothing.\n'
+    printf 'check=PR must be raised via no-mistakes\037SUCCESS\n'
+    exit 0
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -172,6 +187,15 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
+case " $* " in
+  *" api "*)
+    case "$*" in
+      *"/statuses"*) printf '%s\n' '[{"name":"PR must be raised via no-mistakes","status":"success"}]' ;;
+      *) printf '%s\n' '{"sha":"0123456789abcdef0123456789abcdef01234567","author":{"username":"someone"},"target_branch":"feature","source_branch":"feature/x","state":"opened","merged_at":null,"description":"Closes nothing."}' ;;
+    esac
+    exit 0
+    ;;
+esac
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
@@ -1370,6 +1394,10 @@ EOF
   # merge's JSON read cannot be parsed, which must refuse rather than merge on a
   # state it could not read.
   write_task_meta "$dir" task-c
+  # The gate runs before the forge-state read, so declare this repository no-QA
+  # with a green attestation on the current head; the refusal under test is the
+  # merge wrapper's own unreadable glab state, not the gate's coverage refusal.
+  printf '%s\n' 'group/subgroup/project' > "$dir/home/config/merge-gate-no-qa-repos"
   : > "$dir/glab.log"
   # The merge path needs jq before it reads anything, so this case supplies it
   # and the refusal below is the unreadable state rather than a missing tool.

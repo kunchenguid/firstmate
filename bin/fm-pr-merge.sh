@@ -53,6 +53,23 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
+# Before any forge merge, bin/fm-merge-gate-lib.sh decides whether the pull
+# request's review verdict and check state authorize it: a qa-review verdict on
+# the current head that is not success, a head that moved since the verdict, any
+# red check other than the adk47 self-authorship credit-approval-guard, and a
+# master/main twin in a declared GitHub twin repository whose develop/beta
+# counterpart is unmerged all refuse; the twin check is skipped with a note on
+# any other repository or forge. A verdict that cannot be read refuses too,
+# because silence is not a GO. Declared
+# coverage decides on every forge: a QA-covered repository on a forge with no
+# verdict source refuses, a declared no-QA repository needs its attestation green
+# on GitLab and GitHub alike, and an undeclared repository refuses as coverage
+# unknown. The live GitLab pipeline guard below stays an additional check, never
+# a substitute. The gate's own header owns the full rule set. --override-gate
+# <reason> is the only escape, and it records the reason, the operator, and the
+# timestamp in the task's metadata before the merge is attempted; it exists for
+# the captain's explicit "merge it anyway" word, never as a routine flag.
+#
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
@@ -75,6 +92,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-merge-gate-lib.sh
+. "$SCRIPT_DIR/fm-merge-gate-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
 # green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
 # without a branch actor).
@@ -101,6 +120,43 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
+
+# --override-gate is this script's own flag, so it is taken out of the argument
+# list before the forge sees it. It is accepted only before the optional --
+# separator, which is where this script's own flags live.
+OVERRIDE_REASON=
+if [ "$#" -gt 0 ]; then
+  remaining=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --)
+        remaining+=("$@")
+        break
+        ;;
+      --override-gate)
+        if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+          echo "error: --override-gate needs a stated reason" >&2
+          exit 2
+        fi
+        OVERRIDE_REASON=$2
+        shift 2
+        ;;
+      --override-gate=*)
+        OVERRIDE_REASON=${1#--override-gate=}
+        if [ -z "$OVERRIDE_REASON" ]; then
+          echo "error: --override-gate needs a stated reason" >&2
+          exit 2
+        fi
+        shift
+        ;;
+      *)
+        remaining+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- ${remaining[@]+"${remaining[@]}"}
+fi
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -211,11 +267,10 @@ if [ "$PROVIDER" = gitlab ]; then
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
-# because that script re-records pr= and drops a pr_head= it cannot resolve.
-RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
-  RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-fi
+# because that script re-records pr= and drops a pr_head= it cannot resolve. The
+# merge gate compares it with the live head, so a verdict recorded against an
+# older commit cannot authorize a newer one.
+RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
@@ -492,6 +547,35 @@ METHODS
   fi
 }
 
+# The head the caller's own --match-head-commit names, if any, so the gate
+# checks the same commit the forge merge will be bound to.
+caller_match_head_commit() {
+  local arg pending=false
+  for arg in "$@"; do
+    if [ "$pending" = true ]; then
+      printf '%s' "$arg"
+      return 0
+    fi
+    case "$arg" in
+      --match-head-commit) pending=true ;;
+      --match-head-commit=*) printf '%s' "${arg#--match-head-commit=}"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# Record an override durably before the merge is attempted, so the reason, the
+# operator, and the time survive even when the merge itself fails.
+record_merge_gate_override() {
+  local who
+  who=${FM_MERGE_GATE_ACTOR:-${USER:-$(id -un 2>/dev/null || printf 'unknown')}}
+  {
+    printf 'merge_gate_override=%s\n' "$OVERRIDE_REASON"
+    printf 'merge_gate_override_by=%s\n' "$who"
+    printf 'merge_gate_override_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >> "$META"
+}
+
 record_pr_metadata() {
   if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
     return 1
@@ -622,6 +706,21 @@ gitlab_confirm_merged() {
   fi
   [ "$state" = merged ]
 }
+
+# The gate runs before any metadata is rewritten, so the recorded head it
+# compares against is the one the verdict was read on. A refusal here is a
+# refusal of the whole command: nothing is recorded and no merge is attempted.
+if [ -n "$OVERRIDE_REASON" ]; then
+  printf 'warning: the merge gate is overridden for %s: %s\n' "$URL" "$OVERRIDE_REASON" >&2
+  record_merge_gate_override
+else
+  gate_args=(--forge "$PROVIDER")
+  [ -z "$RECORDED_HEAD" ] || gate_args+=(--recorded-head "$RECORDED_HEAD")
+  gate_repo=$PR_OWNER/$PR_REPO
+  [ "$PROVIDER" != gitlab ] || gate_repo=$FM_PR_PATH
+  fm_merge_gate "$gate_repo" "$PR_NUMBER" "$(caller_match_head_commit "$@")" \
+    ${gate_args[@]+"${gate_args[@]}"} || exit 1
+fi
 
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
