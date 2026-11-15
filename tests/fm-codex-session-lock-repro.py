@@ -179,10 +179,13 @@ exec {shlex.quote(sys.executable)} "$@"
     saved_path = env['PATH']
     env['PATH'] = str(no_python)
     assert run('command -v python3', None).returncode == 1, 'python3 remained available'
-    for arguments in (
-        "-C '/Users/me/My Home' app-server",
-        '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership',
+    for executable, arguments in (
+        ('/opt/codex', "-C '/Users/me/My Home' app-server"),
+        ('/opt/codex', '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership'),
+        ('/Users/me/My Tools/codex', 'app-server'),
+        ('/Users/me/My Tools/codex', "-C '/Users/me/My Home' app-server"),
     ):
+        env['FM_FIXTURE_ARGV0'] = executable
         env['FM_FIXTURE_SUBCOMMAND'] = arguments
         for identity in (None, OWNER, OTHER):
             assert run(lock, identity).returncode == 1, 'missing-python ambiguous arguments granted PID-only ownership: ' + arguments
@@ -195,15 +198,19 @@ exec {shlex.quote(sys.executable)} "$@"
         assert (home / 'state/.lock').read_bytes() == legacy, 'missing-python ambiguous arguments replaced the legacy owner'
         assert not (home / 'state/.lock-session').exists(), 'missing-python ambiguous arguments fabricated a legacy owner identity'
         (home / 'state/.lock').unlink()
+    env.pop('FM_FIXTURE_ARGV0')
     print('ok - missing-python spaced directory and ambiguous prompt refuse PID-only ownership')
     env['FM_FIXTURE_SUBCOMMAND'] = '-m gpt-5.5 --approve-for-me Inspect ownership'
-    acquired = run(lock, None)
-    assert acquired.returncode == 0, 'missing-python CLI could not acquire an empty home: ' + acquired.stdout + acquired.stderr
-    assert (home / 'state/.lock').read_text().strip() == str(os.getpid()), 'missing-python CLI lost its PID anchor'
-    assert not (home / 'state/.lock-session').exists(), 'missing-python CLI published a native identity'
-    assert run(lock, None).returncode == 0, 'missing-python CLI could not re-enter its lock'
-    assert run(own, None).returncode == 0, 'missing-python CLI lost ownership'
-    (home / 'state/.lock').unlink()
+    for executable in ('/opt/codex', '/Users/me/My Tools/codex'):
+        env['FM_FIXTURE_ARGV0'] = executable
+        acquired = run(lock, None)
+        assert acquired.returncode == 0, 'missing-python CLI could not acquire an empty home: ' + acquired.stdout + acquired.stderr
+        assert (home / 'state/.lock').read_text().strip() == str(os.getpid()), 'missing-python CLI lost its PID anchor'
+        assert not (home / 'state/.lock-session').exists(), 'missing-python CLI published a native identity'
+        assert run(lock, None).returncode == 0, 'missing-python CLI could not re-enter its lock'
+        assert run(own, None).returncode == 0, 'missing-python CLI lost ownership'
+        (home / 'state/.lock').unlink()
+    env.pop('FM_FIXTURE_ARGV0')
     env['PATH'] = saved_path
     print('ok - missing-python CLI without an ambiguous server token retains lock ownership')
     # Contract: a shared server without identity cannot publish a PID-only
@@ -312,11 +319,14 @@ exec {shlex.quote(sys.executable)} "$@"
     env.pop('FM_FIXTURE_SUBCOMMAND')
     # A shared code-mode host has the same boundary, including Linux comm
     # truncation and vendor global config arguments before the subcommand.
-    env['FM_FIXTURE_COMM'] = 'codex-code-mode'
-    env['FM_FIXTURE_ARGV0'] = '/opt/codex-code-mode-host'
-    assert run(own).returncode == 0, 'code-mode host owner lost its lock'
-    assert run(lock, OTHER).returncode == 1, 'code-mode host accepted a competing session'
-    assert run(own, thread_identity=OTHER).returncode == 1, 'code-mode host authorized a descendant shell thread'
+    for comm in ('codex-code-mode', '/Users/me/My Tools/codex-code-mode-host'):
+        env['FM_FIXTURE_COMM'] = comm
+        for executable in ('/opt/codex-code-mode-host', '/Users/me/My Tools/codex-code-mode-host'):
+            env['FM_FIXTURE_ARGV0'] = executable
+            assert run(own).returncode == 0, 'code-mode host owner lost its lock'
+            assert run(lock, OTHER).returncode == 1, 'code-mode host accepted a competing session'
+            assert run(own, None).returncode == 1, 'code-mode host authorized an unidentified thread'
+            assert run(own, thread_identity=OTHER).returncode == 1, 'code-mode host authorized a descendant shell thread'
     env.pop('FM_FIXTURE_COMM')
     env.pop('FM_FIXTURE_ARGV0')
     env['FM_FIXTURE_SUBCOMMAND'] = '-c features.hooks=true app-server'
@@ -380,7 +390,7 @@ exec {shlex.quote(sys.executable)} "$@"
     # The OS denies argv reads. A server token, including one hidden by a
     # split option value, cannot prove identity from environment or hook IDs.
     env['FM_FIXTURE_ARGV_UNREADABLE'] = '1'
-    for arguments in (
+    unreadable_launches = [('/opt/codex', arguments) for arguments in (
         "-C '/Users/me/My Home' app-server",
         "--cd '/Users/me/My Home' app-server",
         "--cd='/Users/me/My Home' app-server",
@@ -395,7 +405,13 @@ exec {shlex.quote(sys.executable)} "$@"
         '-cfeatures.hooks=true app-server',
         '-C /Users/me/Home app-server',
         '-m gpt-5.5 --approve-for-me app-server',
-    ):
+    )]
+    unreadable_launches.extend((
+        ('/Users/me/My Tools/codex', 'app-server'),
+        ('/Users/me/My Tools/codex', "-C '/Users/me/My Home' app-server"),
+    ))
+    for executable, arguments in unreadable_launches:
+        env['FM_FIXTURE_ARGV0'] = executable
         env['FM_FIXTURE_SUBCOMMAND'] = arguments
         for identity in (OWNER, OTHER, None):
             assert run(lock, identity).returncode == 1, 'ambiguous arguments acquired a fresh PID-only lock: ' + arguments

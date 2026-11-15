@@ -797,16 +797,14 @@ fm_os_proc_argv() {  # <pid>
 # can prove trusted native identity.
 # A tagged Windows pid is never native: that bridge exposes no argv.
 fm_session_lock_codex_native_pid() {  # <pid> [verified]
-  local base argv0 token arg argv_unreadable=0
+  local base token arg argv_unreadable=0
   local -a argv=()
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   fm_proc_info "$1" || return 1
   base=${FM_PROC_COMM##*/}
-  argv0=${FM_PROC_ARGS%% *}
   # Linux truncates comm to 15 bytes for the code-mode host.
-  case "${argv0##*/}" in codex-code-mode-host) return 0 ;; esac
   case "$base" in
-    codex-code-mode-host) return 0 ;;
+    codex-code-mode-host|codex-code-mode) return 0 ;;
     codex)
       while IFS= read -r -d '' arg; do
         argv+=("$arg")
@@ -816,8 +814,9 @@ fm_session_lock_codex_native_pid() {  # <pid> [verified]
         argv_unreadable=1
         IFS=$' \t\n' read -r -a argv <<< "$FM_PROC_ARGS"
         [ "${#argv[@]}" -gt 0 ] || return 1
+      else
+        [ "${argv[0]##*/}" = codex ] || return 1
       fi
-      [ "${argv[0]##*/}" = codex ] || return 1
       set -- "${argv[@]:1}"
       while [ "$#" -gt 0 ]; do
         token=$1

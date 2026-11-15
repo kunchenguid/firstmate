@@ -1054,11 +1054,11 @@ test_denied_ps_reads_native_codex_identity() {
   [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
     || fail "denied-ps route lost the ordinary Codex CLI anchor"
   rm "$table.argv"
-  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' >/dev/null 2>&1; then
-    fail "denied-ps route read prompt text as native with unreadable argv"
+  lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' \
+    || fail "denied-ps route missed an ambiguous server token with unreadable argv"
+  if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
+    fail "denied-ps route anchored ambiguous arguments with unreadable argv"
   fi
-  [ "$(lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid')" = 800 ] \
-    || fail "denied-ps route lost the CLI anchor with unreadable argv"
   pass "denied-ps route reads native Codex server identity and keeps the CLI contract"
 }
 

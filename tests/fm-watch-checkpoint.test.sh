@@ -26,6 +26,7 @@ copy_checkpoint() {  # <bin-dir>
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$1/fm-supervision-engine-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$1/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$1/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-omp-process-lib.sh" "$1/fm-omp-process-lib.sh"
 }
 
 make_home() {
