@@ -778,8 +778,11 @@ test_seed_malformed_cursor_manifest_logs_once_and_starts() {
     || fail "the session marker was not written after a malformed manifest"
   [ "$(status_seen_offset "$state" first)" = 0 ] || fail "malformed row advanced its task"
   [ "$(status_seen_offset "$state" second)" = 0 ] || fail "absent row advanced its task"
-  [ ! -s "$log_file" ] || fail "invalid rows should be treated as absent: $(cat "$log_file")"
-  pass "a malformed presentation cursor row remains unread and startup continues"
+  [ "$(grep -c 'presented status seed' "$log_file")" = 1 ] \
+    || fail "a malformed manifest was not logged exactly once: $(cat "$log_file")"
+  grep -q 'skipped for first second: malformed or unreadable .*/.status-presentation-cursor' "$log_file" \
+    || fail "the malformed manifest log did not name the tasks and the manifest"
+  pass "a malformed presentation cursor manifest is logged once and startup continues"
 }
 
 test_seed_legacy_cursor_failure_does_not_blame_missing_manifest() {
