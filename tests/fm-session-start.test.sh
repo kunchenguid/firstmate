@@ -2378,12 +2378,21 @@ EOF
     || fail "the compact view cut a multibyte character in half"
   assert_contains "$compact" "  no-record-1 (task, -)" "an in-flight item with no task record was lost"
   assert_contains "$compact" "185 more listed under Work under way" "in-flight rows with records were not deduplicated"
-  assert_contains "$compact" "  large-task-001 dead terminal=term_large-task-001 pr=https://github.com/example/repo-001/pull/1 last=done" \
-    "a dead endpoint lost its terminal, PR, or newest event"
-  assert_contains "$compact" "  large-task-002 alive pr=https://github.com/example/repo-002/pull/2 last=paused" \
-    "a live task line was not one bounded line"
-  assert_contains "$compact" "  large-task-004 alive pr=https://github.com/example/repo-004/pull/4 last: needs-decision [key=large-004]" \
+  assert_contains "$compact" "large-task-001 | done | ship |" \
+    "a done task awaiting its merge gate lost its state"
+  assert_contains "$compact" "large-task-002 | paused | ship |" \
+    "a paused task line was not one bounded line"
+  assert_contains "$compact" "endpoint=dead" \
+    "an exception row lost its endpoint presence read"
+  assert_contains "$compact" "large-task-004 | needs-decision | ship |" \
+    "a decision event lost its state"
+  assert_contains "$compact" "needs-decision [key=large-004]" \
     "a decision event lost its capped text"
+  # This fixture makes three of every four tasks an exception, so the exception
+  # rows alone spend the routine budget: the routine table must then disclose
+  # exactly what it left out rather than silently dropping it.
+  assert_contains "$compact" "routine task row(s) omitted by the 12288-byte post-compaction budget" \
+    "the routine table did not disclose what its budget omitted"
   assert_contains "$compact" "orphan-01" "the compact view dropped orphan status logs"
 
   full=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \

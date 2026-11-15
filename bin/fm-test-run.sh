@@ -626,6 +626,7 @@ tests/fm-documentation-audiences.test.sh 732
 tests/fm-drift-check.test.sh 4077
 tests/fm-extension-binding.test.sh 12639
 tests/fm-fable-runway.test.sh 25316
+tests/fm-fleet-digest.test.sh 33060
 tests/fm-fleet-integrity-check.test.sh 5000
 tests/fm-fleet-snapshot-impl.test.sh 121000
 tests/fm-fleet-snapshot-view.test.sh 8547

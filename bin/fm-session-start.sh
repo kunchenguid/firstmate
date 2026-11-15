@@ -406,7 +406,6 @@ BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 # tests/fm-session-start.test.sh holds to that bound. Each section that hits its
 # budget discloses an exact omitted count and the command that shows the rest.
 COMPACT_TITLE_CAP=40
-COMPACT_STATUS_CAP=64
 COMPACT_ROW_CAP=160
 COMPACT_READY_LIMIT=10
 COMPACT_INFLIGHT_BUDGET=2048
@@ -809,68 +808,145 @@ endpoint_liveness() {
   fi
 }
 
-# The compact work-under-way view: one line per task carrying what supervision
-# acts on - task id, endpoint alive/dead, PR URL, and the newest status event.
-# The terminal handle prints only for an endpoint that is not alive, because a
-# live worker is steered by task id and only recovery needs the handle (the
-# window too, when it is not the default fm-<id>). The newest event prints as
-# its state word alone, except a decision, blocker, or failure, whose text
-# prints cut to COMPACT_STATUS_CAP: the wake queue and its OPEN DECISIONS and
-# UNREAD STATUS sections above already carry every event that still needs
-# handling, so routine history is the cheapest thing to drop. Lines are ordered
-# endpoints that are not alive first, then tasks whose newest event is a
-# decision, blocker, failure, pause, or completion, then the rest, so the byte
-# budget only ever omits live, routinely working tasks first.
+# The compact work-under-way view is the fleet ledger. bin/fm-fleet-digest.sh
+# writes state/fleet-ledger.md - one line per task plus the open exceptions -
+# from recorded metadata and the newest status line alone, so the
+# post-compaction view reads ONE file instead of re-inlining every metadata
+# record and status tail. That per-task re-inlining cost about 2.9k tokens per
+# task, which on a large fleet refilled the very context it was compacted from
+# and made the next compaction immediate; the ledger is the same information at
+# about 40 tokens per task. The ledger is refreshed first when it is missing or
+# older than COMPACT_LEDGER_MAX_AGE, so a stale file is never presented as
+# current. Endpoint liveness is added for the exception rows only: a dead
+# endpoint is what recovery acts on, and one cheap presence read per exception
+# costs nothing next to one per task. The byte budget only ever omits routine
+# task rows, never an exception.
+COMPACT_LEDGER_MAX_AGE=900
 print_work_under_way_compact() {
-  local meta id window backend endpoint pr terminal status last word line urgent='' actionable='' routine=''
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    window=$(fm_meta_get "$meta" window)
-    backend=
-    [ -z "$window" ] || backend=$(fm_backend_of_meta "$meta")
-    endpoint=$(endpoint_liveness "$meta" "$id" "$window" "$backend")
-    pr=$(fm_meta_get "$meta" pr)
-    line="  $id $endpoint"
-    if [ "$endpoint" != alive ]; then
-      terminal=$(fm_meta_get "$meta" terminal)
-      [ "$window" = "fm-$id" ] || line="$line window=${window:-none}"
-      [ -z "$terminal" ] || line="$line terminal=$terminal"
+  local ledger="$STATE/fleet-ledger.md" digest="$SCRIPT_DIR/fm-fleet-digest.sh"
+  local mtime age line row id rest state window backend endpoint used=0 omitted=0 in_tasks=0
+  mtime=$(stat -c %Y -- "$ledger" 2>/dev/null) || mtime=$(stat -f %m -- "$ledger" 2>/dev/null) || mtime=
+  case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+  age=$(( $(date +%s) - mtime ))
+  if [ ! -f "$ledger" ] || [ "$age" -gt "$COMPACT_LEDGER_MAX_AGE" ]; then
+    if [ -x "$digest" ]; then
+      FM_STATE_OVERRIDE="$STATE" "$digest" --ledger-only >/dev/null 2>&1 || true
     fi
-    [ -z "$pr" ] || line="$line pr=$pr"
-    status="$STATE/$id.status"
-    last=
-    [ -f "$status" ] && last=$(tail -n 1 "$status" 2>/dev/null)
-    word=${last%%:*}
-    word=${word%% *}
-    case "$word" in
-      ''|*[!a-z-]*) word=other ;;
-    esac
-    if [ -z "$last" ]; then
-      line="$line last=(none)"
-    else
-      case "$word" in
-        needs-decision|blocked|failed)
-          fm_cap_line_var "$last" "$COMPACT_STATUS_CAP"
-          line="$line last: $FM_LINE_CAP_LINE"
-          ;;
-        *) line="$line last=$word" ;;
-      esac
-    fi
-    if [ "$endpoint" != alive ]; then
-      urgent="$urgent$line"$'\n'
-    elif [ -n "$last" ] && [ "$word" != working ]; then
-      actionable="$actionable$line"$'\n'
-    else
-      routine="$routine$line"$'\n'
-    fi
-  done
-  if [ -z "$urgent$actionable$routine" ]; then
-    printf '(none)\n'
+  fi
+  if [ ! -f "$ledger" ]; then
+    printf '(no fleet ledger: %s is absent and %s could not write it)\n' "$ledger" "$digest"
     return 0
   fi
-  printf '%s' "$urgent$actionable$routine" |
-    compact_budget "$COMPACT_TASKS_BUDGET" "task record(s)" "read state/<id>.meta and bin/fm-crew-state.sh <id>" "$COMPACT_OMITTED_IDS_BUDGET"
+  printf 'ledger: %s - one line per task (<id> | <state> | <kind> | <age> | <newest status line>); state is the newest status EVENT, not a live pane read, so run bin/fm-crew-state.sh <id> before acting on one task.\n' "$ledger"
+  while IFS= read -r line; do
+    case "$line" in
+      '## Orphan'*) break ;;
+      '## Tasks'*|'## Exceptions'*)
+        case "$line" in '## Tasks'*) in_tasks=1 ;; *) in_tasks=0 ;; esac
+        printf '%s\n' "$line"
+        used=$((used + ${#line} + 1))
+        continue
+        ;;
+      '#'*|'') continue ;;
+      source:*|note:*) continue ;;
+      generated:*|tasks:*|exceptions:*|orphan_status_logs:*|states:*)
+        printf '%s\n' "$line"
+        used=$((used + ${#line} + 1))
+        continue
+        ;;
+    esac
+    # A routine row prints its state word and nothing else: the wake queue and
+    # its OPEN DECISIONS and UNREAD STATUS sections above already carry every
+    # event that still needs handling, so routine status history is the cheapest
+    # thing to drop. The ledger keeps the full head for a targeted read.
+    if [ "$in_tasks" -eq 1 ]; then
+      row=${line% | *}
+      if [ $((used + ${#row} + 1)) -gt "$COMPACT_TASKS_BUDGET" ]; then
+        omitted=$((omitted + 1))
+        continue
+      fi
+      printf '%s\n' "$row"
+      used=$((used + ${#row} + 1))
+      continue
+    fi
+    # An exception row: keep the capped head only for a decision, blocker, or
+    # failure, whose text is what the supervisor acts on, and annotate the cheap
+    # endpoint presence read.
+    [ "$line" = "(none)" ] && continue
+    id=${line%% | *}
+    rest=${line#* | }
+    state=${rest%% | *}
+    case "$state" in
+      needs-decision|blocked|failed) row=$line ;;
+      *) row=${line% | *} ;;
+    esac
+    window=$(fm_meta_get "$STATE/$id.meta" window)
+    backend=
+    [ -z "$window" ] || backend=$(fm_backend_of_meta "$STATE/$id.meta")
+    endpoint=$(endpoint_liveness "$STATE/$id.meta" "$id" "$window" "$backend")
+    printf '%s endpoint=%s\n' "$row" "$endpoint"
+    used=$((used + ${#row} + 12))
+  done < "$ledger"
+  if [ "$omitted" -gt 0 ]; then
+    printf '(%d routine task row(s) omitted by the %s-byte post-compaction budget - read %s, or bin/fm-fleet-digest.sh --drill <id> for one task)\n' \
+      "$omitted" "$COMPACT_TASKS_BUDGET" "$ledger"
+  fi
+}
+
+# print_compaction_effective: the compaction values actually in force, per
+# model, read from the harness settings file rather than assumed. The trigger is
+# derived (contextWindow - reserveTokens) because that is the number that decides
+# when a sweep is cut short, and a reserve too small for one fleet sweep is
+# exactly the failure this line exists to make visible. The context window comes
+# from the model catalog's own contextWindow, so a model the catalog does not
+# list prints trigger=unknown instead of a guess. docs/compaction.md owns the
+# reasoning; this function owns the numbers.
+FM_PI_SETTINGS=${FM_PI_SETTINGS:-$HOME/.pi/agent/settings.json}
+FM_PI_MODELS=${FM_PI_MODELS:-$HOME/.pi/agent/models.json}
+FM_COMPACTION_DEFAULT_RESERVE=16384
+FM_COMPACTION_DEFAULT_KEEP=20000
+print_compaction_effective() {
+  local settings=$FM_PI_SETTINGS models=$FM_PI_MODELS enabled reserve keep
+  if [ ! -f "$settings" ]; then
+    printf 'compaction: no harness settings at %s (harness defaults apply)\n' "$settings"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'compaction: %s present but jq is unavailable, so the effective values cannot be read\n' "$settings"
+    return 0
+  fi
+  enabled=$(jq -r '.compaction.enabled // true' "$settings" 2>/dev/null) || enabled=unknown
+  reserve=$(jq -r '.compaction.reserveTokens // empty' "$settings" 2>/dev/null) || reserve=
+  keep=$(jq -r '.compaction.keepRecentTokens // empty' "$settings" 2>/dev/null) || keep=
+  case "$reserve" in ''|*[!0-9]*) reserve=$FM_COMPACTION_DEFAULT_RESERVE ;; esac
+  case "$keep" in ''|*[!0-9]*) keep=$FM_COMPACTION_DEFAULT_KEEP ;; esac
+  printf 'compaction: enabled=%s default reserveTokens=%s keepRecentTokens=%s (harness defaults; %s)\n' \
+    "$enabled" "$reserve" "$keep" "$settings"
+  jq -r --argjson dres "$reserve" --argjson dkeep "$keep" '
+    (.compaction.modelOverrides // {}) | to_entries[] |
+    "\(.key)\t\(.value.reserveTokens // $dres)\t\(.value.keepRecentTokens // $dkeep)"
+  ' "$settings" 2>/dev/null | while IFS=$'\t' read -r key r k; do
+    [ -n "$key" ] || continue
+    ctx=
+    if [ -f "$models" ]; then
+      ctx=$(jq -r --arg k "$key" '
+        ($k | split("/")) as $p
+        | ($p[0]) as $prov
+        | ($p[1:] | join("/")) as $mid
+        | (.providers[$prov].models // [])[] | select(.id == $mid) | .contextWindow // empty
+      ' "$models" 2>/dev/null | head -1) || ctx=
+    fi
+    case "$ctx" in
+      ''|*[!0-9]*)
+        printf '  %s reserve=%s keepRecent=%s trigger=unknown (context window not in %s)\n' \
+          "$key" "$r" "$k" "$models"
+        ;;
+      *)
+        printf '  %s reserve=%s keepRecent=%s context=%s trigger=%s\n' \
+          "$key" "$r" "$k" "$ctx" "$((ctx - r))"
+        ;;
+    esac
+  done
 }
 
 # compact_memory_budget_bytes: the one byte budget the compact view's three
@@ -1080,6 +1156,7 @@ if [ -n "$BOOT_OUT" ]; then
 else
   printf '(silent - all good)\n'
 fi
+print_compaction_effective
 
 # --- 3. wake-drain ---------------------------------------------------------
 # The inactive-outcome startup scan runs in the deferred worker launched above,
@@ -1290,7 +1367,7 @@ stage fleet-state
 section "FLEET STATE"
 if [ "$COMPACT" -eq 1 ]; then
   print_backlog_compact_view "$DATA/backlog.md" "data/backlog.md"
-  subsection "Work under way (state/*.meta: <id> <endpoint alive|dead|unknown> [terminal when not alive] [pr] <newest status event - wake-EVENT history, not current state; full log state/<id>.status>)"
+  subsection "Work under way (fleet ledger: state/fleet-ledger.md, written by bin/fm-fleet-digest.sh; <id> | <state> | <kind> | <age> | <newest status event> - wake-EVENT history, not current state; full log state/<id>.status)"
   print_work_under_way_compact
   subsection "Orphan status logs (state/*.status without matching .meta; full log: state/<id>.status)"
   print_orphan_status_logs compact |

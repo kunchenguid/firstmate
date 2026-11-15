@@ -321,6 +321,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/compaction.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/codex-app-backend.md",
       "audience": "operator-current"
     },
