@@ -1934,6 +1934,12 @@ test_declared_wait_surfaces_superseding_state() {
     || fail "a working validation run did not preserve the declared-wait cadence"
   [ ! -s "$state/.wake-queue" ] || fail "working run generated a stale wake"
 
+  dir=$(make_superseded_pause_case gate-ci-unescalated 'paused: waiting for validation run R')
+  state="$dir/state"
+  superseded_pause_round "$dir" 'state: parked · source: run-step · parked at ci · run: R' absorb \
+    || fail "an unescalated ci gate did not preserve the declared-wait cadence"
+  [ ! -s "$state/.wake-queue" ] || fail "unescalated ci gate generated a superseded-wait wake"
+
   dir=$(make_superseded_pause_case gate-terminal 'paused: waiting for validation run R')
   state="$dir/state"
   superseded_pause_round "$dir" 'state: done · source: run-step · run: R' exit \
