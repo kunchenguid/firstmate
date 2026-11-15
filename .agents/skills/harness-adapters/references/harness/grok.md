@@ -2,6 +2,7 @@
 
 The xAI `grok` TUI is Claude-Code-compatible.
 Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41.
+The directory-trust wording below was read from the Grok Build 1.0.70 binary on 2026-10-29, not from a launched session.
 Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
 ## Operating facts
@@ -39,18 +40,27 @@ A hold that silently does not arrive is the worst message to lose.
 The "Run Grok Build in a project directory?" picker appears only outside a project, such as home, Desktop, Downloads, or `/tmp`.
 The spawn starts in the isolated git root, so that picker stays absent and needs no key.
 For unavoidable non-project launch, `[hints] project_picker_disabled = true` in `~/.grok/config.toml` suppresses the picker.
-The project picker and the folder-trust gate are separate dialogs.
-On 2026-09-24, on those same first dispatches, Grok 1.0.41 rendered a folder-trust gate in a linked git worktree.
-The dialog printed the primary checkout path, because a linked worktree's git root resolves to the main one, so the text reads exactly like a worktree-isolation violation when isolation is intact.
+The project picker and the directory-trust dialog are separate.
+On 2026-09-24, on the first dispatches after Grok was added to this fleet, Grok 1.0.41 rendered a folder-trust gate in a linked git worktree, and the dialog printed the primary checkout path.
+A linked worktree's git root resolves to the main one, so that text reads exactly like a worktree-isolation violation when isolation is intact.
 Check the worker's real location with `/proc/<pid>/cwd`, never the path the dialog prints.
-Answer the gate with the key path's Enter (`../../../bin/fm-send.sh <target> --key Enter`).
-`../../../bin/fm-send.sh` carries only Escape, Enter, and C-c, and a literal `y` has no sanctioned route.
-On 2026-09-24 Grok 1.0.41 persisted that answer to `~/.grok/trusted_folders.toml`, keyed by the path the dialog prints.
-That is the same store `../../../bin/fm-spawn.sh` deliberately does not write and calls a high-blast-radius write.
+Grok Build 1.0.70 asks `Do you trust the contents of this directory?`, with `Yes, proceed` and `No, quit`.
+`../../../bin/fm-grok-trust-lib.sh` owns the complete-dialog predicate, matched on the visible pane only.
+`../../../bin/fm-spawn.sh` sends `y` on every poll that predicate matches, then requires a later visible capture with the dialog gone and two consecutive ready, dialog-free captures before it reports success.
+An already trusted directory never shows the dialog, and the same gate accepts an empty composer or the idle `Shift+Tab:mode` footer.
+`../../../bin/fm-send.sh` carries only Escape, Enter, and C-c, so `y` is the launch gate's backend key send and not an `fm-send` key.
+On 2026-09-24 Grok 1.0.41 persisted the answer to `~/.grok/trusted_folders.toml`, keyed by the path the dialog prints, and answering `y` on 1.0.70 writes that same store.
+That is the store `../../../bin/fm-spawn.sh` deliberately does not write itself and calls a high-blast-radius write.
 In a linked worktree the trust therefore lands on the primary checkout, not the disposable copy, and it persists for every later Grok run there.
-This silently enables Grok project hooks for that checkout.
-Answering the gate is nonetheless the sanctioned route, because `../../../bin/fm-send.sh` has no other way to clear it.
-It is a knowing exception to the store-avoidance stance, not an oversight, so expect the new entry to appear in that file.
+This enables Grok project hooks for that checkout.
+Answering the dialog is the sanctioned route, because leaving it up leaves the worker idle.
+It is a knowing exception to the store-avoidance stance, so expect the new entry to appear in that file.
+
+## Readiness-gated start
+
+The brief rides the launch command, and the directory-trust gate above is the only extra step before the ordinary success path.
+A backend with no verified viewport-bounded capture is refused before that launch.
+`../../../docs/configuration.md` records the refusal beside Kimi's, and `../../../bin/fm-spawn.sh`'s header owns the poll loop.
 
 ## Training opt-in
 

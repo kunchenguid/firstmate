@@ -99,7 +99,10 @@ fm_test_fake_gh_axi() {
 # carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. A staged OpenCode 2
 # launch simulates its busy-state plugin per FM_FAKE_OPENCODE_TURN (see below),
-# and FM_FAKE_ENTER_LOG records each bare Enter key.
+# and FM_FAKE_ENTER_LOG records each bare Enter key. A staged
+# `grok --always-approve` launch marks the pane ready: later capture-pane
+# calls print the idle `Shift+Tab:mode` footer so Grok's readiness gate can
+# pass an already-trusted directory. Non-grok captures stay unchanged.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -167,6 +170,10 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    if [ -f "$(dirname "$0")/.grok-ready" ]; then
+      printf 'Shift+Tab:mode\n'
+      exit 0
+    fi
     if ! fake_opencode_composer_drawn; then
       :
     elif [ -f "$(fake_opencode_plugin).fake-pending" ]; then
@@ -208,6 +215,9 @@ case "${1:-}" in
             staged=${staged%"'"}
             if [ -f "$staged" ] && grep -q -- 'opencode.* --standalone --prompt' "$staged"; then
               fake_opencode_launched
+            fi
+            if [ -f "$staged" ] && grep -qF -- 'grok --always-approve' "$staged"; then
+              : > "$(dirname "$0")/.grok-ready"
             fi
             ;;
         esac

@@ -14,7 +14,16 @@
 #     and a directory that declares project MCP servers, in a root `.mcp.json`
 #     or in `.kimi-code/mcp.json`, announces them above the options as
 #     `Start N MCP server(s) automatically` over `Config: <declaring file>`.
+#     A directory with nothing to activate reads
+#     `No project integrations or instructions to activate.`
 #     tests/captures/kimi-code-2.3.0/README.md owns those captures.
+#   2.4.0 (2026-10-29): the title, navigation hint, selection glyph, and
+#     option pair are unchanged from 2.3.0. A directory with project
+#     instructions, such as AGENTS.md, replaces the empty-disclosure line
+#     with `Load project instructions` over `Check: <path>`. That
+#     disclosure is not a project MCP announcement and does not by itself
+#     page the prompt, so the complete dialog is still answered with Enter.
+#     tests/captures/kimi-code-2.4.0/README.md owns that capture.
 # A prompt that announces project servers is never answered: answering it
 # starts those servers, and Kimi's per-folder trust is not a consent decision
 # that covers them.
@@ -27,6 +36,9 @@
 # one recognized affirmative-then-negative option pair. On success
 # KIMI_TRUST_AFFIRMATIVE and KIMI_TRUST_NEGATIVE name the pair that was seen,
 # so a diagnostic can quote the wording the pane actually showed.
+# The lines between the directory and the options are not part of this match.
+# Kimi 2.4.0 puts `Load project instructions` and `Check: <path>` there, and
+# requiring the 2.3.0 empty-disclosure line would refuse that prompt.
 # shellcheck disable=SC2034 # Output globals read by the sourcing caller.
 kimi_trust_dialog_is_visible() {
   local pane=$1
@@ -80,6 +92,8 @@ kimi_trust_prompt_is_paged() {
 # options; project MCP servers appear as `Start N MCP server(s) automatically`
 # over `Config: <declaring file>`. Either line alone carries the verdict, so a
 # capture that wrapped or clipped the other one still refuses.
+# `Check: <path>` is Kimi 2.4.0's project-instruction disclosure, not this
+# announcement. Matching it here would refuse an ordinary AGENTS.md checkout.
 kimi_pane_announces_project_mcp_servers() {
   case "$1" in
     *'Start '*' MCP server'*' automatically'*) return 0 ;;

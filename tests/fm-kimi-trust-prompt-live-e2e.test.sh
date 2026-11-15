@@ -5,6 +5,10 @@
 # bin/fm-kimi-trust-lib.sh:
 #   - a directory with no project MCP servers shows a prompt the
 #     complete-dialog test recognizes, and Enter clears it into a ready pane;
+#   - a directory whose only project file is AGENTS.md shows the same
+#     complete dialog (Kimi 2.4.0 discloses it as `Load project instructions`
+#     over `Check: AGENTS.md`) and Enter clears it, without reading as a
+#     project MCP announcement;
 #   - a directory declaring project MCP servers in a root .mcp.json, and one
 #     declaring them in .kimi-code/mcp.json, each show a prompt the
 #     announcement test refuses, and the declared command never runs;
@@ -70,7 +74,8 @@ if git -C "$LAB" rev-parse --show-toplevel >/dev/null 2>&1; then
   fail "$WHO: the lab $LAB is inside a git checkout, so a root .mcp.json would not be read there; set TMPDIR outside any checkout"
 fi
 
-mkdir -p "$LAB/shim" "$LAB/plain" "$LAB/root-mcp-json" "$LAB/kimi-code-mcp-json/.kimi-code"
+mkdir -p "$LAB/shim" "$LAB/plain" "$LAB/instructions" "$LAB/root-mcp-json" "$LAB/kimi-code-mcp-json/.kimi-code"
+printf '# Project instructions\n' > "$LAB/instructions/AGENTS.md"
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -160,6 +165,54 @@ done
 [ "$cleared" -eq 1 ] || fail "$WHO: plain directory: the prompt did not clear into an empty composer within 60s after Enter; visible pane:
 $PANE"
 pass "$WHO: a plain directory's folder prompt is the complete dialog, and Enter clears it into a ready pane"
+
+# --- project instructions: recognized, not an MCP announcement, answered ----
+# Kimi 2.4.0 replaces the empty-disclosure line with `Load project
+# instructions` over `Check: <path>`. Older releases may still print the
+# empty line. Either shape must be the complete dialog, and neither may
+# read as a project MCP announcement.
+launch_kimi instructions "$LAB/instructions" 120 40
+wait_for_prompt instructions || fail "$WHO: instructions directory: no folder prompt text appeared within 60s"
+kimi_trust_dialog_is_visible "$PANE" \
+  || fail "$WHO: instructions directory: the folder prompt is not recognized as the complete dialog; visible pane:
+$PANE"
+note "$WHO: instructions prompt options read '$KIMI_TRUST_AFFIRMATIVE' / '$KIMI_TRUST_NEGATIVE'"
+note "$WHO: instructions disclosure: $(printf '%s\n' "$PANE" | grep -E 'Load project|Check:' | sed 's/^[[:space:]]*//' | tr '\n' ';')"
+if kimi_pane_announces_project_mcp_servers "$PANE"; then
+  fail "$WHO: instructions directory: the prompt reads as announcing project MCP servers; visible pane:
+$PANE"
+fi
+if kimi_trust_prompt_is_paged "$PANE"; then
+  fail "$WHO: instructions directory: the prompt reads as paged in a 120x40 pane; visible pane:
+$PANE"
+fi
+case "$VERSION" in
+  2.4.*)
+    printf '%s\n' "$PANE" | grep -Fq 'Load project instructions' \
+      || fail "$WHO: instructions directory: Kimi 2.4 did not disclose project instructions; visible pane:
+$PANE"
+    printf '%s\n' "$PANE" | grep -Fq 'Check:' \
+      || fail "$WHO: instructions directory: Kimi 2.4 did not name the instruction file; visible pane:
+$PANE"
+    printf '%s\n' "$PANE" | grep -Fq 'AGENTS.md' \
+      || fail "$WHO: instructions directory: Kimi 2.4 did not name AGENTS.md; visible pane:
+$PANE"
+    ;;
+esac
+fm_backend_send_key tmux instructions Enter || fail "$WHO: instructions directory: Enter could not be sent"
+cleared=0
+for _ in $(seq 1 300); do
+  PANE=$(fm_backend_visible_capture tmux instructions 2>/dev/null || true)
+  if [ -n "$PANE" ] && ! kimi_trust_marker_is_present "$PANE" \
+    && [ "$(fm_backend_composer_state tmux instructions 2>/dev/null)" = empty ]; then
+    cleared=1
+    break
+  fi
+  sleep 0.2
+done
+[ "$cleared" -eq 1 ] || fail "$WHO: instructions directory: the prompt did not clear into an empty composer within 60s after Enter; visible pane:
+$PANE"
+pass "$WHO: a directory with project instructions shows a complete folder prompt, and Enter clears it into a ready pane"
 
 # --- declaring directories: recognized, announced, never answered ------------
 for case_name in root-mcp-json kimi-code-mcp-json; do
