@@ -623,7 +623,7 @@ A line written before that position was recorded does not match, so the next bre
 
 A break also drops the reply source's registration, so nothing collects that mate's replies until the channel is rebased.
 A `resolved` line closes the decision but does not bring the channel back.
-While an alive remote mate has no registered reply source, `bin/fm-crew-state.sh` reports it as blocked and names the recovery: handling a captured result that is still unhandled, otherwise `rebase`.
+While an alive remote mate has no registered reply source, `bin/fm-crew-state.sh` reports it as blocked and names the recovery: `rebase`, preceded by handling any captured result that is still unhandled.
 
 The recovery for a replaced log, such as one on a desk whose host or home was rebuilt, is:
 
