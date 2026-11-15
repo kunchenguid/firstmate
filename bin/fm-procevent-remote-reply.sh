@@ -11,6 +11,8 @@
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
 #   fm-procevent-remote-reply.sh relisten
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
+#   fm-procevent-remote-reply.sh rebase <secondmate-id> [--if-moved]
+#   fm-procevent-remote-reply.sh registered <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
 # home's state/parent-replies.status log. The process-event runner owns blocking,
@@ -23,6 +25,25 @@
 # window, so it relistens too (see JOB_PREEMPTED below).
 # A continuity break is escalated and not re-armed, so the registration is dropped
 # and the runner stops. The runner does not refresh the owner lease.
+#
+# `rebase` is the recovery for a remote log that was replaced, as when the
+# desk's host or home is rebuilt: under one lifecycle lock it retires the source
+# and arms it again from offset zero. It refuses, touching nothing, while a
+# captured result is still unhandled. It prints `rebased: <id>`, followed by
+# ` reason=<reason>` when the continuity break reason is known. The replay
+# identity (state/.remote-reply-mirrored-<id>) makes the full re-read safe:
+# lines already mirrored are never appended again. A successful rebase resolves the
+# open `remote-reply-continuity-<id>` decision, because the channel it reported
+# is collecting again. `--if-moved` first reads the remote log at the committed
+# cursor and rebases only when that read reports a continuity break; a route
+# with no cursor or registration is left alone (`unchanged:`), an intact log is
+# re-armed at its cursor (`unchanged:`), and an unreadable log is re-armed
+# unchanged and reported as an error. The secondmate relaunch and remote-home
+# seed paths run `rebase --if-moved` after they succeed.
+#
+# `registered` exits 0 when the reply source has a process-event registration and
+# 1 when it has none. bin/fm-crew-state.sh reports a live remote mate with no
+# registration as blocked, because nothing would ever collect its replies.
 #
 # `autohandle` is the runner's own entry into that same `handle`: it takes the
 # canonical source id instead of the secondmate id and is called by the runner
@@ -97,7 +118,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,90p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Lifecycle-lock EXIT traps must compose temporary-path cleanup with lock
 # release; installing only one would silently drop the other obligation.
@@ -851,6 +872,109 @@ cmd_retire() {
   )
 }
 
+source_registered() { # <id>
+  [ -f "$STATE/procevent/$(source_id "$1").source" ]
+}
+
+# One zero-wait read of the remote log at <offset>/<hash> into <output>. Sets
+# PROBE_CLASS to delta, empty, continuity-broken, or unavailable, and
+# PROBE_REASON to the reader's break reason.
+probe_remote_log() { # <id> <offset> <hash> <output>
+  local rc=0
+  PROBE_CLASS=unavailable
+  PROBE_REASON=''
+  "$SCRIPT_DIR/fm-on.sh" "$1" fm-remote-delta-read.sh \
+    "$REMOTE_LOG" "$2" "$3" 0 < /dev/null > "$4" 2>/dev/null || rc=$?
+  if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+    PROBE_CLASS=empty
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || return 0
+  case "$(classify_result "$4")" in
+    delta) PROBE_CLASS='delta' ;;
+    continuity-broken)
+      PROBE_CLASS=continuity-broken
+      PROBE_REASON=$(result_field "$4" reason 2>/dev/null || true)
+      ;;
+  esac
+}
+
+# Close the adapter's own continuity decision once a rebase has the channel
+# collecting again. Nothing is appended when no such decision is open.
+resolve_continuity_decision() { # <id> <detail>
+  local id=$1 key status_file lock line rc=0
+  key="remote-reply-continuity-$id"
+  status_file="$STATE/$id.status"
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 0
+  status_open_decisions "$status_file" | cut -f1 | grep -Fqx -- "$key" || return 0
+  lock="$STATE/.remote-reply-ingest-$id.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  line="resolved [key=$key]: remote reply channel for $id rebased onto its current log ($2)"
+  printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file" || rc=1
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+cmd_rebase_locked() {
+  local id=${1:-} mode=${2:-} sid cursor tmp reason=''
+  validate_id "$id"
+  [ -z "$mode" ] || [ "$mode" = --if-moved ] || die "invalid rebase option: $mode"
+  remote_route_exists "$id"
+  sid=$(source_id "$id")
+  cursor=$(cursor_path "$id")
+  if [ "$mode" = --if-moved ] && [ ! -e "$cursor" ] && ! source_registered "$id"; then
+    printf 'unchanged: %s has no reply channel to rebase\n' "$sid"
+    return 0
+  fi
+  # Refuse before touching the registration, so a refusal never leaves a live
+  # channel unarmed.
+  RETIREMENT_PENDING=0
+  retirement_capture_scan "$id" || true
+  [ "$RETIREMENT_PENDING" -eq 0 ] \
+    || die "remote reply rebase refused with $RETIREMENT_PENDING unhandled captured result(s); handle them first"
+  if ! (cmd_retire_quiesce_locked "$id" ''); then
+    cmd_arm_locked "$id" >/dev/null 2>&1 || true
+    die "remote reply rebase could not stop the current source for $id"
+  fi
+  if [ "$mode" = --if-moved ]; then
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-rebase.XXXXXX") \
+      || { cmd_arm_locked "$id" >/dev/null 2>&1 || true; die "cannot create rebase staging directory"; }
+    INGEST_TMP=$tmp
+    read_cursor "$id"
+    probe_remote_log "$id" "$CURSOR_OFFSET" "$CURSOR_HASH" "$tmp/probe"
+    case "$PROBE_CLASS" in
+      delta|empty)
+        cmd_arm_locked "$id" >/dev/null || die "cannot re-arm the remote reply source for $id"
+        printf 'unchanged: %s offset=%s\n' "$sid" "$CURSOR_OFFSET"
+        return 0
+        ;;
+      continuity-broken) reason=${PROBE_REASON:-continuity-broken} ;;
+      *)
+        cmd_arm_locked "$id" >/dev/null 2>&1 || true
+        die "cannot read the remote reply log for $id; the source was re-armed at its current cursor"
+        ;;
+    esac
+  fi
+  cmd_retire_finalize_locked "$id" ''
+  cmd_arm_locked "$id" >/dev/null \
+    || die "remote reply source for $id was retired but could not be armed again; run: $0 arm $id"
+  resolve_continuity_decision "$id" "${reason:-operator rebase}" \
+    || printf 'warning: could not resolve the continuity decision for %s\n' "$id" >&2
+  printf 'rebased: %s%s\n' "$sid" "${reason:+ reason=$reason}"
+}
+
+cmd_rebase() {
+  local id=${1:-} lock
+  validate_id "$id"
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
+    cmd_rebase_locked "$@"
+  )
+}
+
 require_parent_lifecycle_lock() {
   local id=$1 lock owner pid
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
@@ -877,6 +1001,8 @@ case "${1:-}" in
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   relisten) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
+  rebase) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_rebase "$@" ;;
+  registered) shift; [ "$#" -eq 1 ] || usage; source_registered "$1" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
   retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;
   ''|-h|--help|help) usage ;;

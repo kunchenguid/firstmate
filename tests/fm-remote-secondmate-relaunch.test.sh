@@ -70,6 +70,32 @@ command_fields=$(perl -MMIME::Base64=decode_base64 -e '
 IFS=$'\t' read -r cmd action id harness model effort <<EOF
 $command_fields
 EOF
+# The reply log on the far side: FM_FAKE_REPLY_LOG is its whole content, and a
+# read whose offset/prefix is not a prefix of it reports a continuity break.
+if [ "$cmd" = fm-remote-delta-read.sh ]; then
+  [ -n "${FM_FAKE_REPLY_LOG+x}" ] || exit 95
+  offset=$id
+  log=$(mktemp)
+  printf '%s' "$FM_FAKE_REPLY_LOG" > "$log"
+  digest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+  size=$(wc -c < "$log" | tr -d ' ')
+  empty=$(printf '' | digest)
+  prefix=$(head -c "$offset" "$log" | digest)
+  if [ "$offset" -gt "$size" ] || [ "$prefix" != "$harness" ]; then
+    printf 'schema=fm-remote-delta.v1\nstatus=continuity-broken\npath=%s\nfrom_offset=%s\nto_offset=%s\n' "$action" "$offset" "$size"
+    printf 'from_prefix_sha256=%s\nto_prefix_sha256=%s\npayload_sha256=%s\npayload_bytes=0\nreason=prefix-changed\n\n' "$harness" "$(digest < "$log")" "$empty"
+    rm -f "$log"
+    exit 0
+  fi
+  [ "$offset" -lt "$size" ] || { rm -f "$log"; exit 75; }
+  payload=$(tail -c "+$((offset + 1))" "$log")$'\n'
+  printf 'schema=fm-remote-delta.v1\nstatus=delta\npath=%s\nfrom_offset=%s\nto_offset=%s\n' "$action" "$offset" "$size"
+  printf 'from_prefix_sha256=%s\nto_prefix_sha256=%s\npayload_sha256=%s\npayload_bytes=%s\nreason=\n\n' \
+    "$harness" "$(digest < "$log")" "$(printf '%s' "$payload" | digest)" "$((size - offset))"
+  printf '%s' "$payload"
+  rm -f "$log"
+  exit 0
+fi
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
 [ "$action" = relaunch ] || exit 94
 case "$FM_FAKE_RELAUNCH_MODE" in
@@ -97,6 +123,7 @@ chmod +x "$FAKEBIN/fake-ssh"
 
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
+    FM_PROCEVENT_CLAIM_ROOT="$TMP/claims" \
     FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" \
     "$ROOT/bin/fm-remote-secondmate-relaunch.sh" "$@" 2>&1
 }
@@ -188,5 +215,32 @@ expect_code 0 "$RC" "a confirmed remote relaunch should succeed with an armed PR
 fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
+
+# --- a relaunch onto a replaced desk rebases its reply channel --------------
+# The host was rebuilt, so the reply log no longer continues the cursor this
+# parent committed against the old one. The relaunch re-reads it from the start.
+reset_meta
+mkdir -p "$HOME_DIR/state/remote-replies"
+old_hash=$(printf 'working: old host\n' | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)
+printf 'schema=fm-remote-reply-cursor.v1\noffset=18\nprefix_sha256=%s\n' "$old_hash" \
+  > "$HOME_DIR/state/remote-replies/ios.cursor"
+printf 'working: old host\n' > "$HOME_DIR/state/.remote-reply-mirrored-ios"
+OUT=$(FM_FAKE_REPLY_LOG=$'note: new host\nworking: old host\n' run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 0 "$RC" "a relaunch onto a replaced desk should succeed"$'\n'"$OUT"
+assert_contains "$OUT" "rebased: remote-reply-ios reason=prefix-changed" \
+  "a relaunch onto a replaced desk did not rebase its reply channel"
+assert_absent "$HOME_DIR/state/remote-replies/ios.cursor" \
+  "the rebase kept the cursor that belonged to the old log"
+[ -f "$HOME_DIR/state/procevent/remote-reply-ios.source" ] \
+  || fail "the rebase left the reply source unregistered"
+
+# The same log again continues the cursor, so nothing is rebased.
+printf 'schema=fm-remote-reply-cursor.v1\noffset=18\nprefix_sha256=%s\n' "$old_hash" \
+  > "$HOME_DIR/state/remote-replies/ios.cursor"
+OUT=$(FM_FAKE_REPLY_LOG=$'working: old host\nworking: more\n' run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 0 "$RC" "a relaunch onto the same desk should succeed"$'\n'"$OUT"
+assert_contains "$OUT" "unchanged: remote-reply-ios offset=18" \
+  "a relaunch onto the same desk rebased an intact reply channel"
+pass "a remote relaunch rebases a reply channel whose log was replaced, and only then"
 
 echo "ALL TESTS PASSED"

@@ -21,6 +21,11 @@
 # bin/fm-project-mode.sh refuses, is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
+# After a successful provision the seed runs bin/fm-procevent-remote-reply.sh
+# rebase --if-moved, so a route whose host or home was rebuilt does not keep a
+# reply cursor that belongs to the old log; a new route has no cursor and is
+# left alone. That check failing is reported as a warning.
+#
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
 # the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
 set -eu
@@ -270,3 +275,9 @@ if [ "$PROVISION_RC" -ne 0 ]; then
 fi
 printf '%s\n' "$PROVISION_OUT"
 printf 'home=%s:%s\n' "$HOST" "$REMOTE_HOME"
+if REBASE_OUT=$("$SCRIPT_DIR/fm-procevent-remote-reply.sh" rebase "$ID" --if-moved 2>&1); then
+  printf '%s\n' "$REBASE_OUT"
+else
+  printf 'warning: %s provisioned, but its reply channel was not checked against the remote log: %s\n' \
+    "$ID" "$REBASE_OUT" >&2
+fi

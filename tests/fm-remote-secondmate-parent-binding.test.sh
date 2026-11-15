@@ -219,6 +219,20 @@ cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
   || fail "real remote secondmate launch failed"
 
+# --- re-seeding a desk whose reply log was replaced rebases its reply channel --
+# A cursor the remote log does not continue stands in for one committed against
+# the log of a host that has since been rebuilt.
+mkdir -p "$PARENT/state/remote-replies"
+printf 'schema=fm-remote-reply-cursor.v1\noffset=1\nprefix_sha256=%064d\n' 0 \
+  > "$PARENT/state/remote-replies/ios.cursor"
+RESEED_OUT=$(remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha 2>&1) \
+  || fail "re-seeding the same route failed: $RESEED_OUT"
+assert_contains "$RESEED_OUT" "rebased: remote-reply-ios" \
+  "re-seeding a route whose reply log no longer continues the cursor did not rebase it"
+assert_present "$PARENT/state/procevent/remote-reply-ios.source" \
+  "the re-seed rebase left the reply source unregistered"
+pass "re-seeding a desk whose reply log was replaced rebases its reply channel"
+
 STAGED_LAUNCH=$(sed -n "s/^pane send-text [^ ]* \\. '\([^']*\)' --session [^ ]*\$/\1/p" "$HERDR_LOG" | tail -1)
 [ -n "$STAGED_LAUNCH" ] && [ -f "$STAGED_LAUNCH" ] \
   || fail "the remote launch did not deliver a staged command to assert against"
