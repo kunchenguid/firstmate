@@ -146,8 +146,14 @@
 #                          (bin/fm-procevent.sh reconcile queues it once per
 #                          failure episode, and a later cycle that finds the
 #                          source owned closes that episode); the queued
-#                          payload names what to check. These three kinds are
-#                          joined with `;` when more than one surfaces in a cycle
+#                          payload names what to check
+#   check: process-event source started again: <keys>
+#                          with config/procevent-failure-wakes present, a
+#                          source whose later failures were counted without a
+#                          wake started again; the payload carries that count
+#                          (docs/configuration.md "Process-event failure
+#                          wakes"). These four kinds are joined with `;` when
+#                          more than one surfaces in a cycle
 #   check: pr-register: <lines>
 #                          with config/pr-register-scan present, a task's done
 #                          line reported a PR that the check sweep's
@@ -3291,7 +3297,7 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason captured="" stranded="" unstarted=""
+  local key reason captured="" stranded="" unstarted="" restarted=""
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -3306,6 +3312,7 @@ procevent_surface_queued() {
     case "$key" in
       procevent:*:stranded:*) stranded="$stranded $key" ;;
       procevent:*:launch-failed:*) unstarted="$unstarted $key" ;;
+      procevent:*:launch-recovered:*) restarted="$restarted $key" ;;
       *) captured="$captured $key" ;;
     esac
   done < <(fm_wake_queued_keys_locked check)
@@ -3322,6 +3329,10 @@ procevent_surface_queued() {
   if [ -n "$unstarted" ]; then
     [ "$reason" = "check:" ] || reason="$reason;"
     reason="$reason process-event source failed to start:$unstarted"
+  fi
+  if [ -n "$restarted" ]; then
+    [ "$reason" = "check:" ] || reason="$reason;"
+    reason="$reason process-event source started again:$restarted"
   fi
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output

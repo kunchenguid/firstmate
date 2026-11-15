@@ -128,6 +128,9 @@ The crew-hosted recovery ordering and arm-and-acknowledge rule are owned by the 
 : Nothing was captured: the source named in the payload is registered but nothing is confirmed to be collecting from it. There is no result file to read and no `handled` call to make; the ordinary drain acknowledgement consumes the row.
 : The payload says which shape it is and what clears it. Follow it exactly as the arming section above describes - a `start` is named only for the reused-pid strand, a leaderless group is a human check and reclaims itself once its group is empty, and a launch that never proved its claim closes its own episode if a later cycle finds the source owned.
 
+`process-event source started again` (queue key `procevent:<source-id>:launch-recovered:<nonce>`)
+: Sent only with the opt-in `config/procevent-failure-wakes` file, when a source whose later failures were counted without a wake starts again; the payload carries the count. Nothing needs doing; [`docs/configuration.md`](../../../docs/configuration.md) "Process-event failure wakes" owns the policy.
+
 ## What the runner guarantees, exactly
 
 Supported by tests:
