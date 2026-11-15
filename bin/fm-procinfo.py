@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fm-procinfo.py - ps-free process facts for bin/fm-session-lock-lib.sh.
 
-Prints one line: <ppid>TAB<comm>TAB<args> for the pid given as argv[1],
+With <pid>, prints one line: <ppid>TAB<comm>TAB<args> on macOS,
 using only sysctl(3) - the same kernel state `ps` reads, just without
 executing /bin/ps. It exists because an EDR-style policy can deny the
 ps binary's exec outright (even `ps -V`), and a session lock whose
@@ -19,12 +19,19 @@ different fact that disagrees with ps for renamed, symlinked, or
 argv[0]-wrapping harnesses, which is precisely the population the
 denied-ps hosts are expected to run.
 
-Fail-closed by design: every read is verified against the requested pid
+The process-facts mode fails closed: every read is verified against the requested pid
 before anything is printed, and an argv that cannot be read to exactly
 its declared length yields no identity rather than a partial one. No
 pid, no verification, no output - exit 1.
 
+With --argv <pid>, emits raw, NUL-separated arguments with a final NUL.
+This mode preserves spaces and empty arguments without ps rendering.
+It reads KERN_PROCARGS2 on macOS and /proc/<pid>/cmdline on Linux.
+An unreadable or incomplete vector, an empty argv[0], or an unsupported
+platform produces no output and exit 1.
+
 Usage: fm-procinfo.py <pid>
+       fm-procinfo.py --argv <pid>
 """
 import ctypes
 import ctypes.util

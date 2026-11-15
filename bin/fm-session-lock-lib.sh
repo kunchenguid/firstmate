@@ -777,8 +777,8 @@ fm_session_lock_pid_blocks_reclaim() {
 # A hook without shell-tool variables uses its payload identity.
 # Ownership also requires a matching codex-native: sidecar and a live lock pid.
 # A native pid-only lock cannot reveal its owner thread, so it stays read-only
-# until the recorded process dies. An ordinary Codex CLI session is not a
-# shared server and keeps the ancestry contract above unchanged.
+# until the recorded process dies. fm_session_lock_codex_native_pid below
+# defines CLI classification and refusal when argv is unreadable.
 # tests/fm-codex-session-lock.test.sh pins these boundaries portably, and
 # tests/fm-codex-session-identity-live-e2e.test.sh against the installed Codex.
 
@@ -788,9 +788,15 @@ fm_os_proc_argv() {  # <pid>
   python3 "$(dirname -- "${BASH_SOURCE[0]}")/fm-procinfo.py" --argv "$1" 2>/dev/null
 }
 
-# True when pid $1 is a native Codex server shared by threads. Process identity
-# still comes from fm_proc_info. The exact subcommand after global options and
-# their values comes from the kernel argv vector, never from CLI prompt text.
+# True when pid $1 requires the native Codex ownership contract.
+# Process identity comes from fm_proc_info. A code-mode host name suffices.
+# For codex, readable kernel argv proves app-server only as the subcommand
+# after global options and their values, so prompt text cannot select it.
+# With unreadable argv, any standalone app-server token in flattened args
+# triggers refusal, including prompt text and ambiguous executable paths.
+# That fallback cannot prove native identity: verified rejects it even with
+# session identity variables. Ordinary CLI ownership remains available when
+# readable argv proves a CLI or unreadable argv contains no app-server token.
 # A tagged Windows pid is never native: that bridge exposes no argv.
 fm_session_lock_codex_native_pid() {  # <pid> [verified]
   local base token arg
