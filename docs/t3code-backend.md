@@ -115,7 +115,7 @@ A secondmate additionally receives the launch prefix every other backend types (
 A `claude` ship or scout worker also receives the task-worker channel statement that a pane launch appends to the system prompt, written as a `CLAUDE.local.md` in its worktree because T3 owns the system prompt; a secondmate does not, as on every backend.
 Without it a Claude worker can refuse the launch brief as prompt injection, which happened live.
 The statement's pull-request-tool workaround follows the [verified version boundary](verification/runtime-backends.md#claude-pull-request-tools); an older or unreadable server keeps the clause, while a server at or past the verified build gets none.
-Firstmate records the PR from the worker's `done: PR <url>` status line either way.
+Firstmate records the PR from a worker's ready `done:` report; [`config/pr-register-scan`](configuration.md#pr-registration-scan-configpr-register-scan) describes the scan's accepted forms.
 A `claude` task checks the leased worktree and refuses a tracked, existing, or symlinked `CLAUDE.local.md`, because that file is the backend's channel and teardown removes it.
 
 ## Current lifecycle and safety
