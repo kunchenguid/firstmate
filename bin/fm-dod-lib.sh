@@ -509,12 +509,12 @@ EOF
 # pipeline, so it cannot be removed; but a worker that reads it as the end of
 # the task stops one wake round short of its PR, which is the failure this block
 # exists to prevent. One owner for all three no-mistakes shapes (standard,
-# pr=manual, gerrit) so their wording cannot drift apart. The intermediate-stage
-# lines cite this brief's own status and declared-wait rules instead of naming
-# their verb: the verb is bin/fm-classify-lib.sh's, overridable through
-# FM_CLASSIFY_PAUSED_VERB, so a literal here would be wrong in a home that
-# aliases it. fm_dod_nm_handoff_notice <pr|change> prints the lines with no
-# trailing blank. Callers are the no-mistakes arms of fm_dod_block only.
+# pr=manual, gerrit) so their wording cannot drift apart. The notice names no
+# status verb at all: bin/fm-classify-lib.sh owns them, and the declared-wait
+# verb is overridable through FM_CLASSIFY_PAUSED_VERB, so a literal here would
+# be wrong in a home that aliases it. fm_dod_nm_handoff_notice <pr|change>
+# prints the lines with no trailing blank. Callers are the no-mistakes arms of
+# fm_dod_block only.
 fm_dod_nm_handoff_notice() {  # <pr|change>
   local terminal
   case "$1" in
@@ -524,9 +524,9 @@ fm_dod_nm_handoff_notice() {  # <pr|change>
   esac
   printf '%s\n' \
     "\`done: {summary}\` never reports this task complete: it only hands control to the pipeline." \
-    "The only \`done:\` that completes this task is $terminal; a \`done:\` reporting a commit, a branch, or a pushed branch leaves the task unfinished, so stopping there costs an extra wake round before the pipeline even starts." \
-    "Before that handoff, report each stage as \`working:\`, never as \`done: {summary}\`: a commit is not a result to report." \
-    "While the pipeline runs, declare its intermediate stages and waits under this brief's existing status and declared-wait rules."
+    "Append that handoff \`done: {summary}\` when the work is committed: it is required, and it is not completion." \
+    "The only \`done:\` that completes this task is $terminal; a \`done:\` reporting a commit, a branch, or a pushed branch leaves the task unfinished." \
+    "After that handoff, never report a later stage as \`done: {summary}\`: a stage short of that report is not a result."
 }
 
 # The no-mistakes block for a pr=manual project, where the worker owns the PR

@@ -459,12 +459,12 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # The no-mistakes handoff `done: {summary}` is what firstmate reads to start the
 # pipeline, so it stays; but a worker that reads it as completion stops one wake
 # round short of its PR. Every no-mistakes shape must therefore say outright that
-# a commit does not complete the task, name its own completing report, and keep
-# stage reporting off `done:`. The handoff notice must stay verb-free: it names
-# the brief's existing status and declared-wait rules instead of restating their
-# verb, because bin/fm-classify-lib.sh owns that verb through
-# FM_CLASSIFY_PAUSED_VERB and a rendered literal would mislead a home that
-# aliases it.
+# a commit does not complete the task, require the commit-time handoff without
+# calling that handoff completion, name its own completing report, and forbid
+# later stages from being reported as done. The handoff notice must stay
+# verb-free: bin/fm-classify-lib.sh owns the status verbs, and the declared-wait
+# verb is overridable through FM_CLASSIFY_PAUSED_VERB, so a rendered literal
+# would mislead a home that aliases it.
 test_no_mistakes_dod_commit_is_not_completion() {
   local home id flags label brief declared notice
   home="$TMP_ROOT/commit-not-done-home"
@@ -485,21 +485,27 @@ test_no_mistakes_dod_commit_is_not_completion() {
       "$label: DoD still reads a commit as completion"
     assert_no_grep "The task is complete only when committed on your branch." "$brief" \
       "$label: DoD still says the task is complete when committed"
+    assert_grep "When the work is committed, append \`done [at=<epoch>]: {summary}\` to the status file and stop." "$brief" \
+      "$label: DoD does not require the commit-time handoff"
     assert_grep "never reports this task complete: it only hands control to the pipeline" "$brief" \
       "$label: DoD does not say the handoff done is not completion"
-    assert_grep "Before that handoff, report each stage as \`working:\`, never as \`done: {summary}\`" "$brief" \
-      "$label: DoD still lets a commit be reported as done"
-    assert_grep "While the pipeline runs, declare its intermediate stages and waits under this brief's existing status and declared-wait rules." "$brief" \
-      "$label: DoD does not point intermediate reporting at the brief's existing rules"
+    assert_grep "Append that handoff \`done: {summary}\` when the work is committed: it is required, and it is not completion." "$brief" \
+      "$label: DoD does not state the handoff is required but not completion"
+    assert_grep "After that handoff, never report a later stage as \`done: {summary}\`: a stage short of that report is not a result." "$brief" \
+      "$label: DoD lets a later stage be reported as done"
+    assert_no_grep "a commit is not a result to report" "$brief" \
+      "$label: DoD still carries the rejected commit-is-not-a-result phrasing"
     # The whole handoff notice must stay verb-free: bin/fm-classify-lib.sh owns
     # the declared-wait verb through FM_CLASSIFY_PAUSED_VERB, so a literal here
     # would drift from every home that aliases it.
     notice="$home/$id-notice.txt"
-    sed -n '/never reports this task complete/,/declared-wait rules\./p' "$brief" >"$notice"
+    sed -n '/never reports this task complete/,/stage short of that report is not a result/p' "$brief" >"$notice"
     assert_grep "never reports this task complete" "$notice" \
       "$label: the handoff notice was not located for the verb-free check"
-    assert_no_regex 'paused|awaiting|FM_CLASSIFY_PAUSED_VERB' "$notice" \
-      "$label: the handoff notice names the declared-wait verb"
+    assert_grep "stage short of that report is not a result" "$notice" \
+      "$label: the verb-free check did not cover the whole handoff notice"
+    assert_no_regex 'paused|awaiting|working|FM_CLASSIFY_PAUSED_VERB' "$notice" \
+      "$label: the handoff notice names a status verb"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
     case "$label" in
       pr) declared='The only `done:` that completes this task is `done: PR <url> checks green`' ;;
