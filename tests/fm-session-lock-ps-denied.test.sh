@@ -1059,6 +1059,20 @@ test_denied_ps_reads_native_codex_identity() {
   if lib_eval_denied "$fakebin" "$table" 'fm_session_lock_anchor_pid' >/dev/null 2>&1; then
     fail "denied-ps route anchored ambiguous arguments with unreadable argv"
   fi
+  local option fragment
+  for option in -C --cd; do
+    for fragment in -m --model -c; do
+      write_native_table /opt/codex "/opt/codex $option /Users/me/My $fragment app-server" \
+        /opt/codex "$option" "/Users/me/My $fragment" app-server
+      rm "$table.argv"
+      lib_eval_denied "$fakebin" "$table" 'fm_session_lock_codex_native_ancestry' \
+        || fail "denied-ps route lost server evidence in an option-shaped directory"
+      if lib_eval_denied "$fakebin" "$table" \
+        "export CODEX_SESSION_ID=$uuid CODEX_THREAD_ID=$uuid; fm_session_lock_anchor_pid" >/dev/null 2>&1; then
+        fail "denied-ps route anchored an option-shaped directory with unreadable argv"
+      fi
+    done
+  done
   pass "denied-ps route reads native Codex server identity and keeps the CLI contract"
 }
 

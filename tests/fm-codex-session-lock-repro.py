@@ -181,9 +181,15 @@ exec {shlex.quote(sys.executable)} "$@"
     assert run('command -v python3', None).returncode == 1, 'python3 remained available'
     for executable, arguments in (
         ('/opt/codex', "-C '/Users/me/My Home' app-server"),
+        ('/opt/codex', "-C '/Users/me/My -m' app-server"),
+        ('/opt/codex', "--cd '/Users/me/My --model' app-server"),
+        ('/opt/codex', "--cd='/Users/me/My -m' app-server"),
+        ('/opt/codex', "-C'/Users/me/My -m' app-server"),
+        ('/opt/codex', "-c 'note=My -m' app-server"),
         ('/opt/codex', '-m gpt-5.5 --approve-for-me Inspect codex app-server ownership'),
         ('/Users/me/My Tools/codex', 'app-server'),
         ('/Users/me/My Tools/codex', "-C '/Users/me/My Home' app-server"),
+        ('/Users/me/My Tools/codex', "-C '/Users/me/My -m' app-server"),
     ):
         env['FM_FIXTURE_ARGV0'] = executable
         env['FM_FIXTURE_SUBCOMMAND'] = arguments
@@ -392,6 +398,11 @@ exec {shlex.quote(sys.executable)} "$@"
     env['FM_FIXTURE_ARGV_UNREADABLE'] = '1'
     unreadable_launches = [('/opt/codex', arguments) for arguments in (
         "-C '/Users/me/My Home' app-server",
+        "-C '/Users/me/My -m' app-server",
+        "--cd '/Users/me/My --model' app-server",
+        "--cd='/Users/me/My -m' app-server",
+        "-C'/Users/me/My -m' app-server",
+        "-c 'note=My -m' app-server",
         "--cd '/Users/me/My Home' app-server",
         "--cd='/Users/me/My Home' app-server",
         "-C'/Users/me/My Home' app-server",
@@ -409,6 +420,7 @@ exec {shlex.quote(sys.executable)} "$@"
     unreadable_launches.extend((
         ('/Users/me/My Tools/codex', 'app-server'),
         ('/Users/me/My Tools/codex', "-C '/Users/me/My Home' app-server"),
+        ('/Users/me/My Tools/codex', "-C '/Users/me/My -m' app-server"),
     ))
     for executable, arguments in unreadable_launches:
         env['FM_FIXTURE_ARGV0'] = executable

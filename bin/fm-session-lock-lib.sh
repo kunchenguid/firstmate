@@ -791,13 +791,9 @@ fm_os_proc_argv() {  # <pid>
 # True when pid $1 is a native Codex server shared by threads. Process identity
 # still comes from fm_proc_info. The exact subcommand after global options and
 # their values comes from the kernel argv vector, never from CLI prompt text.
-# If argv is unreadable, parse ps tokens with the same option rules. An
-# app-server token after the parser stops is ambiguous and rejects PID-only
-# ownership too, including ordinary CLI prompt text. Neither fallback case
-# can prove trusted native identity.
 # A tagged Windows pid is never native: that bridge exposes no argv.
 fm_session_lock_codex_native_pid() {  # <pid> [verified]
-  local base token arg argv_unreadable=0
+  local base token arg
   local -a argv=()
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   fm_proc_info "$1" || return 1
@@ -811,12 +807,13 @@ fm_session_lock_codex_native_pid() {  # <pid> [verified]
       done < <(fm_os_proc_argv "$1")
       if [ "${#argv[@]}" -eq 0 ]; then
         [ "${2:-}" != verified ] || return 1
-        argv_unreadable=1
         IFS=$' \t\n' read -r -a argv <<< "$FM_PROC_ARGS"
-        [ "${#argv[@]}" -gt 0 ] || return 1
-      else
-        [ "${argv[0]##*/}" = codex ] || return 1
+        for token in "${argv[@]}"; do
+          [ "$token" != app-server ] || return 0
+        done
+        return 1
       fi
+      [ "${argv[0]##*/}" = codex ] || return 1
       set -- "${argv[@]:1}"
       while [ "$#" -gt 0 ]; do
         token=$1
@@ -831,13 +828,6 @@ fm_session_lock_codex_native_pid() {  # <pid> [verified]
           *) [ "$token" != app-server ] || return 0; break ;;
         esac
       done
-      if [ "$argv_unreadable" -eq 1 ]; then
-        # Flattened option values can contain spaces, so the first positional
-        # token may be part of a value rather than the real subcommand.
-        for token in "$@"; do
-          [ "$token" != app-server ] || return 0
-        done
-      fi
       ;;
   esac
   return 1
