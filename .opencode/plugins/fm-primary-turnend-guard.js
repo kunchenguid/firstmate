@@ -22,6 +22,9 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // A guard that exits before reading stdin makes the write fail with EPIPE,
+    // which is its answer, not this plugin's failure.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }

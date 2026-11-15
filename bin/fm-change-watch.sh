@@ -38,15 +38,25 @@
 #           and one that deploys to a host rather than the cluster is watched
 #           through its own deploy workflow instead. A large family is capped
 #           at MAX_TARGETS busiest Deployments and the registration line states
-#           the cap. A repository that also has a Sentry project, and any
-#           workflow the map names, become additional targets of their own; a
-#           Sentry project this home has no token for is not a target. A
-#           PR that touches no deployable service registers nothing and says
-#           so, as does one that only deletes a manifest, one whose only target
-#           could not be read, one whose manifests could not be read, and one
-#           whose cluster image inventory could not be read; each says which of
-#           those it was. Every one of those still writes the merge's durable
-#           row, and one whose surface could not be read records it as
+#           the cap. A repository whose map names more than one service is a
+#           monorepo, so only the services the merged diff actually touches are
+#           cluster targets: a path names a service by one of its segments, or
+#           by the segment under the map's path: prefix, and a deployable path
+#           no service owns is shared build input that keeps every Deployment in
+#           scope. A diff whose every touched path is documentation, a test, a
+#           monorepo's script, or non-deploy CI deploys nothing: the watch
+#           completes clean, saying so when the kept targets hold no deploy
+#           workflow run, because a run is still measured for that diff. A
+#           repository that also has a Sentry project, and any workflow the map
+#           names, become additional targets of their own whatever the diff
+#           touches, since those reads never touch the cluster; a Sentry project
+#           this home has no token for is not a target. A PR that touches no
+#           deployable service registers nothing and says so, as does one that
+#           only deletes a manifest, one whose only target could not be read,
+#           one whose manifests could not be read, and one whose cluster image
+#           inventory could not be read; each says which of those it was. Every
+#           one of those still writes the merge's durable row, and one whose
+#           surface could not be read records it as
 #           unmeasurable-with-reason and queues the unmeasurable wake.
 #           Every Kubernetes target records a rollout FINGERPRINT at
 #           registration - its pod images plus its pods' pod-template-hash
@@ -216,14 +226,18 @@
 #                        Without a Sentry token or a mapped project it is
 #                        unmeasured for the whole watch, with the reason
 #                        recorded.
-#   deploy_run           the repository's own deploy workflow as 1 when a run
-#                        created at or after the merge completed successfully
-#                        and 0 when it failed, was cancelled, or timed out;
-#                        regressed when value is 0, because a failed deploy is
-#                        definite whether or not any run existed at registration
-#                        (so its baseline reads "unmeasured"). Its target is
-#                        run/<owner>/<repo>#<workflow-path>. No run yet, or one
-#                        still in flight, is awaiting the deploy and unmeasured.
+#   deploy_run           the repository's own deploy workflow as 1 when the
+#                        next scheduled or dispatched run whose tree carries the
+#                        merged commit completed successfully, and 0 when that
+#                        run failed, was cancelled, or timed out; regressed when
+#                        value is 0, because a failed deploy is definite whether
+#                        or not any run existed at registration (so its baseline
+#                        reads "unmeasured"). Its target is
+#                        run/<owner>/<repo>#<workflow-path>. No run yet, one
+#                        still in flight, or a merge sha the forge cannot name
+#                        is awaiting the deploy and unmeasured: a run that does
+#                        not carry the merge is never scored as this release's
+#                        success or regression.
 # The baseline window is the 60 minutes before the change's rollout start, read
 # as a level for counters (restarts, oomkilled, rss_ratio) and as a rate for the
 # others. An unmeasured metric is skipped, never scored as a pass, and a metric
@@ -281,7 +295,8 @@
 # Test seams (all optional, all inert in production):
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
 #   FM_CW_FORGE_DIR        directory replacing every forge read (files.txt,
-#                          merge-epoch, head-ref, diff.txt, content/<path>)
+#                          merge-epoch, head-ref, merge-sha, diff.txt,
+#                          content/<path>)
 #   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, the last-resort
 #                          way to resolve an application repository to a Deployment
 #   FM_CW_KUBECONFIG       kubeconfig file used for every cluster read
@@ -296,7 +311,9 @@
 #   FM_CW_SENTRY_DIR       directory of stubbed Sentry responses: issues-<project>.json
 #   FM_CW_GH               gh command used for the deploy-run target (default gh)
 #   FM_CW_GH_DIR           directory of stubbed gh responses:
-#                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json
+#                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json,
+#                          and contains-<head-sha> listing the shas that run's
+#                          tree carries, one per line
 #   FM_CW_FORGE_TIMEOUT    per-call bound on a forge read (default 12s)
 #   FM_CW_FORGE_BUDGET     total bound on forge reads in one register (default 60s)
 #   FM_CW_SAMPLE_DEADLINE  hard budget for one sample or baseline capture (default 25)
@@ -497,6 +514,8 @@ cw_budget_start() {
   CW_FORGE_START=$(cw_now)
   CW_POD_FACTS_CACHE=''
   CW_WORKLOADS_CACHE=''
+  CW_SELECTOR_CACHE=''
+  CW_MERGE_SHA_CACHE=''
   [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || : > "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
@@ -694,6 +713,67 @@ cw_forge_head_ref() {  # <url>
   cw_forge_run gh pr view "$1" --json headRefOid -q .headRefOid || return 1
 }
 
+# LIVE QUERY (forge) - the commit the merged change landed as, the sha a deploy
+# run has to carry before it says anything about this release.
+cw_forge_merge_sha() {  # <url>
+  if [ -n "${FM_CW_FORGE_DIR:-}" ]; then
+    [ -f "$FM_CW_FORGE_DIR/merge-sha" ] || return 1
+    cat "$FM_CW_FORGE_DIR/merge-sha"
+    return 0
+  fi
+  local sha
+  # A stubbed run list means a stubbed forge: never reach the live gh from a test.
+  [ -z "${FM_CW_GH_DIR:-}" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  sha=$(cw_forge_run gh pr view "$1" --json mergeCommit -q '.mergeCommit.oid // empty') || return 1
+  [ -n "$sha" ] || return 1
+  printf '%s\n' "$sha"
+}
+
+# LIVE QUERY (forge) - success when <head-sha>'s history contains <base-sha>: the
+# run built a tree that carries the merged change. A run of an older branch tip
+# carries it too, and a run of a tag or a side branch does not.
+cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha>
+  local repo=$1 base=$2 head=$3 status
+  [ -n "$base" ] && [ -n "$head" ] || return 1
+  if [ -n "${FM_CW_GH_DIR:-}" ]; then
+    # A stubbed forge lists the shas each run's tree carries, one per line.
+    [ -f "$FM_CW_GH_DIR/contains-$head" ] || return 1
+    grep -qxF -- "$base" "$FM_CW_GH_DIR/contains-$head"
+    return $?
+  fi
+  command -v gh >/dev/null 2>&1 || return 1
+  status=$(cw_forge_run gh api "repos/$repo/compare/$base...$head" --jq .status) || return 1
+  case "$status" in ahead|identical) return 0 ;; esac
+  return 1
+}
+
+# The commit a watched merge landed as, or nothing when the forge cannot name it.
+# Memoized for the sample: a watch reads it once and every deploy-workflow read
+# that sample reuses it, so the sha never costs more than one forge call.
+CW_MERGE_SHA_CACHE=''
+cw_merge_sha() {  # <watch-id>
+  local id=$1 url sha key
+  [ -n "$id" ] || return 0
+  key="w${id#w}"
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$key" ] || continue
+    printf '%s\n' "$v"
+    return 0
+  done <<CACHE
+$CW_MERGE_SHA_CACHE
+CACHE
+  url=$(cw_meta_get "$id" pr_url 2>/dev/null || true)
+  sha=''
+  if [ -n "$url" ]; then
+    sha=$(cw_forge_merge_sha "$url" 2>/dev/null || true)
+  fi
+  CW_MERGE_SHA_CACHE="$CW_MERGE_SHA_CACHE$key	$sha
+"
+  [ -n "$sha" ] || return 0
+  printf '%s\n' "$sha"
+}
+
 # --- deployment derivation ----------------------------------------------------
 
 # Documents of a Kubernetes manifest stream (stdin), one per line as
@@ -792,6 +872,10 @@ cw_live_workloads() {
 #   run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow
 #                                  (a path such as .github/workflows/deploy.yml,
 #                                  so the spec stays one whitespace-free token)
+#   path:<prefix>              where a monorepo keeps its service directories,
+#                                  such as services or apps; a deployable path
+#                                  under it that names no service is shared build
+#                                  input every service of that repository consumes
 
 # The home's repository map with comments removed. A `#` starts a comment only at
 # the start of a line or after whitespace, because a `run:` spec carries one
@@ -857,7 +941,7 @@ cw_spec_targets() {  # <spec>
       return 0
       ;;
     image:*) arg=${spec#image:} ;;
-    '') return 0 ;;
+    path:*|'') return 0 ;;
     */*) ns=${spec%%/*}; name=${spec#*/}
       cw_target_eligible "$ns" "$name" || return 0
       printf 'target\t%s\t%s\n' "$ns" "$name"
@@ -903,20 +987,6 @@ cw_spec_targets() {  # <spec>
         [ -n "$ns" ] || continue
         printf 'target\t%s\t%s\n' "$ns" "$name"
       done
-}
-
-# Resolve an application repository to its whole target set from the map: the
-# Deployments that run its image, its Sentry project, and its deploy workflow.
-# Prints "target<TAB>ns<TAB>name", "sentry<TAB>slug", "run<TAB>repo<TAB>workflow",
-# and "note<TAB>text" lines. LIVE QUERY (cluster inventory).
-cw_repo_targets() {  # <repo>
-  local repo=$1 specs spec
-  specs=$(cw_repo_specs "$repo")
-  [ -n "$specs" ] || return 1
-  for spec in $specs; do
-    cw_spec_targets "$spec"
-  done
-  return 0
 }
 
 # Resolve an application repository's name to "target<TAB>namespace<TAB>name"
@@ -988,7 +1058,7 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
   [ -n "$files" ] || return 1
   manifests=$(printf '%s\n' "$files" | grep -E '^k8s/prod/[^/]+/[^/]+\.ya?ml$' || true)
   if [ -z "$manifests" ]; then
-    cw_app_targets "$repo_name"
+    cw_app_targets "$repo_name" "$files"
     return
   fi
   ref=$(cw_forge_head_ref "$url" 2>/dev/null || true)
@@ -1018,17 +1088,174 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
 $manifests
 PATHS
   [ "$any" -eq 1 ] && return 0
-  cw_app_targets "$repo_name"
+  cw_app_targets "$repo_name" "$files"
+}
+
+# The service a repository-map spec names: the Deployment or image name it
+# resolves to, which is also the directory a monorepo keeps that service in.
+cw_spec_service() {  # <spec>
+  local spec=$1
+  case "$spec" in
+    sentry:*|run:*|path:*) return 0 ;;
+    image:*) printf '%s\n' "${spec#image:}" ;;
+    */*) printf '%s\n' "${spec#*/}" ;;
+    *) printf '%s\n' "$spec" ;;
+  esac
+}
+
+# The path prefix a repository maps its services under, when it declares one.
+cw_repo_prefix() {  # <specs>
+  local spec out=''
+  for spec in $1; do
+    case "$spec" in path:*) out=${spec#path:} ;; esac
+  done
+  printf '%s\n' "$out"
+}
+
+# What a merged diff can reach in a repository, printed as one conclusion per
+# line: "deployable" when any touched path is not documentation, a test, a
+# script of a monorepo, or a CI file other than the repository's own deploy
+# workflow; "shared"
+# when it touches a deployable path no mapped service owns, because such a path
+# (a root-level file, a shared library, a path under the map's path: prefix that
+# names no service) is consumed by every Deployment of the repository; and
+# "service <name>" per mapped service a touched path names as any of its path
+# segments, so services/<name>/ and apps/<name>/ place a service the same way a
+# top-level <name>/ does, or as the segment directly under the map's path:
+# prefix. A diff that touches nothing but non-deployable paths prints nothing.
+cw_diff_scope() {  # <files> <services> <prefix> <workflows> <multi-service>
+  printf '%s\n' "$1" | CW_DIFF_SERVICES="$2" CW_DIFF_PREFIX="$3" CW_DIFF_WORKFLOWS="$4" \
+    CW_DIFF_MULTI="$5" awk '
+    BEGIN {
+      ns = split(ENVIRON["CW_DIFF_SERVICES"], sv, " ")
+      multi = ENVIRON["CW_DIFF_MULTI"]
+      nw = split(ENVIRON["CW_DIFF_WORKFLOWS"], wf, " ")
+      pre = ENVIRON["CW_DIFF_PREFIX"]
+      sub(/\/+$/, "", pre)
+    }
+    {
+      p = $0
+      sub(/^\.\//, "", p)
+      sub(/^\/+/, "", p)
+      if (p == "") next
+      n = split(p, part, "/")
+      base = part[n]
+      dep = 1
+      if (part[1] == "docs" || part[1] == "doc" || part[1] == "tests" || part[1] == "test") dep = 0
+      else if (multi == 1 && part[1] == "scripts") dep = 0
+      else if (base ~ /\.mdx?$/) dep = 0
+      else if (part[1] == ".github") {
+        dep = 0
+        for (i = 1; i <= nw; i++) if (wf[i] == p) dep = 1
+      }
+      if (!dep) next
+      deployable = 1
+      if (n == 1) shared = 1
+      # Where the path sits relative to the map path prefix, when it declares
+      # one: the segment just under the prefix names the service, and a deployable
+      # path under the prefix that names no service is shared by all of them.
+      inp = 0
+      if (pre != "") {
+        np = split(pre, pp, "/")
+        inp = (n >= np)
+        for (i = 1; i <= np && inp; i++) if (part[i] != pp[i]) inp = 0
+      }
+      if (inp) {
+        svc = (n > np) ? part[np + 1] : ""
+        matched = 0
+        for (j = 1; j <= ns; j++)
+          if (svc != "" && sv[j] == svc) { hit[j] = 1; matched = 1 }
+        if (!matched) shared = 1
+      } else {
+        matched = 0
+        for (i = 1; i <= n; i++)
+          for (j = 1; j <= ns; j++)
+            if (sv[j] != "" && part[i] == sv[j]) { hit[j] = 1; matched = 1 }
+        if (!matched) shared = 1
+      }
+    }
+    END {
+      if (!deployable) exit 0
+      printf "deployable\n"
+      if (shared) printf "shared\n"
+      for (j = 1; j <= ns; j++) if (hit[j]) printf "service %s\n", sv[j]
+    }'
 }
 
 # An application repository's targets: its image family from the live cluster,
-# its mapped Sentry project, and its mapped deploy workflow. Falls back to the
-# local H-DevOps checkout's Deployment names when the inventory resolves no
-# Deployment for the repository, so a repository whose image name is unknown is
-# still watched rather than silently unwatched.
-cw_app_targets() {  # <repo>
-  local repo=$1 out targets
-  out=$(cw_repo_targets "$repo" 2>/dev/null || true)
+# its mapped Sentry project, and its mapped deploy workflow. A repository whose
+# map names more than one service is a monorepo, so only the services the merged
+# diff actually touches are cluster targets: a change under scripts/ deploys
+# nothing and says so, instead of reporting an unproven rollout of every service
+# in the map. A repository whose map names one service is that service, so any
+# path the diff touches that can deploy anything is in scope, while a diff of
+# documentation, tests, a monorepo's scripts, and non-deploy CI deploys nothing
+# and says so too. A deployable path no service owns - a root-level file, a shared library, a
+# path under the map's path: prefix - keeps every Deployment in scope rather than
+# concluding clean. The Sentry project and the deploy workflow are always kept,
+# because those reads never touch the cluster. Falls back to the local H-DevOps
+# checkout's Deployment names when the inventory resolves no Deployment for an
+# in-scope service, so a repository whose image name is unknown is still watched
+# rather than silently unwatched.
+cw_app_targets() {  # <repo> <files>
+  local repo=$1 files=$2 specs spec service services='' scoped='' out targets
+  local touched=0 single=0 prefix workflows='' scope shared=0
+  specs=$(cw_repo_specs "$repo")
+  if [ -z "$specs" ]; then
+    # No map entry names this repository, so it is its own single service and the
+    # local H-DevOps checkout's Deployment names are the last resort.
+    cw_service_targets "$repo" || true
+    return 0
+  fi
+  prefix=$(cw_repo_prefix "$specs")
+  for spec in $specs; do
+    case "$spec" in
+      path:*) continue ;;
+      run:*)
+        spec=${spec#run:}
+        case "$spec" in *'#'*) workflows="$workflows ${spec#*#}" ;; esac
+        continue
+        ;;
+      sentry:*) continue ;;
+    esac
+    service=$(cw_spec_service "$spec")
+    [ -n "$service" ] || continue
+    case " $services " in *" $service "*) ;; *) services="$services $service" ;; esac
+  done
+  [ "$(printf '%s' "$services" | awk '{ print NF }')" -le 1 ] && single=1
+  scope=$(cw_diff_scope "$files" "${services# }" "$prefix" "${workflows# }" "$((1 - single))")
+  case "$scope" in *shared*) shared=1 ;; esac
+  # One service: every cluster spec is in scope as soon as the diff touches any
+  # deployable path. More than one: each cluster spec is its own service and only
+  # a path that names it, or one every service consumes, reaches it.
+  for spec in $specs; do
+    case "$spec" in
+      path:*) continue ;;
+      sentry:*|run:*) scoped="$scoped $spec" ;;
+      *)
+        if [ "$single" -eq 1 ]; then
+          case "$scope" in *deployable*) scoped="$scoped $spec"; touched=1 ;; esac
+        elif [ "$shared" -eq 1 ] \
+          || printf '%s\n' "$scope" | grep -qxF "service $(cw_spec_service "$spec")"; then
+          scoped="$scoped $spec"
+          touched=1
+        fi
+        ;;
+    esac
+  done
+  out=''
+  for spec in $scoped; do
+    out="$out$(cw_spec_targets "$spec")
+"
+  done
+  if [ "$touched" -eq 0 ]; then
+    # A repository watched through its deploy workflow still measures the merge,
+    # so only a kept set with no run target may say the change deploys nothing.
+    printf '%s\n' "$out" | grep -q '^run	' \
+      || printf 'note\tthe change deploys nothing: no Deployment path is touched by the diff\n'
+    printf '%s\n' "$out" | grep -v '^target	' || true
+    return 0
+  fi
   targets=$(printf '%s\n' "$out" | grep -c '^target	' || true)
   if [ "$targets" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^run	'; then
     # The image inventory resolved no Deployment. Fall back to the checkout's own
@@ -1342,6 +1569,42 @@ cw_report_beta_failure() {  # <watch-id>
     || notice "change-watch: could not steer $task about the beta failure for $url"
 }
 
+# The label selector a Deployment's own pods carry, as a comma-joined "k=v"
+# list sorted by key. A Deployment's spec.selector.matchLabels is the only
+# authoritative answer: assuming `app=<name>` matched nothing on every
+# Deployment labelled app.kubernetes.io/name (49 of the 266 Deployments in
+# production, including the three services that deliver every customer
+# notification), and the empty log read that followed looked exactly like an
+# unmeasured rollout. Every key of the selector is used, never a subset.
+# `app=<deploy>` is the fallback only when the selector cannot be read at all.
+CW_SELECTOR_CACHE=''
+cw_deploy_selector() {  # <ns> <deploy>
+  local ns=$1 deploy=$2 key out sel
+  key="$ns/$deploy"
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$key" ] || continue
+    printf '%s\n' "$v"
+    return 0
+  done <<CACHE
+$CW_SELECTOR_CACHE
+CACHE
+  out=''
+  # A stubbed series directory stands in for every cluster read, so there is no
+  # Deployment to ask.
+  if [ -z "${FM_CW_CLUSTER_DIR:-}" ] && command -v kubectl >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # a Go template, not a shell expansion
+    out=$(cw_kubectl -n "$ns" get deployment "$deploy" \
+      -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{$k}={$v}{"\n"}{end}' 2>/dev/null) || out=''
+  fi
+  sel=$(printf '%s\n' "$out" \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+    | sort | paste -sd ',' -)
+  [ -n "$sel" ] || sel="app=$deploy"
+  CW_SELECTOR_CACHE="$CW_SELECTOR_CACHE$key	$sel
+"
+  printf '%s\n' "$sel"
+}
+
 # LIVE QUERY (cluster) - 5xx responses per minute for one Deployment's pods, from
 # the app's own access log over the window, kept only when the HTTP/1.1 line
 # count proves the probe executed. Each container's read is capped at
@@ -1350,7 +1613,7 @@ cw_report_beta_failure() {  # <watch-id>
 cw_live_http_5xx_per_min() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 secs=$3 out
   out=$(cw_kubectl -n "$ns" logs --tail="$LOG_TAIL_LINES" --since="${secs}s" --max-log-requests=10 \
-    --prefix --timestamps -l "app=$deploy" 2>/dev/null | python3 -c '
+    --prefix --timestamps -l "$(cw_deploy_selector "$ns" "$deploy")" 2>/dev/null | python3 -c '
 import datetime, re, sys
 window = float(sys.argv[1])
 cap = int(sys.argv[2])
@@ -1431,7 +1694,7 @@ cw_pod_facts() {  # <ns> <deploy>
 $CW_POD_FACTS_CACHE
 CACHE
   command -v kubectl >/dev/null 2>&1 || { cw_pod_facts_failed "$key"; return 1; }
-  cached=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
+  cached=$(cw_kubectl -n "$ns" get pods -l "$(cw_deploy_selector "$ns" "$deploy")" -o json 2>/dev/null | python3 -c '
 import datetime, json, sys
 try:
     data = json.load(sys.stdin)
@@ -1498,6 +1761,28 @@ cw_prime_pod_facts() {  # <watch-id>
     [ -n "${ns:-}" ] || continue
     cw_within_budget || return 0
     cw_pod_facts "$ns" "$deploy" >/dev/null 2>&1 || true
+  done < "$(cw_targets_path "$id")"
+}
+
+# Resolve the watched merge's sha once per sample, in this process, so the
+# deploy-workflow reads that follow inherit it instead of each spending its own
+# forge call on the same merge.
+cw_prime_merge_sha() {  # <watch-id>
+  local id=$1
+  [ -s "$(cw_runs_path "$id")" ] || return 0
+  cw_merge_sha "$id" >/dev/null 2>&1 || true
+}
+
+# Read every target's own label selector once per sample, in this process, so
+# each metric's subshell inherits it instead of spending one cluster read per
+# metric on the same Deployment.
+cw_prime_selectors() {  # <watch-id>
+  local id=$1 ns deploy
+  [ -f "$(cw_targets_path "$id")" ] || return 0
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    cw_within_budget || return 0
+    cw_deploy_selector "$ns" "$deploy" >/dev/null 2>&1 || true
   done < "$(cw_targets_path "$id")"
 }
 
@@ -1589,7 +1874,7 @@ cw_live_rss_ratio() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 limits usage
   limits=$(cw_pod_fact "$1" "$2" 4) || return 1
   [ -n "$limits" ] || return 1
-  usage=$(cw_kubectl -n "$ns" top pods -l "app=$deploy" --containers --no-headers 2>/dev/null) || return 1
+  usage=$(cw_kubectl -n "$ns" top pods -l "$(cw_deploy_selector "$ns" "$deploy")" --containers --no-headers 2>/dev/null) || return 1
   [ -n "$usage" ] || return 1
   printf '%s\n' "$limits" | tr ';' '\n' | CW_USAGE="$usage" awk -F',' '
     function bytes(u,    two, one) {
@@ -1735,20 +2020,28 @@ print(count)
 # LIVE QUERY (forge) - the mapped deploy workflow's run created at or after the
 # merge: 1 when the earliest such run completed successfully, 0 when it failed,
 # and nothing while no run exists or one is still in flight (both are awaiting
-# the deploy, never health).
-cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
-  local repo=$1 workflow=$2 since=$3 gh_cmd=${FM_CW_GH:-gh} out rc=0
+# the deploy, never health). With no merge sha to check carriers against, no run
+# can be attributed to this release, so none is scored: an unrelated run is
+# neither this release's success nor its regression.
+cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch> [<merge-sha>]
+  local repo=$1 workflow=$2 since=$3 sha=${4:-}
+  local gh_cmd=${FM_CW_GH:-gh} out rc=0 cands created runsha status conclusion carried=''
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
     [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
-      printf 'no %s run since the merge\n' "$workflow"
+      printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
       return 1
     }
     out=$(cat "$FM_CW_GH_DIR/runs-$repo-$safe.json")
   else
     command -v "$gh_cmd" >/dev/null 2>&1 || return 1
+    # headSha is asked for by name: the run that says anything about this release
+    # is the one whose tree carries the merged commit. hydra deploys from its own
+    # daily schedule and a manual dispatch, never a push, so the earliest run
+    # created after a merge can belong to an older tip - reading that one as 0
+    # reported six healthy releases as regressions.
     out=$(cw_forge_run "$gh_cmd" run list -R "$repo" --workflow "$workflow" --limit 20 \
-      --json conclusion,status,createdAt,databaseId,url) || rc=$?
+      --json conclusion,status,createdAt,databaseId,url,headSha) || rc=$?
     if [ "${rc:-0}" -ne 0 ]; then
       # A spent budget is stated as itself: "read exited 124 with no value" told
       # nobody why the deploy target stayed unmeasured.
@@ -1756,15 +2049,15 @@ cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
       return 1
     fi
   fi
-  printf '%s' "$out" | python3 -c '
+  cands=$(printf '%s' "$out" | python3 -c '
 import datetime, json, sys
 since = int(sys.argv[1] or 0)
 try:
     runs = json.load(sys.stdin)
 except Exception:
-    sys.exit(1)
+    sys.exit(2)
 if not isinstance(runs, list):
-    sys.exit(1)
+    sys.exit(2)
 candidates = []
 for run in runs:
     created = run.get("createdAt") or ""
@@ -1774,21 +2067,55 @@ for run in runs:
         continue
     if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
         candidates.append(run)
-if not candidates:
-    print("no run created at or after the merge")
-    sys.exit(1)
 candidates.sort(key=lambda r: r.get("createdAt") or "")
-run = candidates[0]
-status = (run.get("status") or "")
-conclusion = (run.get("conclusion") or "")
-if status != "completed" or not conclusion:
-    print("run in flight: status %s" % (status or "unknown"))
-    sys.exit(1)
-if conclusion == "success":
-    print("1")
-    sys.exit(0)
-print("0")
-' "$since"
+for run in candidates:
+    print("\t".join([
+        run.get("createdAt") or "-",
+        # A placeholder, never an empty field: read(1) collapses adjacent tabs.
+        run.get("headSha") or "-",
+        run.get("status") or "-",
+        run.get("conclusion") or "-",
+    ]))
+' "$since") || return 1
+  if [ -z "$cands" ]; then
+    printf 'awaiting the deploy: no %s run since the merge\n' "$workflow"
+    return 1
+  fi
+  if [ -z "$sha" ]; then
+    printf 'awaiting the deploy: merge sha unreadable, so no %s run can be proven to carry it\n' "$workflow"
+    return 1
+  fi
+  while IFS=$'\t' read -r created runsha status conclusion; do
+    [ -n "$created" ] || continue
+    # "-" is the reader's placeholder for a field the run does not carry.
+    if [ "$runsha" = "-" ]; then runsha=''; fi
+    if [ "$status" = "-" ]; then status=''; fi
+    if [ "$conclusion" = "-" ]; then conclusion=''; fi
+    if [ "$runsha" != "$sha" ]; then
+      cw_forge_run_carries "$repo" "$sha" "$runsha" || continue
+    fi
+    carried=1
+    break
+  done <<CANDIDATES
+$cands
+CANDIDATES
+  if [ -z "$carried" ]; then
+    printf 'awaiting the deploy: no %s run carrying %s yet\n' "$workflow" "${sha:0:8}"
+    return 1
+  fi
+  # A run still going is a deploy that has not landed yet, not a measurement gap:
+  # hydra's deploy takes 17-20 minutes, so the +15m reading of every merge only
+  # ever sees it in flight.
+  if [ "$status" != completed ] || [ -z "$conclusion" ]; then
+    printf 'awaiting the deploy: the %s run is %s\n' "$workflow" "${status:-unknown}"
+    return 1
+  fi
+  if [ "$conclusion" = success ]; then
+    printf '1\n'
+    return 0
+  fi
+  printf '0\n'
+  return 0
 }
 
 # LIVE QUERY (cluster) - the Deployment's own pgbouncer pool as
@@ -1944,7 +2271,7 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
       ;;
     deploy_run)
       local run_target=${target#run/}
-      cw_live_deploy_run "${run_target%%#*}" "${run_target#*#}" "$since"
+      cw_live_deploy_run "${run_target%%#*}" "${run_target#*#}" "$since" "$(cw_merge_sha "$id")"
       return $?
       ;;
   esac
@@ -2102,11 +2429,13 @@ cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
     [ -n "${workflow:-}" ] || continue
     seen=1
     rc=0
-    out=$(cw_live_deploy_run "$run_repo" "$workflow" "$since" 2>&1) || rc=$?
+    out=$(cw_live_deploy_run "$run_repo" "$workflow" "$since" "$(cw_merge_sha "$id")" 2>&1) || rc=$?
     [ "$rc" -eq 0 ] && continue
     case "$out" in
-      no\ *|'run in flight'*) awaiting=${out:-no run has been read} ;;
-      '') awaiting='no run has been read' ;;
+      # The run reader states its own wait, so the gate reuses that sentence
+      # instead of wrapping a second "awaiting the deploy:" around it.
+      awaiting\ the\ deploy:*) awaiting=$out ;;
+      '') awaiting='awaiting the deploy: no run has been read' ;;
       *) unreadable=$out ;;
     esac
   done < "$(cw_runs_path "$id")"
@@ -2117,7 +2446,7 @@ cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
     return 0
   fi
   [ -n "$awaiting" ] || return 1
-  printf 'awaiting the deploy: %s\n' "$awaiting"
+  printf '%s\n' "$awaiting"
   return 0
 }
 
@@ -2196,7 +2525,9 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   cluster=$(cw_cluster_probe || true)
   cw_resolve_pools "$id"
   [ -z "$cluster" ] || cw_record_reason "$id" "baseline" "cluster read failed: $cluster"
+  [ -n "$cluster" ] || cw_prime_selectors "$id"
   [ -n "$cluster" ] || cw_prime_pod_facts "$id"
+  cw_prime_merge_sha "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
@@ -2297,7 +2628,12 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
   # whole budget on reads that each failed the same way, and every watch
   # completed unmeasured while its record still looked like a normal watch.
   cluster=$(cw_cluster_probe || true)
+  # Selectors before pod facts: the pod reads want each target's selector, and a
+  # memo written inside a command substitution is lost, so priming it after them
+  # spends a second cluster read on the same Deployment.
+  [ -n "$cluster" ] || cw_prime_selectors "$id"
   [ -n "$cluster" ] || cw_prime_pod_facts "$id"
+  cw_prime_merge_sha "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
@@ -3518,13 +3854,14 @@ cmd_doctor() {
     while IFS=$'\t' read -r run_repo workflow; do
       [ -n "${run_repo:-}" ] || continue
       cw_budget_start
-      if value=$(cw_live_deploy_run "$run_repo" "$workflow" "$(cw_meta_get "$id" t0 || true)" 2>&1) \
+      if value=$(cw_live_deploy_run "$run_repo" "$workflow" "$(cw_meta_get "$id" t0 || true)" \
+        "$(cw_merge_sha "$id")" 2>&1) \
         && printf '%s' "$value" | grep -qE '^[01]$'; then
         printf 'doctor: ok run/%s#%s read %s\n' "$run_repo" "$workflow" "$value"
       else
         last=$(printf '%s' "$value" | tail -1)
         case "$last" in
-          "no "*run*|*"in flight"*)
+          "awaiting the deploy:"*|"no "*run*|*"in flight"*)
             printf 'doctor: awaiting run/%s#%s: %s\n' "$run_repo" "$workflow" "$last" ;;
           *)
             printf 'doctor: FAIL run/%s#%s unreadable: %s\n' "$run_repo" "$workflow" "$last"

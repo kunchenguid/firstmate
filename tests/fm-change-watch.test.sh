@@ -1156,9 +1156,12 @@ CW_CLUSTER_DIR='' PATH="$HOME_MC/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MC/shim.log" \
   || fail "a multi-container or digest-pinned Deployment was not matched: $(cat "$HOME_MC/state/change-watch/mc1$CORE_ID_SUFFIX/targets" 2>/dev/null)"
 pass "a Deployment with several containers or a digest-pinned image still matches its image family"
 
-# A repository whose Deployment names differ from its image name is mapped.
+# A repository whose Deployment names differ from its image name is mapped. The
+# diff touches all three service directories, so all three are in scope.
 HOME_M2=$(cluster_world m2)
 seed_app_pr "$HOME_M2"
+printf 'notify-gateway/src/send.ts\nsend-gateway/src/send.ts\npreferences/src/read.ts\n' \
+  > "$HOME_M2/forge/files.txt"
 {
   printf 'messaging\tnotify-gateway\t2\tlocalhost:30500/muso/notify-gateway:prod-1\n'
   printf 'messaging\tsend-gateway\t2\tlocalhost:30500/muso/send-gateway:prod-1\n'
@@ -1361,10 +1364,15 @@ printf '%s\n' '[{"conclusion":"failure","status":"completed","createdAt":"2026-0
 CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_R/gh" FM_CW_SENTRY_DIR="$HOME_R/sentry" \
   FM_CW_CONFIG_DIR="$HOME_R/config" PATH="$HOME_R/bin:$PATH" \
   run_cw "$HOME_R" 1790000900 sample r1-1383 900 >/dev/null || true
+grep -q 'awaiting the deploy: merge sha unreadable' "$HOME_R/state/change-watch/r1-1383/read-failures" \
+  || fail "a run that cannot be tied to the merge was scored anyway: $(cat "$HOME_R/state/change-watch/r1-1383/read-failures" 2>/dev/null)"
+[ -z "$(awk -F'\t' '$2 == 900 { print $4 }' "$HOME_R/state/change-watch/r1-1383/samples.log" 2>/dev/null | tail -1)" ] \
+  || fail "a failed run of a commit the forge cannot name was read as this release's deploy"
 line=$(run_cw "$HOME_R" 1790000900 verdict r1-1383)
-[ "$line" = "change-watch regressed at +15m on deploy_run (0 vs baseline unmeasured)" ] \
-  || fail "a failed deploy run did not regress the watch: $line"
-pass "a failed deploy-workflow run regresses the release and a missing run is awaiting it"
+case "$line" in
+  *regressed*) fail "a run that cannot be proven to carry the merge regressed the release: $line" ;;
+esac
+pass "a deploy run the forge cannot tie to the merge is awaiting it, never a regression"
 
 # A home's own map line for a workflow-deployed repository keeps its workflow
 # path: a `run:` spec uses `#` as its separator, which the comment strip must not
@@ -1451,9 +1459,10 @@ pass "an OOMKilled termination after the merge regresses the watch"
 # is genuinely spent says so instead of "read exited 1 with no value".
 HOME_FB=$(cluster_world fb)
 seed_app_pr "$HOME_FB"
+printf '%s\n' deadbeef > "$HOME_FB/forge/merge-sha"
 cat > "$HOME_FB/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":7,"url":"https://github.com/Muso-AI/hydra/actions/runs/7"}]'
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":7,"headSha":"deadbeef","url":"https://github.com/Muso-AI/hydra/actions/runs/7"}]'
 STUB
 chmod +x "$HOME_FB/bin/gh"
 FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" \
@@ -1483,6 +1492,7 @@ mkdir -p "$HOME_RS/gh/runs-Muso-AI" "$HOME_RS/config" "$HOME_RS/sentry"
 printf 'src/hydra.py\n' > "$HOME_RS/forge/files.txt"
 printf '%s\n' 1790000000 > "$HOME_RS/forge/merge-epoch"
 printf '%s\n' deadbeef > "$HOME_RS/forge/head-ref"
+printf '%s\n' deadbeef > "$HOME_RS/forge/merge-sha"
 printf 'hydra sentry:hydra run:Muso-AI/hydra#.github/workflows/deploy.yml\n' \
   > "$HOME_RS/config/change-watch-repos"
 printf '[]\n' > "$HOME_RS/sentry/issues-hydra.json"
@@ -1500,7 +1510,7 @@ awk -F'\t' '$1 == "sentry_new_issues@sentry/hydra" && $2 ~ /awaiting the deploy/
 [ "$(awk -F'\t' '$3 == "sentry_new_issues@sentry/hydra" { print $7 }' \
   "$HOME_RS/state/change-watch/rs1-1383/samples.log")" = "0" ] \
   || fail "a Sentry read before the deploy run was scored: $(cat "$HOME_RS/state/change-watch/rs1-1383/samples.log" 2>/dev/null)"
-printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"headSha":"deadbeef","url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
   > "$HOME_RS/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
 CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_RS/gh" FM_CW_SENTRY_DIR="$HOME_RS/sentry" \
   FM_CW_CONFIG_DIR="$HOME_RS/config" PATH="$HOME_RS/bin:$PATH" \
@@ -1669,6 +1679,7 @@ chmod +x "$HOME_WN/bin/wiki-retro"
 printf 'src/hydra.py\n' > "$HOME_WN/forge/files.txt"
 printf '%s\n' 1790000000 > "$HOME_WN/forge/merge-epoch"
 printf '%s\n' deadbeef > "$HOME_WN/forge/head-ref"
+printf '%s\n' deadbeef > "$HOME_WN/forge/merge-sha"
 env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" FM_CW_NOW=1790000000 \
   FM_CW_FORGE_DIR="$HOME_WN/forge" FM_CW_CLUSTER_DIR='' FM_CW_WORKLOADS_DIR='' \
   FM_CW_GH_DIR="$HOME_WN/gh" FM_CW_SENTRY_DIR="$HOME_WN/sentry" \
@@ -1678,7 +1689,7 @@ env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" FM_CW_NOW=1790000000 \
   "$CW" register wn1 'https://github.com/Muso-AI/hydra/pull/1383' >/dev/null \
   || fail "hydra register failed"
 printf 'kind=crewmate\n' > "$HOME_WN/state/wn1.meta"
-printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"headSha":"deadbeef","url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
   > "$HOME_WN/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
 FM_CW_WIKI_LOG="$HOME_WN/wiki.log" env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" \
   FM_CW_NOW=1790044000 FM_CW_FORGE_DIR="$HOME_WN/forge" FM_CW_CLUSTER_DIR='' \
@@ -2094,3 +2105,430 @@ BETA_B7="$HOME_B7/state/change-watch/b7-82/beta"
 grep -q 'no beta baseline was readable' "$BETA_B7" \
   || fail "the record did not state why the metric could not be scored"
 pass "the record states why a metric with no beta baseline could not be scored"
+
+# --- a Deployment is measured by its own selector ------------------------------
+# The watch used to ask the cluster for pods labelled app=<name>. A Deployment
+# labelled app.kubernetes.io/name=<name> matched nothing, the log read came back
+# empty, and the watch reported an unmeasured rollout - a monitoring hole that
+# looked exactly like a nuisance notice. 49 of the 266 Deployments in production
+# select on app.kubernetes.io/name, so the selector is read from the Deployment
+# itself. The shim below answers only the selector it is told to expect, so the
+# assumed app=<name> read returns nothing: this case fails before the fix and
+# passes after it.
+
+# selector_world <name> <selector> prints a home whose kubectl answers the
+# Deployment's own selector read and only the pods that carry <selector>.
+selector_world() {
+  local home
+  home=$(new_world "$1")
+  mkdir -p "$home/bin" "$home/config" "$home/sentry"
+  printf '%s\n' "$2" > "$home/selector"
+  cat > "$home/bin/kubectl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "${KUBECONFIG:-}" "$*" >> "$FM_CW_SHIM_LOG"
+sel=''
+case " $* " in
+  *" -l "*) sel=$(printf '%s' "$*" | sed -n 's/.* -l \([^ ]*\).*/\1/p') ;;
+esac
+case " $* " in
+  *" --raw=/version "*) printf '{"gitVersion":"v1.31.0"}\n' ;;
+  *" get deploy -A "*) cat "$FM_CW_SHIM_WORKLOADS" ;;
+  *" get deployment "*) cat "$FM_CW_SHIM_SELECTOR_FILE" ;;
+  *" get pods "*)
+    [ "$sel" = "$(cat "$FM_CW_SHIM_SELECTOR_FILE")" ] || { printf '{"items":[]}\n'; exit 0; }
+    printf '{"items":[{"metadata":{"name":"demo-1","labels":{"pod-template-hash":"%s"}},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":{}}]}}]}\n' \
+      "${FM_CW_SHIM_HASH:-h1}" "${FM_CW_SHIM_IMAGE:-}"
+    ;;
+  *" top pods "*)
+    [ "$sel" = "$(cat "$FM_CW_SHIM_SELECTOR_FILE")" ] || exit 1
+    printf 'demo-1   c   100m   128Mi\n'
+    ;;
+  *" logs "*)
+    [ "$sel" = "$(cat "$FM_CW_SHIM_SELECTOR_FILE")" ] || exit 0
+    awk 'BEGIN {
+      for (i = 0; i < 200; i++) {
+        s = int(i * 120 / 199)
+        printf "[pod/demo-1/c] 2026-09-22T06:%02d:%02d.000000000Z 10.0.0.1 - \"GET /home HTTP/1.1\" %d 12\n", int(s / 60), s % 60, (i % 20 == 0 ? 502 : 200)
+      }
+    }'
+    ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod +x "$home/bin/kubectl"
+  printf 'demo-service image:demo-service\n' > "$home/config/change-watch-repos"
+  printf 'muso-prod\tdemo\t2\tlocalhost:30500/muso/demo-service:old\n' > "$home/workloads"
+  printf 'src/server.ts\n' > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  : > "$home/forge/diff.txt"
+  printf '%s\n' "$home"
+}
+
+# run_selector_cw <home> <now> <args...> runs the watch against the shim.
+run_selector_cw() {
+  local home=$1 now=$2
+  shift 2
+  env FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CW_NOW="$now" \
+    FM_CW_FORGE_DIR="$home/forge" FM_CW_CLUSTER_DIR='' \
+    FM_CW_CONFIG_DIR="$home/config" FM_CW_SENTRY_DIR="$home/sentry" \
+    FM_CW_SHIM_LOG="$home/shim.log" FM_CW_SHIM_WORKLOADS="$home/workloads" \
+    FM_CW_SHIM_SELECTOR_FILE="$home/selector" \
+    FM_CW_ARM_CMD="$home/arm.sh" FM_CW_ARM_LOG="$home/arm.log" \
+    FM_CW_SEND_CMD="$home/send.sh" FM_CW_SEND_LOG="$home/send.log" \
+    FM_CW_NO_WIKI=1 FM_CW_SLEEP_CMD=true PATH="$home/bin:$PATH" \
+    "$CW" "$@"
+}
+
+HOME_SEL=$(selector_world sel 'app.kubernetes.io/name=demo')
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' FM_CW_SHIM_HASH=h1 \
+  run_selector_cw "$HOME_SEL" 1790000000 register sel1 \
+  'https://github.com/Muso-AI/demo-service/pull/7' >/dev/null || fail "selector register failed"
+[ "$(cat "$HOME_SEL/state/change-watch/sel1-7/targets")" = "$(printf 'muso-prod\tdemo')" ] \
+  || fail "the selector fixture did not resolve its Deployment"
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:new' FM_CW_SHIM_HASH=h2 \
+  run_selector_cw "$HOME_SEL" 1790000300 sample sel1-7 300 >/dev/null || fail "selector sample failed"
+SAMPLES_SEL="$HOME_SEL/state/change-watch/sel1-7/samples.log"
+[ "$(awk -F'\t' '$3 == "http_5xx_per_min@muso-prod/demo" { print $4 }' "$SAMPLES_SEL")" = "2.0000" ] \
+  || fail "a Deployment labelled app.kubernetes.io/name was not measured: $(cat "$SAMPLES_SEL")"
+grep -q -- '-l app.kubernetes.io/name=demo' "$HOME_SEL/shim.log" \
+  || fail "the watch did not read the Deployment's own selector: $(cat "$HOME_SEL/shim.log")"
+grep -q -- '-l app=demo' "$HOME_SEL/shim.log" \
+  && fail "the watch still assumed app=<name> for a modern-labelled Deployment"
+pass "a Deployment is measured by its own app.kubernetes.io/name selector"
+
+# The ordinary app=<name> Deployment still measures, so the fallback and the
+# common case did not regress.
+HOME_SEL2=$(selector_world sel2 'app=demo')
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' FM_CW_SHIM_HASH=h1 \
+  run_selector_cw "$HOME_SEL2" 1790000000 register sel2 \
+  'https://github.com/Muso-AI/demo-service/pull/8' >/dev/null || fail "app-label register failed"
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:new' FM_CW_SHIM_HASH=h2 \
+  run_selector_cw "$HOME_SEL2" 1790000300 sample sel2-8 300 >/dev/null || fail "app-label sample failed"
+SAMPLES_SEL2="$HOME_SEL2/state/change-watch/sel2-8/samples.log"
+[ "$(awk -F'\t' '$3 == "http_5xx_per_min@muso-prod/demo" { print $4 }' "$SAMPLES_SEL2")" = "2.0000" ] \
+  || fail "an app-labelled Deployment stopped measuring: $(cat "$SAMPLES_SEL2")"
+grep -q -- '-l app=demo' "$HOME_SEL2/shim.log" \
+  || fail "an app-labelled Deployment was not read by its own selector: $(cat "$HOME_SEL2/shim.log")"
+pass "an app-labelled Deployment still measures through its own selector"
+
+# One selector read per Deployment per sample: the per-sample memo is stored with
+# a real tab separator, so the lookup hits and the metrics that follow reuse the
+# read instead of spending the sample's budget on one cluster call per metric.
+HOME_SEL3=$(selector_world sel3 'app.kubernetes.io/name=demo')
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' FM_CW_SHIM_HASH=h1 \
+  run_selector_cw "$HOME_SEL3" 1790000000 register sel3 \
+  'https://github.com/Muso-AI/demo-service/pull/9' >/dev/null || fail "memo register failed"
+: > "$HOME_SEL3/shim.log"
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:new' FM_CW_SHIM_HASH=h2 \
+  run_selector_cw "$HOME_SEL3" 1790000300 sample sel3-9 300 >/dev/null || fail "memo sample failed"
+[ "$(grep -c -- ' get deployment ' "$HOME_SEL3/shim.log" || true)" = 1 ] \
+  || fail "the selector memo did not hit: one sample read the Deployment $(grep -c -- ' get deployment ' "$HOME_SEL3/shim.log" || true) times"
+pass "one sample reads a Deployment's selector once"
+
+# --- an application repository is scoped to what its diff can affect -----------
+# muso-messaging holds notify-gateway, preferences, send-gateway and the email
+# templates. A change under scripts/ touches none of them, so it deploys nothing
+# and must say so instead of reporting an unproven rollout of all three.
+
+HOME_MS=$(new_world ms)
+printf 'scripts/only/winback.py\n' > "$HOME_MS/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_MS/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_MS/forge/head-ref"
+: > "$HOME_MS/forge/diff.txt"
+out=$(run_cw "$HOME_MS" 1790000000 register ms1 \
+  'https://github.com/Muso-AI/muso-messaging/pull/90') || fail "scripts-only register failed"
+case "$out" in
+  *"no deployable service touched"*"the change deploys nothing"*"nothing registered"*) ;;
+  *) fail "a change that deploys nothing was not reported as such: $out" ;;
+esac
+[ -e "$HOME_MS/state/change-watch/ms1-90" ] \
+  && fail "a change that deploys nothing created a watch record"
+pass "a monorepo change under scripts/ deploys nothing and says so"
+
+# The Sentry project and the deploy workflow are kept regardless: those reads
+# never touch the cluster, so the watch still registers and completes clean.
+HOME_MS2=$(cluster_world ms2)
+printf 'muso-messaging messaging/notify-gateway messaging/send-gateway messaging/preferences sentry:messaging\n' \
+  > "$HOME_MS2/config/change-watch-repos"
+printf 'scripts/only/winback.py\n' > "$HOME_MS2/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_MS2/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_MS2/forge/head-ref"
+: > "$HOME_MS2/forge/diff.txt"
+printf '[]\n' > "$HOME_MS2/sentry/issues-messaging.json"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_MS2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MS2/shim.log" \
+  FM_CW_SHIM_WORKLOADS='' FM_CW_CONFIG_DIR="$HOME_MS2/config" \
+  FM_CW_SENTRY_DIR="$HOME_MS2/sentry" \
+  run_cw "$HOME_MS2" 1790000000 register ms2 \
+  'https://github.com/Muso-AI/muso-messaging/pull/91') \
+  || fail "sentry-only register failed: $out"
+[ -e "$HOME_MS2/state/change-watch/ms2-91/targets" ] \
+  && fail "a change that deploys nothing still registered cluster targets"
+[ "$(cat "$HOME_MS2/state/change-watch/ms2-91/sentry")" = "messaging" ] \
+  || fail "the Sentry project was dropped with the cluster targets"
+CW_CLUSTER_DIR='' PATH="$HOME_MS2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MS2/shim.log" \
+  FM_CW_SHIM_WORKLOADS='' FM_CW_CONFIG_DIR="$HOME_MS2/config" \
+  FM_CW_SENTRY_DIR="$HOME_MS2/sentry" \
+  run_cw "$HOME_MS2" 1790044000 drive ms2-91 >/dev/null || fail "sentry-only drive failed"
+[ "$(run_cw "$HOME_MS2" 1790044000 verdict ms2-91)" = "change-watch clean" ] \
+  || fail "a change that deploys nothing did not complete clean: $(run_cw "$HOME_MS2" 1790044000 verdict ms2-91)"
+pass "a change that deploys nothing completes clean on its Sentry project alone"
+
+# A diff that touches one service directory watches exactly that Deployment.
+HOME_MS3=$(new_world ms3)
+printf 'notify-gateway/src/send.ts\n' > "$HOME_MS3/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_MS3/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_MS3/forge/head-ref"
+: > "$HOME_MS3/forge/diff.txt"
+out=$(run_cw "$HOME_MS3" 1790000000 register ms3 \
+  'https://github.com/Muso-AI/muso-messaging/pull/92') || fail "scoped register failed: $out"
+[ "$(cat "$HOME_MS3/state/change-watch/ms3-92/targets")" = "$(printf 'messaging\tnotify-gateway')" ] \
+  || fail "a one-service diff did not scope to that one Deployment: $(cat "$HOME_MS3/state/change-watch/ms3-92/targets" 2>/dev/null)"
+pass "a monorepo diff is scoped to the one service it touches"
+
+# seed_files <home> <path>... seeds the merged PR's touched paths.
+seed_files() {
+  local home=$1
+  shift
+  printf '%s
+' "$@" > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  : > "$home/forge/diff.txt"
+}
+
+# A monorepo that keeps its services a directory down places them the same way:
+# services/<name>/... names <name>, so the nested layout is not read as a diff
+# that touches no service at all.
+HOME_MS4=$(new_world ms4)
+seed_files "$HOME_MS4" 'services/send-gateway/src/queue.ts'
+out=$(run_cw "$HOME_MS4" 1790000000 register ms4 \
+  'https://github.com/Muso-AI/muso-messaging/pull/93') || fail "nested register failed: $out"
+[ "$(cat "$HOME_MS4/state/change-watch/ms4-93/targets")" = "$(printf 'messaging\tsend-gateway')" ] \
+  || fail "a nested service path did not place its Deployment: $(cat "$HOME_MS4/state/change-watch/ms4-93/targets" 2>/dev/null)"
+pass "a service kept one directory down is still placed by its name"
+
+# A path every Deployment of the repository consumes stays in scope: a root-level
+# build input is not a diff that touches no deployable path, and concluding clean
+# on it would hide a rollout failure the change really could cause.
+HOME_MS5=$(new_world ms5)
+seed_files "$HOME_MS5" 'package.json'
+out=$(run_cw "$HOME_MS5" 1790000000 register ms5 \
+  'https://github.com/Muso-AI/muso-messaging/pull/94') || fail "root-shared register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_MS5/state/change-watch/ms5-94/targets" 2>/dev/null)" | grep -c '^messaging	')" = 3 ] \
+  || fail "a root-shared path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_MS5/state/change-watch/ms5-94/targets" 2>/dev/null)"
+pass "a root-shared path keeps every Deployment that consumes it in scope"
+
+# A deployable path no service owns is shared build input, not nothing: every
+# Deployment of the repository consumes a library or an internal package, so the
+# diff stays in scope instead of concluding that it deploys nothing.
+HOME_SH1=$(new_world sh1)
+seed_files "$HOME_SH1" 'lib/delivery.ts'
+out=$(run_cw "$HOME_SH1" 1790000000 register sh1 \
+  'https://github.com/Muso-AI/muso-messaging/pull/105') || fail "shared-lib register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_SH1/state/change-watch/sh1-105/targets" 2>/dev/null)" | grep -c '^messaging	')" = 3 ] \
+  || fail "a shared library path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_SH1/state/change-watch/sh1-105/targets" 2>/dev/null)"
+HOME_SH2=$(new_world sh2)
+seed_files "$HOME_SH2" 'internal/notify/retry.ts'
+out=$(run_cw "$HOME_SH2" 1790000000 register sh2 \
+  'https://github.com/Muso-AI/muso-messaging/pull/106') || fail "shared-internal register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_SH2/state/change-watch/sh2-106/targets" 2>/dev/null)" | grep -c '^messaging	')" = 3 ] \
+  || fail "an unmatched internal path concluded clean instead of watching the Deployments that consume it: $(cat "$HOME_SH2/state/change-watch/sh2-106/targets" 2>/dev/null)"
+pass "a deployable path no service owns keeps every Deployment in scope"
+
+# The map's path: prefix says where the services and their shared build inputs
+# live. A path under it that names a service scopes to that service; one that
+# names none is shared by all of them.
+HOME_MS6=$(new_world ms6)
+mkdir -p "$HOME_MS6/config"
+printf 'muso-messaging path:services messaging/notify-gateway messaging/send-gateway\n' \
+  > "$HOME_MS6/config/change-watch-repos"
+seed_files "$HOME_MS6" 'services/notify-gateway/src/send.ts'
+out=$(FM_CW_CONFIG_DIR="$HOME_MS6/config" run_cw "$HOME_MS6" 1790000000 register ms6 \
+  'https://github.com/Muso-AI/muso-messaging/pull/95') || fail "prefix register failed: $out"
+[ "$(cat "$HOME_MS6/state/change-watch/ms6-95/targets")" = "$(printf 'messaging\tnotify-gateway')" ] \
+  || fail "a mapped path prefix did not scope to the one service under it: $(cat "$HOME_MS6/state/change-watch/ms6-95/targets" 2>/dev/null)"
+HOME_MS7=$(new_world ms7)
+mkdir -p "$HOME_MS7/config"
+printf 'muso-messaging path:services messaging/notify-gateway messaging/send-gateway\n' \
+  > "$HOME_MS7/config/change-watch-repos"
+seed_files "$HOME_MS7" 'services/shared/logger.ts'
+out=$(FM_CW_CONFIG_DIR="$HOME_MS7/config" run_cw "$HOME_MS7" 1790000000 register ms7 \
+  'https://github.com/Muso-AI/muso-messaging/pull/96') || fail "prefix-shared register failed: $out"
+[ "$(printf '%s\n' "$(cat "$HOME_MS7/state/change-watch/ms7-96/targets" 2>/dev/null)" | grep -c '^messaging	')" = 2 ] \
+  || fail "a shared path under the map's prefix concluded clean: $(cat "$HOME_MS7/state/change-watch/ms7-96/targets" 2>/dev/null)"
+pass "a mapped path prefix scopes its own services and keeps their shared paths in scope"
+
+# A single-service application repository is not exempt from the same rule: a diff
+# of documentation, tests, and non-deploy CI deploys nothing and says so, while a
+# build or script path still measures the rollout.
+HOME_SS=$(new_world ss)
+mkdir -p "$HOME_SS/config" "$HOME_SS/sentry"
+printf 'demo-service image:demo-service sentry:demo\n' > "$HOME_SS/config/change-watch-repos"
+printf '[]\n' > "$HOME_SS/sentry/issues-demo.json"
+seed_files "$HOME_SS" 'README.md' 'docs/setup.md' 'tests/smoke.ts' '.github/workflows/lint.yml'
+out=$(FM_CW_CONFIG_DIR="$HOME_SS/config" FM_CW_SENTRY_DIR="$HOME_SS/sentry" \
+  run_cw "$HOME_SS" 1790000000 register ss1 \
+  'https://github.com/Muso-AI/demo-service/pull/97') || fail "docs-only register failed: $out"
+[ -e "$HOME_SS/state/change-watch/ss1-97/targets" ] \
+  && fail "a docs-only diff in a single-service repository still watched a Deployment"
+pass "a single-service repository concludes a docs-only diff deploys nothing"
+
+HOME_SS2=$(selector_world ss2 'app=demo')
+seed_files "$HOME_SS2" 'scripts/release.sh'
+FM_CW_SHIM_IMAGE='localhost:30500/muso/demo-service:old' \
+  run_selector_cw "$HOME_SS2" 1790000000 register ss2 \
+  'https://github.com/Muso-AI/demo-service/pull/98' >/dev/null || fail "script-path register failed"
+[ "$(cat "$HOME_SS2/state/change-watch/ss2-98/targets" 2>/dev/null)" = "$(printf 'muso-prod\tdemo')" ] \
+  || fail "a script path in a single-service repository was reported as deploying nothing"
+pass "a single-service repository still measures a build or script change"
+
+# --- a deploy run has to carry the merged commit -------------------------------
+# hydra deploys from a daily schedule and a manual dispatch, never a push, so the
+# earliest run created after a merge can belong to an older branch tip. Reading
+# that run as failed reported six healthy releases as regressions on 2026-11-14,
+# and a run still in flight is a deploy that has not landed yet rather than a
+# measurement gap that ends the watch.
+
+hydra_runs() {  # <home> <json>
+  mkdir -p "$1/gh/runs-Muso-AI"
+  printf '%s\n' "$2" > "$1/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
+}
+hydra_world() {  # <name> [<merge-sha>]
+  local home
+  home=$(new_world "$1")
+  mkdir -p "$home/gh/runs-Muso-AI" "$home/sentry" "$home/config" "$home/bin" "$home/state"
+  printf 'src/hydra.py\n' > "$home/forge/files.txt"
+  printf '%s\n' 1790000000 > "$home/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$home/forge/head-ref"
+  [ -z "${2:-}" ] || printf '%s\n' "$2" > "$home/forge/merge-sha"
+  printf '%s\n' "$home"
+}
+# hydra_run <created> <state> <conclusion> <sha>: one entry of the run list.
+hydra_run() {  # <created> <status> <conclusion> <head-sha>
+  printf '{"conclusion":%s,"status":"%s","createdAt":"%s","databaseId":9,"headSha":"%s","url":"https://github.com/Muso-AI/hydra/actions/runs/9"}' \
+    "$(printf '%s' "$3" | sed 's/^/"/; s/$/"/; s/^"null"$/null/')" "$2" "$1" "$4"
+}
+# run_hydra_cw <home> <now> <args...>: hydra reads its run list from the stubbed
+# forge, so every call in this section carries the stub directory. Without it the
+# reader would reach the live forge, which a test must never do. The cluster stub
+# directory is empty here for the same reason: a run target is a forge read, and a
+# set cluster dir makes every metric read a stubbed series file instead.
+run_hydra_cw() {  # <home> <now> <args...>
+  local home=$1 now=$2
+  shift 2
+  CW_CLUSTER_DIR='' FM_CW_GH_DIR="$home/gh" run_cw "$home" "$now" "$@"
+}
+
+deploy_run_value() {  # <home> <watch-id> <offset>
+  awk -F'\t' '$2 == "'"$3"'" { print $4 }' "$1/state/change-watch/$2/samples.log" 2>/dev/null | tail -1
+}
+
+MERGED='aaaa1111bbbb'
+OLDER='cccc2222dddd'
+
+# A merge the forge cannot name has no provable carrier, so no candidate run is
+# scored: an unrelated failed run in the window is neither this release's
+# regression nor its success, only a deploy that cannot be attributed yet.
+HOME_NS=$(hydra_world ns)
+out=$(run_hydra_cw "$HOME_NS" 1790000000 register ns1 'https://github.com/Muso-AI/hydra/pull/1961') \
+  || fail "hydra register failed: $out"
+hydra_runs "$HOME_NS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER")]"
+run_hydra_cw "$HOME_NS" 1790000900 sample ns1-1961 900 >/dev/null || fail "sample failed"
+grep -q 'awaiting the deploy: merge sha unreadable' "$HOME_NS/state/change-watch/ns1-1961/read-failures" \
+  || fail "an unreadable merge sha was not stated as the reason nothing was measured: $(cat "$HOME_NS/state/change-watch/ns1-1961/read-failures" 2>/dev/null)"
+[ -z "$(deploy_run_value "$HOME_NS" ns1-1961 900)" ] \
+  || fail "a failed run that carries nothing provable about the merge was scored: $(cat "$HOME_NS/state/change-watch/ns1-1961/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_NS" 1790000900 verdict ns1-1961)
+case "$line" in
+  *regressed*) fail "an unrelated failed run regressed a release the forge cannot tie to a commit: $line" ;;
+esac
+pass "an unreadable merge sha leaves the deploy unmeasured instead of scoring a run"
+HOME_DS=$(hydra_world ds "$MERGED")
+out=$(run_hydra_cw "$HOME_DS" 1790000000 register ds1 'https://github.com/Muso-AI/hydra/pull/1957') \
+  || fail "hydra register failed: $out"
+case "$out" in
+  *"deploys nothing"*) fail "a repository watched through its deploy workflow claimed the change deploys nothing: $out" ;;
+  *"1 target(s)"*) ;;
+  *) fail "the deploy workflow target was not registered: $out" ;;
+esac
+pass "a repository watched through its deploy workflow measures the change"
+hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER"),$(hydra_run 2026-09-21T15:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_DS" 1790000900 sample ds1-1957 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_DS" ds1-1957 900)" = 1 ] \
+  || fail "a deploy run carrying the merged commit was not measured: $(cat "$HOME_DS/state/change-watch/ds1-1957/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_DS" 1790000900 verdict ds1-1957)
+case "$line" in
+  *regressed*) fail "a failed run of an older tip regressed a healthy release: $line" ;;
+esac
+
+# The same older-tip run is the release's once the forge proves its tree carries
+# the merged commit, and a failed run that genuinely carries it still regresses.
+hydra_runs "$HOME_DS" "[$(hydra_run 2026-09-21T15:00:00Z completed failure "$OLDER")]"
+printf '%s\n' "$MERGED" > "$HOME_DS/gh/contains-$OLDER"
+run_hydra_cw "$HOME_DS" 1790003600 sample ds1-1957 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_DS" ds1-1957 3600)" = 0 ] \
+  || fail "a failed run whose tree carries the merge was not read as a failed deploy: $(deploy_run_value "$HOME_DS" ds1-1957 3600)"
+
+# A run of an unrelated tip with no proof it carries the merge is awaited, never
+# read as a failure.
+rm -f "$HOME_DS/gh/contains-$OLDER"
+run_hydra_cw "$HOME_DS" 1790007200 sample ds1-1957 7200 >/dev/null || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_DS" ds1-1957 7200)" ] \
+  || fail "an unrelated run was read as this release's deploy"
+grep -q 'carrying aaaa1111 yet' "$HOME_DS/state/change-watch/ds1-1957/read-failures" \
+  || fail "an unrelated run was not stated as awaiting a run that carries the merge: $(cat "$HOME_DS/state/change-watch/ds1-1957/read-failures" 2>/dev/null)"
+pass "a deploy run is the one whose tree carries the merged commit"
+
+# However many unrelated runs were created before the one whose tree carries the
+# merge, the carrier is still found and scored: a bounded scan of the oldest few
+# dropped it and ended the watch unmeasured instead of reporting the failure.
+HOME_CC=$(hydra_world cc "$MERGED")
+run_hydra_cw "$HOME_CC" 1790000000 register cc1 'https://github.com/Muso-AI/hydra/pull/1980' >/dev/null \
+  || fail "hydra register failed"
+CC_RUNS=$(hydra_run 2026-09-21T15:00:00Z completed failure oldtip01)
+for n in 02 03 04 05 06; do
+  CC_RUNS="$CC_RUNS,$(hydra_run "2026-09-21T15:0${n#0}:00Z" completed success "oldtip$n")"
+done
+hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed failure "$OLDER")]"
+printf '%s\n' "$MERGED" > "$HOME_CC/gh/contains-$OLDER"
+run_hydra_cw "$HOME_CC" 1790000900 sample cc1-1980 900 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_CC" cc1-1980 900)" = 0 ] \
+  || fail "a carrier created after more than five unrelated runs was not read as a failed deploy: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
+line=$(run_hydra_cw "$HOME_CC" 1790000900 verdict cc1-1980)
+case "$line" in
+  *"regressed at +15m on deploy_run"*) ;;
+  *) fail "a failed carrier run after six unrelated runs did not regress the release: $line" ;;
+esac
+hydra_runs "$HOME_CC" "[$CC_RUNS,$(hydra_run 2026-09-21T15:30:00Z completed success "$OLDER")]"
+run_hydra_cw "$HOME_CC" 1790003600 sample cc1-1980 3600 >/dev/null || fail "sample failed"
+[ "$(deploy_run_value "$HOME_CC" cc1-1980 3600)" = 1 ] \
+  || fail "a successful carrier created after more than five unrelated runs was not proven: $(cat "$HOME_CC/state/change-watch/cc1-1980/samples.log" 2>/dev/null)"
+rm -f "$HOME_CC/gh/contains-$OLDER"
+run_hydra_cw "$HOME_CC" 1790007200 sample cc1-1980 7200 >/dev/null || fail "sample failed"
+[ -z "$(deploy_run_value "$HOME_CC" cc1-1980 7200)" ] \
+  || fail "a run whose tree carries nothing of the merge was scored"
+grep -q 'carrying aaaa1111 yet' "$HOME_CC/state/change-watch/cc1-1980/read-failures" \
+  || fail "a window of unrelated runs was not stated as awaiting a carrier: $(cat "$HOME_CC/state/change-watch/cc1-1980/read-failures" 2>/dev/null)"
+pass "the carrier scan finds the run carrying the merge past many unrelated runs"
+
+# A run still in flight is the deploy not having landed yet: the reading waits,
+# it is not a gap, and the watch still reaches proven once the deploy succeeds.
+HOME_IF=$(hydra_world if "$MERGED")
+run_hydra_cw "$HOME_IF" 1790000000 register if1 'https://github.com/Muso-AI/hydra/pull/1970' >/dev/null \
+  || fail "hydra register failed"
+hydra_runs "$HOME_IF" "[$(hydra_run 2026-09-21T14:30:00Z in_progress '-' "$MERGED")]"
+run_hydra_cw "$HOME_IF" 1790000900 sample if1-1970 900 >/dev/null || fail "sample failed"
+grep -q 'awaiting the deploy: the .github/workflows/deploy.yml run is in_progress' \
+  "$HOME_IF/state/change-watch/if1-1970/read-failures" \
+  || fail "a run in flight was not recorded as awaiting the deploy: $(cat "$HOME_IF/state/change-watch/if1-1970/read-failures" 2>/dev/null)"
+[ "$(awk -F'\t' '$2 == 900 { print $8 }' "$HOME_IF/state/change-watch/if1-1970/samples.log" | tail -1)" = 1 ] \
+  || fail "a run in flight was counted as a measurement gap"
+hydra_runs "$HOME_IF" "[$(hydra_run 2026-09-21T14:30:00Z completed success "$MERGED")]"
+run_hydra_cw "$HOME_IF" 1790044000 drive if1-1970 >/dev/null || fail "resumed drive failed"
+ROW_IF="$HOME_IF/state/change-watch/rows/if1-1970.json"
+grep -q '"900": {[^}]*"measured": true' "$ROW_IF" \
+  || fail "a +15m reading that was only awaiting the deploy was not measured: $(cat "$ROW_IF" 2>/dev/null)"
+grep -q '"terminal_state": "proven"' "$ROW_IF" \
+  || fail "a watch whose scheduled deploy landed after +15m was not proven: $(cat "$ROW_IF" 2>/dev/null)"
+pass "a deploy still in flight at +15m waits instead of ending the watch unmeasurable"
