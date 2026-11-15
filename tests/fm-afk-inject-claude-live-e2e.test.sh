@@ -56,6 +56,20 @@ cat > "$LAB_DIR/project/.claude/settings.json" <<EOF
 {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"FM_HOME=$LAB_DIR/home $ROOT/bin/fm-turnend-guard.sh --claude"}]}]}}
 EOF
 
+# A preprovisioned Herdr server may lack the gate's environment, so the pane
+# command itself must disable the shared Claude installation's auto-updater.
+# Run the exact command against a recording stub before any lab use.
+claude_cmd="FM_HOME='$LAB_DIR/home' DISABLE_AUTOUPDATER=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions"
+mkdir -p "$LAB_DIR/stub"
+cat > "$LAB_DIR/stub/claude" <<EOF
+#!/bin/sh
+printf '%s' "\${DISABLE_AUTOUPDATER:-}" > "$LAB_DIR/stub/autoupdater"
+EOF
+chmod +x "$LAB_DIR/stub/claude"
+env -u DISABLE_AUTOUPDATER PATH="$LAB_DIR/stub:$ORIGINAL_PATH" sh -c "$claude_cmd" \
+  && [ "$(cat "$LAB_DIR/stub/autoupdater" 2>/dev/null)" = 1 ] \
+  || fail "the Claude pane command does not disable the auto-updater"
+
 if [ "${FM_AFK_LIVE_PREPROVISIONED:-0}" != 1 ]; then
   "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab"
 fi
@@ -65,7 +79,7 @@ ws=$(lab workspace create --cwd "$LAB_DIR/project" --label afk-claude-live --no-
   || fail "could not create lab workspace"
 pane=$(printf '%s' "$ws" | jq -er '.result.root_pane.pane_id') || fail "no pane id"
 target="$HERDR_LAB_SESSION:$pane"
-lab pane run "$pane" "FM_HOME='$LAB_DIR/home' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" >/dev/null \
+lab pane run "$pane" "$claude_cmd" >/dev/null \
   || fail "could not start Claude in the lab pane"
 
 idle=0

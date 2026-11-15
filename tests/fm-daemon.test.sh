@@ -763,26 +763,30 @@ test_seed_duplicate_cursor_row_skips_only_that_task() {
   pass "a duplicate presentation cursor row skips only that task; other tasks seed and startup continues"
 }
 
-test_seed_malformed_cursor_manifest_logs_once_and_starts() {
-  local dir state log_file
-  dir=$(make_supercase seed-malformed-manifest)
+test_seed_malformed_cursor_row_skips_only_that_task() {
+  local dir state log_file second second_end
+  dir=$(make_supercase seed-malformed-row)
   state="$dir/state"
+  second="$state/second.status"
   printf 'done: first old completion\n' > "$state/first.status"
-  printf 'done: second old completion\n' > "$state/second.status"
-  printf 'first\tID\tx\t0\n' > "$state/.status-presentation-cursor"
+  printf 'done: second old completion\n' > "$second"
+  second_end=$(log_size "$second")
+  printf 'first\tID\tx\t0\nsecond\t%s\t%s\t0\n' \
+    "$(_fm_open_decisions_file_ident "$second")" "$second_end" > "$state/.status-presentation-cursor"
   log_file="$dir/daemon.log"
 
   LOG="$log_file" seed_presented_status_at_start "$state" \
-    || fail "a malformed presentation cursor manifest stopped away startup"
+    || fail "a malformed presentation cursor row stopped away startup"
   [ -e "$state/.subsuper-session-seeded" ] \
-    || fail "the session marker was not written after a malformed manifest"
+    || fail "the session marker was not written after a malformed row"
   [ "$(status_seen_offset "$state" first)" = 0 ] || fail "malformed row advanced its task"
-  [ "$(status_seen_offset "$state" second)" = 0 ] || fail "absent row advanced its task"
+  [ "$(status_seen_offset "$state" second)" = "$second_end" ] \
+    || fail "another task's malformed row made a valid task replay presented status"
   [ "$(grep -c 'presented status seed' "$log_file")" = 1 ] \
-    || fail "a malformed manifest was not logged exactly once: $(cat "$log_file")"
-  grep -q 'skipped for first second: malformed or unreadable .*/.status-presentation-cursor' "$log_file" \
-    || fail "the malformed manifest log did not name the tasks and the manifest"
-  pass "a malformed presentation cursor manifest is logged once and startup continues"
+    || fail "a malformed row was not logged exactly once: $(cat "$log_file")"
+  grep -q 'skipped for first: malformed or unreadable .*/.status-presentation-cursor' "$log_file" \
+    || fail "the malformed row log did not name only its task and the manifest: $(cat "$log_file")"
+  pass "a malformed presentation cursor row skips only that task; valid tasks keep their presented offset"
 }
 
 test_seed_legacy_cursor_failure_does_not_blame_missing_manifest() {
@@ -4140,7 +4144,7 @@ test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
 test_fresh_away_entry_skips_previously_presented_status
 test_seed_duplicate_cursor_row_skips_only_that_task
-test_seed_malformed_cursor_manifest_logs_once_and_starts
+test_seed_malformed_cursor_row_skips_only_that_task
 test_seed_legacy_cursor_failure_does_not_blame_missing_manifest
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging

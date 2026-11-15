@@ -692,9 +692,9 @@ status_seen_offset() {  # <state> <task>
 # buffer across a daemon restart. A new task or append after this snapshot has
 # no presented offset and remains visible to the catch-all scan.
 # A task that cannot be seeded keeps its own position, so the scan may repeat
-# its lines but away supervision still starts. A duplicate cursor row skips only
-# that task; an unreadable or malformed cursor manifest skips seeding for every
-# task and is logged once. The marker is written regardless,
+# its lines but away supervision still starts. A malformed or duplicate cursor
+# row skips only that task; an unreadable cursor manifest skips seeding for
+# every task. Skipped tasks are logged once. The marker is written regardless,
 # so the same failure does not repeat on each restart.
 seed_presented_status_at_start() {  # <state>
   local state=$1 f task presented seen ident marker tmp unseeded=
