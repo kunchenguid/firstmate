@@ -5344,6 +5344,7 @@ EOF
     FM_CREW_STATE_BIN="$dir/fakebin/slow-crew-state" bash -c '
       . "$1"
       wake() { :; }
+      PARKED_GATE_NEXT=0
       started=$SECONDS
       parked_gate_tick
       [ "$((SECONDS - started))" -lt 9 ] || exit 11
@@ -5353,6 +5354,45 @@ EOF
       awk -F "\t" '\''$3 == "check" && $4 == "parked-gate-z-later-01LATER-ci-abc123" { n++ } END { exit n != 1 }'\'' "$STATE/.wake-queue"
     ' _ "$WATCH" || fail "shared gate-read budget did not defer and resume the later ship"
   pass "parked-gate reads share a bounded cycle and resume at deferred ships"
+}
+
+test_parked_gate_partial_budget_is_fair_across_cycles_and_restarts() {
+  local dir mode
+  for mode in cycle restart; do
+    dir=$(gate_wake_case "gate-wake-partial-$mode" 'paused: waiting' armed)
+    fm_write_meta "$dir/state/z-later.meta" 'kind=ship'
+    cat > "$dir/fakebin/slow-crew-state" <<'EOF'
+#!/usr/bin/env bash
+sleep 3
+printf 'state: parked · source: run-step · parked at ci: 1 finding(s) · ask-user: authority decision · ask-user findings checksum: abc123 · run: %s\n' "$1"
+EOF
+    chmod +x "$dir/fakebin/slow-crew-state"
+    FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE="$dir/config" FM_POLL=15 \
+      FM_CREW_STATE_BIN="$dir/fakebin/slow-crew-state" bash -c '
+        . "$1"
+        wake() { :; }
+        date() { if [ "$1" = +%s ]; then echo "$gate_test_epoch"; else command date "$@"; fi; }
+        gate_test_epoch=0
+        parked_gate_tick
+        [ "$(cat "$STATE/.parked-gate-wake-gate-task")" = "gate-task|ci|abc123" ] || exit 11
+        [ ! -e "$STATE/.parked-gate-wake-z-later" ] || exit 12
+        if [ "$2" = restart ]; then
+          export -f date
+          export gate_test_epoch=15
+          exec bash -c '\''
+            . "$1"
+            wake() { :; }
+            parked_gate_tick
+          '\'' _ "$1"
+        fi
+        parked_gate_tick
+      ' _ "$WATCH" "$mode" || fail "partial-budget $mode did not complete"
+    [ "$(cat "$dir/state/.parked-gate-wake-z-later")" = 'z-later|ci|abc123' ] \
+      || fail "partial-budget $mode starved the later ship"
+    awk -F '\t' '$3 == "check" && $4 == "parked-gate-z-later-z-later-ci-abc123" { n++ } END { exit n != 1 }' \
+      "$dir/state/.wake-queue" || fail "partial-budget $mode lost or duplicated the later notice"
+  done
+  pass "partial-budget ships receive a full attempt next cycle and after restart"
 }
 
 test_parked_gate_wake_is_off_without_its_flag() {
@@ -5772,6 +5812,7 @@ fm_test_run \
   test_secondmate_exit_picker_stays_quiet \
   test_closed_exit_picker_drops_saved_dialog_name \
   test_parked_gate_budget_defers_ships_to_next_cycle \
+  test_parked_gate_partial_budget_is_fair_across_cycles_and_restarts \
   test_parked_gate_wake_is_off_without_its_flag \
   test_parked_human_gate_wakes_once_per_gate \
   test_parked_gate_wake_keeps_a_durable_row_when_delivery_is_lost \
