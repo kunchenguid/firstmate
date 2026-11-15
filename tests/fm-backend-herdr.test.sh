@@ -4153,43 +4153,63 @@ test_normalize_key() {
 
 # --- capture / send_key / kill / current_path --------------------------------
 
-test_capture_calls_pane_read() {
+test_capture_caps_recent_read_to_viewport_rows() {
   local dir log resp fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf 'line one\nline two\nline three\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
+  printf 'line one\nline two\nline three\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
-  # Requesting 250 (already >= the 200 floor) passes straight through as the
-  # fetch bound; the adapter then trims to the caller's requested 250 lines
-  # locally, so all 3 fake lines survive.
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250' "$ROOT" )
   [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not pass through pane read output, got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
-    "capture did not call pane read with the right pane id and line bound"
-  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N' with the session set"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' \
+    "capture must read the pane metadata before choosing a passive line bound"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''40' \
+    "capture did not cap the recent-read bound to the pane viewport"
+  assert_not_contains "$(cat "$log")" $'\x1f''--lines'$'\x1f''250' \
+    "capture must never ask herdr for more rows than the viewport"
+  pass "fm_backend_herdr_capture: caps a recent read to the pane viewport rows"
 }
 
-test_capture_works_around_small_lines_bug() {
+test_capture_falls_back_to_visible_after_empty_small_recent_read() {
   local dir log resp fb out
-  # Verified herdr v0.7.1 bug (herdr-verification-p2.md): `pane read --lines N`
-  # for a small N (below the pane's viewport height) returns EMPTY, not the
-  # last N lines. The adapter must never ask herdr for a small --lines bound -
-  # it always fetches >= 200 and trims locally with tail.
+  # Verified herdr v0.7.1 bug (herdr-verification-p2.md): a bounded small
+  # recent read could return EMPTY instead of the last N lines. The adapter now
+  # keeps the passive bound but falls back to visible when that old release
+  # shape appears.
   dir="$TMP_ROOT/capture-small"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf 'a\nb\nc\nd\ne\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
+  printf 'visible line one\nvisible line two\nvisible line three\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" )
-  [ "$out" = $'d\ne' ] || fail "a small --lines request should still return the last N lines (trimmed locally), got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''--lines'$'\x1f''200' \
-    "capture should request a generous fetch (>=200), never the caller's small N, from herdr's own --lines flag"
-  pass "fm_backend_herdr_capture: works around the verified small-N '--lines' bug by over-fetching and trimming locally"
+  [ "$out" = $'visible line two\nvisible line three' ] || fail "an empty bounded recent read should fall back to visible and trim to the caller's bound, got '$out'"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''2' \
+    "capture did not first try the bounded passive recent read"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''visible' \
+    "capture did not fall back to the passive visible read after an empty bounded recent read"
+  pass "fm_backend_herdr_capture: falls back to visible after an empty bounded recent read"
+}
+
+test_capture_falls_back_when_viewport_unavailable() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/capture-no-viewport"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{}}}\n' > "$resp/1.out"
+  printf 'one\ntwo\nthree\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" )
+  [ "$out" = $'two\nthree' ] || fail "missing viewport should use visible output and trim it, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''visible' "missing viewport should use visible capture"
+  assert_not_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''recent' "missing viewport must not attempt a recent read"
+  pass "fm_backend_herdr_capture: uses visible capture when viewport dimensions are unavailable"
 }
 
 test_capture_preserves_pane_read_failure() {
   local dir log resp fb out status
   dir="$TMP_ROOT/capture-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 2' "$ROOT" 2>&1 )
@@ -4197,6 +4217,8 @@ test_capture_preserves_pane_read_failure() {
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
     "capture did not ensure the herdr server before reading the pane"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' \
+    "capture did not read the pane metadata before the passive recent read"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
   pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
@@ -5056,9 +5078,10 @@ test_send_text_submit_preexisting_working_pending_is_queued_enter() {
   # current turn ends. Footer transition is not the confirmation path here
   # because the pre-Enter native status is already working.
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '  ready\n' > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '  ready\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/3.out"
   herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -5073,10 +5096,11 @@ test_send_text_submit_preexisting_working_does_not_confirm_failed_enter() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-preexisting-working-enter-failed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '  ready\n' > "$resp/3.out"
-  printf '1\n' > "$resp/4.exit"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
+  printf '  ready\n' > "$resp/4.out"
+  printf '1\n' > "$resp/5.exit"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/3.out"
   herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -5132,7 +5156,8 @@ test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
-  printf 'thinking... esc to interrupt\n' > "$resp/7.out"
+  printf 'thinking... esc to interrupt\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/7.out"
   herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
@@ -5189,9 +5214,12 @@ test_composer_state_cursor_midturn_row_reads_pending() {
 test_rendered_busy_state_reads_the_cursor_busy_token() {
   local dir log resp fb idle_out busy_out fail_out
   dir="$TMP_ROOT/rendered-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  herdr_cursor_idle_plain > "$resp/1.out"
-  herdr_cursor_midturn_plain > "$resp/2.out"
-  printf '1\n' > "$resp/3.exit"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
+  herdr_cursor_idle_plain > "$resp/2.out"
+  cp "$resp/1.out" "$resp/3.out"
+  herdr_cursor_midturn_plain > "$resp/4.out"
+  cp "$resp/1.out" "$resp/5.out"
+  printf '1\n' > "$resp/6.exit"
   fb=$(make_herdr_fakebin "$dir")
   idle_out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rendered_busy_state default:w1:p2' "$ROOT" )
@@ -5211,16 +5239,20 @@ test_send_text_submit_confirms_never_idle_native_state_via_footer_transition() {
   # 1: send-text
   # 2: agent get - cursor is `blocked` even while idle, so the native
   #    idle-baseline path is unreachable and the composer branch runs
-  # 3: pane read - rendered footer baseline: no busy token, so the pane was NOT
+  # 3: pane get - viewport dimensions for the baseline capture
+  # 4: pane read - rendered footer baseline: no busy token, so the pane was NOT
   #    mid-turn before our Enter
-  # 4: send-keys enter
-  # 5: pane read - composer content mid-turn: placeholder plus busy token
-  # 6: pane read - rendered footer now busy: an idle-to-busy transition ACROSS
+  # 5: send-keys enter
+  # 6: pane read - composer content mid-turn: placeholder plus busy token
+  # 7: pane get - viewport dimensions for the follow-up capture
+  # 8: pane read - rendered footer now busy: an idle-to-busy transition ACROSS
   #    our Enter, which is the submission proof
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
-  herdr_cursor_idle_plain > "$resp/3.out"
-  herdr_cursor_midturn_ansi > "$resp/5.out"
-  herdr_cursor_midturn_plain > "$resp/6.out"
+  herdr_cursor_idle_plain > "$resp/4.out"
+  herdr_cursor_midturn_ansi > "$resp/6.out"
+  herdr_cursor_midturn_plain > "$resp/8.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/3.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/7.out"
   herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -5238,9 +5270,10 @@ test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
   # evidence about OUR message: the verdict must stay pending rather than
   # borrowing someone else's turn as proof of our delivery.
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
-  herdr_cursor_midturn_plain > "$resp/3.out"
-  herdr_cursor_midturn_ansi > "$resp/5.out"
-  herdr_cursor_midturn_ansi > "$resp/7.out"
+  herdr_cursor_midturn_plain > "$resp/4.out"
+  herdr_cursor_midturn_ansi > "$resp/6.out"
+  herdr_cursor_midturn_ansi > "$resp/8.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/3.out"
   herdr_submit_identity_prefix "$resp" codex
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -5924,7 +5957,8 @@ test_scripts_route_explicit_target_through_meta_backend() {
   neutral="$dir/neutral-root"; mkdir -p "$neutral"
   fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
   touch "$state/.last-watcher-beat"
-  printf 'captured herdr pane\n' > "$resp/1.out"
+  printf '{"result":{"pane":{"scroll":{"viewport_rows":40}}}}\n' > "$resp/1.out"
+  printf 'captured herdr pane\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -6679,8 +6713,9 @@ test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
-test_capture_calls_pane_read
-test_capture_works_around_small_lines_bug
+test_capture_caps_recent_read_to_viewport_rows
+test_capture_falls_back_to_visible_after_empty_small_recent_read
+test_capture_falls_back_when_viewport_unavailable
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
