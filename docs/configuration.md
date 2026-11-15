@@ -819,8 +819,16 @@ A task the captain holds is deliberately stopped, so every pass skips it: its de
 First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
 Second, it restarts fleet-owned `fm-*` units systemd reports as failed, capped per unit per hour.
 Third, it walks each live lane's oldest unacknowledged steering message up an age ladder: a re-ring at 20 minutes, an interrupt plus a bounded continue at 45, and a relaunch at 90, one rung per message and never repeated.
+That relaunch is charged to the same hourly budget and stopped with the same one wake as the connection ladder below, and a transient relaunch failure keeps the message's place in the ladder for the next pass.
 The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
-Fourth, it relaunches every task it does not find held whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+Fourth, it relaunches every task it finds neither held nor left stopped whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+A task the captain left stopped (`state/<id>.stopped`, written by `bin/fm-leave-stopped.sh`) is skipped by every pass exactly like a held one, because stopping its agent was the captain's own order and its dead endpoint is the expected state rather than a fault to repair.
+A relaunch is a transaction that some endpoints provably cannot perform, and a refusal is not a retry: the first refusal is recorded with the backend's own reason, escalated to firstmate once, and spends no relaunch budget, because asking again cannot launch anything.
+That record suppresses the rung only while the endpoint still gives the same liveness answer that earned it: a different `alive` or `dead` read - a hand relaunch brought it back, or it died - drops the record at once, while an `unreadable`, `ambiguous`, or `unverified` read is not an answer and keeps it.
+Otherwise it is re-attempted only after `FM_WATCHDOG_REFUSAL_RETRY_SECS`, which is long enough for a fix or a hand relaunch to land.
+A launch that failed on a timeout or another transient error is not a refusal: the attempt is charged to the hourly relaunch budget and the rung is tried again, and a spent budget stops the retrying and wakes firstmate once with the lane named.
+On an Orca task whose terminal Orca itself reports gone, the replacement is `bin/fm-spawn.sh --relaunch` instead, because that is the only Orca relaunch proven end to end; the pass's carry-over note reaches the new agent as one durable steering record, since a spawn takes no launch note.
+The 2026-11-14 evidence: ten Orca lanes whose terminals an operator had closed were each retried three times an hour, every attempt refused, and every lane then paged as out of budget - three pages per lane for a state no relaunch could change.
 Fifth, it walks each live but frozen worker up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
 A worker that is alive and idle rather than frozen is nudged at most once an hour, and only while `bin/fm-crew-state.sh` still reads `working` from a source the worker itself owns.
 Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set.
@@ -858,6 +866,7 @@ FM_WATCHDOG_CHAIR_SESSION=chair        # tmux session whose first window is the 
 FM_WATCHDOG_CAPTURE_LINES=24           # pane lines that make up a pane's shape
 FM_WATCHDOG_READ_TIMEOUT_SECS=10
 FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS=240
+FM_WATCHDOG_REFUSAL_RETRY_SECS=21600    # a recorded relaunch refusal waits this long
 FM_WATCHDOG_BOOT_BUDGET_SECS=1500      # a boot pass stops taking new tasks past this
 FM_WATCHDOG_INBOX_RING_SECS=1200       # an unread steer this old is re-rung
 FM_WATCHDOG_INBOX_INTERRUPT_SECS=2700  # ... interrupted and continued this old
@@ -873,7 +882,7 @@ FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
 
 `FM_WATCHDOG_FALLBACK_MODEL` is the model spec the fleet already records for DeepSeek V4.1 Flash; set it empty on a home with no second gateway, where no lane can reach that model.
 
-The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
+The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its pending relaunch refusal and the endpoint state that earned it, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
 `bin/fm-watchdog-worker.sh status` prints that record without acting, and a record carrying a different schema stamp is treated as no record at all.
 A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
 

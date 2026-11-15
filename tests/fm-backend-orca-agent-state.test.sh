@@ -14,7 +14,12 @@
 #   3. An unrecognized process below the root is `ambiguous`, never `dead`.
 #   4. A stale handle is `missing`; a pty Orca's sweep does not name, or a
 #      failing CLI, is `unreadable`.
-#   5. fm-control exit on an Orca pi worker submits /quit and proves the stop
+#   5. A terminal Orca itself reports gone - a record carrying a terminal
+#      exitCause or reporting itself neither connected nor writable, while the
+#      pty it names is no longer swept - is `missing`, because no agent can be
+#      running in it; a stop Orca could not verify stays `unreadable`, and a
+#      pty the sweep still names keeps the process-tree verdict.
+#   6. fm-control exit on an Orca pi worker submits /quit and proves the stop
 #      from the tree; an agent that never stops is reported unconfirmed; and
 #      relaunch stays refused on Orca.
 set -u
@@ -75,9 +80,11 @@ case "${1:-} ${2:-}" in
       printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal_handle_stale"}}\n'
       exit 1
     fi
+    if [ -f "$D/show.json" ]; then cat "$D/show.json"; exit 0; fi
     printf '{"ok":true,"result":{"terminal":{"handle":"term-1","ptyId":"wt::/x@@pty1","worktreePath":"/x","agentIdentity":"pi","title":"Pi ready"}}}\n'
     ;;
   "diagnostics memory")
+    [ ! -f "$D/diag-fail" ] || exit 1
     root=$(cat "$D/root" 2>/dev/null || echo 0)
     printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"wt::/x","sessions":[{"sessionId":"wt::/x@@other","pid":1},{"sessionId":"%s","pid":%s}]}]}}\n' \
       "$(cat "$D/pty" 2>/dev/null || echo 'wt::/x@@pty1')" "$root"
@@ -103,6 +110,27 @@ new_dir() {  # <name> -> echoes a fake-orca state dir
   mkdir -p "$d"
   : > "$d/log"
   printf '%s\n' "$d"
+}
+
+# closed_record <dir> <extra-json-fields>: make `terminal show` answer the way
+# Orca answers for a terminal that has stopped. The pty it names is the one the
+# fake sweep reports unless a test redirects it, so a test can also say "and the
+# sweep no longer names this pty", which is what a closed Orca tab leaves.
+closed_record() {  # <dir> <extra-json>
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-1","ptyId":"wt::/x@@pty1","worktreePath":"/x","agentIdentity":"pi","title":"Pi ready","connected":false,"writable":false%s}}}\n' \
+    "$2" > "$1/show.json"
+}
+
+# record_json <dir> <fields...>: a `terminal show` record with no
+# connected/writable pair, for the shapes where only the exit cause is set.
+record_json() {  # <dir> <extra-json>
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-1","ptyId":"wt::/x@@pty1","worktreePath":"/x","agentIdentity":"pi","title":"Pi ready"%s}}}\n' \
+    "$2" > "$1/show.json"
+}
+
+# unswept <dir>: point Orca's host sweep at a pty that is not this terminal's.
+unswept() {  # <dir>
+  printf 'wt::/x@@somewhere-else\n' > "$1/pty"
 }
 
 # start_root <dir> <child-command...>: a real root process (Orca's pty
@@ -179,6 +207,76 @@ test_missing_and_unreadable() {
   pass "orca agent state: a stale handle is missing; an unswept pty or failing CLI is unreadable"
 }
 
+# The shape measured on 2026-11-14: an operator closed the terminal, and Orca
+# kept the record with connected=false, writable=false, and
+# exitCause=operator_close while the pty it names left the host sweep. It read
+# `unreadable` before this change, so no consumer would ever replace it.
+test_an_operator_closed_terminal_is_missing() {
+  local d st
+  d=$(new_dir closed)
+  unswept "$d"
+  closed_record "$d" ',"exitCause":{"kind":"operator_close"}'
+  st=$(agent_state "$d")
+  [ "$st" = missing ] \
+    || fail "a closed terminal with no swept pty should read missing, got '$st'"
+  # The same record with no pty evidence is still the operator's own close.
+  d=$(new_dir closed-writable-pair)
+  unswept "$d"
+  closed_record "$d" ''
+  st=$(agent_state "$d")
+  [ "$st" = missing ] \
+    || fail "a record neither connected nor writable with no swept pty should read missing, got '$st'"
+  pass "orca agent state: a terminal Orca reports gone reads missing, not unreadable"
+}
+
+test_a_closed_record_with_an_unreadable_sweep_stays_unreadable() {
+  local d st
+  d=$(new_dir closed-sweep-failed)
+  unswept "$d"
+  closed_record "$d" ',"exitCause":{"kind":"operator_close"}'
+  : > "$d/diag-fail"
+  st=$(agent_state "$d")
+  [ "$st" = unreadable ] \
+    || fail "a failed sweep must not declare a possibly live pty gone, got '$st'"
+  pass "orca agent state: only a successful sweep that omits the pty proves it gone"
+}
+
+test_a_live_pty_outranks_a_stale_record() {
+  local d st
+  d=$(new_dir record-lies)
+  closed_record "$d" ',"exitCause":{"kind":"operator_close"}'
+  start_root "$d" "$BIN/pi" 60
+  st=$(agent_state "$d")
+  [ "$st" = alive ] \
+    || fail "a record claiming a close must not outrank a living agent; got '$st'"
+  kill "$(cat "$d/agent.pid")" 2>/dev/null; sleep 0.3
+  st=$(agent_state "$d")
+  [ "$st" = dead ] || fail "a live-tree shell-only pty should still read dead, got '$st'"
+  pass "orca agent state: a pty Orca's sweep still names keeps the process-tree verdict"
+}
+
+test_an_unverified_stop_stays_unreadable() {
+  local d st
+  d=$(new_dir unverified)
+  unswept "$d"
+  record_json "$d" ',"exitCause":{"kind":"unknown","reason":"stop_unverified"}'
+  st=$(agent_state "$d")
+  [ "$st" = unreadable ] \
+    || fail "a stop Orca could not verify must stay unreadable, got '$st'"
+  d=$(new_dir unverified-sentinel)
+  unswept "$d"
+  record_json "$d" ',"exitCause":{"kind":"exited","exitCode":-1}'
+  st=$(agent_state "$d")
+  [ "$st" = unreadable ] \
+    || fail "Orca's unverified sentinel exit code must stay unreadable, got '$st'"
+  d=$(new_dir real-exit)
+  unswept "$d"
+  record_json "$d" ',"exitCause":{"kind":"exited","exitCode":0}'
+  st=$(agent_state "$d")
+  [ "$st" = missing ] || fail "an observed process exit should read missing, got '$st'"
+  pass "orca agent state: only a verified stop counts as gone; an unverified one stays unreadable"
+}
+
 # An Orca pi task record exactly as fm-spawn writes one.
 orca_task_home() {  # <dir> -> echoes home
   local d=$1 home wt
@@ -231,4 +329,8 @@ test_harness_below_root_is_alive_despite_sticky_identity
 test_shell_only_tree_is_dead
 test_stranger_below_root_is_ambiguous
 test_missing_and_unreadable
+test_an_operator_closed_terminal_is_missing
+test_a_closed_record_with_an_unreadable_sweep_stays_unreadable
+test_a_live_pty_outranks_a_stale_record
+test_an_unverified_stop_stays_unreadable
 test_control_exit_on_orca

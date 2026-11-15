@@ -332,12 +332,16 @@ fm_backend_orca_kill() {  # <terminal-id>
 # the shell (observed live on Orca 1.4.224), so no Orca display field can
 # prove a stop. The classifier reads the pane's process tree instead, using
 # Orca only to name that tree's root:
-#   1. `orca terminal show` gives the terminal's ptyId; Orca's
-#      terminal_handle_stale answer is its authoritative "no such terminal"
-#      (`missing`), and any other failure is `unreadable`.
+#   1. `orca terminal show` gives the terminal's ptyId plus whether that record
+#      proves the pane is gone (a terminal `exitCause`, or a record reporting
+#      itself neither connected nor writable). Orca's terminal_handle_stale
+#      answer is its authoritative "no such terminal" (`missing`), and any
+#      other failure is `unreadable`.
 #   2. `orca diagnostics memory` (Orca's own host process sweep, ~0.3s) maps
-#      that ptyId to the pty's root pid. A terminal with no swept session is
-#      `unreadable`.
+#      that ptyId to the pty's root pid. A pty the sweep still names keeps the
+#      process-tree verdict below, because a live process is the stronger fact;
+#      one it no longer names is `missing` when the record proves the pane gone
+#      and `unreadable` otherwise.
 #   3. One `ps` snapshot gives every descendant of that root. Any descendant
 #      the shared harness-name classifier (the tmux adapter's
 #      fm_backend_tmux_classify_process_name) calls an agent is `alive`; a tree
@@ -347,9 +351,19 @@ fm_backend_orca_kill() {  # <terminal-id>
 # Exit (bin/fm-control.sh) is the consumer; relaunch stays gated separately
 # (bin/fm-control-lib.sh) until an Orca relaunch is proven end to end.
 
-# fm_backend_orca_terminal_pty_id <terminal>: prints the terminal's ptyId.
-# Returns 3 for Orca's authoritative stale-handle answer, 1 otherwise.
-fm_backend_orca_terminal_pty_id() {  # <terminal-id>
+# fm_backend_orca_terminal_record <terminal>: prints "<ptyId>\t<closed>",
+# where <closed> is 1 when the terminal's own record proves the pane is gone and
+# 0 when it does not. Returns 3 for Orca's authoritative stale-handle answer, 1
+# otherwise.
+#
+# Two shapes prove a gone pane: Orca's own terminal exit cause, and the
+# connected/writable pair. Orca files an `exitCause` when a terminal stops, and
+# only its `unknown` causes (the host could not verify the stop) and an
+# unverified sentinel exit code are not proof - Orca's own contract treats those
+# as "stop unverified", never as an observed death. Everything else, a
+# deliberate `operator_close`, a signal, or a real exit code, leaves no process
+# able to host an agent.
+fm_backend_orca_terminal_record() {  # <terminal-id>
   local terminal=$1 out
   fm_backend_orca_tool_check 2>/dev/null || return 1
   out=$(orca terminal show --terminal "$terminal" --json 2>/dev/null || true)
@@ -365,12 +379,30 @@ if (data.ok === false) {
 const t = (data.result && data.result.terminal) || {};
 const id = typeof t.ptyId === "string" ? t.ptyId : "";
 if (!id || /[\t\n]/.test(id)) process.exit(1);
-process.stdout.write(id);
+const cause = t.exitCause;
+let closed = false;
+if (cause && typeof cause === "object") {
+  if (cause.kind === "operator_close" || cause.kind === "signaled") {
+    closed = true;
+  } else if (cause.kind === "exited") {
+    // Orca records an unverified stop as a negative sentinel exit code, so only
+    // a non-negative code is a process exit the host actually observed.
+    closed = typeof cause.exitCode === "number" && cause.exitCode >= 0;
+  }
+}
+if (!closed) {
+  const writable = typeof t.writable === "boolean" ? t.writable : t.writeable;
+  if (t.connected === false && writable === false) closed = true;
+}
+process.stdout.write(id + "\t" + (closed ? "1" : "0"));
 '
 }
 
 # fm_backend_orca_pty_root_pid <pty-id>: the root pid Orca's host process
-# sweep records for that pty session, or fail.
+# sweep records for that pty session. Returns 3 when the sweep itself succeeded
+# and does not name that pty (an authoritative "no such session"), and 1 when
+# the sweep could not be read at all - a distinction the callers need, because
+# a failed read proves nothing about the pty.
 fm_backend_orca_pty_root_pid() {  # <pty-id>
   local pty=$1 out
   out=$(orca diagnostics memory --json 2>/dev/null || true)
@@ -390,7 +422,7 @@ for (const w of worktrees) {
     }
   }
 }
-process.exit(1);
+process.exit(3);
 ' "$pty"
 }
 
@@ -447,14 +479,36 @@ fm_backend_orca_tree_state() {  # <root-pid>
 }
 
 fm_backend_orca_agent_state() {  # <terminal-id>
-  local terminal=$1 pty root rc=0
+  local terminal=$1 record pty closed root rc=0
   case "$terminal" in ''|*[!A-Za-z0-9_-]*) printf 'unreadable'; return 0 ;; esac
-  pty=$(fm_backend_orca_terminal_pty_id "$terminal") || rc=$?
+  record=$(fm_backend_orca_terminal_record "$terminal") || rc=$?
   if [ "$rc" -eq 3 ]; then
     printf 'missing'
     return 0
   fi
   [ "$rc" -eq 0 ] || { printf 'unreadable'; return 0; }
-  root=$(fm_backend_orca_pty_root_pid "$pty") || { printf 'unreadable'; return 0; }
-  fm_backend_orca_tree_state "$root"
+  pty=${record%%$'\t'*}
+  closed=${record##*$'\t'}
+  # A pty Orca's sweep still names is a live process tree, and that verdict is
+  # the stronger fact: a record can lag the kernel, never outrank it.
+  root=$(fm_backend_orca_pty_root_pid "$pty")
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fm_backend_orca_tree_state "$root"
+    return 0
+  fi
+  # A sweep that could not be read proves nothing, so a possibly live pty is
+  # never declared gone on a transient diagnostics failure.
+  [ "$rc" -eq 3 ] || { printf 'unreadable'; return 0; }
+  # No swept pty plus a record that proves the pane gone is a terminal no agent
+  # can be running in: the shape a closed Orca tab leaves behind, where the
+  # record survives with connected=false, writable=false, and
+  # exitCause=operator_close while the pty it names is gone. Calling that
+  # `unreadable` told every consumer the endpoint could not be judged, so no
+  # consumer ever replaced it.
+  if [ "$closed" = 1 ]; then
+    printf 'missing'
+  else
+    printf 'unreadable'
+  fi
 }

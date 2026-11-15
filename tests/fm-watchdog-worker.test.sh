@@ -45,6 +45,9 @@ make_home() {  # <name>
 # <home>/calls so a test can assert both what ran and in what order.
 fake_tools() {  # <home>
   local home=$1
+  # Every test starts from the working control stand-in; a test that needs a
+  # refusing backend names its own afterwards.
+  CONTROL_OVERRIDE=''
   cat > "$home/fakebin/fake-control" <<SH
 #!/usr/bin/env bash
 printf 'control %s\n' "\$*" >> "$home/calls"
@@ -53,7 +56,44 @@ SH
   cat > "$home/fakebin/fake-send" <<SH
 #!/usr/bin/env bash
 printf 'send %s\n' "\$1" >> "$home/calls"
+if [ -f "$home/units/send-fails" ]; then
+  printf 'error: fire-and-forget delivery unconfirmed\n' >&2
+  exit 3
+fi
 printf '%s\n' "\$*" >> "$home/steers"
+SH
+  # A relaunch transaction the backend refuses structurally, exactly as
+  # bin/fm-control.sh refuses an Orca in-place relaunch.
+  cat > "$home/fakebin/fake-control-refuses" <<SH
+#!/usr/bin/env bash
+printf 'control %s\n' "\$*" >> "$home/calls"
+if [ -f "$home/units/control-transient" ]; then
+  exit 124
+fi
+if [ -f "$home/units/control-lock-contended" ]; then
+  printf 'error: another lifecycle action is already running for task %s\n' "\$1" >&2
+  exit 1
+fi
+if [ -f "$home/units/control-kind-refusal" ]; then
+  printf "error: task %s records kind 'fix', which has no defined relaunch shape\n" "\$1" >&2
+  exit 1
+fi
+printf 'error: task %s runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'\''exit'\'' and respawn the task instead\n' "\$1" >&2
+exit 1
+SH
+  # bin/fm-spawn.sh --relaunch stand-in: the Orca replacement path.
+  cat > "$home/fakebin/fake-spawn" <<SH
+#!/usr/bin/env bash
+printf 'spawn %s\n' "\$*" >> "$home/calls"
+if [ -f "$home/units/spawn-transient" ]; then
+  printf 'error: backend=orca selected but orca status --json failed; start Orca and wait for the runtime\n' >&2
+  exit 1
+fi
+if [ -f "$home/units/spawn-refuses" ]; then
+  printf 'error: task %s recorded worktree is missing; refusing to relaunch\n' "\$1" >&2
+  exit 2
+fi
+printf 'relaunched true task=%s\n' "\$1"
 SH
   cat > "$home/fakebin/fake-lane-switch" <<SH
 #!/usr/bin/env bash
@@ -91,12 +131,18 @@ SH
   chmod +x "$home/fakebin"/*
 }
 
-# worker <home> <id> <state> [kind]: one recorded task and its endpoint state.
-worker() {  # <home> <id> <state> [kind] [harness]
-  local home=$1 id=$2 state=$3 kind=${4:-ship} harness=${5:-pi}
+# worker <home> <id> <state> [kind] [harness] [backend]: one recorded task and
+# its endpoint state.
+worker() {  # <home> <id> <state> [kind] [harness] [backend]
+  local home=$1 id=$2 state=$3 kind=${4:-ship} harness=${5:-pi} backend=${6-}
+  local -a backend_fields=()
+  if [ -n "$backend" ]; then
+    backend_fields=("backend=$backend" "terminal=term-$id" "orca_worktree_id=wt-$id")
+  fi
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:$id" "endpoint_task_id=$id" "worktree=$home/wt-$id" \
-    "project=p" "harness=$harness" "kind=$kind" "mode=no-mistakes" "yolo=off"
+    "project=p" "harness=$harness" "kind=$kind" "mode=no-mistakes" "yolo=off" \
+    ${backend_fields[@]+"${backend_fields[@]}"}
   printf '%s\n' "$state" > "$home/fix/$id.state"
 }
 
@@ -119,7 +165,8 @@ tick() {  # <home> <now> [env...]
   env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_CONFIG_OVERRIDE="$home/config" FM_WATCHDOG_NOW="$now" \
     FM_WATCHDOG_BOOT_ID="${BOOT:-off}" \
-    FM_WATCHDOG_CONTROL_BIN="$home/fakebin/fake-control" \
+    FM_WATCHDOG_CONTROL_BIN="${CONTROL_OVERRIDE:-$home/fakebin/fake-control}" \
+    FM_WATCHDOG_SPAWN_BIN="$home/fakebin/fake-spawn" \
     FM_WATCHDOG_SEND_BIN="$home/fakebin/fake-send" \
     FM_WATCHDOG_CREW_STATE_BIN="$home/fakebin/fake-crew-state" \
     FM_WATCHDOG_SYSTEMCTL_BIN="$home/fakebin/systemctl" \
@@ -134,6 +181,19 @@ tick() {  # <home> <now> [env...]
 # wakes <home>: the durable check wakes the watchdog queued.
 wakes() {  # <home>
   awk -F'\t' '$3 == "check" { print $4 " " $5 }' "$1/state/.wake-queue" 2>/dev/null
+}
+
+# assert_delivery_ids <home>: every fire-and-forget the watchdog sent carried
+# the 16-lowercase-hex id bin/fm-send.sh requires, so the rung actually landed.
+assert_delivery_ids() {  # <home>
+  local id
+  while read -r id; do
+    [ -n "$id" ] || continue
+    [[ "$id" =~ ^[0-9a-f]{16}$ ]] \
+      || fail "watchdog sent an invalid fire-and-forget id '$id': $(cat "$1/steers")"
+  done < <(awk '/--fire-and-forget/ {
+      for (i = 1; i <= NF; i++) if ($i == "--fire-and-forget") print $(i + 1)
+    }' "$1/steers" 2>/dev/null)
 }
 
 # counter <home> <pattern>: how many recorded lines match.
@@ -183,6 +243,167 @@ held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held i
 }
 
 start_clock() { date +%s; }
+
+test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget() {
+  local home now out
+  home=$(make_home kind-refusal); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-kind-refusal"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "has no defined relaunch shape" \
+    "a structural refusal was not reported with the backend's own reason"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a structural refusal phrased outside the old list was not escalated"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" \
+    "a structural refusal phrased outside the old list was retried"
+  pass "a structural refusal is classified by the control command's own error contract"
+}
+
+test_a_boot_transient_failure_keeps_the_lane_relaunch_history() {
+  local home now
+  home=$(make_home boot-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  jq -n --argjson now "$now" \
+    '{schema: 1, boot_identity: "boot-old", units: {}, backlog: {},
+      tasks: { w1: { sig: "abc", since: $now, stage: 2, stage_at: $now,
+        rings: [$now, $now], relaunches: [$now, $now], steers: [$now], woke: false,
+        istage: 1, istage_at: $now, ibase: "001.msg", strikes: [$now],
+        refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
+  BOOT=boot-new tick "$home" "$now" >/dev/null
+  assert_eq "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" "2" \
+    "a transient boot relaunch failure reset the lane's relaunch budget"
+  assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a transient boot relaunch failure reset the lane's strike history"
+  pass "a transient boot relaunch failure preserves the lane's persisted counters"
+}
+
+test_a_boot_refusal_keeps_the_lane_relaunch_history() {
+  local home now relaunches
+  home=$(make_home boot-refusal); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  jq -n --argjson now "$now" \
+    '{schema: 1, boot_identity: "boot-old", units: {}, backlog: {},
+      tasks: { w1: { sig: "abc", since: $now, stage: 2, stage_at: $now,
+        rings: [$now, $now], relaunches: [$now, $now], steers: [$now], woke: false,
+        istage: 1, istage_at: $now, ibase: "001.msg", strikes: [$now],
+        refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
+  BOOT=boot-new tick "$home" "$now" >/dev/null
+  relaunches=$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")
+  assert_eq "$relaunches" "2" \
+    "a boot-pass refusal reset the lane's persisted relaunch budget"
+  assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a boot-pass refusal reset the lane's persisted strike history"
+  assert_eq "$(jq -r '.tasks.w1.refusal' "$home/state/.watchdog-worker.json")" \
+    "error: task w1 runs on the orca backend, whose in-place relaunch is not proven end to end; exit the agent with'exit' and respawn the task instead" \
+    "the boot-pass refusal was not recorded"
+  pass "a boot-pass refusal preserves the lane's persisted counters"
+}
+
+test_an_orca_replacement_names_a_note_it_could_not_deliver() {
+  local home now out
+  home=$(make_home orca-note-fails); fake_tools "$home"
+  : > "$home/units/send-fails"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "could not deliver w1 its carry-over note" \
+    "a replacement started without its carry-over note was reported relaunched silently"
+  grep -q 'could not deliver its carry-over note' <<< "$(wakes "$home")" \
+    || fail "a lost carry-over note never reached firstmate: $(wakes "$home")"
+  pass "an Orca replacement whose carry-over note cannot be delivered is escalated"
+}
+
+test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once() {
+  local home now
+  home=$(make_home orca-spawn-refuses); fake_tools "$home"
+  : > "$home/units/spawn-refuses"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "1" \
+    "a structural spawn refusal was retried before its window closed"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a structural spawn refusal did not escalate exactly once"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "a structural spawn refusal spent the lane's relaunch budget"
+  pass "a structural spawn refusal is not retried inside its window"
+}
+
+test_a_transient_spawn_failure_is_not_a_refusal() {
+  local home now
+  home=$(make_home orca-spawn-transient); fake_tools "$home"
+  : > "$home/units/spawn-transient"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  jq -n --argjson now "$now" \
+    '{schema: 1, boot_identity: "", units: {}, backlog: {},
+      tasks: { w1: { sig: "abc", since: $now, stage: 0, stage_at: 0,
+        rings: [], relaunches: [], steers: [], woke: false,
+        istage: 0, istage_at: 0, ibase: "", strikes: [$now],
+        refusal: "", refusal_at: 0 } }}' \
+    > "$home/state/.watchdog-worker.json"
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "2" \
+    "a transient spawn failure was treated as a structural refusal"
+  assert_eq "$(jq -r '.tasks.w1.strikes | length' "$home/state/.watchdog-worker.json")" "1" \
+    "a transient spawn failure was recorded as a completed relaunch"
+  if wakes "$home" | grep -q 'cannot relaunch w1'; then
+    fail "a transient spawn failure escalated as a refusal: $(wakes "$home")"
+  fi
+  pass "a transient spawn failure is retried on the ordinary budget"
+}
+
+test_lifecycle_lock_contention_is_retried_not_recorded() {
+  local home now
+  home=$(make_home lock-contended); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-lock-contended"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a lifecycle lock hold was not retried on the next pass"
+  if wakes "$home" | grep -q 'cannot relaunch w1'; then
+    fail "a lifecycle lock hold was recorded as a permanent refusal: $(wakes "$home")"
+  fi
+  pass "lifecycle lock contention stays retryable instead of becoming a 6h refusal"
+}
+
+test_a_task_left_stopped_is_never_relaunched_or_paged() {
+  local home now out
+  home=$(make_home left-stopped); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 dead
+  # The captain's own order, written by bin/fm-leave-stopped.sh.
+  printf 'schema=fm-leave-stopped.v1\nat=2026-11-15T00:37:55Z\nreason=left stopped\n' \
+    > "$home/state/w1.stopped"
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 .* relaunch')" "0" \
+    "a task the captain left stopped was relaunched"
+  assert_eq "$(counter "$home" '^control w2 .* relaunch')" "1" \
+    "an ordinary dead task stopped being relaunched alongside a stopped one"
+  [ -z "$(wakes "$home")" ] || fail "a stopped task woke firstmate: $(wakes "$home")"
+  out=$(tick "$home" "$((now + 300))" FM_WATCHDOG_BOOT_ID=boot-a)
+  assert_contains "$out" "relaunched 1 of 1 task(s)" "the boot pass counted a task the captain left stopped"
+  assert_eq "$(counter "$home" '^control w1 .* relaunch')" "0" \
+    "the boot pass relaunched a task the captain left stopped"
+  assert_eq "$(wakes "$home" | grep -c 'w1 endpoint')" "0" \
+    "a stopped task was paged about its endpoint"
+  pass "a task the captain left stopped is skipped by every pass, exactly like a held one"
+}
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
   local home now out
@@ -249,6 +470,81 @@ test_a_new_boot_identity_runs_the_boot_pass_again() {
   pass "a new boot identity runs the boot pass again, so a second reboot is recovered too"
 }
 
+test_a_transient_stall_relaunch_failure_does_not_climb_the_ladder() {
+  local home now out
+  home=$(make_home ladder-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 busy 'a tool call that never returns'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 1900))" >/dev/null
+  out=$(tick "$home" "$((now + 2600))")
+  assert_contains "$out" "relaunch failed w1" \
+    "a transient relaunch failure was not reported as a failure"
+  assert_not_contains "$out" "relaunched w1" \
+    "a transient relaunch failure was announced as a relaunch"
+  out=$(tick "$home" "$((now + 2700))")
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a transient relaunch failure did not retry on the next pass"
+  assert_eq "$(jq -r '.tasks.w1.stage' "$home/state/.watchdog-worker.json")" "1" \
+    "a transient relaunch failure advanced the stall ladder"
+  out=$(tick "$home" "$((now + 4000))")
+  assert_not_contains "$out" "still stalled after every rung" \
+    "the ladder escalated after relaunches that never happened"
+  pass "a transient stall relaunch failure leaves the ladder where it was"
+}
+
+test_a_transient_inbox_relaunch_failure_is_not_announced_as_done() {
+  local home now out
+  home=$(make_home inbox-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'waiting'
+  steer "$home" w1 2800
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  steer "$home" w1 5500
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "relaunch failed w1" \
+    "a transient inbox relaunch failure was not reported as a failure"
+  out=$(tick "$home" "$now")
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "2" \
+    "a transient inbox relaunch failure was not retried"
+  assert_eq "$(wakes "$home" | grep -c 'steering inbox went unread')" "0" \
+    "a transient inbox relaunch failure was announced as a relaunch"
+  assert_eq "$(jq -r '.tasks.w1.istage' "$home/state/.watchdog-worker.json")" "2" \
+    "a transient inbox relaunch failure consumed the last rung"
+  pass "a transient inbox relaunch failure neither announces nor consumes the rung"
+}
+
+test_a_spent_inbox_relaunch_budget_stops_retrying_and_escalates_once() {
+  local home now
+  home=$(make_home inbox-budget); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'waiting'
+  steer "$home" w1 5500
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$now" >/dev/null
+  assert_eq "3" "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" \
+    "a failed inbox relaunch attempt was not charged against the hourly budget"
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$now" >/dev/null
+  assert_eq "3" "$(counter "$home" '^control w1 relaunch')" \
+    "a spent relaunch budget still retried the unread inbox's relaunch"
+  assert_eq "1" "$(wakes "$home" | grep -c 'hourly relaunch budget')" \
+    "an unread inbox whose relaunches all failed never reached firstmate"
+  assert_eq "0" "$(jq -r '.tasks.w1.istage' "$home/state/.watchdog-worker.json")" \
+    "a failed inbox relaunch claimed the rung"
+  pass "an unread inbox retries its failed relaunch on the budget, then escalates once"
+}
+
 test_a_stalled_worker_climbs_the_ladder_and_escalates_once() {
   local home now out
   home=$(make_home ladder); fake_tools "$home"
@@ -264,6 +560,7 @@ test_a_stalled_worker_climbs_the_ladder_and_escalates_once() {
     "the re-ring did not carry the bounded continue"
   assert_contains "$(cat "$home/steers")" "--fire-and-forget" \
     "the re-ring was not fire-and-forget, so the steering ladder would escalate it back to firstmate"
+  assert_delivery_ids "$home"
   out=$(tick "$home" "$((now + 2000))")
   [ -z "$out" ] || fail "the ladder climbed before the rung had its grace: $out"
   out=$(tick "$home" "$((now + 2600))")
@@ -341,6 +638,7 @@ test_an_idle_worker_is_nudged_once_and_run_steps_are_left_alone() {
   [ -z "$out" ] || fail "ten idle minutes already acted at the 30-minute default: $out"
   out=$(tick "$home" "$((now + 1900))")
   assert_contains "$out" "watchdog: nudged idle w1" "an idle worker that still reads working was not nudged"
+  assert_delivery_ids "$home"
   assert_not_contains "$out" "w2" "a pipeline run-step was nudged as an idle agent"
   assert_not_contains "$out" "w3" "a finished worker was nudged"
   out=$(tick "$home" "$((now + 2000))")
@@ -464,6 +762,7 @@ test_an_unread_steer_is_interrupted_then_relaunched_once_each() {
   assert_eq "$(counter "$home" 'interrupt')" "1" "the interrupt rung did not fire exactly once"
   assert_contains "$(cat "$home/steers" 2>/dev/null)" 'waiting unread' \
     "the continue did not tell the worker why it was interrupted"
+  assert_delivery_ids "$home"
   assert_eq "$(counter "$home" '^control .* relaunch')" "0" "the interrupt rung relaunched the lane"
 
   out=$(tick "$home" "$now")
@@ -493,6 +792,7 @@ test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model(
   out=$(tick "$home" "$((now + 700))")
   assert_contains "$out" "watchdog: continued w1 after a connection error" \
     "a frozen connection error did not get a continue"
+  assert_delivery_ids "$home"
   assert_eq "$(counter "$home" 'interrupt')" "0" "a connection error interrupted the lane instead of continuing it"
   out=$(tick "$home" "$((now + 710))")
   out=$(tick "$home" "$((now + 720))")
@@ -679,9 +979,232 @@ test_a_dry_run_plan_matches_the_connection_relaunch_model() {
   pass "the dry-run plan agrees with the connection relaunch's fallback-kind rule"
 }
 
+test_a_refused_relaunch_spends_no_budget_and_escalates_once() {
+  local home now out i refused=''
+  home=$(make_home refused); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  for i in 0 1 2 3 4 5; do
+    out=$(tick "$home" "$((now + i * 60))")
+    [ "$i" = 0 ] && refused=$out
+  done
+  assert_contains "$refused" "in-place relaunch is not proven end to end" \
+    "the refusal was not reported with the backend's own reason"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" \
+    "a structurally refused relaunch was retried instead of recorded once"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a refused relaunch did not escalate exactly once"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "a refused relaunch was charged against the hourly budget"
+  pass "a relaunch the backend cannot perform is recorded once, escalated once, and spends no budget"
+}
+
+test_a_refused_relaunch_is_retried_only_after_its_window() {
+  local home now
+  home=$(make_home refused-window); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 600))" >/dev/null
+  assert_eq "$(counter "$home" '^control .* relaunch')" "1" \
+    "a recorded refusal was retried inside its window"
+  tick "$home" "$((now + 21600 + 60))" >/dev/null
+  assert_eq "$(counter "$home" '^control .* relaunch')" "2" \
+    "a refusal was never retried again, so a fixed backend wait would be lost"
+  pass "a recorded refusal is retried only once its retry window closes"
+}
+
+test_a_refusal_does_not_outlive_the_endpoint_that_earned_it() {
+  local home now
+  home=$(make_home refused-recovered); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a structural refusal was not escalated once"
+  worker "$home" w1 alive
+  tick "$home" "$((now + 120))" >/dev/null
+  assert_eq "" "$(jq -r '.tasks.w1.refusal' "$home/state/.watchdog-worker.json")" \
+    "a refusal survived the endpoint coming back"
+  worker "$home" w1 dead
+  tick "$home" "$((now + 240))" >/dev/null
+  assert_eq "$(counter "$home" '^control .* relaunch')" "2" \
+    "a later death inside the refusal window was never retried"
+  pass "a refusal only suppresses relaunches while its own endpoint is unrecovered"
+}
+
+test_a_live_lane_keeps_the_refusal_its_stall_earned() {
+  local home now
+  home=$(make_home ladder-refused); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 alive
+  pane "$home" w1 busy 'a tool call that never returns'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 1900))" >/dev/null
+  tick "$home" "$((now + 2600))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a live stalled lane never earned a refusal"
+  tick "$home" "$((now + 2700))" >/dev/null
+  tick "$home" "$((now + 2800))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a live lane re-attempted a refused relaunch on every pass"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a live lane re-escalated a refusal it had already reported"
+  pass "a refusal survives the pass that earned it while the lane stays alive"
+}
+
+test_a_flapping_unreadable_read_keeps_the_refusal() {
+  local home now
+  home=$(make_home refused-flap); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "a structural refusal was never earned"
+  worker "$home" w1 unreadable
+  tick "$home" "$((now + 120))" >/dev/null
+  worker "$home" w1 dead
+  tick "$home" "$((now + 240))" >/dev/null
+  tick "$home" "$((now + 360))" >/dev/null
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "an unmeasurable read cleared a refusal, so the refused relaunch was retried"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "1" \
+    "a flapping endpoint re-escalated a refusal it had already reported"
+  pass "a refusal survives a flapping unmeasurable read of the same endpoint"
+}
+
+test_a_dry_run_reports_a_suppressed_relaunch() {
+  local home now out
+  home=$(make_home dry-refused); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  out=$(WD_ARGS=--dry-run tick "$home" "$((now + 120))")
+  assert_contains "$out" "would escalate (relaunch refused" \
+    "the dry run promised a relaunch the pass would refuse"
+  assert_eq "$(counter "$home" '^control w1 relaunch')" "1" \
+    "the dry run ran a lifecycle command"
+  pass "a dry run plans no relaunch while a refusal suppresses it"
+}
+
+test_a_connection_relaunch_failure_is_charged_against_the_budget() {
+  local home now
+  home=$(make_home conn-transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive ship pi
+  pane "$home" w1 idle 'Error: Connection reset by peer'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  tick "$home" "$((now + 710))" >/dev/null
+  tick "$home" "$((now + 720))" >/dev/null
+  tick "$home" "$((now + 730))" >/dev/null
+  assert_eq "1" "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" \
+    "a connection relaunch attempt that failed was not charged against the hourly budget"
+  tick "$home" "$((now + 740))" >/dev/null
+  assert_eq "2" "$(counter "$home" '^control w1 relaunch')" \
+    "a transient connection relaunch failure was not retried"
+  tick "$home" "$((now + 830))" >/dev/null
+  assert_eq "3" "$(jq -r '.tasks.w1.relaunches | length' "$home/state/.watchdog-worker.json")" \
+    "the connection ladder did not charge every attempt against the budget"
+  tick "$home" "$((now + 930))" >/dev/null
+  tick "$home" "$((now + 1030))" >/dev/null
+  assert_eq "3" "$(counter "$home" '^control w1 relaunch')" \
+    "a spent relaunch budget still retried the connection relaunch"
+  assert_eq "1" "$(wakes "$home" | grep -c 'hourly relaunch budget')" \
+    "a spent connection relaunch budget did not escalate exactly once"
+  pass "a connection relaunch failure is charged, retried, then escalated once the budget is spent"
+}
+
+test_a_stall_ladder_escalates_once_its_relaunch_budget_is_spent() {
+  local home now
+  home=$(make_home ladder-budget); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 alive
+  pane "$home" w1 busy 'a tool call that never returns'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 1900))" >/dev/null
+  tick "$home" "$((now + 2600))" >/dev/null
+  tick "$home" "$((now + 3200))" >/dev/null
+  tick "$home" "$((now + 3800))" >/dev/null
+  tick "$home" "$((now + 4400))" >/dev/null
+  tick "$home" "$((now + 5000))" >/dev/null
+  assert_eq "3" "$(counter "$home" '^control w1 relaunch')" \
+    "a spent relaunch budget still retried the stalled lane's relaunch"
+  assert_eq "1" "$(wakes "$home" | grep -c 'hourly relaunch budget')" \
+    "a stalled lane whose relaunches all failed never reached firstmate"
+  assert_eq "1" "$(jq -r '.tasks.w1.stage' "$home/state/.watchdog-worker.json")" \
+    "a failed relaunch claimed the stall rung"
+  pass "a stall ladder retries its failed relaunch on the budget, then escalates once"
+}
+
+test_a_transient_relaunch_failure_is_not_a_refusal() {
+  local home now i
+  home=$(make_home transient); fake_tools "$home"
+  CONTROL_OVERRIDE="$home/fakebin/fake-control-refuses"
+  : > "$home/units/control-transient"
+  worker "$home" w1 dead
+  now=$(start_clock)
+  for i in 0 1 2 3 4 5; do
+    tick "$home" "$((now + i * 60))" >/dev/null
+  done
+  assert_eq "$(counter "$home" '^control .* relaunch')" "3" \
+    "a transient relaunch failure was not retried on the ordinary budget"
+  assert_eq "$(wakes "$home" | grep -c 'cannot relaunch w1')" "0" \
+    "a transient launch failure was escalated as a structural refusal"
+  pass "a timeout is retried on the ordinary budget, never treated as a structural refusal"
+}
+
+test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn() {
+  local home now out
+  home=$(make_home orca-missing); fake_tools "$home"
+  worker "$home" w1 missing ship pi orca
+  now=$(start_clock)
+  out=$(tick "$home" "$now")
+  assert_contains "$out" "watchdog: relaunched w1 after endpoint missing" \
+    "a gone Orca terminal was not replaced"
+  assert_eq "$(counter "$home" '^spawn w1 --relaunch')" "1" \
+    "the Orca replacement did not go through fm-spawn --relaunch"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" \
+    "a gone Orca terminal was still handed to fm-control's unproven in-place relaunch"
+  [ -s "$home/steers" ] || fail "the replacement agent got no carry-over note"
+  grep -q 'worktree and commits are intact' "$home/steers" \
+    || fail "the carry-over note did not tell the new agent what survived: $(cat "$home/steers")"
+  [ -z "$(wakes "$home")" ] || fail "a successful Orca replacement still woke firstmate: $(wakes "$home")"
+  pass "an Orca terminal Orca itself reports gone is replaced by fm-spawn --relaunch and carries its note"
+}
+
+test_a_refused_relaunch_spends_no_budget_and_escalates_once
+test_a_refused_relaunch_is_retried_only_after_its_window
+test_a_refusal_does_not_outlive_the_endpoint_that_earned_it
+test_a_live_lane_keeps_the_refusal_its_stall_earned
+test_a_flapping_unreadable_read_keeps_the_refusal
+test_a_dry_run_reports_a_suppressed_relaunch
+test_a_transient_relaunch_failure_is_not_a_refusal
+test_a_structural_refusal_outside_the_old_phrase_list_spends_no_budget
+test_a_boot_transient_failure_keeps_the_lane_relaunch_history
+test_a_boot_refusal_keeps_the_lane_relaunch_history
+test_lifecycle_lock_contention_is_retried_not_recorded
+test_an_orca_replacement_names_a_note_it_could_not_deliver
+test_a_spawn_preflight_refusal_spends_no_budget_and_retries_once
+test_a_transient_spawn_failure_is_not_a_refusal
+test_an_orca_terminal_that_is_gone_is_replaced_by_a_spawn
+test_a_task_left_stopped_is_never_relaunched_or_paged
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
+test_a_transient_inbox_relaunch_failure_is_not_announced_as_done
+test_a_spent_inbox_relaunch_budget_stops_retrying_and_escalates_once
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
+test_a_connection_relaunch_failure_is_charged_against_the_budget
 test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
@@ -691,6 +1214,8 @@ test_a_dry_run_plan_matches_the_connection_relaunch_model
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last
 test_the_same_boot_is_not_a_boot_twice
 test_a_new_boot_identity_runs_the_boot_pass_again
+test_a_transient_stall_relaunch_failure_does_not_climb_the_ladder
+test_a_stall_ladder_escalates_once_its_relaunch_budget_is_spent
 test_a_stalled_worker_climbs_the_ladder_and_escalates_once
 test_progress_and_status_lines_reset_the_ladder
 test_the_relaunch_cap_escalates_once_instead_of_looping
