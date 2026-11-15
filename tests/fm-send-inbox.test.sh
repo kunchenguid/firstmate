@@ -34,6 +34,24 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+utf8_locale() {
+  local candidate charmap
+  for candidate in C.UTF-8 C.utf8 en_US.UTF-8; do
+    charmap=$(LC_ALL="$candidate" locale charmap 2>/dev/null) || continue
+    case "$charmap" in UTF-8|UTF8|utf8) printf '%s\n' "$candidate"; return 0 ;; esac
+  done
+  return 1
+}
+
+multibyte_text() {
+  local i=0 text='Línea áéíóú ñ «comillas» — → '
+  while [ "$i" -lt 11 ]; do text="$text$text"; i=$((i + 1)); done
+  printf '%s' "$text"
+}
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
@@ -559,3 +577,64 @@ test_meta_lock_contention_fails_bounded
 test_delivery_lock_serializes_enqueue
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+
+test_multibyte_steer_bounded() {
+  local dir locale_name message
+  locale_name=$(utf8_locale) || { printf 'SKIP: UTF-8 locale unavailable\n'; return; }
+  dir=$(setup_case multibyte)
+  message=$(multibyte_text)
+  printf '%s' "$message" > "$dir/expected"
+  fm_run_timed 20 env LC_ALL="$locale_name" PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" FM_SEND_LOG="$dir/send.log" \
+    FM_SEND_SETTLE=0 /bin/bash "$SEND" t1 "$message" > "$dir/out" 2> "$dir/err" \
+    || fail "multibyte steer failed or exceeded 20 seconds"
+  record_body _ "$dir/home/state/t1.inbox/001.msg" > "$dir/actual"
+  cmp -s "$dir/expected" "$dir/actual" || fail "multibyte steer payload changed"
+  pass "fm-send: large UTF-8 steer enqueues byte-exact within the bound"
+}
+test_multibyte_steer_bounded
+
+# The nonempty check keeps the shell's own [[:space:]] class in the active
+# locale: whatever that class strips to nothing refuses, anything else is a
+# byte-exact steer.  The oracle evaluates the class on each short message in the
+# same shell and locale, so platform differences (for example whether NBSP is a
+# space) follow the host instead of a hard-coded table.
+test_nonempty_check_keeps_locale_space_class() {
+  local locale_name i message expect dir rc
+  locale_name=$(utf8_locale) || { printf 'SKIP: UTF-8 locale unavailable\n'; return; }
+  local -a messages=(
+    ''
+    '   '
+    $'\t\n \n'
+    $'\302\240'
+    $' \302\240 \302\240 '
+    $'  a\t'
+    ' ñ '
+    $' \303 '
+  )
+  for ((i = 0; i < ${#messages[@]}; i++)); do
+    message=${messages[$i]}
+    if LC_ALL="$locale_name" /bin/bash -c '[ -z "${1//[[:space:]]/}" ]' _ "$message"; then
+      expect=refuse
+    else
+      expect=accept
+    fi
+    dir=$(setup_case "nonempty-class-$i")
+    fm_run_timed 20 env LC_ALL="$locale_name" PATH="$dir/fakebin:$PATH" \
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" FM_SEND_LOG="$dir/send.log" \
+      FM_SEND_SETTLE=0 /bin/bash "$SEND" t1 "$message" > "$dir/out" 2> "$dir/err"
+    rc=$?
+    if [ "$expect" = refuse ]; then
+      [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] || fail "message $i is blank in $locale_name and must refuse, got exit $rc"
+      assert_contains "$(cat "$dir/err")" "nonempty message" "message $i refusal should be explicit"
+      [ ! -d "$dir/home/state/t1.inbox" ] || fail "blank message $i still wrote an inbox record"
+    else
+      expect_code 0 "$rc" "message $i has a non-space character in $locale_name and must send"
+      printf '%s' "$message" > "$dir/expected"
+      record_body _ "$dir/home/state/t1.inbox/001.msg" > "$dir/actual"
+      cmp -s "$dir/expected" "$dir/actual" || fail "message $i payload changed"
+    fi
+  done
+  pass "fm-send: the nonempty check follows the locale's space class, including NBSP and invalid bytes"
+}
+test_nonempty_check_keeps_locale_space_class
