@@ -1728,30 +1728,44 @@ test_lock_fresh_plain_file_is_respected() {
 }
 
 test_lock_symlink_lock_is_never_reclaimed_as_plain_file() {
-  local dir state lockdir holder_file holder out owner_before owner_after lockpid holderpid i
+  local dir state lockdir holder_file release_file holder out owner_before owner_after lockpid holderpid i
   dir=$(make_case lock-symlink-noop)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   holder_file="$dir/holder"
+  release_file="$dir/release"
+  # The holder stays alive until the test releases it after the challenger has
+  # finished, so a challenger delayed on a busy runner can never see a dead
+  # holder and legitimately reclaim the lock. The wait is capped so a test
+  # failure cannot leave the holder running.
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 7
     printf "%s\n" "${BASHPID:-$$}" > "$3"
-    sleep 3
-  ' _ "$LIB" "$lockdir" "$holder_file" &
+    n=0
+    while [ ! -e "$4" ] && [ "$n" -lt 600 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+  ' _ "$LIB" "$lockdir" "$holder_file" "$release_file" &
   holder=$!
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  [ -s "$holder_file" ] || fail "symlink lock holder did not start"
+  if [ ! -s "$holder_file" ]; then
+    : > "$release_file"
+    wait "$holder" 2>/dev/null || true
+    fail "symlink lock holder did not start"
+  fi
   owner_before=$(readlink "$lockdir" 2>/dev/null || true)
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
     printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
   ' _ "$LIB" "$lockdir")
+  : > "$release_file"
   wait "$holder" || fail "symlink lock holder failed"
   holderpid=$(cat "$holder_file")
   case "$out" in
