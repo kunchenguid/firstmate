@@ -1302,11 +1302,11 @@ EOF
 # shellcheck disable=SC2016 # Backticks are literal brief and contract text.
 test_launch_contract_names_home_task_records() {
   local rec home proj fakebin shape kind id out brief status_path report_dir
-  rec=$(make_home home-task-records)
-  IFS='|' read -r home proj fakebin <<EOF
+  for shape in tracked untracked; do
+    rec=$(make_home "home-task-records-$shape")
+    IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  for shape in tracked untracked; do
     if [ "$shape" = tracked ]; then
       mkdir -p "$proj/state" "$proj/data"
       printf 'project state\n' > "$proj/state/keep.txt"
