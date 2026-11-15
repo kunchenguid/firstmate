@@ -5,7 +5,7 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
+#     "verdict":"routine"|"firstmate"|"captain","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible. A silent
 #     row must have verdict `routine`; the branch prompt and delivery consumers
@@ -19,6 +19,7 @@
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq presented
 #     by Pi as a routine merge note or sequence-keyed visible captain entry,
+#     handed to MAIN as a durable firstmate check,
 #     emitted by Pi's locked session-start replay, silently consumed there
 #     because `silent` is true, or presented by the supervision-host drain.
 #     Records above the cursor are unread. A captain row advances only after
@@ -30,10 +31,10 @@
 #     from the read cursor: reading (the visible entry) is the branch's act,
 #     processing (main acting on the outcome and calling its acknowledgement
 #     tool) is main's. A captain row between the two markers is "unprocessed":
-#     delivered and shown, not yet acted on. Routine rows never wait on this
-#     marker. It only advances through an explicit sequence-bound
+#     delivered and shown, not yet acted on. Routine and firstmate rows never
+#     wait on this marker. It only advances through an explicit sequence-bound
 #     acknowledgement naming a currently unprocessed captain row at or below
-#     the read cursor; a routine, unread, or already-processed target is
+#     the read cursor; a routine, firstmate, unread, or already-processed target is
 #     refused. It never moves past the read cursor or backwards, so an
 #     unrelated or empty model answer cannot move it. An absent marker reads as
 #     0 (every delivered captain row is unprocessed, the safe direction), and
@@ -76,14 +77,31 @@
 #     conversation memory.
 #
 # Usage:
-#   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
+#   fm-branch-outcome.sh append --task <id> --verdict routine|firstmate|captain \
 #       --summary <text> [--wake <text>] [--silent true|false]
 #     Append one outcome record; prints the assigned seq.
+#   fm-branch-outcome.sh handoff --seq <seq>
+#     Queue a firstmate outcome as a durable MAIN-owned check in either posture.
+#     Reporters call this before acknowledging the original wake; Pi also
+#     retries it before marking an unread firstmate row read during recovery.
+#     The wake queue owns delivery and acknowledgement, independently of the
+#     captain-only processed marker, so handling it cannot acknowledge a held
+#     captain decision. Replays prefer duplicate delivery over loss.
+#   fm-branch-outcome.sh recover-handoffs
+#     Retry every unread firstmate row after a store-first interruption, before
+#     the supervision host starts its cycle or MAIN drains its wake queue.
+#     Leave the read cursor unchanged; delivery/presentation still owns it.
+#     $STATE/.branch-handoffs-recovered checkpoints the last recovered seq
+#     only after every earlier unread firstmate row was queued in order.
+#     An interrupted pass may duplicate delivery, never skip an unqueued row.
+#     This separate checkpoint keeps a held unread captain row from causing
+#     the same handled Firstmate wake to be re-queued on every host restart.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
 #     Advance the cursor (never backwards) after Pi delivers the records or
-#     the host presents them in its drain.
+#     the host drain presents routine and captain rows and recovers Firstmate
+#     handoffs through recover-handoffs before advancing past them.
 #   fm-branch-outcome.sh unprocessed
 #     Print read but unprocessed captain records as JSONL in ascending seq, up to 32 per call, each with "recordedAgo".
 #     Summaries over 1024 characters are abbreviated within that bound and point to lookup --seqs <n> for the full outcome.
@@ -97,11 +115,12 @@
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
 #     (JSONL, ascending seq, each with an added "unread" boolean, and each
-#     captain record also with "recordedAgo"). It moves nothing: off Pi that
-#     drain presentation is what the visible entry is, so the drain runs
-#     mark-read once it has presented the rows; it is the only reader that
-#     advances the cursor there. Prints nothing when nothing is unread or
-#     unprocessed.
+#     captain record also with "recordedAgo"). It moves nothing: off Pi the
+#     drain owns presentation and runs mark-read after the verdict-specific
+#     delivery above. Firstmate rows reach MAIN only through queued checks,
+#     without a second listing in BRANCH OUTCOMES. The drain is the only
+#     reader that advances the cursor there. Prints nothing when nothing is
+#     unread or unprocessed.
 #     "recordedAgo" is how long before this read the row was appended, as
 #     whole minutes under an hour, whole hours under two days, else whole days
 #     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
@@ -124,8 +143,9 @@
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
 #     field is true, and mark those leading routine rows read. Stop before the
-#     first captain row because only Pi's sequence-keyed visible entry may
-#     acknowledge that row. Prints nothing when nothing replayable is unread.
+#     first non-routine row: captain rows need Pi's visible entry, and
+#     firstmate rows need their durable MAIN handoff before marking read.
+#     Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
 #   fm-branch-outcome.sh seed-tail
@@ -145,6 +165,7 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
+RECOVERED="$STATE/.branch-handoffs-recovered"
 LOCK="$STATE/.branch-outcomes.lock"
 MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
@@ -163,7 +184,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|firstmate|captain --summary <text> [--wake <text>] [--silent true|false] | handoff --seq <seq> | recover-handoffs | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -172,6 +193,16 @@ bounded_uint() {
   case "$value" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "${#value}" -le "${#MAX_SAFE_SEQ}" ] || return 1
   [ "$value" -le "$MAX_SAFE_SEQ" ]
+}
+
+read_recovered() {
+  local value=0
+  if [ -e "$RECOVERED" ] || [ -L "$RECOVERED" ]; then
+    [ -f "$RECOVERED" ] && [ ! -L "$RECOVERED" ] || return 1
+    value=$(cat "$RECOVERED") || return 1
+  fi
+  bounded_uint "$value" || { echo "error: malformed Firstmate recovery checkpoint" >&2; return 1; }
+  printf '%s\n' "$value"
 }
 
 json_escape() { # <text> -> escaped JSON string content on stdout
@@ -249,7 +280,7 @@ last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
-      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
+      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "firstmate" or .verdict == "captain"))
       and (.silent != true or .verdict == "routine");
     if endswith("\n") then split("\n")[:-1]
     else error("unterminated outcome store")
@@ -516,7 +547,7 @@ case "$CMD" in
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
-    case "$VERDICT" in routine|captain) ;; *) usage ;; esac
+    case "$VERDICT" in routine|firstmate|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
       echo "error: silent outcomes must have the routine verdict" >&2
@@ -558,6 +589,47 @@ case "$CMD" in
     fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    ;;
+  handoff)
+    [ "$#" -eq 2 ] && [ "$1" = --seq ] || usage
+    bounded_uint "$2" && [ "$2" -gt 0 ] || usage
+    ROW=$("$SCRIPT_DIR/fm-branch-outcome.sh" lookup --seqs "$2") || exit 1
+    [ "$(printf '%s\n' "$ROW" | jq -r .verdict)" = firstmate ] || {
+      echo "error: only a firstmate outcome may be handed to MAIN" >&2
+      exit 2
+    }
+    NOTE=$(printf '%s\n' "$ROW" | jq -r '"firstmate-outcome: seq \(.seq) for \(.task): \(.summary | gsub("[\\t\\n\\r]"; " "))"') || exit 1
+    fm_wake_append check "firstmate-outcome:$2" \
+      "check: $NOTE; MAIN owns this decision: check current state and decide within standing authority this turn, or escalate only an act reserved for the captain. Acknowledge this wake after handling it; do not defer a Firstmate-owned OPEN DECISIONS entry to the return brief."
+    ;;
+  recover-handoffs)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    RECOVERED_SEQ=$(read_recovered) || { fm_lock_release "$LOCK"; exit 1; }
+    LAST_SEQ=$(last_seq) || { fm_lock_release "$LOCK"; exit 1; }
+    [ "$RECOVERED_SEQ" -le "$LAST_SEQ" ] || {
+      fm_lock_release "$LOCK"
+      echo "error: Firstmate recovery checkpoint is ahead of the store" >&2
+      exit 1
+    }
+    fm_lock_release "$LOCK"
+    ROWS=$("$SCRIPT_DIR/fm-branch-outcome.sh" unread) || exit 1
+    SEQS=$(printf '%s\n' "$ROWS" | jq -r --argjson recovered "$RECOVERED_SEQ" \
+      'select(.verdict == "firstmate" and .seq > $recovered) | .seq') || exit 1
+    while IFS= read -r SEQ; do
+      [ -n "$SEQ" ] || continue
+      "$SCRIPT_DIR/fm-branch-outcome.sh" handoff --seq "$SEQ" || exit 1
+      fm_lock_acquire_wait "$LOCK"
+      RECOVERED_SEQ=$(read_recovered) || { fm_lock_release "$LOCK"; exit 1; }
+      if [ "$SEQ" -gt "$RECOVERED_SEQ" ]; then
+        TMP=$(mktemp "$STATE/.branch-handoffs-recovered.XXXXXX")
+        printf '%s\n' "$SEQ" > "$TMP"
+        mv -f -- "$TMP" "$RECOVERED"
+      fi
+      fm_lock_release "$LOCK"
+    done <<SEQUENCES
+$SEQS
+SEQUENCES
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
@@ -755,9 +827,9 @@ case "$CMD" in
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
       REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '
-        map(.verdict) as $verdicts
-        | ($verdicts | index("captain")) as $captain
-        | .[0:($captain // length)][]
+        [ .[].verdict != "routine" ] as $actionable
+        | ($actionable | index(true)) as $stop
+        | .[0:($stop // length)][]
       ')
       VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then

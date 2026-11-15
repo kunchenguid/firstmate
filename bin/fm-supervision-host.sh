@@ -61,7 +61,8 @@
 #     session's next park without --restart requests a take-over of its cycle
 #     rather than an ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
 #     conditions under which that restores a single owner and the fallback;
-#   - away (an away record exists): every close goes to the engine.
+#   - away (an away record exists): eligible closes go to the engine under
+#     the shared offer rule; Firstmate-owned handoffs stay on main.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
 # between) or an attended close whose task turned main-only while the
@@ -81,9 +82,10 @@
 # queue. Before parking after a handled turn, it settles the successor handoff;
 # docs/watcher-continuity.md "Durable queue and turn-end backstop" owns how
 # that transition makes rows still queued for main recoverable. A handled wake
-# with only routine outcomes never wakes main, and neither does any handled
-# wake while away: captain outcomes wait in
-# the outcome store for the return drain's BRANCH OUTCOMES section. A handled
+# with only routine outcomes never wakes main. A firstmate outcome exits with
+# a "supervision-host: firstmate-outcome:" line in either posture; its durable
+# check is already queued by bin/fm-branch-report.sh. Away captain outcomes
+# wait in the store for the return drain's BRANCH OUTCOMES section. A handled
 # attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
 # line naming its store rows, without the close it handled; main drains, where
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every
@@ -1036,9 +1038,7 @@ handle_wake() {  # <reason-lines>
     attended_acceptor "$first" || return 2
     scope=$ATTENDED_OFFER
   else
-    set --
-    case "$first" in heartbeat*) set -- --heartbeat ;; esac
-    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
+    if ! scope=$(printf '%s\n' "$first" | node "$SCRIPT_DIR/fm-branch-dispatch.mjs" offer --afk 2>/dev/null); then
       HANDLE_WHY="branch eligibility could not be computed"
       return 1
     fi
@@ -1052,7 +1052,15 @@ handle_wake() {  # <reason-lines>
     HANDLE_WHY="a queued wake could not be read or resolved to a task record, so its scope is unknown"
     return 1
   fi
-  if [ "$status" = empty ] || [ -z "$rows" ]; then
+  if [ "$status" = empty ]; then
+    log_line "no-op	nothing for the branch to claim	$first"
+    return 0
+  fi
+  if [ "$TURN_POSTURE" = away ] && [ "$(printf '%s\n' "$scope" | sed -n 's/^eligible=//p')" != 1 ]; then
+    HANDLE_WHY="a MAIN-owned handoff or unsafe wake must be handled by MAIN"
+    return 1
+  fi
+  if [ -z "$rows" ]; then
     log_line "no-op	nothing for the branch to claim	$first"
     return 0
   fi
@@ -1241,6 +1249,12 @@ trap 'exit 130' INT
 activate || { echo "supervision-host stood down: the host record could not be written"; exit 0; }
 log_line "start	gen=$GEN	primary=$PRIMARY"
 
+# Recover a report interrupted after its store append but before its MAIN
+# handoff. Queue it before arming so even a generic resurface stays MAIN-owned.
+if ! "$SCRIPT_DIR/fm-branch-outcome.sh" recover-handoffs; then
+  exit_to_main "saved Firstmate handoffs could not be recovered; run bin/fm-wake-drain.sh before continuing"
+fi
+
 # The first cycle.
 if [ "$FIRST_ARM_RESTART" -eq 1 ]; then
   start_arm "$OWNER_PREDECESSOR" --restart
@@ -1362,6 +1376,22 @@ while :; do
   elif [ "$RETURNED_LOOKUP_FAILED" -eq 1 ]; then
     exit_to_main "the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
       "$(turn_outcome_lookup_warning)"
+  fi
+  # Firstmate outcomes already queued their durable checks. Hand back now,
+  # even away, rather than waiting for another watcher cycle to open MAIN.
+  FIRSTMATE_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn && $3 == "firstmate" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
+  if [ -n "$FIRSTMATE_SEQS" ]; then
+    ARM_TEXT=
+    if fm_afk_contract_away_present "$STATE"; then
+      exit_to_main "firstmate-outcome: the supervision session needs MAIN's standing authority (store rows $FIRSTMATE_SEQS); run bin/fm-wake-drain.sh and decide the queued firstmate-outcome checks this turn, including Firstmate-owned OPEN DECISIONS; captain-only outcomes still wait for the return" "$HEALTH_NOTE"
+    fi
+    CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
+    CAPTAIN_HANDOFF=
+    if [ -n "$CAPTAIN_SEQS" ]; then
+      CAPTAIN_HANDOFF="supervision-host: branch-outcome: the supervision session recorded captain outcomes (store rows $CAPTAIN_SEQS); process the drain's BRANCH OUTCOMES section this turn and acknowledge them as it prints"
+    fi
+    exit_to_main "firstmate-outcome: the supervision session needs MAIN's standing authority (store rows $FIRSTMATE_SEQS); run bin/fm-wake-drain.sh and decide the queued firstmate-outcome checks this turn, including Firstmate-owned OPEN DECISIONS" \
+      "${CAPTAIN_HANDOFF}${HEALTH_NOTE:+${CAPTAIN_HANDOFF:+$'\n'}$HEALTH_NOTE}"
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close

@@ -378,7 +378,7 @@ line_of() {  # <haystack> <needle> -> 1-based line number of the first match, or
 }
 
 test_return_brief_composes_from_record_store_and_held_set() {
-  local dir out rc gate health_line words_line waiting_line failed_line second
+  local dir out rc gate n health_line words_line waiting_line failed_line second
   dir="$TMP_ROOT/brief"
   install_runner "$dir"
   (cd "$dir/home" && tasks-axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
@@ -416,6 +416,10 @@ test_return_brief_composes_from_record_store_and_held_set() {
   outcome_in "$dir" append --task still-building --verdict routine --silent true \
     --summary 'per your away instructions: the check 1 worker is still building. Nothing new has happened; no action was taken.' >/dev/null \
     || fail "could not seed the silent no-change outcome row"
+  for n in 1 2 3 4; do
+    outcome_in "$dir" append --task "main-decision-$n" --verdict firstmate \
+      --summary "Firstmate decision $n" >/dev/null || fail "could not seed Firstmate outcome"
+  done
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
 
@@ -451,9 +455,11 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'fix-windows [key=token] still blocked, firstmate remediates before ordinary work' "the blocker sharing a task with a captain outcome was exempted"
   assert_contains "$out" 'other [key=dep] still blocked, firstmate remediates before ordinary work' "the unreached blocker was not listed as could-not-fix"
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
+  assert_contains "$out" '10 outcome(s) handled by the away session (4 routine, 4 handed to Firstmate, 2 escalated above)' "Firstmate outcomes were missing from the total"
+  assert_not_contains "$(printf '%s\n' "$out" | sed -n '/^Waiting on you:/,/^Tried and failed/p')" 'Firstmate decision' "Firstmate outcomes entered the captain waiting list"
   assert_contains "$out" '4 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
-  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
+  assert_contains "$out" 'Cost: 10 supervision outcome(s) recorded (4 routine, 4 firstmate, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
   assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
@@ -501,7 +507,7 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
     # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
     out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
       "$fakebin/$harness" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "$harness: the return did not clear: $out"
-    assert_contains "$out" '7 outcome(s) handled by the away session (6 routine, 1 escalated above)' "$harness: the brief must count the window's outcomes"
+    assert_contains "$out" '7 outcome(s) handled by the away session (6 routine, 0 handed to Firstmate, 1 escalated above)' "$harness: the brief must count the window's outcomes"
     if [ "$harness" = claude ]; then
       assert_contains "$out" "  1 captain outcome(s) escalated by the away session, presented in the drain's BRANCH OUTCOMES section" \
         "a host home's brief must point at the drain for its captain outcomes"
@@ -536,7 +542,7 @@ test_return_brief_all_silent_window_does_not_point_at_drain() {
   # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
     "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the all-silent return did not clear: $out"
-  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 escalated above)' \
+  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 handed to Firstmate, 0 escalated above)' \
     "the all-silent window's stored outcome count was lost"
   assert_contains "$out" '1 routine outcome(s) recorded; none were visible.' \
     "the all-silent window should report no visible routine notes"

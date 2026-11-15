@@ -10,10 +10,8 @@
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
-// persists a sequence-keyed visible record in main's transcript, and for a
-// captain-facing outcome opens one sequence-keyed processing turn on main
-// that stays open until main acknowledges that sequence (see
-// presentUnprocessedOutcomes).
+// follows the verdict-specific delivery contract in
+// docs/pi-supervision-branch.md "Two-stage noise filter".
 // Main's captain/assistant dialog is mirrored into the branch as read-only
 // fm-main-mirror context from Pi's
 // before_agent_start prompt and at main's turn_end. Pi-only by construction: this
@@ -201,7 +199,7 @@ const PROCESSING_INSTRUCTION =
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
-type Verdict = "routine" | "captain";
+type Verdict = "routine" | "firstmate" | "captain";
 type LockOwnership = "owned" | "other" | "missing";
 type OutcomeRow = {
   seq: number;
@@ -508,7 +506,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   const row = value as Record<string, unknown>;
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
   if (typeof row.task !== "string" || !row.task) return null;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return null;
+  if (row.verdict !== "routine" && row.verdict !== "firstmate" && row.verdict !== "captain") return null;
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
@@ -1192,7 +1190,9 @@ export default function (pi: ExtensionAPI) {
         // representation for routine delivery, which changes the delivery
         // contract rather than this ordering, so it is deliberately not done
         // here.
-        if (row.verdict === "captain") {
+        if (row.verdict === "firstmate") {
+          if (!(await runOutcomeScript(["handoff", "--seq", String(row.seq)])).ok) return false;
+        } else if (row.verdict === "captain") {
           if (!ensureVisibleCaptainOutcome(row)) return false;
         } else {
           deliverRoutineOutcome(row);
@@ -1216,12 +1216,12 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks an eligible no-change outcome.",
+        "Record the outcome of one handled fleet event durably. Verdict firstmate queues a MAIN-owned wake in either posture; captain persists an exact visible entry and requests processing when attended; routine notes render unless silent marks an eligible no-change outcome.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
-        verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
+        verdict: Type.Union([Type.Literal("routine"), Type.Literal("firstmate"), Type.Literal("captain")], {
           description:
-            "Use captain or routine exactly as the \"Verdict: routine or captain\" section of your system prompt decides; that section is the one owner of the rule.",
+            "Use routine, firstmate, or captain exactly as the \"Verdict owner\" section of your system prompt decides; that section is the one owner of the rule.",
         }),
         summary: Type.String({
           description:
@@ -1238,9 +1238,9 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "firstmate" && verdictRaw !== "captain")) {
           return {
-            content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            content: [{ type: "text", text: "invalid report: task, verdict (routine|firstmate|captain), and summary are required" }],
             details: undefined,
             isError: true,
           };
@@ -1534,8 +1534,12 @@ ${context.command}
         // rows are store-first and the durable queue keeps them.
         const afk = afkPostureRecordPresent(state);
         const scope = scopeForUnreadWake(state, heartbeat, afk);
-        // A newly-arrived main-owned (check-kind) row never bounces this
-        // whole recheck back to main - scopeForUnreadWake excludes it from
+        if (scope.mainHandoff) {
+          throw new Error("an unread Firstmate outcome needs MAIN's standing authority");
+        }
+        // Apart from the Firstmate handoff veto above, a newly-arrived
+        // main-owned (check-kind) row never bounces this whole recheck back
+        // to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
         // in every other, so it stays queued for main while whatever else is
         // eligible right now still reaches the branch. A genuinely empty

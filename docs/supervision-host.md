@@ -29,8 +29,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, Codex, or Antigravit
 - Attended (no away record: no `state/.afk-contract`, or quiet mode's) on Claude and Cursor, the engine takes the wakes the Pi branch would take and never wakes main for a routine outcome; see [Postures](#postures).
   Every other close reaches main exactly as the plain watcher arm delivers it.
 - Attended on OpenCode, omp, Grok, Codex, and agy, the host is a pass-through: every close reaches main as without the host.
-- Away (an away record exists), the host hands each close to the engine.
-  Main stays parked unless the host hands the wake back.
+- Away (an away record exists), [Postures](#away) owns close eligibility and handbacks to main.
 - `/afk` launches no away daemon on a home of those harnesses that runs the host, because the host is the away session there.
 - `/quiet` enters nothing where the attended host runs, and elsewhere launches the daemon; see [Quiet mode](#quiet-mode).
   While the daemon's flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
@@ -88,7 +87,8 @@ The other owners read the file at every arm.
 `bin/fm-branch-report.sh` appends to the outcome store (`bin/fm-branch-outcome.sh`) plus a per-turn receipt the host requires.
 A non-silent row an away turn records after the captain returned is also queued for main as a durable check wake.
 Silent outcomes remain in the store but are not queued or relayed as notes.
-An attended turn queues nothing: its captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.
+An attended turn's captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.
+Firstmate-owned outcomes use the main handoff in [Pi supervision branch](pi-supervision-branch.md#while-the-record-exists) in both postures.
 
 ### Leases and authority
 
@@ -136,7 +136,7 @@ The engine turn runs beside a captain who is present, so its guarded actions tak
 
 ### Away
 
-Every close goes to the engine; captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
+Every eligible close goes to the engine; Firstmate-owned handoffs stay on main, while captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
 Every turn that starts attended meets the attended rule again at its start, and the offer's scan is the scope the turn claims: a close accepted away whose turn starts attended, because the captain returned in between, or an attended close whose task turned main-only (a decision appeared) while the successor started, reaches main unchanged and leaves that successor cycle running, with the handoff that turn had confirmed handed back to downtime as already announced, so that successor does not announce the same close again.
 A captain who leaves while an attended turn runs turns its captain outcomes into away outcomes: they wait for the return too.
 
@@ -184,13 +184,14 @@ The host counts the wake handled only when all three hold:
 
 ### Where a handled wake's outcome goes
 
-Away, a handled wake never reaches main, whether its outcome was routine or captain.
+Away, a handled wake with only routine and captain outcomes stays off main.
+An unresolved Firstmate-owned decision uses the durable main handoff described in [Pi supervision branch](pi-supervision-branch.md#while-the-record-exists).
 Captain outcomes wait in the outcome store, and after the return the drain's `BRANCH OUTCOMES` section presents them; the return brief (`bin/fm-afk-return.sh`) counts them and points there.
 Attended, see [Captain outcomes](#captain-outcomes).
 
 ### A captain who returns during a turn
 
-The one exception to the away rule is a captain who returns while an away turn is still running.
+A captain who returns while an away turn is still running also needs a handback.
 The return brief may have been rendered before that turn's visible outcomes existed.
 So the host hands the close to main with any visible outcomes for main to relay, whether or not the turn handled its wake.
 
@@ -219,15 +220,18 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 
 The section runs only for main on a home that runs the host and whose primary is not Pi, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
+Firstmate-owned decisions reach main through their queued checks, without a second listing in `BRANCH OUTCOMES`.
+The [outcome store header](../bin/fm-branch-outcome.sh) owns handoff recovery and its checkpoint.
+The drain runs recovery before its queue snapshot in either posture and again before advancing past unread Firstmate rows.
 On a Claude Code primary the Calm mod separately shows bounded, display-only supervision notes to the captain ([`calm.md`](calm.md#supervision-notes-on-claude-code)); it moves no outcome marker and adds nothing to main's context.
 A long away window no longer requires a drain per outcome: each task's captain outcomes collapse to one line, subject to the captain byte cap, and visible routine notes past the section's limit collapse into a count; after main acknowledges all captain outcomes no later drain shows anything from the window again.
-A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
+A drain that cannot read or project the store (jq missing included), recover a Firstmate handoff, print the section, or advance its read cursor says so and exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, including across an index repair or a switch to Pi; the absent-marker rule is owned by `bin/fm-branch-outcome.sh`.
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
 Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed.
 Main runs the printed acknowledgement for every presented outcome, settled and handled open ones alike.
-Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
+The branch prompt's "Verdict owner" section classifies actions main must take and reserves captain-only acts for the captain.
 
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.
 The captain row is still durable, and the next drain presents it until it is acknowledged.
@@ -309,10 +313,11 @@ So it never stops the owner's host or watcher or releases its leases.
 The host's owner retries it.
 Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
 The native Codex park reports the failure through its queue delivery and bounded retry owner.
-Before it arms, the next host does two things:
+Before it arms, the next host does three things:
 
 - It stops, by recorded identity, whatever its predecessor left running, including the engine descendants a killed turn recorded.
 - It removes that turn's files.
+- It applies the [outcome store's handoff recovery contract](../bin/fm-branch-outcome.sh), handing control to main if recovery fails.
 
 ## The park boundary
 

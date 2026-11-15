@@ -15,19 +15,21 @@
 # the host's turn record; this script only compares against it.
 #
 # Usage:
-#   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
+#   fm-branch-report.sh --task <id|fleet> --verdict routine|firstmate|captain \
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
-# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine outcome.
+# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict owner");
+# --silent true is legal only for a routine outcome. A firstmate outcome
+# queues a durable MAIN-owned check in either posture before the host receipt
+# is written.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
 # must be "branch" and FM_BRANCH_REPORT_TURN must name the host's current turn
 # record ($STATE/.supervision-host-turn), so a report typed after its turn
-# ended, or from any other shell, is refused. Exit codes: 0 recorded, 1 the
-# store refused or failed (nothing recorded), 2 usage, 3 refused (actor, turn,
-# or scope).
+# ended, or from any other shell, is refused. Exit codes: 0 recorded, 1 a
+# storage or delivery step failed (an outcome may already be stored), 2 usage,
+# 3 refused (actor, turn, or scope).
 #
 # A non-silent row an away turn recorded after the captain returned (the turn
 # record says posture=away, or predates the posture field, and no away record
@@ -39,7 +41,7 @@
 # append, so every visible row is in the brief, queued, or both: the relay does
 # not depend on the host surviving its turn or on its owner delivering the
 # host's own handback. Silent outcomes remain in the store but are not queued
-# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# or relayed as notes. An attended turn's captain rows reach
 # MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u
@@ -78,10 +80,10 @@ done
 
 TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
+case "$VERDICT" in routine|firstmate|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
-  echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
+  echo "invalid report: --task, --verdict (routine|firstmate|captain), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
@@ -123,10 +125,20 @@ if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then
   echo "outcome store append failed (nothing recorded)" >&2
   exit 1
 fi
+if [ "$VERDICT" = firstmate ]; then
+  if ! "$SCRIPT_DIR/fm-branch-outcome.sh" handoff --seq "$SEQ"; then
+    echo "recorded seq $SEQ, but its MAIN handoff failed; the original wake remains unhandled" >&2
+    exit 1
+  fi
+fi
 printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
+if [ "$VERDICT" = firstmate ]; then
+  printf 'recorded seq %s [firstmate]; queued for MAIN in either posture\n' "$SEQ"
+  exit 0
+fi
 if [ "$SILENT" = true ]; then
   printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
   exit 0

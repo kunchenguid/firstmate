@@ -12,7 +12,7 @@ const PROCESSED = `${STATE}/.branch-outcomes-processed`;
 const HEALTH = `${STATE}/.supervision-host-health`;
 const POLL = 3000;
 
-type Row = { seq: number; task: string; verdict: "routine" | "captain"; summary: string; silent?: boolean; epoch?: number };
+type Row = { seq: number; task: string; verdict: "routine" | "firstmate" | "captain"; summary: string; silent?: boolean; epoch?: number };
 
 function tail(rows: readonly Row[]): string {
   return rows
@@ -46,6 +46,27 @@ const history: Row[] = [
 ];
 
 describe("supervision notes", () => {
+  test("Firstmate rows stay in the sequence without transcript notes or false overflow", async ($, on) => {
+    const { clock, files, journal } = world(on);
+    files.set(TAIL, tail(history));
+    files.set(CURSOR, "5\n");
+    files.set(PROCESSED, "3\n");
+    await $.session.start(sessionStart);
+    files.set(TAIL, tail([...history,
+      { seq: 6, task: "fm-main", verdict: "firstmate", summary: "MAIN decides" },
+    ]));
+    await clock.advance(POLL);
+    expect(journal.logs).toEqual([]);
+    files.set(TAIL, tail([...history,
+      { seq: 6, task: "fm-main", verdict: "firstmate", summary: "MAIN decides" },
+      { seq: 7, task: "fm-after", verdict: "routine", summary: "worker continues" },
+    ]));
+    await clock.advance(POLL);
+    expect(journal.logs).toEqual(["⛵ fm-after: worker continues"]);
+    expect(files.get(CURSOR)).toBe("5\n");
+    expect(files.get(PROCESSED)).toBe("3\n");
+  });
+
   test("session start replays unprocessed captain rows and unread visible routine rows with Calm off", async ($, on) => {
     const { files, journal } = world(on);
     files.set(TAIL, tail(history));

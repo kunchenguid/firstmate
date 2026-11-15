@@ -203,6 +203,83 @@ test_branch_outcomes_only_on_a_host_home_off_pi() {
 }
 
 
+test_firstmate_decisions_acknowledged_away_do_not_reappear_on_return() {
+  local home drained ack sequence generation n
+  home="$TMP_ROOT/drain-firstmate-return"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet' >/dev/null 2>&1 \
+    || fail "fixture: could not record away posture"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task cap --verdict captain \
+    --summary 'red merge needs captain' >/dev/null || fail "captain append failed"
+  for n in 1 2 3 4; do
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task "decision-$n" --verdict firstmate \
+      --summary "approved design decision $n" >/dev/null || fail "Firstmate append failed"
+  done
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1) || fail "away drain failed"
+  for n in 1 2 3 4; do
+    assert_contains "$drained" "approved design decision $n" "away drain lost a decision"
+  done
+  assert_not_contains "$drained" 'red merge needs captain' "away drain released the captain control"
+  ack=$(printf '%s\n' "$drained" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p')
+  sequence=$(printf '%s\n' "$ack" | awk '{print $2}')
+  generation=$(printf '%s\n' "$ack" | awk '{print $4}')
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "away drain omitted its acknowledgement"
+  FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "away acknowledgement failed"
+  [ ! -s "$home/state/.wake-queue" ] || fail "acknowledged wakes remain queued"
+  assert_absent "$home/state/.branch-outcomes-cursor" "away handling advanced the outcome read cursor"
+  FM_HOME="$home" "$CONTRACT" archive >/dev/null 2>&1 || fail "away archive failed"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1) || fail "return drain failed"
+  assert_not_contains "$drained" 'approved design decision' "return re-presented an acknowledged decision"
+  assert_not_contains "$drained" 'BRANCH OUTCOMES, FIRSTMATE' "return printed a false pending-decision section"
+  assert_contains "$drained" 'red merge needs captain' "return lost the held captain control"
+  assert_absent "$home/state/.branch-outcomes-processed" "Firstmate handling processed the captain control"
+  pass "drain: acknowledged Firstmate wakes stay settled when the away record is archived"
+}
+
+test_firstmate_outcome_after_queue_snapshot_is_queued_before_mark_read() {
+  local home pid drained count
+  home="$TMP_ROOT/drain-firstmate-late"
+  mkdir -p "$home/state" "$home/config" "$home/bin"
+  : > "$home/config/supervision-host"
+  printf '#!/usr/bin/env bash\nREAL_SLEEP=%q\n' "$(command -v sleep)" > "$home/bin/sleep"
+  cat >> "$home/bin/sleep" <<'SH'
+if [ "$*" = 47 ]; then
+  : > "$FM_HOME/snapshot-ready"
+  for ((n=0; n<200; n++)); do
+    [ ! -e "$FM_HOME/snapshot-release" ] || exit 0
+    "$REAL_SLEEP" 0.1
+  done
+  exit 1
+fi
+exec "$REAL_SLEEP" "$@"
+SH
+  chmod +x "$home/bin/sleep"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task seed --verdict routine \
+    --summary 'initial routine outcome' >/dev/null || fail "seed append failed"
+  append_wake "$home/state" check seed 'check: fixture snapshot' || fail "seed wake failed"
+  PATH="$home/bin:$PATH" FM_HOME="$home" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=47 \
+    "$ROOT/bin/fm-wake-drain.sh" > "$home/drain.out" 2> "$home/drain.err" &
+  pid=$!
+  wait_until 100 test -e "$home/snapshot-ready" \
+    || { kill "$pid" 2>/dev/null || true; wait "$pid" || true; fail "drain never reached its queue snapshot"; }
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task design --verdict firstmate \
+    --summary 'late approved design decision' >/dev/null \
+    || { : > "$home/snapshot-release"; wait "$pid" || true; fail "late append failed"; }
+  : > "$home/snapshot-release"
+  wait "$pid" || fail "late-outcome drain failed: $(cat "$home/drain.err")"
+  assert_no_grep 'late approved design decision' "$home/drain.out" "late decision appeared outside its queued wake"
+  assert_grep 'firstmate-outcome:2' "$home/state/.wake-queue" "late decision was read without a durable wake"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 2 ] || fail "late outcome was not marked read after recovery"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1) || fail "late-wake drain failed"
+  count=$(printf '%s\n' "$drained" | grep -c 'late approved design decision')
+  [ "$count" -eq 1 ] || fail "late decision must appear exactly once through its wake: $drained"
+  assert_contains "$drained" 'MAIN owns this decision' "late wake omitted its owner"
+  assert_not_contains "$drained" 'BRANCH OUTCOMES, FIRSTMATE' "attended drain duplicated the decision section"
+  pass "drain: a Firstmate outcome after the queue snapshot is durably queued before read advancement"
+}
+
 # A fresh captain outcome is never hidden behind older routine outcomes: the
 # captain rows come first whatever the routine backlog, the newest routine
 # outcomes that fit the byte cap follow, and the older overflow collapses into
@@ -590,6 +667,8 @@ fm_test_run \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \
+  test_firstmate_decisions_acknowledged_away_do_not_reappear_on_return \
+  test_firstmate_outcome_after_queue_snapshot_is_queued_before_mark_read \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
   test_branch_outcomes_present_a_long_away_window_once \

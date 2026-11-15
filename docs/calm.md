@@ -234,7 +234,7 @@ Each note is appended to the transcript as its own system-notice row, which Clau
 | `⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.` | The host's broken-session latch trips. |
 | `⛵ Supervision session recovered after a successful cooldown probe.` | That latch clears. |
 
-Silent routine outcomes show nothing.
+Silent routine outcomes and Firstmate-owned handoffs show nothing.
 The mod checks the outcome store's display tail copy and the host's latch file every 3 seconds, so a note can land a few seconds after its outcome.
 On the first tail read in a session, it replays unprocessed captain outcomes and unread visible routine outcomes from the bounded copy, showing at most the newest 20 notes with a count of older due notes within that copy.
 A home whose outcome store predates the copy gains one at its next locked session start, even while away; if the copy first appears after the mod starts, the replay still uses the read and processed markers captured when the session started.

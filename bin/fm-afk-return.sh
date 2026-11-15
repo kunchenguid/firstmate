@@ -534,7 +534,7 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
 
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-ok>
   local evidence=$1 blockers=$2 since=$3 drain_ok=$4 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine routine_visible captain visible_outcomes live held_err last verb rows status url drained=0 pointer
+  local tag task key summary count routine routine_visible firstmate captain visible_outcomes live held_err last verb rows status url drained=0 pointer
   now=$(date +%s)
   # Where main processes outcomes through the drain's BRANCH OUTCOMES section
   # (the supervision host off Pi, docs/supervision-host.md "Captain outcomes"),
@@ -676,8 +676,9 @@ EOF
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   routine_visible=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" && $6 != "true" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
+  firstmate=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "firstmate" { n++ } END { print n + 0 }')
   visible_outcomes=$((routine_visible + captain))
-  printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
+  printf '  %s outcome(s) handled by the away session (%s routine, %s handed to Firstmate, %s escalated above)\n' "$((routine + firstmate + captain))" "$routine" "$firstmate" "$captain"
   if [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ] && [ "$drain_ok" -eq 1 ]; then
     printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s captain outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
   elif [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ]; then
@@ -694,8 +695,8 @@ EOF
   # 7. cost.
   live=0
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
-  printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
-    "$((routine + captain))" "$routine" "$captain" "$live"
+  printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s firstmate, %s captain); %s task(s) live at return.\n' \
+    "$((routine + firstmate + captain))" "$routine" "$firstmate" "$captain" "$live"
 }
 
 return_reconcile() {

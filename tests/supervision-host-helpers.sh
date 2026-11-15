@@ -42,6 +42,9 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   handle      drain, claim the task's lease, report, acknowledge, release
 #   captain     the same as handle, but report verdict captain naming the rows
 #               the drain presented
+#   firstmate   the same as handle, but report verdict firstmate for MAIN
+#   firstmate-before-handoff append a Firstmate outcome, then wait before its
+#               handoff so the test can kill the host in the store-first gap
 #   hold-lease  the same, but leave the lease held (the host must release it),
 #               logging its check line while held
 #   return      handle, but the captain returns (the record is archived) before
@@ -102,11 +105,20 @@ printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
 ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
+if [ "$mode" = firstmate-before-handoff ]; then
+  seq=$("$FM_REPO/bin/fm-branch-outcome.sh" append --task "$task" --verdict firstmate \
+    --summary 'saved design decision needs MAIN') || exit 1
+  printf '%s\n' "$seq" > "$FM_HOME/before-handoff"
+  sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS"
+  "$FM_REPO/bin/fm-branch-outcome.sh" handoff --seq "$seq"
+  exit 1
+fi
 verdict=routine
 [ "$mode" != go-away ] || verdict=captain
+case "$mode" in firstmate|mixed-firstmate) verdict=firstmate ;; esac
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|firstmate|mixed-firstmate|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
@@ -125,6 +137,10 @@ case "$mode" in
           ;;
       esac
       "$FM_REPO/bin/fm-branch-report.sh" "${report_args[@]}" >> "$FM_HOME/engine-report.log" 2>&1
+    fi
+    if [ "$mode" = mixed-firstmate ]; then
+      "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain \
+        --summary 'mixed captain decision' >> "$FM_HOME/engine-report.log" 2>&1
     fi
     if [ "$mode" = return-many ]; then
       awk -v task="$task" 'BEGIN { for (seq = 2; seq <= 1001; seq++)
