@@ -67,7 +67,7 @@
 #   1. a live identity-matched watcher with a fresh beacon - or, in away mode, a
 #      live identity-matched daemon with a fresh beacon - allows immediately;
 #   2. an unhealthy session with a live session-lock owner it does not
-#      own under the shared ancestry-or-trusted-id verdict exits with a read-only
+#      own under bin/fm-session-lock-lib.sh's verdict exits with a read-only
 #      diagnostic instead of blocking a session that cannot repair supervision
 #      without stealing ownership;
 #   3. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
@@ -205,10 +205,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_exit
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-if [ "$CLAUDE_MODE" -eq 1 ]; then
-  # shellcheck source=bin/fm-session-lock-lib.sh
-  . "$SCRIPT_DIR/fm-session-lock-lib.sh"
-fi
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# A native Codex Stop proves its session through the payload session_id.
+fm_session_lock_codex_hook_identity "$PAYLOAD"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -322,7 +322,10 @@ block_stop() {
 # stealing ownership, so blocking its Stop would create an impossible loop.
 # Report the ownership conflict as a diagnostic and let this turn end safely;
 # the owning session remains responsible for restoring the watcher.
-if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
+# A native Codex thread shares its server pid with the owner thread, so the
+# same read-only exit applies to it outside --claude mode.
+if { [ "$CLAUDE_MODE" -eq 1 ] || fm_session_lock_codex_native_ancestry; } \
+  && fm_session_lock_foreign_owner_live "$STATE"; then
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely; the owning session must restore supervision."}\n' \
     "$FM_SESSION_LOCK_FOREIGN_OWNER_PID"
   exit 0

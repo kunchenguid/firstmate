@@ -2,6 +2,9 @@
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
 #
+# A native Codex thread must own the home lock under bin/fm-session-lock-lib.sh
+# before either supervisor starts; otherwise this exits 1 without running one.
+#
 # SUPERVISION HOST. A home opted in with config/supervision-host
 # (docs/configuration.md "Supervision host" owns the gate;
 # config/supervision-host-off opts out, and a Codex home without the file does not run the host) runs
@@ -67,6 +70,16 @@ esac
 # successor. It keeps an announced recovery episode stable while preserving the
 # watcher's ordinary recovery of a generation that becomes pending.
 export FM_WATCH_FOREGROUND_CHECKPOINT=1
+
+# A native Codex server pid is shared by every thread, so a second thread would
+# otherwise pass the watcher's own lock-holder check. Only the verified owner
+# may start a checkpoint. CLI and detached watcher behavior stays unchanged.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+if fm_session_lock_codex_native_ancestry && ! fm_session_lock_owned_by_self "$STATE"; then
+  echo "error: native Codex session does not own the home lock; operate read-only until resolved" >&2
+  exit 1
+fi
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {

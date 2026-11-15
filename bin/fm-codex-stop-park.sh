@@ -9,13 +9,15 @@
 # Hook modes read the native JSON payload on stdin. --capable is read-only.
 # The park is opt-in: only a home with config/codex-stop-park
 # (docs/configuration.md owns it) registers or parks. Without it --session-start
-# only runs the session start, --guard only runs the turn-end guard, the
-# asynchronous Stop hook exits at once, and --capable fails.
+# only runs the session start, the asynchronous Stop hook exits at once,
+# and --capable fails.
+# --guard delegates a live foreign owner to the shared turn-end guard before
+# park selection or retained fallback, regardless of opt-in or CLI version.
+# A matching fallback still applies when this session can no longer park.
 # Registration also requires the native transcript's codex-tui originator;
 # headless exec sessions have no persistent interactive input surface.
-# Homes without the opt-in, unsupported versions, manual session starts,
-# workers, and foreign session owners retain the existing foreground
-# checkpoint and turn-end guard.
+# Other sessions use the foreground checkpoint protocol subject to the
+# ownership check in bin/fm-watch-checkpoint.sh and the shared turn-end guard.
 #
 # state/.codex-park-session binds selection to the native session and fleet
 # lock PID. state/.codex-park.lock is the shared lock library's single-flight
@@ -178,6 +180,8 @@ esac
 PAYLOAD=$(cat)
 SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null)
 case "$SESSION" in ''|*[!A-Za-z0-9-]*) SESSION= ;; esac
+# Every ownership check below runs under the payload's native session identity.
+fm_session_lock_codex_hook_identity "$PAYLOAD"
 
 if [ "$MODE" = --session-start ]; then
   transcript=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null)
@@ -198,6 +202,10 @@ if [ "$MODE" = --session-start ]; then
 fi
 
 if [ "$MODE" = --guard ]; then
+  if fm_session_lock_foreign_owner_live "$STATE"; then
+    printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh"
+    exit $?
+  fi
   if [ -n "$SESSION" ] && capable && [ ! -e "$STATE/.afk" ] \
     && fm_supervision_needed "$STATE"; then
     # Startup grace for the async hook to publish its claim: 50 x 0.2s, about 10s.
