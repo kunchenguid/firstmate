@@ -2854,8 +2854,9 @@ test_typed_lock_fresh_holder() {
 test_typed_wait_reports_refusal() {
   local state="$TMP_ROOT/typed-wait" child i=0 lines
   mkdir -p "$state"
+  printf x > "$state/lock"
   FM_STATE_OVERRIDE="$state" FM_LOCK_WAIT_REFUSAL_REPORT_SECS=1 FM_LOCK_WAIT_REFUSAL_REPEAT_SECS=2 \
-    bash -c '. "$1"; fm_lock_acquire_wait "$2/missing/lock"; printf returned > "$2/returned"' _ "$LIB" "$state" 2> "$state/err" &
+    bash -c '. "$1"; fm_lock_acquire_wait "$2/lock"; printf returned > "$2/returned"' _ "$LIB" "$state" 2> "$state/err" &
   child=$!
   while [ "$i" -lt 70 ]; do
     lines=$(wc -l < "$state/err")
@@ -2867,9 +2868,90 @@ test_typed_wait_reports_refusal() {
   wait "$child" 2>/dev/null || true
   [ ! -e "$state/returned" ] || fail "unbounded wait returned without the lock"
   [ "$lines" -ge 2 ] && [ "$lines" -le 3 ] || fail "refusal diagnostic must repeat at its bounded interval ($lines)"
-  grep -F "$state/missing/lock" "$state/err" >/dev/null || fail "diagnostic omitted lock path"
-  grep -F parent-unresolvable "$state/err" >/dev/null || fail "diagnostic omitted refusal cause"
+  grep -F "$state/lock" "$state/err" >/dev/null || fail "diagnostic omitted lock path"
+  grep -F lock-path-occupied "$state/err" >/dev/null || fail "diagnostic omitted refusal cause"
   pass "unbounded wait reports refusal periodically and keeps waiting"
+}
+
+# Only a positively removed parent ends the unbounded wait; a parent hidden
+# behind an unsearchable ancestor may still exist and must keep waiting.
+test_typed_wait_parent_removal_is_positive() {
+  local state="$TMP_ROOT/typed-wait-parent" child i=0
+  mkdir -p "$state/sealed/inner"
+  chmod 000 "$state/sealed"
+  if [ -d "$state/sealed/inner" ]; then
+    chmod 700 "$state/sealed"
+    pass "unsearchable-parent wait case skipped: account can search mode-000 directories"
+    return 0
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_acquire_wait "$2/sealed/inner/lock"; printf "%s" "$?" > "$2/returned"' \
+    _ "$LIB" "$state" 2>/dev/null &
+  child=$!
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_acquire_wait "$2/missing/lock"; printf "%s" "$?" > "$2/removed-rc"' \
+    _ "$LIB" "$state" 2>/dev/null
+  while [ "$i" -lt 10 ] && [ ! -e "$state/returned" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  chmod 700 "$state/sealed"
+  [ "$(cat "$state/removed-rc" 2>/dev/null)" = 1 ] || fail "wait on a removed parent did not return its error"
+  [ ! -e "$state/returned" ] || fail "an unsearchable parent was mistaken for a removed one"
+  pass "unbounded wait ends only on a positively removed parent"
+}
+
+# A reaper renames a dead steal owner to its tombstone before unlinking the
+# steal link. A rival that sees that dangling protocol link meanwhile is
+# contended, not refused; a dangling foreign link stays an invalid shape.
+test_typed_dangling_steal_link_mid_reap_is_held() {
+  local state="$TMP_ROOT/typed-dangling-steal" reaper dead rc=0
+  mkdir -p "$state/primary-owner"
+  dead=$(dead_pid)
+  printf '%s\n' "$dead" > "$state/primary-owner/pid"
+  ln -s "$state/primary-owner" "$state/lock"
+  sleep 30 &
+  reaper=$!
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    owner="$(fm_lock_abs_path "$2/lock.steal").owner.dead"
+    start=$(fm_pid_start_time "$3" 2>/dev/null || true)
+    tomb="$owner.reaped.$3"
+    [ -z "$start" ] || tomb="$tomb.start-$(printf "%s" "$start" | od -An -v -tx1 | tr -d "[:space:]")"
+    mkdir "$tomb" && ln -s "$owner" "$2/lock.steal" || exit 2
+    fm_lock_try_acquire "$2/lock" && exit 3
+    [ "$FM_LOCK_OUTCOME" = held ] && [ "$FM_LOCK_CAUSE" = reclaim-marker-held ] || exit 4
+    [ -L "$2/lock.steal" ] && [ -d "$tomb" ] && [ "$(cat "$2/lock/pid")" = "$4" ] || exit 5
+    ln -s "$2/elsewhere" "$2/foreign" || exit 6
+    fm_lock_try_acquire "$2/foreign" && exit 7
+    [ "$FM_LOCK_OUTCOME" = refused ] && [ "$FM_LOCK_CAUSE" = lock-path-occupied ] || exit 8
+  ' _ "$LIB" "$state" "$reaper" "$dead" || rc=$?
+  kill "$reaper" 2>/dev/null || true
+  wait "$reaper" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "dangling steal link during a live reap was not held (rc $rc)"
+  pass "dangling protocol steal link mid-reap stays held; foreign dangling link is refused"
+}
+
+# A live downtime-marker holder past the startup bound is positive contention:
+# the watcher reports the typed startup-lock line the arm relays.
+test_stale_watch_reclaim_reports_live_marker_holder() {
+  local dir state fakebin out pid status=0
+  dir=$(make_case stale-lock-marker-held)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir "$state/.watch.lock" "$state/.watcher-down.lock"
+  printf '%s\n' "$(dead_pid)" > "$state/.watch.lock/pid"
+  printf '%s\n' "$$" > "$state/.watcher-down.lock/pid"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCHER_STARTUP_LOCK_BOUND=1 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 100 || status=$?
+  [ "$status" -eq 1 ] || fail "live marker holder must fail watcher startup (exit $status): $(cat "$out")"
+  grep -Fx "watcher: FAILED - startup lock $state/.watcher-down.lock held by live pid $$" "$out" >/dev/null \
+    || fail "live marker holder lacked the typed startup-lock line: $(cat "$out")"
+  [ "$(cat "$state/.watcher-down.lock/pid")" = "$$" ] || fail "live marker holder evidence was removed"
+  pass "live downtime-marker holder reports the typed startup-lock line"
 }
 
 test_typed_watcher_occupied_and_held() {
@@ -3254,6 +3336,9 @@ test_typed_unreadable_is_not_reclaimed
 test_typed_lock_publication_lost
 test_typed_watcher_occupied_and_held
 test_typed_wait_reports_refusal
+test_typed_wait_parent_removal_is_positive
+test_typed_dangling_steal_link_mid_reap_is_held
+test_stale_watch_reclaim_reports_live_marker_holder
 test_typed_lock_refusal
 test_typed_lock_occupied
 test_typed_lock_freshness

@@ -3924,10 +3924,6 @@ fi
 # transient or dead holder keeps the legacy stderr diagnostic.
 startup_lock_failed() {
   local state_devino_now
-  if [ ! -d "$STATE" ]; then
-    echo "watcher: exiting - state directory no longer exists: $STATE" >&2
-    exit 1
-  fi
   if [ ! -e "$WATCH_LOCK/pid" ] && [ -n "$WATCH_STATE_DEVINO" ] \
     && state_devino_now=$(stat_devino "$STATE") && [ -n "$state_devino_now" ] \
     && [ "$state_devino_now" != "$WATCH_STATE_DEVINO" ]; then

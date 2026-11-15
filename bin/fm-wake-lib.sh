@@ -777,6 +777,26 @@ fm_lock_wait_pending_mutation() {
   fi
 }
 
+# Only a non-directory that is not this lock's own protocol link is an invalid
+# shape. A directory, a protocol link (even dangling mid-reclaim) or a name
+# that vanished again is contention that the caller resolves by inspection.
+fm_lock_classify_taken_name() {  # <lockdir>
+  local lockdir=$1 owner lock_abs
+  FM_LOCK_CREATE_VERDICT=contended
+  FM_LOCK_CREATE_CAUSE='holder-pid-unreadable'
+  if [ -L "$lockdir" ]; then
+    [ ! -d "$lockdir" ] || return 0
+    owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    if lock_abs=$(fm_lock_abs_path "$lockdir"); then
+      case "$owner" in "$lock_abs".owner.*) return 0 ;; esac
+    fi
+  elif [ -d "$lockdir" ] || [ ! -e "$lockdir" ]; then
+    return 0
+  fi
+  FM_LOCK_CREATE_VERDICT=name-taken
+  FM_LOCK_CREATE_CAUSE='lock-path-occupied'
+}
+
 # fm_lock_try_create <lockdir> [allowed-steal-owner]
 # Publishes FM_LOCK_CREATE_VERDICT: created, contended, name-taken, refused,
 # or publication-lost; FM_LOCK_CREATE_CAUSE carries the concrete reason.
@@ -814,15 +834,7 @@ fm_lock_try_create() {
     FM_LOCK_PENDING_PID=
   fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
-    if [ -f "$lockdir" ] || [ -p "$lockdir" ] || [ -S "$lockdir" ] \
-      || [ -b "$lockdir" ] || [ -c "$lockdir" ] \
-      || { [ -L "$lockdir" ] && [ ! -d "$lockdir" ]; }; then
-      FM_LOCK_CREATE_VERDICT=name-taken
-      FM_LOCK_CREATE_CAUSE='lock-path-occupied'
-    else
-      FM_LOCK_CREATE_VERDICT=contended
-      FM_LOCK_CREATE_CAUSE='holder-pid-unreadable'
-    fi
+    fm_lock_classify_taken_name "$lockdir"
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -855,8 +867,7 @@ fm_lock_try_create() {
   else
     if ln -s "$ownerdir" "${ownerdir}.probe" 2>/dev/null; then
       rm -f "${ownerdir}.probe" 2>/dev/null || true
-      FM_LOCK_CREATE_VERDICT=name-taken
-      FM_LOCK_CREATE_CAUSE='lock-path-occupied'
+      fm_lock_classify_taken_name "$lockdir"
     else
       FM_LOCK_CREATE_VERDICT=refused
       FM_LOCK_CREATE_CAUSE='create-denied'
@@ -984,12 +995,17 @@ fm_lock_reap_dead_directory() {
   return 1
 }
 
-# Return 0 only when enumeration proves there is no pid entry, 1 when one
-# exists and 2 when the owner cannot be enumerated. A failed existence test
-# cannot distinguish an unsearchable directory from an absent pid.
+# Return 0 only when enumeration proves there is no pid entry, or the owner
+# behind a dangling lock link is positively removed; 1 when one exists and 2
+# when the owner cannot be enumerated. A failed existence test cannot
+# distinguish an unsearchable directory from an absent pid.
 fm_lock_pid_absent() {
-  local entries
-  entries=$(ls -A -- "$1" 2>/dev/null) || return 2
+  local entries owner
+  if ! entries=$(ls -A -- "$1" 2>/dev/null); then
+    [ -L "$1" ] && owner=$(fm_lock_link_owner "$1" 2>/dev/null) \
+      && fm_lock_path_removed "$owner" && return 0
+    return 2
+  fi
   if printf '%s\n' "$entries" | grep -F -x -- pid >/dev/null; then
     return 1
   fi
@@ -1643,23 +1659,9 @@ fm_lock_reap_dead_link() {
 # hold abandoned by this very process (a trap interrupted its critical section)
 # is reclaimed like fm_lock_try_acquire's self-held branch.
 fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
-  local lockdir=$1 current owner lock_abs
+  local lockdir=$1 current
   FM_LOCK_OWNER_DIR=
   fm_lock_try_create "$lockdir" && return 0
-  if [ "$FM_LOCK_CREATE_VERDICT" = name-taken ] && [ -L "$lockdir" ]; then
-    # A reaper can leave a dangling protocol link to its renamed tombstone.
-    # Only this lock's own owner namespace may be recovered this way.
-    owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
-    lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-    case "$owner" in
-      "$lock_abs".owner.*)
-        fm_lock_reap_dead_link "$lockdir" || return 1
-        fm_lock_try_create "$lockdir"
-        return
-        ;;
-      *) return 1 ;;
-    esac
-  fi
   case "$FM_LOCK_CREATE_VERDICT" in refused|name-taken|publication-lost) return 1 ;; esac
   fm_current_pid current || return 1
   fm_lock_reap_dead_link "$lockdir.steal" || true
@@ -1791,11 +1793,17 @@ fm_lock_try_acquire() {
     if [ "$lockdir" = "$STATE/.watch.lock" ] \
       && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
       fm_lock_release "$steal"
+      FM_LOCK_OWNER_DIR=
+      if [ -n "$marker_publish_bound" ] && [ "$FM_LOCK_OUTCOME" = held ]; then
+        # The marker lock was contended inside the caller's bound: surface it
+        # as the blocking lock with the holder pid the marker acquire reported.
+        # shellcheck disable=SC2034 # Read by sourcing callers after try_acquire fails.
+        FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+        return 1
+      fi
       FM_LOCK_OUTCOME=refused
       FM_LOCK_CAUSE='recovery-record-failed'
       FM_LOCK_HELD_PID=
-      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
-      FM_LOCK_OWNER_DIR=
       return 1
     fi
     if ! fm_lock_remove_path "$lockdir" stale && [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
@@ -1807,6 +1815,7 @@ fm_lock_try_acquire() {
     fi
     attempt=$((attempt + 1))
     if fm_lock_try_create "$lockdir" "$steal_owner"; then
+      # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
       FM_LOCK_RECOVERED_PID=$cur
       fm_lock_release "$steal"
       FM_LOCK_OUTCOME=acquired
@@ -1847,13 +1856,35 @@ fm_lock_parent_gone() {  # <lockdir>
     *) parent=. ;;
   esac
   [ -n "$parent" ] || parent=/
-  [ -d "$parent" ] && return 1
+  fm_lock_path_removed "$parent" || return 1
   sleep 0.1
-  [ ! -d "$parent" ]
+  fm_lock_path_removed "$parent"
 }
 
-# Wait until acquired; never return failure to a bare caller. Error branches
-# become active only when that caller adopts a bounded acquisition helper.
+# Removal is proven by a stat of a non-directory or by enumerating the nearest
+# existing ancestor without the entry. An unsearchable or unreadable ancestor
+# never proves removal.
+fm_lock_path_removed() {  # <path>
+  local path=$1 up base entries
+  [ -d "$path" ] && return 1
+  [ -e "$path" ] && return 0
+  [ ! -L "$path" ] || return 1
+  case "$path" in
+    */*) up=${path%/*}; base=${path##*/} ;;
+    *) up=.; base=$path ;;
+  esac
+  [ -n "$up" ] || up=/
+  [ -n "$base" ] || return 1
+  if [ ! -d "$up" ]; then
+    fm_lock_path_removed "$up"
+    return
+  fi
+  entries=$(ls -A -- "$up" 2>/dev/null) || return 1
+  ! printf '%s\n' "$entries" | grep -F -x -- "$base" >/dev/null
+}
+
+# Wait until acquired. The only failure is a lock directory whose parent is
+# positively removed (fm_lock_parent_gone), where no retry can ever succeed.
 fm_lock_acquire_wait() {
   local lockdir=$1 since=-1 last=-1 now report=${FM_LOCK_WAIT_REFUSAL_REPORT_SECS:-10}
   local repeat=${FM_LOCK_WAIT_REFUSAL_REPEAT_SECS:-300}
@@ -1861,6 +1892,7 @@ fm_lock_acquire_wait() {
   case "$repeat" in ''|*[!0-9]*|0) repeat=300 ;; esac
   while ! fm_lock_try_acquire "$lockdir"; do
     if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      ! fm_lock_parent_gone "$lockdir" || return 1
       now=$SECONDS
       [ "$since" -ge 0 ] || since=$now
       if [ "$((now - since))" -ge "$report" ] && { [ "$last" -lt 0 ] || [ "$((now - last))" -ge "$repeat" ]; }; then
