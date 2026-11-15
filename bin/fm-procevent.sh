@@ -1674,13 +1674,13 @@ report_stranded_source() {  # <source-id> <claim-token> <why-and-recovery>
 # same registration would sit in the queue unannounced. The marker records the
 # episode and that nonce together, and the episode alone decides whether to
 # announce.
-report_launch_failure() {  # <source-id> <registration-identity> [extra-payload]
+report_launch_failure() {  # <source-id> <registration-identity>
   local id=$1 identity=$2 episode nonce
   episode=$(failure_episode "$identity")
   nonce="$RANDOM$RANDOM"
   announce_source_once "$(launch_failed_file "$id")" "$episode" \
     "procevent:$id:launch-failed:$episode-$nonce" \
-    "check: process-event source $id is registered but its launch did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS, so nothing is confirmed to be collecting from it; reconcile reports that as failed= and keeps launching it every supervision cycle. If it stays that way, check the source command and the adapter binary the registration names, and run an attached bin/fm-procevent.sh start $id to reproduce a refusal on its stderr - the detached launch discards it, and a hand-run reconcile only counts it as failed=. A later cycle that finds the source owned ends this episode on its own, so a runner that was merely slow to claim needs nothing from you.${3-}" \
+    "check: process-event source $id is registered but its launch did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS, so nothing is confirmed to be collecting from it; reconcile reports that as failed= and keeps launching it every supervision cycle. If it stays that way, check the source command and the adapter binary the registration names, and run an attached bin/fm-procevent.sh start $id to reproduce a refusal on its stderr - the detached launch discards it, and a hand-run reconcile only counts it as failed=. A later cycle that finds the source owned ends this episode on its own, so a runner that was merely slow to claim needs nothing from you." \
     "$episode $nonce"
 }
 
@@ -1760,7 +1760,7 @@ pfw_launch_reason() {
 # Record one failure and send its wake, or hold it back inside the window.
 pfw_failure() {
   local id=$1 kind=$2 identity=$3 reason=$4 text=$5 rec marker episode previous now
-  local would=1 same=0 extra=
+  local would=1 same=0
   rec=$(fm_pfw_record_path "$REG" "$id")
   now=$(date +%s)
   if [ "$kind" = launch ]; then
@@ -1799,9 +1799,8 @@ pfw_failure() {
     [ "$same" -eq 1 ] || { rm -f -- "$marker"; would=1; }
   fi
   [ "$would" -eq 1 ] || return 0
-  [ -z "$text" ] || extra=" The runner reported, before claiming: $text."
   if [ "$kind" = launch ]; then
-    report_launch_failure "$id" "$identity" "$extra" || return 1
+    report_launch_failure "$id" "$identity" || return 1
   else
     report_extension_cleanup_failure "$id" || return 1
   fi
@@ -1967,6 +1966,7 @@ cmd_reconcile() {
           fi
           fm_procevent_source_lock_release "$id"
           if [ "$PFW_ON" -eq 1 ]; then
+            rm -f -- "$(refusal_file "$id")"
             FM_PROCEVENT_RECORD_REFUSAL=1 detach_runner "$id"
           else
             detach_runner "$id"

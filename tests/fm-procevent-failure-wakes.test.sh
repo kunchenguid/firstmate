@@ -128,13 +128,11 @@ flapping_sequence() {  # <home> <source-id>
 }
 
 scenario_off_path_unchanged() {
-  local home="$TMP_ROOT/off" payload
+  local home="$TMP_ROOT/off"
   new_source "$home" off-src
   flapping_sequence "$home" off-src
   # Today's rule: one wake per failure episode, and none on recovery.
   expect_wakes "$home" off-src 2 0 "with no config file the episode rule changed"
-  payload=$(wake_payloads "$home" off-src launch-failed | head -1)
-  assert_not_contains "$payload" "The runner reported" "the off path changed the failure payload"
   assert_absent "$home/state/procevent/.off-src.failure-quiet" "the off path wrote a quiet record"
   assert_absent "$home/state/procevent/.off-src.launch-refusal" "the off path recorded a runner refusal"
   assert_absent "$home/state/procevent/.failure-quiet.log" "the off path wrote the quiet log"
@@ -198,7 +196,7 @@ scenario_repeat_after_window_wakes() {
 }
 
 scenario_different_reason_wakes() {
-  local home="$TMP_ROOT/reason" payload
+  local home="$TMP_ROOT/reason"
   new_source "$home" reason-src -
   damage "$home" reason-src
   reconcile_until_failed_wakes "$home" reason-src 1 || fail "the first failure did not wake"
@@ -208,9 +206,6 @@ scenario_different_reason_wakes() {
   damage_adapter "$home" reason-src
   reconcile_until_failed_wakes "$home" reason-src 2 \
     || fail "a different failure reason for the same source did not wake"
-  payload=$(wake_payloads "$home" reason-src launch-failed | sed -n '2p')
-  assert_contains "$payload" "The runner reported, before claiming: registration names an invalid adapter" \
-    "the second failure wake does not name its reason: $payload"
   repair "$home" reason-src
   pe "$home" retire reason-src >/dev/null 2>&1 || true
 }

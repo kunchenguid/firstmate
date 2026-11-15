@@ -493,7 +493,7 @@ Blank lines, lines that start with `#`, unknown keys, and unusable values are ig
 
 With the file present:
 
-- The first failure of a source wakes exactly as before, and its payload adds the runner's own refusal when the runner left one before claiming.
+- The first failure of a source wakes exactly as before.
 - A later failure of the same source and reason inside the window is counted and logged with no wake, including a new failure episode that would otherwise wake.
 - A failure with a different reason for the same source still wakes at once and opens a new window.
   The reasons are a runner refusal before claiming (each distinct message is its own reason), a launch that did not prove its claim with no refusal recorded, and an extension invocation cleanup refusal.
