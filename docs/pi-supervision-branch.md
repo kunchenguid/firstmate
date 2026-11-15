@@ -486,7 +486,7 @@ Except for the [Firstmate-owned handoff veto](#while-the-record-exists), a co-pr
 Those rows are main-owned while attended.
 They are excluded from what the branch may claim and left queued for main.
 Main is woken for each on its own watcher cycle, so nothing starves by being left behind.
-Under the away-posture record the branch claims them too ("Postures" below).
+[Postures](#while-the-record-exists) owns which co-present rows the branch may claim while away.
 
 Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet.
 That coupling is gone.

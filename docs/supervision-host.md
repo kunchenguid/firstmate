@@ -184,7 +184,7 @@ The host counts the wake handled only when all three hold:
 
 ### Where a handled wake's outcome goes
 
-Away, a handled wake with a routine or captain outcome stays off main.
+Away, a handled wake with only routine and captain outcomes stays off main.
 An unresolved Firstmate-owned decision uses the durable main handoff described in [Pi supervision branch](pi-supervision-branch.md#while-the-record-exists).
 Captain outcomes wait in the outcome store, and after the return the drain's `BRANCH OUTCOMES` section presents them; the return brief (`bin/fm-afk-return.sh`) counts them and points there.
 Attended, see [Captain outcomes](#captain-outcomes).

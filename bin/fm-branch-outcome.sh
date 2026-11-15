@@ -100,7 +100,8 @@
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
 #     Advance the cursor (never backwards) after Pi delivers the records or
-#     the host presents them in its drain.
+#     the host drain presents routine and captain rows and recovers Firstmate
+#     handoffs through recover-handoffs before advancing past them.
 #   fm-branch-outcome.sh unprocessed
 #     Print read but unprocessed captain records as JSONL in ascending seq, up to 32 per call, each with "recordedAgo".
 #     Summaries over 1024 characters are abbreviated within that bound and point to lookup --seqs <n> for the full outcome.
@@ -114,11 +115,12 @@
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
 #     the lock, print every unread record and every unprocessed captain record
 #     (JSONL, ascending seq, each with an added "unread" boolean, and each
-#     captain record also with "recordedAgo"). It moves nothing: off Pi that
-#     drain presentation is what the visible entry is, so the drain runs
-#     mark-read once it has presented the rows; it is the only reader that
-#     advances the cursor there. Prints nothing when nothing is unread or
-#     unprocessed.
+#     captain record also with "recordedAgo"). It moves nothing: off Pi the
+#     drain owns presentation and runs mark-read after the verdict-specific
+#     delivery above. Firstmate rows reach MAIN only through queued checks,
+#     without a second listing in BRANCH OUTCOMES. The drain is the only
+#     reader that advances the cursor there. Prints nothing when nothing is
+#     unread or unprocessed.
 #     "recordedAgo" is how long before this read the row was appended, as
 #     whole minutes under an hour, whole hours under two days, else whole days
 #     (for example "0m", "5h", "6d"; a future epoch reads "0m"). It is the one
