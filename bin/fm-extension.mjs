@@ -2157,7 +2157,8 @@ const LIFECYCLE_LOCK_KNOWN_FILES = ["pid", "role", "fm-home", "pid-identity", "p
 // addressed to this generation, and moving pid into it is the commit point.
 async function retireLifecycleGeneration(lockPath, ownerPath) {
   let pidMissing = false;
-  for (const name of LIFECYCLE_LOCK_KNOWN_FILES) {
+  const temporaryFiles = (await readdir(lockPath)).filter((name) => name.startsWith("pid.tmp."));
+  for (const name of [...LIFECYCLE_LOCK_KNOWN_FILES, ...temporaryFiles]) {
     try {
       await rename(path.join(lockPath, name), path.join(ownerPath, `${name}.retired`));
     } catch (error) {
@@ -2167,7 +2168,9 @@ async function retireLifecycleGeneration(lockPath, ownerPath) {
   }
   if (await maybeLstat(path.join(lockPath, "pid"))) fail("lifecycle-lock-lost", "retirement lifecycle lock owner changed");
   if (pidMissing && !(await maybeLstat(ownerPath))) fail("lifecycle-lock-lost", "retirement lifecycle lock was retired by another process");
-  for (const name of LIFECYCLE_LOCK_KNOWN_FILES) {
+  const remainingTemporaryFiles = (await readdir(lockPath).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error)))
+    .filter((name) => name.startsWith("pid.tmp."));
+  for (const name of [...LIFECYCLE_LOCK_KNOWN_FILES, ...remainingTemporaryFiles]) {
     if (await maybeLstat(path.join(lockPath, name))) fail("lifecycle-lock-invalid", "retirement lifecycle lock could not be retired");
   }
   await rm(ownerPath, { recursive: true, force: true });

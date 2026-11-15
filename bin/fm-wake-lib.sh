@@ -1041,11 +1041,11 @@ _fm_lock_dir_try_create() {  # <lockdir> <staging> <allowed-steal-owner> <probe-
 _fm_lock_retire_generation() {  # <lockdir> <generation>
   local lockdir=$1 generation=$2 file
   perl -e 'my $g = shift; for my $f (@ARGV) { my ($b) = $f =~ m{([^/]+)$}; rename $f, "$g/$b.retired" }' \
-    -- "$generation" "$lockdir/pid" "$lockdir/role" "$lockdir/fm-home" "$lockdir/pid-identity" "$lockdir/pid-start" "$lockdir/watcher-path" \
+    -- "$generation" "$lockdir/pid" "$lockdir/role" "$lockdir/fm-home" "$lockdir/pid-identity" "$lockdir/pid-start" "$lockdir/watcher-path" "$lockdir"/pid.tmp.* \
     2>/dev/null
   [ ! -e "$lockdir/pid" ] || return 1
-  for file in role fm-home pid-identity pid-start watcher-path; do
-    [ ! -e "$lockdir/$file" ] || return 1
+  for file in "$lockdir/role" "$lockdir/fm-home" "$lockdir/pid-identity" "$lockdir/pid-start" "$lockdir/watcher-path" "$lockdir"/pid.tmp.*; do
+    { [ ! -e "$file" ] && [ ! -L "$file" ]; } || return 1
   done
   rm -rf "$generation" 2>/dev/null
   rmdir "$lockdir" 2>/dev/null || true

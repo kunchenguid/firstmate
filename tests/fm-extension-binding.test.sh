@@ -918,7 +918,7 @@ dirlock_node_case n1
 exec 6<> "$H_DIRLOCK/events"
 dirlock_rc=0
 # shellcheck disable=SC2016 # Expanded by the acquiring shell.
-dirlock_out=$(dirlock_node_host "$H_DIRLOCK" "" 'printf "%s\n" 12345 > "$2/pid-start"' 2>&1) || dirlock_rc=$?
+dirlock_out=$(dirlock_node_host "$H_DIRLOCK" "" 'printf "%s\n" 12345 > "$2/pid-start"; printf "%s\n" "$$" > "$2/pid.tmp.$$"' 2>&1) || dirlock_rc=$?
 dirlock_node_expect "host locked pid=" "N1: shell did not acquire a directory lifecycle lock"
 [ "$dirlock_rc" -eq 1 ] && [ "$dirlock_out" = "error[lifecycle-lock-invalid]: extension lifecycle binding command is invalid" ] \
   || fail "N1: host did not admit the inherited lock and run its command: rc=$dirlock_rc $dirlock_out"
@@ -933,7 +933,8 @@ for dirlock_spec in retire:pre retire:post discard:partial; do
   dirlock_node_case "n-${dirlock_spec%%:*}-${dirlock_spec##*:}"
   exec 6<> "$H_DIRLOCK/events"
   dirlock_rc=0
-  dirlock_node_host "$H_DIRLOCK" "$dirlock_spec:kill:$DIRLOCK_NODE_LOCK" > /dev/null 2>&1 || dirlock_rc=$?
+  # shellcheck disable=SC2016
+  dirlock_node_host "$H_DIRLOCK" "$dirlock_spec:kill:$DIRLOCK_NODE_LOCK" 'printf "%s\n" "$$" > "$2/pid.tmp.$$"' > /dev/null 2>&1 || dirlock_rc=$?
   dirlock_node_expect "host locked pid=" "N2/N3: shell did not acquire a directory lifecycle lock"
   dirlock_host_pid=${DIRLOCK_NODE_EVENT##*pid=}
   dirlock_node_expect "host $dirlock_spec:$DIRLOCK_NODE_LOCK pid=$dirlock_host_pid" \

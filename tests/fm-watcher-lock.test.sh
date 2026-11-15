@@ -1963,6 +1963,35 @@ test_dirlock_d7b_bounded_helper_killed_by_deadline() {
   pass "D7': a bounded helper killed by its deadline after acquiring leaves the caller holding"
 }
 
+test_dirlock_interrupted_handoff_temporary_is_reclaimed() {
+  local dir lock helper rc out
+  dir=$(dirlock_case dirlock-handoff-temporary)
+  lock="$dir/state/.d.lock"
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\ncase "$2" in */pid.tmp.*) kill -KILL "$PPID"; exit 1 ;; esac\nexec %q "$@"\n' \
+    "$(command -v mv)" > "$dir/fakebin/mv"
+  chmod +x "$dir/fakebin/mv"
+  dirlock_open "$dir" a
+  # shellcheck disable=SC2016
+  dirlock_spawn "$dir" a "" '_fm_lock_acquire_wait_handoff "$1" "$2"' "$lock" "$$" &
+  helper=$!
+  rc=0
+  wait "$helper" 2>/dev/null || rc=$?
+  [ "$rc" -eq 137 ] || fail "handoff helper was not killed before rename: $rc"
+  [ -f "$lock/pid.tmp.$helper" ] || fail "interrupted handoff left no temporary file"
+  [ "$(cat "$lock/pid")" = "$helper" ] || fail "handoff changed pid before interruption"
+  # shellcheck disable=SC2016
+  out=$(PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$0"
+    fm_lock_try_acquire "$1" || exit 1
+    printf "recovered=%s\n" "$FM_LOCK_RECOVERED_PID"
+    fm_lock_release "$1"' "$LIB" "$lock") || fail "interrupted handoff was not reclaimable"
+  [ "$out" = "recovered=$helper" ] || fail "recovery lost interrupted helper identity: $out"
+  dirlock_close
+  dirlock_assert_clean "$dir" "interrupted handoff left residue"
+  pass "interrupted directory handoff retires its temporary file and permits reacquisition"
+}
+
 test_dirlock_d8_dead_steal_mutex_observers_compose() {
   local dir lock first second
   dir=$(dirlock_case dirlock-d8)
@@ -4074,6 +4103,7 @@ test_dirlock_d5b_stealer_retires_only_captured_generation
 test_dirlock_d5c_acquirer_retires_captured_generation
 test_dirlock_d6_late_publication_is_ordinary_recovery
 test_dirlock_d7b_bounded_helper_killed_by_deadline
+test_dirlock_interrupted_handoff_temporary_is_reclaimed
 test_dirlock_d8_dead_steal_mutex_observers_compose
 test_dirlock_d8b_reaper_retires_captured_generation
 test_dirlock_d9_uncommitted_retirement_keeps_record
