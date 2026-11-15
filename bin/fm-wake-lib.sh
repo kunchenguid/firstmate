@@ -1051,21 +1051,24 @@ _fm_lock_retire_generation() {  # <lockdir> <generation>
   rmdir "$lockdir" 2>/dev/null || return 2
 }
 
+_fm_lock_dir_identity() {
+  [ ! -L "$1" ] && [ -d "$1" ] || return 1
+  if [ "$_FM_UNAME" = Darwin ]; then
+    /usr/bin/stat -f '%d:%i' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
 # Remove a directory record. A caller that captured the owner and pid before
 # deciding passes both, so a successor published since is never reclassified:
 # a captured pid-less husk is removed only by rmdir, which fails on any
 # successor (regression: test_dirlock_d4c_orphan_husk_cleanup_preserves_successor
 # in tests/fm-watcher-lock.test.sh).
-_fm_lock_dir_remove_path() {  # <lockdir> [<captured-owner> <captured-pid>]
-  local lockdir=$1 ownerdir=${2:-} pid=${3:-} directory_identity rc
-  local -a identity_stat
-  if [ "$_FM_UNAME" = Darwin ]; then
-    identity_stat=(/usr/bin/stat -f '%d:%i')
-  else
-    identity_stat=(stat -c '%d:%i')
-  fi
-  directory_identity=$("${identity_stat[@]}" "$lockdir" 2>/dev/null) || return 1
+_fm_lock_dir_remove_path() {
+  local lockdir=$1 ownerdir=${2:-} pid=${3:-} directory_identity=${4:-} rc
   if [ -z "$ownerdir" ]; then
+    directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
     ownerdir=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 1
     pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fi
@@ -1082,8 +1085,8 @@ _fm_lock_dir_remove_path() {  # <lockdir> [<captured-owner> <captured-pid>]
     fi
     rmdir "$lockdir" 2>/dev/null && return 0
   fi
-  if [ ! -L "$lockdir" ] && [ -d "$lockdir" ] \
-    && [ "$directory_identity" = "$("${identity_stat[@]}" "$lockdir" 2>/dev/null)" ]; then
+  if [ -n "$directory_identity" ] \
+    && [ "$directory_identity" = "$(_fm_lock_dir_identity "$lockdir")" ]; then
     FM_LOCK_RECLAIM_FAILED_PATH=$lockdir
   fi
   return 1
@@ -1106,26 +1109,28 @@ _fm_lock_dir_pidless_is_fresh() {  # <lockdir>
 # successor. Raw records with a pid stay with fm_lock_try_acquire's steal path;
 # an empty directory is reaped only after the bounded grace.
 _fm_lock_dir_reap() {  # <lockdir>
-  local lockdir=$1 owner pid
+  local lockdir=$1 owner pid directory_identity
+  directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
   owner=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 1
   if [ "$owner" != "$lockdir" ]; then
     pid=$(cat "$lockdir/pid" 2>/dev/null || true)
     fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
-    _fm_lock_dir_remove_path "$lockdir" "$owner" "$pid"
+    _fm_lock_dir_remove_path "$lockdir" "$owner" "$pid" "$directory_identity"
     return
   fi
   if [ -e "$lockdir/pid" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
     return 1
   fi
-  _fm_lock_dir_remove_path "$lockdir" "$lockdir" ""
+  _fm_lock_dir_remove_path "$lockdir" "$lockdir" "" "$directory_identity"
 }
 
 _fm_lock_dir_release() {  # <lockdir> <current-pid>
-  local lockdir=$1 current=$2 ownerdir pid
+  local lockdir=$1 current=$2 ownerdir pid directory_identity
+  directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
   ownerdir=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  _fm_lock_dir_remove_path "$lockdir" "$ownerdir" "$pid" || true
+  _fm_lock_dir_remove_path "$lockdir" "$ownerdir" "$pid" "$directory_identity" || true
 }
 
 # fm_lock_try_acquire's steal-mutex-held recovery for a directory record. The
@@ -1133,7 +1138,8 @@ _fm_lock_dir_release() {  # <lockdir> <current-pid>
 # addressed to them; a lock that vanished since has no owner to retire, and a
 # present record whose owner cannot be read is refused.
 _fm_lock_dir_steal() {  # <lockdir> <steal> <steal-owner>
-  local lockdir=$1 steal=$2 steal_owner=$3 marker_publish_bound=${4:-} owner='' cur recovered readable=true
+  local lockdir=$1 steal=$2 steal_owner=$3 marker_publish_bound=${4:-} owner='' cur recovered readable=true directory_identity
+  directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
   if { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
     && ! owner=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null); then
     readable=false
@@ -1161,7 +1167,7 @@ _fm_lock_dir_steal() {  # <lockdir> <steal> <steal-owner>
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  [ -z "$owner" ] || _fm_lock_dir_remove_path "$lockdir" "$owner" "$cur" || true
+  [ -z "$owner" ] || _fm_lock_dir_remove_path "$lockdir" "$owner" "$cur" "$directory_identity" || true
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$recovered

@@ -1591,6 +1591,7 @@ test_dirlock_d4c_orphan_husk_cleanup_preserves_successor() {
             printf "%s cleanup:pre:%s pid=%s caller=%s\n" "$FM_TEST_SUBJECT" "$1" "$$" "$PPID" >> "$FM_TEST_EVENTS"
             IFS= read -r _ < "$FM_TEST_RESUME"
             rc=0; _fm_lock_dir_remove_path "$@" || rc=$?
+            printf "%s" "${FM_LOCK_RECLAIM_FAILED_PATH:-}" > "$FM_TEST_BARRIER_DIR/diagnostic"
             printf "%s done rc=%s\n" "$FM_TEST_SUBJECT" "$rc" >> "$FM_TEST_EVENTS"
             exit "$rc"
           '\'' "$0" "$@" || rc=$?
@@ -1617,6 +1618,11 @@ test_dirlock_d4c_orphan_husk_cleanup_preserves_successor() {
     printf 'go\n' >&8
     dirlock_expect "b done rc=" "D4c: orphan cleanup did not resume"
     rc=${DIRLOCK_EVENT##*=}
+    case "$mode" in *-boundary)
+      [ -f "$dir/barrier.b/diagnostic" ] && [ ! -s "$dir/barrier.b/diagnostic" ] \
+        || fail "D4c: replaced husk was reported as unreapable"
+      ;;
+    esac
     pid=$(cat "$lock/pid" 2>/dev/null || true)
     private_pid=$(cat "$generation/pid" 2>/dev/null || true)
     after=$(dirlock_tree "$dir")
@@ -1629,6 +1635,53 @@ test_dirlock_d4c_orphan_husk_cleanup_preserves_successor() {
     dirlock_assert_clean "$dir" "D4c: successor release residue"
   done
   pass "D4c: orphaned husk cleanup cannot unlink a live successor's pid or generation"
+}
+
+test_dirlock_replaced_husk_wait_keeps_retrying() {
+  local dir lock waiter successor generation
+  dir=$(dirlock_case dirlock-husk-wait-retry)
+  lock="$dir/state/.d.lock"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$0"; fm_lock_try_create "$1"' "$LIB" "$lock" || fail "could not seed dead lock"
+  mkdir "$lock.steal"
+  touch -t 200001010000 "$lock.steal"
+  dirlock_open "$dir" b c
+  # shellcheck disable=SC2016
+  dirlock_spawn "$dir" b "" "$DIRLOCK_PAUSE_REMOVE"'
+    attempts=0
+    original=$(declare -f fm_lock_try_acquire)
+    eval "${original/fm_lock_try_acquire/_fm_original_try_acquire}"
+    fm_lock_try_acquire() {
+      local rc=0
+      _fm_original_try_acquire "$@" || rc=$?
+      attempts=$((attempts + 1))
+      [ -z "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ] || exit 91
+      if [ "$attempts" -eq 2 ]; then
+        printf "b retried\n" >> "$FM_TEST_EVENTS"
+      fi
+      return "$rc"
+    }
+    fm_lock_acquire_wait "$2" --refuse-unreapable || exit 92
+    fm_lock_release "$2"
+    printf "b acquired\n" >> "$FM_TEST_EVENTS"
+  ' "$lock.steal" "$lock" &
+  waiter=$!
+  dirlock_expect "b remove:pre:$lock.steal" "waiter did not classify the husk"
+  dirlock_spawn "$dir" c "" "$DIRLOCK_HOLD" "$lock.steal" "$dir/c.id" &
+  successor=$!
+  dirlock_expect "c held pid=$successor" "successor did not acquire the mutex"
+  generation=$(dirlock_generation "$lock.steal")
+  printf 'go\n' >&7
+  dirlock_expect "b retried" "opt-in wait refused the live successor instead of retrying"
+  [ "$(cat "$lock.steal/pid")" = "$successor" ] && [ -f "$generation/pid" ] \
+    || fail "waiter changed the live successor"
+  printf 'go\n' >&8
+  wait "$successor" || fail "successor did not release"
+  dirlock_expect "b acquired" "waiter did not acquire after successor release"
+  wait "$waiter" || fail "opt-in waiter failed"
+  dirlock_close
+  dirlock_assert_clean "$dir" "opt-in waiter residue"
+  pass "opt-in directory wait retries a replaced husk and acquires after successor release"
 }
 
 # D1b: a claim that fails after publication leaves its generation to
@@ -4141,6 +4194,7 @@ test_dirlock_d1b_failed_claim_leaves_generation_to_retirement
 test_dirlock_d4_crashed_release_is_finished
 test_dirlock_d4b_handoff_release_recovers_caller
 test_dirlock_d4c_orphan_husk_cleanup_preserves_successor
+test_dirlock_replaced_husk_wait_keeps_retrying
 test_dirlock_d5_orphan_retirement_cannot_touch_successor
 test_dirlock_d5b_stealer_retires_only_captured_generation
 test_dirlock_d5c_acquirer_retires_captured_generation
