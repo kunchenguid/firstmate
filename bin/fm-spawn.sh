@@ -1343,11 +1343,67 @@ else
   fi
 fi
 
+# spawn_arm_start_check: publish (or, when disabled, remove) the watcher's
+# one-shot start-check record STATE/<id>.start-pending under the task's meta
+# lock, so the watcher never judges a half-replaced record. bin/fm-watch.sh's
+# start_check_tick owns the `<epoch> <busy-gen or -> <harness>` format. The
+# epoch is the launch boundary every launch path takes before delivery
+# (fm_start_check_launch_epoch); arming without one, or failing to write the
+# record, returns nonzero with an error, so a launch is never reported as
+# checked when no check was armed. The worker itself is already running then.
+# The check is opt-in: without the home-local config/spawn-start-check flag
+# nothing is armed, locked, or pruned, except that a record left from when the
+# flag was present is removed so the watcher never judges a replaced launch.
+# FM_SPAWN_NO_START_CHECK=1 disables arming for a spawn whose watcher lives in
+# another home (bin/fm-remote-secondmate-control.sh sets it).
+# The remote path is called while holding STATE/.spawn-<id>.lock, which the only
+# other writer (bin/fm-remote-secondmate-relaunch.sh) takes first, so the
+# writers stay serialized. Retirement (bin/fm-teardown.sh) can hold the meta lock
+# while it waits for that spawn lock, so the remote path waits only briefly for
+# the meta lock and then publishes by atomic rename instead of deadlocking.
+spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [wait|remote]
+  local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock locked=1 rc=0
+
+  record="$STATE/$id.start-pending"
+  if [ ! -e "$CONFIG/spawn-start-check" ]; then
+    fm_start_check_armed "$STATE" "$id" || return 0
+    enabled=0
+  fi
+  [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0
+  if [ "$enabled" -eq 1 ] && [ -z "$epoch" ]; then
+    echo "error: $id launched, but no launch boundary was taken before delivery, so its start check was not armed; inspect the worker yourself in about two minutes" >&2
+    return 1
+  fi
+  lock=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
+  if [ "$how" = remote ]; then
+    fm_lock_acquire_wait_max "$lock" 3 || locked=0
+  else
+    fm_lock_acquire_wait "$lock"
+  fi
+  # A start wake an earlier launch already queued names the launch this one
+  # replaced; drop only that row, under the lock the watcher holds to queue one.
+  fm_wake_queue_prune_task "$STATE" "$id" "" start 2>/dev/null || true
+  if [ "$enabled" -eq 1 ]; then
+    if ! { printf '%s %s %s\n' "$epoch" "$gen" "$harness" >"$record.tmp.$$" \
+      && mv -f "$record.tmp.$$" "$record"; }; then
+      rm -f "$record.tmp.$$"
+      echo "error: $id launched, but its start check could not be armed ($record could not be written); inspect the worker yourself in about two minutes" >&2
+      rc=1
+    fi
+  else
+    fm_start_check_clear "$STATE" "$id" || rc=1
+  fi
+  [ "$locked" -eq 0 ] || fm_lock_release "$lock"
+  return "$rc"
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local start_check_armed
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
+  local remote_start_epoch remote_busy_gen remote_replies_offset remote_replies_cursor
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1551,6 +1607,8 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  remote_start_epoch=$(fm_start_check_launch_epoch "$STATE" "$id")
+  remote_replies_cursor=$(fm_start_check_reply_cursor "$STATE" "$id")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1570,6 +1628,10 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_busy_gen=$(printf '%s\n' "$out" | sed -n 's/^busy_gen=//p' | tail -1)
+  case "$remote_busy_gen" in *[!A-Za-z0-9._-]*) remote_busy_gen= ;; esac
+  remote_replies_offset=$(printf '%s\n' "$out" | sed -n 's/^replies_offset=//p' | tail -1)
+  case "$remote_replies_offset" in *[!0-9]*) remote_replies_offset= ;; esac
   if [ "$remote_backend" != "$backend" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -1654,6 +1716,9 @@ spawn_remote_secondmate() {
     esac
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
+    [ -z "$remote_busy_gen" ] || echo "remote_busy_gen=$remote_busy_gen"
+    [ -z "$remote_replies_offset" ] || echo "remote_replies_offset=$remote_replies_offset"
+    echo "remote_replies_cursor=$remote_replies_cursor"
   } >"$tmp"
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
@@ -1672,12 +1737,25 @@ spawn_remote_secondmate() {
   fi
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
+  # The remote host runs no watcher over this mate's route, so the start check
+  # is armed here, where this home's watcher scans; it reads the proof back
+  # through the route (bin/fm-watch.sh start_check_tick). The record carries the
+  # remote launch's busy generation, recorded above as remote_busy_gen. Kimi
+  # already proved its start in its own remote spawn gate.
+  # A failed arm still releases the lock and arms the reply source below; the
+  # spawn then fails, because the launch is running without its start check.
+  start_check_armed=1
+  case "$harness" in
+  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" "${remote_busy_gen:--}" "$harness" remote || start_check_armed=0 ;;
+  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" "${remote_busy_gen:--}" "$harness" remote || start_check_armed=0 ;;
+  esac
   fm_lock_release "$SPAWN_TASK_LOCK" || true
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
+  [ "$start_check_armed" = 1 ] || return 1
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
@@ -7326,7 +7404,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen replies_offset spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7371,6 +7449,17 @@ preserve_relaunch_meta() {
   [ -z "$OMP_PROFILE_PIN" ] || echo "omp_profile=$OMP_PROFILE_PIN"
   [ "$HARNESS" != hermes ] || { echo "hermes_profile=$HERMES_PROFILE"; echo "hermes_home=$HERMES_PROFILE_HOME"; }
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
+  # A secondmate whose start check lives in a remote parent
+  # (bin/fm-remote-secondmate-control.sh) records its parent reply log's size
+  # here, before this agent launches and after any previous one has exited, so
+  # the parent counts only replies past it as this launch's start proof.
+  if [ "$KIND" = secondmate ] && [ "${FM_SPAWN_NO_START_CHECK:-0}" = 1 ]; then
+    if [ -f "$WT/state/parent-replies.status" ]; then
+      echo "replies_offset=$(wc -c < "$WT/state/parent-replies.status" | tr -d ' ')"
+    else
+      echo "replies_offset=0"
+    fi
+  fi
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -8080,6 +8169,7 @@ else
       sleep 0.2
     done
   }
+  START_CHECK_EPOCH=$(fm_start_check_launch_epoch "$STATE" "$ID")
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.
@@ -8303,6 +8393,21 @@ if [ "$T3CODE_LAUNCH_UNCONFIRMED" = 1 ]; then
   echo "error: the launch brief for $ID may already have been delivered to T3 thread $T: its outcome is unproven (a lost reply or a T3 error that can follow a commit). The task record is kept; inspect the thread in T3 Code, and if the brief is absent resend only the identical brief text, which reuses its request id within the hour" >&2
   exit 1
 fi
+
+# Arm the watcher's one-shot start check (bin/fm-watch.sh start_check_tick
+# owns the record format and the wake) for every launch that reaches here
+# without proof the brief started. kimi, rovo, OpenCode 2, agy, and polytoken
+# already proved it in their own post-launch gates above, a T3 Code launch
+# carries its own unconfirmed-delivery path, and a raw launch command carries
+# no adapter wiring that could ever post the proof. A relaunch rewrites the
+# record with the replacement's generation, or removes an earlier one.
+case "$HARNESS" in
+kimi* | rovo* | agy | polytoken) START_CHECK=0 ;;
+opencode) START_CHECK=1; [ "$OPENCODE_MAJOR" -lt 2 ] || START_CHECK=0 ;;
+*) START_CHECK=1 ;;
+esac
+[ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] || START_CHECK=0
+spawn_arm_start_check "$ID" "$START_CHECK" "${START_CHECK_EPOCH:-}" "${BUSY_GEN:--}" "$HARNESS" || exit 1
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

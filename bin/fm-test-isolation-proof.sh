@@ -189,6 +189,7 @@ tests/fm-send-popup-settle.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
+tests/fm-start-check.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-t3-mcp.test.sh
 tests/fm-test-run.test.sh

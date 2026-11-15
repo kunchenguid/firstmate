@@ -135,6 +135,8 @@ EOF
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
+# The parent opts into the spawn start check this suite exercises.
+touch "$PARENT/config/spawn-start-check"
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash
@@ -896,8 +898,18 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+# A start wake an earlier launch of ios left queued names a launch this spawn
+# replaces; publishing the new check drops that row.
+FM_STATE_OVERRIDE="$PARENT/state" bash -c '. "$0/bin/fm-wake-lib.sh"
+  fm_wake_append check start:ios "check: start ios: no start signal 120s after spawn (harness=codex)"' "$ROOT" \
+  || fail "fixture: could not queue the earlier launch's start wake"
+# The agent replies the moment it starts, before the launch returns.
+printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios fast launch reply' \
+  > "$HERDR_STATE.launch-reply"
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
+[ "$(awk -F '\t' '$3 == "check" && $4 == "start:ios"' "$PARENT/state/.wake-queue" | wc -l | tr -d ' ')" = 0 ] \
+  || fail "remote spawn kept an earlier launch's queued start wake: $(cat "$PARENT/state/.wake-queue")"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
@@ -914,6 +926,36 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 # without the rendered-output fallback a tmux endpoint needs.
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
+# The spawn start check is armed where this home's watcher scans, never in the
+# host's route state. A busy generation is recorded when the host provides one.
+ios_remote_gen=$(sed -n 's/^busy_gen=//p' "$REMOTE_HOME/state/parent-route/ios.meta")
+if [ -n "$ios_remote_gen" ]; then
+  assert_grep "remote_busy_gen=$ios_remote_gen" "$PARENT/state/ios.meta" \
+    "parent metadata did not record the remote launch's busy generation"
+  expected_gen=$ios_remote_gen
+else
+  expected_gen=-
+fi
+[ "$(cut -d' ' -f2- "$PARENT/state/ios.start-pending")" = "$expected_gen codex" ] \
+  || fail "remote spawn did not arm the parent's start check: $(cat "$PARENT/state/ios.start-pending" 2>&1)"
+assert_absent "$REMOTE_HOME/state/parent-route/ios.start-pending" "the remote host armed its own start check"
+# Only replies past the host's reply-log size before this launch prove the
+# start, so the reply the agent wrote as it started lies past the recorded offset.
+assert_replies_offset_precedes() { # <parent-meta> <reply-line> <context>
+  local offset
+  offset=$(sed -n 's/^remote_replies_offset=//p' "$1" | tail -1)
+  case "$offset" in ''|*[!0-9]*) fail "$3: parent metadata did not record the host's reply-log offset" ;; esac
+  [ "$(tail -c +"$((offset + 1))" "$REMOTE_HOME/state/parent-replies.status")" = "$2" ] \
+    || fail "$3: the recorded reply-log offset $offset does not end just before the replacement's first reply: $(cat "$REMOTE_HOME/state/parent-replies.status")"
+}
+assert_absent "$HERDR_STATE.launch-reply" "the fake agent launch did not write its fast reply"
+assert_replies_offset_precedes "$PARENT/state/ios.meta" 'note: ios fast launch reply' "remote spawn"
+# The start check reads the host's own busy record through observe's
+# start-proof mode; codex seeds no busy generation, so none is reported.
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios --start-proof)" = "idle
+verdict=unknown codex-unverified
+event=
+busy_gen=$ios_remote_gen" ] || fail "observe --start-proof did not report the host's busy record through the route"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
@@ -1330,6 +1372,10 @@ jq --arg p "$ios_pane" \
   || fail "the agent-free remote pane did not classify dead"
 
 tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+# The replacement replies as it starts; the previous worker's replies already in
+# the log must stay below the boundary this relaunch records.
+printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios replacement fast reply' \
+  > "$HERDR_STATE.launch-reply"
 # The watcher bounds this relaunch itself: its guarded spawn runs under
 # FM_SECONDMATE_LIVENESS_TIMEOUT, and either outcome wakes and exits the
 # watcher. The leg waits for that same bound plus probe headroom on the wall
@@ -1374,12 +1420,39 @@ assert_grep '- ios ' "$PARENT/data/secondmates.md" \
   "the watcher relaunch changed the registry route"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the auto-relaunched remote endpoint did not read alive"
+assert_absent "$HERDR_STATE.launch-reply" "the relaunched fake agent did not write its fast reply"
+assert_replies_offset_precedes "$WATCH_STATE/ios.meta" 'note: ios replacement fast reply' "watcher relaunch"
 # Production relaunch updates the parent route meta and inheritance generation
 # in place; the dedicated watch state above kept the rest of this suite's
 # parent state out of scope, so fold both records back now.
 cp "$WATCH_STATE/ios.meta" "$PARENT/state/ios.meta"
 cp "$WATCH_STATE/.remote-inherit-ios.generation" "$PARENT/state/" 2>/dev/null || true
 pass "watch liveness: a dead remote secondmate is auto-relaunched on its own host with one wake"
+
+# --- an operator remote relaunch records a fresh reply boundary --------------
+# bin/fm-remote-secondmate-relaunch.sh republishes the parent's reply boundary
+# from the host's route report, which the host-local relaunch (bin/fm-control.sh
+# relaunch -> bin/fm-spawn.sh --relaunch) re-samples before the replacement
+# launches. A reply the previous worker wrote just before the relaunch, which
+# the parent's mirror may read only afterwards, must stay below that boundary,
+# so it can never count as the replacement's start proof. The previous worker
+# replies and then exits, the endpoint an operator relaunch replaces.
+printf 'note: ios previous worker late reply\n' >> "$REMOTE_HOME/state/parent-replies.status"
+ios_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
+[ -n "$ios_pane" ] || fail "the remote route meta did not record its Herdr pane"
+jq --arg p "$ios_pane" \
+  '.typed |= with_entries(select(.key != $p)) | .working |= with_entries(select(.key != $p))' \
+  "$HERDR_STATE" > "$TMP_ROOT/herdr-dead.json" && mv "$TMP_ROOT/herdr-dead.json" "$HERDR_STATE"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
+  || fail "the exited previous worker's pane did not classify dead"
+printf '%s\n%s\n' "$REMOTE_HOME/state/parent-replies.status" 'note: ios operator relaunch fast reply' \
+  > "$HERDR_STATE.launch-reply"
+OPERATOR_RELAUNCH=$(remote_env "$ROOT/bin/fm-remote-secondmate-relaunch.sh" ios codex - - 2>&1) \
+  || fail "the operator remote relaunch failed: $OPERATOR_RELAUNCH"
+assert_absent "$HERDR_STATE.launch-reply" "the operator-relaunched fake agent did not write its fast reply"
+assert_replies_offset_precedes "$PARENT/state/ios.meta" 'note: ios operator relaunch fast reply' \
+  "operator remote relaunch"
+pass "an operator remote relaunch keeps the previous worker's replies below the replacement's reply boundary"
 
 # Host loss mid-supervision is never evidence of death: the same tick on an
 # unreachable route probes, preserves, and stays silent.
@@ -1839,6 +1912,12 @@ if ! wait "$spawn_retirement_pid"; then
   printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
   fail "serialized remote respawn failed"
 fi
+assert_present "$PARENT/state/ios.start-pending" \
+  "remote respawn dropped its start check while retirement held the task lock"
+grep -Eq '^[0-9]+ (-|g[0-9]+[.][^ ]+) codex$' "$PARENT/state/ios.start-pending" || \
+  fail "remote respawn published a malformed start check while retirement held the task lock"
+assert_present "$PARENT/state/.meta-ios.lock" \
+  "remote respawn released the task meta lock before retirement finished"
 # Pin the archive fixture generation only after the respawn has finished
 # publishing metadata, so the exporter sees exactly one spawn_gen.
 awk -F= '$1 != "spawn_gen"' "$PARENT/state/ios.meta" > "$TMP_ROOT/remote-meta.tmp"

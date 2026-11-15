@@ -15,7 +15,8 @@ Let the control plane verify postconditions.
 Inspect after spawn within the tool's readiness window.
 Select only its documented trust choice from the active Firstmate home, binding `FM_HOME` unless already correct, then inspect again under the router-owned completion postcondition.
 No observed dialog proves only that launch.
-
+Accepting a folder-trust dialog for your own worker with the tool's documented choice is the supervisor's call under these rules and needs no captain word.
+For the watcher start-check timing and remote-route behavior, see [architecture](../../../../../docs/architecture.md#event-driven-supervision).
 Each supported harness handles its folder-trust gate differently, and the tool reference owns the detail.
 For Claude, load `references/harness/claude.md`; its workspace-trust section owns the non-key-answerable gate and spawn-time pre-registration for every spawn kind.
 agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.

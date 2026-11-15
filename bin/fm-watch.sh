@@ -127,6 +127,22 @@
 #                          opt-in config/open-decision-reminders record-age
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
+#   check: start <id>: no start signal <n>s after spawn (harness=<h>[; <cause>]); <command>
+#                          opt-in config/spawn-start-check: a launch
+#                          fm-spawn.sh could not prove started still has
+#                          no start proof FM_START_CHECK_SECS (default 120) after
+#                          spawn, judged on the next poll, so the wake lands
+#                          within about FM_START_CHECK_SECS plus one FM_POLL for
+#                          local workers; remote secondmates add proof- and
+#                          cause-read route round trips, each capped at
+#                          FM_START_CHECK_ROUTE_SECS (proof reads share one
+#                          budget per poll; the wake's cause reads get one
+#                          more). <n> is the real elapsed time: one wake per launch,
+#                          including remote secondmates, naming an exited agent,
+#                          a vanished endpoint, a recognized launch dialog, or an
+#                          unsubmitted brief, and the command that clears it; the
+#                          stale path stays quiet for that pane meanwhile
+#                          (start_check_tick)
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -3014,6 +3030,368 @@ EOF
   fi
 }
 
+# One-shot start check. In a home with config/spawn-start-check, bin/fm-spawn.sh
+# writes STATE/<id>.start-pending as `<spawn-epoch> <busy-gen or -> <harness>`
+# for every launch it could not prove started (its header names the exempt
+# harnesses); without the flag nothing is armed and this tick finds no record. Each poll this tick reads
+# only those records, so a quiet fleet pays one glob. A record is removed
+# silently when its task record is gone or belongs to another busy generation,
+# or as soon as start_check_started finds a start proof. A record still without
+# proof START_CHECK_SECS after spawn queues exactly one `check: start` wake that
+# names what is on screen and the command that clears it, and is removed only
+# after that append succeeded, so a crash in between can repeat the wake once
+# but never lose it. Nothing here presses a key: the supervisor accepts a
+# folder-trust dialog for its own worker under the harness-adapters trust
+# rules. Remote proofs wait until the deadline, remote proof reads share one
+# START_CHECK_ROUTE_SECS wall-clock budget per poll, the one wake a poll may
+# queue gets a second budget to read its cause, and at most one wake is queued.
+START_CHECK_SECS=${FM_START_CHECK_SECS:-120}
+case "$START_CHECK_SECS" in ''|0*|*[!0-9]*) START_CHECK_SECS=120 ;; esac
+START_CHECK_ROUTE_SECS=${FM_START_CHECK_ROUTE_SECS:-20}
+case "$START_CHECK_ROUTE_SECS" in ''|0*|*[!0-9]*) START_CHECK_ROUTE_SECS=20 ;; esac
+START_CHECK_WAKE=
+
+# A remote secondmate's endpoint and busy record live on its host, so its start
+# check reads them through the recorded route (bin/fm-on.sh and the host's
+# bin/fm-remote-secondmate-control.sh verbs), as the secondmate liveness tick
+# does. watcher_waited keeps shutdown interruptible; fm_run_timed bounds each
+# route call. An unreachable host returns nonzero and is neither proof nor death.
+# 0 when <id> wrote a status line or completed a turn at or after <epoch>. A
+# remote secondmate's status reaches this home only through its reply mirror,
+# which can append a line the previous worker wrote long after a relaunch, so
+# for it only reply bytes past the host's log offset at this launch
+# (remote_replies_offset) count: the mirror's cursor
+# (bin/fm-procevent-remote-reply.sh) must have read beyond it, and must have
+# moved since the launch (remote_replies_cursor), since a cursor committed
+# against a host log truncated before a relaunch can already lie past it.
+start_check_local_proof() {  # <id> <epoch> <meta>
+  local f m boundary launch_cursor cursor
+  if [ -n "$(fm_meta_get "$3" remote_host)" ]; then
+    boundary=$(fm_meta_get "$3" remote_replies_offset)
+    launch_cursor=$(fm_meta_get "$3" remote_replies_cursor)
+    cursor=$(fm_start_check_reply_cursor "$STATE" "$1")
+    case "$boundary" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$launch_cursor" ] && [ "$cursor" != "$launch_cursor" ] || return 1
+    cursor=${cursor%%:*}
+    case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$cursor" -gt "$boundary" ]
+    return
+  fi
+  for f in "$STATE/$1.status" "$STATE/$1.turn-ended"; do
+    m=$(stat_mtime "$f") || continue
+    [ "$m" -ge "$2" ] && return 0
+  done
+  return 1
+}
+
+# 0 while the current start_check_tick still has route time left; outside a
+# tick there is no shared budget.
+start_check_route_budget_left() {
+  [ -z "${START_CHECK_TICK_STARTED:-}" ] \
+    || [ "$((START_CHECK_TICK_STARTED + START_CHECK_ROUTE_SECS - $(date +%s)))" -gt 0 ]
+}
+
+start_check_remote() {  # <id> <verb> [args...]; output in WATCHER_CAPTURE
+  local id=$1 verb=$2 limit=$START_CHECK_ROUTE_SECS now
+  shift 2
+  if [ -n "${START_CHECK_TICK_STARTED:-}" ]; then
+    now=$(date +%s)
+    limit=$((START_CHECK_ROUTE_SECS - now + START_CHECK_TICK_STARTED))
+    [ "$limit" -gt 0 ] || return 1
+  fi
+  watcher_waited fm_run_timed "$limit" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$verb" "$id" "$@"
+}
+
+# 0 when a busy-contract verdict proves a started worker: busy from anything but
+# the spawn's own seed, or an idle verdict only a running worker can have
+# produced (a hook-written record, or a settled Muse or Cursor session). Idle
+# from the rendered-text fallbacks proves nothing, since a parked dialog renders
+# no busy footer either. Nor does an idle record whose <event> is session-end:
+# the Claude, Devin, Gemini, Cortex and Command Code adapters write it on
+# shutdown even when no prompt was ever submitted, so a worker that exits before
+# starting must still wake. An ordinary task's completed turn also touched its
+# turn-ended marker, which start_check_local_proof reads first.
+start_check_verdict_proves() {  # <verdict> [record event]
+  case "$1" in
+    'busy fm-spawn') return 1 ;;
+    busy\ *) return 0 ;;
+    idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) return 1 ;;
+    idle\ *) [ "${2:-}" != session-end ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# 0 when <id> shows positive evidence it began its brief at or after <epoch>: a
+# status line or completed turn written since the launch boundary, or a verdict
+# start_check_verdict_proves accepts. A remote secondmate's evidence comes from
+# its host through `observe <id> --start-proof`, bound to the launch this check
+# was armed for by its busy record's generation: an exact `busy` observation
+# over anything but that launch's spawn seed, or a verdict that record proves. A
+# relaunch can reuse the endpoint, whose observation may still be the previous
+# worker's, so a `busy` observation alone proves only a launch with no busy
+# generation. A mate that starts and settles without a status line leaves only
+# that record. Cursor creates no busy generation; its transcript
+# verdict is bound to this launch by the task's Cursor conversation binding
+# instead, which excludes every earlier conversation (bin/fm-busy-lib.sh
+# fm_busy_cursor_transcript). An unreachable host proves nothing. Codex has no
+# semantic source, so its rendered busy footer counts unless the same tail shows
+# a launch dialog.
+start_check_started() {  # <id> <meta> <epoch> [record-gen]
+  local id=$1 meta=$2 epoch=$3 gen=${4:--} backend target tail verdict
+  start_check_local_proof "$id" "$epoch" "$meta" && return 0
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    start_check_remote "$id" observe --start-proof || return 1
+    verdict=$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^verdict=//p' | head -1)
+    case "$verdict" in 'busy cursor-transcript' | 'idle cursor-transcript') return 0 ;; esac
+    [ "$gen" = - ] && { [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ]; return; }
+    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^busy_gen=//p' | head -1)" = "$gen" ] || return 1
+    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && [ "$verdict" != 'busy fm-spawn' ] && return 0
+    start_check_verdict_proves "$verdict" "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^event=//p' | head -1)"
+    return
+  fi
+  local record event
+  record=$(fm_busy_record_read "$STATE" "$id") || record=
+  event=$(printf '%s\n' "$record" | awk '{print $3}')
+  start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" "$event" && return 0
+  case "$(fm_meta_get "$meta" harness)" in
+    codex*)
+      backend=$(fm_backend_of_meta "$meta")
+      target=$(fm_backend_target_of_meta "$meta")
+      watcher_capture "$backend" "$target" 40 "$(window_label "$target")" || return 1
+      tail=$(printf '%s' "$WATCHER_CAPTURE" | grep -v '^[[:space:]]*$' | tail -6)
+      case "$tail" in
+        *'Do you trust the contents of this directory?'* | *'Hooks need review'*) ;;
+        *) printf '%s\n' "$tail" | fm_busy_lines_match codex && return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+# The wake reason for a launch with no start proof, classified from one fresh
+# capture: an exited agent or a vanished endpoint, a recorded launch dialog
+# (fm_busy_launch_prompt_name owns the table and whether Enter accepts it), a
+# brief left unsubmitted in the composer, or no signal at all. The dialog match
+# only sharpens the wording; a vendor rewording degrades it to the generic
+# reason and never silences it.
+# Sets START_CHECK_REASON, and START_CHECK_TAIL to the capture for the stale
+# marker; both are globals so the caller keeps the capture without a subshell.
+START_CHECK_REASON=
+START_CHECK_TAIL=
+# A remote secondmate is classified the same way through its route: the host's
+# own agent state, then its captured screen. Recovery for it is the secondmate
+# provisioning playbook, never a local relaunch command.
+start_check_remote_reason() {  # <id> <meta> <harness> <head> <home>
+  local id=$1 meta=$2 harness=$3 head=$4 home=$5 host state row name
+  host=$(fm_meta_get "$meta" remote_host)
+  state=
+  if start_check_remote "$id" state; then
+    state=$(printf '%s' "$WATCHER_CAPTURE" | head -1)
+  fi
+  case "$state" in
+    dead | missing)
+      printf -v START_CHECK_REASON '%s; remote worker on %s exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: %s %q %q' \
+        "$head" "$host" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+      return 0
+      ;;
+  esac
+  if start_check_remote "$id" capture 40 && [ -n "$WATCHER_CAPTURE" ] \
+    && row=$(printf '%s' "$WATCHER_CAPTURE" | fm_busy_launch_prompt_name "$harness"); then
+    name=${row%%$'\t'*}
+    if [ "${row#*$'\t'}" = enter ]; then
+      printf -v START_CHECK_REASON '%s; on screen on %s: %s); accept: %s %q %q --key Enter' "$head" "$host" "$name" "$home" \
+        "$SCRIPT_DIR/fm-send.sh" "$id"
+    else
+      printf -v START_CHECK_REASON '%s; on screen on %s: %s); no key accepts it: answer it in that endpoint as the harness reference describes' \
+        "$head" "$host" "$name"
+    fi
+    return 0
+  fi
+  printf -v START_CHECK_REASON '%s; remote host %s); inspect: %s %q %q' "$head" "$host" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+}
+
+start_check_reason() {  # <id> <meta> <harness> <age>
+  local id=$1 meta=$2 harness=$3 age=$4 backend target home row name cstate head note
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  home="FM_HOME=$(printf '%q' "$FM_HOME")"
+  head="check: start $id: no start signal ${age}s after spawn (harness=$harness"
+  START_CHECK_TAIL=
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    start_check_remote_reason "$id" "$meta" "$harness" "$head" "$home"
+    return 0
+  fi
+  if watcher_capture "$backend" "$target" 40 "$(window_label "$target")"; then
+    START_CHECK_TAIL=$WATCHER_CAPTURE
+  fi
+  # The agent's own state outranks the screen: a dialog the agent painted
+  # before it died stays in the captured scrollback, and Enter there would go
+  # to a bare shell.
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" in
+    dead)
+      # A ship or scout relaunch must tell the replacement what happened; a
+      # secondmate's relaunch takes no note (bin/fm-control.sh owns both rules).
+      note=
+      case "$(fm_meta_get "$meta" kind)" in
+        secondmate) ;;
+        *) note=" --note 'The previous launch exited before it started the brief; start the brief from the beginning.'" ;;
+      esac
+      printf -v START_CHECK_REASON '%s; worker exited before starting); relaunch: %s %q %q relaunch%s' "$head" "$home" \
+        "$SCRIPT_DIR/fm-control.sh" "$id" "$note"
+      return 0
+      ;;
+    missing)
+      # Relaunch refuses an endpoint it cannot prove stopped, so a vanished
+      # endpoint goes to the stuck-worker recovery playbook instead.
+      printf -v START_CHECK_REASON '%s; worker endpoint gone before starting); recover it per stuck-crewmate-recovery after: %s %q %q' \
+        "$head" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+      return 0
+      ;;
+  esac
+  if [ -n "$START_CHECK_TAIL" ] \
+    && row=$(printf '%s' "$START_CHECK_TAIL" | fm_busy_launch_prompt_name "$harness"); then
+    name=${row%%$'\t'*}
+    if [ "${row#*$'\t'}" = enter ]; then
+      printf -v START_CHECK_REASON '%s; on screen: %s); accept: %s %q %q --key Enter' "$head" "$name" "$home" \
+        "$SCRIPT_DIR/fm-send.sh" "$id"
+    else
+      printf -v START_CHECK_REASON '%s; on screen: %s); no key accepts it: answer it in endpoint %s as the harness reference describes' \
+        "$head" "$name" "$target"
+    fi
+    return 0
+  fi
+  cstate=$(fm_backend_composer_state "$backend" "$target" "$(window_label "$target")" 2>/dev/null) || cstate=unknown
+  if [ "$cstate" = pending ]; then
+    printf -v START_CHECK_REASON '%s; instructions typed but not submitted); submit: %s %q %q --key Enter' "$head" "$home" \
+      "$SCRIPT_DIR/fm-send.sh" "$id"
+    return 0
+  fi
+  printf -v START_CHECK_REASON '%s); inspect: %s %q %q' "$head" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+}
+
+# start_check_claim <path> <record>: take the start-check record the watcher
+# judged, and only that one, as $START_CHECK_CLAIM for the caller to delete. A
+# remote respawn that cannot get the meta lock within its bound publishes its
+# record by atomic rename without it (bin/fm-spawn.sh spawn_arm_start_check), so
+# a compare-then-remove of the path could delete a replacement landing between
+# the two. Claiming the path by rename first makes the comparison and the
+# removal act on the same file; a claimed record that is not the judged one goes
+# back, unless a newer one already stands there.
+start_check_claim() {  # <path> <record>
+  START_CHECK_CLAIM="$1.claim.$$"
+  mv -f -- "$1" "$START_CHECK_CLAIM" 2>/dev/null || return 1
+  [ "$(cat -- "$START_CHECK_CLAIM")" != "$2" ] || return 0
+  start_check_unclaim "$1"
+  return 1
+}
+
+start_check_unclaim() {  # <path>
+  ln -- "$START_CHECK_CLAIM" "$1" 2>/dev/null || true
+  rm -f -- "$START_CHECK_CLAIM"
+}
+
+# start_check_restore_claims: put back each claimed record a stopped watcher
+# left behind, unless a newer one already stands there. A claim lives only while
+# its task's meta lock is held, so a claim whose lock this poll can take is
+# abandoned; one stopped after its wake was queued may wake once more.
+start_check_restore_claims() {
+  local c lock
+  for c in "$STATE"/*.start-pending.claim.*; do
+    [ -f "$c" ] || continue
+    lock=$(fm_meta_lock_path "$STATE/$(basename -- "${c%.start-pending.claim.*}").meta") || return 1
+    fm_lock_try_acquire "$lock" || continue
+    START_CHECK_CLAIM=$c
+    [ ! -f "$c" ] || start_check_unclaim "${c%.claim.*}"
+    fm_lock_release "$lock"
+  done
+}
+
+# start_check_drop <path> <record>: remove the judged record if it still stands.
+start_check_drop() {  # <path> <record>
+  start_check_claim "$1" "$2" || return 0
+  rm -f -- "$START_CHECK_CLAIM"
+}
+
+start_check_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} f id epoch gen harness meta mgen reason target lock remote record
+  START_CHECK_WAKE=
+  START_CHECK_TICK_STARTED=$(date +%s)
+  start_check_restore_claims || return 1
+  for f in "$STATE"/*.start-pending; do
+    [ -f "$f" ] || continue
+    id=${f##*/}
+    id=${id%.start-pending}
+    meta="$STATE/$id.meta"
+    lock=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_try_acquire "$lock" || continue
+    [ -f "$f" ] || { fm_lock_release "$lock"; continue; }
+    epoch=; gen=; harness=
+    read -r epoch gen harness _ < "$f" || true
+    record=$(cat "$f") || record=
+    case "$epoch" in ''|*[!0-9]*) start_check_drop "$f" "$record"; fm_lock_release "$lock"; continue ;; esac
+    if [ ! -f "$meta" ]; then
+      start_check_drop "$f" "$record"
+      fm_lock_release "$lock"
+      continue
+    fi
+    # A remote secondmate's generation is its host's launch, recorded here as
+    # remote_busy_gen; this home holds no busy record for it.
+    if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+      mgen=$(fm_meta_get "$meta" remote_busy_gen)
+    else
+      mgen=$(fm_meta_get "$meta" busy_gen)
+    fi
+    if [ "${mgen:--}" != "$gen" ]; then
+      start_check_drop "$f" "$record"
+      fm_lock_release "$lock"
+      continue
+    fi
+    remote=$(fm_meta_get "$meta" remote_host)
+    [ -n "$now" ] || fm_epoch_seconds_to now
+    # A remote proof crosses the route, so it is read only once the record is
+    # due and only while this poll's shared route budget lasts; until then only
+    # the parent-side mirror can clear it, and the record waits for a later poll.
+    if [ -n "$remote" ] && { [ "$((now - epoch))" -lt "$START_CHECK_SECS" ] || ! start_check_route_budget_left; }; then
+      if start_check_local_proof "$id" "$epoch" "$meta"; then
+        start_check_claim "$f" "$record" || { fm_lock_release "$lock"; continue; }
+        rm -f -- "$START_CHECK_CLAIM"
+        fm_lock_release "$lock"
+        triage_log "start check: $id started"
+      else
+        fm_lock_release "$lock"
+      fi
+      continue
+    fi
+    if start_check_started "$id" "$meta" "$epoch" "$gen"; then
+      start_check_claim "$f" "$record" || { fm_lock_release "$lock"; continue; }
+      rm -f -- "$START_CHECK_CLAIM"
+      fm_lock_release "$lock"
+      triage_log "start check: $id started"
+      continue
+    fi
+    [ "$((now - epoch))" -ge "$START_CHECK_SECS" ] || { fm_lock_release "$lock"; continue; }
+    [ -z "$START_CHECK_WAKE" ] || { fm_lock_release "$lock"; continue; }
+    # A proof read may have spent this poll's route budget; the wake's cause
+    # gets its own, so a slow host still yields the named dialog and its key.
+    [ -z "$remote" ] || START_CHECK_TICK_STARTED=$(date +%s)
+    start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
+    reason=$START_CHECK_REASON
+    start_check_claim "$f" "$record" || { fm_lock_release "$lock"; continue; }
+    fm_wake_append check "start:$id" "$reason" || { start_check_unclaim "$f"; fm_lock_release "$lock"; return 1; }
+    rm -f -- "$START_CHECK_CLAIM"
+    fm_lock_release "$lock"
+    # The stale backbone absorbed this parked pane while the record stood; mark
+    # the screen this wake already named so it does not re-surface as stale.
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$target" ] && [ -n "$START_CHECK_TAIL" ]; then
+      printf '%s' "$START_CHECK_TAIL" | hash_pane > "$STATE/.stale-$(window_key "$target")"
+    fi
+    START_CHECK_WAKE=$reason
+    break
+  done
+  START_CHECK_TICK_STARTED=
+}
+
 # The identity a re-surface throttle is bound to: the task's whole status-log
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
@@ -4154,6 +4532,12 @@ while :; do
   }
   [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
 
+  start_check_tick || {
+    echo 'watcher: start check failed' >&2
+    exit 1
+  }
+  [ -z "$START_CHECK_WAKE" ] || wake "$START_CHECK_WAKE"
+
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
   # is also what unsticks that mate's foreign wake queue. The tick's single
@@ -4618,7 +5002,13 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if [ -n "$task" ] && [ -e "$STATE/$task.start-pending" ]; then
+          # A launch with no start proof yet belongs to start_check_tick, which
+          # ran earlier this poll and wakes once with a named reason at its
+          # deadline; a bare stale here would be a second, vaguer wake.
+          printf '%s' "$h" > "$sf"
+          triage_log "absorbed stale (start check pending): $w"
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
