@@ -21,7 +21,7 @@ Every step's mechanics stay with the skill or script named in it; do not restate
    Ask whether that is done; firstmate runs no harness upgrade.
 2. **Refresh the AXI tools.**
    A node or harness upgrade leaves the globally installed tools (`gh-axi`, `lavish-axi`, `tasks-axi`, `quota-axi`, `chrome-devtools-axi`) unavailable under the new node, and `bin/fm-tasks-axi.sh` breaks with them.
-   Run `bin/fm-bootstrap.sh` and fix every `MISSING:` or `OUTDATED:` line it prints with the install command on that line (`bootstrap-diagnostics` owns them).
+   Run `bin/fm-bootstrap.sh` and resolve every `MISSING:` or `OUTDATED:` line it prints as the `bootstrap-diagnostics` skill directs; it owns the install commands and the consent step.
    Continue only once each tool runs under the active node and `bin/fm-tasks-axi.sh --help` works; otherwise report the failing tool and stop.
 3. **Stow.**
    Run the `stow` skill in this home.
