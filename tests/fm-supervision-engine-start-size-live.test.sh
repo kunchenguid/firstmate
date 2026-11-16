@@ -44,6 +44,7 @@ mkdir -p "$TMP_ROOT/home/state" "$TMP_ROOT/home/config" "$TMP_ROOT/home/data"
 bash "$ROOT/bin/fm-branch-prompt.sh" >"$TMP_ROOT/prompt" || fail "the branch prompt could not be generated"
 printf 'unused: the wrapper replaces this message\n' >"$TMP_ROOT/msg"
 
+# shellcheck disable=SC2016 # the single-quoted script expands in its own shell
 out=$(env FM_HOME="$TMP_ROOT/home" STATE="$TMP_ROOT/home/state" FM_ROOT="$ROOT" \
   FM_SUPERVISION_ENGINE_CLAUDE_BIN="$TMP_ROOT/claude" bash -c '
     . "$1/bin/fm-wake-lib.sh"

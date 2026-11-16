@@ -1678,6 +1678,11 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       printf '%s\n' "__script__:fm-context-ceiling.test.sh"
       ;;
+    bin/fm-check-register.sh|bin/fm-check-lib.sh)
+      printf '%s\n' "__script__:fm-check-audience.test.sh"
+      printf '%s\n' "__script__:fm-check-unregister.test.sh"
+      printf '%s\n' "__script__:fm-wake-queue.test.sh"
+      ;;
     bin/fm-fresh-start-lib.sh)
       printf '%s\n' "__script__:fm-fresh-start.test.sh"
       printf '%s\n' "__script__:fm-warm-compact.test.sh"
@@ -1727,6 +1732,7 @@ families_for_changed_path() {
       # these suites sit in four different families, so that pulls in dozens
       # of suites with nothing to do with Pi.
       printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-check-audience.test.sh
       printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-watch-recovery-loop.test.sh

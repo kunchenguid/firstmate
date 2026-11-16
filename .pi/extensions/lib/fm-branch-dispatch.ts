@@ -445,8 +445,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       // Main-owned while attended: excluded from what the branch may claim,
       // never a reason to reject the rest of the queue and never a reason to
       // send an otherwise-eligible heartbeat review to main. Away, the branch
-      // is the only actor, so the row is claimed unscoped.
-      if (afk) {
+      // is the only actor, so the row is claimed unscoped. A custom check
+      // registered for the supervision audience is claimed attended too.
+      if (afk || supervisionAudienceCheck(state, key)) {
         eligibleSeqs.push(seq);
         checkSeqs.push(seq);
       }
@@ -608,9 +609,30 @@ export interface BranchOfferVerdict {
 // The away posture collapses that partition: every actionable row is
 // branch-eligible and the trigger class no longer forces anything to main
 // (scopeForUnreadWake owns the per-row rule).
+// A custom check whose hash-bound trust record names audience=supervision
+// (bin/fm-check-register.sh --audience and bin/fm-check-lib.sh own the record).
+// Only that exact three-line record for a check in this state directory counts;
+// anything else, a built-in check, or an unreadable record stays main's.
+export function supervisionAudienceCheck(state: string, checkPath: string): boolean {
+  const name = checkPath.split("/").pop() ?? "";
+  const id = /^([A-Za-z0-9][A-Za-z0-9._-]*)\.check\.sh$/.exec(name)?.[1];
+  if (!id) return false;
+  try {
+    if (!statSync(`${state}/${name}`).isFile()) return false;
+    const record = readFileSync(`${state}/${id}.check-trust`, "utf8").split("\n");
+    return record.length === 4 && record[0] === "fm-custom-check-v1" && /^[0-9a-f]{64}$/.test(record[1])
+      && record[2] === "audience=supervision" && record[3] === "";
+  } catch {
+    return false;
+  }
+}
+
 export function branchOfferForWake(state: string, message: string, afk: boolean, attendedHost = false): BranchOfferVerdict {
   const heartbeat = /^heartbeat($|:)/.test(message);
-  const isCheckTrigger = /^check:/.test(message);
+  // One custom check's wake is "check: <path>.check.sh: <output>"; only that
+  // single-check shape can carry the supervision audience.
+  const checkPath = /^check: (\S+\.check\.sh): /.exec(message)?.[1];
+  const isCheckTrigger = /^check:/.test(message) && !(checkPath && supervisionAudienceCheck(state, checkPath));
   const scope = scopeForUnreadWake(state, heartbeat, afk, attendedHost && !afk);
   const triggerKeys = /^signal:/.test(message)
     ? message

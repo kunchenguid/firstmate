@@ -139,8 +139,8 @@ test_save_then_clear_once() {
 /clear
 $(bash -c '. "$1/bin/fm-fresh-start-lib.sh"; printf "%s" "$FM_FRESH_START_RESUME_PROMPT"' _ "$ROOT")" "$(typed)" \
     "the clear step types /clear then exactly the resume prompt"
-  assert_equals done "$(step "$CASE" 99999999999)" "a cleared day is done"
-  assert_equals done "$(FAKE_HOUR=05 step "$CASE" 99999999999)" "the rest of the window stays done"
+  assert_equals 'done' "$(step "$CASE" 99999999999)" "a cleared day is done"
+  assert_equals 'done' "$(FAKE_HOUR=05 step "$CASE" 99999999999)" "the rest of the window stays done"
   assert_equals saving "$(FAKE_DAY=2030-01-03 step "$CASE" 99999999999)" "the next day starts again with a save"
   pass "one day saves, then clears on a later park, then resumes with one prompt, exactly once"
 }
@@ -153,7 +153,7 @@ test_never_clears_an_unsaved_conversation() {
   new_case window-closed
   assert_equals saving "$(step "$CASE" 100)" "the save runs"
   assert_equals skipped "$(FAKE_HOUR=07 step "$CASE" 99999999999)" "a window that closes before the clear records skipped"
-  assert_equals done "$(FAKE_HOUR=04 step "$CASE" 99999999999)" "a skipped day never clears later"
+  assert_equals 'done' "$(FAKE_HOUR=04 step "$CASE" 99999999999)" "a skipped day never clears later"
   assert_equals /stow "$(typed)" "nothing after the save was typed"
   pass "a clear never runs without a save of the same day, even when the window closes between them"
 }
