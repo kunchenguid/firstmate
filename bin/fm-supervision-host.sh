@@ -618,7 +618,7 @@ fresh_start_tick() {
 OUTCOME_BATCH_TICK=${FM_OUTCOME_BATCH_TICK:-15}
 OUTCOME_BATCH_NEXT=0
 outcome_batch_tick() {
-  [ -f "$STATE/.outcome-batch" ] || return 0
+  [ -e "$STATE/.outcome-batch" ] || [ -L "$STATE/.outcome-batch" ] || return 0
   [ "$SECONDS" -ge "$OUTCOME_BATCH_NEXT" ] || return 0
   OUTCOME_BATCH_NEXT=$((SECONDS + OUTCOME_BATCH_TICK))
   fm_afk_contract_away_present "$STATE" && return 0

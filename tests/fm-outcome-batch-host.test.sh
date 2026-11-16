@@ -4,7 +4,8 @@
 # and no model call (bin/fm-supervision-host.sh outcome_batch_tick,
 # bin/fm-outcome-batch-lib.sh).
 #
-# Pins: one held outcome and then complete silence is handed to main once its
+# Pins: an engine question reaches main at once unless the engine marked it
+# batchable; one held outcome and then complete silence is handed to main once its
 # window passes, including after the host restarts; a batch still inside its
 # window keeps the park; removing the setting releases what it held; away, the
 # outcomes wait for the return. Uses the shared host fixtures, which run the
@@ -84,7 +85,44 @@ test_removed_setting_releases_and_away_waits() {
   pass "host: removing the setting releases the batch, and away it waits for the captain's return"
 }
 
+# The re-review's case: the engine discovers a question while the worker's
+# durable status still says working, and words it so no keyword matches. It
+# reaches main at once, because the engine did not mark it batchable; the same
+# turn with a finished result the engine marked batchable is held.
+test_engine_question_reaches_main_at_once() {
+  local home
+  home=$(make_home batch-alpha attended)
+  : > "$home/config/outcome-batch"
+  echo captain-say > "$home/stub-mode"
+  printf 'Please select A or B\n' > "$home/stub-summary"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "question: the host never parked"
+  append_status "$home" 'continuing'
+  wait_until 300 host_exited "$home" || fail "question: an unmarked captain outcome must end the park at once: $(tail -5 "$home/state/.supervision-host.log")"
+  assert_equals 1 "$(engine_calls "$home")" "question: one engine turn handled the wake"
+  [ ! -e "$home/state/.outcome-batch" ] || fail "question: an unmarked outcome must not be held"
+  assert_no_re 'outcome-batch	hold' "$home/state/.supervision-host.log" "question: the host must not log a hold"
+  stop_home_processes "$home"
+  home=$(make_home batch-marked attended)
+  : > "$home/config/outcome-batch"
+  echo captain-say > "$home/stub-mode"
+  printf 'Setup finished; the tests run next\n' > "$home/stub-summary"
+  printf -- '--batchable\ntrue\n' > "$home/stub-report-flags"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "marked: the host never parked"
+  append_status "$home" 'continuing'
+  wait_until 300 handled_at_least "$home" 1 || fail "marked: the wake was not handled"
+  wait_until 150 watcher_live "$home" || fail "marked: a held outcome must keep the park"
+  sleep 3
+  host_exited "$home" && fail "marked: a batchable outcome must be held: $(cat "$home/host.out")"
+  assert_re 'outcome-batch	hold' "$home/state/.supervision-host.log" "marked: the host logs the hold"
+  [ -f "$home/state/.outcome-batch" ] || fail "marked: the hold leaves its release record"
+  stop_home_processes "$home"
+  pass "host: an engine question reaches main at once whatever its words; only an outcome the engine marked batchable is held"
+}
+
 fm_test_run \
+  test_engine_question_reaches_main_at_once \
   test_expired_batch_reaches_main_without_another_event \
   test_batch_inside_its_window_keeps_the_park \
   test_removed_setting_releases_and_away_waits
