@@ -131,7 +131,7 @@ state/               runtime records and signals; gitignored
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
   .supervision-host*  supervision host process record, engine conversation, current turn scope and report receipts, and bounded ledger of every close and engine turn; bin/fm-supervision-host.sh owns them; never touch
   .supervision-handoff-pending .supervision-handoff-owner .supervision-handoff.log  the opt-in acknowledged hand-back's unacknowledged token, retry-owner process record, and bounded retry log; bin/fm-supervision-handoff.sh owns them; never touch
-  .daily-fresh-start .daily-fresh-start-attest .daily-fresh-start-history  the daily fresh start's step record, the stow skill's reset-safe attestation, and the two-day safety net's history; bin/fm-fresh-start-lib.sh owns them
+  .daily-fresh-start .daily-fresh-start-attest .daily-fresh-start-ended .daily-fresh-start-session .daily-fresh-start-history  the daily fresh start's step record, the stow skill's reset-safe attestation, the save turn's end, the primary's current session transcript, and the two-day safety net's history; bin/fm-fresh-start-lib.sh owns them
   chat-questions/    one record per question firstmate asked the captain in chat that is still unanswered; bin/fm-chat-question.sh owns the format, and the daily fresh start waits while any exists
   .outcome-batch     outcome batching's release record for held captain outcomes; bin/fm-outcome-batch-lib.sh owns it
   .lease-<task>        per-task supervision lease naming which actor (main or branch) may change that task; bin/fm-lease-lib.sh owns the contract the guarded scripts enforce
