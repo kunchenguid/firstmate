@@ -12,7 +12,9 @@
 #     cost plus one second, and must leave every other task's material intact;
 #   - the daily pass, which must remove exactly the N orphans and nothing live;
 #   - the old-folder preview, which must offer exactly the 3N rebuildable
-#     directories and no record, at a per-folder cost that grows linearly;
+#     directories and no record, at a per-folder cost that grows linearly,
+#     and, in one folder, 400 and then 4000 candidates at a per-candidate
+#     cost that grows linearly;
 #   - the report, which must count every area and folder.
 # Each measurement prints as a "# scale" line so a run's output is the
 # evidence of timings and sizes.
@@ -97,10 +99,11 @@ SH
 
 # one_task_cost <n>: spawn-side creation plus close-time cleanup of one task, in ms.
 one_task_cost() {
-  local n=$1 t0 t1 out
+  local n=$1 t0 t1 out label
   t0=$(now_ms)
-  lib 'fm_footprint_task_env "$H/config" "$H" new-task codex' >/dev/null || fail "N=$n: scratch creation failed"
-  printf 'container\tcnew\tfirstmate.task=%s/new-task\n' "$KEY" >> "$FB/docker.objects"
+  label=$(lib 'fm_footprint_task_env "$H/config" "$H" new-task codex' | sed -n 's/^FM_DOCKER_LABEL=//p')
+  [ -n "$label" ] || fail "N=$n: scratch creation failed"
+  printf 'container\tcnew\t%s\n' "$label" >> "$FB/docker.objects"
   out=$(fp task-close new-task "$SHORT/$n/$KEY/new-task" projects/demo)
   t1=$(now_ms)
   assert_contains "$out" "scratch removed" "N=$n: the closing task's scratch must be removed"
@@ -155,8 +158,41 @@ test_scale() {  # <n>
   pass "at $n tasks: one task's create and close cost stays flat, and report, preview, and sweep give exact results"
 }
 
+# dense_preview <k>: one finished folder holding <k> separate rebuildable
+# directories; prints the preview time in ms after checking it offers all.
+dense_preview() {
+  local k=$1 i t0 t1
+  H="$TMP_ROOT/dense-$k/home"
+  mkdir -p "$H/data/done/x" "$H/state" "$H/config"
+  printf 'scratch-root %s\n' "$SHORT/dense-$k" > "$H/config/footprint"
+  printf 'brief\n' > "$H/data/done/brief.md"
+  i=1
+  while [ "$i" -le "$k" ]; do mkdir -p "$H/data/done/$i/node_modules"; i=$((i + 1)); done
+  old=$(( $(date +%s) - 60 * 86400 ))
+  stamp=$(TZ=UTC0 date -d "@$old" +%Y%m%d%H%M.%S 2>/dev/null || TZ=UTC0 date -r "$old" +%Y%m%d%H%M.%S)
+  TZ=UTC0 find "$H/data/done" -exec touch -t "$stamp" {} +
+  t0=$(now_ms)
+  fp old-tasks --days 30 >/dev/null
+  t1=$(now_ms)
+  [ "$(awk -F '\t' 'NR > 2' "$H/state/footprint-old-tasks.preview" | wc -l | tr -d ' ')" = "$k" ] ||
+    fail "dense $k: the preview must offer all $k directories"
+  printf '%s\n' $((t1 - t0))
+}
+
+# Many candidates inside one folder: the cost per candidate at 4000 may not
+# exceed three times the cost per candidate at 400, plus 2 ms.
+test_dense_folder() {
+  local small large
+  small=$(dense_preview 400)
+  large=$(dense_preview 4000)
+  printf '# scale dense folder: preview %s ms for 400 candidates, %s ms for 4000\n' "$small" "$large"
+  [ "$large" -le $((small * 10 * 3 + 4000 * 2)) ] ||
+    fail "the preview of one folder grew faster than linearly: $small ms for 400, $large ms for 4000"
+  pass "one folder with thousands of candidates is classified in linear time"
+}
+
 test_scale_5() { test_scale 5; }
 test_scale_100() { test_scale 100; }
 test_scale_1000() { test_scale 1000; }
 
-fm_test_run test_scale_5 test_scale_100 test_scale_1000
+fm_test_run test_scale_5 test_scale_100 test_scale_1000 test_dense_folder

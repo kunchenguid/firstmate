@@ -5436,17 +5436,19 @@ test_leaked_tasktmp_process_is_reaped() {
 # library under a short scratch root, a process living in it, and a recording
 # docker whose only object carries the task's label.
 footprint_case() {  # <case-dir>
-  local case_dir=$1 root key
+  local case_dir=$1 root
   root=$(mktemp -d /tmp/fmtd.XXXXXX)
   root=$(cd -P "$root" && pwd -P)
   FM_TEST_CLEANUP_DIRS+=("$root")
   FOOTPRINT_ROOT=$root
-  FOOTPRINT_SCRATCH=$(FM_SCRATCH_ROOT_OVERRIDE=$root HOME="$case_dir" bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-footprint-lib.sh"; fm_footprint_task_env "$2" "$1" task-x1 codex' _ "$ROOT" "$case_dir/config" | sed -n 's/^FM_TASK_SCRATCH=//p')
+  FOOTPRINT_ENV=$(FM_SCRATCH_ROOT_OVERRIDE=$root HOME="$case_dir" bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-footprint-lib.sh"; fm_footprint_task_env "$2" "$1" task-x1 codex' _ "$ROOT" "$case_dir/config")
+  FOOTPRINT_SCRATCH=$(printf '%s\n' "$FOOTPRINT_ENV" | sed -n 's/^FM_TASK_SCRATCH=//p')
+  FOOTPRINT_LABEL=$(printf '%s\n' "$FOOTPRINT_ENV" | sed -n 's/^FM_DOCKER_LABEL=//p')
   [ -d "$FOOTPRINT_SCRATCH/tmp" ] || fail "footprint: the scratch area was not created"
   head -c 100000 /dev/zero > "$FOOTPRINT_SCRATCH/tmp/profile.bin"
   printf '%s\n' "scratch=$FOOTPRINT_SCRATCH" >> "$case_dir/state/task-x1.meta"
-  key=$(bash -c '. "$1/bin/fm-footprint-lib.sh"; fm_footprint_home_key "$1"' _ "$ROOT")
-  printf 'container\tc1\tfirstmate.task=%s/task-x1\n' "$key" > "$case_dir/fakebin/docker.objects"
+  [ -n "$FOOTPRINT_LABEL" ] || fail "footprint: the task's Docker label was not exported"
+  printf 'container\tc1\t%s\n' "$FOOTPRINT_LABEL" > "$case_dir/fakebin/docker.objects"
   cat > "$case_dir/fakebin/docker" <<'SH'
 #!/usr/bin/env bash
 dir=$(dirname "$0")
@@ -5499,16 +5501,16 @@ test_footprint_refused_teardown_removes_nothing() {
   expect_code 1 "$rc" "footprint-refused: a dirty worktree must refuse"
   assert_grep REFUSED "$case_dir/stderr" "footprint-refused: no REFUSED line"
   assert_present "$FOOTPRINT_SCRATCH/tmp/profile.bin" "footprint-refused: a refused cleanup must keep the scratch area"
-  assert_equals "container	c1	firstmate.task=$(bash -c '. "$1/bin/fm-footprint-lib.sh"; fm_footprint_home_key "$1"' _ "$ROOT")/task-x1" \
+  assert_equals "container	c1	$FOOTPRINT_LABEL" \
     "$(cat "$case_dir/fakebin/docker.objects")" "footprint-refused: a refused cleanup must keep the labelled Docker material"
   assert_absent "$case_dir/fakebin/docker.log" "footprint-refused: a refused cleanup must not even ask Docker"
   assert_absent "$case_dir/data/footprint-ledger.tsv" "footprint-refused: a refused cleanup must not record a close"
   pass "a refused teardown removes no scratch, no Docker material, and records nothing"
 }
 
-# The landed-work checks prove the task's own copy; a checkout the worker made
-# inside its scratch area needs its own proof, so an unpublished one keeps the
-# whole area even after an otherwise clean, landed teardown.
+# The landed-work checks prove the task's own copy, not a repository the
+# worker made inside its scratch area, so one there keeps the whole area even
+# after an otherwise clean, landed teardown.
 test_footprint_unlanded_scratch_checkout_survives_landed_teardown() {
   local case_dir rc=0 nested
   case_dir=$(make_case footprint-scratch-unlanded)
@@ -5526,7 +5528,7 @@ test_footprint_unlanded_scratch_checkout_survives_landed_teardown() {
   assert_present "$nested/unique.txt" "footprint-scratch-unlanded: the unpublished checkout must survive"
   assert_present "$FOOTPRINT_SCRATCH/tmp/profile.bin" "footprint-scratch-unlanded: the whole area must be kept"
   assert_grep "kept whole" "$case_dir/stderr" "footprint-scratch-unlanded: teardown must say the area was kept"
-  pass "an unpublished checkout inside the scratch area keeps the whole area through a landed teardown"
+  pass "a repository inside the scratch area keeps the whole area through a landed teardown"
 }
 
 # A recorded scratch path that is not this home's area for the task is never

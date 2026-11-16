@@ -34,14 +34,17 @@
 # path to 104 bytes and tests create sockets under TMPDIR. Every other tool
 # keeps its inherited temp directory and is reported as not covered.
 #
-# Docker. FM_DOCKER_LABEL is the one flag a worker passes to docker run,
-# docker create, docker volume create, docker network create and docker build:
-# firstmate.task=<home-key>/<task-id>. COMPOSE_PROJECT_NAME is
-# fm-<home-key>-<task-id lowercased, "." as "_">-<first 6 hex digits of the
-# SHA-256 of the exact task id>, so compose names and labels every container,
-# network, volume and built image of the task without the worker doing
-# anything, and two task ids that lowercase alike (Task.A and task_a) never
-# share a project. Cleanup matches either label, never a name.
+# Docker. Each task area holds a generation, 16 random hex digits written in
+# <area>/.fm-generation when spawn first makes the area and reused while it
+# exists (a relaunch keeps it). FM_DOCKER_LABEL is the one flag a worker
+# passes to docker run, docker create, docker volume create, docker network
+# create and docker build: firstmate.task=<home-key>/<task-id>/<generation>.
+# COMPOSE_PROJECT_NAME is fm-<home-key>-<task-id lowercased, "." as
+# "_">-<generation>, so compose names and labels every container, network,
+# volume and built image of the task without the worker doing anything. The
+# random generation, not the task id, makes both names unique: two task ids
+# that lowercase alike, or a later task reusing an id, never share one.
+# Cleanup matches either exact label, never a name or a prefix.
 
 FM_FOOTPRINT_SCRATCH_ROOT_MAX=64
 FM_FOOTPRINT_TMPDIR_MAX=90
@@ -239,14 +242,45 @@ fm_footprint_tmpdir_covered() {  # <harness>
   return 1
 }
 
-fm_footprint_docker_label() {  # <home-key> <task-id>
-  printf 'firstmate.task=%s/%s\n' "$1" "$2"
+fm_footprint_docker_label() {  # <home-key> <task-id> <generation>
+  printf 'firstmate.task=%s/%s/%s\n' "$1" "$2" "$3"
 }
 
-fm_footprint_compose_project() {  # <home-key> <task-id>
-  local h
-  h=$(fm_footprint_sha256 "$2") || return 1
-  printf 'fm-%s-%s-%s\n' "$1" "$(printf '%s' "$2" | tr 'A-Z.' 'a-z_')" "${h%"${h#??????}"}"
+fm_footprint_compose_project() {  # <home-key> <task-id> <generation>
+  printf 'fm-%s-%s-%s\n' "$1" "$(printf '%s' "$2" | tr 'A-Z.' 'a-z_')" "$3"
+}
+
+fm_footprint_generation_valid() {  # <generation>: exactly 16 lowercase hex digits
+  case "$1" in
+    ????????????????) case "$1" in *[!0-9a-f]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_footprint_task_generation <area>: prints the generation recorded in the
+# area, or returns 1 when there is none or it is not a regular file owned by
+# this user holding exactly one valid generation.
+fm_footprint_task_generation() {  # <area>
+  local f="$1/.fm-generation" g
+  [ -f "$f" ] && [ ! -L "$f" ] && [ -O "$f" ] || return 1
+  IFS= read -r g < "$f" || return 1
+  fm_footprint_generation_valid "$g" || return 1
+  printf '%s\n' "$g"
+}
+
+# fm_footprint_generation_ensure <area>: the area's generation, written from
+# /dev/urandom when the area has none yet. Returns 1 when one exists but is
+# not valid, or none could be written.
+fm_footprint_generation_ensure() {  # <area>
+  local f="$1/.fm-generation" g
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    fm_footprint_task_generation "$1"
+    return
+  fi
+  g=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fm_footprint_generation_valid "$g" || return 1
+  (umask 077 && printf '%s\n' "$g" > "$f.$$" && mv -f "$f.$$" "$f") 2>/dev/null || { rm -f "$f.$$"; return 1; }
+  fm_footprint_task_generation "$1"
 }
 
 # fm_footprint_key_dir_bind <key-dir> <home>
@@ -292,7 +326,7 @@ fm_footprint_key_dir_trusted() {  # <root> <key> <home>
 #   off. Prints "#" note lines for anything left uncovered. Returns 1 with a
 #   reason on stderr for a malformed config or an unsafe scratch path.
 fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness>
-  local config=$1 home=$2 id=$3 harness=$4 root key dir tmp
+  local config=$1 home=$2 id=$3 harness=$4 root key dir tmp gen
   if ! fm_footprint_config_read "$config"; then
     printf 'error: %s\n' "$FP_CONFIG_ERROR" >&2
     return 1
@@ -310,14 +344,15 @@ fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness>
   tmp="$dir/tmp"
   if ! fm_footprint_private_dir "$root" || ! fm_footprint_private_dir "$root/$key" ||
     ! fm_footprint_key_dir_bind "$root/$key" "$home" ||
-    ! fm_footprint_private_dir "$dir" || ! fm_footprint_private_dir "$tmp"; then
-    printf 'error: task scratch area %s is not a private directory owned by this user; inspect and remove it, then retry\n' "$dir" >&2
+    ! fm_footprint_private_dir "$dir" || ! fm_footprint_private_dir "$tmp" ||
+    ! gen=$(fm_footprint_generation_ensure "$dir"); then
+    printf 'error: task scratch area %s is not a private directory owned by this user with a valid .fm-generation; inspect and remove it, then retry\n' "$dir" >&2
     return 1
   fi
   printf 'FM_TASK_SCRATCH=%s\n' "$dir"
   if [ "$FP_DOCKER_LABELS" = on ]; then
-    printf 'FM_DOCKER_LABEL=%s\n' "$(fm_footprint_docker_label "$key" "$id")"
-    printf 'COMPOSE_PROJECT_NAME=%s\n' "$(fm_footprint_compose_project "$key" "$id")"
+    printf 'FM_DOCKER_LABEL=%s\n' "$(fm_footprint_docker_label "$key" "$id" "$gen")"
+    printf 'COMPOSE_PROJECT_NAME=%s\n' "$(fm_footprint_compose_project "$key" "$id" "$gen")"
   fi
   if [ "$FP_TASK_TMPDIR" != on ]; then
     printf '# task-tmpdir off: temp stays where the worker inherits it\n'

@@ -52,8 +52,13 @@ home_key() {
   lib 'fm_footprint_home_key "$H"'
 }
 
-compose_for() {  # <id>
-  lib 'fm_footprint_compose_project "$(fm_footprint_home_key "$H")" '"$1"
+# label_for <area> <id> / compose_for <area> <id>: the task's Docker names,
+# from the generation spawn recorded in its area.
+label_for() {
+  lib 'fm_footprint_docker_label "$(fm_footprint_home_key "$H")" '"$2"' "$(fm_footprint_task_generation '"$1"')"'
+}
+compose_for() {
+  lib 'fm_footprint_compose_project "$(fm_footprint_home_key "$H")" '"$2"' "$(fm_footprint_task_generation '"$1"')"'
 }
 
 # fake_docker: a docker that answers info and label-filtered listings from
@@ -134,8 +139,8 @@ test_task_env_creates_private_area_and_exports() {
   key=$(home_key)
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" task-a1 claude')
   assert_equals "FM_TASK_SCRATCH=$root/$key/task-a1
-FM_DOCKER_LABEL=firstmate.task=$key/task-a1
-COMPOSE_PROJECT_NAME=$(compose_for task-a1)
+FM_DOCKER_LABEL=$(label_for "$root/$key/task-a1" task-a1)
+COMPOSE_PROJECT_NAME=$(compose_for "$root/$key/task-a1" task-a1)
 TMPDIR=$root/$key/task-a1/tmp
 TMP=$root/$key/task-a1/tmp
 TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch area, labels, and temp"
@@ -144,7 +149,9 @@ TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch are
     assert_equals 700 "$mode" "$d must be private"
   done
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" Task.B2 pi')
-  assert_contains "$out" "COMPOSE_PROJECT_NAME=fm-$key-task_b2-" "a compose name must be lowercase with dots as underscores"
+  assert_contains "$out" "COMPOSE_PROJECT_NAME=fm-$key-task_b2-$(lib 'fm_footprint_task_generation '"$root/$key/Task.B2")" "a compose name must be lowercase with dots as underscores, ending in the generation"
+  case "$(lib 'fm_footprint_task_generation '"$root/$key/task-a1")" in ????????????????) ;; *) fail "the area must record a 16 digit generation" ;; esac
+  assert_equals "$(label_for "$root/$key/task-a1" task-a1)" "$(lib 'fm_footprint_task_env "$H/config" "$H" task-a1 claude' | sed -n 's/^FM_DOCKER_LABEL=//p')" "a relaunch must keep the generation"
   assert_contains "$out" "# pi is not verified with a redirected TMPDIR" "an unverified tool must be named as not covered"
   assert_not_contains "$out" "TMPDIR=" "an unverified tool must keep its inherited temp"
   printf 'scratch-root %s\ntask-tmpdir off\ndocker-labels off\n' "$root" > "$H/config/footprint"
@@ -197,12 +204,13 @@ test_task_close_removes_scratch_and_labelled_docker_only() {
   chmod 0555 "$s/gomod/pkg"
   mkdir -p "$H/data/task-x1"
   printf 'brief\n' > "$H/data/task-x1/brief.md"
-  printf 'container\tc1\tfirstmate.task=%s/task-x1\n' "$key" >> "$FB/docker.objects"
-  printf 'container\tc2\tcom.docker.compose.project=%s\n' "$(compose_for task-x1)" >> "$FB/docker.objects"
-  printf 'volume\tv1\tfirstmate.task=%s/task-x1\n' "$key" >> "$FB/docker.objects"
-  printf 'network\tn1\tcom.docker.compose.project=%s\n' "$(compose_for task-x1)" >> "$FB/docker.objects"
-  printf 'image\ti1\tfirstmate.task=%s/task-x1\n' "$key" >> "$FB/docker.objects"
+  printf 'container\tc1\t%s\n' "$(label_for "$s" task-x1)" >> "$FB/docker.objects"
+  printf 'container\tc2\tcom.docker.compose.project=%s\n' "$(compose_for "$s" task-x1)" >> "$FB/docker.objects"
+  printf 'volume\tv1\t%s\n' "$(label_for "$s" task-x1)" >> "$FB/docker.objects"
+  printf 'network\tn1\tcom.docker.compose.project=%s\n' "$(compose_for "$s" task-x1)" >> "$FB/docker.objects"
+  printf 'image\ti1\t%s\n' "$(label_for "$s" task-x1)" >> "$FB/docker.objects"
   printf 'container\tother\tfirstmate.task=%s/task-y2\n' "$key" >> "$FB/docker.objects"
+  printf 'container\tearlier\tfirstmate.task=%s/task-x1/0000000000000000\n' "$key" >> "$FB/docker.objects"
   printf 'volume\tforeign\tfirstmate.task=00000000/task-x1\n' >> "$FB/docker.objects"
   printf 'container\tplain\t\n' >> "$FB/docker.objects"
   out=$(fp task-close task-x1 "$s" projects/demo)
@@ -211,6 +219,7 @@ test_task_close_removes_scratch_and_labelled_docker_only() {
   assert_contains "$out" "scratch removed" "the summary must report the scratch removal"
   assert_contains "$out" "Docker: 5 labelled object(s) removed" "the summary must count the labelled Docker objects"
   assert_equals "container	other	firstmate.task=$key/task-y2
+container	earlier	firstmate.task=$key/task-x1/0000000000000000
 volume	foreign	firstmate.task=00000000/task-x1
 container	plain	" "$(cat "$FB/docker.objects")" "only this task's labelled objects may be removed"
   assert_no_grep 'prune' "$FB/docker.log" "close-time cleanup must never prune"
@@ -239,7 +248,7 @@ test_task_close_with_its_own_temp_inside_scratch() {
   s=$(scratch_for task-t1)
   mkdir -p "$H/data/task-t1"
   printf 'brief\n' > "$H/data/task-t1/brief.md"
-  printf 'container\tc1\tfirstmate.task=%s/task-t1\n' "$(home_key)" >> "$FB/docker.objects"
+  printf 'container\tc1\t%s\n' "$(label_for "$s" task-t1)" >> "$FB/docker.objects"
   # The bash fallback, like GNU timeout on Linux, needs a usable TMPDIR.
   out=$(TMPDIR="$s/tmp" FM_TIMEOUT_MECHANISM_OVERRIDE=bash fp task-close task-t1 "$s")
   assert_absent "$s" "the scratch area must be removed"
@@ -286,7 +295,7 @@ test_task_close_docker_absent_or_down() {
   fake_docker
   # Unset, the client is `docker` on PATH (here the stand-in in FB).
   s=$(scratch_for task-n3)
-  printf 'container\tc3\tfirstmate.task=%s/task-n3\n' "$(home_key)" >> "$FB/docker.objects"
+  printf 'container\tc3\t%s\n' "$(label_for "$s" task-n3)" >> "$FB/docker.objects"
   out=$(unset FM_FOOTPRINT_DOCKER; fp task-close task-n3 "$s")
   assert_contains "$out" "Docker: 1 labelled object(s) removed" "with the seam unset, docker on PATH must be used"
   : > "$FB/docker.log"
@@ -414,7 +423,7 @@ make_old_folders() {
   touch "$H/data/new-c3/brief.md"
 }
 
-test_old_tasks_preview_offers_only_rebuildable_and_landed() {
+test_old_tasks_preview_offers_only_rebuildable_outside_repositories() {
   local out id listed
   CASE=old
   new_home "$CASE"
@@ -423,15 +432,14 @@ test_old_tasks_preview_offers_only_rebuildable_and_landed() {
   out=$(fp old-tasks)
   listed=$(awk -F '\t' 'NR > 2 { print $1, $3 }' "$H/state/footprint-old-tasks.preview" | sort -t ' ' -k2)
   assert_equals "$(printf '%s\n' \
-    "landed-checkout $H/data/old-a1/landed" \
     "rebuildable $H/data/old-a1/node_modules" \
     "rebuildable $H/data/old-a1/sub/.venv" | sort -t ' ' -k2)" \
-    "$listed" "the preview must offer only rebuildable layouts outside checkouts and the landed checkout"
-  # A rebuildable layout inside a checkout not proven landed goes only with that checkout.
-  for inside in dirty ignored unlanded untracked; do
+    "$listed" "the preview must offer only rebuildable layouts outside every repository"
+  # Nothing inside a repository is offered, landed or not.
+  for inside in landed dirty ignored unlanded untracked; do
     printf '%s\n' "$listed" | grep -q " $H/data/old-a1/$inside/" && fail "nothing inside the $inside checkout may be offered"
   done
-  for never in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence children unlanded dirty untracked ignored; do
+  for never in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence children landed unlanded dirty untracked ignored; do
     printf '%s\n' "$listed" | grep -q " $H/data/old-a1/$never\$" && fail "$never must never be offered"
   done
   assert_not_contains "$listed" "live-b2" "a live task's folder must never be offered"
@@ -451,16 +459,16 @@ test_old_tasks_preview_offers_only_rebuildable_and_landed() {
   id=$(awk -F '\t' '$1 == "id" {print $2}' "$H/state/footprint-old-tasks.preview")
   out=$(fp old-tasks --apply "$id")
   assert_contains "$out" "Removed" "apply must report what it removed"
-  for gone in node_modules sub/.venv landed; do
+  for gone in node_modules sub/.venv; do
     assert_absent "$H/data/old-a1/$gone" "$gone must be removed by apply"
   done
-  for kept in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence/run.log children/c1/node_modules unlanded/b.txt unlanded/node_modules dirty/a.txt ignored/secret.env; do
+  for kept in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence/run.log children/c1/node_modules landed/.git unlanded/b.txt unlanded/node_modules dirty/a.txt ignored/secret.env; do
     assert_present "$H/data/old-a1/$kept" "$kept must survive apply"
   done
   assert_present "$H/data/live-b2/node_modules" "the live task must be untouched"
   assert_present "$H/data/backlog.md" "the task list must be untouched"
   assert_absent "$H/state/footprint-old-tasks.preview" "an applied preview must be retired"
-  pass "old-folder preview offers only rebuildable and landed material and removes exactly the preview"
+  pass "old-folder preview offers only rebuildable material outside repositories and removes exactly the preview"
 }
 
 # --- sweep and check -------------------------------------------------------------
@@ -685,7 +693,7 @@ fm_test_run \
   test_task_close_refusals_remove_nothing \
   test_task_close_docker_absent_or_down \
   test_cache_cap_trims_least_recently_used_first \
-  test_old_tasks_preview_offers_only_rebuildable_and_landed \
+  test_old_tasks_preview_offers_only_rebuildable_outside_repositories \
   test_sweep_removes_only_old_orphaned_scratch \
   test_check_runs_daily_and_reports_changes_once \
   test_report_json_kinds_docker_absent_and_allowance \

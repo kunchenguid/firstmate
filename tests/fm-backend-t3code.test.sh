@@ -1571,7 +1571,7 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   scratch=$(sed -n 's/^scratch=//p' "$state/$id.meta")
   [ -n "$scratch" ] || fail "a ship spawn must record its scratch area"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_SCRATCH')" = "$scratch" ] || fail "a ship worker's settings env must carry its scratch area"
-  case "$(t3_json_field "$settings" 'd.env.FM_DOCKER_LABEL')" in firstmate.task=*/"$id") ;; *) fail "a ship worker's settings env must carry its Docker label" ;; esac
+  case "$(t3_json_field "$settings" 'd.env.FM_DOCKER_LABEL')" in firstmate.task=*/"$id"/????????????????) ;; *) fail "a ship worker's settings env must carry its Docker label" ;; esac
   case "$(t3_json_field "$settings" 'd.env.TMPDIR')" in "$scratch/tmp"|undefined) ;; *) fail "a redirected TMPDIR must point into the scratch area" ;; esac
   # The temp redirect is present only when its path fits the socket limit, so it is left out of the exact set.
   [ "$(t3_json_field "$settings" 'Object.keys(d.env).filter(k => !["TMPDIR", "TMP", "TEMP"].includes(k)).sort().join(" ")')" = "COMPACT_ADVISER_DISABLE COMPOSE_PROJECT_NAME FM_DOCKER_LABEL FM_HOME FM_T3CODE_ENV_KEYS FM_TASK_ID FM_TASK_INBOX FM_TASK_SCRATCH GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GOTMPDIR" ] || fail "a worker env block carries the task inbox, Git hook, and scratch area with the launch environment"

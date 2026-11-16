@@ -795,7 +795,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Keep project edits inside this worktree; keep proof outside it, under \`$DATA/$ID/\`, and put everything rebuildable (caches, environments, toolchains, downloads, test temp, extra checkouts) under \`\$FM_TASK_SCRATCH\`, which cleanup removes.
+2. Keep project edits inside this worktree; keep proof outside it, under \`$DATA/$ID/\`, and put everything rebuildable (caches, environments, toolchains, downloads, test temp) under \`\$FM_TASK_SCRATCH\`, which cleanup removes unless it holds a repository; delete any extra checkout you make there once you no longer need it.
    Pass \`--label "\$FM_DOCKER_LABEL"\` to every \`docker run\`, \`docker create\`, \`docker build\`, \`docker volume create\`, and \`docker network create\`; compose projects are already named for this task, so cleanup removes them too.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
