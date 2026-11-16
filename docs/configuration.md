@@ -994,7 +994,6 @@ Each drain reads it, so creating or removing it needs no restart.
 The file may be empty or hold these lines, each optional:
 
 - `hot-seconds=<n>` is how recently a status file must have changed to count as hot (default 3600).
-- `cold-sweep=heartbeat` names when cold files are scanned (default and only value `heartbeat`): on drains that present a heartbeat wake, and on the session-start and away-mode return drains.
 
 Blank lines, lines without `=`, unknown keys, and unusable values keep the defaults.
 
@@ -1005,8 +1004,14 @@ A status file is hot when any of these holds:
 - It has no manifest row yet.
 - A wake the drain presents names its task.
 
+A drain scans every file, hot or cold, when any of these holds:
+
+- It presents a heartbeat wake.
+- It is the session-start or away-mode return drain.
+- The last full scan, whose time it records in `state/.status-full-sweep-at`, is at least `FM_HEARTBEAT` seconds old (default 600), or none is recorded.
+
 Other drains scan hot files only, and keep each cold file's manifest row unchanged.
-A cold file's open decisions and unread lines are therefore never dropped: they are presented again on the next heartbeat, session-start, or away-mode return drain.
+A cold file's open decisions and unread lines are therefore never dropped: the first drain at least `FM_HEARTBEAT` seconds after the last full scan presents them again, even when the watcher absorbs the heartbeat without queuing a wake.
 A drain that skipped cold files prints one `STATUS SCAN: skipped <n> cold status file(s) ...` line.
 `bin/fm-wake-drain.sh` owns the drain selection, including its `--full-status-scan` flag, and `bin/fm-classify-lib.sh`'s `status_presentation_snapshot_tiered` owns the hot test, with coverage in [`tests/fm-status-scan-tiers.test.sh`](../tests/fm-status-scan-tiers.test.sh).
 

@@ -1706,17 +1706,15 @@ EOF
 # files keep their manifest rows unchanged, so the next full sweep still
 # presents every open decision they hold.
 FM_STATUS_SCAN_HOT_SECONDS_DEFAULT=3600
-FM_STATUS_SCAN_COLD_SWEEP_DEFAULT=heartbeat
 
 # status_scan_tiers_config <config-dir>: 0 and sets FM_STATUS_SCAN_HOT_SECONDS
-# and FM_STATUS_SCAN_COLD_SWEEP when the home opted in; 1 when it did not.
+# when the home opted in; 1 when it did not.
 # Blank lines, # comments, unknown keys, and unusable values keep the defaults.
 # shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
 status_scan_tiers_config() {  # <config-dir>
   local file=$1/status-scan-tiers line key value
   [ -f "$file" ] && [ -r "$file" ] || return 1
   FM_STATUS_SCAN_HOT_SECONDS=$FM_STATUS_SCAN_HOT_SECONDS_DEFAULT
-  FM_STATUS_SCAN_COLD_SWEEP=$FM_STATUS_SCAN_COLD_SWEEP_DEFAULT
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *=*) ;; *) continue ;; esac
     key=${line%%=*}
@@ -1724,9 +1722,6 @@ status_scan_tiers_config() {  # <config-dir>
     case "$key" in
       hot-seconds)
         case "$value" in ''|0*|*[!0-9]*) ;; *) FM_STATUS_SCAN_HOT_SECONDS=$value ;; esac
-        ;;
-      cold-sweep)
-        case "$value" in heartbeat) FM_STATUS_SCAN_COLD_SWEEP=$value ;; esac
         ;;
     esac
   done < "$file"

@@ -20,8 +20,8 @@ mkdir -p "$TMP_ROOT/config-off" "$TMP_ROOT/config-on" "$TMP_ROOT/config-bad"
 : > "$TMP_ROOT/config-off/supervision-host-off"
 : > "$TMP_ROOT/config-on/supervision-host-off"
 : > "$TMP_ROOT/config-bad/supervision-host-off"
-printf '# tiered scanning\nhot-seconds=600\ncold-sweep=heartbeat\n' > "$TMP_ROOT/config-on/status-scan-tiers"
-printf 'hot-seconds=abc\nhot-seconds=0\ncold-sweep=never\nnonsense line\n' > "$TMP_ROOT/config-bad/status-scan-tiers"
+printf '# tiered scanning\nhot-seconds=600\n' > "$TMP_ROOT/config-on/status-scan-tiers"
+printf 'hot-seconds=abc\nhot-seconds=0\nunknown-key=1\nnonsense line\n' > "$TMP_ROOT/config-bad/status-scan-tiers"
 
 age_file() {  # <seconds-ago> <file>...
   local ago=$1
@@ -104,14 +104,16 @@ test_cursor_path_matches_dirname_and_basename() {
 }
 
 # A cold fixture: an old open decision whose bytes the first full drain
-# presented, so its manifest row covers the whole file.
+# presented, so its manifest row covers the whole file. The priming drain is a
+# session-start full scan, so the tiered drains that follow are within the
+# heartbeat sweep interval.
 make_cold_decision_case() {  # <name> -> case dir
   local dir state
   dir=$(make_case "$1")
   state="$dir/state"
   printf 'needs-decision [key=pick]: choose the cold option\nnote: waiting\n' > "$state/cold.status"
   printf 'working: started\nnote: hot ping\n' > "$state/hot.status"
-  drain "$state" "$TMP_ROOT/config-off" > "$dir/prime.out" || fail "priming drain failed"
+  drain "$state" "$TMP_ROOT/config-on" --full-status-scan > "$dir/prime.out" || fail "priming drain failed"
   grep -F 'cold [key=pick]' "$dir/prime.out" >/dev/null \
     || fail "setup error: the priming drain did not present the open decision: $(cat "$dir/prime.out")"
   age_file 7200 "$state/cold.status"
@@ -146,7 +148,7 @@ test_on_path_skips_cold_until_heartbeat() {
   if grep -F 'cold [key=pick]' "$out" >/dev/null; then
     fail "an ordinary tiered drain rescanned a cold file: $(cat "$out")"
   fi
-  grep -Fx 'STATUS SCAN: skipped 1 cold status file(s) on this wake; the next heartbeat or session start scans them.' "$out" >/dev/null \
+  grep -Fx 'STATUS SCAN: skipped 1 cold status file(s) on this wake; a drain scans every file at least every 600 s, and on a heartbeat wake or session start.' "$out" >/dev/null \
     || fail "a tiered drain that skipped a cold file did not say so: $(cat "$out")"
 
   append_wake "$state" heartbeat heartbeat "fleet review" || fail "could not queue a heartbeat"
@@ -187,6 +189,48 @@ test_cold_file_that_gains_a_line_is_hot_next_drain() {
   pass "a cold file that gains a line is hot on the next drain, whatever its age"
 }
 
+# Record the last full scan as <seconds-ago> old; state/.status-full-sweep-at
+# is the drain's persisted sweep-time state (docs/configuration.md).
+age_full_sweep() {  # <state> <seconds-ago>
+  printf '%s\n' "$(( $(date +%s) - $2 ))" > "$1/.status-full-sweep-at" \
+    || fail "could not age the recorded full sweep"
+}
+
+test_cold_file_is_rescanned_at_heartbeat_cadence() {
+  local dir state out
+  dir=$(make_cold_decision_case sweep-cadence)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  age_full_sweep "$state" 500
+  drain "$state" "$TMP_ROOT/config-on" > "$out" || fail "drain inside the sweep interval failed"
+  if grep -F 'cold [key=pick]' "$out" >/dev/null; then
+    fail "a drain 500 s after the last full scan rescanned a cold file: $(cat "$out")"
+  fi
+  grep -F 'STATUS SCAN: skipped 1' "$out" >/dev/null \
+    || fail "a drain inside the sweep interval did not skip the cold file: $(cat "$out")"
+
+  FM_HEARTBEAT=400 drain "$state" "$TMP_ROOT/config-on" > "$out" || fail "drain with FM_HEARTBEAT=400 failed"
+  grep -F 'cold [key=pick] needs-decision: choose the cold option' "$out" >/dev/null \
+    || fail "with FM_HEARTBEAT=400 a drain 500 s after the last full scan hid the open decision: $(cat "$out")"
+
+  drain "$state" "$TMP_ROOT/config-on" > "$out" || fail "drain after the sweep failed"
+  grep -F 'STATUS SCAN: skipped 1' "$out" >/dev/null \
+    || fail "the full scan did not record its time, so the next drain swept again: $(cat "$out")"
+
+  age_full_sweep "$state" 700
+  drain "$state" "$TMP_ROOT/config-on" > "$out" || fail "drain past the default interval failed"
+  grep -F 'cold [key=pick] needs-decision: choose the cold option' "$out" >/dev/null \
+    || fail "a drain 700 s after the last full scan hid the open decision: $(cat "$out")"
+  if grep -F 'STATUS SCAN' "$out" >/dev/null; then
+    fail "a drain past the sweep interval reported skipped files: $(cat "$out")"
+  fi
+  if grep -F 'note: waiting' "$out" >/dev/null; then
+    fail "a timed full scan replayed an already-presented note: $(cat "$out")"
+  fi
+  pass "with no heartbeat wake a cold open decision is presented again once FM_HEARTBEAT seconds pass since the last full scan, and not before"
+}
+
 test_signal_wake_task_is_always_scanned() {
   local dir state out
   dir=$(make_cold_decision_case signal-forced)
@@ -212,7 +256,7 @@ test_malformed_config_keeps_the_defaults() {
   drain "$state" "$TMP_ROOT/config-bad" > "$out" || fail "second drain with a malformed config failed"
   grep -F 'cold [key=pick]' "$out" >/dev/null \
     || fail "a file inside the default 3600 s window was treated as cold: $(cat "$out")"
-  pass "a malformed config keeps hot-seconds=3600 and cold-sweep=heartbeat"
+  pass "a malformed config keeps hot-seconds=3600"
 }
 
 # Count every external command a drain starts, through PATH shims.
@@ -236,7 +280,7 @@ make_fleet() {  # <state> <count> <hot-count>
     printf 'working: started %s\nnote: ping %s\n' "$i" "$i" > "$state/task$i.status"
     i=$((i + 1))
   done
-  drain "$state" "$TMP_ROOT/config-off" > /dev/null || fail "priming drain for the fleet failed"
+  drain "$state" "$TMP_ROOT/config-on" --full-status-scan > /dev/null || fail "priming drain for the fleet failed"
   age_file 7200 "$state"/task*.status
   i=1
   while [ "$i" -le "$hot" ]; do
@@ -287,6 +331,7 @@ test_cursor_path_matches_dirname_and_basename
 test_off_path_scans_every_file
 test_on_path_skips_cold_until_heartbeat
 test_cold_file_that_gains_a_line_is_hot_next_drain
+test_cold_file_is_rescanned_at_heartbeat_cadence
 test_signal_wake_task_is_always_scanned
 test_malformed_config_keeps_the_defaults
 test_hot_drain_process_count_is_independent_of_file_count

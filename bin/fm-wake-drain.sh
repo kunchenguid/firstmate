@@ -15,8 +15,9 @@
 # found while taking that lock was left by a drain that died mid-write; each
 # locked drain rotates such leftovers away before doing anything else.
 # --full-status-scan (session start, away-mode return) scans every status file
-# even when the home opted into tiered scanning with config/status-scan-tiers;
-# without that file the flag changes nothing (docs/configuration.md "Tiered
+# even when the home opted into tiered scanning with config/status-scan-tiers,
+# as do heartbeat wakes and any drain whose last full scan is FM_HEARTBEAT
+# seconds old; without that file the flag changes nothing (docs/configuration.md "Tiered
 # status scanning").
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
@@ -803,16 +804,28 @@ print_status_sections() {  # [<snapshot>] [<fully-presented>] [<cold-carry-tasks
 # Opt-in tiered scanning (docs/configuration.md "Tiered status scanning"):
 # succeed when config/status-scan-tiers is present and this drain is not a full
 # sweep, setting TIER_NOW and TIER_FORCED_HOT for the tiered snapshot. A full
-# sweep is a drain started with --full-status-scan or one that presents a
-# heartbeat wake. Every task a presented signal wake names is hot.
+# sweep is a drain started with --full-status-scan, one that presents a
+# heartbeat wake, or one that finds the last full sweep recorded in
+# state/.status-full-sweep-at missing or at least TIER_SWEEP_SECONDS
+# (FM_HEARTBEAT, default 600) old. TIER_RECORD_SWEEP is true when the home
+# opted in and this drain is a full sweep, so a successful presentation records
+# its time. Every task a presented signal wake names is hot.
 TIER_NOW=
 TIER_FORCED_HOT=
+TIER_RECORD_SWEEP=false
+TIER_SWEEP_SECONDS=${FM_HEARTBEAT:-600}
+case "$TIER_SWEEP_SECONDS" in ''|0*|*[!0-9]*) TIER_SWEEP_SECONDS=600 ;; esac
 status_scan_tiers_limits_this_drain() {  # [<deduped-raw-rows>]
-  local rows=${1:-} epoch seq kind key payload
+  local rows=${1:-} epoch seq kind key payload last=''
   TIER_NOW=
   TIER_FORCED_HOT=
-  [ "$FULL_STATUS_SCAN" = false ] || return 1
+  TIER_RECORD_SWEEP=false
   status_scan_tiers_config "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || return 1
+  printf -v TIER_NOW '%(%s)T' -1 2>/dev/null || TIER_NOW=
+  case "$TIER_NOW" in ''|*[!0-9]*) TIER_NOW=$(date +%s) || TIER_NOW= ;; esac
+  case "$TIER_NOW" in ''|*[!0-9]*) TIER_NOW=; return 1 ;; esac
+  TIER_RECORD_SWEEP=true
+  [ "$FULL_STATUS_SCAN" = false ] || return 1
   while IFS=$'\t' read -r epoch seq kind key payload; do
     [ "$kind" != heartbeat ] || return 1
     if [ "$kind" = signal ] && fm_wake_status_key_map "$key"; then
@@ -821,9 +834,10 @@ status_scan_tiers_limits_this_drain() {  # [<deduped-raw-rows>]
   done <<EOF
 $rows
 EOF
-  printf -v TIER_NOW '%(%s)T' -1 2>/dev/null || TIER_NOW=
-  case "$TIER_NOW" in ''|*[!0-9]*) TIER_NOW=$(date +%s) || return 1 ;; esac
-  case "$TIER_NOW" in ''|*[!0-9]*) return 1 ;; esac
+  [ ! -f "$STATE/.status-full-sweep-at" ] || IFS= read -r last < "$STATE/.status-full-sweep-at" || :
+  case "$last" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$TIER_NOW" -ge "$last" ] && [ $((TIER_NOW - last)) -lt "$TIER_SWEEP_SECONDS" ] || return 1
+  TIER_RECORD_SWEEP=false
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
@@ -870,8 +884,11 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     print_record_divergence_section || rc=1
   fi
   if [ "$rc" -eq 0 ] && [ "$STATUS_SNAPSHOT_COLD_COUNT" -gt 0 ]; then
-    printf 'STATUS SCAN: skipped %s cold status file(s) on this wake; the next heartbeat or session start scans them.\n' \
-      "$STATUS_SNAPSHOT_COLD_COUNT" || rc=1
+    printf 'STATUS SCAN: skipped %s cold status file(s) on this wake; a drain scans every file at least every %s s, and on a heartbeat wake or session start.\n' \
+      "$STATUS_SNAPSHOT_COLD_COUNT" "$TIER_SWEEP_SECONDS" || rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$TIER_RECORD_SWEEP" = true ]; then
+    printf '%s\n' "$TIER_NOW" > "$STATE/.status-full-sweep-at" || :
   fi
   fm_lock_release "$lock"
   return "$rc"
