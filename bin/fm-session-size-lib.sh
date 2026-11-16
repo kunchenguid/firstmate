@@ -61,6 +61,8 @@ fm_session_size_codex() {  # <worktree>
   [ -d "$sessions" ] || return 1
   days=${FM_SESSION_SIZE_DAYS:-30}
   case "$days" in '' | *[!0-9]*) days=30 ;; esac
+  # One awk pass reads only each file's first line and prints the files whose
+  # session_meta names the worktree; jq then confirms each candidate exactly.
   while IFS= read -r file; do
     head -n 1 "$file" 2>/dev/null | jq -e --arg wt "$wt" --arg pwt "$physical" 'select(.type == "session_meta") | (.payload.cwd == $wt or .payload.cwd == $pwt)' >/dev/null 2>&1 || continue
     m=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null) || continue
@@ -68,7 +70,8 @@ fm_session_size_codex() {  # <worktree>
       newest=$file
       newest_m=$m
     fi
-  done < <(find "$sessions" -type f -name 'rollout-*.jsonl' -mtime "-$days" 2>/dev/null)
+  done < <(find "$sessions" -type f -name 'rollout-*.jsonl' -mtime "-$days" -exec awk -v a="\"cwd\":\"$wt\"" -v b="\"cwd\":\"$physical\"" \
+    'FNR == 1 { if (index($0, a) || index($0, b)) print FILENAME; nextfile }' {} + 2>/dev/null)
   [ -n "$newest" ] || return 1
   FM_SESSION_CALLS=$(jq -r 'select(.type == "event_msg" and .payload.type == "token_count" and (.payload.info | type) == "object") | 1' "$newest" 2>/dev/null | wc -l | tr -d ' ')
   FM_SESSION_CONTEXT=$(jq -r 'select(.type == "event_msg" and .payload.type == "token_count" and (.payload.info | type) == "object") | .payload.info.last_token_usage.input_tokens // empty' "$newest" 2>/dev/null | tail -n 1)

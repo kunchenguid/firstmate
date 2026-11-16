@@ -145,7 +145,31 @@ test_quiet_cases() {
   pass "secondmates, off lines, missing sessions, and unreadable settings stay silent and never block"
 }
 
+# The Codex lookup reads the first line of each recent rollout, so its cost
+# grows with the machine's session count; time it at fleet sizes.
+test_scale_codex_lookup() {
+  local n i dir start ms
+  for n in 5 100 1000; do
+    setup_case "scale-$n" codex ship
+    : >"$CASE/home/config/context-ceiling"
+    dir="$USER_HOME/.codex/sessions/2030/01/02"
+    mkdir -p "$dir"
+    for i in $(seq 1 "$n"); do
+      printf '{"type":"session_meta","payload":{"cwd":"/elsewhere/wt-%s"}}\n{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":9}}}}\n' "$i" >"$dir/rollout-other-$i.jsonl"
+    done
+    write_codex_session 300 1000
+    start=$(perl -MTime::HiRes=time -e 'printf "%d", time*1000')
+    send
+    ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
+    assert_recorded "scale $n"
+    assert_contains "$(cat "$ERR")" "300 model calls" "the worker's own session is found among $n others"
+    printf '# scale: %s other rollouts -> steer with advice in %s ms\n' "$n" "$ms"
+  done
+  pass "the advice finds the worker's Codex session among 5, 100 and 1000 others (timings above)"
+}
+
 test_no_setting_no_advice
 test_claude_calls_advice
 test_codex_context_advice
 test_quiet_cases
+test_scale_codex_lookup
