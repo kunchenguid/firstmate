@@ -986,6 +986,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
+# shellcheck source=bin/fm-context-ceiling-lib.sh
+. "$SCRIPT_DIR/fm-context-ceiling-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
@@ -1010,6 +1012,8 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+CONTEXT_CEILING_ARG=
+CONTEXT_CEILING_SET=0
 HERMES_PROFILE=
 HERMES_PROFILE_SET=0
 BACKEND_SET=0
@@ -1049,6 +1053,10 @@ for a in "$@"; do
     effort)
       EFFORT=$a
       EFFORT_SET=1
+      ;;
+    context-ceiling)
+      CONTEXT_CEILING_ARG=$a
+      CONTEXT_CEILING_SET=1
       ;;
     dispatch-override) DISPATCH_OVERRIDE=$a ;;
     hermes-profile)
@@ -1121,6 +1129,11 @@ for a in "$@"; do
     EFFORT=${a#--effort=}
     EFFORT_SET=1
     ;;
+  --context-ceiling) want_value=context-ceiling ;;
+  --context-ceiling=*)
+    CONTEXT_CEILING_ARG=${a#--context-ceiling=}
+    CONTEXT_CEILING_SET=1
+    ;;
   --dispatch-override) want_value=dispatch-override ;;
   --dispatch-override=*) DISPATCH_OVERRIDE=${a#--dispatch-override=} ;;
   --hermes-profile) want_value=hermes-profile ;;
@@ -1192,6 +1205,16 @@ fi
   echo "error: --effort requires a non-empty value" >&2
   exit 1
 }
+if [ "$CONTEXT_CEILING_SET" = 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --context-ceiling is a per-task worker setting; a secondmate takes the secondmate= line of config/context-ceiling" >&2
+    exit 1
+  fi
+  fm_context_ceiling_valid "$CONTEXT_CEILING_ARG" || {
+    echo "error: --context-ceiling must be off or a token count from $FM_CONTEXT_CEILING_MIN through $FM_CONTEXT_CEILING_MAX (got '$CONTEXT_CEILING_ARG')" >&2
+    exit 1
+  }
+fi
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
   echo "error: --backend requires a non-empty value" >&2
   exit 1
@@ -2171,6 +2194,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$CONTEXT_CEILING_SET" -eq 0 ] || shared_args+=(--context-ceiling "$CONTEXT_CEILING_ARG")
   [ -z "$DISPATCH_OVERRIDE" ] || shared_args+=(--dispatch-override "$DISPATCH_OVERRIDE")
   [ "$HERMES_PROFILE_SET" -eq 0 ] || shared_args+=(--hermes-profile "$HERMES_PROFILE")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -2967,9 +2991,9 @@ launch_template() {
   # secondmate launch deliberately keeps hooks on but shares this approval posture.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXCEILING____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXCEILING____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -3268,8 +3292,8 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
   dispatch_fields=$(jq -r --arg id "$ID" '
     select(.task == $id and (.status | IN("clear", "ambiguous", "escalate", "error", "off"))
       and (if .status == "clear" then (.profile.harness | type) == "string" and .profile.harness != "" else true end))
-    | .status, (.profile.harness // ""), (.profile.model // ""), (.profile.effort // "")' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_fields=
-  { read -r dispatch_status; read -r selected_harness; read -r selected_model; read -r selected_effort; } <<<"$dispatch_fields" || true
+    | .status, (.profile.harness // ""), (.profile.model // ""), (.profile.effort // ""), (.profile.context_ceiling // "" | tostring)' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_fields=
+  { read -r dispatch_status; read -r selected_harness; read -r selected_model; read -r selected_effort; read -r selected_ceiling; } <<<"$dispatch_fields" || true
   if [ -z "$dispatch_status" ]; then
     echo "error: malformed dispatch resolution $DISPATCH_RECORD for task $ID; rerun bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name>" >&2
     exit 1
@@ -3277,8 +3301,9 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
   if [ "$dispatch_status" = clear ] && [ -z "$DISPATCH_OVERRIDE" ] \
     && { [ "$RAW_LAUNCH" -eq 1 ] || [ "$HARNESS" != "$selected_harness" ] \
       || { [ -n "$selected_model" ] && [ "${MODEL:-}" != "$selected_model" ]; } \
-      || { [ -n "$selected_effort" ] && [ "${EFFORT:-}" != "$selected_effort" ]; }; }; then
-    echo "error: launch flags do not match the clear dispatch selection --harness $selected_harness${selected_model:+ --model $selected_model}${selected_effort:+ --effort $selected_effort} recorded in $DISPATCH_RECORD; pass those flags with no raw launch command, or record this task's override with --dispatch-override <reason>" >&2
+      || { [ -n "$selected_effort" ] && [ "${EFFORT:-}" != "$selected_effort" ]; } \
+      || { [ -n "$selected_ceiling" ] && [ "$CONTEXT_CEILING_ARG" != "$selected_ceiling" ]; }; }; then
+    echo "error: launch flags do not match the clear dispatch selection --harness $selected_harness${selected_model:+ --model $selected_model}${selected_effort:+ --effort $selected_effort}${selected_ceiling:+ --context-ceiling $selected_ceiling} recorded in $DISPATCH_RECORD; pass those flags with no raw launch command, or record this task's override with --dispatch-override <reason>" >&2
     exit 1
   fi
 fi
@@ -3534,6 +3559,36 @@ WORKER_ACCOUNT_MATE=
 # launch spends: --account on a fresh spawn, and on a relaunch that flag or
 # else the account the task already records.
 WORKER_ACCOUNT_REQUEST=$ACCOUNT_ARG
+# The conversation size at which this launch's tool summarizes it
+# (bin/fm-context-ceiling-lib.sh owns the setting, precedence, and coverage).
+# Resolved before anything is created so an unreadable setting refuses cleanly.
+CONTEXT_CEILING_RECORDED=
+[ "$RELAUNCH" -eq 0 ] || CONTEXT_CEILING_RECORDED=$(fm_meta_get "$RELAUNCH_META" context_ceiling)
+fm_context_ceiling_resolve "$CONFIG" "$KIND" "$CONTEXT_CEILING_SET" "$CONTEXT_CEILING_ARG" "$CONTEXT_CEILING_RECORDED" || {
+  echo "error: spawn refused: $FM_CONTEXT_CEILING_ERROR" >&2
+  exit 1
+}
+CONTEXT_CEILING=$FM_CONTEXT_CEILING_VALUE
+CONTEXT_CEILING_APPLIED=
+CONTEXT_CEILING_TOKENS=
+if [ -n "$CONTEXT_CEILING" ]; then
+  if [ "$CONTEXT_CEILING" = off ]; then
+    CONTEXT_CEILING_APPLIED=no
+  elif [ "$RAW_LAUNCH" = 0 ] && [ "$BACKEND" != t3code ] && fm_context_ceiling_covered "$HARNESS"; then
+    CONTEXT_CEILING_APPLIED=yes
+    CONTEXT_CEILING_TOKENS=$CONTEXT_CEILING
+  else
+    CONTEXT_CEILING_APPLIED=no
+    if [ "$RAW_LAUNCH" = 1 ]; then
+      ceiling_why='a raw launch command'
+    elif [ "$BACKEND" = t3code ]; then
+      ceiling_why='backend=t3code starts the agent itself'
+    else
+      ceiling_why="$HARNESS has no verified per-launch ceiling"
+    fi
+    echo "notice: context ceiling $CONTEXT_CEILING is recorded but not applied: $ceiling_why, so it keeps its own default" >&2
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   WORKER_ACCOUNT_REQUEST=$(fm_worker_account_relaunch_request "$HARNESS" "$CONFIG" "$RELAUNCH_PRIOR_HARNESS" \
     "$(fm_meta_get "$RELAUNCH_META" account)" "$ACCOUNT_ARG" "$WORKER_ACCOUNT_MATE") || exit 1
@@ -6583,6 +6638,7 @@ BUSY_GEN=
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then
         session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
       fi
+      [ -z "$CONTEXT_CEILING_TOKENS" ] || session_keys="$session_keys\"autoCompactWindow\":$CONTEXT_CEILING_TOKENS,"
       printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
     else
       mkdir -p "$WT/.claude"
@@ -7326,7 +7382,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort context_ceiling context_ceiling_applied opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7357,6 +7413,10 @@ preserve_relaunch_meta() {
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Written only when a ceiling applies to this launch (bin/fm-context-ceiling-lib.sh),
+  # so a home without one keeps every task record byte-identical.
+  [ -z "$CONTEXT_CEILING" ] || echo "context_ceiling=$CONTEXT_CEILING"
+  [ -z "$CONTEXT_CEILING" ] || echo "context_ceiling_applied=$CONTEXT_CEILING_APPLIED"
   [ -z "$DISPATCH_OVERRIDE" ] || printf 'dispatch_override=%s\n' "$DISPATCH_OVERRIDE"
   # The detected OpenCode major, recorded so fm-control sends the exit key this
   # agent's TUI understands. Written only when a version was resolved, so a
@@ -7564,12 +7624,20 @@ case "$LAUNCH" in
   if [ "$KIND" = secondmate ]; then
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
+    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION____CLAUDECEILING__}'"
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
   fi
   ;;
 esac
 LAUNCH=${LAUNCH//__CODEXAPPROVALFLAG__/$CODEX_APPROVAL_FLAG}
+CLAUDECEILING=
+CODEXCEILING=
+if [ -n "$CONTEXT_CEILING_TOKENS" ]; then
+  CLAUDECEILING=",\"autoCompactWindow\":$CONTEXT_CEILING_TOKENS"
+  CODEXCEILING="-c model_auto_compact_token_limit=$CONTEXT_CEILING_TOKENS "
+fi
+LAUNCH=${LAUNCH//__CLAUDECEILING__/$CLAUDECEILING}
+LAUNCH=${LAUNCH//__CODEXCEILING__/$CODEXCEILING}
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
 else

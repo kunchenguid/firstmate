@@ -1952,13 +1952,13 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"agy","quota_scope":""}}]}|each use profile quota_scope must be a non-empty string when present' \
   '{"rules":[{"when":"x","use":{"harness":"agy","quota_scope":7}}]}|each use profile quota_scope must be a non-empty string when present' \
-  '{"rules":[{"when":"x","use":["codex"]}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":["codex"]}|each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":["codex"]}]}|each use profile needs harness; model, effort, context_ceiling, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":["codex"]}|each default profile needs harness; model, effort, context_ceiling, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"agy"}}],"default":{"harness":"agy","quota_scope":["gemini"]}}|each default profile quota_scope must be a non-empty string when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, context_ceiling, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, context_ceiling, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, context_ceiling, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, context_ceiling, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
@@ -2073,5 +2073,34 @@ assert_not_contains "$out" 'quota ranking off' "shared_quota false prints no opt
 assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidence"
 pass "shared_quota false keeps the unchanged quota-ranked behavior"
 cp "$BASE_RULES" "$RULES"
+
+# --- context_ceiling: a kind of task's summarizing size rides the profile ----
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+TASK_RECORD="$HOME_DIR/data/pager-fix/dispatch-resolution.json"
+jq '.rules[3].use = {harness:"claude",model:"sonnet",effort:"high",context_ceiling:400000}' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+expect_code 0 "$code" "a profile with context_ceiling resolves"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high' --context-ceiling '400000'" "the profile line carries the rule's context ceiling"
+assert_equals 400000 "$(jq -r .profile.context_ceiling "$TASK_RECORD")" "the task record carries the ceiling fm-spawn checks"
+jq '.rules[3].use = {harness:"claude",model:"sonnet",context_ceiling:"off"}' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_contains "$out" "--context-ceiling 'off'" "a rule may ask for no ceiling (a very large window)"
+for bad in '"250k"' 19999 250000.5 '"OFF"' null; do
+  jq --argjson c "$bad" '.rules[3].use = {harness:"claude",model:"sonnet",context_ceiling:$c}' "$BASE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+  expect_code 2 "$code" "context_ceiling=$bad is a configuration error"
+  assert_contains "$err$out" 'context_ceiling' "the context_ceiling=$bad error names the field"
+done
+jq '.rules[3].use = {harness:"claude",model:"sonnet"}' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_not_contains "$out" '--context-ceiling' "a profile without context_ceiling prints no ceiling flag"
+assert_equals false "$(jq -r '.profile | has("context_ceiling")' "$TASK_RECORD")" "a profile without context_ceiling records none"
+cp "$BASE_RULES" "$RULES"
+pass "context_ceiling: a rule's ceiling is printed and recorded, off is allowed, malformed values are errors"
 
 printf '# all fm-dispatch-resolve tests passed\n'

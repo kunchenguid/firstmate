@@ -1208,6 +1208,9 @@ crew_dispatch_validate() {
     def configured_profiles:
       ([(.rules // [])[]? | profiles(.use?)[]?]
         + (if has("default") then [profiles(.default)[]?] else [] end));
+    # context_ceiling: bin/fm-context-ceiling-lib.sh owns the value grammar.
+    def malformed_ceilings($items):
+      $items | any(. as $p | type == "object" and has("context_ceiling") and ((($p.context_ceiling == "off") or ((($p.context_ceiling | type) == "number") and ($p.context_ceiling == ($p.context_ceiling | floor)) and $p.context_ceiling >= 20000 and $p.context_ceiling <= 10000000)) | not));
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
@@ -1248,6 +1251,7 @@ crew_dispatch_validate() {
       if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "use profile model and effort must be non-empty strings when present"
       end
+    elif malformed_ceilings([(.rules // [])[]? | profiles(.use?)[]?] + (if has("default") then [profiles(.default)[]?] else [] end)) then "profile context_ceiling must be \"off\" or a whole number of tokens from 20000 through 10000000"
     elif $typed and malformed_quota_scopes([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile quota_scope must be a non-empty string when present"
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"

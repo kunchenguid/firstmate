@@ -392,7 +392,8 @@ family_for_basename() {
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
-    fm-claude-tool-exclude-live.test.sh)
+    fm-claude-tool-exclude-live.test.sh|\
+    fm-context-ceiling-live.test.sh|fm-context-ceiling-codex-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -407,6 +408,7 @@ family_for_basename() {
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
     fm-project-capacity.test.sh|fm-lane-capacity-integration.test.sh|\
+    fm-context-ceiling.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -1673,6 +1675,12 @@ families_for_changed_path() {
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling.test.sh"
+      ;;
+    bin/fm-context-ceiling-lib.sh)
+      printf '%s\n' "__script__:fm-context-ceiling.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling-live.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling-codex-live.test.sh"
       ;;
     bin/fm-capacity.sh)
       printf '%s\n' "__script__:fm-capacity.test.sh"
