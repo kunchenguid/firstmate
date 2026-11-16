@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), [process-event failure wakes](#process-event-failure-wakes-configprocevent-failure-wakes), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
@@ -474,6 +474,40 @@ A compacted primary still picks up pending wakes and decisions from disk, becaus
 
 This feature does not set `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or any other autocompact setting.
 `bin/fm-warm-compact-lib.sh` owns the guards, with coverage in [`tests/fm-warm-compact.test.sh`](../tests/fm-warm-compact.test.sh) and the opt-in live guard [`tests/fm-warm-compact-herdr-live-e2e.test.sh`](../tests/fm-warm-compact-herdr-live-e2e.test.sh).
+
+## Process-event failure wakes (config/procevent-failure-wakes)
+
+Create the home-local `config/procevent-failure-wakes` file to stop a process-event source that keeps failing to start from waking firstmate on every new failure episode.
+Without it, each [failure episode](#process-to-event-sources-stateprocevent) of a source sends its own `check: process-event source failed to start` wake, so a source that starts briefly and fails again wakes the supervisor every few cycles.
+
+The feature is off when the file is absent, and then failure wakes, their payloads, and the fleet view are unchanged.
+The file is local to each home and is not inherited by secondmates.
+`bin/fm-procevent.sh reconcile` reads it on every cycle, so creating or removing it needs no restart.
+
+The file may be empty or hold these lines, each optional:
+
+- `repeat-seconds=<n>` is the window after a failure wake during which later failures of the same source and reason are counted without a wake (default 3600).
+- `recovered-wake=on|off` sends one wake when a source whose failures were counted starts again (default `on`).
+
+Blank lines, lines that start with `#`, unknown keys, and unusable values are ignored, so a malformed file keeps the defaults.
+
+With the file present:
+
+- The first failure of a source wakes exactly as before.
+- A later failure of the same source and reason inside the window is counted and logged with no wake, including a new failure episode that would otherwise wake.
+- A failure with a different reason for the same source still wakes at once and opens a new window.
+  The reasons are a runner refusal before claiming (each distinct message is its own reason), a launch that did not prove its claim with no refusal recorded, and an extension invocation cleanup refusal.
+  A launch with no refusal recorded counts as the same reason as a refusal already known, because it adds nothing new.
+- A failure after the window wakes again when the episode rule would wake for it, and opens a new window.
+  The gate never sends a failure wake that the episode rule would not send.
+- When the source is found owned or its launch confirms, and failures were counted since the last wake, one `check: process-event source started again` wake reports the count, at most once per window.
+  Failures after that wake and before the window ends are counted again without a wake.
+- The heartbeat fleet view (`bin/fm-fleet-view.sh`, from the `procevent_failure_quiet` field of `bin/fm-fleet-snapshot.sh --json`) lists each source with counted failures, its state, its reason, and when its window started.
+  A recovered source keeps its row, with the failures counted without a wake in that window, until the window ends.
+
+So a source that fails every cycle for an hour produces one wake when it first fails and one when it starts again, and a flapping source produces at most two wakes per window.
+Reconcile keeps relaunching the source every cycle exactly as before; only the wakes change.
+`bin/fm-procevent-failure-wakes-lib.sh` owns the parser and the per-source record, with coverage in [`tests/fm-procevent-failure-wakes.test.sh`](../tests/fm-procevent-failure-wakes.test.sh).
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -3423,6 +3457,7 @@ The `failed=` count reaches only the command's caller because `bin/fm-watch.sh` 
 For that reason, `reconcile` also publishes a durable `check` wake once per failure episode, with key `procevent:<id>:launch-failed:<registration-identity>-<episode-nonce>`.
 Later cycles stay silent for that episode until a launch confirms.
 A later fresh failure gets a fresh key, because the watcher never re-surfaces a key it has already surfaced.
+The opt-in [process-event failure wakes](#process-event-failure-wakes-configprocevent-failure-wakes) setting holds back repeat episodes of the same failure.
 
 - The announcement changes nothing about the launch: `reconcile` keeps relaunching the source every cycle exactly as before, and nothing is retried differently, throttled, or recovered from that signal.
 - The wake reports only the observed failure: the launch did not prove that it took the claim within the window.

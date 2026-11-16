@@ -92,5 +92,17 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
    end),
   "",
   "## Secondmates",
-  .secondmate_guidance.note
+  .secondmate_guidance.note,
+  (if has("procevent_failure_quiet") then
+    "",
+    "## Quiet Process-Event Failures",
+    (if (.procevent_failure_quiet | length) == 0 then
+      "No process-event failures are being counted without a wake."
+     else
+      "| Source | State | Failures Counted | Counted In Window | Since | Last Failure | Reason |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      (.procevent_failure_quiet[] |
+        "| \(.source) | \(.state) | \(.held_failures) | \(.suppressed_failures) | \(.window_start) | \(.last_failure) | \(if .reason_text == "" then .reason else .reason_text end) |")
+     end)
+   else empty end)
 '

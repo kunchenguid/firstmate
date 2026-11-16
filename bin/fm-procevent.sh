@@ -85,6 +85,10 @@
 #            identity it ran under and ended by a later launch of that source
 #            confirming - because the supervision cycle discards the `failed=`
 #            count. The launch itself is retried every cycle exactly as before.
+#            With config/procevent-failure-wakes present, repeat failure wakes
+#            of one source and reason are counted without a wake inside a
+#            window and a recovery wake reports the count; docs/configuration.md
+#            "Process-event failure wakes" owns that policy.
 #            A source whose claim nothing may automatically displace is not
 #            relaunched at all; it is counted `uncertain` and announced once per
 #            stranded claim generation as a durable `check` wake, because the
@@ -248,6 +252,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -259,8 +264,20 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-procevent-failure-wakes-lib.sh
+. "$SCRIPT_DIR/fm-procevent-failure-wakes-lib.sh"
 
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+# A runner that reconcile launched under config/procevent-failure-wakes sets
+# REFUSAL_FILE until it holds its claim, so a refusal before the claim leaves
+# its reason where the next failure report can read it.
+REFUSAL_FILE=
+die() {
+  printf 'error: %s\n' "$1" >&2
+  if [ -n "$REFUSAL_FILE" ]; then
+    (umask 077; printf '%s\n' "$(fm_pfw_text "$1")" > "$REFUSAL_FILE") 2>/dev/null || true
+  fi
+  exit 1
+}
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 case "${1-}" in ''|-h|--help|help) usage ;; esac
@@ -431,6 +448,7 @@ runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 stranded_file() { printf '%s/.%s.stranded\n' "$REG" "$1"; }
 launch_failed_file() { printf '%s/.%s.launch-failed\n' "$REG" "$1"; }
+refusal_file() { printf '%s/.%s.launch-refusal\n' "$REG" "$1"; }
 
 # Let the source's own adapter apply and acknowledge one captured result. See
 # the header for why this exists and what each exit means. An already
@@ -1002,6 +1020,10 @@ cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  if [ "${FM_PROCEVENT_RECORD_REFUSAL:-0}" = 1 ] && [ -d "$REG" ] && [ ! -L "$REG" ]; then
+    REFUSAL_FILE=$(refusal_file "$id")
+  fi
+  unset FM_PROCEVENT_RECORD_REFUSAL
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
@@ -1070,6 +1092,7 @@ cmd_start() {
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
   if [ "$claimed" -eq 0 ]; then
+    REFUSAL_FILE=
     rm -f -- "$REG/.$id.cleanup-failed"
   fi
   fm_procevent_source_lock_release "$id"
@@ -1653,12 +1676,18 @@ report_stranded_source() {  # <source-id> <claim-token> <why-and-recovery>
 # announce.
 report_launch_failure() {  # <source-id> <registration-identity>
   local id=$1 identity=$2 episode nonce
-  case "$identity" in ''|*[!0-9:]*) episode=unreadable ;; *) episode=${identity//:/-} ;; esac
+  episode=$(failure_episode "$identity")
   nonce="$RANDOM$RANDOM"
   announce_source_once "$(launch_failed_file "$id")" "$episode" \
     "procevent:$id:launch-failed:$episode-$nonce" \
     "check: process-event source $id is registered but its launch did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS, so nothing is confirmed to be collecting from it; reconcile reports that as failed= and keeps launching it every supervision cycle. If it stays that way, check the source command and the adapter binary the registration names, and run an attached bin/fm-procevent.sh start $id to reproduce a refusal on its stderr - the detached launch discards it, and a hand-run reconcile only counts it as failed=. A later cycle that finds the source owned ends this episode on its own, so a runner that was merely slow to claim needs nothing from you." \
     "$episode $nonce"
+}
+
+# The failure episode a registration identity names, shared by both
+# launch-failed announcements and the opt-in quiet gate below.
+failure_episode() {  # <registration-identity>
+  case "$1" in ''|*[!0-9:]*) printf 'unreadable\n' ;; *) printf '%s\n' "${1//:/-}" ;; esac
 }
 
 # Cleanup has no claim token when an ownerless invocation blocks a source.
@@ -1667,7 +1696,7 @@ report_launch_failure() {  # <source-id> <registration-identity>
 report_extension_cleanup_failure() {  # <source-id>
   local id=$1 identity episode nonce
   identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) || identity=
-  case "$identity" in ''|*[!0-9:]*) episode=unreadable ;; *) episode=${identity//:/-} ;; esac
+  episode=$(failure_episode "$identity")
   nonce="$RANDOM$RANDOM"
   announce_source_once "$REG/.$id.cleanup-failed" "$episode" \
     "procevent:$id:launch-failed:$episode-$nonce" \
@@ -1693,6 +1722,123 @@ announce_source_once() {  # <marker> <generation> <key> <payload> [marker-record
   return 0
 }
 
+# Opt-in quiet handling for repeated failure wakes (config/procevent-failure-wakes;
+# docs/configuration.md "Process-event failure wakes" owns the policy and
+# bin/fm-procevent-failure-wakes-lib.sh owns the record). Nothing below runs
+# when the file is absent, so the announcements above are then unchanged.
+#
+# The gate only holds wakes back; it never adds a failure wake the episode rule
+# above would not send. The one wake it adds is the recovery wake, sent at most
+# once per window and only when failures were held back.
+PFW_ON=0
+
+pfw_reason_label() {  # <reason> <text>
+  case "$1" in
+    launch-refused-*) printf 'the runner refused before claiming: %s\n' "$2" ;;
+    cleanup-refused) printf 'extension invocation cleanup refused\n' ;;
+    *) printf 'the launch did not prove its claim\n' ;;
+  esac
+}
+
+# pfw_launch_reason <source-id>: set PFW_REASON and PFW_TEXT for a launch that
+# did not confirm. A refusal the runner left before claiming names the reason;
+# with none, all reconcile knows is that no claim was proved.
+pfw_launch_reason() {
+  local text sum
+  text=$(head -n 1 2>/dev/null < "$(refusal_file "$1")" || true)
+  if [ -n "$text" ]; then
+    sum=$(printf '%s' "$text" | cksum | awk '{print $1}')
+    PFW_REASON=launch-refused-$sum
+    PFW_TEXT=$text
+  else
+    PFW_REASON=launch-unconfirmed
+    PFW_TEXT=
+  fi
+}
+
+# pfw_failure <source-id> <launch|cleanup> <registration-identity> <reason> <text>
+# Record one failure and send its wake, or hold it back inside the window.
+pfw_failure() {
+  local id=$1 kind=$2 identity=$3 reason=$4 text=$5 rec marker episode previous now
+  local would=1 same=0
+  rec=$(fm_pfw_record_path "$REG" "$id")
+  now=$(date +%s)
+  if [ "$kind" = launch ]; then
+    marker=$(launch_failed_file "$id")
+    episode=$(failure_episode "$identity")
+  else
+    marker="$REG/.$id.cleanup-failed"
+    identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) || identity=
+    episode=$(failure_episode "$identity")
+  fi
+  previous=$(cat -- "$marker" 2>/dev/null || true)
+  [ "${previous%%[[:space:]]*}" != "$episode" ] || would=0
+  if fm_pfw_record_read "$rec"; then
+    if [ "$FM_PFW_REC_REASON" = "$reason" ]; then
+      same=1
+    elif [ "$reason" = launch-unconfirmed ] && [ "$FM_PFW_REC_REASON" != cleanup-refused ]; then
+      # No refusal this cycle adds nothing to a refusal already known.
+      same=1; reason=$FM_PFW_REC_REASON; text=$FM_PFW_REC_TEXT
+    elif [ "$FM_PFW_REC_REASON" = launch-unconfirmed ] && [ "$kind" = launch ]; then
+      # A refusal that names the reason refines an unknown one; it is not a
+      # different kind of failure.
+      same=1
+    fi
+    if [ "$same" -eq 1 ] && { [ $((now - FM_PFW_REC_START)) -lt "$FM_PFW_REPEAT" ] || [ "$would" -eq 0 ]; }; then
+      fm_pfw_record_write "$rec" "$reason" "$FM_PFW_REC_START" $((FM_PFW_REC_FAILURES + 1)) failing \
+        "$FM_PFW_REC_WOKE" "$now" $((FM_PFW_REC_SUPPRESSED + 1)) "$text" || return 1
+      fm_pfw_log "$REG" "$(fm_pfw_utc "$now") $id counted $reason: $(pfw_reason_label "$reason" "$text")" || true
+      if [ "$would" -eq 1 ]; then
+        # Record the episode as reported, so the end of the window does not
+        # announce an episode the window already covered.
+        (umask 077; printf '%s %s\n' "$episode" "$RANDOM$RANDOM" > "$marker") || true
+      fi
+      return 0
+    fi
+    # A different kind of failure is news even inside an episode already reported.
+    [ "$same" -eq 1 ] || { rm -f -- "$marker"; would=1; }
+  fi
+  [ "$would" -eq 1 ] || return 0
+  if [ "$kind" = launch ]; then
+    report_launch_failure "$id" "$identity" || return 1
+  else
+    report_extension_cleanup_failure "$id" || return 1
+  fi
+  fm_pfw_record_write "$rec" "$reason" "$now" 0 failing 0 "$now" 0 "$text"
+}
+
+# pfw_recovered <source-id>: the source was found owned or its launch confirmed.
+pfw_recovered() {
+  local id=$1 rec now woke nonce until
+  rec=$(fm_pfw_record_path "$REG" "$id")
+  [ -e "$rec" ] || return 0
+  rm -f -- "$(refusal_file "$id")"
+  if ! fm_pfw_record_read "$rec"; then
+    rm -f -- "$rec"
+    return 0
+  fi
+  now=$(date +%s)
+  woke=$FM_PFW_REC_WOKE
+  if [ "$FM_PFW_REC_STATE" = failing ] && [ "$FM_PFW_REC_FAILURES" -gt 0 ] \
+    && [ "$woke" -eq 0 ] && [ "$FM_PFW_RECOVERED_WAKE" = on ]; then
+    nonce="$RANDOM$RANDOM"
+    until=
+    if [ $((now - FM_PFW_REC_START)) -lt "$FM_PFW_REPEAT" ]; then
+      until=" A failure of the same kind before $(fm_pfw_utc $((FM_PFW_REC_START + FM_PFW_REPEAT))) stays quiet and is counted in the fleet view."
+    fi
+    fm_wake_append check "procevent:$id:launch-recovered:$nonce" \
+      "check: process-event source $id started again after $FM_PFW_REC_FAILURES further failed launches that were counted without a wake since its failure wake at $(fm_pfw_utc "$FM_PFW_REC_START") ($(pfw_reason_label "$FM_PFW_REC_REASON" "$FM_PFW_REC_TEXT")); config/procevent-failure-wakes sets that policy. Nothing needs doing unless it fails again.$until" \
+      || return 1
+    woke=1
+  fi
+  if [ $((now - FM_PFW_REC_START)) -ge "$FM_PFW_REPEAT" ]; then
+    rm -f -- "$rec"
+  elif [ "$FM_PFW_REC_STATE" != recovered ] || [ "$woke" != "$FM_PFW_REC_WOKE" ]; then
+    fm_pfw_record_write "$rec" "$FM_PFW_REC_REASON" "$FM_PFW_REC_START" 0 recovered "$woke" \
+      "$FM_PFW_REC_LAST" "$FM_PFW_REC_SUPPRESSED" "$FM_PFW_REC_TEXT"
+  fi
+}
+
 # The reused-pid strand: the recorded pid is alive under a different identity
 # while the runner's process group still has members. The claim path does not
 # consult the process group, so a deliberate `start` reclaims this - provided
@@ -1714,6 +1860,8 @@ cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
   local launch_identity launch_stamp launch_mark unconfirmed entry
   local -a launched=()
+  PFW_ON=0
+  if fm_pfw_config "$CONFIG"; then PFW_ON=1; fi
   # Rejected before anything is launched, and by name. A window this command
   # cannot use makes every launch unconfirmable, so validating it later would
   # report a fleet of perfectly healthy runners as `failed=` and blame nothing.
@@ -1795,7 +1943,11 @@ cmd_reconcile() {
         elif [ "$claim_state" -eq 1 ]; then
           if ! cleanup_extension_registration_invocations_locked "$id"; then
             uncertain=$((uncertain + 1))
-            report_extension_cleanup_failure "$id" || true
+            if [ "$PFW_ON" -eq 1 ]; then
+              pfw_failure "$id" cleanup "" cleanup-refused "" || true
+            else
+              report_extension_cleanup_failure "$id" || true
+            fi
             fm_procevent_source_lock_release "$id"
             continue
           fi
@@ -1813,7 +1965,12 @@ cmd_reconcile() {
             launch_mark=$(cat -- "$launch_stamp" 2>/dev/null || true)
           fi
           fm_procevent_source_lock_release "$id"
-          detach_runner "$id"
+          if [ "$PFW_ON" -eq 1 ]; then
+            rm -f -- "$(refusal_file "$id")"
+            FM_PROCEVENT_RECORD_REFUSAL=1 detach_runner "$id"
+          else
+            detach_runner "$id"
+          fi
           launched+=("$id"$'\t'"$launch_identity"$'\t'"$launch_mark")
           continue
         elif [ "$claim_state" -eq 4 ]; then
@@ -1845,6 +2002,7 @@ cmd_reconcile() {
           # runner was started, so it ends any launch-failure episode here.
           rm -f -- "$(launch_failed_file "$id")"
           rm -f -- "$REG/.$id.cleanup-failed"
+          [ "$PFW_ON" -eq 0 ] || pfw_recovered "$id" || true
         fi
       fi
       fm_procevent_source_lock_release "$id"
@@ -1859,10 +2017,16 @@ cmd_reconcile() {
       launch_identity=${launch_identity%%$'\t'*}
       if launch_entry_listed "$entry" "$unconfirmed"; then
         failed=$((failed + 1))
-        report_launch_failure "$id" "$launch_identity" || true
+        if [ "$PFW_ON" -eq 1 ]; then
+          pfw_launch_reason "$id"
+          pfw_failure "$id" launch "$launch_identity" "$PFW_REASON" "$PFW_TEXT" || true
+        else
+          report_launch_failure "$id" "$launch_identity" || true
+        fi
       else
         started=$((started + 1))
         rm -f -- "$(launch_failed_file "$id")"
+        [ "$PFW_ON" -eq 0 ] || pfw_recovered "$id" || true
       fi
     done
   fi
@@ -2274,6 +2438,7 @@ cmd_retire() {
   rm -f -- "$(stranded_file "$id")"
   rm -f -- "$(launch_failed_file "$id")"
   rm -f -- "$REG/.$id.cleanup-failed"
+  rm -f -- "$(fm_pfw_record_path "$REG" "$id")" "$(refusal_file "$id")"
   rm -f -- "$REG/.$id.reply."*
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it

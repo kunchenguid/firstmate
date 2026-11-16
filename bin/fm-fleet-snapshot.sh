@@ -114,6 +114,13 @@
 #     with the bearings projection so one Recently Landed section has one owner.
 #   contributions: cached owned-contribution coverage; fm-contributions.sh owns it.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
+#   procevent_failure_quiet[]: present only when config/procevent-failure-wakes
+#     exists. One row per process-event source whose failure wakes that gate is
+#     holding back: source, reason, reason_text, state (failing|recovered),
+#     held_failures counted without a wake since the last wake or recovery,
+#     suppressed_failures counted without a wake in the whole window (kept
+#     after a recovery until the window ends), window_start, last_failure, and
+#     recovery_woke. bin/fm-procevent-failure-wakes-lib.sh owns the record.
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
@@ -232,6 +239,8 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-procevent-failure-wakes-lib.sh
+. "$SCRIPT_DIR/fm-procevent-failure-wakes-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -2067,6 +2076,14 @@ secondmate_current_json "$TASKS_JSON_FILE" "$SECONDMATE_CURRENT_JSON_FILE" \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON_FILE" "$SECONDMATE_LANDED_JSON_FILE" \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+PROCEVENT_QUIET_JSON_FILE="$JSON_TRANSPORT_DIR/procevent-failure-quiet.json"
+if fm_pfw_config "$CONFIG"; then
+  fm_pfw_snapshot_json "$STATE/procevent" > "$PROCEVENT_QUIET_JSON_FILE" \
+    || { echo "fm-fleet-snapshot: process-event failure records unreadable" >&2; exit 1; }
+else
+  printf 'null\n' > "$PROCEVENT_QUIET_JSON_FILE" \
+    || { echo "fm-fleet-snapshot: temporary process-event file write failed" >&2; exit 1; }
+fi
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
@@ -2083,6 +2100,7 @@ jq -n \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
+  --slurpfile procevent_quiet "$PROCEVENT_QUIET_JSON_FILE" \
   '($backlog[0]) as $backlog
    | ($tasks[0]) as $tasks
    | ($main_inventory[0]) as $main_inventory
@@ -2107,4 +2125,4 @@ jq -n \
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
-   }'
+   } + (if $procevent_quiet[0] == null then {} else {procevent_failure_quiet:$procevent_quiet[0]} end)'
