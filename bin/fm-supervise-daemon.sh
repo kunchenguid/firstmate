@@ -1368,6 +1368,7 @@ reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after o
   IFS=: read -r marker_identity offset < "$marker" || [ -n "$offset" ] || { rm -f "$marker"; return 1; }
   size=$(_fm_status_file_size "$statusf") || return 2
   case "$offset:$size" in *[!0-9:]*) rm -f "$marker"; return 1 ;; esac
+  # Compare inode only; _fm_status_ident_same owns why the device is dropped.
   if [ "${identity#* }" != "${marker_identity#* }" ] || [ "$size" -lt "$offset" ]; then
     rm -f "$marker"; return 1
   fi
