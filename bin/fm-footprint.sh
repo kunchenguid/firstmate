@@ -11,8 +11,13 @@
 #   fm-footprint.sh old-tasks [--days N]
 #   fm-footprint.sh old-tasks --apply <preview-id>
 #   fm-footprint.sh sweep [--dry-run]
+#   fm-footprint.sh owns-scratch <task-id> <scratch-dir>
 #   fm-footprint.sh check | arm | disarm
 #   fm-footprint.sh --help
+#
+# Every command takes only the flags shown: anything else exits 2 before
+# anything is read or removed, and -h or --help after any command prints this
+# help and does nothing else.
 #
 # Settings come from the optional config/footprint (docs/configuration.md
 # "Footprint" owns its keys and defaults); bin/fm-footprint-lib.sh owns the
@@ -54,28 +59,64 @@
 #   (default the macOS per-user temp directory, empty for none) replace the
 #   temp directories measured (tests and diagnosis).
 #
+# owns-scratch <task-id> <scratch-dir>
+#   Exit 0 only when <scratch-dir> is this home's own area for the task (the
+#   ownership test below). bin/fm-teardown.sh asks before ending processes
+#   there, so a recorded path naming anything else never has its processes
+#   ended.
+#
 # task-close <task-id> <scratch-dir> [<project>]
 #   Called by bin/fm-teardown.sh only after every landed-work check passed, so
 #   a refused cleanup never reaches it. With task-cleanup off it removes
-#   nothing. Otherwise it removes the task's scratch area, but only when the
-#   recorded path is exactly <scratch-root>/<home-key>/<task-id>, is a real
-#   directory owned by this user, and is not a link; removal stays on one
-#   filesystem. When the Docker daemon answers within its bound, it then removes
-#   the containers (with their anonymous volumes), networks, volumes, and images
-#   carrying the task's firstmate.task label or its compose project label,
-#   and never anything else: no prune, no name match. Docker absent or not
-#   running is a normal case and is skipped. It appends one line to
+#   nothing. Otherwise it removes the task's scratch area only when:
+#   - the key directory <scratch-root>/<home-key> is a real directory, not a
+#     link, owned by this user, writable by nobody else, physically a direct
+#     child of the root, and its .fm-home names this home's physical path
+#     (written by spawn when it made the directory);
+#   - the recorded path is physically that key directory's child named for
+#     the task, a real directory owned by this user and writable by nobody
+#     else, on the same filesystem;
+#   - nothing in the area needs a landing proof it lacks: every git
+#     repository inside (a checkout or a bare repository) passes the landing
+#     proof below, no name inside holds a control character, and the scan
+#     completes. The task's own landed-work checks cover its own copy only, so
+#     an area holding a checkout whose work has not landed is kept whole and
+#     named, and the daily pass keeps reporting it.
+#   The area is first renamed to a hidden name beside it, then removed, so a
+#   spawn reusing the task id always gets a fresh area. Removal stays on one
+#   filesystem and never follows links. When the Docker daemon answers within
+#   its bound, it then removes the containers (with their anonymous volumes),
+#   networks, volumes, and images carrying the task's firstmate.task label or
+#   its compose project label, and never anything else: no prune, no name
+#   match. Docker absent is a normal case and is skipped. When a listing fails
+#   (unknown), some objects remain (partial), or the daemon does not answer
+#   (down), the task is queued in state/footprint-docker-retry for the daily
+#   pass. It appends one line to
 #   data/footprint-ledger.tsv (mode 0600): epoch, task, project, kept KB
-#   (data/<task-id>/), scratch KB removed, Docker objects removed, Docker
-#   status, scratch status, and "oversized" when the kept folder is over
+#   (data/<task-id>/), scratch KB, Docker objects verified removed, Docker
+#   status (removed, partial, unknown, down, absent), scratch status (removed,
+#   partial, refused, kept-unlanded, none), and "oversized" when the kept
+#   folder is over
 #   keep-warn-mb (else "-"). An oversized folder is named in the summary and
-#   kept whole: nothing kept is ever removed for its size. Every step is best effort: it always exits 0 and
-#   prints one summary line, so a failure is visible but never fails cleanup.
+#   kept whole: nothing kept is ever removed for its size. Every step is best
+#   effort and the steps are independent, not one transaction: it always exits
+#   0 and prints one summary line, so a failure is visible but never fails
+#   cleanup.
+#
+# Landing proof (for a checkout or bare repository found in a scratch area or
+#   an old task folder): a checkout must be its own top level with no
+#   uncommitted, untracked, or stashed change and only rebuildable-layout
+#   ignored files; for either kind, HEAD, every local branch, and every tag
+#   must be contained in a remote-tracking ref other than
+#   refs/remotes/no-mistakes/*, the local validation gate. Any git error or
+#   timeout (60 s per call) means "not landed". git runs with
+#   GIT_OPTIONAL_LOCKS=0, so the proof never rewrites the index.
 #
 # caches
 #   Lists the known shared download caches present on this machine with size,
 #   last use (newest modification time of the cache directory and its direct
-#   entries), and the tool's own trim command: uv (uv cache prune), npm (npm
+#   entries, a modification-age stand-in for last use: reading a cached item
+#   need not change those times), and the tool's own trim command: uv (uv cache prune), npm (npm
 #   cache verify), pip (pip3 cache purge), bun (bun pm cache rm), pnpm (pnpm
 #   store prune), yarn (yarn cache clean), go build and module caches (go clean
 #   -cache, go clean -modcache), Playwright browsers (playwright uninstall),
@@ -97,38 +138,59 @@
 #   A task folder is a directory directly under data/ that holds brief.md,
 #   launch-brief.md, report.md, or a status*.log, has no state/<id>.meta (no
 #   live task), and whose newest direct entry is older than N days (default
-#   old-task-days). Inside it only two kinds of entry are offered:
-#   - a directory whose name is a known rebuildable layout (node_modules,
-#     .venv, venv, .tox, .nox, __pycache__, .pytest_cache, .mypy_cache,
-#     .ruff_cache, .next, .turbo, .parcel-cache, .gradle, .terraform,
-#     .pnpm-store, .npm, .uv-cache, ms-playwright, .cache);
-#   - a nested git checkout whose repository data is present, that has no
-#     uncommitted, untracked, or stashed changes, whose HEAD and every local
-#     branch are contained in a remote-tracking ref, whose ignored files are
-#     only rebuildable layouts, and that holds no further nested repository.
-#   Files are never offered, so records (brief.md, launch-brief.md, report.md,
-#   dispatch-resolution.json, status*.log), reports, decisions, and the task
-#   list (data/backlog.md) never are, and neither is children/. The preview
-#   prints every entry with its size and writes state/footprint-old-tasks.preview
-#   naming a preview id, the SHA-256 of the exact entry list. --apply <id>
-#   recomputes the selection and removes exactly that list only when it is
-#   identical; anything changed since the preview refuses and removes nothing.
-#   Removal is the captain's decision: apply only a preview the captain
-#   approved.
+#   old-task-days). One bounded scan reads each folder's whole tree; a folder
+#   holding any name with a control character, or whose scan does not
+#   complete, offers nothing. Only two kinds of entry are offered, never
+#   nested in each other:
+#   - the outermost directory whose name is a known rebuildable layout
+#     (node_modules, .venv, venv, .tox, .nox, __pycache__, .pytest_cache,
+#     .mypy_cache, .ruff_cache, .next, .turbo, .parcel-cache, .gradle,
+#     .terraform, .pnpm-store, .npm, .uv-cache, ms-playwright, .cache) that
+#     holds no repository and no record (brief.md, launch-brief.md, report.md,
+#     evidence.md, backlog.md, *.meta, status*.log, decision*,
+#     dispatch-resolution.json) and is not inside a repository: the name
+#     makes a candidate, the contents decide;
+#   - a repository root, not inside another repository or a rebuildable
+#     directory, holding no further repository, that passes the landing proof
+#     above (its rebuildable directories go with it).
+#   Each entry's physical path must be its folder's physical path plus the
+#   same relative path. Files are never offered, so records, reports,
+#   decisions, and the task list (data/backlog.md) never are, and neither is
+#   children/. The preview prints every entry with its size and writes
+#   state/footprint-old-tasks.preview naming a preview id: the SHA-256 of the
+#   entry list together with the device, inode, type, size, modification and
+#   change times of everything under each entry and the SHA-256 of every
+#   file's contents. --apply <id> recomputes the selection and its id and
+#   removes the list only when both are identical, so a same-size edit, a
+#   replaced entry, or an added or removed entry refuses and removes nothing;
+#   each entry is then rechecked and set aside under its task's spawn lock
+#   before removal. Removal is the captain's decision: apply only a preview
+#   the captain approved.
 #
 # sweep [--dry-run]
-#   The daily pass, rebuildable classes only: removes this home's scratch areas
-#   whose task has no record and that are older than orphan-grace-hours, then
-#   runs trim-caches when a cap is set. Prints one finding line only when the
-#   caches stay over the cap or a trim command failed.
+#   The daily pass, rebuildable classes only. When this home's key directory
+#   passes the ownership test, it removes the scratch areas there whose task
+#   has no record, that are older than orphan-grace-hours, and that hold
+#   nothing needing a landing proof it lacks; each is removed only after
+#   taking that task's spawn lock (bin/fm-spawn.sh holds it from before it
+#   makes the area until the task is recorded), rechecking that no record
+#   exists, and renaming the area aside, so a spawn reusing the id either is
+#   recorded first and keeps its area or starts later with a fresh one. It
+#   then retries queued Docker cleanups while Docker answers, and runs
+#   trim-caches when a cap is set. It prints one finding line naming kept
+#   areas that hold unlanded work, an untrusted key directory, pending Docker
+#   cleanups, and caches still over the cap or a failed trim command.
 #
 # check / arm / disarm
 #   arm writes state/footprint.check.sh and binds it through
 #   bin/fm-check-register.sh, so the existing watcher slow-check cadence calls
-#   check; check runs sweep at most once every 86400 seconds and prints its
-#   finding only when it differs from the last one reported (record:
-#   state/.footprint-check). disarm removes the shim, its trust binding, and the
-#   record.
+#   check. Because one check may run for at most FM_CHECK_TIMEOUT (default
+#   30 s), check starts sweep at most once every 86400 seconds as a detached
+#   run in its own process group (daily-run; one at a time, lock
+#   state/.footprint-daily.lock, result state/.footprint-daily.result) and
+#   returns at once; a later check prints that run's finding only when it
+#   differs from the last one reported (record: state/.footprint-check).
+#   disarm removes the shim, its trust binding, the record, and the result.
 set -u
 export LC_ALL=C
 
@@ -161,6 +223,44 @@ usage() {
 die() {
   printf 'fm-footprint: %s\n' "$1" >&2
   exit 1
+}
+
+# fp_only_flags <allowed> <args...>: every argument must be the one allowed
+# flag (none when empty), at most once; -h or --help prints the help and exits
+# before anything is read or removed; anything else exits 2.
+fp_only_flags() {  # <allowed> <args...>
+  local allowed=$1
+  shift
+  case "${1:-}" in -h|--help) sed -n '2,/^set -u$/{/^set -u$/d;s/^# \{0,1\}//;p;}' "$0"; exit 0 ;; esac
+  [ "$#" -eq 0 ] && return 0
+  if [ -n "$allowed" ] && [ "$#" -eq 1 ] && [ "$1" = "$allowed" ]; then
+    return 0
+  fi
+  printf 'fm-footprint: unknown argument: %s\n' "$*" >&2
+  usage >&2
+  exit 2
+}
+
+# fp_locks: the per-task spawn lock bin/fm-spawn.sh holds from before it
+# creates a task's scratch area until it has recorded the task, loaded only
+# by the commands that remove material a spawn could reuse.
+fp_locks() {
+  command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+}
+
+fp_task_lock() {  # <id>: 0 when this process now holds the task's spawn lock
+  fp_locks
+  fm_lock_try_acquire "$STATE/.spawn-$1.lock" 2>/dev/null
+}
+
+fp_task_unlock() {  # <id>
+  fm_lock_release "$STATE/.spawn-$1.lock" >/dev/null 2>&1 || true
+}
+
+fp_task_live() {  # <id>
+  [ -e "$STATE/$1.meta" ] || [ -L "$STATE/$1.meta" ]
 }
 
 now_epoch() {
@@ -227,20 +327,146 @@ fp_config() {
 fp_remove_tree() {  # <dir>
   local dir=$1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  find "$dir" -xdev -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true
-  find "$dir" -xdev -depth -delete 2>/dev/null || true
+  fm_run_timed 600 find "$dir" -xdev -type d ! -perm -u+w -exec chmod u+w {} + </dev/null 2>/dev/null || true
+  fm_run_timed 600 find "$dir" -xdev -depth -delete </dev/null 2>/dev/null || true
   [ ! -e "$dir" ] && [ ! -L "$dir" ]
 }
 
-# fp_scratch_owned <dir> <id>: the recorded scratch path is exactly this
-# home's area for <id> under the scratch root, physically, and safe to remove.
+# A name holding a control character (a newline above all) would make one
+# path read as two, so any tree holding one is never inspected or removed.
+FP_CTRL_GLOB=$(printf '*[\001-\037\177]*')
+
+# fp_names_unsafe <dir>: 0 when a name under <dir> holds a control character
+# or the tree could not be read in full.
+fp_names_unsafe() {  # <dir>
+  local out
+  out=$(fm_run_timed 120 find "$1" -xdev -name "$FP_CTRL_GLOB" -print -quit </dev/null 2>/dev/null) || return 0
+  [ -n "$out" ]
+}
+
+# fp_repo_roots <dir>: every git repository under <dir>, one root per line: a
+# directory holding .git (a directory or a worktree file) and a bare
+# repository (HEAD beside objects/ and refs/). Returns 1 when the scan could
+# not complete. Call only after fp_names_unsafe found nothing.
+fp_repo_roots() {  # <dir>
+  local out line d
+  out=$(fm_run_timed 120 find "$1" -xdev \( -name .git -o \( -type f -name HEAD \) \) -print </dev/null 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      */.git) printf '%s\n' "${line%/.git}" ;;
+      */.git/*) ;;
+      */HEAD)
+        d=${line%/HEAD}
+        [ -d "$d/objects" ] && [ -d "$d/refs" ] && printf '%s\n' "$d"
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 0
+}
+
+# Read-only git: GIT_OPTIONAL_LOCKS=0 keeps status from refreshing the index,
+# so a landing proof never changes the tree the preview fingerprints.
+fp_git() {  # <repo> <args...>
+  local repo=$1
+  shift
+  GIT_OPTIONAL_LOCKS=0 fm_run_timed 60 git -C "$repo" "$@" </dev/null 2>/dev/null
+}
+
+# fp_checkout_landed <repo>: every commit of the repository exists on a
+# remote other than the local validation gate. For a checkout: it is its own
+# top level, has no uncommitted, untracked, or stashed changes, and its
+# ignored files are only rebuildable layouts. For checkout and bare
+# repository alike: HEAD, every local branch, and every tag are contained in a
+# remote-tracking ref other than refs/remotes/no-mistakes/*, which is the
+# local validation gate rather than a published copy (the same exclusion
+# bin/fm-teardown.sh makes). Any git failure or timeout is "not landed".
+fp_checkout_landed() {  # <repo>
+  local d=$1 bare top st line path base stash locals head remotes extra
+  bare=$(fp_git "$d" rev-parse --is-bare-repository) || return 1
+  if [ "$bare" != true ]; then
+    top=$(fp_git "$d" rev-parse --show-toplevel) || return 1
+    [ "$(fm_footprint_physical_dir "$top")" = "$(fm_footprint_physical_dir "$d")" ] || return 1
+    st=$(fp_git "$d" status --porcelain --ignored) || return 1
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in '!! '*) ;; *) return 1 ;; esac
+      path=${line#!! }
+      path=${path%/}
+      base=${path##*/}
+      fp_rebuildable_name "$base" || return 1
+    done <<EOF
+$st
+EOF
+    stash=$(fp_git "$d" stash list) || return 1
+    [ -z "$stash" ] || return 1
+    head=$(fp_git "$d" rev-parse --verify -q HEAD) || head=
+  else
+    head=
+    [ -z "$(fp_git "$d" for-each-ref refs/stash)" ] || return 1
+  fi
+  locals=$(fp_git "$d" for-each-ref --format='%(objectname)' refs/heads refs/tags) || return 1
+  locals=$(printf '%s\n%s\n' "$head" "$locals" | awk 'NF && !seen[$0]++')
+  [ -n "$locals" ] || return 0
+  remotes=$(fp_git "$d" for-each-ref --format='%(refname)' refs/remotes) || return 1
+  remotes=$(printf '%s\n' "$remotes" | awk 'NF && $0 !~ /^refs\/remotes\/no-mistakes\//')
+  [ -n "$remotes" ] || return 1
+  # shellcheck disable=SC2086 # object names and ref names are single words
+  extra=$(fp_git "$d" rev-list --max-count=1 $locals --not $remotes) || return 1
+  [ -z "$extra" ]
+}
+
+# fp_tree_disposable <dir>: 0 when nothing under <dir> needs a landing proof
+# it lacks. Sets FP_UNLANDED to the first blocking repository or reason.
+fp_tree_disposable() {  # <dir>
+  local roots r
+  FP_UNLANDED=
+  if fp_names_unsafe "$1"; then
+    FP_UNLANDED="a name with a control character, or an unreadable entry, under $1"
+    return 1
+  fi
+  roots=$(fp_repo_roots "$1") || { FP_UNLANDED="could not scan $1 for checkouts"; return 1; }
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    fp_checkout_landed "$r" || { FP_UNLANDED=$r; return 1; }
+  done <<EOF
+$roots
+EOF
+  return 0
+}
+
+# fp_key_dir_ok: this home's scratch key directory carries this home's
+# identity (fm_footprint_key_dir_trusted). Every removal under it needs this.
+fp_key_dir_ok() {
+  fm_footprint_key_dir_trusted "$FP_ROOT" "$FP_KEY" "$FM_HOME"
+}
+
+# fp_scratch_owned <dir> <id>: <dir> is physically this home's area for <id>:
+# the trusted key directory's direct child named <id>, a real directory owned
+# by this user, writable by nobody else, on the key directory's filesystem.
 fp_scratch_owned() {  # <dir> <id>
-  local dir=$1 id=$2 root_real dir_real
+  local dir=$1 id=$2 key_real dir_real
+  fp_key_dir_ok || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
-  root_real=$(fm_footprint_physical_dir "$FP_ROOT/$FP_KEY") || return 1
+  [ -z "$(find "$dir" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] || return 1
+  key_real=$(fm_footprint_physical_dir "$FP_ROOT/$FP_KEY") || return 1
   dir_real=$(fm_footprint_physical_dir "$dir") || return 1
-  [ "$dir_real" = "$root_real/$id" ] || return 1
-  [ "$(fp_device "$dir_real")" = "$(fp_device "$root_real")" ]
+  [ "$dir_real" = "$key_real/$id" ] || return 1
+  [ "$(fp_device "$dir_real")" = "$(fp_device "$key_real")" ]
+}
+
+# fp_set_aside <dir> <tag>: renames a validated directory to a hidden name
+# beside it, so a spawn that reuses the task id afterwards gets a fresh area
+# and the removal works only on what was validated. Prints the new path.
+fp_set_aside() {  # <dir> <tag>
+  local dir=$1 parent n=0 to
+  parent=${dir%/*}
+  to="$parent/.fm-$2-${dir##*/}.$$"
+  while [ -e "$to" ] || [ -L "$to" ]; do n=$((n + 1)); to="$parent/.fm-$2-${dir##*/}.$$.$n"; done
+  mv -- "$dir" "$to" 2>/dev/null || return 1
+  printf '%s\n' "$to"
 }
 
 # --- Docker -------------------------------------------------------------
@@ -271,45 +497,105 @@ fp_docker_up() {
   [ "$FP_DOCKER_STATE" = up ]
 }
 
+# fp_docker_ids <kind> <label> <compose>: object ids carrying either label.
+# Returns 1 when any listing failed, so an incomplete inventory is never
+# read as "nothing to remove".
 fp_docker_ids() {  # <ps|network|volume|image> <label> <compose>
-  local kind=$1 label=$2 compose=$3 f
+  local kind=$1 label=$2 compose=$3 f out rc=0 all=''
   for f in "label=$label" "label=com.docker.compose.project=$compose"; do
     case "$kind" in
-      ps) fp_docker 15 ps -aq --filter "$f" ;;
-      network) fp_docker 15 network ls -q --filter "$f" ;;
-      volume) fp_docker 15 volume ls -q --filter "$f" ;;
-      image) fp_docker 15 image ls -q --filter "$f" ;;
+      ps) out=$(fp_docker 15 ps -aq --filter "$f") || rc=1 ;;
+      network) out=$(fp_docker 15 network ls -q --filter "$f") || rc=1 ;;
+      volume) out=$(fp_docker 15 volume ls -q --filter "$f") || rc=1 ;;
+      image) out=$(fp_docker 15 image ls -q --filter "$f") || rc=1 ;;
     esac
-  done | awk 'NF && !seen[$0]++'
+    all="$all
+$out"
+  done
+  printf '%s\n' "$all" | awk 'NF && !seen[$0]++'
+  return "$rc"
 }
 
-# fp_docker_task_remove <id>: sets FP_DOCKER_REMOVED and FP_DOCKER_RESULT.
+# fp_docker_task_remove <id>: sets FP_DOCKER_REMOVED (objects verified gone)
+# and FP_DOCKER_RESULT: removed (none left), partial (some remain), unknown
+# (an inventory could not be taken), absent, or down.
 fp_docker_task_remove() {  # <id>
-  local id=$1 label compose kind ids n
+  local id=$1 label compose kind ids before=0 after=0 n failed=0
   FP_DOCKER_REMOVED=0
   if ! fp_docker_up; then
     FP_DOCKER_RESULT=$FP_DOCKER_STATE
     return 0
   fi
-  FP_DOCKER_RESULT=removed
   label=$(fm_footprint_docker_label "$FP_KEY" "$id")
-  compose=$(fm_footprint_compose_project "$FP_KEY" "$id")
+  compose=$(fm_footprint_compose_project "$FP_KEY" "$id") || { FP_DOCKER_RESULT=unknown; return 0; }
   for kind in ps network volume image; do
-    ids=$(fp_docker_ids "$kind" "$label" "$compose")
+    ids=$(fp_docker_ids "$kind" "$label" "$compose") || failed=1
     [ -n "$ids" ] || continue
     n=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
+    before=$((before + n))
     # shellcheck disable=SC2086 # one docker object id per word
     case "$kind" in
       ps) fp_docker 60 rm -f -v $ids >/dev/null ;;
       network) fp_docker 60 network rm $ids >/dev/null ;;
       volume) fp_docker 60 volume rm -f $ids >/dev/null ;;
       image) fp_docker 120 image rm -f $ids >/dev/null ;;
-    esac || FP_DOCKER_RESULT=partial
-    FP_DOCKER_REMOVED=$((FP_DOCKER_REMOVED + n))
+    esac
   done
   for kind in ps network volume image; do
-    [ -z "$(fp_docker_ids "$kind" "$label" "$compose")" ] || FP_DOCKER_RESULT=partial
+    ids=$(fp_docker_ids "$kind" "$label" "$compose") || { failed=1; continue; }
+    [ -z "$ids" ] || after=$((after + $(printf '%s\n' "$ids" | wc -l | tr -d ' ')))
   done
+  if [ "$failed" = 1 ]; then
+    FP_DOCKER_RESULT=unknown
+  elif [ "$after" -gt 0 ]; then
+    FP_DOCKER_RESULT=partial
+  else
+    FP_DOCKER_RESULT=removed
+  fi
+  [ "$failed" = 1 ] || FP_DOCKER_REMOVED=$((before > after ? before - after : 0))
+}
+
+# Closed tasks whose Docker cleanup was incomplete (partial, unknown, or a
+# daemon that did not answer): "id<TAB>epoch" lines the daily pass retries.
+DOCKER_RETRY="$STATE/footprint-docker-retry"
+
+fp_docker_retry_add() {  # <id>
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ ! -L "$DOCKER_RETRY" ] || return 1
+  grep -q "^$1	" "$DOCKER_RETRY" 2>/dev/null && return 0
+  (umask 077 && printf '%s\t%s\n' "$1" "$(now_epoch)" >> "$DOCKER_RETRY")
+}
+
+# fp_docker_retry_run <dry>: retries each listed closed task's Docker cleanup
+# while Docker answers; sets FP_DOCKER_PENDING to the tasks still pending.
+fp_docker_retry_run() {  # <dry>
+  local dry=$1 id at keep='' n=0
+  FP_DOCKER_PENDING=0
+  [ -f "$DOCKER_RETRY" ] && [ ! -L "$DOCKER_RETRY" ] || return 0
+  while IFS='	' read -r id at; do
+    [ -n "$id" ] || continue
+    fm_task_id_path_safe "$id" || continue
+    if [ "$dry" = 1 ] || fp_task_live "$id" || ! fp_docker_up; then
+      keep="$keep$id	$at
+"
+      n=$((n + 1))
+      continue
+    fi
+    fp_docker_task_remove "$id"
+    if [ "$FP_DOCKER_RESULT" = removed ]; then
+      fp_ledger_append "$(now_epoch)" "$id" - - 0 "$FP_DOCKER_REMOVED" docker-retry removed - || true
+    else
+      keep="$keep$id	$at
+"
+      n=$((n + 1))
+    fi
+  done < "$DOCKER_RETRY"
+  FP_DOCKER_PENDING=$n
+  [ "$dry" = 1 ] && return 0
+  if [ -n "$keep" ]; then
+    (umask 077 && printf '%s' "$keep" > "$DOCKER_RETRY.tmp" && mv -f "$DOCKER_RETRY.tmp" "$DOCKER_RETRY")
+  else
+    rm -f "$DOCKER_RETRY"
+  fi
 }
 
 # --- task-close -------------------------------------------------------------
@@ -325,8 +611,20 @@ fp_ledger_append() {  # <fields...>
   (umask 077 && printf '%s\n' "$line" >> "$LEDGER")
 }
 
+# cmd_owns_scratch <id> <scratch>: exit 0 only when <scratch> is this home's
+# own area for <id>. Teardown asks before ending processes there.
+cmd_owns_scratch() {  # <id> <scratch>
+  fm_task_id_path_safe "$1" || exit 1
+  [ -n "$2" ] || exit 1
+  fm_footprint_config_read "$CONFIG_DIR" || exit 1
+  fm_footprint_scratch_root "$FM_HOME" || exit 1
+  FP_KEY=$(fm_footprint_home_key "$FM_HOME") || exit 1
+  FP_ROOT=$FP_SCRATCH_ROOT
+  fp_scratch_owned "$2" "$1"
+}
+
 cmd_task_close() {  # <id> <scratch> [project]
-  local id=$1 scratch=$2 project=${3:-} kept scratch_kb=0 scratch_result=none oversized=-
+  local id=$1 scratch=$2 project=${3:-} kept scratch_kb=0 scratch_result=none oversized=- aside
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   if ! fm_footprint_config_read "$CONFIG_DIR"; then
     printf 'footprint: %s; removed nothing for %s\n' "$FP_CONFIG_ERROR" "$id"
@@ -346,14 +644,24 @@ cmd_task_close() {  # <id> <scratch> [project]
   # files, so later steps run with the system temp instead.
   case "${TMPDIR:-}/" in "$scratch"/*) export TMPDIR=/tmp ;; esac
   if [ -n "$scratch" ] && { [ -e "$scratch" ] || [ -L "$scratch" ]; }; then
-    if fp_scratch_owned "$scratch" "$id"; then
-      scratch_kb=$(fp_du_kb "$scratch" 60) || scratch_kb=
-      if fp_remove_tree "$scratch"; then scratch_result=removed; else scratch_result=partial; fi
-    else
+    if ! fp_scratch_owned "$scratch" "$id"; then
       scratch_result=refused
+    elif ! fp_tree_disposable "$scratch"; then
+      # The landed-work checks cover the task's own copy, not a checkout the
+      # worker made inside its scratch area, so that one needs its own proof.
+      scratch_result='kept-unlanded'
+      scratch_kb=$(fp_du_kb "$scratch" 60) || scratch_kb=
+    else
+      scratch_kb=$(fp_du_kb "$scratch" 60) || scratch_kb=
+      if aside=$(fp_set_aside "$scratch" closing) && fp_remove_tree "$aside"; then
+        scratch_result=removed
+      else
+        scratch_result=partial
+      fi
     fi
   fi
   fp_docker_task_remove "$id"
+  case "$FP_DOCKER_RESULT" in partial|unknown|down) fp_docker_retry_add "$id" || true ;; esac
   kept=$(fp_du_kb "$DATA_DIR/$id" 30) || kept=
   oversized=-
   case "$kept" in ''|*[!0-9]*) ;; *) [ "$kept" -le $((FP_KEEP_WARN_MB * 1024)) ] || oversized=oversized ;; esac
@@ -362,10 +670,15 @@ cmd_task_close() {  # <id> <scratch> [project]
   case "$scratch_result" in
     refused) printf 'footprint: %s scratch path %s is not this home'"'"'s area for the task; left it in place. ' "$id" "$scratch" ;;
     partial) printf 'footprint: %s scratch area %s was only partly removed. ' "$id" "$scratch" ;;
+    kept-unlanded) printf 'footprint: %s scratch area %s kept whole (%s): %s holds work that has not landed; land it, then remove the area. ' \
+      "$id" "$scratch" "$(fp_human "$scratch_kb")" "$FP_UNLANDED" ;;
     *) printf 'footprint: %s scratch %s (%s). ' "$id" "$scratch_result" "$(fp_human "$scratch_kb")" ;;
   esac
   case "$FP_DOCKER_RESULT" in
-    absent|down) printf 'Docker not present.' ;;
+    absent) printf 'Docker not present.' ;;
+    down) printf 'Docker did not answer; its cleanup is queued for the daily pass.' ;;
+    unknown) printf 'Docker did not list the task'"'"'s objects; its cleanup is queued for the daily pass.' ;;
+    partial) printf 'Docker: %s labelled object(s) removed, some remain; the rest is queued for the daily pass.' "$FP_DOCKER_REMOVED" ;;
     *) printf 'Docker: %s labelled object(s) %s.' "$FP_DOCKER_REMOVED" "$FP_DOCKER_RESULT" ;;
   esac
   if [ "$oversized" = oversized ]; then
@@ -598,44 +911,171 @@ fp_newest_entry() {  # <dir>
   fp_cache_last_used "$1"
 }
 
-# fp_checkout_landed <dir>: the nested checkout's work all exists elsewhere.
-fp_checkout_landed() {  # <dir>
-  local d=$1 top sha line path base
-  top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [ "$(fm_footprint_physical_dir "$top")" = "$(fm_footprint_physical_dir "$d")" ] || return 1
-  [ -z "$(git -C "$d" status --porcelain 2>/dev/null)" ] || return 1
-  git -C "$d" status --porcelain >/dev/null 2>&1 || return 1
-  [ -z "$(git -C "$d" stash list 2>/dev/null)" ] || return 1
-  for sha in $(git -C "$d" rev-parse HEAD 2>/dev/null) $(git -C "$d" for-each-ref --format='%(objectname)' refs/heads 2>/dev/null); do
-    [ -n "$(git -C "$d" for-each-ref --contains "$sha" --format='%(refname)' refs/remotes 2>/dev/null)" ] || return 1
-  done
-  while IFS= read -r line; do
-    case "$line" in '!! '*) ;; *) continue ;; esac
-    path=${line#!! }
-    path=${path%/}
-    base=${path##*/}
-    fp_rebuildable_name "$base" || return 1
+# Files whose presence under a directory means it holds a record, so the
+# directory is never offered whatever its name.
+FP_RECORD_TESTS='-name brief.md -o -name launch-brief.md -o -name report.md -o -name evidence.md -o -name backlog.md -o -name *.meta -o -name status*.log -o -name decision* -o -name dispatch-resolution.json'
+
+fp_under() {  # <path> <list>: 0 when <path> is inside (or is) a path in <list>
+  local p=$1 q
+  while IFS= read -r q; do
+    [ -n "$q" ] || continue
+    case "$p/" in "$q/"*) return 0 ;; esac
   done <<EOF
-$(git -C "$d" status --porcelain --ignored 2>/dev/null)
+$2
 EOF
-  [ -z "$(find "$d" -mindepth 2 -name .git -print -quit 2>/dev/null)" ]
+  return 1
 }
 
-# fp_old_task_candidates <folder>: rebuildable-named directories, which are
-# not descended into, and nested checkout roots (directories holding .git).
-fp_old_task_candidates() {  # <folder>
+fp_holds() {  # <dir> <list>: 0 when a path in <list> lies strictly inside <dir>
+  local d=$1 q
+  while IFS= read -r q; do
+    [ -n "$q" ] || continue
+    case "$q" in "$d"/*) return 0 ;; esac
+  done <<EOF
+$2
+EOF
+  return 1
+}
+
+# fp_folder_entries <folder>: "kind<TAB>path" rows for one finished task
+# folder, from one bounded scan of its whole tree. Prints nothing when any
+# name in it holds a control character or the scan did not complete, so such
+# a folder is never offered. Offered entries never nest:
+#   rebuildable      the outermost directory with a rebuildable name that
+#                    holds no repository and no record, and is not inside a
+#                    repository;
+#   landed-checkout  a repository root holding no further repository, not
+#                    inside another repository or a rebuildable directory,
+#                    whose work fp_checkout_landed proves landed.
+fp_scan_args() {  # sets FP_SCAN_REBUILD: the rebuildable-name tests of an old-folder scan
   local expr='' name
-  for name in $FP_REBUILDABLE_NAMES; do
-    expr="$expr${expr:+ -o }-name $name"
-  done
-  # shellcheck disable=SC2086 # expr is a fixed list of -name tests
-  find "$1" -mindepth 1 -maxdepth 6 \( -type d \( $expr \) -print -prune \) \
-    -o \( -name .git -prune -print \) 2>/dev/null | sed 's#/\.git$##'
+  for name in $FP_REBUILDABLE_NAMES; do expr="$expr${expr:+ -o }-name $name"; done
+  FP_SCAN_REBUILD=$expr
+}
+
+# fp_folder_scan <folder>...: one bounded scan of whole folder trees, printing
+# repository markers, records, and rebuildable-named directories, plus the
+# line FM-CONTROL-NAME (and stopping) at the first name holding a control
+# character. Returns 1 when the scan did not complete.
+fp_folder_scan() {  # <folder>...
+  fp_scan_args
+  # shellcheck disable=SC2086 # FP_SCAN_REBUILD and FP_RECORD_TESTS are fixed lists of find tests
+  (set -f; fm_run_timed 300 find "$@" -xdev \
+    \( -name "$FP_CTRL_GLOB" -exec printf '%s\n' FM-CONTROL-NAME \; -quit \) \
+    -o \( -name .git -print -prune \) \
+    -o \( -type f \( -name HEAD -o $FP_RECORD_TESTS \) -print \) \
+    -o \( -type d \( $FP_SCAN_REBUILD \) -print \) </dev/null 2>/dev/null)
+}
+
+# fp_folder_entries <folder>: fp_folder_classify over its own scan.
+fp_folder_entries() {  # <folder>
+  local scan
+  scan=$(fp_folder_scan "$1") || return 0
+  fp_folder_classify "$1" "$scan"
+}
+
+# fp_folder_classify <folder> <scan>: "kind<TAB>path" rows for one finished
+# task folder from its scan. Prints nothing when the scan saw a name with a
+# control character or a line outside the folder, so such a folder is never
+# offered. Offered entries never nest:
+#   rebuildable      the outermost directory with a rebuildable name that
+#                    holds no repository and no record, and is not inside a
+#                    repository;
+#   landed-checkout  a repository root holding no further repository, not
+#                    inside another repository or a rebuildable directory,
+#                    whose work fp_checkout_landed proves landed.
+fp_folder_classify() {  # <folder> <scan>
+  local folder=$1 scan=$2 folder_real line rebuild='' repos='' records='' cand d
+  case "$scan" in *FM-CONTROL-NAME*) return 0 ;; esac
+  folder_real=$(fm_footprint_physical_dir "$folder") || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$folder"/*) ;;
+      *) return 0 ;;
+    esac
+    case "$line" in
+      */.git/*) ;;
+      */.git) repos="$repos${line%/.git}
+" ;;
+      */HEAD)
+        d=${line%/HEAD}
+        if [ -d "$d/objects" ] && [ -d "$d/refs" ]; then repos="$repos$d
+"; fi
+        ;;
+      *)
+        if [ -d "$line" ] && [ ! -L "$line" ]; then rebuild="$rebuild$line
+"
+        else records="$records$line
+"; fi
+        ;;
+    esac
+  done <<EOF
+$scan
+EOF
+  # Records at the folder's own top level are the task's records, never inside a candidate.
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    case "$cand" in "$folder/children"|"$folder/children/"*) continue ;; esac
+    fp_under "${cand%/*}" "$rebuild" && continue
+    fp_under "$cand" "$repos" && continue
+    fp_holds "$cand" "$repos" && continue
+    fp_holds "$cand" "$records" && continue
+    fp_entry_contained "$cand" "$folder" "$folder_real" || continue
+    printf 'rebuildable\t%s\n' "$cand"
+  done <<EOF
+$rebuild
+EOF
+  while IFS= read -r cand; do
+    [ -n "$cand" ] && [ "$cand" != "$folder" ] || continue
+    case "$cand" in "$folder/children"|"$folder/children/"*) continue ;; esac
+    fp_under "${cand%/*}" "$repos" && continue
+    fp_under "$cand" "$rebuild" && continue
+    fp_holds "$cand" "$repos" && continue
+    fp_entry_contained "$cand" "$folder" "$folder_real" || continue
+    fp_checkout_landed "$cand" || continue
+    printf 'landed-checkout\t%s\n' "$cand"
+  done <<EOF
+$repos
+EOF
+}
+
+# fp_entry_contained <entry> <folder> <folder-physical>: <entry> is a real
+# directory, not a link, whose physical path is the folder's own path plus
+# the same relative path, so nothing outside the folder can be named.
+fp_entry_contained() {  # <entry> <folder> <folder-physical>
+  local real
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 1
+  real=$(fm_footprint_physical_dir "$1") || return 1
+  [ "$real" = "$3/${1#"$2"/}" ]
+}
+
+# fp_classify_grouped <scan>: classifies a scan over several folders, whose
+# lines find prints grouped by folder in argument order.
+fp_classify_grouped() {  # <scan>
+  local scan=$1 line folder current='' chunk=''
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in "$DATA_DIR"/*) ;; *) continue ;; esac
+    folder=${line#"$DATA_DIR"/}
+    folder="$DATA_DIR/${folder%%/*}"
+    if [ "$folder" != "$current" ]; then
+      [ -z "$current" ] || fp_folder_classify "$current" "$chunk"
+      current=$folder
+      chunk=''
+    fi
+    chunk="$chunk$line
+"
+  done <<EOF
+$scan
+EOF
+  [ -z "$current" ] || fp_folder_classify "$current" "$chunk"
 }
 
 # fp_old_task_entries <days> <out>: "kind<TAB>kb<TAB>path" rows, sorted.
 fp_old_task_entries() {  # <days> <out>
-  local days=$1 out=$2 now cutoff folder id newest entry kind kb
+  local days=$1 out=$2 now cutoff folder id newest kind entry scan
+  local -a folders=()
   now=$(now_epoch)
   cutoff=$((now - days * 86400))
   : > "$out.kinds"
@@ -645,42 +1085,66 @@ fp_old_task_entries() {  # <days> <out>
     id=${folder##*/}
     fm_task_id_path_safe "$id" || continue
     fp_task_folder "$folder" || continue
-    { [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; } && continue
+    fp_task_live "$id" && continue
     newest=$(fp_newest_entry "$folder")
     [ "$newest" -le "$cutoff" ] || continue
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      case "$entry" in "$folder/children"|"$folder/children/"*) continue ;; esac
-      [ -d "$entry" ] && [ ! -L "$entry" ] || continue
-      if fp_rebuildable_name "${entry##*/}"; then
-        kind=rebuildable
-      else
-        fp_checkout_landed "$entry" || continue
-        kind=landed-checkout
-      fi
-      printf '%s\t%s\n' "$kind" "$entry" >> "$out.kinds"
-    done <<EOF
-$(fp_old_task_candidates "$folder")
-EOF
+    folders+=("$folder")
   done
+  # One scan across every eligible folder; when it meets a name with a
+  # control character (and stops), each folder is scanned on its own instead,
+  # so only the folder holding that name is withheld.
+  if [ "${#folders[@]}" -gt 0 ]; then
+    if scan=$(fp_folder_scan "${folders[@]}") && case "$scan" in *FM-CONTROL-NAME*) false ;; *) true ;; esac; then
+      fp_classify_grouped "$scan" >> "$out.kinds"
+    else
+      for folder in "${folders[@]}"; do fp_folder_entries "$folder" >> "$out.kinds"; done
+    fi
+  fi
   # One bounded du for every entry; an entry it could not measure is not offered.
   local -a paths=()
   while IFS='	' read -r kind entry; do paths+=("$entry"); done < "$out.kinds"
   fp_du_many "$out.du" "${paths[@]+"${paths[@]}"}"
-  awk -F '\t' 'NR == FNR { kb[$2] = $1; next } ($2 in kb) { print $1 "\t" kb[$2] "\t" $2 }' "$out.du" "$out.kinds" > "$out.unsorted"
+  awk -F '\t' 'NR == FNR { kb[$2] = $1; next } ($2 in kb) { print $1 "\t" kb[$2] "\t" $2 }' "$out.du" "$out.kinds" |
+    sort -t '	' -k3,3 > "$out"
   rm -f "$out.kinds" "$out.du"
-  # An entry inside another offered entry goes with it, so it is listed once.
-  sort -t '	' -k3,3 "$out.unsorted" | awk -F '\t' '
-    { for (i = 1; i <= n; i++) if (index($3, acc[i] "/") == 1) next; acc[++n] = $3; print }' > "$out"
-  rm -f "$out.unsorted"
+}
+
+fp_sha256_stream() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+  else sha256sum | awk '{print $1}'; fi
+}
+
+# fp_old_task_id <rows>: the preview id: the SHA-256 of the rows together with
+# the identity of everything under each offered entry - device, inode, type,
+# size, modification and change times of every entry, and the SHA-256 of every
+# file's contents - so a same-size edit, a replaced entry, or any added or
+# removed entry changes it. Returns 1 when that could not be read in full.
+fp_old_task_id() {  # <rows>
+  local rows=$1 kind kb entry listing sums sumtool
+  local -a paths=()
+  while IFS='	' read -r kind kb entry; do [ -n "$entry" ] && paths+=("$entry"); done < "$rows"
+  if [ "${#paths[@]}" -gt 0 ]; then
+    if [ "$FP_OS" = Darwin ]; then
+      listing=$(fm_run_timed 600 find "${paths[@]}" -xdev -exec /usr/bin/stat -f '%d %i %HT %z %m %c %N' {} + </dev/null 2>/dev/null) || return 1
+    else
+      listing=$(fm_run_timed 600 find "${paths[@]}" -xdev -exec stat -c '%d %i %F %s %Y %Z %n' {} + </dev/null 2>/dev/null) || return 1
+    fi
+    if command -v shasum >/dev/null 2>&1; then sumtool='shasum -a 256'; else sumtool=sha256sum; fi
+    # shellcheck disable=SC2086 # sumtool is a fixed command and its flags
+    sums=$(fm_run_timed 600 find "${paths[@]}" -xdev -type f -exec $sumtool {} + </dev/null 2>/dev/null) || return 1
+  else
+    listing='' sums=''
+  fi
+  { cat "$rows"; printf '%s\n' "$listing" | sort; printf '%s\n' "$sums" | sort; } | fp_sha256_stream
 }
 
 cmd_old_tasks() {  # [--days N] | --apply <id>
-  local days apply='' tmp id want total
+  local days apply='' tmp id want total kind kb entry task folder aside
   fp_config
   days=$FP_OLD_TASK_DAYS
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      -h|--help) fp_only_flags "" --help ;;
       --days) _fm_footprint_whole "${2:-}" || die "--days needs a whole number"; days=$2; shift 2 ;;
       --apply) [ -n "${2:-}" ] || die "--apply needs a preview id"; apply=$2; shift 2 ;;
       *) usage >&2; exit 2 ;;
@@ -693,19 +1157,34 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     days=$(awk -F '\t' '$1 == "days" {print $2; exit}' "$PREVIEW_FILE")
     [ "$want" = "$apply" ] || { rm -f "$tmp"; die "preview id $apply is not the current preview ($want); nothing removed"; }
     fp_old_task_entries "$days" "$tmp"
-    id=$(fm_footprint_sha256 "$(cat "$tmp")")
-    if [ "$id" != "$want" ]; then
+    if ! id=$(fp_old_task_id "$tmp") || [ "$id" != "$want" ]; then
       rm -f "$tmp"
-      die "task folders changed since preview $want; nothing removed - run old-tasks again"
+      die "task folders changed since preview $want, or could not be read in full; nothing removed - run old-tasks again"
     fi
     total=0
     while IFS='	' read -r kind kb entry; do
       [ -n "$entry" ] || continue
-      if fp_remove_tree "$entry"; then
+      task=${entry#"$DATA_DIR"/}
+      task=${task%%/*}
+      folder="$DATA_DIR/$task"
+      # Under the task's spawn lock, recheck that the task is still finished
+      # and the entry is still the same real directory inside its folder.
+      if ! fp_task_lock "$task"; then
+        printf 'skipped %s: its task is being spawned\n' "$entry"
+        continue
+      fi
+      if fp_task_live "$task" || ! fp_entry_contained "$entry" "$folder" "$(fm_footprint_physical_dir "$folder")" ||
+        ! aside=$(fp_set_aside "$entry" reclaim); then
+        fp_task_unlock "$task"
+        printf 'skipped %s: it changed or its task is live again\n' "$entry"
+        continue
+      fi
+      fp_task_unlock "$task"
+      if fp_remove_tree "$aside"; then
         printf 'removed %s %s %s\n' "$kind" "$(fp_human "$kb")" "$entry"
         total=$((total + kb))
       else
-        printf 'could not fully remove %s\n' "$entry"
+        printf 'could not fully remove %s (left as %s)\n' "$entry" "$aside"
       fi
     done < "$tmp"
     rm -f "$tmp" "$PREVIEW_FILE"
@@ -713,13 +1192,13 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     return 0
   fi
   fp_old_task_entries "$days" "$tmp"
-  id=$(fm_footprint_sha256 "$(cat "$tmp")")
-  total=$(awk -F '\t' '{ t += $2 } END { printf "%d\n", t }' "$tmp")
   if [ ! -s "$tmp" ]; then
     rm -f "$tmp" "$PREVIEW_FILE"
     printf 'Nothing to offer in task folders older than %s days.\n' "$days"
     return 0
   fi
+  id=$(fp_old_task_id "$tmp") || { rm -f "$tmp"; die "could not read the offered entries in full; nothing previewed"; }
+  total=$(awk -F '\t' '{ t += $2 } END { printf "%d\n", t }' "$tmp")
   {
     printf 'id\t%s\n' "$id"
     printf 'days\t%s\n' "$days"
@@ -737,27 +1216,36 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
 # --- sweep and check ----------------------------------------------------------------
 
 cmd_sweep() {  # [--dry-run]
-  local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path
-  local -a cands=() orphans=()
+  local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path root roots aside out
+  local kept=0 kept_ids='' busy=0 findings='' scan_each=0
+  local -a cands=() orphans=() asides=()
   [ "${1:-}" = --dry-run ] && dry=1
   fp_config
   now=$(now_epoch)
   age_cut=$((now - FP_ORPHAN_GRACE_HOURS * 3600))
   base="$FP_ROOT/$FP_KEY"
   work=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-sweep.XXXXXX") || die "cannot create a temporary directory"
-  if [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ]; then
-    for area in "$base"/*; do
-      [ -d "$area" ] && [ ! -L "$area" ] || continue
-      id=${area##*/}
-      fm_task_id_path_safe "$id" || continue
-      { [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; } && continue
-      cands+=("$area")
-    done
+  if [ -d "$base" ] || [ -L "$base" ]; then
+    if ! fp_key_dir_ok; then
+      findings="scratch directory $base does not carry this home's identity, so nothing in it was removed"
+    else
+      # Set-aside areas a previous pass or close validated but did not finish removing.
+      for aside in "$base"/.fm-reclaim-* "$base"/.fm-closing-*; do
+        [ -d "$aside" ] && [ ! -L "$aside" ] && [ "$dry" = 0 ] || continue
+        fp_remove_tree "$aside" || true
+      done
+      for area in "$base"/*; do
+        [ -d "$area" ] && [ ! -L "$area" ] || continue
+        id=${area##*/}
+        fm_task_id_path_safe "$id" || continue
+        fp_task_live "$id" && continue
+        cands+=("$area")
+      done
+    fi
   fi
   if [ "${#cands[@]}" -gt 0 ]; then
     # One stat for every candidate: old enough, owned by this user, and on the
-    # key root's own filesystem. Each is a direct, non-link child of the key
-    # root checked above, so no per-area path resolution is needed.
+    # key directory's own filesystem.
     uid=$(id -u)
     { if [ "$FP_OS" = Darwin ]; then /usr/bin/stat -f '%m %d %u %N' -- "$base" "${cands[@]}"
       else stat -c '%Y %d %u %n' -- "$base" "${cands[@]}"; fi; } 2>/dev/null |
@@ -766,51 +1254,151 @@ cmd_sweep() {  # [--dry-run]
     while IFS= read -r path; do orphans+=("$path"); done < "$work/orphans"
   fi
   if [ "${#orphans[@]}" -gt 0 ]; then
-    fp_du_many "$work/du" "${orphans[@]}"
-    if [ "$dry" = 1 ]; then
-      while IFS='	' read -r kb path; do
-        printf 'would remove orphaned scratch %s (%s)\n' "$path" "$(fp_human "$kb")"
-      done < "$work/du"
+    # One scan for unsafe names and one for repositories across every orphan;
+    # an orphan holding a repository not proven landed is kept whole.
+    if out=$(fm_run_timed 300 find "${orphans[@]}" -xdev -name "$FP_CTRL_GLOB" -print -quit </dev/null 2>/dev/null) && [ -z "$out" ]; then
+      scan_each=0
     else
-      find "${orphans[@]}" -xdev -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true
-      find "${orphans[@]}" -xdev -depth -delete 2>/dev/null || true
-      while IFS='	' read -r kb path; do
-        [ ! -e "$path" ] && [ ! -L "$path" ] || continue
-        removed=$((removed + 1))
-        removed_kb=$((removed_kb + kb))
-        printf '%s\t%s\t-\t-\t%s\t0\tsweep\torphan-removed\t-\n' "$now" "${path##*/}" "$kb"
-      done < "$work/du" > "$work/ledger"
-      if [ -s "$work/ledger" ] && [ -d "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ] && [ ! -L "$LEDGER" ]; then
-        (umask 077 && cat "$work/ledger" >> "$LEDGER") || true
+      scan_each=1
+    fi
+    : > "$work/blocked"
+    if [ "$scan_each" = 0 ]; then
+      if roots=$(fm_run_timed 300 find "${orphans[@]}" -xdev \( -name .git -o \( -type f -name HEAD \) \) -print </dev/null 2>/dev/null); then
+        printf '%s\n' "$roots" | while IFS= read -r root; do
+          case "$root" in ''|*/.git/*) continue ;; */.git) root=${root%/.git} ;;
+            */HEAD) root=${root%/HEAD}; [ -d "$root/objects" ] && [ -d "$root/refs" ] || continue ;; esac
+          fp_checkout_landed "$root" && continue
+          area=${root#"$base"/}
+          printf '%s\n' "$base/${area%%/*}"
+        done | sort -u > "$work/blocked"
+      else
+        scan_each=1
       fi
+    fi
+    for area in "${orphans[@]}"; do
+      id=${area##*/}
+      if [ "$scan_each" = 1 ]; then
+        fp_tree_disposable "$area" || printf '%s\n' "$area" >> "$work/blocked"
+      fi
+      if grep -Fqx -- "$area" "$work/blocked"; then
+        kept=$((kept + 1))
+        [ "$kept" -gt 5 ] || kept_ids="$kept_ids${kept_ids:+, }$id"
+        continue
+      fi
+      if [ "$dry" = 1 ]; then
+        printf 'would remove orphaned scratch %s (%s)\n' "$area" "$(fp_human "$(fp_du_kb "$area" 60)")"
+        continue
+      fi
+      # Under the task's spawn lock, so a spawn reusing the id either finished
+      # recording the task (and the recheck keeps the area) or starts after
+      # the area was set aside and gets a fresh one.
+      if ! fp_task_lock "$id"; then
+        busy=$((busy + 1))
+        continue
+      fi
+      if fp_task_live "$id" || [ ! -d "$area" ] || [ -L "$area" ] || ! aside=$(fp_set_aside "$area" reclaim); then
+        fp_task_unlock "$id"
+        continue
+      fi
+      fp_task_unlock "$id"
+      asides+=("$aside")
+    done
+  fi
+  if [ "${#asides[@]}" -gt 0 ]; then
+    fp_du_many "$work/du" "${asides[@]}"
+    fm_run_timed 600 find "${asides[@]}" -xdev -type d ! -perm -u+w -exec chmod u+w {} + </dev/null 2>/dev/null || true
+    fm_run_timed 600 find "${asides[@]}" -xdev -depth -delete </dev/null 2>/dev/null || true
+    while IFS='	' read -r kb path; do
+      [ ! -e "$path" ] && [ ! -L "$path" ] || continue
+      id=${path##*/.fm-reclaim-}
+      id=${id%.*}
+      removed=$((removed + 1))
+      removed_kb=$((removed_kb + kb))
+      printf '%s\t%s\t-\t-\t%s\t0\tsweep\torphan-removed\t-\n' "$now" "$id" "$kb"
+    done < "$work/du" > "$work/ledger"
+    if [ -s "$work/ledger" ] && [ -d "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ] && [ ! -L "$LEDGER" ]; then
+      (umask 077 && cat "$work/ledger" >> "$LEDGER") || true
     fi
   fi
   rm -rf "$work"
   [ "$dry" = 1 ] || printf 'Removed %s orphaned scratch area(s), %s.\n' "$removed" "$(fp_human "$removed_kb")"
+  if [ "$kept" -gt 0 ]; then
+    printf 'Kept %s orphaned scratch area(s) whole because they hold work that has not landed: %s.\n' "$kept" "$kept_ids"
+    findings="${findings:+$findings; }$kept orphaned scratch area(s) hold work that has not landed ($kept_ids)"
+  fi
+  [ "$busy" = 0 ] || printf 'Skipped %s orphaned scratch area(s) whose task was being spawned.\n' "$busy"
+  fp_docker_retry_run "$dry"
+  if [ "$FP_DOCKER_PENDING" -gt 0 ]; then
+    printf 'Docker cleanup is pending for %s closed task(s).\n' "$FP_DOCKER_PENDING"
+    findings="${findings:+$findings; }Docker cleanup is pending for $FP_DOCKER_PENDING closed task(s)"
+  fi
   FP_TRIM_FINDING=
   [ -z "$FP_CACHE_CAP_GB" ] || fp_trim_caches "$dry"
-  [ -z "$FP_TRIM_FINDING" ] || printf 'finding: %s\n' "$FP_TRIM_FINDING"
+  [ -z "$FP_TRIM_FINDING" ] || findings="${findings:+$findings; }$FP_TRIM_FINDING"
+  [ -z "$findings" ] || printf 'finding: %s\n' "$findings"
 }
 
-cmd_check() {
-  local now last out finding previous
+# The daily pass can take longer than the watcher allows one check
+# (FM_CHECK_TIMEOUT, default 30 s), and a killed check records nothing, so
+# check only starts the pass as a detached run in its own process group and
+# reports a finished run's finding on a later poll.
+DAILY_LOCK="$STATE/.footprint-daily.lock"
+DAILY_RESULT="$STATE/.footprint-daily.result"
+
+fp_daily_running() {
+  local pid
+  [ -d "$DAILY_LOCK" ] || return 1
+  pid=$(cat "$DAILY_LOCK/pid" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+cmd_daily_run() {
+  local out finding
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
-  now=$(now_epoch)
-  last=$(awk -F '\t' '$1 == "last_eval" {print $2; exit}' "$CHECK_RECORD" 2>/dev/null)
-  case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  [ $((now - last)) -ge "$CHECK_INTERVAL" ] || exit 0
+  rm -rf "$DAILY_LOCK.stale.$$" 2>/dev/null
+  if ! mkdir "$DAILY_LOCK" 2>/dev/null; then
+    fp_daily_running && exit 0
+    mv "$DAILY_LOCK" "$DAILY_LOCK.stale.$$" 2>/dev/null && rm -rf "$DAILY_LOCK.stale.$$"
+    mkdir "$DAILY_LOCK" 2>/dev/null || exit 0
+  fi
+  printf '%s\n' "$$" > "$DAILY_LOCK/pid"
   out=$(cmd_sweep 2>&1)
   finding=$(printf '%s\n' "$out" | awk '/^finding: / { sub(/^finding: /, ""); print; exit }')
   case "$out" in
     'fm-footprint: '*) finding=${out#fm-footprint: } ;;
   esac
+  { printf 'finished\t%s\n' "$(now_epoch)"; [ -z "$finding" ] || printf 'finding\t%s\n' "$finding"; } \
+    > "$DAILY_RESULT.tmp" && mv -f "$DAILY_RESULT.tmp" "$DAILY_RESULT"
+  rm -rf "$DAILY_LOCK"
+}
+
+cmd_check() {
+  local now last finished finding previous reported_at
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
+  now=$(now_epoch)
+  last=$(awk -F '\t' '$1 == "last_eval" {print $2; exit}' "$CHECK_RECORD" 2>/dev/null)
   previous=$(awk -F '\t' '$1 == "reported" {print $2; exit}' "$CHECK_RECORD" 2>/dev/null)
-  if [ -n "$finding" ] && [ "$finding" != "$previous" ]; then
-    printf 'footprint: %s\n' "$finding"
+  reported_at=$(awk -F '\t' '$1 == "result_seen" {print $2; exit}' "$CHECK_RECORD" 2>/dev/null)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  # Report a finished run once, and only a finding that changed.
+  finished=$(awk -F '\t' '$1 == "finished" {print $2; exit}' "$DAILY_RESULT" 2>/dev/null)
+  if [ -n "$finished" ] && [ "$finished" != "${reported_at:-}" ]; then
+    finding=$(awk -F '\t' '$1 == "finding" {print $2; exit}' "$DAILY_RESULT" 2>/dev/null)
+    if [ -n "$finding" ] && [ "$finding" != "$previous" ]; then
+      printf 'footprint: %s\n' "$finding"
+    fi
+    previous=$finding
+    reported_at=$finished
+  fi
+  if [ $((now - last)) -ge "$CHECK_INTERVAL" ] && ! fp_daily_running; then
+    last=$now
+    perl -e 'setpgrp(0, 0); exec @ARGV' "$0" daily-run </dev/null >/dev/null 2>&1 &
   fi
   {
-    printf 'last_eval\t%s\n' "$now"
-    [ -z "$finding" ] || printf 'reported\t%s\n' "$finding"
+    printf 'last_eval\t%s\n' "$last"
+    [ -z "$previous" ] || printf 'reported\t%s\n' "$previous"
+    [ -z "${reported_at:-}" ] || printf 'result_seen\t%s\n' "$reported_at"
   } > "$CHECK_RECORD.tmp" && mv -f "$CHECK_RECORD.tmp" "$CHECK_RECORD"
 }
 
@@ -834,7 +1422,7 @@ cmd_arm() {
 }
 
 cmd_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$CHECK_RECORD"
+  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$CHECK_RECORD" "$DAILY_RESULT"
   printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
 }
 
@@ -1146,13 +1734,17 @@ case "${1:-}" in
   task-close)
     [ "$#" -ge 3 ] && [ "$#" -le 4 ] || { usage >&2; exit 2; }
     cmd_task_close "$2" "$3" "${4:-}" ;;
-  caches) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; cmd_caches "$@" ;;
-  trim-caches) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; cmd_trim_caches "$@" ;;
+  caches) shift; fp_only_flags "--json" "$@"; cmd_caches "$@" ;;
+  trim-caches) shift; fp_only_flags "--dry-run" "$@"; cmd_trim_caches "$@" ;;
   old-tasks) shift; cmd_old_tasks "$@" ;;
-  sweep) shift; [ "$#" -le 1 ] || { usage >&2; exit 2; }; cmd_sweep "$@" ;;
-  check) cmd_check ;;
-  arm) cmd_arm ;;
-  disarm) cmd_disarm ;;
+  sweep) shift; fp_only_flags "--dry-run" "$@"; cmd_sweep "$@" ;;
+  owns-scratch)
+    [ "$#" -eq 3 ] || { usage >&2; exit 2; }
+    cmd_owns_scratch "$2" "$3" ;;
+  check) shift; fp_only_flags "" "$@"; cmd_check ;;
+  daily-run) shift; fp_only_flags "" "$@"; cmd_daily_run ;;
+  arm) shift; fp_only_flags "" "$@"; cmd_arm ;;
+  disarm) shift; fp_only_flags "" "$@"; cmd_disarm ;;
   -h|--help|help) sed -n '2,/^set -u$/{/^set -u$/d;s/^# \{0,1\}//;p;}' "$0" ;;
   *) usage >&2; exit 2 ;;
 esac

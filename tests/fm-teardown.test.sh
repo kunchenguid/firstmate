@@ -5506,6 +5506,55 @@ test_footprint_refused_teardown_removes_nothing() {
   pass "a refused teardown removes no scratch, no Docker material, and records nothing"
 }
 
+# The landed-work checks prove the task's own copy; a checkout the worker made
+# inside its scratch area needs its own proof, so an unpublished one keeps the
+# whole area even after an otherwise clean, landed teardown.
+test_footprint_unlanded_scratch_checkout_survives_landed_teardown() {
+  local case_dir rc=0 nested
+  case_dir=$(make_case footprint-scratch-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  footprint_case "$case_dir"
+  land_shippable_commit "$case_dir"
+  nested="$FOOTPRINT_SCRATCH/extra-checkout"
+  mkdir -p "$nested"
+  git -C "$nested" init -q
+  printf 'unique unpublished change\n' > "$nested/unique.txt"
+  git -C "$nested" add unique.txt
+  git -C "$nested" -c user.email=test@example.invalid -c user.name=test commit -qm 'unpublished extra checkout'
+  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT FM_FOOTPRINT_DOCKER="$case_dir/fakebin/docker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "footprint-scratch-unlanded: the landed teardown itself should succeed: $(cat "$case_dir/stderr")"
+  assert_present "$nested/unique.txt" "footprint-scratch-unlanded: the unpublished checkout must survive"
+  assert_present "$FOOTPRINT_SCRATCH/tmp/profile.bin" "footprint-scratch-unlanded: the whole area must be kept"
+  assert_grep "kept whole" "$case_dir/stderr" "footprint-scratch-unlanded: teardown must say the area was kept"
+  pass "an unpublished checkout inside the scratch area keeps the whole area through a landed teardown"
+}
+
+# A recorded scratch path that is not this home's area for the task is never
+# trusted, so no process living there is ended and nothing there is removed.
+test_footprint_foreign_scratch_path_keeps_its_processes() {
+  local case_dir rc=0 foreign pid
+  case_dir=$(make_case footprint-foreign-scratch)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  foreign="$case_dir/other-task-scratch"
+  mkdir -p "$foreign"
+  printf 'other task data\n' > "$foreign/data"
+  printf 'scratch=%s\n' "$foreign" >> "$case_dir/state/task-x1.meta"
+  ( cd "$foreign" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  FM_FOOTPRINT_DOCKER='' run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "footprint-foreign-scratch: teardown should succeed: $(cat "$case_dir/stderr")"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "footprint-foreign-scratch: a process in a scratch path the task does not own was ended"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$foreign/data" "footprint-foreign-scratch: the foreign directory must survive"
+  assert_grep "is not this home's area for the task; left it in place" "$case_dir/stderr" "footprint-foreign-scratch: cleanup must refuse the path"
+  pass "a recorded scratch path the task does not own keeps its processes and its files"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -6798,6 +6847,8 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_footprint_cleanup_after_landed_teardown
 test_footprint_refused_teardown_removes_nothing
+test_footprint_unlanded_scratch_checkout_survives_landed_teardown
+test_footprint_foreign_scratch_path_keeps_its_processes
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

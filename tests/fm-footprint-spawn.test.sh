@@ -77,7 +77,7 @@ test_ship_spawn_exports_scratch_for_a_verified_tool() {
     assert_equals "scratch=$scratch
 tmpdir=$scratch/tmp
 label=firstmate.task=$key/fp-ship-$allow
-compose=fm-$key-fp-ship-$allow" "$seen" "a codex ship ($allow allowlist) must start with its scratch area, temp, and labels"
+compose=$(bash -c '. "$1/bin/fm-footprint-lib.sh"; fm_footprint_compose_project "$2" "$3"' _ "$ROOT" "$key" "fp-ship-$allow")" "$seen" "a codex ship ($allow allowlist) must start with its scratch area, temp, and labels"
   done
   pass "a ship spawn records its scratch area and the worker starts with it, its temp, and its labels"
 }

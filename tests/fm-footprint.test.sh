@@ -52,6 +52,10 @@ home_key() {
   lib 'fm_footprint_home_key "$H"'
 }
 
+compose_for() {  # <id>
+  lib 'fm_footprint_compose_project "$(fm_footprint_home_key "$H")" '"$1"
+}
+
 # fake_docker: a docker that answers info and label-filtered listings from
 # $FB/docker.objects ("kind<TAB>id<TAB>label") and logs every call.
 fake_docker() {
@@ -131,7 +135,7 @@ test_task_env_creates_private_area_and_exports() {
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" task-a1 claude')
   assert_equals "FM_TASK_SCRATCH=$root/$key/task-a1
 FM_DOCKER_LABEL=firstmate.task=$key/task-a1
-COMPOSE_PROJECT_NAME=fm-$key-task-a1
+COMPOSE_PROJECT_NAME=$(compose_for task-a1)
 TMPDIR=$root/$key/task-a1/tmp
 TMP=$root/$key/task-a1/tmp
 TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch area, labels, and temp"
@@ -140,7 +144,7 @@ TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch are
     assert_equals 700 "$mode" "$d must be private"
   done
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" Task.B2 pi')
-  assert_contains "$out" "COMPOSE_PROJECT_NAME=fm-$key-task_b2" "a compose name must be lowercase with dots as underscores"
+  assert_contains "$out" "COMPOSE_PROJECT_NAME=fm-$key-task_b2-" "a compose name must be lowercase with dots as underscores"
   assert_contains "$out" "# pi is not verified with a redirected TMPDIR" "an unverified tool must be named as not covered"
   assert_not_contains "$out" "TMPDIR=" "an unverified tool must keep its inherited temp"
   printf 'scratch-root %s\ntask-tmpdir off\ndocker-labels off\n' "$root" > "$H/config/footprint"
@@ -194,9 +198,9 @@ test_task_close_removes_scratch_and_labelled_docker_only() {
   mkdir -p "$H/data/task-x1"
   printf 'brief\n' > "$H/data/task-x1/brief.md"
   printf 'container\tc1\tfirstmate.task=%s/task-x1\n' "$key" >> "$FB/docker.objects"
-  printf 'container\tc2\tcom.docker.compose.project=fm-%s-task-x1\n' "$key" >> "$FB/docker.objects"
+  printf 'container\tc2\tcom.docker.compose.project=%s\n' "$(compose_for task-x1)" >> "$FB/docker.objects"
   printf 'volume\tv1\tfirstmate.task=%s/task-x1\n' "$key" >> "$FB/docker.objects"
-  printf 'network\tn1\tcom.docker.compose.project=fm-%s-task-x1\n' "$key" >> "$FB/docker.objects"
+  printf 'network\tn1\tcom.docker.compose.project=%s\n' "$(compose_for task-x1)" >> "$FB/docker.objects"
   printf 'image\ti1\tfirstmate.task=%s/task-x1\n' "$key" >> "$FB/docker.objects"
   printf 'container\tother\tfirstmate.task=%s/task-y2\n' "$key" >> "$FB/docker.objects"
   printf 'volume\tforeign\tfirstmate.task=00000000/task-x1\n' >> "$FB/docker.objects"
@@ -289,9 +293,10 @@ test_task_close_docker_absent_or_down() {
   touch "$FB/docker.down"
   s=$(scratch_for task-n2)
   out=$(fp task-close task-n2 "$s")
-  assert_contains "$out" "Docker not present" "a Docker daemon that does not answer must be skipped"
+  assert_contains "$out" "Docker did not answer; its cleanup is queued for the daily pass." "a Docker daemon that does not answer must be skipped and queued"
+  assert_grep "task-n2	" "$H/state/footprint-docker-retry" "the closed task must be queued for a Docker retry"
   assert_no_regex '^rm ' "$FB/docker.log" "nothing may be removed when the daemon does not answer"
-  pass "task-close skips Docker when it is absent or not running"
+  pass "task-close skips Docker when it is absent, and queues a retry when the daemon does not answer"
 }
 
 # --- caches -----------------------------------------------------------------------
@@ -419,13 +424,13 @@ test_old_tasks_preview_offers_only_rebuildable_and_landed() {
   listed=$(awk -F '\t' 'NR > 2 { print $1, $3 }' "$H/state/footprint-old-tasks.preview" | sort -t ' ' -k2)
   assert_equals "$(printf '%s\n' \
     "landed-checkout $H/data/old-a1/landed" \
-    "rebuildable $H/data/old-a1/dirty/node_modules" \
-    "rebuildable $H/data/old-a1/ignored/node_modules" \
     "rebuildable $H/data/old-a1/node_modules" \
-    "rebuildable $H/data/old-a1/sub/.venv" \
-    "rebuildable $H/data/old-a1/unlanded/node_modules" \
-    "rebuildable $H/data/old-a1/untracked/node_modules" | sort -t ' ' -k2)" \
-    "$listed" "the preview must offer only rebuildable layouts and the landed checkout"
+    "rebuildable $H/data/old-a1/sub/.venv" | sort -t ' ' -k2)" \
+    "$listed" "the preview must offer only rebuildable layouts outside checkouts and the landed checkout"
+  # A rebuildable layout inside a checkout not proven landed goes only with that checkout.
+  for inside in dirty ignored unlanded untracked; do
+    printf '%s\n' "$listed" | grep -q " $H/data/old-a1/$inside/" && fail "nothing inside the $inside checkout may be offered"
+  done
   for never in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence children unlanded dirty untracked ignored; do
     printf '%s\n' "$listed" | grep -q " $H/data/old-a1/$never\$" && fail "$never must never be offered"
   done
@@ -446,10 +451,10 @@ test_old_tasks_preview_offers_only_rebuildable_and_landed() {
   id=$(awk -F '\t' '$1 == "id" {print $2}' "$H/state/footprint-old-tasks.preview")
   out=$(fp old-tasks --apply "$id")
   assert_contains "$out" "Removed" "apply must report what it removed"
-  for gone in node_modules sub/.venv landed unlanded/node_modules; do
+  for gone in node_modules sub/.venv landed; do
     assert_absent "$H/data/old-a1/$gone" "$gone must be removed by apply"
   done
-  for kept in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence/run.log children/c1/node_modules unlanded/b.txt dirty/a.txt ignored/secret.env; do
+  for kept in brief.md report.md status.log dispatch-resolution.json captain-answers.md evidence/run.log children/c1/node_modules unlanded/b.txt unlanded/node_modules dirty/a.txt ignored/secret.env; do
     assert_present "$H/data/old-a1/$kept" "$kept must survive apply"
   done
   assert_present "$H/data/live-b2/node_modules" "the live task must be untouched"
@@ -486,6 +491,16 @@ test_sweep_removes_only_old_orphaned_scratch() {
   pass "the daily sweep removes only this home's orphaned scratch past its grace period"
 }
 
+wait_daily_result() {  # <epoch>: wait for the detached pass started at <epoch>
+  local i
+  for i in $(seq 1 100); do
+    [ "$(awk -F '\t' '$1 == "finished" {print $2}' "$H/state/.footprint-daily.result" 2>/dev/null)" = "$1" ] &&
+      [ ! -d "$H/state/.footprint-daily.lock" ] && return 0
+    sleep 0.2
+  done
+  fail "the detached daily pass started at $1 did not finish"
+}
+
 test_check_runs_daily_and_reports_changes_once() {
   local now out
   CASE=check
@@ -494,14 +509,23 @@ test_check_runs_daily_and_reports_changes_once() {
   fake_cache_tool uv "$U/c/uv" 2000 $((now - 3 * 86400)) fail
   export FM_FOOTPRINT_CACHE_NAMES=uv
   printf 'cache-cap-gb 0.001\nscratch-root %s\n' "$SHORT/$CASE" > "$H/config/footprint"
+  # check starts the pass detached and returns at once; a later check reports it.
   out=$(FM_FOOTPRINT_NOW=$now fp check)
+  assert_equals "" "$out" "check must return before the detached pass finishes"
+  wait_daily_result "$now"
+  out=$(FM_FOOTPRINT_NOW=$((now + 60)) fp check)
   assert_contains "$out" "footprint: shared caches still" "an over-cap result must be reported"
   out=$(FM_FOOTPRINT_NOW=$((now + 3600)) fp check)
   assert_equals "" "$out" "the check must stay silent inside its daily interval"
-  out=$(FM_FOOTPRINT_NOW=$((now + 90000)) fp check)
+  assert_equals "$now" "$(awk -F '\t' '$1 == "finished" {print $2}' "$H/state/.footprint-daily.result")" "no second pass may start inside the interval"
+  FM_FOOTPRINT_NOW=$((now + 90000)) fp check >/dev/null
+  wait_daily_result $((now + 90000))
+  out=$(FM_FOOTPRINT_NOW=$((now + 90060)) fp check)
   assert_equals "" "$out" "an unchanged finding must not be reported again"
   printf 'cache-cap-gb 1\nscratch-root %s\n' "$SHORT/$CASE" > "$H/config/footprint"
-  out=$(FM_FOOTPRINT_NOW=$((now + 180000)) fp check)
+  FM_FOOTPRINT_NOW=$((now + 180000)) fp check >/dev/null
+  wait_daily_result $((now + 180000))
+  out=$(FM_FOOTPRINT_NOW=$((now + 180060)) fp check)
   assert_equals "" "$out" "a cleared finding must be silent"
   unset FM_FOOTPRINT_CACHE_NAMES
   out=$(fp arm)

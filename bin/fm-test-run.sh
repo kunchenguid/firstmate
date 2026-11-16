@@ -452,7 +452,7 @@ family_for_basename() {
     fm-claude-account-quota.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
-    fm-extension-binding.test.sh|fm-footprint.test.sh|fm-footprint-scale.test.sh|fm-gitignore-config.test.sh|\
+    fm-extension-binding.test.sh|fm-footprint.test.sh|fm-footprint-safety.test.sh|fm-footprint-scale.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-extension-errors.test.sh|fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
@@ -808,7 +808,8 @@ tests/fm-extension-binding.test.sh 11105
 tests/fm-fleet-ledger.test.sh 19980
 tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
-tests/fm-footprint-scale.test.sh 23251
+tests/fm-footprint-safety.test.sh 13480
+tests/fm-footprint-scale.test.sh 123910
 tests/fm-footprint-spawn.test.sh 17936
 tests/fm-footprint-tmpdir-live.test.sh 149
 tests/fm-footprint.test.sh 16025
@@ -1686,6 +1687,7 @@ families_for_changed_path() {
       ;;
     bin/fm-footprint.sh|bin/fm-footprint-lib.sh)
       printf '%s\n' "__script__:fm-footprint.test.sh"
+      printf '%s\n' "__script__:fm-footprint-safety.test.sh"
       printf '%s\n' "__script__:fm-footprint-scale.test.sh"
       printf '%s\n' "__script__:fm-footprint-spawn.test.sh"
       printf '%s\n' "__script__:fm-teardown.test.sh"

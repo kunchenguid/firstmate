@@ -19,6 +19,10 @@
 # the redirected temp directory at tmp/ inside it. <home-key> is the first 8
 # hex digits of the SHA-256 of this home's physical path, so two homes on one
 # machine that reuse a task id never share or remove each other's scratch.
+# The key directory carries a .fm-home file naming that physical home path,
+# written when the directory is created; fm_footprint_key_dir_trusted is the
+# ownership proof every removal requires, so a key directory that is a link,
+# lies elsewhere, or names another home is never trusted.
 # FM_SCRATCH_ROOT_OVERRIDE, when set, replaces the configured and default root;
 # bin/fm-test-run.sh sets it so the suite never writes into a real cache.
 #
@@ -33,9 +37,11 @@
 # Docker. FM_DOCKER_LABEL is the one flag a worker passes to docker run,
 # docker create, docker volume create, docker network create and docker build:
 # firstmate.task=<home-key>/<task-id>. COMPOSE_PROJECT_NAME is
-# fm-<home-key>-<task-id lowercased, "." as "_">, so compose names and labels
-# every container, network, volume and built image of the task without the
-# worker doing anything. Cleanup matches either label, never a name.
+# fm-<home-key>-<task-id lowercased, "." as "_">-<first 6 hex digits of the
+# SHA-256 of the exact task id>, so compose names and labels every container,
+# network, volume and built image of the task without the worker doing
+# anything, and two task ids that lowercase alike (Task.A and task_a) never
+# share a project. Cleanup matches either label, never a name.
 
 FM_FOOTPRINT_SCRATCH_ROOT_MAX=64
 FM_FOOTPRINT_TMPDIR_MAX=90
@@ -238,7 +244,44 @@ fm_footprint_docker_label() {  # <home-key> <task-id>
 }
 
 fm_footprint_compose_project() {  # <home-key> <task-id>
-  printf 'fm-%s-%s\n' "$1" "$(printf '%s' "$2" | tr 'A-Z.' 'a-z_')"
+  local h
+  h=$(fm_footprint_sha256 "$2") || return 1
+  printf 'fm-%s-%s-%s\n' "$1" "$(printf '%s' "$2" | tr 'A-Z.' 'a-z_')" "${h%"${h#??????}"}"
+}
+
+# fm_footprint_key_dir_bind <key-dir> <home>
+#   Records <home>'s physical path in <key-dir>/.fm-home when absent, and
+#   returns 1 when the file is not a regular file or names another home.
+fm_footprint_key_dir_bind() {  # <key-dir> <home>
+  local marker="$1/.fm-home" home_real current
+  home_real=$(fm_footprint_physical_dir "$2") || return 1
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    (umask 077 && printf '%s\n' "$home_real" > "$marker.$$" && mv -f "$marker.$$" "$marker") 2>/dev/null || {
+      rm -f "$marker.$$"
+      return 1
+    }
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] || return 1
+  IFS= read -r current < "$marker" || return 1
+  [ "$current" = "$home_real" ]
+}
+
+# fm_footprint_key_dir_trusted <root> <key> <home>
+#   The ownership proof for <root>/<key>: a real directory, not a link, owned
+#   by this user and writable by nobody else, physically a direct child of
+#   the root, whose .fm-home names <home>'s physical path. Returns 1 otherwise.
+fm_footprint_key_dir_trusted() {  # <root> <key> <home>
+  local dir="$1/$2" root_real dir_real home_real current marker
+  marker="$dir/.fm-home"
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+  [ -z "$(find "$dir" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] || return 1
+  root_real=$(fm_footprint_physical_dir "$1") || return 1
+  dir_real=$(fm_footprint_physical_dir "$dir") || return 1
+  [ "$dir_real" = "$root_real/$2" ] || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] || return 1
+  home_real=$(fm_footprint_physical_dir "$3") || return 1
+  IFS= read -r current < "$marker" || return 1
+  [ "$current" = "$home_real" ]
 }
 
 # fm_footprint_task_env <config-dir> <home> <task-id> <harness>
@@ -266,6 +309,7 @@ fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness>
   dir="$root/$key/$id"
   tmp="$dir/tmp"
   if ! fm_footprint_private_dir "$root" || ! fm_footprint_private_dir "$root/$key" ||
+    ! fm_footprint_key_dir_bind "$root/$key" "$home" ||
     ! fm_footprint_private_dir "$dir" || ! fm_footprint_private_dir "$tmp"; then
     printf 'error: task scratch area %s is not a private directory owned by this user; inspect and remove it, then retry\n' "$dir" >&2
     return 1

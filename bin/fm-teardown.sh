@@ -3959,10 +3959,19 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
+# Only a scratch path proven to be this home's own area for the task may have
+# its processes ended; a recorded path naming anything else is left alone here
+# and refused again by the footprint cleanup below.
+TASK_SCRATCH_REAP=
+if [ -n "$TASK_SCRATCH" ] && [ "$KIND" != secondmate ] && [ -x "$SCRIPT_DIR/fm-footprint.sh" ] &&
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_DATA_OVERRIDE=$DATA FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-footprint.sh" owns-scratch "$ID" "$TASK_SCRATCH" >/dev/null 2>&1; then
+  TASK_SCRATCH_REAP=$TASK_SCRATCH
+fi
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" "$TASK_SCRATCH"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" "$TASK_SCRATCH_REAP"
 elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP" "$TASK_SCRATCH"
+  reap_task_worktree_processes tasktmp "$TASK_TMP" "$TASK_SCRATCH_REAP"
 fi
 
 # A worker can write after the first proof, including while its run is concluded

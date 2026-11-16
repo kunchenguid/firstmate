@@ -4,14 +4,15 @@
 #
 # For each size N a synthetic home holds N live tasks (records and scratch
 # areas), N finished task folders with a rebuildable directory each, N orphaned
-# scratch areas, and a fake Docker holding N other tasks' labelled objects. The
+# scratch areas, and a fake Docker holding N other tasks' labelled objects;
+# each finished folder holds three rebuildable directories at two depths. The
 # suite then measures, through the public commands:
 #   - spawn-side scratch creation and close-time cleanup of ONE task, which
 #     must stay flat: the 1000-task cost may not exceed four times the 5-task
 #     cost plus one second, and must leave every other task's material intact;
 #   - the daily pass, which must remove exactly the N orphans and nothing live;
-#   - the old-folder preview, which must offer exactly the N rebuildable
-#     directories and no record;
+#   - the old-folder preview, which must offer exactly the 3N rebuildable
+#     directories and no record, at a per-folder cost that grows linearly;
 #   - the report, which must count every area and folder.
 # Each measurement prints as a "# scale" line so a run's output is the
 # evidence of timings and sizes.
@@ -55,12 +56,16 @@ build_home() {
   printf 'scratch-root %s\n' "$root" > "$H/config/footprint"
   key=$(lib 'fm_footprint_home_key "$H"')
   KEY=$key
+  # The key directory and its recorded home identity, exactly as spawn makes them.
+  lib 'fm_footprint_task_env "$H/config" "$H" seed codex' >/dev/null || fail "N=$n: cannot create the key directory"
+  rm -rf "$root/$key/seed"
   old=$(( $(date +%s) - 60 * 86400 ))
   stamp=$(TZ=UTC0 date -d "@$old" +%Y%m%d%H%M.%S 2>/dev/null || TZ=UTC0 date -r "$old" +%Y%m%d%H%M.%S)
   : > "$FB/docker.objects"
   i=1
   while [ "$i" -le "$n" ]; do
-    mkdir -p "$root/$key/live-$i/tmp" "$root/$key/orphan-$i/tmp" "$H/data/live-$i" "$H/data/done-$i/node_modules/p"
+    mkdir -p "$root/$key/live-$i/tmp" "$root/$key/orphan-$i/tmp" "$H/data/live-$i" "$H/data/done-$i/node_modules/p" \
+      "$H/data/done-$i/app/.venv/lib" "$H/data/done-$i/app/.next"
     printf 'brief\n' > "$H/data/live-$i/brief.md"
     printf 'worktree=/x\nscratch=%s\n' "$root/$key/live-$i" > "$H/state/live-$i.meta"
     printf 'brief\n' > "$H/data/done-$i/brief.md"
@@ -71,6 +76,7 @@ build_home() {
   done
   chmod -R go-w "$root"
   chmod 700 "$root" "$root/$key"
+  PER_TASK=3
   TZ=UTC0 find "$H/data" -path "$H/data/done-*" -exec touch -t "$stamp" {} +
   TZ=UTC0 find "$root/$key" -maxdepth 1 -name 'orphan-*' -exec touch -t "$stamp" {} +
   cat > "$FB/docker" <<'SH'
@@ -107,7 +113,7 @@ one_task_cost() {
 
 COST_5=
 test_scale() {  # <n>
-  local n=$1 cost t0 t1 out kb
+  local n=$1 cost t0 t1 out kb preview
   N=$n
   build_home "$n"
   cost=$(one_task_cost "$n")
@@ -126,12 +132,19 @@ test_scale() {  # <n>
   t0=$(now_ms)
   fp old-tasks >/dev/null
   t1=$(now_ms)
-  [ "$(awk -F '\t' 'NR > 2' "$H/state/footprint-old-tasks.preview" | wc -l | tr -d ' ')" = "$n" ] ||
-    fail "N=$n: the preview must offer exactly the $n rebuildable directories"
-  awk -F '\t' 'NR > 2 { print $3 }' "$H/state/footprint-old-tasks.preview" | grep -v '/node_modules$' >/dev/null &&
+  [ "$(awk -F '\t' 'NR > 2' "$H/state/footprint-old-tasks.preview" | wc -l | tr -d ' ')" = $((n * PER_TASK)) ] ||
+    fail "N=$n: the preview must offer exactly the $((n * PER_TASK)) rebuildable directories"
+  awk -F '\t' 'NR > 2 { print $3 }' "$H/state/footprint-old-tasks.preview" | grep -Ev '/(node_modules|\.venv|\.next)$' >/dev/null &&
     fail "N=$n: the preview offered something other than rebuildable directories"
   grep -q 'live-' "$H/state/footprint-old-tasks.preview" && fail "N=$n: a live task's folder was offered"
-  printf '# scale N=%s: old-folder preview %s ms for %s folders\n' "$n" $((t1 - t0)) "$((2 * n))"
+  preview=$((t1 - t0))
+  printf '# scale N=%s: old-folder preview %s ms for %s folders, %s candidates\n' "$n" "$preview" "$((2 * n))" "$((n * PER_TASK))"
+  # Linear, not quadratic: the cost per task folder at 1000 may not exceed
+  # three times the cost per task folder at 100, plus 2 ms.
+  [ "$n" != 100 ] || PREVIEW_PER_100=$((preview * 1000 / 100))
+  if [ "$n" = 1000 ] && [ -n "${PREVIEW_PER_100:-}" ] && [ $((preview * 1000 / 1000)) -gt $((PREVIEW_PER_100 * 3 + 2000)) ]; then
+    fail "N=1000: the preview cost $((preview / 1000)) ms per task folder against $((PREVIEW_PER_100 / 1000)) ms at N=100; it must grow linearly"
+  fi
   t0=$(now_ms)
   out=$(fp sweep)
   t1=$(now_ms)
