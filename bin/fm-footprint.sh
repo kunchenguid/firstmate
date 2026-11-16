@@ -1545,7 +1545,11 @@ fp_lane_rows() {  # <in> <out>
 
 # fp_leftover_processes <out>: "pid<TAB>mem_kb<TAB>class<TAB>cwd"
 fp_leftover_processes() {  # <out>
-  local out=$1 procs pid mem cwd rest id key
+  local out=$1 procs pid mem cwd rest id key tmp_root tmp_real
+  # Per-task temp roots live under FM_FOOTPRINT_TMP_ROOT (default /tmp),
+  # matched by its own path and its physical one (/private/tmp on macOS).
+  tmp_root=${FM_FOOTPRINT_TMP_ROOT:-/tmp}
+  tmp_real=$(fm_footprint_physical_dir "$tmp_root") || tmp_real=$tmp_root
   procs="$out.procs"
   : > "$out"
   # shellcheck source=bin/fm-lane-vitals-lib.sh
@@ -1565,8 +1569,9 @@ fp_leftover_processes() {  # <out>
           printf '%s\t%s\tno-task\t%s\n' "$pid" "$mem" "$cwd" >> "$out"
         fi
         ;;
-      /tmp/fm-*|/private/tmp/fm-*)
-        rest=${cwd#*/tmp/fm-}
+      "$tmp_root"/fm-*|"$tmp_real"/fm-*)
+        rest=${cwd#"$tmp_root"/fm-}
+        [ "$rest" != "$cwd" ] || rest=${cwd#"$tmp_real"/fm-}
         id=${rest%%/*}
         id=${id%%+*}
         [ -n "$id" ] && [ ! -e "$STATE/$id.meta" ] && printf '%s\t%s\tno-task\t%s\n' "$pid" "$mem" "$cwd" >> "$out"
