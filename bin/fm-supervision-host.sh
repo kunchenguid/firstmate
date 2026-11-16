@@ -1025,7 +1025,7 @@ health_record() {  # <engine-error 0|1> <reports>
 # never a subshell, because it advances the host's grant and turn state.
 handle_wake() {  # <reason-lines>
   local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
-  local receipts usage result errors unacked mirror
+  local receipts usage denied result errors unacked mirror
   LAST_TURN=
   ENGINE_ERROR=0
   HEALTH_NOTE=
@@ -1165,9 +1165,11 @@ handle_wake() {  # <reason-lines>
   rm -f "$TURN_FILE"
   receipts=$(awk -F '\t' -v turn="$turn" '$1 == turn { n++ } END { print n + 0 }' "$RECEIPTS" 2>/dev/null)
   usage=$(fm_supervision_engine_result "$FM_SUPERVISION_ENGINE" "$result" "${ENGINE_COST:-0}" 2>/dev/null || true)
+  denied=$(numeric_or "$(printf '%s\n' "$usage" | sed -n 's/.* denied=\([0-9]*\).*/\1/p')" 0)
   [ "$result" = /dev/null ] || rm -f "$result"
   TURN_RESULT=
-  if [ "$rc" -ne 0 ] || [ -z "$usage" ] || [ "${usage#error=0}" = "$usage" ]; then
+  if [ "$rc" -ne 0 ] || [ -z "$usage" ] || [ "${usage#error=0}" = "$usage" ] \
+    || { [ "$denied" -gt 0 ] && [ "${receipts:-0}" -eq 0 ]; }; then
     ENGINE_ERROR=1
   fi
   health_record "$ENGINE_ERROR" "${receipts:-0}"
@@ -1192,6 +1194,8 @@ handle_wake() {  # <reason-lines>
     HANDLE_WHY="the $FM_SUPERVISION_ENGINE engine could not run"
   elif [ "$rc" -ne 0 ]; then
     HANDLE_WHY="the engine turn failed (exit $rc)"
+  elif [ "$denied" -gt 0 ] && [ "${receipts:-0}" -eq 0 ]; then
+    HANDLE_WHY="the engine's commands were refused by its permission rules ($denied refused)"
   elif [ "${usage#error=0}" = "$usage" ]; then
     HANDLE_WHY="the engine turn ended with an error or an incomplete result"
   elif [ "${receipts:-0}" -eq 0 ]; then

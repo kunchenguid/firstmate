@@ -367,8 +367,9 @@ $note" "$evidence"
 # The supervision host's broken-session latch across the window, from its
 # ledger (state/.supervision-host.log) and latch record
 # (state/.supervision-host-health), both owned by bin/fm-supervision-host.sh.
-# An engine error is a failed turn that exited nonzero or lacked a clean
-# engine result, the latch's own definition.
+# An engine error is a failed turn that exited nonzero, lacked a clean engine
+# result, or recorded no report and had a call refused, the latch's own
+# definition.
 engine_snapshot() {  # <evidence-file> <since-epoch>
   local evidence=$1 since=$2 summary errors trip last latch_errors cooldown recovered retry paused="" state line session_start lock_start sidecar_start count_clause episodes episode_count episode lost_trip=""
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
@@ -386,7 +387,7 @@ engine_snapshot() {  # <evidence-file> <since-epoch>
   [ "$sidecar_start" -le "$session_start" ] || session_start=$sidecar_start
   summary=$(awk -F '\t' -v since="$since" -v session_start="$session_start" -v base="${FM_SUPERVISION_HOST_COOLDOWN}s" '
     $1 !~ /^[0-9]+$/ || ($1 < since && $1 < session_start) { next }
-    $1 >= since && $2 == "failed" && ($5 != "rc=0" || $8 !~ /^error=0/) { errors++ }
+    $1 >= since && $2 == "failed" && ($5 != "rc=0" || $8 !~ /^error=0/ || ($6 == "reports=0" && $8 ~ / denied=[1-9]/)) { errors++ }
     $2 == "latch" {
       sub(/^errors=/, "", $3); sub(/^cooldown=/, "", $4)
       if ($4 == base) {
