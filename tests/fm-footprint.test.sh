@@ -134,7 +134,7 @@ TMPDIR=$root/$key/task-a1/tmp
 TMP=$root/$key/task-a1/tmp
 TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch area, labels, and temp"
   for d in "$root" "$root/$key" "$root/$key/task-a1" "$root/$key/task-a1/tmp"; do
-    mode=$(stat -f %Lp "$d" 2>/dev/null || stat -c %a "$d")
+    mode=$(stat -c %a "$d" 2>/dev/null || stat -f %Lp "$d")
     assert_equals 700 "$mode" "$d must be private"
   done
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" Task.B2 pi')
@@ -220,7 +220,7 @@ container	plain	" "$(cat "$FB/docker.objects")" "only this task's labelled objec
   assert_contains "$out" "Kept folder data/task-x1 is" "an oversized kept folder must be named"
   assert_present "$H/data/task-x1/evidence.bin" "an oversized kept folder must be kept whole"
   assert_equals "oversized" "$(awk -F '\t' 'END {print $9}' "$H/data/footprint-ledger.tsv")" "the ledger must flag the oversized folder"
-  mode=$(stat -f %Lp "$H/data/footprint-ledger.tsv" 2>/dev/null || stat -c %a "$H/data/footprint-ledger.tsv")
+  mode=$(stat -c %a "$H/data/footprint-ledger.tsv" 2>/dev/null || stat -f %Lp "$H/data/footprint-ledger.tsv")
   assert_equals 600 "$mode" "the ledger must be private"
   pass "task-close removes the scratch area and only the task's labelled Docker material"
 }
