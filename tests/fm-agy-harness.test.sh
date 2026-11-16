@@ -114,9 +114,8 @@ agy_spaced_install() {  # <case-dir> -> install dir with a space in its path
 
 agy_harness_under() {  # <argv0> <executable> -> fm-harness.sh verdict
   # shellcheck disable=SC2016 # The child shell expands $1 and $r at runtime.
-  ( exec -a "$1" env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
-      "$2" -c 'r=$("$1"); printf "%s" "$r"' _ "$HARNESS" )
+  local inner='r=$("$1"); printf "%s" "$r"'
+  ( exec -a "$1" "$2" -c "$inner" _ "$HARNESS" )
 }
 
 test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init() {
@@ -130,57 +129,72 @@ test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init() {
   [ "$out" = agy ] \
     || fail "a sandbox init (comm=exe, argv0=.../antigravity) under a spaced install path must be detected as agy, got '$out'"
 
-  out=$(agy_harness_under "${dir%/1.5.6}/latest/agy" "$dir/antigravity")
+  out=$(agy_harness_under /usr/local/bin/agy "$dir/antigravity")
   [ "$out" = agy ] \
-    || fail "comm=antigravity with an argv[0] named agy must be detected as agy, got '$out'"
+    || fail "comm=antigravity with an argv[0] named agy outside an antigravity-cli tree must be detected as agy, got '$out'"
   pass "fm-harness.sh: ancestry detects the antigravity binary and its sandbox init under a spaced path"
 }
 
+# The stub ps answers only comm and args, never ppid, so the walk examines one
+# process and the verdict cannot come from the suite's real ancestry. It also
+# writes that pid's NUL-separated cmdline under a fake proc root, so the argv[0]
+# fm-harness.sh reads is the one each case names.
+agy_harness_for() {  # <comm> <argv0> [<args-line>] -> fm-harness.sh verdict
+  FAKE_PS_COMM=$1 FAKE_ARGV0=$2 FAKE_PS_ARGS=${3:-$2} FAKE_PROC="$AGY_FAKE_PROC" \
+    FM_PROC_ROOT_OVERRIDE="$AGY_FAKE_PROC" PATH="$AGY_FAKE_PS_BIN:$PATH" "$HARNESS"
+}
+
 test_agy_ancestry_rejects_unrelated_mentions() {
-  local fakebin out
-  fakebin=$(fm_fakebin "$TMP_ROOT/anc-negatives")
-  cat > "$fakebin/ps" <<'SH'
+  local out
+  AGY_FAKE_PS_BIN=$(fm_fakebin "$TMP_ROOT/anc-negatives")
+  AGY_FAKE_PROC="$TMP_ROOT/anc-negatives-proc"
+  mkdir -p "$AGY_FAKE_PROC"
+  cat > "$AGY_FAKE_PS_BIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
+  *"comm="*)
+    pid=${!#}
+    mkdir -p "$FAKE_PROC/$pid"
+    printf '%s\0' "${FAKE_ARGV0:?}" > "$FAKE_PROC/$pid/cmdline"
+    printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
   *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
 esac
 exit 1
 SH
-  chmod +x "$fakebin/ps"
+  chmod +x "$AGY_FAKE_PS_BIN/ps"
 
-  out=$(FAKE_PS_COMM=magyk FAKE_PS_ARGS='magyk --serve' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for antigravity '/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity')
+  [ "$out" = agy ] \
+    || fail "the fixture must reach the agy rule: comm=antigravity under antigravity-cli must detect agy, got '$out'"
+  out=$(agy_harness_for exe agy)
+  [ "$out" = agy ] \
+    || fail "the fixture must reach the agy rule: comm=exe with argv[0] agy must detect agy, got '$out'"
+
+  out=$(agy_harness_for magyk magyk)
   [ "$out" != agy ] \
     || fail "an unrelated magyk command must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=bash FAKE_PS_ARGS='bash -c "echo agy --help"' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for bash bash 'bash -c "echo agy --help"')
   [ "$out" != agy ] \
-    || fail "a later shell argument naming agy must not detect agy, got '$out'"
+    || fail "a shell whose later arguments name agy must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=antigravityd FAKE_PS_ARGS='antigravityd --serve' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for antigravityd antigravityd)
   [ "$out" != agy ] \
     || fail "an unrelated antigravityd command must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=exe FAKE_PS_ARGS='/usr/lib/sandbox/exe --child' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for exe /usr/lib/sandbox/exe)
   [ "$out" != agy ] \
     || fail "an unrelated exe process must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=exe FAKE_PS_ARGS='/opt/magyk/antigravity-tools/exe agy antigravity' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for exe /opt/magyk/antigravity-tools/exe)
   [ "$out" != agy ] \
     || fail "an exe whose argv[0] only contains agy fragments must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=antigravity FAKE_PS_ARGS='/usr/share/antigravity/antigravity --type=ptyHost' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for antigravity /usr/share/antigravity/antigravity)
   [ "$out" != agy ] \
     || fail "the Antigravity IDE at /usr/share/antigravity/antigravity must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=antigravity FAKE_PS_ARGS='/usr/bin/antigravity' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for antigravity /usr/bin/antigravity)
   [ "$out" != agy ] \
     || fail "the Antigravity IDE at /usr/bin/antigravity must not detect agy, got '$out'"
   pass "fm-harness.sh: ancestry rejects unrelated agy mentions"
