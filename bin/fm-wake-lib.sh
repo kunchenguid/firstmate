@@ -894,11 +894,12 @@ fm_lock_reap_dead_directory() {
   return 1
 }
 
-# A lock path is a symlink to an owner directory, so a lock path that is
-# neither a symlink nor a directory is never a legitimate live lock - it is
-# garbage left behind by a process that opened the path as a plain file
+# A lock path is a symlink to an owner directory, so a regular plain file at
+# the lock path is never a legitimate live lock - it is garbage left behind by
+# a process that opened the path as a regular plain file
 # (observed: an out-of-repo bridge holding its own flock fd on the path).
-# Reclaim it once it is older than the staleness window so waiters stop
+# An externally flock-held regular file older than the staleness window is
+# treated as stale. Reclaim it once it is older so waiters stop
 # spinning on it forever; a fresh one is still respected so a mid-acquire
 # window is never stolen. The removal runs under the steal mutex with its
 # guards re-verified after acquisition, so a rival that just created a live
@@ -907,16 +908,14 @@ fm_lock_reap_dead_directory() {
 fm_lock_reclaim_stale_plain_path() {
   local lockdir=$1 marker_publish_bound=${2:-} steal steal_owner rc
   steal="$lockdir.steal"
-  [ -L "$lockdir" ] && return 1
-  [ -d "$lockdir" ] && return 1
-  [ -e "$lockdir" ] || return 1
+  [ -f "$lockdir" ] || return 1
   fm_lock_mid_acquire_is_fresh "$lockdir" "" && return 1
   if ! fm_lock_try_acquire_steal_mutex "$steal"; then
     FM_LOCK_OWNER_DIR=
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
-  if ! fm_lock_points_to_owner "$steal" "$steal_owner" || [ -L "$lockdir" ] || [ -d "$lockdir" ] || [ ! -e "$lockdir" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
+  if ! fm_lock_points_to_owner "$steal" "$steal_owner" || [ ! -f "$lockdir" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
     fm_lock_release "$steal"
     FM_LOCK_OWNER_DIR=
     return 1
@@ -1589,8 +1588,8 @@ fm_lock_try_acquire() {
   fi
 
   fm_current_pid current || return 1
-  # A stale plain file (or other non-directory, non-symlink path) at the lock
-  # path can never become a live lock on its own; reclaim it under the steal
+  # A stale regular plain file at the lock path can never become a live lock on
+  # its own; reclaim it under the steal
   # mutex so a live lock is never unlinked and racing reclaimers still yield
   # exactly one holder.
   if fm_lock_reclaim_stale_plain_path "$lockdir" "$marker_publish_bound"; then

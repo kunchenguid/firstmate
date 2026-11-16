@@ -1727,6 +1727,36 @@ test_lock_fresh_plain_file_is_respected() {
   pass "fresh plain-file lock path is respected during its grace"
 }
 
+test_lock_nonregular_paths_are_not_reclaimed_as_plain_files() {
+  local dir state lockdir fifo socket socket_dir out
+  dir=$(make_case lock-nonregular-noop)
+  state="$dir/state"
+  fifo="$state/.fifo.lock"
+  socket_dir=$(mktemp -d /tmp/fm-lock-socket.XXXXXX)
+  socket="$socket_dir/lock"
+  mkfifo "$fifo"
+  python3 - "$socket" <<'PY'
+import socket
+import sys
+
+path = sys.argv[1]
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(path)
+sock.close()
+PY
+  touch -t 200001010000 "$fifo" "$socket"
+  for lockdir in "$fifo" "$socket"; do
+    out=$(FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then exit 7; fi
+    ' _ "$LIB" "$lockdir") || fail "nonregular lock path was acquired: $lockdir ($out)"
+  done
+  [ -p "$fifo" ] || fail "stale FIFO lock path was removed"
+  [ -S "$socket" ] || fail "stale socket lock path was removed"
+  rm -rf "$socket_dir"
+  pass "FIFO and socket lock paths are never reclaimed as plain files"
+}
+
 test_lock_symlink_lock_is_never_reclaimed_as_plain_file() {
   local dir state lockdir holder_file release_file holder out owner_before owner_after lockpid holderpid i
   dir=$(make_case lock-symlink-noop)
@@ -3019,6 +3049,7 @@ test_bounded_deadline_malformed_lock
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_stale_plain_file_is_reclaimed
 test_lock_fresh_plain_file_is_respected
+test_lock_nonregular_paths_are_not_reclaimed_as_plain_files
 test_lock_symlink_lock_is_never_reclaimed_as_plain_file
 test_lock_stale_plain_file_single_winner_under_concurrency
 test_watch_restart_rejects_reused_pid
