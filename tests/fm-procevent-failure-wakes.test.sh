@@ -53,9 +53,11 @@ repair() { cat "$1/good.source" > "$1/state/procevent/$2.source"; }
 
 # A failing launch always waits out the whole confirm window, so failing
 # cycles use a short one. A repaired launch ends its window on the first
-# evidence, so it gets a long one that a loaded host cannot outrun.
+# evidence, so it gets a long one that a loaded host cannot outrun. A
+# scenario that needs the runner's refusal reason sets FAIL_CONFIRM_SECONDS,
+# because a refusal that lands after the window is not attributed to it.
 reconcile() {  # <home>
-  FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 pe "$1" reconcile 2>/dev/null || true
+  FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=${FAIL_CONFIRM_SECONDS:-1} pe "$1" reconcile 2>/dev/null || true
 }
 reconcile_repaired() {  # <home>
   local out
@@ -63,15 +65,23 @@ reconcile_repaired() {  # <home>
   case "$out" in *"failed=0"*) ;; *) fail "a repaired source did not start: $out" ;; esac
 }
 
-# A confirmed runner runs its source and releases the claim; the next damaged
-# launch must not find the source still owned.
+# A confirmed runner runs its source and exits; the next damaged launch must
+# not find the source still owned by a live runner. A runner that exits while
+# reconcile's confirm loop holds the source lock leaves its claim behind by
+# design, for the next reconcile to reclaim, so a claim whose recorded owner
+# (pid plus process identity, as the claim records it) is gone also counts.
 wait_released() {  # <source-id>
-  local _
+  local _ claim="$FM_PROCEVENT_CLAIM_ROOT/$1.claim" pid identity
   for _ in $(seq 1 600); do
-    [ -e "$FM_PROCEVENT_CLAIM_ROOT/$1.claim" ] || return 0
+    [ -e "$claim" ] || return 0
+    { IFS= read -r _ && IFS= read -r pid && IFS= read -r _ && IFS= read -r identity; } < "$claim" 2>/dev/null \
+      && [ "$(owner_identity "$pid")" != "$identity" ] && return 0
     sleep 0.1
   done
   fail "the runner for $1 never released its claim"
+}
+owner_identity() {  # <pid>: the identity a claim records for a live pid, empty once it is gone
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$1" 2>/dev/null || true
 }
 
 wake_keys() {  # <home> <source-id> <kind>
@@ -181,16 +191,22 @@ scenario_repeat_inside_window_and_recovery() {
 }
 
 scenario_repeat_after_window_wakes() {
-  local home="$TMP_ROOT/after"
-  new_source "$home" after-src repeat-seconds=2
+  local home="$TMP_ROOT/after" window=30 before woke
+  new_source "$home" after-src repeat-seconds=$window
   damage "$home" after-src
+  # The window opens at the failure wake, so it opens no earlier than
+  # <before> and no later than <woke>.
+  before=$(date +%s)
   reconcile_until_failed_wakes "$home" after-src 1 || fail "the first failure did not wake"
+  woke=$(date +%s)
   repair "$home" after-src
   reconcile_repaired "$home"
-  wait_released after-src
+  [ "$(date +%s)" -lt $((before + window)) ] \
+    || fail "the host was too slow to look inside a ${window}s window"
   assert_contains "$(fleet_view "$home")" "| after-src | recovered |" \
     "a recovered source left the fleet view inside its window"
-  sleep 3
+  wait_released after-src
+  while [ "$(date +%s)" -le $((woke + window)) ]; do sleep 1; done
   reconcile_repaired "$home"
   wait_released after-src
   assert_contains "$(fleet_view "$home")" "No process-event failures are being counted without a wake." \
@@ -203,13 +219,16 @@ scenario_repeat_after_window_wakes() {
 }
 
 scenario_different_reason_wakes() {
-  local home="$TMP_ROOT/reason"
+  local home="$TMP_ROOT/reason" FAIL_CONFIRM_SECONDS=5 reason
   new_source "$home" reason-src -
   damage "$home" reason-src
   reconcile_until_failed_wakes "$home" reason-src 1 || fail "the first failure did not wake"
   # Make sure the first reason is the argv refusal before changing it.
   reconcile "$home" >/dev/null
   expect_wakes "$home" reason-src 1 0 "the same reason again"
+  reason=$(FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json \
+    | jq -r '.procevent_failure_quiet[] | select(.source == "reason-src") | .reason')
+  case "$reason" in launch-refused-*) ;; *) fail "the first failure was not the runner's refusal: $reason" ;; esac
   damage_adapter "$home" reason-src
   reconcile_until_failed_wakes "$home" reason-src 2 \
     || fail "a different failure reason for the same source did not wake"
