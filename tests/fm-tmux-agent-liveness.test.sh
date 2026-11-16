@@ -224,6 +224,39 @@ wait_for_state "$SESSION:decoy-command-code-helper" ambiguous \
   || fail "'command-code-helper' merely contains Command Code's name and must not classify as a live agent pane"
 pass "tmux liveness: Command Code's anchored process name classifies alive; a containing name stays ambiguous"
 
+# --- agy under an install path containing a space ---------------------------
+# agy can run as `antigravity` (its real file name under a mise install) or as
+# its sandbox `exe`, and those names count only with agy CLI evidence in
+# argv[0]. Flattened ps output cuts a spaced install path before that evidence,
+# so only the structured procfs argv[0] can carry the verdict; where procfs is
+# absent there is no structured argv[0] to read.
+
+if [ -r "/proc/$$/cmdline" ]; then
+  agy_dir="$LAB/home/John Doe/.local/share/mise/installs/antigravity-cli/1.5.6"
+  mkdir -p "$agy_dir" "$LAB/ide"
+  ln -s "$STANDIN_BIN" "$agy_dir/antigravity"
+  ln -s "$STANDIN_BIN" "$agy_dir/exe"
+  ln -s "$STANDIN_BIN" "$LAB/ide/antigravity"
+  new_window agy-spaced "$agy_dir/antigravity" 900
+  # shellcheck disable=SC2016 # The pane's shell expands $1 and $2.
+  new_window agy-spaced-exe bash -c 'exec -a "$1" "$2" 900' _ "$agy_dir/antigravity" "$agy_dir/exe"
+  for window in agy-spaced agy-spaced-exe; do
+    wait_for_state "$SESSION:$window" alive \
+      || fail "$window: agy under a spaced install path must classify alive, not ambiguous"
+    # Neither the title nor the flattened name sources may carry this case,
+    # or the procfs argv[0] read would be untested.
+    if title_classifies_agent "$SESSION:$window" || comms_classify_agent "$SESSION:$window"; then
+      fail "$window: a flattened name source classified the spaced agy pane, so the case is vacuous"
+    fi
+  done
+  new_window agy-ide "$LAB/ide/antigravity" 900
+  wait_for_state "$SESSION:agy-ide" ambiguous \
+    || fail "an antigravity process outside an antigravity-cli install must not classify as a live agent pane"
+  pass "tmux liveness: agy under a spaced install path classifies alive; an IDE-shaped antigravity stays ambiguous"
+else
+  pass "tmux liveness: spaced agy install path skipped (no procfs argv[0] on this platform)"
+fi
+
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
 # Claude Code 2.1.220 reports drives the two sources apart on both supported

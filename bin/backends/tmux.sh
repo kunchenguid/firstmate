@@ -399,6 +399,19 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# True when foreground pid $1 is agy started as `antigravity` or its sandbox
+# `exe`. Those names need argv[0] evidence (bin/fm-agy-process-lib.sh), and an
+# install path with a space splits in flattened ps output, so the structured
+# argv[0] is read from procfs.
+fm_backend_tmux_pid_is_agy() {  # <pid>
+  local pid=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} comm argv0=
+  [ -r "$proc_root/$pid/cmdline" ] || return 1
+  IFS= read -r -d '' argv0 < "$proc_root/$pid/cmdline" || true
+  [ -n "$argv0" ] || return 1
+  comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || return 1
+  fm_agy_process_matches "$comm" "$argv0"
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -467,11 +480,12 @@ $argv0s
 EOF
 
   # Preserve argv boundaries where the platform exposes them. This is needed
-  # when a Gemini or Hermes script path contains whitespace, which flattened
-  # ps output cannot represent unambiguously.
+  # when a Gemini or Hermes script path, or an agy install path, contains
+  # whitespace, which flattened ps output cannot represent unambiguously.
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    if fm_gemini_pid_is_gemini "$pid" || fm_hermes_process_matches '' "$pid"; then
+    if fm_gemini_pid_is_gemini "$pid" || fm_hermes_process_matches '' "$pid" \
+      || fm_backend_tmux_pid_is_agy "$pid"; then
       printf 'alive'
       return 0
     fi

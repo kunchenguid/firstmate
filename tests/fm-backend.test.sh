@@ -1013,19 +1013,19 @@ test_backend_source_requires_unreadable_adapter_file() {
   _backend_source_adapter_condition unreadable
 }
 
-_backend_source_hermes_helper_condition() {  # missing|unreadable
-  local condition=$1 dir backend helper marker continued rc test_bash
-  dir="$TMP_ROOT/hermes-helper-$condition"
+_backend_source_helper_condition() {  # <helper-file> <label> missing|unreadable
+  local file=$1 label=$2 condition=$3 dir backend helper marker continued rc test_bash
+  dir="$TMP_ROOT/helper-${file%.sh}-$condition"
   test_bash=${FM_TEST_BASH:-${BASH:-bash}}
   mkdir -p "$dir"
   cp -R "$ROOT/bin" "$dir/bin"
-  helper="$dir/bin/fm-hermes-process-lib.sh"
+  helper="$dir/bin/$file"
   if [ "$condition" = missing ]; then
     rm "$helper"
   else
     chmod 000 "$helper"
     if [ -r "$helper" ]; then
-      pass "fm_backend_source: unreadable Hermes helper skipped (mode-000 files remain readable)"
+      pass "fm_backend_source: unreadable $label helper skipped (mode-000 files remain readable)"
       return 0
     fi
   fi
@@ -1044,26 +1044,34 @@ _backend_source_hermes_helper_condition() {  # missing|unreadable
     ' _ "$ROOT/bin/fm-backend.sh" "$dir/bin" "$backend" "$continued" >/dev/null 2>&1
     rc=$?
     [ "$rc" -ne 0 ] && [ ! -e "$marker" ] && [ ! -e "$continued" ] \
-      || fail "$backend loaded or continued with a $condition Hermes helper"
+      || fail "$backend loaded or continued with a $condition $label helper"
   done
   rm -f "$helper"
-  cp "$ROOT/bin/fm-hermes-process-lib.sh" "$helper"
+  cp "$ROOT/bin/$file" "$helper"
   for backend in tmux herdr rex tern hc; do
     # shellcheck disable=SC2016 # Positional parameters belong to the child.
     "$test_bash" -c '. "$1"; FM_BACKEND_LIB_DIR=$2; fm_backend_source "$3"' \
       _ "$ROOT/bin/fm-backend.sh" "$dir/bin" "$backend" \
-      || fail "$backend did not load with its Hermes helper restored"
+      || fail "$backend did not load with its $label helper restored"
     [ -e "$dir/$backend.loaded" ] || fail "$backend did not reach its sentinel adapter"
   done
-  pass "fm_backend_source: $condition Hermes helper refuses every dependent backend before sourcing"
+  pass "fm_backend_source: $condition $label helper refuses every dependent backend before sourcing"
 }
 
 test_backend_source_requires_missing_hermes_helper() {
-  _backend_source_hermes_helper_condition missing
+  _backend_source_helper_condition fm-hermes-process-lib.sh Hermes missing
 }
 
 test_backend_source_requires_unreadable_hermes_helper() {
-  _backend_source_hermes_helper_condition unreadable
+  _backend_source_helper_condition fm-hermes-process-lib.sh Hermes unreadable
+}
+
+test_backend_source_requires_missing_agy_helper() {
+  _backend_source_helper_condition fm-agy-process-lib.sh agy missing
+}
+
+test_backend_source_requires_unreadable_agy_helper() {
+  _backend_source_helper_condition fm-agy-process-lib.sh agy unreadable
 }
 
 test_backend_validate_spawn_accepts_orca() {
@@ -1735,7 +1743,9 @@ if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
     test_backend_source_requires_missing_adapter_file \
     test_backend_source_requires_unreadable_adapter_file \
     test_backend_source_requires_missing_hermes_helper \
-    test_backend_source_requires_unreadable_hermes_helper
+    test_backend_source_requires_unreadable_hermes_helper \
+    test_backend_source_requires_missing_agy_helper \
+    test_backend_source_requires_unreadable_agy_helper
   exit 0
 fi
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -1769,6 +1779,8 @@ test_backend_source_requires_missing_adapter_file
 test_backend_source_requires_unreadable_adapter_file
 test_backend_source_requires_missing_hermes_helper
 test_backend_source_requires_unreadable_hermes_helper
+test_backend_source_requires_missing_agy_helper
+test_backend_source_requires_unreadable_agy_helper
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
