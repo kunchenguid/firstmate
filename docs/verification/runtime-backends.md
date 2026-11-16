@@ -3697,6 +3697,7 @@ Each takes its arguments from what the real `bin/fm-spawn.sh` or `bin/fm-supervi
 | 2026-11-16 | codex-cli 0.169.0, macOS | A session launched with the spawn's `-c model_auto_compact_token_limit=20000` wrote one `compacted` rollout record after its context passed 21,000 tokens; the same prompt without it wrote none at 22,328. |
 | 2026-11-16 | Pi 1.5.2, Gemini CLI 0.67.0, Antigravity 1.5.9 | Installed and not covered: no per-launch ceiling was verified, so each records the value with `context_ceiling_applied=no` and keeps its default. |
 | 2026-11-16 | Claude Code 2.1.325, supervision engine on sonnet | `/context` through the engine's own launch path estimates 16.2k tokens (13.8k system prompt, 2.3k tools). One real engine turn's first call read 17,097 tokens (2 fresh, 17,095 cache write). The guard's budget is 18,000; the design target of 15,000 is not met. |
+| 2026-11-16 | Claude Code 2.1.325, macOS | A skill invoked as `/<skill> daily-fresh-start <nonce>` in `claude -p` is recorded in the session transcript as a `user` line whose string content carries `<command-name>/<skill></command-name>` and `<command-args>daily-fresh-start <nonce></command-args>`, followed by the skill text as an `isMeta` user line; the daily fresh start's newest-prompt check reads that shape. |
 
 ## hc
 
