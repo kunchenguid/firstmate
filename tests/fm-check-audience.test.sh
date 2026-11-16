@@ -112,7 +112,7 @@ test_routing() {
 }
 
 test_silent_checks_never_wake() {
-  local n state dir i out start ms rows
+  local n state dir i out start ms rows rc
   for n in 5 100 1000; do
     dir=$(make_case "scale-$n")
     state="$dir/state"
@@ -131,7 +131,9 @@ test_silent_checks_never_wake() {
       FM_HEARTBEAT=999999 "$WATCH" >"$out" 2>&1 &
     # One pass runs every check in turn, about 0.1 s each on an idle machine,
     # so the bound scales with the count and leaves room for a loaded host.
-    wait_for_exit "$!" $((600 + n * 6)) || fail "$n checks: the watcher did not wake for the one finding"
+    rc=0
+    wait_for_exit "$!" $((600 + n * 6)) || rc=$?
+    [ "$rc" -eq 0 ] || fail "$n checks: the watcher did not wake for the one finding (exit $rc after $(( ($(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start) / 1000 )) s): $(tail -n 5 "$out" | tr '\n' ' ')"
     ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
     assert_equals 1 "$(grep -c '^check:' "$out")" "$n checks: exactly one wake for the one finding"
     grep -qF "check: $state/zz-finder.check.sh: found it" "$out" || fail "$n checks: the wake is not the finder's: $(cat "$out")"
