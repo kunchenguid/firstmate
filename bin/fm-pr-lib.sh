@@ -1558,14 +1558,27 @@ fm_pr_forgejo_api() {  # <method> <owner> <repo> <suffix> [<cli-args>...]
 FM_PR_FORGEJO_CLI_PREFERENCE=
 fm_pr_forgejo_cli_preference() {  # <task-meta-file>
   FM_PR_FORGEJO_CLI_PREFERENCE=auto
-  local meta=${1:-} project preference
+  local meta=${1:-} project preference data resolved
   [ -n "$meta" ] && [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   project=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$project" ] || return 0
   project=$(basename "$project")
   [ -n "$project" ] || return 0
   [ -x "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" ] || return 0
-  preference=$(FM_HOME="${FM_HOME:-$_FM_PR_LIB_ROOT}" \
+  # fm-project-mode.sh reads its registry from $FM_DATA_OVERRIDE, else
+  # $FM_HOME/data. Forward that override explicitly and resolved to an absolute
+  # path, the way bin/fm-brief.sh and bin/fm-promote.sh do: relying on the
+  # inherited value alone means a relative override resolves against a
+  # different working directory than the run's and the registration silently
+  # reads as `auto`, proving a merge through a CLI the project never chose.
+  data=${FM_DATA_OVERRIDE:-}
+  if [ -n "$data" ]; then
+    resolved=$(cd "$data" 2>/dev/null && pwd) || return 0
+    data=$resolved
+  else
+    data="${FM_HOME:-$_FM_PR_LIB_ROOT}/data"
+  fi
+  preference=$(FM_HOME="${FM_HOME:-$_FM_PR_LIB_ROOT}" FM_DATA_OVERRIDE="$data" \
     "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" --forge-cli "$project" 2>/dev/null) || return 0
   case "$preference" in
     tea|fgj|fj) FM_PR_FORGEJO_CLI_PREFERENCE=$preference ;;
