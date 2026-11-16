@@ -63,6 +63,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   noreport    drain and exit cleanly without a report
 #   denied      the same as noreport, but its result lists a refused tool call
 #               in permission_denials (an engine whose commands were refused)
+#   handle-denied the same as handle, but its result lists a refused tool call
+#               in permission_denials (an incidental refusal on a handled turn)
 #   go-away     the captain goes away (the record is written) mid-turn, then
 #               the turn reports verdict captain
 #   fail        exit nonzero at once, with no result and no report (an engine
@@ -91,7 +93,9 @@ case "$mode" in held|captain-held) printf 'ready\n' > "$FM_HOME/stub-ready" ;; e
 # Like Claude, the reported cost is the conversation's running total.
 result() {
   printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":%s,' "$(awk -v n="$n" 'BEGIN { print n * 0.25 }')"
-  [ "$mode" != denied ] || printf '"permission_denials":[{"tool_name":"Bash","tool_use_id":"stub","tool_input":{"command":"bin/fm-wake-drain.sh"}}],'
+  case "$mode" in denied|handle-denied)
+    printf '"permission_denials":[{"tool_name":"Bash","tool_use_id":"stub","tool_input":{"command":"bin/fm-wake-drain.sh"}}],' ;;
+  esac
   printf '"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20},"session_id":"stub"}\n'
 }
 if [ "$mode" = hang ]; then
@@ -109,7 +113,7 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|handle-denied|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1

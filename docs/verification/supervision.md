@@ -844,7 +844,7 @@ tests/fm-watch-arm.test.sh
 
 ### Refused engine commands, 2026-11-15
 
-This supports [supervision-host.md](../supervision-host.md#claude-print-mode-behavior)'s rule that a non-empty `permission_denials` fails the engine turn.
+This supports [supervision-host.md](../supervision-host.md#claude-print-mode-behavior)'s rule that a non-empty `permission_denials` fails an engine turn that recorded no report.
 It was measured on macOS arm64 with Claude Code 2.1.325 on `claude-haiku-5-5`, under remote-managed settings that set `allowManagedPermissionRulesOnly: true` with a managed allow list that includes `Bash(echo *)`, from a disposable directory holding an executable `bin/fm-probe.sh`.
 
 ```sh

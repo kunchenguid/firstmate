@@ -18,9 +18,9 @@ set -u
 
 
 # Claude Code reports a refused tool call as a successful turn that lists it
-# in permission_denials; the host must count it as an engine error, say the
-# commands were refused, and latch on the second one rather than handing every
-# wake back unexplained.
+# in permission_denials; on a turn that recorded no report the host must count
+# it as an engine error, say the commands were refused, and latch on the
+# second one rather than handing every wake back unexplained.
 test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch() {
   local home
   home=$(make_home away-denied away)
@@ -29,9 +29,9 @@ test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch() {
   park_again "$home"
   append_status "$home" 'first'
   wait_until_deadline 60 host_exited "$home" || fail "denied: the first refused turn did not hand the wake back"
-  assert_re "^supervision-host: the away session could not take this wake: the engine's commands were refused by its permission rules \\(1 refused; a managed-only permission policy is a likely cause\\); this wake is yours$" \
+  assert_re "^supervision-host: the away session could not take this wake: the engine's commands were refused by its permission rules \\(1 refused\\); this wake is yours$" \
     "$home/host.out" "a refused turn must hand the wake back saying its commands were refused"
-  assert_re '	failed	turn=.*	error=1 .* denied=1	' "$home/state/.supervision-host.log" "the ledger must record the refused turn as failed"
+  assert_re '	failed	turn=.*	reports=0	.* denied=1	' "$home/state/.supervision-host.log" "the ledger must record the refused turn as failed"
   assert_grep 'errors=1' "$home/state/.supervision-host-health" "a refused turn must count as an engine error"
   main_drain_and_ack "$home"
   park_again "$home"
@@ -41,6 +41,27 @@ test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch() {
     "$home/host.out" "the second refused turn must trip the latch with one line"
   assert_grep 'cooldown=300' "$home/state/.supervision-host-health" "refused turns must start the latch's cooldown"
   pass "host: an engine turn whose commands were refused is an engine error that names the refusal and trips the latch"
+}
+
+# A turn that reported and acknowledged its wake stays handled even when one
+# of its calls was refused: the refusal is recorded, not counted as an engine
+# error, so the wakes stay with the away session.
+test_refused_call_on_a_turn_that_handled_its_wake_keeps_it_handled() {
+  local home
+  home=$(make_home away-handled-denied away)
+  echo handle-denied > "$home/stub-mode"
+  start_session "$home"
+  park_again "$home"
+  append_status "$home" 'first'
+  wait_until 250 handled_at_least "$home" 1 || fail "handled denied: the first turn was not handled: $(cat "$home/host.out")"
+  append_status "$home" 'second'
+  wait_until 250 handled_at_least "$home" 2 || fail "handled denied: the second turn was not handled: $(cat "$home/host.out")"
+  host_exited "$home" && fail "a turn that handled its wake must not hand it back for a refused call: $(cat "$home/host.out")"
+  [ "$(engine_calls "$home")" -eq 2 ] || fail "each wake must reach the engine once"
+  assert_re '	handled	turn=.*	error=0 .* denied=1	' "$home/state/.supervision-host.log" "the ledger must record the refused call on the handled turn"
+  assert_no_re '	(failed|latch)	' "$home/state/.supervision-host.log" "a refused call on a handled turn must neither fail it nor latch"
+  assert_grep 'errors=0' "$home/state/.supervision-host-health" "a refused call on a handled turn must not count as an engine error"
+  pass "host: a turn that handled its wake stays handled when one of its calls was refused, and its ledger line records the refusal"
 }
 
 test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
@@ -692,6 +713,7 @@ test_superseded_host_leaves_the_owner_untouched() {
 fm_test_run \
   test_latch_trips_after_two_engine_errors_then_probes_and_recovers \
   test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch \
+  test_refused_call_on_a_turn_that_handled_its_wake_keeps_it_handled \
   test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes \
   test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main \
   test_engine_turn_is_bounded_and_its_descendants_reaped \

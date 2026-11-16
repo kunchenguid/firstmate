@@ -1168,7 +1168,8 @@ handle_wake() {  # <reason-lines>
   denied=$(numeric_or "$(printf '%s\n' "$usage" | sed -n 's/.* denied=\([0-9]*\).*/\1/p')" 0)
   [ "$result" = /dev/null ] || rm -f "$result"
   TURN_RESULT=
-  if [ "$rc" -ne 0 ] || [ -z "$usage" ] || [ "${usage#error=0}" = "$usage" ]; then
+  if [ "$rc" -ne 0 ] || [ -z "$usage" ] || [ "${usage#error=0}" = "$usage" ] \
+    || { [ "$denied" -gt 0 ] && [ "${receipts:-0}" -eq 0 ]; }; then
     ENGINE_ERROR=1
   fi
   health_record "$ENGINE_ERROR" "${receipts:-0}"
@@ -1193,8 +1194,8 @@ handle_wake() {  # <reason-lines>
     HANDLE_WHY="the $FM_SUPERVISION_ENGINE engine could not run"
   elif [ "$rc" -ne 0 ]; then
     HANDLE_WHY="the engine turn failed (exit $rc)"
-  elif [ "$denied" -gt 0 ]; then
-    HANDLE_WHY="the engine's commands were refused by its permission rules ($denied refused; a managed-only permission policy is a likely cause)"
+  elif [ "$denied" -gt 0 ] && [ "${receipts:-0}" -eq 0 ]; then
+    HANDLE_WHY="the engine's commands were refused by its permission rules ($denied refused)"
   elif [ "${usage#error=0}" = "$usage" ]; then
     HANDLE_WHY="the engine turn ended with an error or an incomplete result"
   elif [ "${receipts:-0}" -eq 0 ]; then

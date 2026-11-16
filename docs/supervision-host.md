@@ -280,8 +280,8 @@ So the owner's next arm starts from the same state as without the host, and the 
 - A dialog mirror that cannot be read, on an attended wake.
 - A session latched after repeated engine errors, inside its cooldown; see [The broken-session latch](#the-broken-session-latch).
 - A turn that timed out or failed.
-- A turn whose commands the engine's permission rules refused.
-  Its line says so and names a managed-only permission policy as a likely cause.
+- A turn that recorded no report and had commands refused by the engine's permission rules.
+  Its line says so and counts the refused calls.
 - A turn that recorded no report.
 - A turn that reported but left any of its granted rows unacknowledged.
   Its line names those rows, which stay durable in the queue for main's drain.
@@ -291,7 +291,7 @@ When the captain returned during a failed turn that recorded visible outcomes, t
 
 ### The broken-session latch
 
-The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, ended without a complete successful result, or had any command refused by its permission rules.
+The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, ended without a complete successful result, or recorded no report and had a command refused by its permission rules.
 Two consecutive engine errors latch the session: every wake reaches main for a five-minute cooldown, the attended close unchanged and the away close with a `supervision-host:` line, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
 A turn that records a report without an engine error clears the latch; a turn with a complete engine result but no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
 The first trip adds one `supervision-host:` line to the failing turn's handback; a recovery is only recorded in the host ledger, so a routine probe stays off main.
@@ -410,7 +410,8 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 - `--permission-mode dontAsk` with the `Bash` and `Read` allowlist never prompts.
   A denied call reaches the model as a tool error and never wedges the turn.
 - Admin-managed settings still apply, so a managed `allowManagedPermissionRulesOnly` policy drops that allowlist and refuses every command the managed rules and Claude's read-only classifier do not allow, with or without `--safe-mode`.
-  Claude still reports such a turn as a success and lists each refusal in `permission_denials`, so the host counts a non-empty list as an engine error ([verification](verification/supervision.md#refused-engine-commands-2026-11-15)).
+  Claude still reports such a turn as a success and lists each refusal in `permission_denials`, so the host counts a non-empty list on a turn that recorded no report as an engine error ([verification](verification/supervision.md#refused-engine-commands-2026-11-15)).
+  A turn that reported and acknowledged its wake stays handled, and its ledger line records the refused count.
 - `--safe-mode` does not override the user's default mode, so the mode is always passed.
 - Claude path-checks direct file reads against its working directories.
   So a home or state directory outside the code root is passed with `--add-dir`.
@@ -432,8 +433,8 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
   - `subtype` is `success`.
   - `is_error` is false.
   - `total_cost_usd`, `num_turns`, and the four `usage` token counts (input, cache read, cache creation, output) are finite numbers.
-  - `permission_denials` is empty or absent.
 - Any other result fails the turn and hands its wake to main.
+- A complete result with a non-empty `permission_denials` also fails the turn when the turn recorded no report.
 
 **Tool process reaping**
 
