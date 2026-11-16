@@ -165,6 +165,14 @@ fm_context_ceiling_config_value() {
   fi
 }
 
+# fm_context_ceiling_advice_enabled <config-dir>: true only when the setting is
+# present, readable, and keeps at least one advice line on, so a caller can skip
+# reading any session at all otherwise.
+fm_context_ceiling_advice_enabled() {
+  fm_context_ceiling_read "$1" || return 1
+  [ "$FM_CONTEXT_ADVISE_CALLS" != off ] || [ "$FM_CONTEXT_ADVISE_TOKENS" != off ]
+}
+
 # fm_context_ceiling_advice <config-dir> <calls> <context-tokens>
 # Prints why a worker with this session size is better replaced than steered,
 # or nothing. Never fails the caller: an absent or unreadable setting is silent.

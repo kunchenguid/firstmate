@@ -29,11 +29,23 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) printf 'fm-t1\nwin\n'; exit 0 ;;
+  send-keys) printf 'ring\n' >>"$ORDER_LOG" ;;
 esac
 exit 0
 SH
   printf '#!/usr/bin/env bash\nexit 0\n' >"$fb/sleep"
-  chmod +x "$fb/tmux" "$fb/sleep"
+  # Record every read of a session store, then run the real tool.
+  cat >"$fb/find" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *.codex/sessions*) printf 'session-read find\n' >>"$ORDER_LOG" ;; esac
+exec /usr/bin/find "$@"
+SH
+  cat >"$fb/ls" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *.claude/projects*) printf 'session-read ls\n' >>"$ORDER_LOG" ;; esac
+exec /bin/ls "$@"
+SH
+  chmod +x "$fb/tmux" "$fb/sleep" "$fb/find" "$fb/ls"
 }
 
 setup_case() {  # <name> <harness> <kind>
@@ -71,7 +83,8 @@ write_codex_session() {  # <calls> <context>
 
 send() {  # -> sets ERR to stderr, returns fm-send's status
   ERR="$CASE/send.err"
-  env PATH="$CASE/fakebin:$PATH" HOME="$USER_HOME" CLAUDE_CONFIG_DIR= CODEX_HOME= \
+  : >"$CASE/order.log"
+  env PATH="$CASE/fakebin:$PATH" HOME="$USER_HOME" CLAUDE_CONFIG_DIR= CODEX_HOME= ORDER_LOG="$CASE/order.log" \
     FM_ROOT_OVERRIDE="$CASE/home" FM_HOME="$CASE/home" FM_SEND_SETTLE=0 \
     "$SEND" t1 "start the next piece of work" >/dev/null 2>"$ERR"
 }
@@ -168,8 +181,39 @@ test_scale_codex_lookup() {
   pass "the advice finds the worker's Codex session among 5, 100 and 1000 others (timings above)"
 }
 
+# The reviewer's case: an absent or switched-off setting reads no session at
+# all, and when advice is on it runs only after the doorbell.
+test_no_session_read_unless_on_and_after_the_ring() {
+  local harness
+  for harness in codex claude; do
+    setup_case "absent-$harness" "$harness" ship
+    write_codex_session 300 1000
+    write_claude_session 300 120000
+    send
+    assert_recorded "absent $harness"
+    assert_grep ring "$CASE/order.log" "the steer still rings"
+    assert_no_grep session-read "$CASE/order.log" "without config/context-ceiling a $harness steer reads no session"
+    setup_case "off-$harness" "$harness" ship
+    printf 'advise-calls=off\nadvise-tokens=off\n' >"$CASE/home/config/context-ceiling"
+    write_codex_session 300 1000
+    write_claude_session 300 120000
+    send
+    assert_no_grep session-read "$CASE/order.log" "with both advice lines off a $harness steer reads no session"
+    setup_case "on-$harness" "$harness" ship
+    : >"$CASE/home/config/context-ceiling"
+    write_codex_session 300 1000
+    write_claude_session 300 120000
+    send
+    assert_contains "$(cat "$ERR")" "300 model calls" "$harness advice still fires when on"
+    assert_equals ring "$(head -n 1 "$CASE/order.log")" "the doorbell comes before any $harness session read"
+    assert_grep session-read "$CASE/order.log" "advice that is on reads the $harness session"
+  done
+  pass "an absent or switched-off setting reads no session, and advice that is on runs after the doorbell"
+}
+
 test_no_setting_no_advice
 test_claude_calls_advice
 test_codex_context_advice
 test_quiet_cases
 test_scale_codex_lookup
+test_no_session_read_unless_on_and_after_the_ring

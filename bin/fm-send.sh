@@ -645,14 +645,16 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
 # into a new piece of work (bin/fm-context-ceiling-lib.sh "THE ADVICE"). It
 # prints at most one line and never changes the steer or the exit status.
 fm_send_fresh_worker_advice() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 kind harness wt reason
+  local meta=$1 id=$2 kind harness wt reason config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  # No session is read unless the advice is on for this home.
+  fm_context_ceiling_advice_enabled "$config" || return 0
   kind=$(fm_meta_get "$meta" kind)
   case "$kind" in ship | scout) ;; *) return 0 ;; esac
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 0
   harness=$(fm_meta_get "$meta" harness)
   wt=$(fm_meta_get "$meta" worktree)
   fm_session_size "$harness" "$wt" || return 0
-  reason=$(fm_context_ceiling_advice "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_SESSION_CALLS" "$FM_SESSION_CONTEXT")
+  reason=$(fm_context_ceiling_advice "$config" "$FM_SESSION_CALLS" "$FM_SESSION_CONTEXT")
   [ -n "$reason" ] || return 0
   echo "advice: $id's conversation is already $reason; if this steer starts a new piece of work, a fresh worker is cheaper: let this one finish and spawn a new task for it" >&2
 }
@@ -1245,7 +1247,6 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
-    [ -n "$FIRE_AND_FORGET_ID" ] || fm_send_fresh_worker_advice "$TARGET_META" "$INBOX_TASK_ID" || true
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
@@ -1269,6 +1270,9 @@ else
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
+    # Optional advice comes after the doorbell, so reading a long session
+    # never delays delivery (bin/fm-context-ceiling-lib.sh owns the setting).
+    [ -n "$FIRE_AND_FORGET_ID" ] || fm_send_fresh_worker_advice "$TARGET_META" "$INBOX_TASK_ID" || true
     exit 0
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
