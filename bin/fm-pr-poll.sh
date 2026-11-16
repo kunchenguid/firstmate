@@ -530,10 +530,11 @@ case "$provider" in
     # on every poll rather than trusted from anywhere durable. The CLI comes
     # from the sidecar preference the arming write recorded
     # (bin/fm-pr-lib.sh's fm_pr_poll_prepare): `tea` or `fgj` uses only that
-    # CLI, and `auto` is the same order bin/fm-pr-lib.sh's
-    # fm_pr_forgejo_resolve walks - tea, then fgj - taking the first installed
-    # CLI holding exactly ONE login for $host; zero or several logins for the
-    # host refuse rather than guess. `fj` is deliberately absent: forgejo-cli
+    # CLI, and `auto` is tea and only tea, exactly as bin/fm-pr-lib.sh's
+    # fm_pr_forgejo_resolve resolves it: fgj is opt-in and reached only when
+    # the sidecar preference records it. Whichever CLI runs must hold exactly
+    # ONE login for $host; zero or several logins for the host refuse rather
+    # than guess. `fj` is deliberately absent: forgejo-cli
     # has no authenticated request passthrough, so it cannot read this record
     # at all. Arming refuses such a host (bin/fm-pr-check.sh), so a poll that
     # reaches here without tea or fgj is unknown rather than
@@ -547,7 +548,7 @@ case "$provider" in
       tea) try_tea=1; try_fgj=0 ;;
       fgj) try_tea=0; try_fgj=1 ;;
       fj) try_tea=0; try_fgj=0 ;;
-      *) try_tea=1; try_fgj=1 ;;
+      *) try_tea=1; try_fgj=0 ;;
     esac
     if [ "$try_tea" = 1 ] && command -v tea >/dev/null 2>&1; then
       login=$(
@@ -571,23 +572,15 @@ case "$provider" in
     fi
     if [ -z "$cli" ] && [ "$try_fgj" = 1 ] && command -v fgj >/dev/null 2>&1; then
       # fgj selects the instance with --hostname and keeps one login per
-      # hostname, reported as "  <bullet> <host> (user: <name>)" lines. The
-      # hostname is read from that report, never from fgj's config file, which
-      # also holds the token. The not-authenticated notice is on stdout too (as
-      # docs/forgejo-cli-alternatives.md records); it carries no `(user: ...)`
-      # line, so the awk ignores it.
-      login=$(
-        fgj auth status 2>/dev/null | awk -v h="$host" '
-          /\(user: [^)]*\)[[:space:]]*$/ {
-            line = $0
-            sub(/[[:space:]]*\(user: [^)]*\)[[:space:]]*$/, "", line)
-            n = split(line, field, /[[:space:]]+/)
-            if (n >= 1 && field[n] == h) matched++
-          }
-          END { if (matched != 1) exit 1; print h }
-        '
-      ) || login=
-      [ -z "$login" ] || cli=fgj
+      # hostname. `fgj auth token --hostname <host>` exits 0 exactly when <host>
+      # is configured, so this reads a documented exit status rather than the
+      # human-readable `fgj auth status` report or the config file (which also
+      # holds the token). Kept in step with fm_pr_forgejo_fgj_login in
+      # bin/fm-pr-lib.sh, which the rest of the path uses.
+      if fgj auth token --hostname "$host" >/dev/null 2>&1; then
+        login=$host
+        cli=fgj
+      fi
     fi
     [ -n "$cli" ] || exit $unknown
     [ -n "$login" ] || exit $unknown

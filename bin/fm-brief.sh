@@ -75,13 +75,15 @@
 # bin/fm-project-mode.sh's header owns what the binding means, and
 # bin/fm-dod-lib.sh owns what `gerrit`, `forgejo`, and `external` change in the
 # Definition of done. On `forgejo` this script reads the binding's optional CLI
-# annotation (bin/fm-project-mode.sh --forge-cli) and resolves `auto` against the
-# project clone's own host through the same resolver the merge path uses
-# (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project), so the ship brief's
-# forge-CLI rule and Definition of done name the CLI that will actually be used,
-# falling back to tea only when the clone cannot name a host, and it refuses a
-# binding that resolves to forgejo-cli (`fj`), which cannot read the pull request
-# record or bind a merge to a verified head. On
+# annotation (bin/fm-project-mode.sh --forge-cli) and, for `auto`, goes through
+# the same resolver the merge path uses (bin/fm-pr-lib.sh's
+# fm_pr_forgejo_resolve_project) so the ship brief's forge-CLI rule and
+# Definition of done can never name a CLI the merge path would not use. `auto`
+# now resolves to tea and only tea - fgj is opted into by naming it - so this
+# keeps the two in step by construction rather than by duplicated policy, and a
+# clone that cannot name a host still falls back to tea. It refuses a binding
+# that resolves to forgejo-cli (`fj`), which cannot read the pull request record
+# or bind a merge to a verified head. On
 # `external` that rule names no forge CLI, because the home's review tool is the
 # only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.

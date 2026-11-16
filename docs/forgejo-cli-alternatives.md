@@ -4,9 +4,32 @@ Empirical record for the Forgejo CLIs firstmate can drive besides `tea`, alongsi
 `tea` remains the documented default and its behaviour is unchanged; this record is about what `forgejo-cli` (`fj`) and `fgj` actually offer, so the resolver can accept them without weakening the merge path's head-binding guarantee.
 All evidence below was collected on 2026-11-12.
 
-Unlike the tea record, **nothing here was verified against a live Forgejo instance**: no disposable instance was stood up for this pass.
-Every finding below was read from the CLI's own shipped surface and from the exact released source, both named at each finding, and the merge path's REST calls are the same ones the tea record already verified against a real instance.
+The findings below were first read from each CLI's own shipped surface and from the exact released source, both named at each finding, and the merge path's REST calls are the same ones the tea record already verified against a real instance.
 Where a finding is inferable only from source rather than from the CLI's own output, it says so.
+
+The `fgj` path has since been verified **live**, end to end, against a real Forgejo instance (a released `fgj` build against Forgejo 17.0.1 on a self-hosted instance), by resolving the CLI, reading the pull request record, reading the repository's default merge style, attempting a deliberately wrong-head merge, landing a head-bound merge, and then polling the merged state back:
+
+```sh
+# the resolved CLI's own host login, then the live record read
+fm_pr_forgejo_resolve <host> fgj          # cli=fgj login=<host>
+fm_pr_forgejo_read_record <host> <owner>/<repo> <n> fgj
+#   state=open merged=false head=660f9a765f92ebbc462fb1cd8c0499bbb3077aa0
+
+# a merge bound to the WRONG head is refused, and the pull request stays open
+fgj api repos/<owner>/<repo>/pulls/<n>/merge --hostname <host>   -X POST -f Do=squash -f head_commit_id=1111111111111111111111111111111111111111
+#   {"message":"head out of date",...}  HTTP 409
+
+# the merge bound to the verified head lands
+fgj api repos/<owner>/<repo>/pulls/<n>/merge --hostname <host>   -X POST -f Do=squash -f head_commit_id=660f9a765f92ebbc462fb1cd8c0499bbb3077aa0
+
+# the merged-state poll through the same resolved CLI
+fm_pr_forgejo_read_record <host> <owner>/<repo> <n> fgj
+#   state=closed merged=true head=660f9a765f92ebbc462fb1cd8c0499bbb3077aa0
+```
+
+The wrong-head refusal is the live proof of the head-binding guarantee this record is about: Forgejo rejects the merge with "head out of date" and leaves the pull request open, exactly as the `tea` and `gh`/`glab` counterparts do.
+Two live observations were added by that pass: `Do=squash` was accepted for a repository whose `default_merge_style` reads `squash`, and a first merge attempt was answered with a transient `HTTP 405` ("Please try again later") that a retry carried through — which is why every merge in `bin/fm-pr-merge.sh` is judged by reading the pull request back rather than by the call's own exit status.
+The `fj` refusal and the `tea` path were **not** re-verified live in that pass: `tea` was not installed on the machine used, and the `fj` refusal is a negative claim about a capability `fj` still does not ship.
 
 ## Versions
 
@@ -127,7 +150,7 @@ That is the whole reason `fgj` is usable where `fj` is not, and why the head-bin
 
 Both CLIs keep one login per instance and select it on the command line, but the stores and their reports differ.
 
-`fgj` keeps `~/.config/fgj/config.yaml` (or `$XDG_CONFIG_HOME/fgj/config.yaml`) with a `hosts:` map keyed by hostname, and picks one with `--hostname`; `FGJ_TOKEN` and `FGJ_HOST` override it. It prints its configured hostnames through `fgj auth status`:
+`fgj` keeps `~/.config/fgj/config.yaml` (or `$XDG_CONFIG_HOME/fgj/config.yaml`) with a `hosts:` map keyed by hostname, and picks one with `--hostname`; `FGJ_TOKEN` and `FGJ_HOST` override it. `fgj auth status` prints a human report of the configured instances:
 
 ```
 $ fgj auth status
@@ -136,7 +159,16 @@ Authenticated instances:
 ```
 
 `runAuthStatus` in `cmd/auth.go` writes that line per instance, and prints the "Not authenticated with any Forgejo instances" notice on stdout when the map is empty.
-Only that report is read: the config file also holds each instance's token, and firstmate must not need it.
+That report is **not** what firstmate reads: `fgj` offers no `--json`/`-o` listing of its hosts, so matching the configured hostname against the report would mean parsing a rendered, human-facing line.
+Instead firstmate reads `<host>`'s login presence from the exit status of `fgj auth token --hostname <host>`, which is 0 exactly when the instance is configured and nonzero when it is not:
+
+```
+$ fgj auth token --hostname <configured-host>;    echo $?   # 0
+$ fgj auth token --hostname <unknown-host>;       echo $?   # 1
+```
+
+`runAuthToken` in `cmd/auth.go` reads the token for a configured instance and errors out when the host is absent, so the status is a documented, machine-checkable signal rather than a rendered surface — the property [`VISION.md`](https://github.com/kunchenguid/firstmate/blob/main/VISION.md) requires of an adapter over another tool's output.
+The config file is still never read: it also holds each instance's token, and firstmate must not need it.
 
 `fj` prints its hostnames through `fj auth list` as bare lines, shown above.
 
@@ -150,4 +182,8 @@ The merge watch is handed the project's recorded preference through the register
 The watch's manual `--validated`/`--baseline` form keeps the six-argument shape `--validated <provider> <url> <host> <path> <number>` (preference `auto`) recorded for the other forges; the watcher's own invocation passes the recorded preference as an optional seventh argument.
 
 A project names its CLI through the registry forge binding, `forge=forgejo:tea`, `forge=forgejo:fgj`, or `forge=forgejo:fj`, queried with `bin/fm-project-mode.sh --forge-cli`; `--forge` still answers `forgejo` for every spelling, so no existing consumer changes.
-`forge=forgejo` alone, the spelling every registered project already has, means `auto`: `tea` first, then `fgj`, then `fj`, taking the first one that is installed and holds exactly one login for the host. A home that has `tea` therefore behaves exactly as it did before, and a home that has only the others stops failing with "tea not found".
+`forge=forgejo` alone, the spelling every registered project already has, means `auto`, and `auto` is `tea` and only `tea`.
+`fgj` and `fj` are **opt-in**: a project reaches one only by naming it, `forge=forgejo:fgj` or `forge=forgejo:fj`.
+The reason is that auto-detection would otherwise let a CLI's *stored login for some other host* silently change what firstmate ships with: on a home where `tea` holds no login for a project's host but `fgj` does, walking past `tea` would adopt `fgj` for a captain who never chose it, and the ship brief would start telling the worker to open the pull request with a different tool.
+Keeping `auto` on `tea` alone makes an unmodified home's behaviour exactly what it was before, and makes the choice of CLI an explicit, reviewable act.
+A project that needs `fgj` names it and is served; a project that names nothing and whose host has no `tea` login is refused with a message naming the binding to add, rather than silently switching tools.

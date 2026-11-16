@@ -695,16 +695,14 @@ make_forgejo_case() {
 }
 
 # write_fgj_auth <file> [<host> ...]
-# The report `fgj auth status` prints for its configured instances: a header
-# line, then one bulleted "  <bullet> <host> (user: <name>)" line per host.
-# The bullet is written as an octal escape so this file stays plain ASCII.
+# The set of instances the fake fgj answers `auth token --hostname <host>` for,
+# one host per line. The real fgj reads that configured set from its own store
+# and signals membership with an exit status, which is what the reader uses.
 write_fgj_auth() {
   local file=$1 host
   shift
-  printf 'Authenticated instances:\n' > "$file"
-  for host in "$@"; do
-    printf '  \342\200\242 %s (user: fixture)\n' "$host" >> "$file"
-  done
+  : > "$file"
+  for host in "$@"; do printf '%s\n' "$host" >> "$file"; done
 }
 
 # The per-instance login store a fake `fj` reads its `auth list` from. Written
@@ -718,7 +716,7 @@ write_fj_auth() {
   for host in "$@"; do printf '%s\n' "$host" >> "$file"; done
 }
 
-# fgj mock recording every invocation. `auth status` answers from
+# fgj mock recording every invocation. `auth token` answers from
 # <case>/fgj-auth.txt; `api <endpoint>` reads the same pull request and
 # combined-status payloads the tea mock uses, keyed by the endpoint path fgj
 # builds (repos/<owner>/<repo>/...). It differs from the tea mock in the one way
@@ -732,9 +730,18 @@ set -u
 log_dir=$(dirname "$FM_TEST_FGJ_LOG")
 printf '%s\n' "$*" >> "$FM_TEST_FGJ_LOG"
 
-if [ "${1:-} ${2:-}" = "auth status" ]; then
-  cat "$log_dir/fgj-auth.txt"
-  exit 0
+if [ "${1:-} ${2:-}" = "auth token" ]; then
+  # exit 0 exactly when the requested host is configured, as the real fgj does.
+  shift 2
+  host=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hostname) host=${2:-}; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$host" ] && grep -qxF -- "$host" "$log_dir/fgj-auth.txt" && exit 0
+  exit 1
 fi
 [ "${1:-}" = api ] || exit 0
 shift

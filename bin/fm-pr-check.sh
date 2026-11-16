@@ -293,7 +293,7 @@ if [ "$PROVIDER" = forgejo ]; then
   }
   fm_pr_forgejo_cli_preference "$META"
   fm_pr_forgejo_resolve "$HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
-    echo "error: watching a Forgejo pull request at $HOST requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth status'), or fj (see 'fj auth list')" >&2
+    echo "error: watching a Forgejo pull request at $HOST requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth token --hostname <host>'), or fj (see 'fj auth list')" >&2
     exit 1
   }
   if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then

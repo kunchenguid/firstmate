@@ -3692,9 +3692,7 @@ test_forgejo_arming_resolves_the_forgejo_cli() {
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   cat > "$dir/fakebin/fgj" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-} ${2:-}" = "auth status" ]; then
-  printf 'Authenticated instances:\n'
-  printf '  \342\200\242 forgejo.example (user: fixture)\n'
+if [ "${1:-} ${2:-}" = "auth token" ]; then
   exit 0
 fi
 exit 0
@@ -3743,9 +3741,7 @@ test_forgejo_fgj_merge_watch() {
   cat > "$dir/fakebin/fgj" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../fgj.log"
-if [ "${1:-} ${2:-}" = "auth status" ]; then
-  printf 'Authenticated instances:\n'
-  printf '  \342\200\242 forgejo.example (user: fixture)\n'
+if [ "${1:-} ${2:-}" = "auth token" ]; then
   exit 0
 fi
 [ "${1:-}" = api ] || exit 0
@@ -3818,9 +3814,7 @@ SH
   cat > "$dir/fakebin/fgj" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "fgj $*" >> "$FM_TEST_FGJ_LOG"
-if [ "${1:-} ${2:-}" = "auth status" ]; then
-  printf 'Authenticated instances:\n'
-  printf '  \342\200\242 forgejo.example (user: fixture)\n'
+if [ "${1:-} ${2:-}" = "auth token" ]; then
   exit 0
 fi
 [ "${1:-}" = api ] || exit 0

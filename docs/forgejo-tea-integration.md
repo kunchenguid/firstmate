@@ -148,10 +148,10 @@ $ PATH="$notea" bin/fm-pr-poll.sh --validated forgejo https://localhost/fixture/
 (nothing)
 
 $ PATH="$notea" bin/fm-pr-check.sh task-x https://localhost/fixture/fixture-repo/pulls/1
-error: watching a Forgejo pull request at localhost requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth status'), or fj (see 'fj auth list')
+error: watching a Forgejo pull request at localhost requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth token --hostname <host>'), or fj (see 'fj auth list')
 ```
 
-A home that has `fgj` logged in for the host instead arms through that CLI, whose own login store is read the same way; [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns that selection.
+A project that names its Forgejo CLI (`forge=forgejo:fgj`) arms through that CLI instead, whose own login store is read the same way; a bare `forge=forgejo` stays on `tea`, so merely having `fgj` logged in never switches a project to it. [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns that selection.
 
 ## Merging: tea's merge subcommand cannot bind a head, but the API can
 

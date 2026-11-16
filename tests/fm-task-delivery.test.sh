@@ -1910,9 +1910,8 @@ EOF
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tea"
   cat > "$fakebin/fgj" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-} ${2:-}" = "auth status" ] || exit 1
-printf 'Authenticated instances:\n'
-printf '  \342\200\242 forgejo.example (user: fixture)\n'
+[ "${1:-} ${2:-}" = "auth token" ] || exit 1
+exit 0
 SH
   chmod +x "$fakebin/tea" "$fakebin/fgj"
   id="forge-forgejo-auto-p1"
