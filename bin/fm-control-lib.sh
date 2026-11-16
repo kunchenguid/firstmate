@@ -522,13 +522,16 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # A secondmate's .claude/settings.local.json belongs to the captain.
     # Retire only the firstmate-owned settings file the launch passes to
     # --settings and the Stop pointer that carries the same busy generation.
-    # A crewmate's hook file is the worktree settings.local.json.
+    # A crewmate's hook file is the worktree settings.local.json, and an
+    # external-marked crewmate also has the --settings file its launch
+    # rewrites (bin/fm-external-sandbox-lib.sh).
     claude)
       if [ "$kind" = secondmate ]; then
         printf '%s\n' "$state/$id.claude-settings.json"
         printf '%s\n' "$wt/.fm-busy-stop"
       else
         printf '%s\n' "$wt/.claude/settings.local.json"
+        printf '%s\n' "$state/$id.claude-settings.json"
       fi
       ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;

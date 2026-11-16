@@ -1313,6 +1313,45 @@ test_exclude_tools_refusals_happen_before_the_agent_stops() {
   pass "fm-control relaunch: exclusion-list refusals happen before the running agent stops"
 }
 
+test_external_mark_follows_the_relaunch() {
+  local dir out rc id=rl-external state_real
+  dir=$(new_case external "$id")
+  add_ship_task "$dir" "$id" claude
+  echo "trust=external" >> "$dir/home/state/$id.meta"
+  printf claude > "$dir/fake/command"
+  printf claude > "$dir/fake/becomes"
+  out=$(run_control "$dir" "$id" relaunch --note "keep the sandbox"); rc=$?
+  expect_code 0 "$rc" "an external Claude relaunch should succeed"$'\n'"$out"
+  state_real=$(cd "$dir/home/state" && pwd -P)
+  assert_contains "$(cat "$dir/fake/literal")" "--settings '$state_real/$id.claude-settings.json' " \
+    "the relaunched external worker must launch on its sandbox settings file"
+  jq -e '.sandbox.enabled == true and .sandbox.network.strictAllowlist == true' "$state_real/$id.claude-settings.json" >/dev/null \
+    || fail "the relaunched external worker's settings file lacks the sandbox"
+  [ "$(meta_field "$dir" "$id" trust)" = external ] || fail "a relaunch dropped the external mark"
+  pass "fm-control relaunch: an external task keeps its mark and its sandbox"
+}
+
+test_external_refusals_happen_before_the_agent_stops() {
+  local dir out rc id=rl-external-refuse
+  dir=$(new_case external-refuse "$id")
+  add_ship_task "$dir" "$id" claude
+  echo "trust=external" >> "$dir/home/state/$id.meta"
+  printf claude > "$dir/fake/command"
+  printf claude > "$dir/fake/becomes"
+  out=$(run_control "$dir" "$id" relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 1 "$rc" "relaunching an external task onto a runtime without the sandbox must refuse"
+  assert_contains "$out" "marked external" "the refusal must name the external mark"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an external refusal stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch sent lifecycle input"
+  mkdir -p "$dir/home/config"
+  printf '%s\n' 'not a host!' > "$dir/home/config/external-allowed-domains"
+  out=$(run_control "$dir" "$id" relaunch --note "bad allowlist"); rc=$?
+  expect_code 1 "$rc" "a malformed allowlist must refuse the external relaunch"
+  assert_contains "$out" "config/external-allowed-domains has a malformed entry" "the refusal must name the entry"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a malformed allowlist stopped the running agent"
+  pass "fm-control relaunch: external-mark refusals happen before the running agent stops"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -3285,6 +3324,8 @@ test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_claude_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
+test_external_mark_follows_the_relaunch
+test_external_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

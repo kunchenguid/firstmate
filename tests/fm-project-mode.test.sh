@@ -40,6 +40,11 @@ cat > "$DATA/projects.md" <<'EOF'
 - hand-forgejo [no-mistakes forge=forgejo pr=manual] - a bound forge (added 2026-01-01)
 - hand-empty [no-mistakes pr=] - an empty value (added 2026-01-01)
 - hand-auto [no-mistakes pr=auto] - auto is the absence of the token, not a value (added 2026-01-01)
+- outside [no-mistakes trust=external] - third-party code (added 2026-01-01)
+- outside-first [trust=external direct-PR +yolo branch=] - trust token first, order must not matter (added 2026-01-01)
+- outside-empty [no-mistakes trust=] - an empty trust value (added 2026-01-01)
+- outside-own [no-mistakes trust=own] - own is the absence of the token, not a value (added 2026-01-01)
+- outside-typo [no-mistakes trusted=external] - a near miss of the trust key (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -160,5 +165,37 @@ assert_contains "$err" "pr=manual" "the unknown pr value refusal did not name th
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-direct 2>&1 >/dev/null)
 assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal did not say why"
 pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
+
+run_trust() {
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust "$1" 2>/dev/null
+}
+
+[ "$(run_trust legacy)" = "own" ] || fail "an entry with no trust token must report trust own: $(run_trust legacy)"
+[ "$(run_trust hand)" = "own" ] || fail "an entry with other tokens and no trust token must report trust own: $(run_trust hand)"
+[ "$(run_trust missing-project)" = "own" ] || fail "a missing project must default --trust to own: $(run_trust missing-project)"
+[ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --trust legacy 2>/dev/null)" = "own" ] \
+  || fail "an absent registry file must default --trust to own"
+[ "$(run_trust outside)" = "external" ] || fail "trust=external did not resolve: $(run_trust outside)"
+[ "$(run_mode outside)" = "no-mistakes off" ] || fail "trust=external changed the two-word output: $(run_mode outside)"
+[ "$(run_trust outside-first)" = "external" ] || fail "trust=external placed first did not resolve: $(run_trust outside-first)"
+[ "$(run_mode outside-first)" = "direct-PR on" ] || fail "trust=external placed first displaced the mode or +yolo: $(run_mode outside-first)"
+[ "$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --branch-prefix outside-first 2>/dev/null)" = "" ] \
+  || fail "trust=external placed first displaced the empty branch= override"
+pass "fm-project-mode: trust=external binds in any token order and leaves mode, yolo, and branch alone"
+
+for name in outside-empty outside-own outside-typo; do
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust "$name" 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "$name did not refuse under --trust (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused $name still handed the caller a trust answer: '$out'"
+  [ "$(run_mode "$name")" = "no-mistakes off" ] || fail "the trust token of $name broke the default output"
+done
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust outside-empty 2>&1 >/dev/null)
+assert_contains "$err" "empty trust binding" "the empty trust= refusal did not name the empty value"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust outside-own 2>&1 >/dev/null)
+assert_contains "$err" "trust=external" "the unknown trust value refusal did not name the accepted value"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust outside-typo 2>&1 >/dev/null)
+assert_contains "$err" "misspelled trust binding" "the near-miss trust key was not refused"
+pass "fm-project-mode: --trust refuses an empty value, an unknown value, and a misspelled key, and the default output ignores them"
 
 echo "# fm-project-mode.test.sh: all assertions passed"

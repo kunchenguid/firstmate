@@ -94,6 +94,9 @@
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
+#              An external-marked task (bin/fm-external-sandbox-lib.sh) refuses
+#              there too, when the replacement runtime cannot carry the sandbox
+#              or the home's domain allowlist is malformed.
 #              Refused on t3code before anything is stopped: a T3 thread
 #              keeps its conversation, so a new turn or a provider change on
 #              it continues the same agent rather than a fresh one
@@ -206,6 +209,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-external-sandbox-lib.sh
+. "$SCRIPT_DIR/fm-external-sandbox-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -1112,6 +1117,13 @@ resolve_relaunch_profile() {
   # agent stops. Secondmate agents are not covered.
   if [ "$KIND" != secondmate ]; then
     fm_exclude_tools_check "$TARGET_HARNESS" 0 "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" >/dev/null || return 1
+  fi
+  # Likewise an external-marked task (bin/fm-external-sandbox-lib.sh): a
+  # replacement runtime that cannot carry the sandbox, or a malformed domain
+  # allowlist, refuses here, before the old agent stops.
+  if [ "$(fm_meta_get "$META" trust)" = external ]; then
+    fm_external_check "$TARGET_HARNESS" 0 "$(fm_meta_get "$META" backend)" || return 1
+    fm_external_domains "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" >/dev/null || return 1
   fi
 }
 

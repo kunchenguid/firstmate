@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--external] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--external] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -60,11 +60,23 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
+#   --external marks this one ship or scout as working on untrusted or
+#   third-party code; a project registered trust=external in data/projects.md
+#   (bin/fm-project-mode.sh --trust) marks every ship and scout on it the same
+#   way, and a registry entry whose trust binding the parser refuses stops the
+#   spawn. A marked task launches only on the claude runtime, with
+#   bin/fm-external-sandbox-lib.sh's settings written to
+#   state/<task-id>.claude-settings.json and passed as __CLAUDESETTINGS__; every
+#   other runtime and a raw launch command refuse before any endpoint, worktree,
+#   or record exists. The mark is recorded as trust=external in
+#   state/<id>.meta, and a relaunch keeps it, so a mark is never dropped by a
+#   relaunch; it is refused on secondmates. docs/configuration.md "External
+#   workers" owns the contract and its measured limits.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>] [--external]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -538,7 +550,8 @@
 #                  supplies its own trailing space, empty never used)
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
-#                  state/<task-id>.claude-settings.json for a secondmate
+#                  state/<task-id>.claude-settings.json for a secondmate or an
+#                  external-marked crewmate or scout
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -553,6 +566,10 @@
 #                  Code drops a disallowed tool's schema from every request, and
 #                  a later flag always follows so the variadic option cannot
 #                  swallow the launch prompt.
+#     __CLAUDEEXTERNAL__ optional `--strict-mcp-config ` on an external-marked
+#                  Claude ship or scout (FM_EXTERNAL_CLAUDE_FLAGS in
+#                  bin/fm-external-sandbox-lib.sh; supplies its own trailing
+#                  space, empty otherwise)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
 #                  reports (relaunch_resume_args below owns it; it supplies its
@@ -817,6 +834,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-external-sandbox-lib.sh
+. "$SCRIPT_DIR/fm-external-sandbox-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
   exit 1
 fi
@@ -1023,6 +1042,7 @@ UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
+EXTERNAL_FLAG=0
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -1165,6 +1185,7 @@ for a in "$@"; do
     ACCOUNT_ARG=${a#--account=}
     ACCOUNT_SET=1
     ;;
+  --external) EXTERNAL_FLAG=1 ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -1220,6 +1241,10 @@ fi
 # is refused here, before the remote route could ignore it.
 [ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
   echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
+  exit 1
+}
+[ "$EXTERNAL_FLAG" -eq 0 ] || [ "$KIND" != secondmate ] || {
+  echo "error: --external applies to ships and scouts; a secondmate runs its own home's agent, which the external worker sandbox does not cover" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -2183,6 +2208,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
+  [ "$EXTERNAL_FLAG" -eq 0 ] || shared_args+=(--external)
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -2926,7 +2952,7 @@ launch_template() {
   claude)
     printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
-      printf '%s' '__CLAUDEEXCLUDE__'
+      printf '%s' '__CLAUDEEXCLUDE____CLAUDEEXTERNAL__'
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
     fi
     # Claude Code strips invisible characters, U+2063 included, from the
@@ -4237,6 +4263,29 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   ! git -C "$PROJ_ABS" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
+fi
+# External worker mark (header above). Any source marks the task: this spawn's
+# --external, the task's recorded mark on a relaunch, or the project's
+# registered trust=external. A trust binding the registry parser refuses stops
+# the spawn, and so does a runtime that cannot carry the sandbox, before any
+# endpoint, worktree, or record exists.
+EXTERNAL_SANDBOX=0
+EXTERNAL_DOMAINS=
+if [ "$KIND" != secondmate ]; then
+  [ "$EXTERNAL_FLAG" -eq 0 ] || EXTERNAL_SANDBOX=1
+  if [ "$RELAUNCH" -eq 1 ] && [ "$(fm_meta_get "$RELAUNCH_META" trust)" = external ]; then
+    EXTERNAL_SANDBOX=1
+  fi
+  if ! STANDING_TRUST=$("$FM_ROOT/bin/fm-project-mode.sh" --trust "$(basename "$PROJ_ABS")" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --trust "$(basename "$PROJ_ABS")" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $(basename "$PROJ_ABS") has a trust binding the parser refuses (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ "$STANDING_TRUST" != external ] || EXTERNAL_SANDBOX=1
+  if [ "$EXTERNAL_SANDBOX" -eq 1 ]; then
+    fm_external_check "$HARNESS" "$RAW_LAUNCH" "$BACKEND" || exit 1
+    EXTERNAL_DOMAINS=$(fm_external_domains "$CONFIG") || exit 1
+  fi
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
@@ -7326,7 +7375,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent trust forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7351,6 +7400,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  [ "$EXTERNAL_SANDBOX" = 0 ] || echo "trust=external"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
@@ -7559,9 +7609,38 @@ LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 CLAUDE_EXCLUDE=
 [ -z "$EXCLUDE_TOOLS" ] || [ "$HARNESS" != claude ] || CLAUDE_EXCLUDE="--disallowedTools $(shell_quote "$EXCLUDE_TOOLS") "
 LAUNCH=${LAUNCH//__CLAUDEEXCLUDE__/$CLAUDE_EXCLUDE}
+CLAUDE_EXTERNAL=
+[ "$EXTERNAL_SANDBOX" = 0 ] || CLAUDE_EXTERNAL="$FM_EXTERNAL_CLAUDE_FLAGS "
+LAUNCH=${LAUNCH//__CLAUDEEXTERNAL__/$CLAUDE_EXTERNAL}
 case "$LAUNCH" in
 *__CLAUDESETTINGS__*)
   if [ "$KIND" = secondmate ]; then
+    LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
+  elif [ "$EXTERNAL_SANDBOX" = 1 ]; then
+    # The sandbox may write the worktree and the --add-dir task channels; the
+    # status file sits directly in state/, and a linked worktree commits into
+    # its repository's common git directory, so both are named here. A
+    # worktree whose no-mistakes remote is a local gate repository also gets
+    # that repository and the ambient no-mistakes daemon socket, so the
+    # worker can still push to the gate and drive its pipeline run.
+    external_writes="$STATE_REAL/$ID.status"
+    external_sockets=
+    external_git_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || external_git_common=
+    case "$external_git_common" in
+    '' | "$WT"/*) ;;
+    *) external_writes="$external_writes"$'\n'"$external_git_common" ;;
+    esac
+    external_gate=$(git -C "$WT" remote get-url no-mistakes 2>/dev/null) || external_gate=
+    case "$external_gate" in
+    /*)
+      external_writes="$external_writes"$'\n'"$external_gate"
+      external_sockets="${NM_HOME:-$HOME/.no-mistakes}/socket"
+      ;;
+    esac
+    fm_external_settings_json "$KEEP_AI_TRAILERS" "$EXTERNAL_DOMAINS" "$external_writes" "$external_sockets" >"$STATE_REAL/$ID.claude-settings.json" || {
+      echo "error: could not write the external worker sandbox settings for $ID" >&2
+      exit 1
+    }
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   else
     claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"

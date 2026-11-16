@@ -714,6 +714,41 @@ The token-free live guard refreshes the per-version evidence and fails naming th
 bin/fm-test-run.sh tests/fm-claude-tool-exclude-live.test.sh
 ```
 
+## Claude external worker sandbox
+
+[External workers](../configuration.md#external-workers-dataprojectsmd-trust-token-fm-spawnsh---external) owns the contract; this record owns the measurement.
+Verified on 2026-11-16 with Claude Code 2.1.325 on macOS.
+
+Token-free arms ran the installed `claude -p` under `--dangerously-skip-permissions` against a scripted local stand-in for the model API, so each tool result is what the real client and its sandbox returned.
+Each row changes one setting against the external settings block.
+
+| Setting | Without it | With it |
+| --- | --- | --- |
+| `sandbox.network.strictAllowlist` | A host outside `allowedDomains` was reached. | The sandbox proxy answered 403 for an unlisted host, a direct socket was refused, and a listed host was reached. |
+| `permissions.blockWritesOutsideWorkingDirectories` | The Write tool created a file in `/tmp`. | The Write tool refused `/tmp` and still wrote the worktree and the `--add-dir` directories. |
+| Local gate repository in `sandbox.filesystem.allowWrite` | `git push` to the gate failed with `unable to create temporary object directory`. | The push succeeded. |
+| No-mistakes daemon socket in `sandbox.network.allowUnixSockets` | `no-mistakes daemon status` failed with `connect: operation not permitted`. | The daemon answered. |
+| `--strict-mcp-config` | Local and plugin MCP servers still loaded, 46 MCP tools, with `disableClaudeAiConnectors` on. | No MCP server loaded. |
+| `sandbox.enableWeakerNetworkIsolation`, left off | `gh api` failed with `x509: OSStatus -26276`. | `gh api` succeeded, and an unlisted host stayed refused. |
+
+A model-driven interactive worker then ran the same 21 steps in a tmux pane once per permission mode, with the external settings and launch flags `fm-spawn.sh` builds.
+
+| Result | `bypass` | `auto` |
+| --- | --- | --- |
+| Unlisted host, by proxy and by direct socket | Refused | Refused |
+| `.env` and `.env.production`, by shell and by the Read tool | Refused | Refused |
+| Writes to `/tmp`, by shell and by the Write tool | Refused | Refused |
+| Worktree, status file, channel directories, gate push, daemon socket, allowlisted host | Allowed | Allowed |
+| Legitimate commands stopped | `gh api`, by the TLS limit above | `gh api`, by the same limit; the auto reviewer stopped none |
+| Turn length | 79 s | 103 s |
+| After the turn | Composer ready | A "Teach auto mode about your environment?" dialog held the pane until answered |
+
+The token-free live guard refreshes the network, read, and write refusals and the `strictAllowlist` control arm on every installed version, and fails naming the version:
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-external-sandbox-live.test.sh
+```
+
 ## Secondmate busy contract
 
 Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.
