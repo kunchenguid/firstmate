@@ -817,7 +817,7 @@ tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
 tests/fm-forge-detect.test.sh 193
 tests/fm-fork-free-helpers.test.sh 746
-tests/fm-fresh-start.test.sh 13000
+tests/fm-fresh-start.test.sh 30000
 tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
@@ -866,7 +866,8 @@ tests/fm-on.test.sh 11473
 tests/fm-opencode-primary-live-e2e.test.sh 47
 tests/fm-operational-input.test.sh 2404
 tests/fm-osc7501.test.sh 14000
-tests/fm-outcome-batch.test.sh 4000
+tests/fm-outcome-batch-host.test.sh 30000
+tests/fm-outcome-batch.test.sh 13000
 tests/fm-peek-remote.test.sh 1082
 tests/fm-pending-reply.test.sh 41090
 tests/fm-pi-branch-extension.test.sh 77218
@@ -917,7 +918,7 @@ tests/fm-secondmate-restart.test.sh 52591
 tests/fm-secondmate-safety.test.sh 69424
 tests/fm-secondmate-sync.test.sh 55501
 tests/fm-send-agy-confirm.test.sh 4440
-tests/fm-send-fresh-worker-advice.test.sh 13000
+tests/fm-send-fresh-worker-advice.test.sh 27000
 tests/fm-send-inbox-doorbell-live-e2e.test.sh 108
 tests/fm-send-inbox.test.sh 41713
 tests/fm-send-remote-delivery.test.sh 31964
