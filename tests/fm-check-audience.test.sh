@@ -129,7 +129,9 @@ test_silent_checks_never_wake() {
     start=$(perl -MTime::HiRes=time -e 'printf "%d", time*1000')
     PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 \
       FM_HEARTBEAT=999999 "$WATCH" >"$out" 2>&1 &
-    wait_for_exit "$!" 1200 || fail "$n checks: the watcher did not wake for the one finding"
+    # One pass runs every check in turn, about 0.1 s each on an idle machine,
+    # so the bound scales with the count and leaves room for a loaded host.
+    wait_for_exit "$!" $((600 + n * 6)) || fail "$n checks: the watcher did not wake for the one finding"
     ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
     assert_equals 1 "$(grep -c '^check:' "$out")" "$n checks: exactly one wake for the one finding"
     grep -qF "check: $state/zz-finder.check.sh: found it" "$out" || fail "$n checks: the wake is not the finder's: $(cat "$out")"
