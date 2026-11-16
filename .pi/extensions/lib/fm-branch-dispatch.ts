@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -585,6 +586,32 @@ export interface BranchOfferVerdict {
   awayOnly: boolean;
 }
 
+const FM_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../../bin");
+
+// A custom check's wake may go to the supervision session while the captain is
+// present only when its registration says so AND still holds for the check's
+// current bytes. bin/fm-check-lib.sh's fm_custom_check_registered is the one
+// owner of that trust contract (byte hash, owner, mode, links, device), so it
+// is asked directly rather than re-implemented here; a check outside this
+// home's state directory, an edited or relinked check, an unreadable record,
+// or any failure to ask keeps the wake main's.
+export function supervisionAudienceCheck(state: string, checkPath: string): boolean {
+  const name = basename(checkPath);
+  const id = /^([A-Za-z0-9][A-Za-z0-9._-]*)\.check\.sh$/.exec(name)?.[1];
+  if (!id) return false;
+  try {
+    if (realpathSync(dirname(checkPath)) !== realpathSync(state)) return false;
+    execFileSync(
+      "bash",
+      ["-c", '. "$1/fm-pr-lib.sh" && . "$1/fm-check-lib.sh" && fm_custom_check_registered "$2" "$3" && [ "$FM_CUSTOM_CHECK_AUDIENCE" = supervision ]', "_", FM_BIN_DIR, state, id],
+      { env: { ...process.env, FM_STATE_OVERRIDE: state }, stdio: ["ignore", "ignore", "ignore"], timeout: 10000 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // The offer rule for one actionable close: whether a branch may take it, in
 // either posture. The Pi watcher (fm-primary-pi-watch.ts) and the supervision
 // host off Pi (bin/fm-branch-dispatch.mjs offer) both route through this one
@@ -609,24 +636,6 @@ export interface BranchOfferVerdict {
 // The away posture collapses that partition: every actionable row is
 // branch-eligible and the trigger class no longer forces anything to main
 // (scopeForUnreadWake owns the per-row rule).
-// A custom check whose hash-bound trust record names audience=supervision
-// (bin/fm-check-register.sh --audience and bin/fm-check-lib.sh own the record).
-// Only that exact three-line record for a check in this state directory counts;
-// anything else, a built-in check, or an unreadable record stays main's.
-export function supervisionAudienceCheck(state: string, checkPath: string): boolean {
-  const name = checkPath.split("/").pop() ?? "";
-  const id = /^([A-Za-z0-9][A-Za-z0-9._-]*)\.check\.sh$/.exec(name)?.[1];
-  if (!id) return false;
-  try {
-    if (!statSync(`${state}/${name}`).isFile()) return false;
-    const record = readFileSync(`${state}/${id}.check-trust`, "utf8").split("\n");
-    return record.length === 4 && record[0] === "fm-custom-check-v1" && /^[0-9a-f]{64}$/.test(record[1])
-      && record[2] === "audience=supervision" && record[3] === "";
-  } catch {
-    return false;
-  }
-}
-
 export function branchOfferForWake(state: string, message: string, afk: boolean, attendedHost = false): BranchOfferVerdict {
   const heartbeat = /^heartbeat($|:)/.test(message);
   // One custom check's wake is "check: <path>.check.sh: <output>"; only that

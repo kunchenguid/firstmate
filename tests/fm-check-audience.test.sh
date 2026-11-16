@@ -83,10 +83,32 @@ test_routing() {
   assert_equals 0 "$(offer "$state" "check: $state/plain.check.sh: found one")" "a main-audience check stays main's while attended"
   assert_equals 1 "$(offer "$state" "check: $state/plain.check.sh: found one" --afk)" "away, every check is the branch's as before"
   assert_equals 0 "$(offer "$state" "check: rearm-resurface")" "a built-in check stays main's"
-  printf '1\t1\tcheck\t%s\tcheck: %s: found two\n' "$state/helper.check.sh" "$state/helper.check.sh" >"$state/.wake-queue"
+  queue_helper() { printf '1\t1\tcheck\t%s\tcheck: %s: found two\n' "$1/helper.check.sh" "$1/helper.check.sh" >"$state/.wake-queue"; }
+  queue_helper "$state"
   printf 'fm-custom-check-v1\n%064d\naudience=supervision\nextra\n' 0 >"$state/helper.check-trust"
   assert_equals 0 "$(offer "$state" "check: $state/helper.check.sh: found two")" "a malformed record falls back to main"
-  pass "only a hash-bound supervision record moves a check's wake off main; built-in and malformed stay main's"
+  # The reviewer's case: registered for supervision, then edited before its
+  # queued finding is offered. The byte binding no longer holds.
+  FM_STATE_OVERRIDE="$state" "$REGISTER" helper --audience supervision >/dev/null
+  assert_equals 1 "$(offer "$state" "check: $state/helper.check.sh: found two")" "re-registered, it is the branch's again"
+  printf '# edited after registration\n' >>"$state/helper.check.sh"
+  if registered "$state" helper >/dev/null; then fail "the shell reader must reject an edited check"; fi
+  assert_equals 0 "$(offer "$state" "check: $state/helper.check.sh: found two")" "an edited check's queued finding falls back to main"
+  FM_STATE_OVERRIDE="$state" "$REGISTER" helper --audience supervision >/dev/null
+  chmod 0777 "$state/helper.check.sh"
+  assert_equals 0 "$(offer "$state" "check: $state/helper.check.sh: found two")" "a check with loosened permissions falls back to main"
+  chmod 0700 "$state/helper.check.sh"
+  # A wake naming a same-named check in another directory is not this home's.
+  mkdir -p "$TMP_ROOT/route/other"
+  cp -p "$state/helper.check.sh" "$TMP_ROOT/route/other/helper.check.sh"
+  queue_helper "$TMP_ROOT/route/other"
+  assert_equals 0 "$(offer "$state" "check: $TMP_ROOT/route/other/helper.check.sh: found two")" "a check outside this state directory falls back to main"
+  # A linked check is never trusted.
+  queue_helper "$state"
+  mv "$state/helper.check.sh" "$TMP_ROOT/route/helper.real"
+  ln -s "$TMP_ROOT/route/helper.real" "$state/helper.check.sh"
+  assert_equals 0 "$(offer "$state" "check: $state/helper.check.sh: found two")" "a linked check falls back to main"
+  pass "only a supervision registration the shell reader still accepts for the check's current bytes, in this state directory, moves its wake off main"
 }
 
 test_silent_checks_never_wake() {
