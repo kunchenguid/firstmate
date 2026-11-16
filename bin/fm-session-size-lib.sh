@@ -65,7 +65,10 @@ fm_session_size_codex() {  # <worktree>
   # session_meta names the worktree; jq then confirms each candidate exactly.
   while IFS= read -r file; do
     head -n 1 "$file" 2>/dev/null | jq -e --arg wt "$wt" --arg pwt "$physical" 'select(.type == "session_meta") | (.payload.cwd == $wt or .payload.cwd == $pwt)' >/dev/null 2>&1 || continue
-    m=$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null) || continue
+    # GNU stat reads -f as filesystem mode and prints a status block, so the
+    # flavor is chosen by platform rather than by trying one after the other.
+    if [ "$(uname)" = Darwin ]; then m=$(/usr/bin/stat -f %m "$file" 2>/dev/null); else m=$(stat -c %Y "$file" 2>/dev/null); fi
+    case "$m" in '' | *[!0-9]*) continue ;; esac
     if [ "$m" -gt "$newest_m" ]; then
       newest=$file
       newest_m=$m
