@@ -279,6 +279,10 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-context-ceiling-lib.sh
+. "$SCRIPT_DIR/fm-context-ceiling-lib.sh"
+# shellcheck source=bin/fm-session-size-lib.sh
+. "$SCRIPT_DIR/fm-session-size-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -636,6 +640,23 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
 }
 
 # The still-open keys in a folded "<key>\t<verb>\t<note>" open set, one per line.
+# Advice only, after a steer is durably recorded: a ship or scout whose session
+# already reached the home's advise line is cheaper to replace than to steer
+# into a new piece of work (bin/fm-context-ceiling-lib.sh "THE ADVICE"). It
+# prints at most one line and never changes the steer or the exit status.
+fm_send_fresh_worker_advice() {  # <meta-file> <task-id>
+  local meta=$1 id=$2 kind harness wt reason
+  kind=$(fm_meta_get "$meta" kind)
+  case "$kind" in ship | scout) ;; *) return 0 ;; esac
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 0
+  harness=$(fm_meta_get "$meta" harness)
+  wt=$(fm_meta_get "$meta" worktree)
+  fm_session_size "$harness" "$wt" || return 0
+  reason=$(fm_context_ceiling_advice "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_SESSION_CALLS" "$FM_SESSION_CONTEXT")
+  [ -n "$reason" ] || return 0
+  echo "advice: $id's conversation is already $reason; if this steer starts a new piece of work, a fresh worker is cheaper: let this one finish and spawn a new task for it" >&2
+}
+
 fm_send_open_set_keys() {  # <open-set>
   [ -n "$1" ] || return 0
   printf '%s\n' "$1" | cut -f1
@@ -1224,6 +1245,7 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
+    [ -n "$FIRE_AND_FORGET_ID" ] || fm_send_fresh_worker_advice "$TARGET_META" "$INBOX_TASK_ID" || true
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.

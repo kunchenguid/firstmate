@@ -17,8 +17,10 @@
 # THE HOME SETTING (config/context-ceiling). Absent means no ceiling: every tool
 # keeps its own default and every launch stays byte-identical. A present file,
 # even an empty one, sets a ceiling for both kinds; its optional lines are
-#   worker=<value>       ship and scout launches (default 250000)
-#   secondmate=<value>   secondmate launches (default 250000)
+#   worker=<value>         ship and scout launches (default 250000)
+#   secondmate=<value>     secondmate launches (default 250000)
+#   advise-calls=<n|off>   advise a fresh worker past this many calls (default 300)
+#   advise-tokens=<value>  advise a fresh worker past this context (default 200000)
 # Blank lines and lines starting with # are ignored. Any other line, a repeated
 # key, or an unusable value makes the file unreadable, and fm_context_ceiling_
 # resolve then fails with FM_CONTEXT_CEILING_ERROR set so the spawn refuses
@@ -32,6 +34,14 @@
 # value a crew-dispatch profile's `context_ceiling` field selects for one kind
 # of task, so a rule may ask for a larger ceiling or for `off` (a very large
 # window) where the task needs it.
+#
+# THE ADVICE. Past about two hundred calls a worker pays several times more per
+# call than at its start, so a new piece of work is cheaper in a fresh worker.
+# bin/fm-send.sh prints one advice line after it durably records a steer to a
+# ship or scout whose session (bin/fm-session-size-lib.sh) has reached either
+# advise line. It is advice to firstmate only: the steer is never blocked,
+# delayed, or changed, and an unreadable session or setting prints nothing.
+# advise-calls takes a whole number from 1 through 1000000, or off.
 #
 # PRECEDENCE, highest first: the per-spawn value; on a relaunch, the value the
 # task recorded at its spawn; the home setting's line for the launch kind;
@@ -53,8 +63,12 @@
 FM_CONTEXT_CEILING_DEFAULT=250000
 FM_CONTEXT_CEILING_MIN=20000
 FM_CONTEXT_CEILING_MAX=10000000
+FM_CONTEXT_CEILING_ADVISE_CALLS_DEFAULT=300
+FM_CONTEXT_CEILING_ADVISE_TOKENS_DEFAULT=200000
 FM_CONTEXT_CEILING_ERROR=
 FM_CONTEXT_CEILING_VALUE=
+FM_CONTEXT_ADVISE_CALLS=
+FM_CONTEXT_ADVISE_TOKENS=
 
 # fm_context_ceiling_valid <value> - true for `off` or an in-range token count.
 fm_context_ceiling_valid() {
@@ -75,32 +89,32 @@ fm_context_ceiling_kind_key() {
   esac
 }
 
-# fm_context_ceiling_config_value <config-dir> <kind>
-# Sets FM_CONTEXT_CEILING_VALUE to the home setting's value for <kind>: empty
-# when the file is absent, otherwise `off` or a token count. Returns 1 with
-# FM_CONTEXT_CEILING_ERROR set when the file is unreadable. Call it directly,
-# never in a command substitution, so the error reaches the caller.
-fm_context_ceiling_config_value() {
-  local config=$1 kind=$2 file key line k v seen=' ' value=
+# fm_context_ceiling_read <config-dir>
+# Reads config/context-ceiling once. Returns 2 when the file is absent, 1 with
+# FM_CONTEXT_CEILING_ERROR set when it is unreadable, and 0 after setting
+# FM_CONTEXT_CEILING_WORKER, FM_CONTEXT_CEILING_SECONDMATE,
+# FM_CONTEXT_ADVISE_CALLS and FM_CONTEXT_ADVISE_TOKENS (`off` or a number).
+# Call it directly, never in a command substitution, so the error reaches the
+# caller.
+fm_context_ceiling_read() {
+  local file=$1/context-ceiling line k v seen=' '
   FM_CONTEXT_CEILING_ERROR=
-  FM_CONTEXT_CEILING_VALUE=
-  file="$config/context-ceiling"
-  [ -e "$file" ] || return 0
+  [ -e "$file" ] || return 2
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     FM_CONTEXT_CEILING_ERROR="config/context-ceiling is not a readable file"
     return 1
   fi
-  key=$(fm_context_ceiling_kind_key "$kind")
-  value=$FM_CONTEXT_CEILING_DEFAULT
+  FM_CONTEXT_CEILING_WORKER=$FM_CONTEXT_CEILING_DEFAULT
+  FM_CONTEXT_CEILING_SECONDMATE=$FM_CONTEXT_CEILING_DEFAULT
+  FM_CONTEXT_ADVISE_CALLS=$FM_CONTEXT_CEILING_ADVISE_CALLS_DEFAULT
+  FM_CONTEXT_ADVISE_TOKENS=$FM_CONTEXT_CEILING_ADVISE_TOKENS_DEFAULT
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%$'\r'}
     case "$line" in
     '' | '#'*) continue ;;
-    esac
-    case "$line" in
-    worker=* | secondmate=*) ;;
+    worker=* | secondmate=* | advise-calls=* | advise-tokens=*) ;;
     *)
-      FM_CONTEXT_CEILING_ERROR="config/context-ceiling: unknown line '$line' (expected worker=<tokens|off> or secondmate=<tokens|off>)"
+      FM_CONTEXT_CEILING_ERROR="config/context-ceiling: unknown line '$line' (expected worker=, secondmate=, advise-calls=, or advise-tokens=)"
       return 1
       ;;
     esac
@@ -113,13 +127,59 @@ fm_context_ceiling_config_value() {
       ;;
     esac
     seen="$seen$k "
+    if [ "$k" = advise-calls ]; then
+      if [ "$v" != off ] && ! { case "$v" in '' | *[!0-9]* | 0*) false ;; *) [ "${#v}" -le 7 ] && [ "$v" -le 1000000 ] ;; esac; }; then
+        FM_CONTEXT_CEILING_ERROR="config/context-ceiling: advise-calls=$v is not off or a whole number from 1 through 1000000"
+        return 1
+      fi
+      FM_CONTEXT_ADVISE_CALLS=$v
+      continue
+    fi
     if ! fm_context_ceiling_valid "$v"; then
       FM_CONTEXT_CEILING_ERROR="config/context-ceiling: $k=$v is not off or a token count from $FM_CONTEXT_CEILING_MIN through $FM_CONTEXT_CEILING_MAX"
       return 1
     fi
-    [ "$k" != "$key" ] || value=$v
+    case "$k" in
+    worker) FM_CONTEXT_CEILING_WORKER=$v ;;
+    secondmate) FM_CONTEXT_CEILING_SECONDMATE=$v ;;
+    advise-tokens) FM_CONTEXT_ADVISE_TOKENS=$v ;;
+    esac
   done <"$file"
-  FM_CONTEXT_CEILING_VALUE=$value
+  return 0
+}
+
+# fm_context_ceiling_config_value <config-dir> <kind>
+# Sets FM_CONTEXT_CEILING_VALUE to the home setting's value for <kind>: empty
+# when the file is absent, otherwise `off` or a token count. Returns 1 with
+# FM_CONTEXT_CEILING_ERROR set when the file is unreadable.
+fm_context_ceiling_config_value() {
+  local rc=0
+  FM_CONTEXT_CEILING_VALUE=
+  fm_context_ceiling_read "$1" || rc=$?
+  [ "$rc" -ne 2 ] || return 0
+  [ "$rc" -eq 0 ] || return 1
+  if [ "$(fm_context_ceiling_kind_key "$2")" = secondmate ]; then
+    FM_CONTEXT_CEILING_VALUE=$FM_CONTEXT_CEILING_SECONDMATE
+  else
+    FM_CONTEXT_CEILING_VALUE=$FM_CONTEXT_CEILING_WORKER
+  fi
+}
+
+# fm_context_ceiling_advice <config-dir> <calls> <context-tokens>
+# Prints why a worker with this session size is better replaced than steered,
+# or nothing. Never fails the caller: an absent or unreadable setting is silent.
+fm_context_ceiling_advice() {
+  local calls=$2 tokens=$3 rc=0
+  fm_context_ceiling_read "$1" || rc=$?
+  [ "$rc" -eq 0 ] || return 0
+  case "$calls" in '' | *[!0-9]*) calls= ;; esac
+  case "$tokens" in '' | *[!0-9]*) tokens= ;; esac
+  if [ -n "$calls" ] && [ "$FM_CONTEXT_ADVISE_CALLS" != off ] && [ "$calls" -ge "$FM_CONTEXT_ADVISE_CALLS" ]; then
+    printf '%s model calls (advise-calls=%s)' "$calls" "$FM_CONTEXT_ADVISE_CALLS"
+  elif [ -n "$tokens" ] && [ "$FM_CONTEXT_ADVISE_TOKENS" != off ] && [ "$tokens" -ge "$FM_CONTEXT_ADVISE_TOKENS" ]; then
+    printf '%s context tokens (advise-tokens=%s)' "$tokens" "$FM_CONTEXT_ADVISE_TOKENS"
+  fi
+  return 0
 }
 
 # fm_context_ceiling_resolve <config-dir> <kind> <flag-set 0|1> <flag-value> <recorded-value>
