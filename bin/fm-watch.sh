@@ -1773,7 +1773,7 @@ parked_gate_tick() {
   done
   count=${#ships[@]}
   [ "$count" -gt 0 ] || return 0
-  start=$((${PARKED_GATE_NEXT:-$(($(date +%s) / POLL))} % count))
+  start=$((${PARKED_GATE_NEXT:-$RANDOM} % count))
   for ((offset=0; offset<count; offset++)); do
     remaining=$((deadline - SECONDS))
     [ "$remaining" -gt 0 ] || break

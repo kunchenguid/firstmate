@@ -5357,9 +5357,8 @@ EOF
 }
 
 test_parked_gate_partial_budget_is_fair_across_cycles_and_restarts() {
-  local dir mode
-  for mode in cycle restart; do
-    dir=$(gate_wake_case "gate-wake-partial-$mode" 'paused: waiting' armed)
+  local dir
+  dir=$(gate_wake_case gate-wake-partial-cycle 'paused: waiting' armed)
     fm_write_meta "$dir/state/z-later.meta" 'kind=ship'
     cat > "$dir/fakebin/slow-crew-state" <<'EOF'
 #!/usr/bin/env bash
@@ -5371,28 +5370,43 @@ EOF
       FM_CREW_STATE_BIN="$dir/fakebin/slow-crew-state" bash -c '
         . "$1"
         wake() { :; }
-        date() { if [ "$1" = +%s ]; then echo "$gate_test_epoch"; else command date "$@"; fi; }
-        gate_test_epoch=0
+        PARKED_GATE_NEXT=0
         parked_gate_tick
         [ "$(cat "$STATE/.parked-gate-wake-gate-task")" = "gate-task|ci|abc123" ] || exit 11
         [ ! -e "$STATE/.parked-gate-wake-z-later" ] || exit 12
-        if [ "$2" = restart ]; then
-          export -f date
-          export gate_test_epoch=15
-          exec bash -c '\''
-            . "$1"
-            wake() { :; }
-            parked_gate_tick
-          '\'' _ "$1"
-        fi
         parked_gate_tick
-      ' _ "$WATCH" "$mode" || fail "partial-budget $mode did not complete"
+      ' _ "$WATCH" || fail "partial-budget cycle did not complete"
     [ "$(cat "$dir/state/.parked-gate-wake-z-later")" = 'z-later|ci|abc123' ] \
-      || fail "partial-budget $mode starved the later ship"
+      || fail "partial-budget cycle starved the later ship"
     awk -F '\t' '$3 == "check" && $4 == "parked-gate-z-later-z-later-ci-abc123" { n++ } END { exit n != 1 }' \
-      "$dir/state/.wake-queue" || fail "partial-budget $mode lost or duplicated the later notice"
-  done
-  pass "partial-budget ships receive a full attempt next cycle and after restart"
+      "$dir/state/.wake-queue" || fail "partial-budget cycle lost or duplicated the later notice"
+
+  dir=$(gate_wake_case gate-wake-random-restarts 'paused: waiting' armed)
+  fm_write_meta "$dir/state/z-later.meta" 'kind=ship'
+  cat > "$dir/fakebin/leading-crew-state" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_GATE_LEAD_LOG"
+printf 'state: parked · source: run-step · parked at ci: 1 finding(s) · ask-user: authority decision · ask-user findings checksum: abc123 · run: %s\n' "$1"
+EOF
+  chmod +x "$dir/fakebin/leading-crew-state"
+  FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE="$dir/config" FM_POLL=15 \
+    FM_GATE_LEAD_LOG="$dir/leaders" FM_CREW_STATE_BIN="$dir/fakebin/leading-crew-state" \
+    bash -c '
+      for ((attempt=0; attempt<64; attempt++)); do
+        bash -c '\''
+          . "$1"
+          date() { if [ "$1" = +%s ]; then echo 0; else command date "$@"; fi; }
+          wake() { exit 0; }
+          parked_gate_tick
+        '\'' _ "$1" || exit 11
+        rm -f "$FM_STATE_OVERRIDE"/.parked-gate-wake-*
+      done
+    ' _ "$WATCH" || fail "fresh watcher rotations did not complete"
+  [ "$(wc -l < "$dir/leaders" | tr -d ' ')" -eq 64 ] \
+    || fail "a fresh watcher read more than its leading ship before waking"
+  grep -Fx gate-task "$dir/leaders" >/dev/null || fail "gate-task never led a fresh watcher"
+  grep -Fx z-later "$dir/leaders" >/dev/null || fail "z-later never led a fresh watcher"
+  pass "partial-budget ships resume first and random restart leaders cover both ships"
 }
 
 test_parked_gate_wake_is_off_without_its_flag() {
