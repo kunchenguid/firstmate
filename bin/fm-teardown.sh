@@ -1305,6 +1305,9 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+# scratch is recorded by fm-spawn for ship and scout tasks spawned with a task
+# scratch area (bin/fm-footprint-lib.sh); absent for older tasks.
+TASK_SCRATCH=$(grep '^scratch=' "$META" | cut -d= -f2- || true)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -3957,9 +3960,9 @@ if [ "$BACKEND" = herdr ]; then
 fi
 
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" "$TASK_SCRATCH"
 elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
+  reap_task_worktree_processes tasktmp "$TASK_TMP" "$TASK_SCRATCH"
 fi
 
 # A worker can write after the first proof, including while its run is concluded
@@ -4181,6 +4184,14 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Close-time footprint cleanup, reached only after every landed-work refusal
+# above: bin/fm-footprint.sh task-close removes the task's scratch area and its
+# labelled Docker material and records one ledger line. It owns every safety
+# check and always exits 0, so a failure is printed but never fails cleanup.
+if [ "$KIND" != secondmate ] && [ -x "$SCRIPT_DIR/fm-footprint.sh" ]; then
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_DATA_OVERRIDE=$DATA FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-footprint.sh" task-close "$ID" "$TASK_SCRATCH" "$PROJ" >&2 || true
+fi
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
 teardown_launch_home_token() {

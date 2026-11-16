@@ -15,6 +15,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Disk, Docker, temp, caches, and cleanup of finished tasks | [Footprint](#footprint-configfootprint) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -960,6 +961,54 @@ Publishing is best-effort and never changes what the watcher does.
 `bin/fm-capacity.sh --admit` checks the same verdict: it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
 Only with `admit-spawns` does `bin/fm-spawn.sh` ask it, as `--spawn-gate`, before a fresh ship or scout: a refusal defers the spawn with exit 75 and leaves the task queued, and a malformed file that names `admit-spawns`, or a file that exists but cannot be read, refuses spawns rather than guessing; without that key no spawn reads the verdict, and nothing in the environment skips it.
 The script's header owns the report line, the published document's fields, the verdict, the auto budget's rules and thresholds, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks; `bin/fm-lane-vitals-lib.sh` owns how each vital is measured.
+
+## Footprint (config/footprint)
+
+Every ship and scout task gets a private scratch area outside `data/` and outside `/tmp`, and cleanup removes it, with everything the task labelled in Docker, once the task's work has landed.
+`bin/fm-footprint.sh report` shows this machine's footprint in one page without calling a model: disk by kind, Docker, temp, shared caches against the cap, leftover processes, and allowance used per lane from the worker tools' own transcripts, on macOS, Linux, and Linux under WSL.
+
+The optional local, gitignored `config/footprint` file holds this machine's choices, one key and its value per line, with `#` starting a comment.
+It is not inherited by secondmate homes, so each machine sets its own.
+With the file absent every default below applies, and no cache is ever trimmed.
+An unknown key, a repeated key, or a malformed value is an error naming the line: spawn refuses before launch, and cleanup removes nothing rather than guessing.
+
+```text
+scratch-root /mnt/big/fm-scratch   # default: ~/Library/Caches/firstmate/scratch on macOS, ${XDG_CACHE_HOME:-~/.cache}/firstmate/scratch elsewhere
+task-cleanup on                    # remove a closed task's scratch area and labelled Docker material (default on)
+task-tmpdir on                     # point TMPDIR, TMP, and TEMP into the scratch area for a verified worker tool (default on)
+docker-labels on                   # export FM_DOCKER_LABEL and COMPOSE_PROJECT_NAME (default on)
+cache-cap-gb 50                    # shared download-cache cap for this machine; absent means report only
+orphan-grace-hours 24              # age before the daily pass removes a scratch area whose task has no record
+old-task-days 30                   # age before a finished task folder's rebuildable entries are offered
+```
+
+`scratch-root` must be absolute, at most 64 bytes, and outside this home's `data/` and `projects/`, because temp paths under it must stay within the 104-byte Unix socket limit on macOS.
+A task's area is `<scratch-root>/<home-key>/<task-id>/`, where the home key separates homes on one machine that reuse a task id, and spawn records it as `scratch=` in the task record.
+
+Spawn exports, for a ship or scout:
+
+| Name | Value |
+| --- | --- |
+| `FM_TASK_SCRATCH` | the task's scratch area; the worker instructions put every rebuildable thing there |
+| `FM_DOCKER_LABEL` | `firstmate.task=<home-key>/<task-id>`, the one `--label` flag a worker passes to `docker run`, `create`, `build`, `volume create`, and `network create` |
+| `COMPOSE_PROJECT_NAME` | `fm-<home-key>-<task-id>`, so compose names and labels the task's containers, networks, volumes, and built images by itself |
+| `TMPDIR`, `TMP`, `TEMP` | the area's `tmp/`, only for a worker tool verified live with a redirected temp directory (Claude Code and Codex; [runtime-backends verification](verification/runtime-backends.md)) and only while that path is at most 90 bytes; every other tool keeps its inherited temp and spawn names it as not covered |
+
+Current macOS `mktemp(1)` ignores `TMPDIR`, so only temp files made through `TMPDIR`-aware runtimes (Node, Python, Go, browsers launched by test tools) move into the area there.
+
+At cleanup, only after every landed-work check has passed, teardown ends processes whose working directory is inside the task's copy, temp root, or scratch area, then `bin/fm-footprint.sh task-close` removes the scratch area and the containers, networks, volumes, and images carrying the task's label or compose project, and appends one line to `data/footprint-ledger.tsv`.
+A refused cleanup removes nothing.
+Docker absent or not running is skipped, Docker is never pruned, and unlabelled Docker material is only reported.
+Shared caches are never touched at task cleanup.
+
+`bin/fm-footprint.sh arm` registers a daily pass through the watcher's existing check mechanism.
+It removes this home's scratch areas whose task has no record once they are older than `orphan-grace-hours`, and with `cache-cap-gb` set it trims the least recently used shared cache first, only through that tool's own command, until the total is under the cap.
+It reports one line only when the caches stay over the cap or a trim command fails, and only when that finding changes.
+
+`bin/fm-footprint.sh old-tasks` previews rebuildable directories and fully landed nested checkouts inside finished task folders older than `old-task-days`; records, reports, decisions, the backlog, evidence files, and unlanded work are never offered.
+Removal is a captain decision: `old-tasks --apply <preview-id>` removes exactly the previewed list and refuses, removing nothing, when anything changed since the preview.
+
+The script's header owns each command's exact rules, the known caches and their trim commands, the rebuildable directory names, the ledger columns, and the report's JSON shape; `bin/fm-footprint-lib.sh` owns the scratch layout, the exported names, and the verified tool list.
 
 ## PR-ready line after green (config/ready-after-green)
 
