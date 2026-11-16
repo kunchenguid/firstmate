@@ -408,6 +408,7 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 The skill owns the guarded fleet update and restart procedure; it never touches anything under `projects/`.
+When the captain asks for a full fleet restart or reset after harness updates, or invokes `/fleet-reset`, load the `fleet-reset` skill.
 
 ## 13. Agent-only reference skills
 
