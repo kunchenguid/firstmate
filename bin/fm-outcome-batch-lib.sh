@@ -4,7 +4,8 @@
 #
 # Sourced, never executed. The supervision host (bin/fm-supervision-host.sh)
 # asks fm_outcome_batch_verdict after an attended engine turn recorded captain
-# outcomes, instead of always waking main for them. This file is the single
+# outcomes, instead of always waking main for them, and fm_outcome_batch_due
+# while parked. This file is the single
 # owner of the setting, the urgency rule, and the hold record.
 # docs/configuration.md "Outcome batching" is the operator reference.
 #
@@ -17,24 +18,40 @@
 #   window-seconds=<60-3600>   longest a routine outcome waits (default 600)
 # Blank lines, lines starting with #, and unusable values keep the default.
 #
-# THE RULE. An outcome is urgent unless it is positively routine. It is urgent
-# when its summary or its wake text names a blocker, failure, error, sign-in,
-# credential, login, token, password, review, merge, pull request, URL,
-# decision, approval, deletion, security, secret, production, incident, or
-# alert, or when the newest line of its task's status log is anything but
-# working, paused, note, or resolved. One urgent outcome in a turn makes the
-# whole turn urgent. A routine turn is held while the oldest held outcome is
-# younger than the window; once the window passes, the next turn that records
-# a captain outcome or the next handled wake releases them all.
+# THE RULE. An outcome is urgent unless the records prove it routine. It is
+# routine only when all of these hold:
+#   - it is one of the turn's captain rows, read back through the outcome
+#     store's own validating reader (bin/fm-branch-outcome.sh lookup), so a
+#     malformed or partly written store is never trusted;
+#   - its task has a status log that is a readable regular file, whose newest
+#     line is working, paused, note, or resolved, and whose folded open set
+#     (status_open_decisions, the authoritative fold) is empty, so an earlier
+#     question an unrelated progress line did not close still counts;
+#   - neither its summary nor its wake text names a blocker, failure, error,
+#     sign-in, credential, login, token, password, review, merge, pull request,
+#     link, decision, approval, deletion, security, secret, production,
+#     incident, or alert, or asks anything (a question mark, or words such as
+#     choose, pick, which, option, prefer, confirm, should, answer).
+# One urgent outcome in a turn makes the whole turn urgent. A turn with more
+# than FM_OUTCOME_BATCH_TURN_MAX (20) captain outcomes is already a batch and
+# goes at once, which also bounds the work the rule does per turn. A routine
+# turn is held while the oldest held outcome is younger than the window.
 #
-# Nothing is lost by holding: every held outcome stays an unprocessed row in
-# the outcome store, and main's next drain presents all of them, whatever wakes
-# it - a captain message, another event, or the release. The hold record
-# state/.outcome-batch holds only first=<epoch>, the time the oldest held
-# outcome was recorded; it is removed when no captain outcome is unprocessed.
+# RELEASE. Held outcomes are captain rows still unread in the store. The
+# supervision host asks fm_outcome_batch_due while it is parked and after each
+# handled wake, and hands them to main once the oldest has waited the window,
+# when the setting was removed, or whenever the store cannot be read, so an
+# uncertainty reaches main rather than waiting. Main's next drain presents all
+# of them, whatever wakes it.
+#
+# The hold record state/.outcome-batch holds only first=<epoch>, the time the
+# oldest held outcome was recorded; it is removed only once the store proves no
+# captain row is unread.
 
+FM_OUTCOME_BATCH_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_OUTCOME_BATCH_WINDOW_DEFAULT=600
-FM_OUTCOME_BATCH_URGENT_RE='block|fail|error|broke|crash|sign[ -]?in|credential|log[ -]?in|auth|token|password|review|merge|pull request|(^|[^a-z])pr([^a-z]|$)|https?://|decision|decide|approv|delet|destroy|security|secret|prod|incident|alert|outage|down'
+FM_OUTCOME_BATCH_TURN_MAX=20
+FM_OUTCOME_BATCH_URGENT_RE='block|fail|error|broke|crash|sign[ -]?in|credential|log[ -]?in|auth|token|password|review|merge|pull request|(^|[^a-z])pr([^a-z]|$)|https?://|decision|decide|approv|delet|destroy|security|secret|prod|incident|alert|outage|down|\?|choose|choice|pick|which|option|prefer|confirm|should|answer|question|(^|[^a-z])ask|let me know|wait'
 
 # fm_outcome_batch_config <config-dir>: succeed and set FM_OUTCOME_BATCH_WINDOW
 # when the home opted in.
@@ -52,52 +69,75 @@ fm_outcome_batch_config() {
   return 0
 }
 
-# fm_outcome_batch_routine <state-dir> <outcome-json-line>: true only for an
-# outcome THE RULE proves routine.
-fm_outcome_batch_routine() {
-  local state=$1 row=$2 text task verb
-  text=$(printf '%s\n' "$row" | jq -r '"\(.summary // "") \(.wake // "")"' 2>/dev/null) || return 1
-  [ -n "$text" ] || return 1
-  if printf '%s\n' "$text" | LC_ALL=C grep -Eiq "$FM_OUTCOME_BATCH_URGENT_RE"; then return 1; fi
-  task=$(printf '%s\n' "$row" | jq -r '.task // empty' 2>/dev/null)
-  case "$task" in '' | */* | *..*) return 1 ;; esac
-  verb=$(grep -v '^[[:space:]]*$' "$state/$task.status" 2>/dev/null | tail -n 1 | sed -n 's/^\([a-z-]*\).*/\1/p')
-  case "$verb" in working | paused | note | resolved) return 0 ;; esac
-  return 1
+# _fm_outcome_batch_store <state-dir> <subcommand> [args...]: the store's own
+# validating reader for this home.
+_fm_outcome_batch_store() {
+  local state=$1
+  shift
+  FM_STATE_OVERRIDE="$state" "$FM_OUTCOME_BATCH_LIB_DIR/fm-branch-outcome.sh" "$@" 2>/dev/null </dev/null
 }
 
-# fm_outcome_batch_unprocessed_first <state-dir>: print the epoch of the oldest
-# unprocessed captain outcome, or nothing.
-fm_outcome_batch_unprocessed_first() {
-  local state=$1 processed
-  processed=$(cat "$state/.branch-outcomes-processed" 2>/dev/null || true)
-  case "$processed" in '' | *[!0-9]*) processed=0 ;; esac
-  jq -r -n --argjson p "$processed" '[inputs | select(.verdict == "captain" and (.seq // 0) > $p) | .epoch // 0] | min // empty' \
-    "$state/branch-outcomes.jsonl" 2>/dev/null
+# _fm_outcome_batch_first_unread <state-dir>: print the epoch of the oldest
+# unread captain row, or nothing when none; fails when the store cannot be read.
+_fm_outcome_batch_first_unread() {
+  local rows
+  rows=$(_fm_outcome_batch_store "$1" unread) || return 1
+  [ -n "$rows" ] || return 0
+  printf '%s\n' "$rows" | jq -r -n '[inputs | select(.verdict == "captain") | .epoch] | min // empty' 2>/dev/null
+}
+
+# _fm_outcome_batch_tasks_routine <state-dir> <task>...: true only when every
+# task's status log is readable and proves it is not waiting on anyone. One
+# shell for the whole turn, so the classify library's names stay out of the
+# host and its cost does not grow per outcome.
+_fm_outcome_batch_tasks_routine() {
+  local state=$1
+  shift
+  bash -c '
+    . "$1/fm-classify-lib.sh" || exit 1
+    state=$2
+    shift 2
+    for task in "$@"; do
+      case "$task" in "" | */* | *..* | .*) exit 1 ;; esac
+      f="$state/$task.status"
+      [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ] || exit 1
+      verb=$(grep -v "^[[:space:]]*$" "$f" | tail -n 1 | sed -n "s/^\([a-z-]*\).*/\1/p")
+      case "$verb" in working | paused | note | resolved) ;; *) exit 1 ;; esac
+      open=$(status_open_decisions "$f") || exit 1
+      [ -z "$open" ] || exit 1
+    done
+  ' _ "$FM_OUTCOME_BATCH_LIB_DIR" "$state" "$@"
 }
 
 # fm_outcome_batch_verdict <config-dir> <state-dir> <seq>...
 # Prints now or hold for a turn that recorded captain outcome rows <seq>...,
 # and keeps the hold record in step. Any unreadable input prints now.
 fm_outcome_batch_verdict() {
-  local config=$1 state=$2 seq row first now
+  local config=$1 state=$2 seq csv='' rows count tasks first now
   shift 2
   fm_outcome_batch_config "$config" || { printf 'now\n'; return 0; }
-  [ "$#" -gt 0 ] || { printf 'now\n'; return 0; }
+  [ "$#" -gt 0 ] && [ "$#" -le "$FM_OUTCOME_BATCH_TURN_MAX" ] || { printf 'now\n'; return 0; }
   for seq in "$@"; do
     case "$seq" in '' | *[!0-9]*) printf 'now\n'; return 0 ;; esac
-    row=$(jq -c --argjson s "$seq" 'select(.seq == $s)' "$state/branch-outcomes.jsonl" 2>/dev/null | head -n 1)
-    if [ -z "$row" ] || ! fm_outcome_batch_routine "$state" "$row"; then
-      rm -f "$state/.outcome-batch"
-      printf 'now\n'
-      return 0
-    fi
+    csv=${csv:+$csv,}$seq
   done
-  first=$(fm_outcome_batch_unprocessed_first "$state")
+  # One validated read for the whole turn.
+  rows=$(_fm_outcome_batch_store "$state" lookup --seqs "$csv") || { printf 'now\n'; return 0; }
+  count=$(printf '%s\n' "$rows" | jq -s -r --argjson n "$#" '
+      if length == $n and all(.[]; .verdict == "captain" and (.task | type) == "string") then length else "bad" end' 2>/dev/null)
+  [ "$count" = "$#" ] || { printf 'now\n'; return 0; }
+  if printf '%s\n' "$rows" | jq -r '"\(.summary // "") \(.wake // "")"' 2>/dev/null \
+    | LC_ALL=C grep -Eiq "$FM_OUTCOME_BATCH_URGENT_RE"; then
+    printf 'now\n'
+    return 0
+  fi
+  tasks=$(printf '%s\n' "$rows" | jq -r '.task' | sort -u)
+  # shellcheck disable=SC2086 # task ids are validated single words
+  _fm_outcome_batch_tasks_routine "$state" $tasks || { printf 'now\n'; return 0; }
+  first=$(_fm_outcome_batch_first_unread "$state") || { printf 'now\n'; return 0; }
   now=$(date +%s)
   case "$first" in '' | *[!0-9]*) first=$now ;; esac
   if [ $((now - first)) -ge "$FM_OUTCOME_BATCH_WINDOW" ]; then
-    rm -f "$state/.outcome-batch"
     printf 'now\n'
     return 0
   fi
@@ -105,13 +145,17 @@ fm_outcome_batch_verdict() {
   printf 'hold\n'
 }
 
-# fm_outcome_batch_due <config-dir> <state-dir>: true when held outcomes have
-# waited the whole window and should be released now; clears a stale record.
+# fm_outcome_batch_due <config-dir> <state-dir>: true when held outcomes should
+# reach main now: their window passed, the setting was removed, or the store
+# cannot be read. Removes the hold record only once no captain row is unread.
 fm_outcome_batch_due() {
   local config=$1 state=$2 first
   [ -f "$state/.outcome-batch" ] || return 1
-  first=$(fm_outcome_batch_unprocessed_first "$state")
-  case "$first" in '' | *[!0-9]*) rm -f "$state/.outcome-batch"; return 1 ;; esac
-  fm_outcome_batch_config "$config" || { rm -f "$state/.outcome-batch"; return 0; }
+  first=$(_fm_outcome_batch_first_unread "$state") || return 0
+  case "$first" in
+  '') rm -f "$state/.outcome-batch"; return 1 ;;
+  *[!0-9]*) return 0 ;;
+  esac
+  fm_outcome_batch_config "$config" || return 0
   [ $(($(date +%s) - first)) -ge "$FM_OUTCOME_BATCH_WINDOW" ]
 }

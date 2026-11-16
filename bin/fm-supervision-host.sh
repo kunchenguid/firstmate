@@ -609,8 +609,33 @@ fresh_start_tick() {
   case "$verdict" in saving | cleared | skipped | failed) log_line "fresh-start	$verdict" ;; esac
 }
 
+# Outcome batching (bin/fm-outcome-batch-lib.sh owns the rule and the hold
+# record). While parked, held routine outcomes are handed to main once their
+# window passes, the setting is removed, or the store cannot be read, without
+# starting a model; the cheap record test runs every poll, the store read at
+# most every OUTCOME_BATCH_TICK seconds. Away, captain outcomes wait for the
+# return as they always do.
+OUTCOME_BATCH_TICK=${FM_OUTCOME_BATCH_TICK:-15}
+OUTCOME_BATCH_NEXT=0
+outcome_batch_tick() {
+  [ -f "$STATE/.outcome-batch" ] || return 0
+  [ "$SECONDS" -ge "$OUTCOME_BATCH_NEXT" ] || return 0
+  OUTCOME_BATCH_NEXT=$((SECONDS + OUTCOME_BATCH_TICK))
+  fm_afk_contract_away_present "$STATE" && return 0
+  fm_outcome_batch_due "$CONFIG" "$STATE" || return 0
+  log_line "outcome-batch	release"
+  local why='branch-outcome: the supervision session held routine captain outcomes for you until their batching window passed; run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints'
+  acknowledged_handback "supervision-host: $why"
+  retire_arm "$ARM_PID" "$ARM_OUT"
+  ARM_PID=
+  ARM_OUT=
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  exit_to_main "$why"
+}
+
 warm_compact_tick() {
   local backend target verdict ended compacted
+  outcome_batch_tick
   fresh_start_tick
   [ -f "$CONFIG/warm-compact" ] || return 0
   park_elapsed
