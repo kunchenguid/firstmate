@@ -216,6 +216,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-warm-compact-lib.sh"
 # shellcheck source=bin/fm-fresh-start-lib.sh
 . "$SCRIPT_DIR/fm-fresh-start-lib.sh"
+# shellcheck source=bin/fm-outcome-batch-lib.sh
+. "$SCRIPT_DIR/fm-outcome-batch-lib.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -1388,12 +1390,23 @@ while :; do
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close
-  # itself was handled, so only the host's lines reach main.
+  # itself was handled, so only the host's lines reach main. With
+  # config/outcome-batch, a turn whose outcomes are all positively routine is
+  # held instead, and released together (bin/fm-outcome-batch-lib.sh).
   if [ -n "$LAST_TURN" ] && ! fm_afk_contract_away_present "$STATE"; then
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
+      # shellcheck disable=SC2086 # the store rows are plain numbers, one word each
+      if [ "$(fm_outcome_batch_verdict "$CONFIG" "$STATE" ${CAPTAIN_SEQS//,/})" = hold ]; then
+        log_line "outcome-batch	hold	$CAPTAIN_SEQS"
+      else
+        ARM_TEXT=
+        exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+          "$HEALTH_NOTE"
+      fi
+    elif fm_outcome_batch_due "$CONFIG" "$STATE"; then
       ARM_TEXT=
-      exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+      exit_to_main "branch-outcome: the supervision session held routine captain outcomes for you until their batching window passed; run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
         "$HEALTH_NOTE"
     fi
   fi
