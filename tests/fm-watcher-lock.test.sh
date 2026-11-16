@@ -2903,16 +2903,16 @@ test_stale_watch_reclaim_publishes_before_clear() {
   dir=$(make_case stale-watch-publish-before-clear)
   state="$dir/state"
   lockdir="$state/.watch.lock"
-  mkdir -p "$lockdir"
-  printf '99999999\n' > "$lockdir/pid"
+  : > "$lockdir"
+  touch -t 200001010000 "$lockdir"
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
-    fm_lock_remove_path() {
-      if [ "$1" = "$STATE/.watch.lock" ]; then
+    rm() {
+      if [ "${!#}" = "$STATE/.watch.lock" ]; then
         kill -KILL "${BASHPID:-$$}"
       fi
-      return 1
+      command rm "$@"
     }
     fm_lock_try_acquire "$2"
   ' _ "$LIB" "$lockdir" >/dev/null 2>&1

@@ -905,7 +905,7 @@ fm_lock_reap_dead_directory() {
 # lock can never have it unlinked from under it and racing reclaimers still
 # resolve to exactly one holder.
 fm_lock_reclaim_stale_plain_path() {
-  local lockdir=$1 steal steal_owner rc
+  local lockdir=$1 marker_publish_bound=${2:-} steal steal_owner rc
   steal="$lockdir.steal"
   [ -L "$lockdir" ] && return 1
   [ -d "$lockdir" ] && return 1
@@ -918,6 +918,15 @@ fm_lock_reclaim_stale_plain_path() {
   steal_owner=${FM_LOCK_OWNER_DIR:-}
   if ! fm_lock_points_to_owner "$steal" "$steal_owner" || [ -L "$lockdir" ] || [ -d "$lockdir" ] || [ ! -e "$lockdir" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
     fm_lock_release "$steal"
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
+    fm_lock_release "$steal"
+    if [ -n "$marker_publish_bound" ]; then
+      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+    fi
     FM_LOCK_OWNER_DIR=
     return 1
   fi
@@ -1584,7 +1593,7 @@ fm_lock_try_acquire() {
   # path can never become a live lock on its own; reclaim it under the steal
   # mutex so a live lock is never unlinked and racing reclaimers still yield
   # exactly one holder.
-  if fm_lock_reclaim_stale_plain_path "$lockdir"; then
+  if fm_lock_reclaim_stale_plain_path "$lockdir" "$marker_publish_bound"; then
     return 0
   fi
 
