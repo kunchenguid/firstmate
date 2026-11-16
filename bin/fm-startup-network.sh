@@ -91,18 +91,23 @@
 #   .startup-network.delivered
 #                             a durable acknowledgement that harvest printed the
 #                             current finished result; only this suppresses its
-#                             wake. It is bound to the report's CONTENT, not to
-#                             a run: its second line is the report's cksum, and a
-#                             later clean run that republishes a byte-identical
-#                             report keeps it, so a standing finding is announced
-#                             once instead of on every run. A different report, a
-#                             timed-out or failed run, or an unpublished report
-#                             clears it, so a changed finding always announces.
+#                             wake. It is bound to the report's CONTENT and to
+#                             the session that saw it, not to a run: its second
+#                             line is the report's cksum and its third the lock
+#                             owner (the session) that received the announcement.
+#                             A later clean run by the same owner that republishes
+#                             a byte-identical report keeps it, so a standing
+#                             finding is announced once per session instead of on
+#                             every run. A different report, a different owner (a
+#                             fresh session, which has not seen it), a timed-out
+#                             or failed run, or an unpublished report clears it,
+#                             so a changed finding always announces.
 #   .startup-network.announced
-#                             the same cksum, recorded when the WAKE (rather than
-#                             harvest) announced a clean-state report, so the
-#                             wake path is content-bound too. Carried into
-#                             .delivered by the next identical publication.
+#                             the same two-part binding, recorded when the WAKE
+#                             (rather than harvest) announced a clean-state
+#                             report, so the wake path is bound the same way.
+#                             Carried into .delivered by the next identical
+#                             publication.
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
 #                             stage total, one record per network phase (gh auth,
@@ -378,10 +383,34 @@ report_digest() {  # <file>
   printf '%s' "$digest" | tr ' ' '-'
 }
 
-# The digest a record file is bound to (its second line), empty for a legacy or
-# missing record, which therefore never matches and is cleared like before.
-record_digest() {  # <file>
-  sed -n '2p' "$1" 2>/dev/null
+# The identity a record file is bound to: the report digest (its second line)
+# and the session lock owner that saw the announcement (its third), joined. A
+# legacy or missing record is empty, so it never matches and is cleared like
+# before.
+record_binding() {  # <file>
+  local digest owner
+  digest=$(sed -n '2p' "$1" 2>/dev/null) || digest=
+  owner=$(sed -n '3p' "$1" 2>/dev/null) || owner=
+  [ -n "$digest" ] && [ -n "$owner" ] || return 0
+  printf '%s@%s' "$digest" "$owner"
+}
+
+# What a record written now binds to: this report's digest at the current run's
+# lock owner. A fresh session has a different owner, so a record the dead session
+# left behind never silences the finding for the session that has not seen it.
+current_binding() {  # <file>
+  local owner
+  owner=$(status_get lock_pid)
+  [ -n "$owner" ] || owner=$(cat "$STATE/.lock" 2>/dev/null || true)
+  [ -n "$owner" ] || owner=none
+  printf '%s@%s' "$(report_digest "$1")" "$owner"
+}
+
+write_record() {  # <kind> <file> <report-file>
+  local binding
+  binding=$(current_binding "$3")
+  [ -n "$binding" ] || return 0
+  printf '%s\n%s\n%s\n' "$1" "${binding%@*}" "${binding##*@}" | write_atomic "$2" || true
 }
 
 queue_result_wake() {  # <state>
@@ -396,7 +425,7 @@ queue_result_wake() {  # <state>
 announce_result_wake() {  # <state>
   queue_result_wake "$1" || return 0
   [ "$1" = 'done' ] || return 0
-  printf 'announced\n%s\n' "$(report_digest "$REPORT_FILE")" | write_atomic "$ANNOUNCED_FILE" || true
+  write_record announced "$ANNOUNCED_FILE" "$REPORT_FILE"
 }
 
 # Bounded by DELIVERY_DEADLINE, which publish() sets from the delivery budget.
@@ -454,10 +483,11 @@ EOF
 settle_delivered_record() {  # <state> <report-published> <new-report-file>
   local state=$1 published=$2 out=$3 digest
   if [ "$state" = 'done' ] && [ "$published" = 1 ]; then
-    digest=$(report_digest "$out")
-    if [ "$(record_digest "$DELIVERED_FILE")" = "$digest" ] \
-      || [ "$(record_digest "$ANNOUNCED_FILE")" = "$digest" ]; then
-      printf 'delivered\n%s\n' "$digest" | write_atomic "$DELIVERED_FILE" || true
+    digest=$(current_binding "$out")
+    if [ -n "$digest" ] \
+      && { [ "$(record_binding "$DELIVERED_FILE")" = "$digest" ] \
+        || [ "$(record_binding "$ANNOUNCED_FILE")" = "$digest" ]; }; then
+      write_record delivered "$DELIVERED_FILE" "$out"
       return 0
     fi
   fi
@@ -757,7 +787,7 @@ EOF
   print_state
   case "$state" in
     done|timeout|failed) [ "$(status_get report_published)" = 0 ] \
-      || printf 'delivered\n%s\n' "$(report_digest "$REPORT_FILE")" | write_atomic "$DELIVERED_FILE" || true
+      || write_record delivered "$DELIVERED_FILE" "$REPORT_FILE"
       ;;
   esac
   fm_lock_release "$PUBLISH_LOCK"

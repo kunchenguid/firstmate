@@ -866,7 +866,7 @@ EOF
 # it (through the wake path and through harvest alike), while a changed report, or
 # a failed or timed-out run, still announces every time.
 test_an_unchanged_finding_is_announced_once() {
-  local rec home root log finding other woke record
+  local rec home root log finding other record
   rec=$(new_world unchanged-finding-once)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -920,6 +920,16 @@ EOF
   woke && fail "a harvested finding re-announced when republished unchanged"
   stage "$other"
   woke || fail "a harvested finding's change was swallowed"
+
+  # A fresh session (a different lock owner) has not seen the announcement the
+  # dead one received, so the standing finding announces to it exactly once.
+  stage "$other"
+  woke && fail "setup: the finding should be quiet for the owner that saw it"
+  printf '222222\n' > "$home/state/.lock"
+  stage "$other"
+  woke || fail "a fresh session got no announcement for a finding only the dead session saw"
+  stage "$other"
+  woke && fail "the fresh session was re-announced an unchanged finding"
   pass "fm-startup-network: an unchanged finding announces once and a changed one announces immediately"
 }
 
