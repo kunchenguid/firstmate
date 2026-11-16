@@ -162,7 +162,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
   # Replace the file at the same path with a DIFFERENT file of the SAME byte
   # size (mv gives the destination path a new inode) - a same-size rewrite,
   # which a plain offset>size shrink check alone would NOT catch. The buried
-  # decision must still surface: the device+inode identity check must detect
+  # decision must still surface: the inode identity check must detect
   # this as a rotation/recreation and fall back to a full re-fold.
   new_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
   printf 'needs-decision [key=migration]: rewritten via rotation\n' > "$dir/replacement"
