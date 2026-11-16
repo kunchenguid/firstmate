@@ -524,9 +524,11 @@ On a later park, the host submits `/clear` and one short resume prompt only when
 The startup digest then re-enters through the session-start hook, and the resume turn re-arms supervision.
 A save that never attests, because it failed, was interrupted, or was not reset-safe, never clears: the day is skipped when the window closes, and a save the session moved past is skipped at once.
 
-Each step waits while an away or quiet record exists, a wake is queued, a supervision handoff or a secondmate reply is pending, a captain outcome is unread or unprocessed, a captain inbox note is unread, a decision or blocker is open in any status log, or any backlog item is held for the captain.
-It also waits whenever one of those records cannot be read, including a path that is only a link, dangling or not, a path of the wrong kind, and a wake queue holding anything but whole, well-formed rows, such as a partly written append; nothing is typed unless the agent reads idle and its composer provably empty.
-A home that keeps long-lived captain holds therefore never starts fresh until they are answered.
+Each step waits only for what lives in the conversation alone and clears within minutes: an away or quiet record, a queued wake, a pending supervision handoff or secondmate reply, an unread captain outcome or inbox note, and a question firstmate asked the captain in chat that is still unanswered.
+That last one is known from a record, never from reading the conversation: firstmate runs [`bin/fm-chat-question.sh`](../bin/fm-chat-question.sh) `open <key> <summary>` in the turn it asks a question that has no other durable record, and `close <key>` in the turn the captain answers.
+Durable records that survive a restart and are printed again at session start do not hold it: backlog items held for the captain, open decisions and blockers in worker status logs, and captain outcomes already presented but not yet acknowledged.
+Each step also waits whenever one of its inputs cannot be read, including a path that is only a link, dangling or not, a path of the wrong kind, and a wake queue holding anything but whole, well-formed rows, such as a partly written append; nothing is typed unless the agent reads idle and its composer provably empty.
+If two days and one window pass without a fresh start, the host queues one note for firstmate to tell the captain, naming the most recent reason, and sends no more until a fresh start runs again; a conversation still below `min-context-tokens` counts as run, because none was due, and turning the setting off resets the count.
 [`bin/fm-fresh-start-lib.sh`](../bin/fm-fresh-start-lib.sh) owns the gate and the steps, with coverage in [`tests/fm-fresh-start.test.sh`](../tests/fm-fresh-start.test.sh).
 
 ## Outcome batching (config/outcome-batch)
