@@ -65,7 +65,9 @@
 #   running is a normal case and is skipped. It appends one line to
 #   data/footprint-ledger.tsv (mode 0600): epoch, task, project, kept KB
 #   (data/<task-id>/), scratch KB removed, Docker objects removed, Docker
-#   status, scratch status. Every step is best effort: it always exits 0 and
+#   status, scratch status, and "oversized" when the kept folder is over
+#   keep-warn-mb (else "-"). An oversized folder is named in the summary and
+#   kept whole: nothing kept is ever removed for its size. Every step is best effort: it always exits 0 and
 #   prints one summary line, so a failure is visible but never fails cleanup.
 #
 # caches
@@ -148,6 +150,7 @@ CHECK_INTERVAL=86400
 . "$SCRIPT_DIR/fm-footprint-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+FP_OS=$(fm_footprint_os)
 
 usage() {
   sed -n '2,15{s/^# \{0,1\}//;p;}' "$0"
@@ -166,7 +169,7 @@ now_epoch() {
 }
 
 fp_mtime() {  # <path>
-  if [ "$(fm_footprint_os)" = Darwin ]; then
+  if [ "$FP_OS" = Darwin ]; then
     /usr/bin/stat -f %m "$1" 2>/dev/null
   else
     stat -c %Y "$1" 2>/dev/null
@@ -174,7 +177,7 @@ fp_mtime() {  # <path>
 }
 
 fp_device() {  # <path>
-  if [ "$(fm_footprint_os)" = Darwin ]; then
+  if [ "$FP_OS" = Darwin ]; then
     /usr/bin/stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
@@ -187,6 +190,16 @@ fp_du_kb() {  # <path> [seconds]: prints KB, or nothing when unmeasurable
   kb=$(fm_run_timed "${2:-60}" du -sk "$1" 2>/dev/null </dev/null | awk 'NR == 1 {print $1}')
   case "$kb" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$kb"
+}
+
+# fp_du_many <out> <path>...: one bounded du for many paths, writing
+# "kb<TAB>path" rows for those it measured.
+fp_du_many() {  # <out> <path>...
+  local out=$1
+  shift
+  : > "$out"
+  [ "$#" -gt 0 ] || return 0
+  fm_run_timed 300 du -sk "$@" </dev/null > "$out" 2>/dev/null || true
 }
 
 fp_human() {  # <kb or empty>
@@ -306,7 +319,7 @@ fp_ledger_append() {  # <fields...>
 }
 
 cmd_task_close() {  # <id> <scratch> [project]
-  local id=$1 scratch=$2 project=${3:-} kept scratch_kb=0 scratch_result=none
+  local id=$1 scratch=$2 project=${3:-} kept scratch_kb=0 scratch_result=none oversized=-
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   if ! fm_footprint_config_read "$CONFIG_DIR"; then
     printf 'footprint: %s; removed nothing for %s\n' "$FP_CONFIG_ERROR" "$id"
@@ -331,17 +344,24 @@ cmd_task_close() {  # <id> <scratch> [project]
   fi
   fp_docker_task_remove "$id"
   kept=$(fp_du_kb "$DATA_DIR/$id" 30) || kept=
+  oversized=-
+  case "$kept" in ''|*[!0-9]*) ;; *) [ "$kept" -le $((FP_KEEP_WARN_MB * 1024)) ] || oversized=oversized ;; esac
   fp_ledger_append "$(now_epoch)" "$id" "${project:--}" "${kept:-unknown}" "${scratch_kb:-unknown}" \
-    "$FP_DOCKER_REMOVED" "$FP_DOCKER_RESULT" "$scratch_result" || true
+    "$FP_DOCKER_REMOVED" "$FP_DOCKER_RESULT" "$scratch_result" "$oversized" || true
   case "$scratch_result" in
     refused) printf 'footprint: %s scratch path %s is not this home'"'"'s area for the task; left it in place. ' "$id" "$scratch" ;;
     partial) printf 'footprint: %s scratch area %s was only partly removed. ' "$id" "$scratch" ;;
     *) printf 'footprint: %s scratch %s (%s). ' "$id" "$scratch_result" "$(fp_human "$scratch_kb")" ;;
   esac
   case "$FP_DOCKER_RESULT" in
-    absent|down) printf 'Docker not present.\n' ;;
-    *) printf 'Docker: %s labelled object(s) %s.\n' "$FP_DOCKER_REMOVED" "$FP_DOCKER_RESULT" ;;
+    absent|down) printf 'Docker not present.' ;;
+    *) printf 'Docker: %s labelled object(s) %s.' "$FP_DOCKER_REMOVED" "$FP_DOCKER_RESULT" ;;
   esac
+  if [ "$oversized" = oversized ]; then
+    printf ' Kept folder data/%s is %s, over %s MB; kept whole, review it.\n' "$id" "$(fp_human "$kept")" "$FP_KEEP_WARN_MB"
+  else
+    printf '\n'
+  fi
   return 0
 }
 
@@ -364,7 +384,7 @@ fp_cache_path() {  # <name>
     go-mod) command -v go >/dev/null 2>&1 && p=$(fm_run_timed 10 go env GOMODCACHE 2>/dev/null </dev/null) ;;
     playwright)
       if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then p=$PLAYWRIGHT_BROWSERS_PATH
-      elif [ "$(fm_footprint_os)" = Darwin ]; then p="$HOME/Library/Caches/ms-playwright"
+      elif [ "$FP_OS" = Darwin ]; then p="$HOME/Library/Caches/ms-playwright"
       else p="${XDG_CACHE_HOME:-$HOME/.cache}/ms-playwright"; fi ;;
     cargo) p="${CARGO_HOME:-$HOME/.cargo}/registry" ;;
   esac
@@ -388,15 +408,13 @@ fp_cache_trim_cmd() {  # <name>: prints the trim command, empty when none
   return 0
 }
 
-fp_cache_last_used() {  # <path>
-  local newest=0 entry m
-  m=$(fp_mtime "$1") && [ -n "$m" ] && newest=$m
-  for entry in "$1"/* "$1"/.[!.]*; do
-    [ -e "$entry" ] || continue
-    m=$(fp_mtime "$entry") || continue
-    [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest=$m
-  done
-  printf '%s\n' "$newest"
+fp_cache_last_used() {  # <path>: newest mtime of the directory and its direct entries, one stat call
+  local args
+  if [ "$FP_OS" = Darwin ]; then args='-f %m'; else args='-c %Y'; fi
+  # shellcheck disable=SC2086 # args is a fixed stat format flag pair
+  { if [ "$FP_OS" = Darwin ]; then /usr/bin/stat $args -- "$1" "$1"/* "$1"/.[!.]* 2>/dev/null
+    else stat $args -- "$1" "$1"/* "$1"/.[!.]* 2>/dev/null; fi; } |
+    awk '$1 ~ /^[0-9]+$/ && $1 > m { m = $1 } END { printf "%d\n", m }'
 }
 
 fp_docker_build_cache_kb() {
@@ -609,7 +627,7 @@ fp_old_task_entries() {  # <days> <out>
   local days=$1 out=$2 now cutoff folder id newest entry kind kb
   now=$(now_epoch)
   cutoff=$((now - days * 86400))
-  : > "$out.unsorted"
+  : > "$out.kinds"
   for folder in "$DATA_DIR"/*/; do
     folder=${folder%/}
     [ -d "$folder" ] && [ ! -L "$folder" ] || continue
@@ -629,12 +647,17 @@ fp_old_task_entries() {  # <days> <out>
         fp_checkout_landed "$entry" || continue
         kind=landed-checkout
       fi
-      kb=$(fp_du_kb "$entry" 60) || continue
-      printf '%s\t%s\t%s\n' "$kind" "$kb" "$entry" >> "$out.unsorted"
+      printf '%s\t%s\n' "$kind" "$entry" >> "$out.kinds"
     done <<EOF
 $(fp_old_task_candidates "$folder")
 EOF
   done
+  # One bounded du for every entry; an entry it could not measure is not offered.
+  local -a paths=()
+  while IFS='	' read -r kind entry; do paths+=("$entry"); done < "$out.kinds"
+  fp_du_many "$out.du" "${paths[@]+"${paths[@]}"}"
+  awk -F '\t' 'NR == FNR { kb[$2] = $1; next } ($2 in kb) { print $1 "\t" kb[$2] "\t" $2 }' "$out.du" "$out.kinds" > "$out.unsorted"
+  rm -f "$out.kinds" "$out.du"
   # An entry inside another offered entry goes with it, so it is listed once.
   sort -t '	' -k3,3 "$out.unsorted" | awk -F '\t' '
     { for (i = 1; i <= n; i++) if (index($3, acc[i] "/") == 1) next; acc[++n] = $3; print }' > "$out"
@@ -703,33 +726,55 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
 # --- sweep and check ----------------------------------------------------------------
 
 cmd_sweep() {  # [--dry-run]
-  local dry=0 base area id age_cut now m kb removed=0 removed_kb=0
+  local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path
+  local -a cands=() orphans=()
   [ "${1:-}" = --dry-run ] && dry=1
   fp_config
   now=$(now_epoch)
   age_cut=$((now - FP_ORPHAN_GRACE_HOURS * 3600))
   base="$FP_ROOT/$FP_KEY"
-  if [ -d "$base" ] && [ ! -L "$base" ]; then
+  work=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-sweep.XXXXXX") || die "cannot create a temporary directory"
+  if [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ]; then
     for area in "$base"/*; do
       [ -d "$area" ] && [ ! -L "$area" ] || continue
       id=${area##*/}
       fm_task_id_path_safe "$id" || continue
       { [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; } && continue
-      m=$(fp_mtime "$area") || continue
-      [ "$m" -le "$age_cut" ] || continue
-      fp_scratch_owned "$area" "$id" || continue
-      kb=$(fp_du_kb "$area" 60) || kb=0
-      if [ "$dry" = 1 ]; then
-        printf 'would remove orphaned scratch %s (%s)\n' "$area" "$(fp_human "$kb")"
-        continue
-      fi
-      if fp_remove_tree "$area"; then
-        removed=$((removed + 1))
-        removed_kb=$((removed_kb + kb))
-        fp_ledger_append "$now" "$id" - - "$kb" 0 sweep orphan-removed || true
-      fi
+      cands+=("$area")
     done
   fi
+  if [ "${#cands[@]}" -gt 0 ]; then
+    # One stat for every candidate: old enough, owned by this user, and on the
+    # key root's own filesystem. Each is a direct, non-link child of the key
+    # root checked above, so no per-area path resolution is needed.
+    uid=$(id -u)
+    { if [ "$FP_OS" = Darwin ]; then /usr/bin/stat -f '%m %d %u %N' -- "$base" "${cands[@]}"
+      else stat -c '%Y %d %u %n' -- "$base" "${cands[@]}"; fi; } 2>/dev/null |
+      awk -v cut="$age_cut" -v uid="$uid" 'NR == 1 { dev = $2; next }
+        { p = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", p); if ($1 <= cut && $2 == dev && $3 == uid) print p }' > "$work/orphans"
+    while IFS= read -r path; do orphans+=("$path"); done < "$work/orphans"
+  fi
+  if [ "${#orphans[@]}" -gt 0 ]; then
+    fp_du_many "$work/du" "${orphans[@]}"
+    if [ "$dry" = 1 ]; then
+      while IFS='	' read -r kb path; do
+        printf 'would remove orphaned scratch %s (%s)\n' "$path" "$(fp_human "$kb")"
+      done < "$work/du"
+    else
+      find "${orphans[@]}" -xdev -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true
+      find "${orphans[@]}" -xdev -depth -delete 2>/dev/null || true
+      while IFS='	' read -r kb path; do
+        [ ! -e "$path" ] && [ ! -L "$path" ] || continue
+        removed=$((removed + 1))
+        removed_kb=$((removed_kb + kb))
+        printf '%s\t%s\t-\t-\t%s\t0\tsweep\torphan-removed\t-\n' "$now" "${path##*/}" "$kb"
+      done < "$work/du" > "$work/ledger"
+      if [ -s "$work/ledger" ] && [ -d "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ] && [ ! -L "$LEDGER" ]; then
+        (umask 077 && cat "$work/ledger" >> "$LEDGER") || true
+      fi
+    fi
+  fi
+  rm -rf "$work"
   [ "$dry" = 1 ] || printf 'Removed %s orphaned scratch area(s), %s.\n' "$removed" "$(fp_human "$removed_kb")"
   FP_TRIM_FINDING=
   [ -z "$FP_CACHE_CAP_GB" ] || fp_trim_caches "$dry"
@@ -786,11 +831,11 @@ cmd_disarm() {
 
 fp_platform() {
   local proc=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  case "$(fm_footprint_os)" in
+  case "$FP_OS" in
     Darwin) printf 'macOS\n' ;;
     Linux)
       if grep -qi microsoft "$proc/version" 2>/dev/null; then printf 'Linux (WSL)\n'; else printf 'Linux\n'; fi ;;
-    *) fm_footprint_os ;;
+    *) printf '%s\n' "$FP_OS" ;;
   esac
 }
 
@@ -884,7 +929,7 @@ fp_leftover_processes() {  # <out>
   : > "$out"
   # shellcheck source=bin/fm-lane-vitals-lib.sh
   . "$SCRIPT_DIR/fm-lane-vitals-lib.sh"
-  fm_lane_vitals_processes "$(fm_footprint_os)" "$procs" 2>/dev/null || FP_PROCS_UNREADABLE=1
+  fm_lane_vitals_processes "$FP_OS" "$procs" 2>/dev/null || FP_PROCS_UNREADABLE=1
   while IFS='	' read -r pid _ mem _ cwd; do
     [ -n "$cwd" ] || continue
     case "$cwd" in
@@ -976,7 +1021,7 @@ cmd_report() {  # [--json] [--days N]
     fp_docker 15 system df --format '{{.Type}}\t{{.TotalCount}}\t{{.Active}}\t{{.Size}}\t{{.Reclaimable}}' > "$work/docker"
     docker_lab_c=$(fp_docker 15 ps -a --filter "label=firstmate.task" --format '{{.Label "firstmate.task"}}' | grep -c "^$FP_KEY/" || true)
     docker_lab_v=$(fp_docker 15 volume ls --filter "label=firstmate.task" --format '{{.Label "firstmate.task"}}' | grep -c "^$FP_KEY/" || true)
-    if [ "$(fm_footprint_os)" = Darwin ]; then
+    if [ "$FP_OS" = Darwin ]; then
       d="$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
       [ ! -f "$d" ] || docker_img_kb=$(du -k "$d" 2>/dev/null | awk '{print $1}')
     fi

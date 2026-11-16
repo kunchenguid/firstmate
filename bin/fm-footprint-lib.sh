@@ -81,8 +81,8 @@ _fm_footprint_whole() {  # <value>
 # shellcheck disable=SC2034 # FP_* are output globals read by the sourcing script.
 # fm_footprint_config_read <config-dir>
 #   Sets FP_SCRATCH_ROOT_CFG, FP_TASK_CLEANUP, FP_TASK_TMPDIR, FP_DOCKER_LABELS,
-#   FP_CACHE_CAP_GB (empty means no cap), FP_ORPHAN_GRACE_HOURS and
-#   FP_OLD_TASK_DAYS. Returns 1 with FP_CONFIG_ERROR set for an unsafe,
+#   FP_CACHE_CAP_GB (empty means no cap), FP_ORPHAN_GRACE_HOURS,
+#   FP_OLD_TASK_DAYS and FP_KEEP_WARN_MB. Returns 1 with FP_CONFIG_ERROR set for an unsafe,
 #   unreadable or malformed file, leaving the defaults in place.
 fm_footprint_config_read() {  # <config-dir>
   local file="$1/footprint" line key value rest n=0 seen=' '
@@ -93,6 +93,7 @@ fm_footprint_config_read() {  # <config-dir>
   FP_CACHE_CAP_GB=
   FP_ORPHAN_GRACE_HOURS=24
   FP_OLD_TASK_DAYS=30
+  FP_KEEP_WARN_MB=200
   FP_CONFIG_ERROR=
   [ -e "$file" ] || [ -L "$file" ] || return 0
   if [ -L "$file" ] || [ ! -f "$file" ] || [ ! -r "$file" ]; then
@@ -143,12 +144,16 @@ fm_footprint_config_read() {  # <config-dir>
         }
         FP_CACHE_CAP_GB=$value
         ;;
-      orphan-grace-hours|old-task-days)
+      orphan-grace-hours|old-task-days|keep-warn-mb)
         _fm_footprint_whole "$value" || {
           FP_CONFIG_ERROR="$file line $n: '$key' must be a whole number"
           return 1
         }
-        if [ "$key" = orphan-grace-hours ]; then FP_ORPHAN_GRACE_HOURS=$value; else FP_OLD_TASK_DAYS=$value; fi
+        case "$key" in
+          orphan-grace-hours) FP_ORPHAN_GRACE_HOURS=$value ;;
+          old-task-days) FP_OLD_TASK_DAYS=$value ;;
+          keep-warn-mb) FP_KEEP_WARN_MB=$value ;;
+        esac
         ;;
       *)
         FP_CONFIG_ERROR="$file line $n: unknown key '$key'"

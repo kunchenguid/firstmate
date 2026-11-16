@@ -980,6 +980,7 @@ docker-labels on                   # export FM_DOCKER_LABEL and COMPOSE_PROJECT_
 cache-cap-gb 50                    # shared download-cache cap for this machine; absent means report only
 orphan-grace-hours 24              # age before the daily pass removes a scratch area whose task has no record
 old-task-days 30                   # age before a finished task folder's rebuildable entries are offered
+keep-warn-mb 200                   # a closed task whose kept folder is larger is flagged, never trimmed
 ```
 
 `scratch-root` must be absolute, at most 64 bytes, and outside this home's `data/` and `projects/`, because temp paths under it must stay within the 104-byte Unix socket limit on macOS.

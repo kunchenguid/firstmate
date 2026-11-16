@@ -209,9 +209,17 @@ volume	foreign	firstmate.task=00000000/task-x1
 container	plain	" "$(cat "$FB/docker.objects")" "only this task's labelled objects may be removed"
   assert_no_grep 'prune' "$FB/docker.log" "close-time cleanup must never prune"
   assert_present "$H/data/task-x1/brief.md" "kept records must stay"
-  out=$(awk -F '\t' '{ print $2, $3, $6, $7, $8 }' "$H/data/footprint-ledger.tsv")
+  out=$(awk -F '\t' 'NR == 1 { print $2, $3, $6, $7, $8 }' "$H/data/footprint-ledger.tsv")
   assert_equals "task-x1 projects/demo 5 removed removed" "$out" "one ledger line must record the close"
   case "$(awk -F '\t' '{print $5}' "$H/data/footprint-ledger.tsv")" in ''|*[!0-9]*|0) fail "the ledger must record the scratch bytes removed" ;; esac
+  assert_equals "-" "$(awk -F '\t' '{print $9}' "$H/data/footprint-ledger.tsv")" "a small kept folder must not be flagged"
+  # A kept folder over keep-warn-mb is flagged and kept whole.
+  printf 'scratch-root %s\nkeep-warn-mb 0\n' "$SHORT/$CASE" > "$H/config/footprint"
+  head -c 2000000 /dev/zero > "$H/data/task-x1/evidence.bin"
+  out=$(fp task-close task-x1 "")
+  assert_contains "$out" "Kept folder data/task-x1 is" "an oversized kept folder must be named"
+  assert_present "$H/data/task-x1/evidence.bin" "an oversized kept folder must be kept whole"
+  assert_equals "oversized" "$(awk -F '\t' 'END {print $9}' "$H/data/footprint-ledger.tsv")" "the ledger must flag the oversized folder"
   mode=$(stat -f %Lp "$H/data/footprint-ledger.tsv" 2>/dev/null || stat -c %a "$H/data/footprint-ledger.tsv")
   assert_equals 600 "$mode" "the ledger must be private"
   pass "task-close removes the scratch area and only the task's labelled Docker material"
