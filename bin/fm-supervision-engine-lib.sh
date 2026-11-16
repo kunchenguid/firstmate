@@ -439,8 +439,7 @@ fm_supervision_engine_result() {
         const complete = j.type === "result" && j.subtype === "success" && j.is_error === false
           && finite(j.total_cost_usd) && finite(j.num_turns) && finite(u.input_tokens)
           && finite(u.cache_read_input_tokens) && finite(u.cache_creation_input_tokens) && finite(u.output_tokens);
-        const denied = Array.isArray(j.permission_denials) ? j.permission_denials.length
-          : j.permission_denials == null ? 0 : 1;
+        const denied = Array.isArray(j.permission_denials) ? j.permission_denials.length : 0;
         const error = complete ? 0 : 1;
         const total = n(j.total_cost_usd);
         const prior = Number(process.argv[2]);

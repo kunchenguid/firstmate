@@ -64,6 +64,29 @@ test_refused_call_on_a_turn_that_handled_its_wake_keeps_it_handled() {
   pass "host: a turn that handled its wake stays handled when one of its calls was refused, and its ledger line records the refusal"
 }
 
+# The result's denied count is the length of its permission_denials list; a
+# missing field or any value that is not a list records no refusal.
+test_engine_result_counts_refusals_only_from_a_permission_denials_list() {
+  local dir file value want got
+  dir="$TMP_ROOT/result-denied"; mkdir -p "$dir"
+  for value in '[{"tool_name":"Bash"},{"tool_name":"Read"}]=2' '[]=0' 'absent=0' 'null=0' 'false=0' '0=0' '""=0' '"Bash"=0' '{}=0' '{"tool_name":"Bash"}=0'; do
+    want=${value##*=}; value=${value%=*}
+    file="$dir/result.json"
+    {
+      printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.25,'
+      [ "$value" = absent ] || printf '"permission_denials":%s,' "$value"
+      printf '"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20}}\n'
+    } > "$file"
+    got=$(bash -c '. "$1"; fm_supervision_engine_result claude "$2"' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$file") \
+      || fail "the engine result with permission_denials $value could not be read"
+    case "$got" in
+      "error=0 "*" denied=$want") ;;
+      *) fail "permission_denials $value must read as error=0 with denied=$want, got: $got" ;;
+    esac
+  done
+  pass "engine result: denied counts the entries of a permission_denials list and is 0 for any other value"
+}
+
 test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
   local home
   home=$(make_home away-latch away)
@@ -711,6 +734,7 @@ test_superseded_host_leaves_the_owner_untouched() {
 }
 
 fm_test_run \
+  test_engine_result_counts_refusals_only_from_a_permission_denials_list \
   test_latch_trips_after_two_engine_errors_then_probes_and_recovers \
   test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch \
   test_refused_call_on_a_turn_that_handled_its_wake_keeps_it_handled \
