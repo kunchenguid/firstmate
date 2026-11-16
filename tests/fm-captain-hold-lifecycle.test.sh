@@ -2469,6 +2469,61 @@ SH
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
+# A board answer typed with accents must be recorded as the captain typed it.
+# One call's note stays inside Latin-1 and the other's carries a character above
+# it, because the two used to corrupt differently: the first came out as bare
+# Latin-1 bytes, the second as a double-encoded element label.
+test_board_answer_keeps_non_ascii_text() {
+  local home sid stub out show
+  home=$(make_home board-utf8)
+  sid=lavish-b0a4d0000000f1e3
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+
+  run_captain "$home" hold sample-accent-call --title "Choose the accented route" \
+    --reason "captain accented choice pending" --repo sample >/dev/null \
+    || fail "could not register the accented call"
+  run_captain "$home" hold sample-arrow-call --title "Choose the arrow route" \
+    --reason "captain arrow choice pending" --repo sample >/dev/null \
+    || fail "could not register the arrow call"
+
+  stub="$home/board-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: true
+prompts[2]{tag,text,prompt}:
+  "choice","Decisão: não, só depois da revisão","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-accent-call\",\"selection\":\"\",\"note\":\"não, só depois da revisão\"}"
+  "choice","Ação: revisar → depois","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-arrow-call\",\"selection\":\"\",\"note\":\"revisar → depois\"}"
+OUT
+SH
+  chmod +x "$stub"
+
+  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+    || fail "could not register the accented board source"
+  run_captain "$home" bind "$sid" >/dev/null \
+    || fail "could not bind the accented board source to the keyed-answer intake"
+  out=$(run_procevent "$home" start "$sid" 2>&1) \
+    || fail "the accented board source runner did not complete: $out"
+  assert_contains "$out" "answers-fed: $sid" \
+    "the accented board answer never reached the keyed-answer intake: $out"
+
+  show=$(tasks_in "$home" show sample-accent-call --full)
+  assert_contains "$show" "state: done" "the accented board answer did not close its call"
+  assert_contains "$show" "Answer: não, só depois da revisão" \
+    "the accented board answer was not recorded as typed"
+  assert_contains "$show" "Answer as shown to the captain: Decisão: não, só depois da revisão" \
+    "the accented board label was not recorded as shown"
+  show=$(tasks_in "$home" show sample-arrow-call --full)
+  assert_contains "$show" "state: done" "the arrow board answer did not close its call"
+  assert_contains "$show" "Answer: revisar → depois" \
+    "the board answer beyond Latin-1 was not recorded as typed"
+  assert_contains "$show" "Answer as shown to the captain: Ação: revisar → depois" \
+    "the accented label beside a wide answer was not recorded as shown"
+  pass "a board answer with accented text is recorded exactly as the captain typed it"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -5151,6 +5206,7 @@ test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
+test_board_answer_keeps_non_ascii_text
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
