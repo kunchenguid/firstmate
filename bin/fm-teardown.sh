@@ -176,6 +176,11 @@
 # through metadata publication, closing the publication
 # gap; forced secondmate teardown takes it and runs the same checks for every
 # descendant Treehouse slot before touching any child.
+# A task's own teardown waits up to FM_TEARDOWN_TREEHOUSE_LOCK_WAIT_SECS
+# (default 120) for that lock instead of refusing on first contention: a
+# concurrent spawn holds it only for a bounded allocation, and a refusal here
+# leaves a merged task's cleanup with no owner to retry it. A wait that runs
+# out still refuses with nothing changed.
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
@@ -595,7 +600,9 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
       echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
       exit 1
     }
-    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+    TREEHOUSE_LOCK_WAIT_SECS=${FM_TEARDOWN_TREEHOUSE_LOCK_WAIT_SECS:-120}
+    case "$TREEHOUSE_LOCK_WAIT_SECS" in ''|*[!0-9]*) TREEHOUSE_LOCK_WAIT_SECS=120 ;; esac
+    fm_lock_acquire_wait_max "$TREEHOUSE_PROJECT_LOCK" "$((10#$TREEHOUSE_LOCK_WAIT_SECS))" || {
       echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
       exit 1
     }
