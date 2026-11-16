@@ -119,6 +119,16 @@ test_gate_holds_every_step() {
       replies-file) printf 'x\n' >"$CASE/state/pending-replies" ;;
       inbox-file) printf 'x\n' >"$CASE/state/inbox" ;;
       no-backlog) rm -rf "$CASE/data"; printf 'x\n' >"$CASE/data" ;;
+      queue-torn) printf 'torn pending wake\n' >"$CASE/state/.wake-queue" ;;
+      queue-unterminated) printf '1\t2030\tsignal\tt1\tsignal: t1 do' >"$CASE/state/.wake-queue" ;;
+      queue-mixed) printf '1\t2030\tsignal\tt1\tsignal: t1 done\ngarbage\n' >"$CASE/state/.wake-queue" ;;
+      queue-badseq) printf '1\tx\tsignal\tt1\tsignal: t1 done\n' >"$CASE/state/.wake-queue" ;;
+      store-dangling) ln -s "$CASE/missing.jsonl" "$CASE/state/branch-outcomes.jsonl" ;;
+      store-dir) mkdir "$CASE/state/branch-outcomes.jsonl" ;;
+      replies-dangling) ln -s "$CASE/missing-dir" "$CASE/state/pending-replies" ;;
+      inbox-dangling) ln -s "$CASE/missing-dir" "$CASE/state/inbox" ;;
+      afk-dangling) ln -s "$CASE/missing" "$CASE/state/.afk" ;;
+      handoff-dangling) ln -s "$CASE/missing" "$CASE/state/.supervision-handoff-pending" ;;
     esac
     assert_equals "waiting:$reason" "$(step "$CASE")" "$name must hold the save step"
     [ ! -s "$CASE/typed" ] || fail "$name: a held step typed: $(typed)"
@@ -143,6 +153,16 @@ queue-dir|an unreadable wake queue
 replies-file|an unreadable pending-reply record
 inbox-file|an unreadable captain inbox
 no-backlog|an unreadable captain-held list
+queue-torn|an unreadable wake queue
+queue-unterminated|an unreadable wake queue
+queue-mixed|an unreadable wake queue
+queue-badseq|an unreadable wake queue
+store-dangling|an unreadable outcome store
+store-dir|an unreadable outcome store
+replies-dangling|an unreadable pending-reply record
+inbox-dangling|an unreadable captain inbox
+afk-dangling|away or quiet mode
+handoff-dangling|a supervision handoff
 ROWS
   # The same gate holds the clear step after a save.
   new_case gate-clear
@@ -152,6 +172,29 @@ ROWS
   printf 'needs-decision [at=1] [key=pick]: A or B\n' >"$CASE/state/t1.status"
   assert_equals 'waiting:an open decision (t1)' "$(step "$CASE" 99999999999)" "an open decision must hold the clear step too"
   [ "$(grep -c . "$CASE/typed")" = 1 ] || fail "a held clear step types nothing after the save: $(typed)"
+  # A damaged input that appears between an attested save and the clear holds
+  # the clear: an interrupted append or a broken link is not proof of quiet.
+  local damage
+  for damage in queue-torn store-dangling replies-dangling; do
+    new_case "clear-$damage"
+    assert_equals saving "$(step "$CASE" 100)" "$damage: the save step runs on a quiet home"
+    stow_turn "$(record nonce)"
+    attest "$(record nonce)" || fail "$damage: the save attempt's own nonce must attest"
+    case "$damage" in
+      queue-torn) printf 'torn pending wake\n' >"$CASE/state/.wake-queue" ;;
+      store-dangling) ln -s "$CASE/missing.jsonl" "$CASE/state/branch-outcomes.jsonl" ;;
+      replies-dangling) ln -s "$CASE/missing-dir" "$CASE/state/pending-replies" ;;
+    esac
+    case "$(step "$CASE" 99999999999)" in
+      waiting:*) ;;
+      *) fail "$damage must hold the clear step" ;;
+    esac
+    if grep -qx /clear "$CASE/typed"; then fail "$damage: /clear was typed"; fi
+  done
+  # Blank lines alone are still an empty queue.
+  new_case queue-blank
+  printf '\n\n' >"$CASE/state/.wake-queue"
+  assert_equals saving "$(step "$CASE")" "a queue of blank lines is empty"
   pass "every gate reason, and every input the gate cannot read, holds both steps and types or records nothing"
 }
 

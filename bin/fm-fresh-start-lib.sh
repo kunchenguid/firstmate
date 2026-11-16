@@ -47,7 +47,10 @@
 #
 # THE GATE. Every step re-checks, and a step is held back while anything could
 # still be waiting on the captain or the current conversation, and whenever one
-# of these inputs cannot be read (fm_fresh_start_waiting prints the first):
+# of these inputs cannot be read (fm_fresh_start_waiting prints the first).
+# A path that exists only as a link, dangling or not, or as the wrong kind of
+# file counts as unreadable, and a wake queue holding anything but whole,
+# well-formed rows counts as unreadable rather than empty:
 #   - an away or quiet record exists (state/.afk);
 #   - a wake is queued and unacknowledged (state/.wake-queue);
 #   - a supervision handoff is pending (state/.supervision-handoff-pending);
@@ -116,22 +119,38 @@ _fm_fresh_start_dir_has() {
 # nothing. FM_HOME must name this home, for the backlog read.
 fm_fresh_start_waiting() {
   local state=$1 rc f open out count
-  if [ -e "$state/.afk" ]; then printf 'away or quiet mode\n'; return 0; fi
-  if [ -e "$state/.wake-queue" ] || [ -L "$state/.wake-queue" ]; then
-    if [ -L "$state/.wake-queue" ] || [ ! -f "$state/.wake-queue" ] || [ ! -r "$state/.wake-queue" ]; then
+  if [ -e "$state/.afk" ] || [ -L "$state/.afk" ]; then printf 'away or quiet mode\n'; return 0; fi
+  f=$state/.wake-queue
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then
       printf 'an unreadable wake queue\n'
       return 0
     fi
+    # Blank lines alone are an empty queue; a row is whole when it has the
+    # five tab-separated fields the queue writer appends, a numeric sequence,
+    # and its newline. A torn append or any other content is not proof of
+    # an empty queue.
     rc=0
-    awk -F '\t' 'NF >= 5 { found = 1; exit } END { exit !found }' "$state/.wake-queue" 2>/dev/null || rc=$?
+    awk -F '\t' '
+      /^[[:space:]]*$/ { next }
+      NF >= 5 && $2 ~ /^[0-9]+$/ { found = 1; next }
+      { bad = 1 }
+      END { exit bad ? 3 : (found ? 0 : 1) }
+    ' "$f" 2>/dev/null || rc=$?
+    if [ "$rc" -ne 3 ] && [ -s "$f" ] && [ "$(tail -c 1 "$f" 2>/dev/null | wc -l | tr -d ' ')" != 1 ]; then
+      rc=3
+    fi
     case "$rc" in
     0) printf 'a queued wake\n'; return 0 ;;
     1) ;;
     *) printf 'an unreadable wake queue\n'; return 0 ;;
     esac
   fi
-  if [ -e "$state/.supervision-handoff-pending" ]; then printf 'a supervision handoff\n'; return 0; fi
-  if [ -e "$state/pending-replies" ]; then
+  if [ -e "$state/.supervision-handoff-pending" ] || [ -L "$state/.supervision-handoff-pending" ]; then
+    printf 'a supervision handoff\n'
+    return 0
+  fi
+  if [ -e "$state/pending-replies" ] || [ -L "$state/pending-replies" ]; then
     rc=0
     _fm_fresh_start_dir_has "$state/pending-replies" ! -name '.*' || rc=$?
     case "$rc" in
@@ -139,7 +158,14 @@ fm_fresh_start_waiting() {
     2) printf 'an unreadable pending-reply record\n'; return 0 ;;
     esac
   fi
-  if [ -e "$state/branch-outcomes.jsonl" ] || [ -L "$state/branch-outcomes.jsonl" ]; then
+  f=$state/branch-outcomes.jsonl
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    # The store's reader reads a missing file as empty, so a link or an
+    # irregular file is refused here before it is asked.
+    if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then
+      printf 'an unreadable outcome store\n'
+      return 0
+    fi
     if ! out=$(FM_STATE_OVERRIDE="$state" "$FM_FRESH_START_LIB_DIR/fm-branch-outcome.sh" unread 2>/dev/null); then
       printf 'an unreadable outcome store\n'
       return 0
@@ -154,7 +180,7 @@ fm_fresh_start_waiting() {
     fi
     if [ -n "$out" ]; then printf 'an unprocessed captain outcome\n'; return 0; fi
   fi
-  if [ -e "$state/inbox" ]; then
+  if [ -e "$state/inbox" ] || [ -L "$state/inbox" ]; then
     rc=0
     _fm_fresh_start_dir_has "$state/inbox" -name '*.note' || rc=$?
     case "$rc" in
