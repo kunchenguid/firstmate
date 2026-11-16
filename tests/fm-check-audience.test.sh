@@ -12,8 +12,8 @@
 #   2. a supervision-audience check's wake is branch-eligible while attended,
 #      a main-audience or tampered one stays main's, and away is unchanged;
 #   3. 5, 100 and 1000 registered checks that print nothing produce no wake at
-#      all, while one that prints produces exactly its own wake (timings and
-#      sizes are printed as evidence).
+#      all, while one that prints, run after all of them, produces exactly its
+#      own wake (timings are printed as evidence).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -90,45 +90,30 @@ test_routing() {
 }
 
 test_silent_checks_never_wake() {
-  local n state dir i out start ms pid bytes
+  local n state dir i out start ms rows
   for n in 5 100 1000; do
-    dir=$(make_case "silent-$n")
+    dir=$(make_case "scale-$n")
     state="$dir/state"
+    out="$dir/watch.out"
     for i in $(seq 1 "$n"); do
       write_check "$state" "quiet-$i" ''
       FM_STATE_OVERRIDE="$state" "$REGISTER" "quiet-$i" >/dev/null || fail "register quiet-$i"
     done
-    out="$dir/watch.out"
+    # The watcher runs checks in name order and wakes on the first finding, so
+    # a finder that sorts last is reached only after every silent check ran
+    # without waking: one wake, and only the finder's, proves both halves.
+    write_check "$state" zz-finder 'found it'
+    FM_STATE_OVERRIDE="$state" "$REGISTER" zz-finder >/dev/null
     start=$(perl -MTime::HiRes=time -e 'printf "%d", time*1000')
     PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 \
       FM_HEARTBEAT=999999 "$WATCH" >"$out" 2>&1 &
-    pid=$!
-    # One full check pass has run once .last-check exists; nothing may wake.
-    i=0
-    while [ ! -e "$state/.last-check" ] && [ "$i" -lt 1200 ]; do sleep 0.1; i=$((i + 1)); done
-    ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
-    [ -e "$state/.last-check" ] || fail "$n silent checks: the watcher never finished a check pass"
-    sleep 1
-    kill -TERM "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
-    if grep -q '^check:' "$out"; then fail "$n silent checks produced a wake: $(head -3 "$out")"; fi
-    [ ! -s "$state/.wake-queue" ] || fail "$n silent checks queued a wake row"
-    bytes=$(wc -c <"$out" | tr -d ' ')
-    printf '# scale: %s silent checks -> first pass in %s ms, 0 wakes, %s bytes of watcher output\n' "$n" "$ms" "$bytes"
-    dir=$(make_case "finder-$n")
-    state="$dir/state"
-    out="$dir/watch.out"
-    for i in $(seq 1 "$n"); do
-      write_check "$state" "quiet-$i" ''
-      FM_STATE_OVERRIDE="$state" "$REGISTER" "quiet-$i" >/dev/null || fail "register quiet-$i"
-    done
-    write_check "$state" finder 'found it'
-    FM_STATE_OVERRIDE="$state" "$REGISTER" finder >/dev/null
-    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 \
-      FM_HEARTBEAT=999999 "$WATCH" >"$out" 2>&1 &
     wait_for_exit "$!" 1200 || fail "$n checks: the watcher did not wake for the one finding"
+    ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
     assert_equals 1 "$(grep -c '^check:' "$out")" "$n checks: exactly one wake for the one finding"
-    grep -qF "check: $state/finder.check.sh: found it" "$out" || fail "$n checks: the wake is not the finder's: $(cat "$out")"
+    grep -qF "check: $state/zz-finder.check.sh: found it" "$out" || fail "$n checks: the wake is not the finder's: $(cat "$out")"
+    rows=$(grep -c . "$state/.wake-queue" 2>/dev/null || true)
+    assert_equals 1 "${rows:-0}" "$n checks: exactly one queued wake row"
+    printf '# scale: %s silent checks then one finding -> one wake after %s ms, 0 wakes from the silent ones\n' "$n" "$ms"
   done
   pass "at 5, 100 and 1000 checks, silence wakes nothing and one finding wakes exactly once"
 }
