@@ -593,8 +593,15 @@ test_report_platform_linux_and_wsl() {
   out=$(FM_PROC_ROOT_OVERRIDE="$proc" fp report --json | jq -r .platform)
   assert_equals "Linux" "$out" "a plain Linux kernel must be named"
   rm -f "$FB/uname"
+  # A home with an empty data/ folder, or none at all, holds no records: 0, not unknown.
+  out=$(fp report --json | jq -r .disk.records_and_evidence_kb)
+  assert_equals "0" "$out" "an empty data/ folder must report 0"
+  rmdir "$H/data"
+  out=$(fp report --json | jq -r .disk.records_and_evidence_kb)
+  assert_equals "0" "$out" "a home with no data/ folder must report 0"
+  mkdir -p "$H/data"
   unset FM_FOOTPRINT_TMP_ROOT FM_FOOTPRINT_SYSTEM_TMPDIR FM_FOOTPRINT_CACHE_NAMES
-  pass "the report names Linux and Linux under WSL"
+  pass "the report names Linux and Linux under WSL, and an empty or absent data/ folder as 0"
 }
 
 fm_test_run \

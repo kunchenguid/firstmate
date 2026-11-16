@@ -981,7 +981,7 @@ fp_scratch_summary() {  # sets FP_S_HOME_KB FP_S_HOME_N FP_S_ORPHAN_N FP_S_OTHER
 }
 
 cmd_report() {  # [--json] [--days N]
-  local json=0 days=7 work platform free data_kb top tmp_kb tmp_n tmpdir_kb slash_tmp slash_tmp_kb sys_tmp
+  local json=0 days=7 work platform free data_kb d top tmp_kb tmp_n tmpdir_kb slash_tmp slash_tmp_kb sys_tmp
   local docker_rows docker_lab_c docker_lab_v docker_img_kb caches_total cap name path kb last trim
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -997,7 +997,12 @@ cmd_report() {  # [--json] [--days N]
   # One bounded walk of data/ gives both the total and the per-folder sizes.
   : > "$work/top"
   data_kb=
-  if [ -d "$DATA_DIR" ] && fm_run_timed 120 du -sk "$DATA_DIR"/* </dev/null > "$work/du" 2>/dev/null; then
+  local -a data_entries=()
+  [ ! -d "$DATA_DIR" ] || for d in "$DATA_DIR"/* "$DATA_DIR"/.[!.]*; do [ -e "$d" ] || [ -L "$d" ] && data_entries+=("$d"); done
+  # A home with no data/ folder, or an empty one, holds no records: 0, not unknown.
+  if [ "${#data_entries[@]}" -eq 0 ]; then
+    data_kb=0
+  elif fm_run_timed 120 du -sk "${data_entries[@]}" </dev/null > "$work/du" 2>/dev/null; then
     data_kb=$(awk '{ t += $1 } END { printf "%d\n", t }' "$work/du")
     while IFS='	' read -r kb d; do
       { [ -d "$d" ] && [ ! -L "$d" ] && fp_task_folder "$d"; } || continue
