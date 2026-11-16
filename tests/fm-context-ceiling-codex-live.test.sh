@@ -55,6 +55,9 @@ $(cat "$launchlog")" | awk 'prev == "-c" && /^model_auto_compact_token_limit=/ {
 # records that session's rollout holds.
 # Standard input is closed: codex exec reads a piped one as part of the
 # prompt, so an inherited channel would change what the run measures.
+# Codex shortens each command's output to about 16,000 characters, so one cat
+# of the file reaches only about 17,000 tokens of context, too close to the
+# 20,000 ceiling to separate it reliably; four separate reads pass it clearly.
 compactions() {  # <label> [-c override...]
   local label=$1 scratch rollout i
   shift
@@ -65,7 +68,7 @@ compactions() {  # <label> [-c override...]
   done >"$scratch/big.txt"
   (cd "$scratch" && codex exec --skip-git-repo-check -m "$MODEL" -c 'model_reasoning_effort="low"' "$@" \
     --dangerously-bypass-approvals-and-sandbox \
-    'Run: cat big.txt. Then run: cat big.txt again. Then reply with only the word DONE.' </dev/null) >"$scratch.out" 2>&1 \
+    'Run these four commands one at a time, each as its own command: sed -n 1,500p big.txt; sed -n 501,1000p big.txt; sed -n 1001,1500p big.txt; sed -n 1,500p big.txt. Then reply with only the word DONE.' </dev/null) >"$scratch.out" 2>&1 \
     || fail "codex $CODEX_VERSION: the $label run failed: $(tail -5 "$scratch.out")"
   rollout=$(grep -rlF "\"cwd\":\"$scratch\"" "$CODEX_SESSIONS" 2>/dev/null | head -1)
   [ -n "$rollout" ] || rollout=$(grep -rlF "$scratch" "$CODEX_SESSIONS" 2>/dev/null | head -1)
