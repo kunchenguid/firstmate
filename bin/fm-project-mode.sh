@@ -293,7 +293,7 @@ case "$forge" in
     case "$forge_cli" in
       tea|fgj|fj) forge=forgejo ;;
       *)
-        echo "refused: unknown Forgejo CLI \"$forge_cli\" in the binding \"$forge\" registered for $NAME in $REG; the accepted Forgejo CLIs are forge=forgejo:tea, forge=forgejo:fgj, and forge=forgejo:fj, or forge=forgejo alone to follow what is installed; correct the registry entry" >&2
+        echo "refused: unknown Forgejo CLI \"$forge_cli\" in the binding \"$forge\" registered for $NAME in $REG; the accepted Forgejo CLIs are forge=forgejo:tea, forge=forgejo:fgj, and forge=forgejo:fj, or forge=forgejo alone for tea; correct the registry entry" >&2
         exit 3 ;;
     esac ;;
   forge=)

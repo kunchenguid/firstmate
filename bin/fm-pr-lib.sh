@@ -1353,17 +1353,14 @@ FIELDS
 # A CLI is selected by explicit configuration first: a project's registered
 # `forge=forgejo:<cli>` registry binding names the CLI and that CLI is then
 # required to be installed and to hold a login for <host>, or the run refuses.
-# `auto` (no binding, or an empty one) means tea and only tea, so an unmodified
-# home keeps today's behaviour exactly: nothing starts using a different CLI's
-# stored login because tea happened to have none for this host. fgj is
-# therefore opt-in, reached only when a project names it.
-# FM_PR_FORGEJO_CLI_ORDER is the list `auto` walks and intentionally holds tea
-# alone; the resolved CLI must still hold exactly one login for <host>. Zero
-# logins for <host> in that CLI's own store, or several, refuses rather than
-# guesses, mirroring the tea login match this block replaces.
-
-# The CLIs `auto` tries, in order. tea only: see the selection note above.
-FM_PR_FORGEJO_CLI_ORDER='tea'
+# `auto` (no binding, or an empty one) means tea and only tea - not a search
+# that walks the installed CLIs - so an unmodified home keeps today's behaviour
+# exactly: nothing starts using a different CLI's stored login because tea
+# happened to have none for this host. fgj is therefore opt-in, reached only
+# when a project names it. The resolved CLI must still hold exactly one login
+# for <host>: zero logins for <host> in that CLI's own store, or several,
+# refuses rather than guesses, mirroring the tea login match this block
+# replaces.
 
 # The CLI and host login fm_pr_forgejo_resolve selected: consumed by the
 # fm_pr_forgejo_* helpers below and by every caller's own diagnostics.
@@ -1457,12 +1454,12 @@ fm_pr_forgejo_cli_login() {  # <cli> <host>
 # Resolve the Forgejo CLI and its own host login for <host> in one place.
 # <preference> is `auto` (or empty) or one of tea|fgj|fj. An explicit preference
 # is honored and REFUSED when that CLI is not installed or holds no single login
-# for <host>, rather than silently falling back to another CLI; `auto` walks
-# FM_PR_FORGEJO_CLI_ORDER, which holds tea alone, and takes the first installed
-# CLI holding exactly one login for <host>. So `auto` resolves to tea or not at
-# all: fgj and fj are reachable only by an explicit preference. Sets
-# FM_PR_FORGEJO_CLI and FM_PR_FORGEJO_LOGIN and returns 0 on success; clears
-# both and returns 1 otherwise.
+# for <host>, rather than silently falling back to another CLI; `auto` resolves
+# to tea and only tea, refusing when tea is absent or holds no single login for
+# <host>. So `auto` never adopts another CLI's stored login: fgj and fj are
+# reachable only by an explicit preference. Sets FM_PR_FORGEJO_CLI and
+# FM_PR_FORGEJO_LOGIN and returns 0 on success; clears both and returns 1
+# otherwise.
 # The caller decides whether the resolved CLI can serve the operation it needs
 # (fm_pr_forgejo_cli_api_capable); this function only answers "which CLI, which
 # login", so a caller can report `fj` by name instead of reporting nothing.
@@ -1485,15 +1482,15 @@ fm_pr_forgejo_resolve() {  # <host> [<preference>]
       ;;
     *) return 1 ;;
   esac
-  for cli in $FM_PR_FORGEJO_CLI_ORDER; do
-    fm_pr_forgejo_cli_installed "$cli" || continue
-    login=$(fm_pr_forgejo_cli_login "$cli" "$host") || continue
-    [ -n "$login" ] || continue
-    FM_PR_FORGEJO_CLI=$cli
-    FM_PR_FORGEJO_LOGIN=$login
-    return 0
-  done
-  return 1
+  # `auto` is tea and only tea. A direct attempt, not a walk over a candidate
+  # list: an unnamed project must never adopt fgj's or fj's stored login, so
+  # there is no ordered fallback to search.
+  fm_pr_forgejo_cli_installed tea || return 1
+  login=$(fm_pr_forgejo_cli_login tea "$host") || return 1
+  [ -n "$login" ] || return 1
+  FM_PR_FORGEJO_CLI=tea
+  FM_PR_FORGEJO_LOGIN=$login
+  return 0
 }
 
 # One authenticated REST request through the CLI fm_pr_forgejo_resolve chose.
