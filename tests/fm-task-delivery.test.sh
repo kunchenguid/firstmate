@@ -1896,10 +1896,11 @@ EOF
   pass "forge=forgejo:fj is refused at promotion rather than downgraded to tea"
 }
 
-# A bare forge=forgejo binding resolves auto at promotion the same way the brief
-# and the merge path do, so an fgj-only home that names no CLI receives an fgj
-# contract rather than a tea one. The clone's origin is the host signal.
-test_forge_forgejo_promotion_resolves_auto() {
+# A bare forge=forgejo binding is opt-in, not new-default: auto means tea and
+# only tea, so promotion must keep the tea contract even on a home where fgj is
+# installed and logged in. Adopting fgj's stored login for a project that named
+# no CLI would ship work under a tool the captain never chose.
+test_forge_forgejo_promotion_keeps_auto_on_tea() {
   local rec home proj fakebin id meta payload
   rec=$(make_home forge-forgejo-auto "- proj [direct-PR +yolo forge=forgejo] - fixture (added 2026-01-01)")
   IFS='|' read -r home proj fakebin <<EOF
@@ -1907,6 +1908,8 @@ $rec
 EOF
   git -C "$proj" remote add origin https://forgejo.example/o/r.git \
     || fail "could not set the promotion clone origin"
+  # tea holds no login for this host while fgj is installed and does. Under the
+  # opt-in rule that must change nothing, so the tea contract still stands.
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tea"
   cat > "$fakebin/fgj" <<'SH'
 #!/usr/bin/env bash
@@ -1921,14 +1924,14 @@ SH
     || fail "scout brief generation should succeed"
   fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on >/dev/null 2>&1 \
-    || fail "promotion should resolve the auto binding to fgj"
+    || fail "promotion should keep the auto binding on tea"
   payload="$home/data/$id/ship-instructions.md"
   assert_present "$payload" "the promoted ship instructions were not published"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'open a PR with `fgj`' "$payload" "the promoted fgj-only worker was not told to open the PR with fgj"
+  assert_grep 'open a PR with `tea`' "$payload" "an auto-bound worker must be told to open the PR with tea"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_no_grep 'open a PR with `tea`' "$payload" "the promoted fgj-only worker was told to use tea"
-  pass "forge=forgejo promotion resolves auto to the CLI the merge path will use"
+  assert_no_grep 'open a PR with `fgj`' "$payload" "an auto-bound worker must not adopt fgj's login"
+  pass "forge=forgejo promotion keeps auto on tea and never adopts another CLI's login"
 }
 
 # direct-PR composes with the forge: the mode still means "publish without the
@@ -2062,7 +2065,7 @@ test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_forge_forgejo_rides_the_same_binding
 test_forge_forgejo_fj_binding_refuses_promotion
-test_forge_forgejo_promotion_resolves_auto
+test_forge_forgejo_promotion_keeps_auto_on_tea
 test_pr_manual_brief_hands_the_pr_text_to_the_worker
 test_pr_manual_is_refused_where_it_cannot_apply
 test_spawn_requires_the_brief_to_carry_the_registered_pr_text

@@ -2856,14 +2856,16 @@ test_forgejo_merge_method_and_extra_args() {
 
 # fgj keeps its own per-hostname auth store and reaches the API through
 # `fgj api`, so it can serve every read the tea path serves and send the same
-# head_commit_id that binds a merge to the verified head. It resolves on its own
-# when no tea is installed and logged in for the host, which is the shape this
-# case pins: the inherited search path is rebuilt without tea, so `auto` has
-# exactly one API-capable candidate.
+# head_commit_id that binds a merge to the verified head. Choosing it is opt-in:
+# `auto` is tea-and-only-tea, so the project registers the CLI it ships through
+# (forge=forgejo:fgj) and the search path is rebuilt without tea, pinning that
+# the registered binding, not PATH order, is what selects fgj here.
 test_forgejo_fgj_serves_the_reads_and_binds_the_merge() {
   local case_dir rc merge_line
   case_dir=$(make_fgj_case forgejo-fgj-merges)
   mirror_path_without "$case_dir/nocli" tea "$case_dir/fakebin"
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fgj] - fixture (added 2026-01-01)\n' \
+    > "$case_dir/home/data/projects.md"
 
   FM_TEST_PATH_OVERRIDE="$case_dir/nocli" run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
@@ -2933,10 +2935,11 @@ test_forgejo_registered_cli_beats_path_order() {
 }
 
 # forgejo-cli cannot serve firstmate's contract, and the refusal has to say so
-# with the capability it lacks rather than merging or watching unbound. The
-# case's search path is rebuilt so fj is the only Forgejo CLI present and it
-# holds a login for the host; the merge is refused, nothing is recorded, and no
-# poll is left behind.
+# with the capability it lacks rather than merging or watching unbound. A project
+# reaches fj only by registering it (forge=forgejo:fj), because `auto` is
+# tea-and-only-tea; the case registers that binding, its search path is rebuilt
+# so fj is the only Forgejo CLI present, and it holds a login for the host. The
+# merge is refused by name, nothing is recorded, and no poll is left behind.
 test_forgejo_fj_is_refused_with_the_capability_it_lacks() {
   local case_dir rc
   case_dir=$(make_forgejo_case forgejo-fj-only)
@@ -2945,6 +2948,8 @@ test_forgejo_fj_is_refused_with_the_capability_it_lacks() {
   write_fj_auth "$case_dir/fj-auth.txt" "$FJ_HOST"
   mirror_path_without "$case_dir/nocli" tea "$case_dir/fakebin"
   rm -f "$case_dir/nocli/fgj"
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fj] - fixture (added 2026-01-01)\n' \
+    > "$case_dir/home/data/projects.md"
 
   set +e
   FM_TEST_PATH_OVERRIDE="$case_dir/nocli" run_pr_merge "$case_dir" task-x1 "$FJ_URL" \

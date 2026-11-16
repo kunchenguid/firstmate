@@ -3688,7 +3688,11 @@ test_forgejo_arming_resolves_the_forgejo_cli() {
   dir=$(make_case forgejo-arming-cli)
   state="$dir/home/state"
   url=https://forgejo.example/o/r/pulls/7
-  write_poll_meta "$state" task-a "$url"
+  write_poll_meta "$state" task-a "$url" "project=$dir/project"
+  # fgj is opt-in: a project reaches it by registering it, because `auto` is
+  # tea-and-only-tea. Without this binding an fgj-only home would refuse.
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fgj] - fixture (added 2026-01-01)\n' \
+    > "$dir/home/data/projects.md"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   cat > "$dir/fakebin/fgj" <<'SH'
 #!/usr/bin/env bash
@@ -3703,8 +3707,11 @@ SH
     || fail "a Forgejo host on fgj's store should arm: $(cat "$dir/arm-ok.err")"
   [ -f "$state/task-a.check.sh" ] || fail "fgj's host did not produce an armed check"
 
-  # The same host, once forgejo-cli is the only Forgejo CLI left holding it.
+  # The same host, once the project registers forgejo-cli, the only Forgejo CLI
+  # left holding it. That binding is what reaches fj now, and it is refused.
   rm -f "$dir/fakebin/fgj" "$state/task-a.check.sh" "$state/task-a.pr-poll"
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fj] - fixture (added 2026-01-01)\n' \
+    > "$dir/home/data/projects.md"
   cat > "$dir/fakebin/fj" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-} ${2:-}" = "auth list" ]; then
@@ -3756,7 +3763,8 @@ SH
   : > "$dir/fgj.log"
 
   write_poll_meta "$state" task-a "$url"
-  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example o/r 7 "$POLL" \
+  # fgj is reached through the recorded preference, since `auto` is tea-only.
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example o/r 7 "$POLL" fgj \
     || fail "could not prepare an fgj Forgejo poll"
   fm_pr_poll_publish_prepared || fail "could not publish an fgj Forgejo poll"
 
@@ -3769,9 +3777,9 @@ SH
   grep -qF -- "api repos/o/r/pulls/7 --hostname forgejo.example" "$dir/fgj.log" \
     || fail "the poll did not read the one pull request by number through fgj's own hostname"
 
-  # Only forgejo-cli left. It holds a login for this host, so it IS the
-  # resolved CLI, and the poll must still stay silent because it cannot read
-  # the record at all.
+  # fgj removed, so the recorded preference cannot be served: the poll must
+  # stay silent rather than reach for any other CLI, which is the same
+  # never-invent-a-verdict property the fj refusal protects.
   rm -f "$dir/fakebin/fgj"
   cat > "$dir/fakebin/fj" <<'SH'
 #!/usr/bin/env bash
