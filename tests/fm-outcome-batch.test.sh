@@ -7,7 +7,9 @@
 # Drives fm_outcome_batch_verdict and fm_outcome_batch_due over the real outcome
 # store, read through bin/fm-branch-outcome.sh, and real status logs folded by
 # bin/fm-classify-lib.sh. Rows are written in the store's own line format so a
-# case can date them; the reader validates every one. The host's park-time
+# case can date them; the reader validates every one. A captain row is written
+# marked batchable, as the supervision engine marks a finished result that asks
+# nothing, unless a case says otherwise. The host's park-time
 # release is covered by tests/fm-outcome-batch-host.test.sh.
 set -u
 
@@ -24,10 +26,13 @@ new_case() {  # <name>
   NEXT_SEQ=1
 }
 
-outcome() {  # <task> <summary> [epoch] [wake] [verdict]: append the next row
+outcome() {  # <task> <summary> [epoch] [wake] [verdict] [batchable]: append the next row
   jq -cn --argjson s "$NEXT_SEQ" --arg t "$1" --arg m "$2" --argjson e "${3:-$(date +%s)}" \
-    --arg w "${4:-signal: $1.status}" --arg v "${5:-captain}" \
-    '{seq: $s, epoch: $e, task: $t, wake: $w, verdict: $v, summary: $m}' >>"$CASE/state/branch-outcomes.jsonl"
+    --arg w "${4:-signal: $1.status}" --arg v "${5:-captain}" --arg b "${6:-true}" \
+    '{seq: $s, epoch: $e, task: $t, wake: $w, verdict: $v, summary: $m}
+     | if $v == "captain" and $b == "true"
+       then . + {silent: false, statusEndpoint: 0, statusIdent: "", batchable: true} else . end' \
+    >>"$CASE/state/branch-outcomes.jsonl"
   NEXT_SEQ=$((NEXT_SEQ + 1))
 }
 
@@ -128,6 +133,82 @@ ROWS
   pass "blockers, failures, sign-ins, credentials, reviews, merges, decisions, deletions, security, prod, questions, open earlier keys, unknown or linked status, and unproven rows are never delayed"
 }
 
+# The re-review's case: the engine itself introduces the question while the
+# worker's durable status still says working, so no status record shows it.
+# Only the engine's explicit mark can make an outcome batchable.
+test_only_a_marked_outcome_is_held() {
+  local summary
+  for summary in 'Please select A or B' 'setup finished; continuing with the tests' 'The build is red; intervention required'; do
+    new_case "unmarked-${summary%% *}"
+    status t1 'working [at=1]: continuing'
+    outcome t1 "$summary" '' 'signal: t1.status' captain false
+    assert_equals now "$(verdict 1)" "an unmarked captain outcome goes at once: '$summary'"
+    [ ! -e "$CASE/state/.outcome-batch" ] || fail "an unmarked outcome must leave no hold record"
+  done
+  new_case marked-question
+  status t1 'working [at=1]: continuing'
+  outcome t1 'Please choose A or B'
+  assert_equals now "$(verdict 1)" "a mark never overrides the wording check"
+  new_case mixed-mark
+  status t1 'working [at=1]: continuing'
+  outcome t1 'setup finished'
+  outcome t1 'Please select A or B' '' 'signal: t1.status' captain false
+  assert_equals now "$(verdict 1 2)" "one unmarked outcome sends the whole turn now"
+  # The store's own append owns the mark: captain only, absent unless asked.
+  new_case store-append
+  : >"$CASE/state/branch-outcomes.jsonl"
+  status t1 'working [at=1]: continuing'
+  if FM_STATE_OVERRIDE="$CASE/state" "$ROOT/bin/fm-branch-outcome.sh" append --task t1 --verdict routine \
+    --summary 'note' --batchable true >/dev/null 2>&1 </dev/null; then
+    fail "a routine outcome must not be recorded batchable"
+  fi
+  store append --task t1 --verdict captain --summary 'setup finished'
+  store append --task t1 --verdict captain --summary 'tests finished' --batchable true
+  assert_equals 'null true' "$(jq -r '.batchable' "$CASE/state/branch-outcomes.jsonl" | tr '\n' ' ' | sed 's/ $//')" \
+    "the mark is absent by default and recorded when asked"
+  assert_equals now "$(verdict 1)" "a captain row appended without the mark goes at once"
+  assert_equals hold "$(verdict 2)" "a captain row appended with the mark can be held"
+  printf '%s\n' '{"seq":3,"epoch":1,"task":"t1","wake":"","verdict":"routine","summary":"x","silent":false,"statusEndpoint":0,"statusIdent":"","batchable":true}' \
+    >>"$CASE/state/branch-outcomes.jsonl"
+  if FM_STATE_OVERRIDE="$CASE/state" "$ROOT/bin/fm-branch-outcome.sh" unread >/dev/null 2>&1 </dev/null; then
+    fail "the store reader must reject a routine row marked batchable"
+  fi
+  pass "only a captain outcome the engine marked batchable can be held; the store records the mark only on request and rejects it on a routine row"
+}
+
+# The re-review's case: the hold is reported only when its release record was
+# published, so a release can never be lost.
+test_hold_needs_its_release_record() {
+  local kind
+  for kind in directory link failed-rename; do
+    new_case "marker-$kind"
+    status t1 'working [at=1]: on it'
+    outcome t1 'progress note'
+    case "$kind" in
+      directory) mkdir "$CASE/state/.outcome-batch" ;;
+      link) ln -s "$CASE/elsewhere" "$CASE/state/.outcome-batch" ;;
+      failed-rename)
+        mkdir -p "$CASE/bin"
+        printf '#!/bin/sh
+case "$*" in *.outcome-batch) exit 1 ;; esac
+exec /bin/mv "$@"
+' >"$CASE/bin/mv"
+        chmod +x "$CASE/bin/mv" ;;
+    esac
+    assert_equals now "$(PATH="$CASE/bin:$PATH" verdict 1)" "$kind: an unpublished release record sends now"
+    case "$kind" in
+      failed-rename)
+        [ ! -e "$CASE/state/.outcome-batch" ] || fail "a failed rename must leave no record"
+        [ -z "$(find "$CASE/state" -name '.outcome-batch.tmp.*')" ] || fail "a failed rename must remove its temp file" ;;
+      *)
+        due || fail "$kind: an irregular record with an unread captain row is due at once"
+        store mark-read --through 1
+        if due; then fail "$kind: an irregular record with nothing unread is not due"; fi ;;
+    esac
+  done
+  pass "a hold is reported only after its release record is read back; an irregular record sends now and releases anything unread"
+}
+
 test_unreadable_store() {
   new_case all-bad
   printf 'not json\n' >"$CASE/state/branch-outcomes.jsonl"
@@ -192,7 +273,7 @@ test_scale() {
     new_case "turn-$n"
     seqs=()
     for i in $(seq 1 "$n"); do
-      printf '{"seq":%s,"epoch":%s,"task":"t%s","wake":"signal: t%s.status","verdict":"captain","summary":"progress note"}\n' "$i" "$(date +%s)" "$i" "$i"
+      printf '{"seq":%s,"epoch":%s,"task":"t%s","wake":"signal: t%s.status","verdict":"captain","summary":"progress note","silent":false,"statusEndpoint":0,"statusIdent":"","batchable":true}\n' "$i" "$(date +%s)" "$i" "$i"
       printf 'working [at=1]: on it\n' >"$CASE/state/t$i.status"
       seqs+=("$i")
     done >"$CASE/state/branch-outcomes.jsonl"
@@ -223,6 +304,8 @@ test_scale() {
 
 test_off_and_routine_hold
 test_never_delayed
+test_only_a_marked_outcome_is_held
+test_hold_needs_its_release_record
 test_unreadable_store
 test_window_and_release
 test_scale

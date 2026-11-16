@@ -23,6 +23,10 @@
 #   - it is one of the turn's captain rows, read back through the outcome
 #     store's own validating reader (bin/fm-branch-outcome.sh lookup), so a
 #     malformed or partly written store is never trusted;
+#   - the supervision engine marked it batchable when it reported it
+#     (bin/fm-branch-report.sh --batchable true, recorded in the row), its
+#     explicit claim that the outcome asks nothing of anyone; a row without
+#     that mark always goes at once, whatever its wording;
 #   - its task has a status log that is a readable regular file, whose newest
 #     line is working, paused, note, or resolved, and whose folded open set
 #     (status_open_decisions, the authoritative fold) is empty, so an earlier
@@ -32,7 +36,9 @@
 #     link, decision, approval, deletion, security, secret, production,
 #     incident, or alert, or asks anything (a question mark, or words such as
 #     choose, pick, which, option, prefer, confirm, should, answer).
-# One urgent outcome in a turn makes the whole turn urgent. A turn with more
+# The last two tests are extra protection against a wrong mark, never a
+# reason to hold on their own. One urgent outcome in a turn makes the whole
+# turn urgent. A turn with more
 # than FM_OUTCOME_BATCH_TURN_MAX (20) captain outcomes is already a batch and
 # goes at once, which also bounds the work the rule does per turn. A routine
 # turn is held while the oldest held outcome is younger than the window.
@@ -46,7 +52,10 @@
 #
 # The hold record state/.outcome-batch holds only first=<epoch>, the time the
 # oldest held outcome was recorded; it is removed only once the store proves no
-# captain row is unread.
+# captain row is unread. A turn is held only once that record is read back as
+# a regular file naming its time, so a release can never be lost; anything
+# else at that path sends the turn at once and, while captain rows are unread,
+# releases them at the next check.
 
 FM_OUTCOME_BATCH_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_OUTCOME_BATCH_WINDOW_DEFAULT=600
@@ -113,7 +122,7 @@ _fm_outcome_batch_tasks_routine() {
 # Prints now or hold for a turn that recorded captain outcome rows <seq>...,
 # and keeps the hold record in step. Any unreadable input prints now.
 fm_outcome_batch_verdict() {
-  local config=$1 state=$2 seq csv='' rows count tasks first now
+  local config=$1 state=$2 seq csv='' rows count tasks first now marker
   shift 2
   fm_outcome_batch_config "$config" || { printf 'now\n'; return 0; }
   [ "$#" -gt 0 ] && [ "$#" -le "$FM_OUTCOME_BATCH_TURN_MAX" ] || { printf 'now\n'; return 0; }
@@ -124,7 +133,8 @@ fm_outcome_batch_verdict() {
   # One validated read for the whole turn.
   rows=$(_fm_outcome_batch_store "$state" lookup --seqs "$csv") || { printf 'now\n'; return 0; }
   count=$(printf '%s\n' "$rows" | jq -s -r --argjson n "$#" '
-      if length == $n and all(.[]; .verdict == "captain" and (.task | type) == "string") then length else "bad" end' 2>/dev/null)
+      if length == $n and all(.[]; .verdict == "captain" and .batchable == true and (.task | type) == "string")
+      then length else "bad" end' 2>/dev/null)
   [ "$count" = "$#" ] || { printf 'now\n'; return 0; }
   if printf '%s\n' "$rows" | jq -r '"\(.summary // "") \(.wake // "")"' 2>/dev/null \
     | LC_ALL=C grep -Eiq "$FM_OUTCOME_BATCH_URGENT_RE"; then
@@ -141,21 +151,36 @@ fm_outcome_batch_verdict() {
     printf 'now\n'
     return 0
   fi
-  printf 'first=%s\n' "$first" >"$state/.outcome-batch.tmp.$$" && mv -f "$state/.outcome-batch.tmp.$$" "$state/.outcome-batch"
-  printf 'hold\n'
+  # Hold only once the release record is published and read back.
+  marker=$state/.outcome-batch
+  if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+    printf 'now\n'
+    return 0
+  fi
+  if printf 'first=%s\n' "$first" >"$marker.tmp.$$" 2>/dev/null \
+    && mv -f "$marker.tmp.$$" "$marker" 2>/dev/null \
+    && [ -f "$marker" ] && [ ! -L "$marker" ] \
+    && [ "$(cat "$marker" 2>/dev/null)" = "first=$first" ]; then
+    printf 'hold\n'
+    return 0
+  fi
+  rm -f "$marker.tmp.$$" 2>/dev/null
+  printf 'now\n'
 }
 
 # fm_outcome_batch_due <config-dir> <state-dir>: true when held outcomes should
-# reach main now: their window passed, the setting was removed, or the store
-# cannot be read. Removes the hold record only once no captain row is unread.
+# reach main now: their window passed, the setting was removed, the store
+# cannot be read, or the hold record is not a regular file. Removes the hold
+# record only once no captain row is unread.
 fm_outcome_batch_due() {
-  local config=$1 state=$2 first
-  [ -f "$state/.outcome-batch" ] || return 1
+  local config=$1 state=$2 first marker=$2/.outcome-batch
+  [ -e "$marker" ] || [ -L "$marker" ] || return 1
   first=$(_fm_outcome_batch_first_unread "$state") || return 0
   case "$first" in
-  '') rm -f "$state/.outcome-batch"; return 1 ;;
+  '') rm -f "$marker" 2>/dev/null; return 1 ;;
   *[!0-9]*) return 0 ;;
   esac
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   fm_outcome_batch_config "$config" || return 0
   [ $(($(date +%s) - first)) -ge "$FM_OUTCOME_BATCH_WINDOW" ]
 }
