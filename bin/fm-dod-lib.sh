@@ -331,6 +331,19 @@ fm_brief_task_placeholders_present() {  # <file>
   return 1
 }
 
+# Print the first addendum fill-in token (`{FILL:NAME}`, NAME made of A-Z, 0-9
+# and underscores) a brief still carries and return 0; return 1 with no output
+# when it has none, and for a missing file. A project addendum
+# (config/brief-addenda/<repo>.md) writes such a token where the task must
+# supply a value, so a brief that still carries one was never filled in.
+fm_brief_unfilled_addendum_token() {  # <file>
+  local file=$1 token
+  [ -f "$file" ] || return 1
+  token=$(grep -oE '\{FILL:[A-Z0-9_]+\}' -- "$file" | sed -n 1p)
+  [ -n "$token" ] || return 1
+  printf '%s\n' "$token"
+}
+
 # Print the words of every provenance-marked line in a legacy `# Task` body.
 # The marker is read the way bin/fm-brief-heading-lib.sh reads a heading: a
 # line inside a ``` or ~~~ fenced block, or indented four spaces or a tab as an

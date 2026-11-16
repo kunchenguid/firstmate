@@ -28,7 +28,8 @@
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
-#   placeholders, an empty Task, an incomplete pair of Task subsections, or a
+#   placeholders, a leftover addendum fill-in token `{FILL:NAME}` (the
+#   refusal names it), an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
 #   When config/herdr-lifecycle-spawn-guard exists, a brief naming
 #   bin/fm-herdr-lab.sh or a listed Herdr session/server lifecycle command must
@@ -4495,6 +4496,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
+    exit 1
+  fi
+  if UNFILLED_ADDENDUM_TOKEN=$(fm_brief_unfilled_addendum_token "$BRIEF"); then
+    echo "error: $BRIEF still contains the unfilled addendum token $UNFILLED_ADDENDUM_TOKEN; fill it in the brief before spawn" >&2
     exit 1
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then
