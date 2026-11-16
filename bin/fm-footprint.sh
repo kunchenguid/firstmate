@@ -981,7 +981,7 @@ fp_scratch_summary() {  # sets FP_S_HOME_KB FP_S_HOME_N FP_S_ORPHAN_N FP_S_OTHER
 }
 
 cmd_report() {  # [--json] [--days N]
-  local json=0 days=7 work platform free data_kb d top tmp_kb tmp_n tmpdir_kb slash_tmp slash_tmp_kb sys_tmp
+  local json=0 days=7 work platform free data_kb data_partial d top tmp_kb tmp_n tmpdir_kb slash_tmp slash_tmp_kb sys_tmp
   local docker_rows docker_lab_c docker_lab_v docker_img_kb caches_total cap name path kb last trim
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -996,13 +996,21 @@ cmd_report() {  # [--json] [--days N]
   free=$(fp_free_kb "$FM_HOME")
   # One bounded walk of data/ gives both the total and the per-folder sizes.
   : > "$work/top"
-  data_kb=
+  data_kb='' data_partial=0
+  : > "$work/du"
   local -a data_entries=()
   [ ! -d "$DATA_DIR" ] || for d in "$DATA_DIR"/* "$DATA_DIR"/.[!.]*; do [ -e "$d" ] || [ -L "$d" ] && data_entries+=("$d"); done
   # A home with no data/ folder, or an empty one, holds no records: 0, not unknown.
   if [ "${#data_entries[@]}" -eq 0 ]; then
     data_kb=0
-  elif fm_run_timed 120 du -sk "${data_entries[@]}" </dev/null > "$work/du" 2>/dev/null; then
+  else
+    # du exits non-zero when part of the tree is unreadable but still prints what
+    # it measured: report that as a lower bound marked partial, never a silent total.
+    fm_run_timed 120 du -sk "${data_entries[@]}" </dev/null > "$work/du" 2>/dev/null || data_partial=1
+  fi
+  # Nothing measured at all (a timeout or a wholly unreadable data/) stays unknown.
+  [ -s "$work/du" ] || data_partial=0
+  if [ -s "$work/du" ]; then
     data_kb=$(awk '{ t += $1 } END { printf "%d\n", t }' "$work/du")
     while IFS='	' read -r kb d; do
       { [ -d "$d" ] && [ ! -L "$d" ] && fp_task_folder "$d"; } || continue
@@ -1046,7 +1054,7 @@ cmd_report() {  # [--json] [--days N]
   if [ "$json" = 1 ]; then
     jq -n \
       --arg platform "$platform" --arg host "$(hostname 2>/dev/null || printf unknown)" \
-      --arg free "${free:-}" --arg data "${data_kb:-}" --arg top "$top" \
+      --arg free "${free:-}" --arg data "${data_kb:-}" --arg data_partial "$data_partial" --arg top "$top" \
       --arg s_home "${FP_S_HOME_KB:-}" --arg s_n "$FP_S_HOME_N" --arg s_orph "$FP_S_ORPHAN_N" --arg s_other "${FP_S_OTHER_KB:-}" \
       --arg root "$FP_ROOT" --arg key "$FP_KEY" \
       --arg tmp_kb "$tmp_kb" --arg tmp_n "$tmp_n" --arg sys_tmp "$sys_tmp" --arg sys_tmp_kb "${tmpdir_kb:-}" --arg slash_tmp "${slash_tmp_kb:-}" \
@@ -1057,7 +1065,7 @@ cmd_report() {  # [--json] [--days N]
       def n: if . == "" then null else (tonumber? // null) end;
       def rows: split("\n") | map(select(length > 0) | split("\t"));
       { schema: "fm-footprint-report.v1", host: $host, platform: $platform, free_kb: ($free | n),
-        disk: { records_and_evidence_kb: ($data | n),
+        disk: { records_and_evidence_kb: ($data | n), records_and_evidence_partial: ($data_partial == "1"),
                 largest_task_folders: ($top | rows | map({ task: .[1], kb: (.[0] | n) })),
                 scratch: { root: $root, home_key: $key, this_home_kb: ($s_home | n), areas: ($s_n | n), areas_without_task: ($s_orph | n), other_homes_kb: ($s_other | n) },
                 task_temp_roots: { count: ($tmp_n | n), kb: ($tmp_kb | n) },
@@ -1078,7 +1086,11 @@ cmd_report() {  # [--json] [--days N]
   printf 'Footprint report - %s (%s) - %s\n' "$(hostname 2>/dev/null || printf unknown)" "$platform" "$(date -u '+%Y-%m-%d %H:%M UTC')"
   printf 'Free disk where this home lives: %s\n\n' "$(fp_human "$free")"
   printf 'Disk by kind\n'
-  printf '  records and evidence (data/)      %s\n' "$(fp_human "$data_kb")"
+  if [ "$data_partial" = 1 ]; then
+    printf '  records and evidence (data/)      at least %s (part of data/ was unreadable)\n' "$(fp_human "$data_kb")"
+  else
+    printf '  records and evidence (data/)      %s\n' "$(fp_human "$data_kb")"
+  fi
   if [ -n "$top" ]; then
     printf '%s\n' "$top" | while IFS='	' read -r kb name; do printf '    largest task folder: %s %s\n' "$name" "$(fp_human "$kb")"; done
   fi

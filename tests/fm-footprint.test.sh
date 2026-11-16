@@ -577,6 +577,46 @@ worker codex 1 2 50 0 200 30 150" "$lanes" "allowance must be summed per lane wi
   pass "the report covers disk kinds, Docker absent, leftover processes, and allowance per lane"
 }
 
+test_report_empty_malformed_and_unreadable_inputs() {
+  local out proj
+  CASE=report-inputs
+  new_home "$CASE"
+  export FM_FOOTPRINT_TMP_ROOT="$TMP_ROOT/$CASE/tmp" FM_FOOTPRINT_SYSTEM_TMPDIR='' FM_FOOTPRINT_CACHE_NAMES=''
+  mkdir -p "$FM_FOOTPRINT_TMP_ROOT"
+  # No transcripts at all: the report still completes with no allowance lanes.
+  out=$(fp report --json)
+  printf '%s\n' "$out" | jq -e . >/dev/null || fail "report --json must stay one JSON document with no transcripts: $out"
+  assert_equals "0" "$(printf '%s' "$out" | jq -r '.allowance.lanes | length')" "no transcripts must mean no lanes"
+  # A malformed line and an unreadable transcript are skipped; the readable lines still count.
+  proj="$U/.claude/projects/p"
+  mkdir -p "$proj"
+  {
+    printf '{"type":"assistant","cwd":"/elsewhere","message":{"id":"m1","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2}}}\n'
+    printf '{not json at all\n'
+    printf '\n'
+  } > "$proj/good.jsonl"
+  printf '{"type":"assistant","cwd":"/elsewhere","message":{"id":"m2","usage":{"input_tokens":1000,"output_tokens":1000}}}\n' > "$proj/locked.jsonl"
+  chmod 000 "$proj/locked.jsonl"
+  # An unreadable task folder makes the records size a marked lower bound.
+  mkdir -p "$H/data/readable" "$H/data/locked/inner"
+  head -c 40000 /dev/zero > "$H/data/readable/evidence.bin"
+  chmod 000 "$H/data/locked"
+  out=$(fp report --json)
+  chmod 700 "$H/data/locked"
+  chmod 600 "$proj/locked.jsonl"
+  printf '%s\n' "$out" | jq -e . >/dev/null || fail "report --json must stay one JSON document with bad inputs: $out"
+  assert_equals "other claude 1 1 3 2" "$(printf '%s' "$out" | jq -r '.allowance.lanes[] | "\(.lane) \(.tool) \(.sessions) \(.calls) \(.fresh) \(.output)"')" \
+    "only the readable, well-formed line may count"
+  assert_equals "true" "$(printf '%s' "$out" | jq -r '.disk.records_and_evidence_partial')" "an unreadable task folder must mark the size partial"
+  [ "$(printf '%s' "$out" | jq -r '.disk.records_and_evidence_kb')" -ge 39 ] || fail "the readable part must still be measured: $out"
+  chmod 000 "$H/data/locked"
+  out=$(fp report)
+  chmod 700 "$H/data/locked"
+  assert_contains "$out" "(part of data/ was unreadable)" "the text report must say the size is partial"
+  unset FM_FOOTPRINT_TMP_ROOT FM_FOOTPRINT_SYSTEM_TMPDIR FM_FOOTPRINT_CACHE_NAMES
+  pass "the report completes on missing, malformed, and unreadable inputs and marks a partial size"
+}
+
 test_report_platform_linux_and_wsl() {
   local out proc
   CASE=platform
@@ -617,4 +657,5 @@ fm_test_run \
   test_sweep_removes_only_old_orphaned_scratch \
   test_check_runs_daily_and_reports_changes_once \
   test_report_json_kinds_docker_absent_and_allowance \
+  test_report_empty_malformed_and_unreadable_inputs \
   test_report_platform_linux_and_wsl
