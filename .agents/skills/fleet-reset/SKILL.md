@@ -19,18 +19,22 @@ Every step's mechanics stay with the skill or script named in it; do not restate
 1. **Remind, never run, the harness upgrade.**
    The captain upgrades the harness CLIs (for example `mise upgrade`) themselves, because claude, codex, and pi never self-update.
    Ask whether that is done; firstmate runs no harness upgrade.
-2. **Stow.**
+2. **Refresh the AXI tools.**
+   A node or harness upgrade leaves the globally installed tools (`gh-axi`, `lavish-axi`, `tasks-axi`, `quota-axi`, `chrome-devtools-axi`) unavailable under the new node, and `bin/fm-tasks-axi.sh` breaks with them.
+   Run `bin/fm-bootstrap.sh` and fix every `MISSING:` or `OUTDATED:` line it prints with the install command on that line (`bootstrap-diagnostics` owns them).
+   Continue only once each tool runs under the active node and `bin/fm-tasks-axi.sh --help` works; otherwise report the failing tool and stop.
+3. **Stow.**
    Run the `stow` skill in this home.
    Its cascade has every secondmate curate its own memory and persist its open records.
-3. **Update.**
-   Run the `updatefirstmate` skill's updater and re-read step, but defer its restart step to step 5 so the mates restart once, after teardown.
+4. **Update.**
+   Run the `updatefirstmate` skill's updater and re-read step, but defer its restart step to step 6 so the mates restart once, after teardown.
    A home skipped as diverged or dirty needs a manual reconcile; report it and keep going without that home.
-4. **Tear down finished work** under the rules below, in this home and in each secondmate's home.
-5. **Restart the secondmates.**
+5. **Tear down finished work** under the rules below, in this home and in each secondmate's home.
+6. **Restart the secondmates.**
    Finish `updatefirstmate`'s restart step with `bin/fm-secondmate-restart.sh`.
    A mate it refuses because its composer holds unsent text is retried later in this step, never forced or skipped; if it still refuses, report that mate and what the captain must clear.
-6. **Hand back.**
-   Tell the captain, in plain outcomes, that main is safe to restart only when the `stow` completion receipt from step 2 claims reset-safe and no mate was skipped or left unrestarted.
+7. **Hand back.**
+   Tell the captain, in plain outcomes, that main is safe to restart only when the `stow` completion receipt from step 3 claims reset-safe and no mate was skipped or left unrestarted.
    Otherwise report what still prevents a safe reset (an unreachable memory tier, an unresolved over-budget decision, an unfiled open record, a skipped or unreached mate) and do not tell the captain to restart.
    Name anything left running and why.
    Durable records, held captain calls, the backlog, and unread status survive a restart, and `bearings` restores the picture.
