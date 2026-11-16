@@ -55,14 +55,16 @@ launch_text() {
 }
 
 # assert_contained <id>: the launch passes the task's settings file, the file
-# carries the sandbox, and the record carries the mark.
+# carries the sandbox and the worker's busy hooks, and the record carries the
+# mark.
 assert_contained() {
-  local id=$1 state_real settings launch common
+  local id=$1 state_real settings launch common wt_real root_real tmp_real
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
   settings="$state_real/$id.claude-settings.json"
   launch=$(launch_text)
   assert_contains "$launch" "--settings '$settings' " "the external launch did not pass its settings file"
-  assert_contains "$launch" " --strict-mcp-config --append-system-prompt " "the external launch must load no MCP server"
+  assert_contains "$launch" " --strict-mcp-config --setting-sources user --append-system-prompt " \
+    "the external launch must load no MCP server and no project or local settings"
   [ -f "$settings" ] || fail "the external launch wrote no settings file"
   jq -e '
     .feedbackDrafts == "off"
@@ -77,25 +79,36 @@ assert_contained() {
     and (.permissions.deny | index("WebSearch") != null)
     and (.permissions.deny | index("Read(**/.env)") != null)
     and (.permissions.deny | index("Read(**/.env.*)") != null)
+    and (.permissions.deny | index("Read(~/.config/gh/**)") != null)
+    and (.sandbox.network.allowedDomains == ["github.com", "api.github.com", "*.githubusercontent.com"])
   ' "$settings" >/dev/null || fail "the external settings file lacks the sandbox block"$'\n'"$(cat "$settings")"
+  jq -e '(.hooks.UserPromptSubmit | length) == 1 and (.hooks.Stop | length) == 1 and (.hooks.SessionEnd | length) == 1' "$settings" >/dev/null \
+    || fail "the external worker's busy hooks must ride its settings file"$'\n'"$(cat "$settings")"
+  wt_real=$(cd "$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")" && pwd -P)
+  [ ! -e "$wt_real/.claude/settings.local.json" ] || fail "the external worker's hooks landed in a worktree settings file it does not load"
   common=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir)
-  jq -e --arg status "$state_real/$id.status" --arg common "$common" \
-    '.sandbox.filesystem.allowWrite == [$status, $common]' "$settings" >/dev/null \
-    || fail "the sandbox must write only the status file and the shared git directory beyond the task channels"$'\n'"$(cat "$settings")"
+  tmp_real=$(cd "/tmp/fm-$id" && pwd -P)
+  jq -e --arg status "$state_real/$id.status" --arg tmp "$tmp_real" --arg common "$common" \
+    '.sandbox.filesystem.allowWrite == [$status, $tmp, $common]' "$settings" >/dev/null \
+    || fail "the sandbox must write only the status file, the task temp root, and the shared git directory beyond the task channels"$'\n'"$(cat "$settings")"
+  root_real=$(cd "$ROOT" && pwd -P)
+  jq -e --arg skills "$root_real/.agents/skills" --arg wt "$wt_real" --arg common "$common" '
+    .sandbox.filesystem.denyWrite == [$skills, "\($wt)/.claude/settings.json", "\($wt)/.claude/settings.local.json",
+      "\($wt)/.git", "\($common)/config", "\($common)/hooks"]
+    and ([.sandbox.filesystem.denyWrite[] | "Edit(/\(.))", "Edit(/\(.)/**)"] - .permissions.deny) == []
+  ' "$settings" >/dev/null \
+    || fail "the skills, the worktree Claude settings, and the git link, config, and hooks must stay unwritable for every tool"$'\n'"$(cat "$settings")"
   jq -e '.sandbox.network | has("allowUnixSockets") | not' "$settings" >/dev/null \
     || fail "a worktree with no local gate must allow no Unix socket"$'\n'"$(cat "$settings")"
   grep -qx 'trust=external' "$HOME_DIR/state/$id.meta" || fail "the task record lacks the external mark"
 }
 
 test_registered_external_project_launches_contained() {
-  local id=ext-reg out status settings
+  local id=ext-reg out status
   make_case registered "$id" "no-mistakes trust=external"
   out=$(run_spawn "$id"); status=$?
   expect_code 0 "$status" "a trust=external project should launch"$'\n'"$out"
   assert_contained "$id"
-  settings="$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json"
-  jq -e '.sandbox.network.allowedDomains == ["github.com", "api.github.com", "*.githubusercontent.com"]' "$settings" >/dev/null \
-    || fail "without config/external-allowed-domains the default allowlist applies"$'\n'"$(cat "$settings")"
   pass "fm-spawn: a project registered trust=external launches its worker inside the sandbox"
 }
 
@@ -118,8 +131,12 @@ test_local_gate_opens_the_gate_and_its_daemon_only() {
   settings="$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json"
   common=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir)
   jq -e --arg gate "$CASE_DIR/nm-home/repos/gate.git" --arg common "$common" \
-    '(.sandbox.filesystem.allowWrite | .[1:]) == [$common, $gate]' "$settings" >/dev/null \
+    '(.sandbox.filesystem.allowWrite | .[2:]) == [$common, $gate]' "$settings" >/dev/null \
     || fail "a local gate repository must be writable"$'\n'"$(cat "$settings")"
+  jq -e --arg gate "$CASE_DIR/nm-home/repos/gate.git" \
+    '(.sandbox.filesystem.denyWrite | .[-2:]) == ["\($gate)/config", "\($gate)/hooks"]
+     and (.permissions.deny | index("Edit(/\($gate)/hooks/**)") != null)' "$settings" >/dev/null \
+    || fail "a local gate repository must keep its config and hooks unwritable"$'\n'"$(cat "$settings")"
   jq -e --arg sock "$CASE_DIR/nm-home/socket" '.sandbox.network.allowUnixSockets == [$sock]' "$settings" >/dev/null \
     || fail "a local gate must open exactly the no-mistakes daemon socket"$'\n'"$(cat "$settings")"
   pass "fm-spawn: a worktree with a local gate opens that gate and the daemon socket, and nothing else"
@@ -145,30 +162,11 @@ test_unmarked_task_launches_unchanged() {
     "an unmarked worker must keep its inline session settings"
   [ ! -e "$HOME_DIR/state/$id.claude-settings.json" ] || fail "an unmarked worker got a settings file"
   assert_not_contains "$launch" "--strict-mcp-config" "an unmarked worker must keep its MCP servers"
+  assert_not_contains "$launch" "--setting-sources" "an unmarked worker must keep its project and local settings"
+  jq -e '.hooks.UserPromptSubmit' "$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")/.claude/settings.local.json" >/dev/null \
+    || fail "an unmarked worker must keep its busy hooks in the worktree settings file"
   ! grep -q '^trust=' "$HOME_DIR/state/$id.meta" || fail "an unmarked task recorded a trust mark"
   pass "fm-spawn: an unmarked task launches exactly as before"
-}
-
-test_allowlist_file_replaces_the_default() {
-  local id out status settings
-  id=ext-list
-  make_case list "$id" "no-mistakes trust=external"
-  printf '%s\n' '# registries' 'registry.npmjs.org' '  *.example.org:443  ' '' > "$HOME_DIR/config/external-allowed-domains"
-  out=$(run_spawn "$id"); status=$?
-  expect_code 0 "$status" "a valid allowlist should launch"$'\n'"$out"
-  settings="$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json"
-  jq -e '.sandbox.network.allowedDomains == ["registry.npmjs.org", "*.example.org:443"]' "$settings" >/dev/null \
-    || fail "the allowlist file must replace the default list"$'\n'"$(cat "$settings")"
-
-  id=ext-closed
-  make_case closed "$id" "no-mistakes trust=external"
-  printf '# nothing allowed\n' > "$HOME_DIR/config/external-allowed-domains"
-  out=$(run_spawn "$id"); status=$?
-  expect_code 0 "$status" "an allowlist with no entries should launch"$'\n'"$out"
-  settings="$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json"
-  jq -e '.sandbox.network.allowedDomains == [] and .sandbox.network.strictAllowlist == true' "$settings" >/dev/null \
-    || fail "an allowlist with no entries must close the network"$'\n'"$(cat "$settings")"
-  pass "fm-spawn: config/external-allowed-domains replaces the default list, and no entries closes the network"
 }
 
 # assert_refused <id> <output> <status> <needle> <why>
@@ -186,22 +184,11 @@ test_marks_the_launch_cannot_honor_refuse_before_any_record() {
   out=$(run_spawn "$id"); status=$?
   assert_refused "$id" "$out" "$status" 'unknown trust binding "trust=extrenal"' "an unknown trust value"
 
-  id=ext-key
-  make_case key "$id" "no-mistakes trusted=external"
-  out=$(run_spawn "$id"); status=$?
-  assert_refused "$id" "$out" "$status" 'looks like a misspelled trust binding' "a misspelled trust key"
-
   id=ext-codex
   make_case codex "$id" "no-mistakes trust=external" codex
   out=$(run_spawn "$id"); status=$?
   assert_refused "$id" "$out" "$status" "the codex runtime has no verified external worker sandbox" "a non-Claude external worker"
-
-  id=ext-badlist
-  make_case badlist "$id" "no-mistakes"
-  printf '%s\n' 'https://example.org/path' > "$HOME_DIR/config/external-allowed-domains"
-  out=$(run_spawn "$id" --external); status=$?
-  assert_refused "$id" "$out" "$status" "config/external-allowed-domains has a malformed entry 'https://example.org/path'" "a malformed allowlist"
-  pass "fm-spawn: an unknown or misspelled mark, a runtime without the sandbox, and a malformed allowlist refuse before any record"
+  pass "fm-spawn: an unknown mark and a runtime without the sandbox refuse before any record"
 }
 
 test_external_flag_is_refused_on_a_secondmate() {
@@ -228,7 +215,6 @@ test_external_flag_marks_one_task_on_an_unmarked_project
 test_unmarked_task_launches_unchanged
 test_batch_dispatch_keeps_the_external_flag
 test_local_gate_opens_the_gate_and_its_daemon_only
-test_allowlist_file_replaces_the_default
 test_marks_the_launch_cannot_honor_refuse_before_any_record
 test_external_flag_is_refused_on_a_secondmate
 

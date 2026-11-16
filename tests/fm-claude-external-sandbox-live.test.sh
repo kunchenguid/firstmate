@@ -17,9 +17,16 @@
 # proxy-aware and by direct connection), and a write outside the granted paths
 # from Bash and from the Write tool, while it still reaches the listed server
 # and writes the granted path and the working directory, so a
-# sandbox that simply breaks everything cannot pass. A control arm without
-# network.strictAllowlist must reach the unlisted server, which proves the
-# strict key is what closes the network and keeps the guard from going vacuous.
+# sandbox that simply breaks everything cannot pass. It must also refuse a
+# planted gh credential store, writes to a read-only --add-dir directory such
+# as Firstmate's skills, to the working directory's .claude/settings.json, and
+# to a granted gate repository's hooks, while that directory stays readable and
+# the rest of the gate stays writable. A hook the checkout's own
+# .claude/settings.json names must not run, while the busy hook the --settings
+# file carries does. A control arm without network.strictAllowlist and without
+# --setting-sources user must reach the unlisted server and run the checkout's
+# hook, which proves those two settings are what close the network and the
+# project settings, and keeps the guard from going vacuous.
 #
 # The launch gets a clean environment, a private config directory and a
 # synthetic API key, so it needs no Claude Code login and cannot reach any model.
@@ -100,9 +107,19 @@ LISTED_PORT=$(wait_port "$TMP_ROOT/listed.port")
 UNLISTED_PORT=$(wait_port "$TMP_ROOT/unlisted.port")
 
 WORK=$TMP_ROOT/work
-mkdir -p "$WORK" "$TMP_ROOT/granted" "$TMP_ROOT/outside"
+SKILLS=$TMP_ROOT/skills
+GATE=$TMP_ROOT/gate.git
+mkdir -p "$WORK/.claude" "$TMP_ROOT/granted" "$TMP_ROOT/outside" "$SKILLS" "$TMP_ROOT/home/.config/gh"
 git init --quiet -b main "$WORK"
+git init --quiet --bare "$GATE"
 printf 'SECRET=canary-secret-value\n' > "$WORK/.env"
+printf 'github.com:\n    oauth_token: canary-gh-token\n' > "$TMP_ROOT/home/.config/gh/hosts.yml"
+printf 'skill-body\n' > "$SKILLS/SKILL.md"
+PROJECT_HOOK=$(jq -nc --arg cmd "touch '$TMP_ROOT/project-hook-fired'" \
+  '{hooks: {SessionStart: [{hooks: [{type: "command", command: $cmd}]}], UserPromptSubmit: [{hooks: [{type: "command", command: $cmd}]}]}}')
+printf '%s\n' "$PROJECT_HOOK" > "$WORK/.claude/settings.json"
+OWN_HOOK=$(jq -nc --arg cmd "touch '$TMP_ROOT/own-hook-fired'" \
+  '{hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $cmd}]}]}}')
 
 STEPS=(
   "cat .env"
@@ -113,12 +130,23 @@ STEPS=(
   "echo y > '$TMP_ROOT/granted/file' && echo granted-wr''itten"
   "tool:{\"name\":\"Write\",\"input\":{\"file_path\":\"$TMP_ROOT/outside/tool-file\",\"content\":\"x\"}}"
   "tool:{\"name\":\"Write\",\"input\":{\"file_path\":\"$WORK/tool-file\",\"content\":\"x\"}}"
+  "cat '$TMP_ROOT/home/.config/gh/hosts.yml'"
+  "cat '$SKILLS/SKILL.md'"
+  "echo z > '$SKILLS/SKILL.md' && echo skills-wr''itten"
+  "tool:{\"name\":\"Write\",\"input\":{\"file_path\":\"$SKILLS/tool-file\",\"content\":\"x\"}}"
+  "echo '{}' > .claude/settings.json && echo settings-wr''itten"
+  "tool:{\"name\":\"Write\",\"input\":{\"file_path\":\"$WORK/.claude/settings.json\",\"content\":\"{}\"}}"
+  "echo x > '$GATE/hooks/post-checkout' && echo gate-hook-wr''itten"
+  "echo y > '$GATE/objects/probe' && echo gate-wr''itten"
 )
 
-# run_arm <label> <settings-json>: run the scripted steps under these settings;
-# the results land in $TMP_ROOT/<label>.results, one JSON line per step.
+# run_arm <label> <settings-json> <launch-flag>...: run the scripted steps
+# under these settings and flags; the results land in
+# $TMP_ROOT/<label>.results, one JSON line per step.
 run_arm() {
   local label=$1 settings=$2 api_port
+  shift 2
+  rm -f "$TMP_ROOT/project-hook-fired" "$TMP_ROOT/own-hook-fired"
   printf '%s\n' "$settings" > "$TMP_ROOT/$label.settings.json"
   : > "$TMP_ROOT/$label.results"
   python3 -I "$ROOT/tests/fixtures/fm-claude-scripted-tools.py" \
@@ -133,7 +161,7 @@ run_arm() {
       ANTHROPIC_BASE_URL="http://127.0.0.1:$api_port" \
       DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
       claude -p "run the scripted steps" --max-turns 20 --dangerously-skip-permissions \
-      --settings "$TMP_ROOT/$label.settings.json" "$FM_EXTERNAL_CLAUDE_FLAGS" \
+      --settings "$TMP_ROOT/$label.settings.json" --add-dir "$SKILLS" "$@" \
       >"$TMP_ROOT/$label.out" 2>&1 || true
   )
   [ "$(wc -l < "$TMP_ROOT/$label.results" | tr -d ' ')" -eq "${#STEPS[@]}" ] \
@@ -145,8 +173,11 @@ step_output() {
   sed -n "$(($2 + 1))p" "$TMP_ROOT/$1.results" | jq -r .content
 }
 
-CONTAINED=$(fm_external_settings_json 0 "127.0.0.1:$LISTED_PORT" "$TMP_ROOT/granted" "")
-run_arm contained "$CONTAINED"
+CONTAINED=$(fm_external_settings_json 0 "127.0.0.1:$LISTED_PORT" "$TMP_ROOT/granted"$'\n'"$GATE" \
+  "$SKILLS"$'\n'"$WORK/.claude/settings.json"$'\n'"$WORK/.claude/settings.local.json"$'\n'"$GATE/config"$'\n'"$GATE/hooks" \
+  "" "$OWN_HOOK")
+# shellcheck disable=SC2086  # FM_EXTERNAL_CLAUDE_FLAGS is a list of separate flags.
+run_arm contained "$CONTAINED" $FM_EXTERNAL_CLAUDE_FLAGS
 grep -q 'sandbox' "$TMP_ROOT/contained.out" && grep -qi 'unavailable\|not available\|cannot start' "$TMP_ROOT/contained.out" \
   && unusable "claude $CLAUDE_VERSION reports its sandbox unavailable on this host"
 
@@ -165,10 +196,31 @@ assert_contains "$(step_output contained 5)" "granted-written" \
   "claude $CLAUDE_VERSION refused the granted write path"
 [ ! -e "$TMP_ROOT/outside/tool-file" ] || fail "claude $CLAUDE_VERSION let the Write tool write outside the working directories"
 [ -e "$WORK/tool-file" ] || fail "claude $CLAUDE_VERSION refused a Write tool write inside the working directory"
+assert_not_contains "$(step_output contained 8)" "canary-gh-token" \
+  "claude $CLAUDE_VERSION let the contained worker read the gh credential store"
+assert_contains "$(step_output contained 9)" "skill-body" \
+  "claude $CLAUDE_VERSION refused a read of the read-only --add-dir directory"
+assert_not_contains "$(step_output contained 10)" "skills-written" \
+  "claude $CLAUDE_VERSION let a shell command write the read-only --add-dir directory"
+[ "$(cat "$SKILLS/SKILL.md")" = skill-body ] || fail "claude $CLAUDE_VERSION changed a file in the read-only --add-dir directory"
+[ ! -e "$SKILLS/tool-file" ] || fail "claude $CLAUDE_VERSION let the Write tool write the read-only --add-dir directory"
+assert_not_contains "$(step_output contained 12)" "settings-written" \
+  "claude $CLAUDE_VERSION let a shell command write the working directory's .claude/settings.json"
+[ "$(cat "$WORK/.claude/settings.json")" = "$PROJECT_HOOK" ] \
+  || fail "claude $CLAUDE_VERSION let the contained worker rewrite the working directory's .claude/settings.json"
+assert_not_contains "$(step_output contained 14)" "gate-hook-written" \
+  "claude $CLAUDE_VERSION let the contained worker write a granted gate repository's hooks"
+[ ! -e "$GATE/hooks/post-checkout" ] || fail "claude $CLAUDE_VERSION planted a hook in the granted gate repository"
+assert_contains "$(step_output contained 15)" "gate-written" \
+  "claude $CLAUDE_VERSION refused the rest of the granted gate repository, so the hooks check proves nothing"
+[ ! -e "$TMP_ROOT/project-hook-fired" ] || fail "claude $CLAUDE_VERSION ran a hook from the checkout's own .claude/settings.json"
+[ -e "$TMP_ROOT/own-hook-fired" ] || fail "claude $CLAUDE_VERSION did not run the busy hook the --settings file carries"
 
 CONTROL=$(printf '%s' "$CONTAINED" | jq -c 'del(.sandbox.network.strictAllowlist)')
-run_arm control "$CONTROL"
+run_arm control "$CONTROL" --strict-mcp-config
 assert_contains "$(step_output control 1)" "reached-unlisted" \
   "claude $CLAUDE_VERSION closed the network without network.strictAllowlist, so this guard no longer proves that key is load-bearing; re-measure and update the guard"
+[ -e "$TMP_ROOT/project-hook-fired" ] \
+  || fail "claude $CLAUDE_VERSION ran no checkout hook even without --setting-sources user, so this guard no longer proves that flag is load-bearing; re-measure and update the guard"
 
-pass "Claude Code $CLAUDE_VERSION: the external worker sandbox refuses .env, unlisted hosts, and outside writes under bypass, and network.strictAllowlist is what closes the network"
+pass "Claude Code $CLAUDE_VERSION: the external worker sandbox refuses .env, the gh store, unlisted hosts, outside writes, and writes to read-only grants under bypass, runs no checkout hook, and network.strictAllowlist and --setting-sources user are what close the network and the project settings"

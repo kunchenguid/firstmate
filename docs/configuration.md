@@ -1681,41 +1681,35 @@ Either mark is enough, and a worker with neither mark launches exactly as before
 
 ### What a marked worker gets
 
-The spawn writes the worker's Claude settings to `state/<task-id>.claude-settings.json`, passes that file with `--settings`, and adds `--strict-mcp-config`.
+The spawn writes the worker's Claude settings to `state/<task-id>.claude-settings.json`, passes that file with `--settings`, and adds `--strict-mcp-config --setting-sources user`.
 
 | Surface | Behavior of a marked worker |
 | --- | --- |
 | Shell commands | Run only inside the Claude Code sandbox, with no way to ask to leave it; the launch fails instead of starting when the sandbox is unavailable on the host. |
-| Network from shell commands | Only hosts on the allowlist below; every other host is refused without a prompt, and a direct connection that skips the sandbox proxy is refused too. |
-| Secret files | `.env` and `.env.*` files, and the home folders that hold SSH, cloud, GPG, `.netrc`, and Git credentials, are unreadable by shell commands and by the Read tool. |
-| Writes | Shell commands write only the worktree, the task's Firstmate channel directories, its status file, its repository's shared git directory, and a local no-mistakes gate repository; the file tools write only the worktree and the channel directories. |
+| Network from shell commands | Only `github.com`, `api.github.com`, and `*.githubusercontent.com`; every other host is refused without a prompt, and a direct connection that skips the sandbox proxy is refused too. |
+| Secret files | `.env` and `.env.*` files, and the home files and folders that hold SSH keys, AWS, Google Cloud, Azure, and Kubernetes credentials, GPG keys, `.netrc`, Git credentials (`~/.git-credentials` and `~/.config/git/credentials`), the `gh` login (`~/.config/gh`), the Docker login (`~/.docker/config.json`), and `~/.npmrc` are unreadable by shell commands and by the Read tool. |
+| Project settings | The worktree's own `.claude/settings.json` and `.claude/settings.local.json` do not load, so hooks, a status line, or helper commands committed in the checkout never run; Firstmate's busy hooks ride the `--settings` file instead. |
+| Writes | Shell commands write only the worktree, the task's inbox, data directory, and the shared operational inbox, its status file, its task temp root under `/tmp`, its repository's shared git directory, and a local no-mistakes gate repository; the file tools write only the worktree, the task's inbox, data directory, and the shared operational inbox. |
+| Read-only paths | No tool writes Firstmate's skills directory, which the worker can still read, the worktree's `.claude/settings.json` and `.claude/settings.local.json`, the worktree's `.git` link file, or the `config` and `hooks` of the shared git directory and of a local gate repository, because Firstmate's own processes and later git commands load them outside the sandbox. |
 | Delivery pipeline | When the worktree's `no-mistakes` remote is a local gate repository, shell commands may push to it and connect to the no-mistakes daemon socket, so the worker can still drive its pipeline run. |
 | Connectors and MCP | Account connectors are off, and no MCP server loads, because a local MCP server runs outside the sandbox with its own network access. |
 | Web tools | WebFetch and WebSearch are denied. |
 
 [`bin/fm-external-sandbox-lib.sh`](../bin/fm-external-sandbox-lib.sh) owns the exact settings block.
 
-### Network allowlist (config/external-allowed-domains)
-
-With no file, a marked worker may reach `github.com`, `api.github.com`, and `*.githubusercontent.com`.
-Create the optional, local, gitignored `config/external-allowed-domains` to replace that list, with one host per line, optionally led by `*.` or followed by `:<port>`.
-Blank lines and lines beginning with `#` are allowed, and surrounding whitespace is trimmed.
-A file with no entries closes the network to every host.
-An entry with any other shape, such as a URL, refuses the launch and names the entry; an unreadable or nonregular file refuses too.
-The file is read on every spawn and relaunch, and it is not in the inherited configuration set, so each home that marks workers keeps its own list.
-
 ### Refusals and relaunch
 
 Only the `claude` runtime on a Firstmate-built command line carries the sandbox.
 A marked task on any other runtime, on a raw launch command, or on `backend=t3code`, which starts the agent itself, refuses before its endpoint, worktree, or task record exists.
-A registry entry with an empty or unknown `trust=` value, or a key one or two edits from `trust`, refuses the spawn the same way, so a typo never launches a worker uncontained.
+A registry entry with an empty or unknown `trust=` value refuses the spawn the same way, so a typo in the value never launches a worker uncontained.
 `--external` is refused on a secondmate, whose agent the sandbox does not cover.
 The task record keeps the mark as `trust=external`, and a relaunch keeps it.
-A relaunch onto a runtime that cannot carry the sandbox, or with a malformed allowlist, refuses before the running worker stops.
+A relaunch also reads the project's current registry entry, so a project marked after the spawn contains the replacement worker.
+A relaunch onto a runtime that cannot carry the sandbox, or of a task whose project entry has an empty or unknown `trust=` value, refuses before the running worker stops.
 
 ### Limits
 
-- The sandbox covers the worker's own commands and file tools; Claude Code's model traffic, its hooks, and the no-mistakes pipeline's own agents run outside it.
+- The sandbox covers the worker's own commands and file tools; Claude Code's model traffic, the hooks from the user's own settings and from the `--settings` file, and the no-mistakes pipeline's own agents run outside it.
 - An allowed host stays fully reachable, so a worker that holds credentials for it can still send data there.
 - Go-based command-line tools such as `gh` cannot verify TLS certificates inside the macOS sandbox, so `gh` and `gh-axi` fail in a marked worker; publication through the no-mistakes daemon is not affected.
 - `.env.example` and similar templates are unreadable too, because the rule covers every `.env.*` name.

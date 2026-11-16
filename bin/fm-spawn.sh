@@ -566,10 +566,12 @@
 #                  Code drops a disallowed tool's schema from every request, and
 #                  a later flag always follows so the variadic option cannot
 #                  swallow the launch prompt.
-#     __CLAUDEEXTERNAL__ optional `--strict-mcp-config ` on an external-marked
-#                  Claude ship or scout (FM_EXTERNAL_CLAUDE_FLAGS in
-#                  bin/fm-external-sandbox-lib.sh; supplies its own trailing
-#                  space, empty otherwise)
+#     __CLAUDEEXTERNAL__ optional `--strict-mcp-config --setting-sources user `
+#                  on an external-marked Claude ship or scout
+#                  (FM_EXTERNAL_CLAUDE_FLAGS in bin/fm-external-sandbox-lib.sh;
+#                  supplies its own trailing space, empty otherwise); that
+#                  worker's busy hooks ride its settings file instead of the
+#                  worktree's .claude/settings.local.json
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
 #                  reports (relaunch_resume_args below owns it; it supplies its
@@ -4270,7 +4272,7 @@ fi
 # the spawn, and so does a runtime that cannot carry the sandbox, before any
 # endpoint, worktree, or record exists.
 EXTERNAL_SANDBOX=0
-EXTERNAL_DOMAINS=
+EXTERNAL_CLAUDE_HOOKS=
 if [ "$KIND" != secondmate ]; then
   [ "$EXTERNAL_FLAG" -eq 0 ] || EXTERNAL_SANDBOX=1
   if [ "$RELAUNCH" -eq 1 ] && [ "$(fm_meta_get "$RELAUNCH_META" trust)" = external ]; then
@@ -4284,7 +4286,6 @@ if [ "$KIND" != secondmate ]; then
   [ "$STANDING_TRUST" != external ] || EXTERNAL_SANDBOX=1
   if [ "$EXTERNAL_SANDBOX" -eq 1 ]; then
     fm_external_check "$HARNESS" "$RAW_LAUNCH" "$BACKEND" || exit 1
-    EXTERNAL_DOMAINS=$(fm_external_domains "$CONFIG") || exit 1
   fi
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
@@ -6604,6 +6605,9 @@ BUSY_GEN=
     # (https://code.claude.com/docs/en/hooks) and keeps any key
     # the flag omits (https://code.claude.com/docs/en/cli-reference), so the
     # home's tracked Stop guard and its settings.local.json both stay.
+    # An external-marked crewmate loads no project or local settings
+    # (FM_EXTERNAL_CLAUDE_FLAGS), so its hooks ride the sandbox settings file
+    # written with the launch below.
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
@@ -6633,6 +6637,8 @@ BUSY_GEN=
         session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
       fi
       printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
+    elif [ "$EXTERNAL_SANDBOX" = 1 ]; then
+      EXTERNAL_CLAUDE_HOOKS="{$hooks_json}"
     else
       mkdir -p "$WT/.claude"
       printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
@@ -7618,26 +7624,39 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   elif [ "$EXTERNAL_SANDBOX" = 1 ]; then
     # The sandbox may write the worktree and the --add-dir task channels; the
-    # status file sits directly in state/, and a linked worktree commits into
-    # its repository's common git directory, so both are named here. A
-    # worktree whose no-mistakes remote is a local gate repository also gets
-    # that repository and the ambient no-mistakes daemon socket, so the
-    # worker can still push to the gate and drive its pipeline run.
-    external_writes="$STATE_REAL/$ID.status"
+    # status file sits directly in state/, the task temp root holds GOTMPDIR,
+    # and a linked worktree commits into its repository's common git
+    # directory, so all three are named here. A worktree whose no-mistakes
+    # remote is a local gate repository also gets that repository and the
+    # ambient no-mistakes daemon socket, so the worker can still push to the
+    # gate and drive its pipeline run. Whatever Firstmate's own unsandboxed
+    # processes load stays unwritable: the code root's skills, which every
+    # later session follows; the worktree's Claude settings; and the git
+    # config, hooks, and worktree link that later git commands on the
+    # worktree and the gate run.
+    external_wt=$(cd "$WT" && pwd -P)
+    external_writes="$STATE_REAL/$ID.status"$'\n'"$(cd "$TASK_TMP" && pwd -P)"
+    external_denies="$(cd "$FM_ROOT" && pwd -P)/.agents/skills"$'\n'"$external_wt/.claude/settings.json"$'\n'"$external_wt/.claude/settings.local.json"
+    [ ! -f "$external_wt/.git" ] || external_denies="$external_denies"$'\n'"$external_wt/.git"
     external_sockets=
     external_git_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || external_git_common=
-    case "$external_git_common" in
-    '' | "$WT"/*) ;;
-    *) external_writes="$external_writes"$'\n'"$external_git_common" ;;
-    esac
+    if [ -n "$external_git_common" ]; then
+      case "$external_git_common" in
+      "$WT"/* | "$external_wt"/*) ;;
+      *) external_writes="$external_writes"$'\n'"$external_git_common" ;;
+      esac
+      external_denies="$external_denies"$'\n'"$external_git_common/config"$'\n'"$external_git_common/hooks"
+    fi
     external_gate=$(git -C "$WT" remote get-url no-mistakes 2>/dev/null) || external_gate=
     case "$external_gate" in
     /*)
       external_writes="$external_writes"$'\n'"$external_gate"
+      external_denies="$external_denies"$'\n'"$external_gate/config"$'\n'"$external_gate/hooks"
       external_sockets="${NM_HOME:-$HOME/.no-mistakes}/socket"
       ;;
     esac
-    fm_external_settings_json "$KEEP_AI_TRAILERS" "$EXTERNAL_DOMAINS" "$external_writes" "$external_sockets" >"$STATE_REAL/$ID.claude-settings.json" || {
+    fm_external_settings_json "$KEEP_AI_TRAILERS" "$FM_EXTERNAL_ALLOWED_DOMAINS" "$external_writes" \
+      "$external_denies" "$external_sockets" "$EXTERNAL_CLAUDE_HOOKS" >"$STATE_REAL/$ID.claude-settings.json" || {
       echo "error: could not write the external worker sandbox settings for $ID" >&2
       exit 1
     }

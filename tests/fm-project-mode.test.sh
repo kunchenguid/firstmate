@@ -44,7 +44,6 @@ cat > "$DATA/projects.md" <<'EOF'
 - outside-first [trust=external direct-PR +yolo branch=] - trust token first, order must not matter (added 2026-01-01)
 - outside-empty [no-mistakes trust=] - an empty trust value (added 2026-01-01)
 - outside-own [no-mistakes trust=own] - own is the absence of the token, not a value (added 2026-01-01)
-- outside-typo [no-mistakes trusted=external] - a near miss of the trust key (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -183,7 +182,7 @@ run_trust() {
   || fail "trust=external placed first displaced the empty branch= override"
 pass "fm-project-mode: trust=external binds in any token order and leaves mode, yolo, and branch alone"
 
-for name in outside-empty outside-own outside-typo; do
+for name in outside-empty outside-own; do
   out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust "$name" 2>/dev/null)
   status=$?
   [ "$status" -eq 3 ] || fail "$name did not refuse under --trust (status $status, got '$out')"
@@ -194,8 +193,6 @@ err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust outside-empty 2>&1 >/dev/
 assert_contains "$err" "empty trust binding" "the empty trust= refusal did not name the empty value"
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust outside-own 2>&1 >/dev/null)
 assert_contains "$err" "trust=external" "the unknown trust value refusal did not name the accepted value"
-err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --trust outside-typo 2>&1 >/dev/null)
-assert_contains "$err" "misspelled trust binding" "the near-miss trust key was not refused"
-pass "fm-project-mode: --trust refuses an empty value, an unknown value, and a misspelled key, and the default output ignores them"
+pass "fm-project-mode: --trust refuses an empty value and an unknown value, and the default output ignores them"
 
 echo "# fm-project-mode.test.sh: all assertions passed"

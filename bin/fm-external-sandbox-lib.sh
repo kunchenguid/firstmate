@@ -5,58 +5,24 @@
 # (bin/fm-project-mode.sh --trust reads that token).
 #
 # docs/configuration.md "External workers" owns the operator contract and its
-# measured limits; this file owns the settings block, the allowlist file
-# parser, and the runtime-support refusal. bin/fm-spawn.sh's header owns the
+# measured limits; this file owns the settings block, the network allowlist,
+# and the runtime-support refusal. bin/fm-spawn.sh's header owns the
 # launch-flag mechanics.
 
 # Command-line flags an external Claude launch adds: no MCP server loads, since
-# a local server runs outside the sandbox with its own network access.
-FM_EXTERNAL_CLAUDE_FLAGS='--strict-mcp-config'
+# a local server runs outside the sandbox with its own network access, and only
+# user settings load beside the --settings file, since the checkout's own
+# project and local settings can name hooks and helper commands that run
+# outside the sandbox.
+# shellcheck disable=SC2034 # Read by the sourcing caller.
+FM_EXTERNAL_CLAUDE_FLAGS='--strict-mcp-config --setting-sources user'
 
-# The allowlist an external worker gets when config/external-allowed-domains
-# is absent: the GitHub hosts a worker reads code and pull requests from.
-FM_EXTERNAL_DEFAULT_DOMAINS='github.com
+# The hosts an external worker may reach: the GitHub hosts a worker reads code
+# and pull requests from.
+# shellcheck disable=SC2034 # Read by the sourcing caller.
+FM_EXTERNAL_ALLOWED_DOMAINS='github.com
 api.github.com
 *.githubusercontent.com'
-
-# fm_external_domains <config-dir>: print the allowlist, one domain per line.
-# An absent config/external-allowed-domains prints the default list; a file
-# with no entries prints nothing, which closes the network completely.
-# Non-zero with the reason on stderr when the file or an entry is invalid.
-fm_external_domains() {
-  local config=$1 file line present out=''
-  file=$config/external-allowed-domains
-  present=$(perl -MErrno=ENOENT -e '
-    if (lstat $ARGV[0]) { print 1 }
-    elsif ($! == ENOENT) { print 0 }
-    else { die "error: cannot inspect config/external-allowed-domains: $!\n" }
-  ' -- "$file") || return 1
-  if [ "$present" != 1 ]; then
-    printf '%s\n' "$FM_EXTERNAL_DEFAULT_DOMAINS"
-    return 0
-  fi
-  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-    echo "error: config/external-allowed-domains must be a readable regular file" >&2
-    return 1
-  fi
-  while IFS= read -r line || [ -n "$line" ]; do
-    line=${line#"${line%%[![:space:]]*}"}
-    line=${line%"${line##*[![:space:]]}"}
-    case "$line" in
-    '' | '#'*) continue ;;
-    esac
-    # A host name, optionally led by "*." and optionally followed by ":<port>".
-    if ! printf '%s' "$line" | grep -Eq '^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]{1,5})?$'; then
-      echo "error: config/external-allowed-domains has a malformed entry '$line'; expected one host name per line, optionally led by '*.' or followed by ':<port>' (blank lines and # comment lines are allowed)" >&2
-      return 1
-    fi
-    out="$out$line"$'\n'
-  done <"$file" || {
-    echo "error: cannot read config/external-allowed-domains" >&2
-    return 1
-  }
-  printf '%s' "$out"
-}
 
 # fm_external_check <harness> <raw-launch 0|1> [<backend>]: succeed when this
 # launch can carry the external containment. Only the claude runtime has a
@@ -84,33 +50,41 @@ fm_external_check() {
   }
 }
 
-# fm_external_settings_json <keep-ai-trailers 0|1> <domains> <write-paths> <unix-sockets>:
+# fm_external_settings_json <keep-ai-trailers 0|1> <domains> <write-paths> <deny-write-paths> <unix-sockets> [<hooks-json>]:
 # print the complete --settings object for an external Claude worker. It keeps
 # the session keys every Claude worker carries (feedbackDrafts, and the
 # attribution policy unless the home keeps AI trailers) and adds the sandbox:
 # Bash runs only inside it, reads of credential files are refused for every
 # tool, writes outside the working directories and the named write paths are
-# refused for every tool, the network is closed to every host outside
-# <domains>, and the account connectors and in-process web tools are off.
-# <domains>, <write-paths>, and <unix-sockets> each hold one entry per line;
+# refused for every tool, the named deny-write paths stay unwritable for every
+# tool even inside a working directory or a write path, the network is closed
+# to every host outside <domains>, and the account connectors and in-process
+# web tools are off. <domains>, <write-paths>, <deny-write-paths>, and
+# <unix-sockets> each hold one entry per line, every path absolute;
 # <unix-sockets> names the only local sockets sandboxed commands may connect
-# to, such as a delivery pipeline's daemon. The launch adds
-# FM_EXTERNAL_CLAUDE_FLAGS, because local MCP servers run outside the sandbox
-# and only a command-line flag turns them all off.
-fm_external_settings_json() {  # <keep-ai-trailers 0|1> <domains> <write-paths> <unix-sockets>
-  local keep=$1 domains=$2 writes=$3 sockets=$4 domains_json writes_json sockets_json
+# to, such as a delivery pipeline's daemon. <hooks-json> is an optional
+# {"hooks": ...} object merged in, so the worker's own busy hooks load from
+# this file. The launch adds FM_EXTERNAL_CLAUDE_FLAGS, because local MCP
+# servers and project settings run outside the sandbox and only command-line
+# flags turn them off.
+fm_external_settings_json() {  # <keep-ai-trailers 0|1> <domains> <write-paths> <deny-write-paths> <unix-sockets> [<hooks-json>]
+  local keep=$1 domains=$2 writes=$3 denies=$4 sockets=$5 hooks=${6:-'{}'}
+  local domains_json writes_json denies_json sockets_json
   domains_json=$(printf '%s' "$domains" | jq -R . | jq -sc 'map(select(length > 0))') || return 1
   writes_json=$(printf '%s' "$writes" | jq -R . | jq -sc 'map(select(length > 0))') || return 1
+  denies_json=$(printf '%s' "$denies" | jq -R . | jq -sc 'map(select(length > 0))') || return 1
   sockets_json=$(printf '%s' "$sockets" | jq -R . | jq -sc 'map(select(length > 0))') || return 1
   jq -nc --argjson keep "$keep" --argjson domains "$domains_json" \
-    --argjson writes "$writes_json" --argjson sockets "$sockets_json" '
+    --argjson writes "$writes_json" --argjson denies "$denies_json" \
+    --argjson sockets "$sockets_json" --argjson hooks "$hooks" '
     {feedbackDrafts: "off"}
     + (if $keep == 1 then {} else {attribution: {commit: "", pr: "", sessionUrl: false}} end)
+    + $hooks
     + {
       disableClaudeAiConnectors: true,
       permissions: {
         blockWritesOutsideWorkingDirectories: true,
-        deny: [
+        deny: ([
           "WebFetch",
           "WebSearch",
           "Read(**/.env)",
@@ -119,15 +93,23 @@ fm_external_settings_json() {  # <keep-ai-trailers 0|1> <domains> <write-paths> 
           "Read(~/.aws/**)",
           "Read(~/.gnupg/**)",
           "Read(~/.netrc)",
-          "Read(~/.git-credentials)"
-        ]
+          "Read(~/.git-credentials)",
+          "Read(~/.config/git/credentials)",
+          "Read(~/.config/gh/**)",
+          "Read(~/.docker/config.json)",
+          "Read(~/.npmrc)",
+          "Read(~/.kube/config)",
+          "Read(~/.config/gcloud/**)",
+          "Read(~/.azure/**)"
+        ] + [$denies[] | "Edit(/\(.))", "Edit(/\(.)/**)"])
       },
       sandbox: {
         enabled: true,
         failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
         allowUnsandboxedCommands: false,
-        filesystem: {allowWrite: $writes},
+        filesystem: ({allowWrite: $writes}
+          + (if ($denies | length) > 0 then {denyWrite: $denies} else {} end)),
         network: ({allowedDomains: $domains, strictAllowlist: true}
           + (if ($sockets | length) > 0 then {allowUnixSockets: $sockets} else {} end))
       }

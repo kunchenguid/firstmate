@@ -110,9 +110,7 @@
 #   and PR-text binding. A malformed binding (an empty or unknown value) is
 #   REFUSED in the --trust output form only: nothing on stdout, exit status 3,
 #   the token named, so a typo can never launch an external project's worker
-#   uncontained; a keyed token whose key is one or two edits from `trust`
-#   (such as `trusted=` or `Trust=`) is refused there the same way. The other
-#   output forms ignore the token.
+#   uncontained. The other output forms ignore the token.
 #
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
@@ -229,8 +227,6 @@ parsed=$(awk -v n="$NAME" '
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
           if (e >= 1 && e <= 2) print "near", a[j];
-          e = dist(key, "trust");
-          if (e >= 1 && e <= 2) print "neartrust", a[j];
           if (mode_set == 0) { mode = a[j]; mode_set = 1 }
           continue
         }
@@ -254,10 +250,8 @@ if [ -z "$parsed" ]; then
 fi
 
 posture=
-near_trust=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
-    neartrust) near_trust=$rest ;;
     near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external" >&2 ;;
     posture) posture=$rest ;;
   esac
@@ -281,10 +275,6 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   exit 0
 fi
 if [ "$WANT_TRUST" -eq 1 ]; then
-  if [ -n "$near_trust" ]; then
-    echo "refused: \"$near_trust\" registered for $NAME in $REG looks like a misspelled trust binding; the only accepted spelling is trust=external, or no trust token at all for the home's own code; correct the registry entry" >&2
-    exit 3
-  fi
   trust=${rest_trust:-own}
   case "$trust" in
     own|trust=external) echo "${trust#trust=}"; exit 0 ;;

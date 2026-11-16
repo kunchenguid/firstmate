@@ -66,17 +66,19 @@ The controls are scoped to the launched process and never modify the captain's g
 
 ## External worker sandbox
 
-An external-marked ship or scout carries the sandbox block from `../../../../../bin/fm-external-sandbox-lib.sh` in its `--settings` file, and its launch adds `--strict-mcp-config`; [`External workers`](../../../../../docs/configuration.md#external-workers-dataprojectsmd-trust-token-fm-spawnsh---external) owns the contract.
+An external-marked ship or scout carries the sandbox block and its busy hooks from `../../../../../bin/fm-external-sandbox-lib.sh` in its `--settings` file, and its launch adds `--strict-mcp-config --setting-sources user`; [`External workers`](../../../../../docs/configuration.md#external-workers-dataprojectsmd-trust-token-fm-spawnsh---external) owns the contract.
 These vendor facts, measured on Claude Code 2.1.325 on macOS, shape that block:
 
 - `sandbox.network.allowedDomains` alone only spares listed hosts a prompt: an unlisted host asks, `--dangerously-skip-permissions` approves the ask, and the connection succeeds.
 - `sandbox.network.strictAllowlist: true` refuses every unlisted host without asking; Claude Code honors it from `--settings`, user, and managed settings, never from project settings.
 - The sandbox wraps Bash only. A `Read(...)` deny rule also enters the sandbox's read denials, but a Write or Edit outside the working directories succeeds under bypass unless `permissions.blockWritesOutsideWorkingDirectories` is on.
 - `disableClaudeAiConnectors` removes the account connectors only; local and plugin MCP servers still load until `--strict-mcp-config` is passed.
+- A hook in the working directory's `.claude/settings.json` runs outside the sandbox; `--setting-sources user` stops it from loading, while the hooks in the `--settings` file still run.
+- A path in `sandbox.filesystem.denyWrite` with matching `Edit(...)` deny rules stays unwritable for shell commands and the Write tool inside the working directory, an `--add-dir` directory, or an `allowWrite` path, and an `--add-dir` directory stays readable.
 - The sandbox lists loopback addresses in `NO_PROXY`, so a loopback client connects directly and is refused, while an outside host goes through the sandbox proxy.
 - Go-based tools such as `gh` cannot verify TLS certificates in the sandbox unless `sandbox.enableWeakerNetworkIsolation` is on, which the vendor describes as a data exfiltration path, so the block leaves it off.
 
-`../../../../../tests/fm-claude-external-sandbox-live.test.sh` re-proves the network, read, and write refusals on the installed version without spending tokens.
+`../../../../../tests/fm-claude-external-sandbox-live.test.sh` re-proves the network, read, and write refusals and the project-settings exclusion on the installed version without spending tokens.
 
 ## Task control channel
 

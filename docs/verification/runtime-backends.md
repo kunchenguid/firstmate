@@ -730,8 +730,13 @@ Each row changes one setting against the external settings block.
 | No-mistakes daemon socket in `sandbox.network.allowUnixSockets` | `no-mistakes daemon status` failed with `connect: operation not permitted`. | The daemon answered. |
 | `--strict-mcp-config` | Local and plugin MCP servers still loaded, 46 MCP tools, with `disableClaudeAiConnectors` on. | No MCP server loaded. |
 | `sandbox.enableWeakerNetworkIsolation`, left off | `gh api` failed with `x509: OSStatus -26276`. | `gh api` succeeded, and an unlisted host stayed refused. |
+| `--setting-sources user` | A `SessionStart` and `UserPromptSubmit` hook in the working directory's `.claude/settings.json` ran. | That hook did not run, and a `UserPromptSubmit` hook in the `--settings` file still ran. |
 
-A model-driven interactive worker then ran the same 21 steps in a tmux pane once per permission mode, with the external settings and launch flags `fm-spawn.sh` builds.
+With the read-only paths in `sandbox.filesystem.denyWrite` and as `Edit(...)` deny rules, shell commands and the Write tool were refused on an `--add-dir` directory, on the working directory's `.claude/settings.json`, and on a granted gate repository's `hooks`.
+The `--add-dir` directory stayed readable, and the rest of the gate repository stayed writable.
+A planted `~/.config/gh/hosts.yml` was unreadable by shell commands.
+
+A model-driven interactive worker then ran the same 21 steps in a tmux pane once per permission mode, with the external settings and launch flags `fm-spawn.sh` built before the read-only paths, the extra credential stores, and `--setting-sources user` were added; the token-free guard covers those.
 
 | Result | `bypass` | `auto` |
 | --- | --- | --- |
@@ -743,7 +748,7 @@ A model-driven interactive worker then ran the same 21 steps in a tmux pane once
 | Turn length | 79 s | 103 s |
 | After the turn | Composer ready | A "Teach auto mode about your environment?" dialog held the pane until answered |
 
-The token-free live guard refreshes the network, read, and write refusals and the `strictAllowlist` control arm on every installed version, and fails naming the version:
+The token-free live guard refreshes the network, read, and write refusals, the project-settings exclusion, and the control arm without `strictAllowlist` and `--setting-sources user` on every installed version, and fails naming the version:
 
 ```sh
 bin/fm-test-run.sh tests/fm-claude-external-sandbox-live.test.sh
