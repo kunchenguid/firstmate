@@ -7625,36 +7625,27 @@ case "$LAUNCH" in
   elif [ "$EXTERNAL_SANDBOX" = 1 ]; then
     # The sandbox may write the worktree and the --add-dir task channels; the
     # status file sits directly in state/, the task temp root holds GOTMPDIR,
-    # and a linked worktree commits into its repository's common git
-    # directory, so all three are named here. A worktree whose no-mistakes
-    # remote is a local gate repository also gets that repository and the
-    # ambient no-mistakes daemon socket, so the worker can still push to the
-    # gate and drive its pipeline run. Whatever Firstmate's own unsandboxed
-    # processes load stays unwritable: the code root's skills, which every
-    # later session follows; the worktree's Claude settings; and the git
-    # config, hooks, and worktree link that later git commands on the
-    # worktree and the gate run.
+    # and a commit and a push need parts of the shared git directory and of a
+    # local gate repository (fm_external_git_paths owns that set), so all are
+    # named here. A worktree whose no-mistakes remote is a local gate
+    # repository also gets the ambient no-mistakes daemon socket, so the
+    # worker can still drive its pipeline run. Whatever Firstmate's own
+    # unsandboxed processes load stays unwritable: the code root's skills,
+    # which every later session follows; the worktree's Claude settings; and
+    # the git configuration, hooks, and links fm_external_git_paths refuses.
     external_wt=$(cd "$WT" && pwd -P)
-    external_writes="$STATE_REAL/$ID.status"$'\n'"$(cd "$TASK_TMP" && pwd -P)"
-    external_denies="$(cd "$FM_ROOT" && pwd -P)/.agents/skills"$'\n'"$external_wt/.claude/settings.json"$'\n'"$external_wt/.claude/settings.local.json"
-    [ ! -f "$external_wt/.git" ] || external_denies="$external_denies"$'\n'"$external_wt/.git"
     external_sockets=
-    external_git_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || external_git_common=
-    if [ -n "$external_git_common" ]; then
-      case "$external_git_common" in
-      "$WT"/* | "$external_wt"/*) ;;
-      *) external_writes="$external_writes"$'\n'"$external_git_common" ;;
-      esac
-      external_denies="$external_denies"$'\n'"$external_git_common/config"$'\n'"$external_git_common/hooks"
-    fi
     external_gate=$(git -C "$WT" remote get-url no-mistakes 2>/dev/null) || external_gate=
     case "$external_gate" in
-    /*)
-      external_writes="$external_writes"$'\n'"$external_gate"
-      external_denies="$external_denies"$'\n'"$external_gate/config"$'\n'"$external_gate/hooks"
-      external_sockets="${NM_HOME:-$HOME/.no-mistakes}/socket"
-      ;;
+    /*) external_sockets="${NM_HOME:-$HOME/.no-mistakes}/socket" ;;
+    *) external_gate= ;;
     esac
+    external_git=$(fm_external_git_paths "$WT" "$external_gate") || {
+      echo "error: could not resolve the git directories of $WT for the external worker sandbox" >&2
+      exit 1
+    }
+    external_writes="$STATE_REAL/$ID.status"$'\n'"$(cd "$TASK_TMP" && pwd -P)"$'\n'"$(printf '%s\n' "$external_git" | sed -n 's/^allow //p')"
+    external_denies="$(cd "$FM_ROOT" && pwd -P)/.agents/skills"$'\n'"$external_wt/.claude/settings.json"$'\n'"$external_wt/.claude/settings.local.json"$'\n'"$(printf '%s\n' "$external_git" | sed -n 's/^deny //p')"
     fm_external_settings_json "$KEEP_AI_TRAILERS" "$FM_EXTERNAL_ALLOWED_DOMAINS" "$external_writes" \
       "$external_denies" "$external_sockets" "$EXTERNAL_CLAUDE_HOOKS" >"$STATE_REAL/$ID.claude-settings.json" || {
       echo "error: could not write the external worker sandbox settings for $ID" >&2

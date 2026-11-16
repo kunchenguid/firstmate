@@ -50,6 +50,56 @@ fm_external_check() {
   }
 }
 
+# fm_external_git_paths <worktree> [<gate-repository>]: print the git paths an
+# external worker's sandbox grants and refuses, one "allow <path>" or
+# "deny <path>" line each, every path physical. A commit and a push need only
+# objects, refs, reflogs, and packed refs, plus a linked worktree's own admin
+# directory, so only those are granted in the shared git directory and in a
+# local gate repository. Every file git reads as configuration, as hooks, or
+# as a pointer to another git directory stays refused, because Firstmate's
+# own unsandboxed git commands and the gate's daemon read them later: the
+# worktree's .git link, commondir, gitdir, config, config.worktree, hooks,
+# submodule git directories, and every other worktree's admin directory (not
+# granted, or refused outright when the shared git directory sits inside the
+# worktree).
+fm_external_git_paths() {  # <worktree> [<gate-repository>]
+  local wt common admin gate=${2:-} name
+  wt=$(cd "$1" && pwd -P) || return 1
+  [ ! -f "$wt/.git" ] || printf 'deny %s\n' "$wt/.git"
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+    common=$(cd "$common" && pwd -P) || common=
+  admin=$(git -C "$wt" rev-parse --path-format=absolute --git-dir 2>/dev/null) &&
+    admin=$(cd "$admin" && pwd -P) || admin=
+  if [ -n "$common" ]; then
+    for name in commondir config config.worktree hooks modules; do
+      printf 'deny %s\n' "$common/$name"
+    done
+    case "$common" in
+    "$wt"/*) printf 'deny %s\n' "$common/worktrees" ;;
+    *)
+      for name in objects refs logs packed-refs packed-refs.lock; do
+        printf 'allow %s\n' "$common/$name"
+      done
+      if [ -n "$admin" ] && [ "$admin" != "$common" ]; then
+        printf 'allow %s\n' "$admin"
+        for name in commondir gitdir config.worktree; do
+          printf 'deny %s\n' "$admin/$name"
+        done
+      fi
+      ;;
+    esac
+  fi
+  if [ -n "$gate" ]; then
+    [ ! -d "$gate" ] || gate=$(cd "$gate" && pwd -P) || return 1
+    for name in objects refs logs packed-refs packed-refs.lock; do
+      printf 'allow %s\n' "$gate/$name"
+    done
+    for name in commondir config hooks worktrees; do
+      printf 'deny %s\n' "$gate/$name"
+    done
+  fi
+}
+
 # fm_external_settings_json <keep-ai-trailers 0|1> <domains> <write-paths> <deny-write-paths> <unix-sockets> [<hooks-json>]:
 # print the complete --settings object for an external Claude worker. It keeps
 # the session keys every Claude worker carries (feedbackDrafts, and the
@@ -87,8 +137,8 @@ fm_external_settings_json() {  # <keep-ai-trailers 0|1> <domains> <write-paths> 
         deny: ([
           "WebFetch",
           "WebSearch",
-          "Read(**/.env)",
-          "Read(**/.env.*)",
+          "Read(//**/.env)",
+          "Read(//**/.env.*)",
           "Read(~/.ssh/**)",
           "Read(~/.aws/**)",
           "Read(~/.gnupg/**)",

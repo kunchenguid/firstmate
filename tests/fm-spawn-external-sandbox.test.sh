@@ -58,7 +58,7 @@ launch_text() {
 # carries the sandbox and the worker's busy hooks, and the record carries the
 # mark.
 assert_contained() {
-  local id=$1 state_real settings launch common wt_real root_real tmp_real
+  local id=$1 state_real settings launch common admin wt_real root_real tmp_real
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
   settings="$state_real/$id.claude-settings.json"
   launch=$(launch_text)
@@ -77,8 +77,8 @@ assert_contained() {
     and .permissions.blockWritesOutsideWorkingDirectories == true
     and (.permissions.deny | index("WebFetch") != null)
     and (.permissions.deny | index("WebSearch") != null)
-    and (.permissions.deny | index("Read(**/.env)") != null)
-    and (.permissions.deny | index("Read(**/.env.*)") != null)
+    and (.permissions.deny | index("Read(//**/.env)") != null)
+    and (.permissions.deny | index("Read(//**/.env.*)") != null)
     and (.permissions.deny | index("Read(~/.config/gh/**)") != null)
     and (.sandbox.network.allowedDomains == ["github.com", "api.github.com", "*.githubusercontent.com"])
   ' "$settings" >/dev/null || fail "the external settings file lacks the sandbox block"$'\n'"$(cat "$settings")"
@@ -86,18 +86,23 @@ assert_contained() {
     || fail "the external worker's busy hooks must ride its settings file"$'\n'"$(cat "$settings")"
   wt_real=$(cd "$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")" && pwd -P)
   [ ! -e "$wt_real/.claude/settings.local.json" ] || fail "the external worker's hooks landed in a worktree settings file it does not load"
-  common=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir)
+  common=$(cd "$PROJECT_DIR/.git" && pwd -P)
+  admin=$(cd "$(sed -n 's/^gitdir: //p' "$wt_real/.git")" && pwd -P)
+  case "$admin" in "$common/worktrees/"*) ;; *) fail "the fixture worktree is not linked into $common: $admin" ;; esac
   tmp_real=$(cd "/tmp/fm-$id" && pwd -P)
-  jq -e --arg status "$state_real/$id.status" --arg tmp "$tmp_real" --arg common "$common" \
-    '.sandbox.filesystem.allowWrite == [$status, $tmp, $common]' "$settings" >/dev/null \
-    || fail "the sandbox must write only the status file, the task temp root, and the shared git directory beyond the task channels"$'\n'"$(cat "$settings")"
+  jq -e --arg status "$state_real/$id.status" --arg tmp "$tmp_real" --arg common "$common" --arg admin "$admin" '
+    .sandbox.filesystem.allowWrite == [$status, $tmp, "\($common)/objects", "\($common)/refs", "\($common)/logs",
+      "\($common)/packed-refs", "\($common)/packed-refs.lock", $admin]
+  ' "$settings" >/dev/null \
+    || fail "beyond the task channels the sandbox must write only the status file, the task temp root, the shared objects, refs, reflogs, and packed refs, and this worktree's own admin directory"$'\n'"$(cat "$settings")"
   root_real=$(cd "$ROOT" && pwd -P)
-  jq -e --arg skills "$root_real/.agents/skills" --arg wt "$wt_real" --arg common "$common" '
+  jq -e --arg skills "$root_real/.agents/skills" --arg wt "$wt_real" --arg common "$common" --arg admin "$admin" '
     .sandbox.filesystem.denyWrite == [$skills, "\($wt)/.claude/settings.json", "\($wt)/.claude/settings.local.json",
-      "\($wt)/.git", "\($common)/config", "\($common)/hooks"]
+      "\($wt)/.git", "\($common)/commondir", "\($common)/config", "\($common)/config.worktree", "\($common)/hooks",
+      "\($common)/modules", "\($admin)/commondir", "\($admin)/gitdir", "\($admin)/config.worktree"]
     and ([.sandbox.filesystem.denyWrite[] | "Edit(/\(.))", "Edit(/\(.)/**)"] - .permissions.deny) == []
   ' "$settings" >/dev/null \
-    || fail "the skills, the worktree Claude settings, and the git link, config, and hooks must stay unwritable for every tool"$'\n'"$(cat "$settings")"
+    || fail "the skills, the worktree Claude settings, and every git link, config, and hooks path must stay unwritable for every tool"$'\n'"$(cat "$settings")"
   jq -e '.sandbox.network | has("allowUnixSockets") | not' "$settings" >/dev/null \
     || fail "a worktree with no local gate must allow no Unix socket"$'\n'"$(cat "$settings")"
   grep -qx 'trust=external' "$HOME_DIR/state/$id.meta" || fail "the task record lacks the external mark"
@@ -122,21 +127,24 @@ test_external_flag_marks_one_task_on_an_unmarked_project() {
 }
 
 test_local_gate_opens_the_gate_and_its_daemon_only() {
-  local id=ext-gate out status settings common
+  local id=ext-gate out status settings gate
   make_case gate "$id" "no-mistakes trust=external"
   git init --quiet --bare "$CASE_DIR/nm-home/repos/gate.git"
   git -C "$PROJECT_DIR" remote add no-mistakes "$CASE_DIR/nm-home/repos/gate.git"
   out=$(NM_HOME="$CASE_DIR/nm-home" run_spawn "$id"); status=$?
   expect_code 0 "$status" "an external spawn with a local gate should launch"$'\n'"$out"
   settings="$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json"
-  common=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir)
-  jq -e --arg gate "$CASE_DIR/nm-home/repos/gate.git" --arg common "$common" \
-    '(.sandbox.filesystem.allowWrite | .[2:]) == [$common, $gate]' "$settings" >/dev/null \
-    || fail "a local gate repository must be writable"$'\n'"$(cat "$settings")"
-  jq -e --arg gate "$CASE_DIR/nm-home/repos/gate.git" \
-    '(.sandbox.filesystem.denyWrite | .[-2:]) == ["\($gate)/config", "\($gate)/hooks"]
-     and (.permissions.deny | index("Edit(/\($gate)/hooks/**)") != null)' "$settings" >/dev/null \
-    || fail "a local gate repository must keep its config and hooks unwritable"$'\n'"$(cat "$settings")"
+  gate=$(cd "$CASE_DIR/nm-home/repos/gate.git" && pwd -P)
+  jq -e --arg gate "$gate" '
+    (.sandbox.filesystem.allowWrite | .[-5:]) == ["\($gate)/objects", "\($gate)/refs", "\($gate)/logs",
+      "\($gate)/packed-refs", "\($gate)/packed-refs.lock"]
+  ' "$settings" >/dev/null \
+    || fail "a push to a local gate repository needs exactly its objects, refs, reflogs, and packed refs"$'\n'"$(cat "$settings")"
+  jq -e --arg gate "$gate" '
+    (.sandbox.filesystem.denyWrite | .[-4:]) == ["\($gate)/commondir", "\($gate)/config", "\($gate)/hooks", "\($gate)/worktrees"]
+    and (.permissions.deny | index("Edit(/\($gate)/hooks/**)") != null)
+  ' "$settings" >/dev/null \
+    || fail "a local gate repository must keep its links, config, hooks, and worktrees unwritable"$'\n'"$(cat "$settings")"
   jq -e --arg sock "$CASE_DIR/nm-home/socket" '.sandbox.network.allowUnixSockets == [$sock]' "$settings" >/dev/null \
     || fail "a local gate must open exactly the no-mistakes daemon socket"$'\n'"$(cat "$settings")"
   pass "fm-spawn: a worktree with a local gate opens that gate and the daemon socket, and nothing else"

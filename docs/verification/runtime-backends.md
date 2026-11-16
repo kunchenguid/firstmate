@@ -733,8 +733,11 @@ Each row changes one setting against the external settings block.
 | `--setting-sources user` | A `SessionStart` and `UserPromptSubmit` hook in the working directory's `.claude/settings.json` ran. | That hook did not run, and a `UserPromptSubmit` hook in the `--settings` file still ran. |
 
 With the read-only paths in `sandbox.filesystem.denyWrite` and as `Edit(...)` deny rules, shell commands and the Write tool were refused on an `--add-dir` directory, on the working directory's `.claude/settings.json`, and on a granted gate repository's `hooks`.
+With only the commit and push parts of the shared git directory and of the gate granted, a commit in a linked worktree and a push to a local bare gate succeeded.
+Shell writes were refused on the shared git directory's `commondir`, on the worktree admin directory's existing `commondir` and missing `config.worktree`, on another worktree's `commondir`, and on the gate's `commondir`.
 The `--add-dir` directory stayed readable, and the rest of the gate repository stayed writable.
 A planted `~/.config/gh/hosts.yml` was unreadable by shell commands.
+With `Read(//**/.env)`, a `.env` outside the working directory was unreadable by shell commands and by the Read tool.
 
 A model-driven interactive worker then ran the same 21 steps in a tmux pane once per permission mode, with the external settings and launch flags `fm-spawn.sh` built before the read-only paths, the extra credential stores, and `--setting-sources user` were added; the token-free guard covers those.
 

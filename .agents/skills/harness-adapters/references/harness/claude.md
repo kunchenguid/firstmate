@@ -74,7 +74,8 @@ These vendor facts, measured on Claude Code 2.1.325 on macOS, shape that block:
 - The sandbox wraps Bash only. A `Read(...)` deny rule also enters the sandbox's read denials, but a Write or Edit outside the working directories succeeds under bypass unless `permissions.blockWritesOutsideWorkingDirectories` is on.
 - `disableClaudeAiConnectors` removes the account connectors only; local and plugin MCP servers still load until `--strict-mcp-config` is passed.
 - A hook in the working directory's `.claude/settings.json` runs outside the sandbox; `--setting-sources user` stops it from loading, while the hooks in the `--settings` file still run.
-- A path in `sandbox.filesystem.denyWrite` with matching `Edit(...)` deny rules stays unwritable for shell commands and the Write tool inside the working directory, an `--add-dir` directory, or an `allowWrite` path, and an `--add-dir` directory stays readable.
+- A path in `sandbox.filesystem.denyWrite` with matching `Edit(...)` deny rules stays unwritable for shell commands and the Write tool inside the working directory, an `--add-dir` directory, or an `allowWrite` path, and an `--add-dir` directory stays readable; this holds for a missing file inside an `allowWrite` directory too.
+- `Read(//**/.env)` refuses a `.env` outside the working directory for shell commands and the Read tool.
 - The sandbox lists loopback addresses in `NO_PROXY`, so a loopback client connects directly and is refused, while an outside host goes through the sandbox proxy.
 - Go-based tools such as `gh` cannot verify TLS certificates in the sandbox unless `sandbox.enableWeakerNetworkIsolation` is on, which the vendor describes as a data exfiltration path, so the block leaves it off.
 
