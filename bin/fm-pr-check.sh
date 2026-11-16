@@ -277,8 +277,8 @@ fi
 # a repository by owner/repository slug only, resolving the host from its own
 # login rather than from the URL the way gh and glab do, so the CLI and that
 # login are resolved through the same single owner the merge path and the
-# reads use (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve), honoring the project's
-# registered CLI first and what is installed second. `fj` resolves but cannot
+# reads use (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve): the project's registered
+# CLI when the binding names one, and tea when it names none. `fj` resolves but cannot
 # serve this contract, so it is refused here by name rather than armed into a
 # poll that stays silent forever. The resolved preference is recorded in the
 # registered poll sidecar (bin/fm-pr-lib.sh's fm_pr_poll_prepare), so

@@ -717,8 +717,8 @@ fi
 # login comes from whichever Forgejo CLI this run uses, so both the CLI and its
 # login for this exact host are resolved here in one place
 # (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve): by the project's registered forge
-# binding when it names a CLI (forge=forgejo:<cli>), and by what is installed
-# and logged in for the host otherwise. bin/fm-pr-check.sh already refused
+# binding when it names a CLI (forge=forgejo:<cli>), and tea when it names none.
+# bin/fm-pr-check.sh already refused
 # arming without one, but a CLI can be uninstalled or a login removed or
 # renamed after arming, so this is re-derived fresh rather than trusted from
 # that earlier check. `fj` (forgejo-cli) cannot serve this contract - it

@@ -1353,7 +1353,7 @@ FIELDS
 # A CLI is selected by explicit configuration first: a project's registered
 # `forge=forgejo:<cli>` registry binding names the CLI and that CLI is then
 # required to be installed and to hold a login for <host>, or the run refuses.
-# `auto` (no binding, or an empty one) means tea and only tea - not a search
+# `auto` (no CLI named in the binding) means tea and only tea - not a search
 # that walks the installed CLIs - so an unmodified home keeps today's behaviour
 # exactly: nothing starts using a different CLI's stored login because tea
 # happened to have none for this host. fgj is therefore opt-in, reached only
