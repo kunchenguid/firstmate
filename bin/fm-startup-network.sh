@@ -91,7 +91,18 @@
 #   .startup-network.delivered
 #                             a durable acknowledgement that harvest printed the
 #                             current finished result; only this suppresses its
-#                             wake.
+#                             wake. It is bound to the report's CONTENT, not to
+#                             a run: its second line is the report's cksum, and a
+#                             later clean run that republishes a byte-identical
+#                             report keeps it, so a standing finding is announced
+#                             once instead of on every run. A different report, a
+#                             timed-out or failed run, or an unpublished report
+#                             clears it, so a changed finding always announces.
+#   .startup-network.announced
+#                             the same cksum, recorded when the WAKE (rather than
+#                             harvest) announced a clean-state report, so the
+#                             wake path is content-bound too. Carried into
+#                             .delivered by the next identical publication.
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
 #                             stage total, one record per network phase (gh auth,
@@ -125,6 +136,7 @@ STATUS_FILE="$STATE/.startup-network.status"
 REPORT_FILE="$STATE/.startup-network.report"
 CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
+ANNOUNCED_FILE="$STATE/.startup-network.announced"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
 
@@ -358,10 +370,33 @@ report_requires_wake() {  # <state>
     "$REPORT_FILE" 2>/dev/null
 }
 
+# The cksum of a report file: the identity a delivered or announced record is
+# bound to. A missing file digests as empty, which is a real (silent) report.
+report_digest() {  # <file>
+  local digest
+  digest=$(cksum < "$1" 2>/dev/null) || digest=
+  printf '%s' "$digest" | tr ' ' '-'
+}
+
+# The digest a record file is bound to (its second line), empty for a legacy or
+# missing record, which therefore never matches and is cleared like before.
+record_digest() {  # <file>
+  sed -n '2p' "$1" 2>/dev/null
+}
+
 queue_result_wake() {  # <state>
   fm_wake_append check startup-network \
     "check: startup-network: deferred startup network checks finished ($1); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
-    || true
+    || return 1
+}
+
+# A wake that announces a clean-state report is recorded by content, AFTER the
+# durable queue append, so a crash in between can only repeat an announcement,
+# never lose one.
+announce_result_wake() {  # <state>
+  queue_result_wake "$1" || return 0
+  [ "$1" = 'done' ] || return 0
+  printf 'announced\n%s\n' "$(report_digest "$REPORT_FILE")" | write_atomic "$ANNOUNCED_FILE" || true
 }
 
 # Bounded by DELIVERY_DEADLINE, which publish() sets from the delivery budget.
@@ -375,7 +410,7 @@ await_delivery() {  # <generation> <state>
       # A live holder outlived the whole delivery budget, so the claim cannot be
       # judged under the lock. A possible duplicate of an inline print is
       # cheaper than an actionable result nobody is woken for.
-      ! report_requires_wake "$state" || queue_result_wake "$state"
+      ! report_requires_wake "$state" || queue_result_wake "$state" || true
       return 1
     fi
     if [ "$(status_get generation)" != "$generation" ]; then
@@ -400,13 +435,31 @@ EOF
       [ "$claim_live" -eq 1 ] || rm -f "$CLAIM_FILE" 2>/dev/null || true
     fi
     if [ "$claim_live" -eq 0 ]; then
-      ! report_requires_wake "$state" || queue_result_wake "$state"
+      ! report_requires_wake "$state" || announce_result_wake "$state"
       fm_lock_release "$PUBLISH_LOCK"
       return 0
     fi
     fm_lock_release "$PUBLISH_LOCK"
     sleep 0.1
   done
+}
+
+# Bind the already-delivered record to the report's content. A clean-state,
+# published report byte-identical to one already delivered or announced inherits
+# that state, so the unchanged finding stays quiet; every other outcome (a
+# different report, timeout, failure, an unpublished report) clears it exactly as
+# before, so a change or a broken run always announces.
+settle_delivered_record() {  # <state> <report-published> <new-report-file>
+  local state=$1 published=$2 out=$3 digest
+  if [ "$state" = 'done' ] && [ "$published" = 1 ]; then
+    digest=$(report_digest "$out")
+    if [ "$(record_digest "$DELIVERED_FILE")" = "$digest" ] \
+      || [ "$(record_digest "$ANNOUNCED_FILE")" = "$digest" ]; then
+      printf 'delivered\n%s\n' "$digest" | write_atomic "$DELIVERED_FILE" || true
+      return 0
+    fi
+  fi
+  rm -f "$DELIVERED_FILE" "$ANNOUNCED_FILE" 2>/dev/null || true
 }
 
 # Write the result files. Prints the final state, which differs from the
@@ -426,7 +479,7 @@ record_result() {  # <generation> <state> <phases> <locked> <started> <rc> <outp
     rc=1
     report_published=0
   fi
-  rm -f "$DELIVERED_FILE" 2>/dev/null || true
+  settle_delivered_record "$state" "$report_published" "$out"
   write_atomic "$STATUS_FILE" <<EOF || true
 state=$state
 pid=$$
@@ -476,7 +529,7 @@ publish_lock_held() {  # <generation> <phases> <locked> <started> <lockdir> <out
     return 1
   fi
   record_result "$generation" failed "$phases" "$locked" "$started" 124 "$out" "$timings" >/dev/null
-  queue_result_wake failed
+  queue_result_wake failed || true
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
@@ -701,9 +754,8 @@ EOF
   state=$(status_get state)
   print_state
   case "$state" in
-    done|timeout|failed) [ "$(status_get report_published)" = 0 ] || write_atomic "$DELIVERED_FILE" <<EOF || true
-delivered
-EOF
+    done|timeout|failed) [ "$(status_get report_published)" = 0 ] \
+      || printf 'delivered\n%s\n' "$(report_digest "$REPORT_FILE")" | write_atomic "$DELIVERED_FILE" || true
       ;;
   esac
   fm_lock_release "$PUBLISH_LOCK"
