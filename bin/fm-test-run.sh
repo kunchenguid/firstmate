@@ -393,7 +393,8 @@ family_for_basename() {
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
     fm-claude-tool-exclude-live.test.sh|\
-    fm-context-ceiling-live.test.sh|fm-context-ceiling-codex-live.test.sh)
+    fm-context-ceiling-live.test.sh|fm-context-ceiling-codex-live.test.sh|\
+    fm-supervision-engine-start-size-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -1676,6 +1677,13 @@ families_for_changed_path() {
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       printf '%s\n' "__script__:fm-context-ceiling.test.sh"
+      ;;
+    bin/fm-fresh-start-lib.sh)
+      printf '%s\n' "__script__:fm-fresh-start.test.sh"
+      printf '%s\n' "__script__:fm-warm-compact.test.sh"
+      ;;
+    bin/fm-branch-prompt.sh)
+      printf '%s\n' "__script__:fm-supervision-engine-start-size-live.test.sh"
       ;;
     bin/fm-session-size-lib.sh)
       printf '%s\n' "__script__:fm-send-fresh-worker-advice.test.sh"

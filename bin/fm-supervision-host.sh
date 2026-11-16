@@ -214,6 +214,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-warm-compact-lib.sh
 . "$SCRIPT_DIR/fm-warm-compact-lib.sh"
+# shellcheck source=bin/fm-fresh-start-lib.sh
+. "$SCRIPT_DIR/fm-fresh-start-lib.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -585,8 +587,29 @@ WARM_COMPACT_LAST_TICK=-1
 WARM_COMPACT_PRIMARY_DONE=0
 WARM_COMPACT_VERDICT=
 
+# Daily fresh start (bin/fm-fresh-start-lib.sh owns the setting, the gate, and
+# the steps). Ticks on the warm-compact cadence; a step that types ends this
+# park's ownership the way any new primary turn does.
+FRESH_START_LAST_TICK=-1
+
+fresh_start_tick() {
+  local backend target verdict
+  [ "$PRIMARY" = claude ] && [ -f "$CONFIG/daily-fresh-start" ] && [ -n "${FM_WARM_COMPACT_TRANSCRIPT:-}" ] || return 0
+  park_elapsed
+  if [ "$FRESH_START_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - FRESH_START_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
+    return 0
+  fi
+  FRESH_START_LAST_TICK=$PARK_ELAPSED
+  turn_crosses_boundary && return 0
+  target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend) || return 0
+  verdict=$(fm_fresh_start_step "$CONFIG" "$STATE" "$backend" "$target" "$FM_WARM_COMPACT_TRANSCRIPT" \
+    $(($(date +%s) - PARK_ELAPSED)))
+  case "$verdict" in saving | cleared | skipped | failed) log_line "fresh-start	$verdict" ;; esac
+}
+
 warm_compact_tick() {
   local backend target verdict ended compacted
+  fresh_start_tick
   [ -f "$CONFIG/warm-compact" ] || return 0
   park_elapsed
   if [ "$WARM_COMPACT_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - WARM_COMPACT_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then

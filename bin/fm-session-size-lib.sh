@@ -33,7 +33,7 @@ FM_SESSION_CALLS=
 FM_SESSION_CONTEXT=
 
 fm_session_size_claude() {  # <worktree>
-  local wt=$1 root dir= path physical newest
+  local wt=$1 root dir='' path physical newest
   root=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
   physical=$(cd "$wt" 2>/dev/null && pwd -P) || physical=$wt
   for path in "$wt" "$physical"; do
@@ -55,7 +55,7 @@ fm_session_size_claude() {  # <worktree>
 }
 
 fm_session_size_codex() {  # <worktree>
-  local wt=$1 sessions days file newest= newest_m=0 m physical
+  local wt=$1 sessions days file newest='' newest_m=0 m physical
   sessions=${CODEX_HOME:-$HOME/.codex}/sessions
   physical=$(cd "$wt" 2>/dev/null && pwd -P) || physical=$wt
   [ -d "$sessions" ] || return 1
