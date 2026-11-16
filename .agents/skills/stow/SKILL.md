@@ -286,6 +286,8 @@ State what reset-safe means in the same breath as the claim: nothing this sessio
 It is never a claim that the home's durable records are correct, because this pass checks no record the session did not name.
 Do not hide an over-budget result behind a reset-safe claim.
 In a primary home the receipt is written after the cascade below, not instead of it.
+When `/stow` was invoked as `/stow daily-fresh-start <nonce>`, the daily fresh start is waiting to clear this conversation (`bin/fm-fresh-start-lib.sh` owns the steps).
+Run `bin/fm-fresh-start.sh attest <nonce>` as your very last action, after the receipt, only when that receipt declares the session reset-safe; otherwise do not run it, and the conversation is not cleared today.
 
 ## Automatic cascade to secondmates
 

@@ -25,29 +25,41 @@
 # THE STEPS, at most one per day (the local date), each on its own park so a
 # turn always ends between them, recorded in state/.daily-fresh-start as
 #   date=<YYYY-MM-DD>  step=<saving|cleared|skipped>  at=<epoch>
-#   1. save   submit /stow, so the session files every durable fact first;
-#   2. clear  on a later park after that save turn ended, submit /clear, then a
-#             one-line resume prompt. Claude Code's SessionStart hook re-emits
-#             the startup digest into the new conversation (docs/
-#             sessionstart-nudge.md, source clear), and the resume turn's own
-#             Stop hook arms supervision again, so monitoring never depends on
-#             the old conversation's park.
-# A day whose window closes before step 2 records skipped and never clears an
-# unsaved conversation: clear runs only after a save of the same day.
+#   nonce=<random>     transcript=<the primary's session transcript>
+#   1. save   submit `/stow daily-fresh-start <nonce>`. The stow skill runs
+#             `bin/fm-fresh-start.sh attest <nonce>` as its last action only
+#             when its own completion receipt declares the session safe to
+#             reset (.agents/skills/stow/SKILL.md "Completion receipt"), which
+#             writes state/.daily-fresh-start-attest. Submitting the command
+#             proves nothing about the save.
+#   2. clear  on a later park after that save turn ended, and only when all of
+#             these hold: the attestation names this attempt's nonce; the
+#             primary is still the session the save was submitted to (same
+#             transcript path); and that session's newest human prompt is
+#             still the /stow carrying the nonce, so nothing was said after the
+#             save. Then submit /clear and a one-line resume prompt. Claude
+#             Code's SessionStart hook re-emits the startup digest into the
+#             new conversation (docs/sessionstart-nudge.md, source clear), and
+#             the resume turn's own Stop hook arms supervision again.
+# A save that never attests (failed, interrupted, not reset-safe) never clears:
+# the day records skipped when its window closes. A save the session moved past
+# (another session, or a later prompt) records skipped at once.
 #
-# THE GATE. Every step re-checks, and a step is held back while anything the
-# current conversation is in the middle of could be dropped by clearing it
-# (fm_fresh_start_waiting prints the first one):
+# THE GATE. Every step re-checks, and a step is held back while anything could
+# still be waiting on the captain or the current conversation, and whenever one
+# of these inputs cannot be read (fm_fresh_start_waiting prints the first):
 #   - an away or quiet record exists (state/.afk);
 #   - a wake is queued and unacknowledged (state/.wake-queue);
-#   - a needs-decision or blocked line is still open in any status log;
-#   - a captain outcome from the supervision session is unprocessed;
 #   - a supervision handoff is pending (state/.supervision-handoff-pending);
 #   - a request to a secondmate still waits for its reply (state/pending-replies);
-#   - a captain inbox note waits for firstmate (state/inbox/*.note).
-# A standing captain-held backlog item does not hold a step back: it is a
-# durable record the new conversation's startup digest presents again, and a
-# home with long-lived holds would otherwise never start fresh.
+#   - a captain outcome is unread or unprocessed, read through the outcome
+#     store's own validating reader (bin/fm-branch-outcome.sh);
+#   - a captain inbox note waits for firstmate (state/inbox/*.note);
+#   - a needs-decision or blocked line is still open in any status log, and
+#     every status log must be a readable regular file for that to be known;
+#   - a backlog item is held for the captain (bin/fm-tasks-axi.sh list --state
+#     held), which is where an unanswered status question goes when it is
+#     transferred to a captain hold.
 # Each step also needs the agent idle and the composer provably empty, through
 # the same backend primitives warm-cache compaction uses; nothing is typed
 # otherwise. A held step is retried on the next tick inside the window.
@@ -56,7 +68,7 @@ FM_FRESH_START_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_FRESH_START_HOUR_DEFAULT=4
 FM_FRESH_START_WINDOW_DEFAULT=3
 FM_FRESH_START_MIN_DEFAULT=100000
-FM_FRESH_START_RESUME_PROMPT='Daily fresh start: this conversation was cleared after /stow saved it. The startup digest above is your current state; resume supervision exactly as after any session start.'
+FM_FRESH_START_RESUME_PROMPT='Daily fresh start: this conversation was cleared after /stow saved it and declared it safe to reset. The startup digest above is your current state; resume supervision exactly as after any session start.'
 
 # fm_fresh_start_config <config-dir>: succeed and set FM_FRESH_START_HOUR,
 # FM_FRESH_START_WINDOW and FM_FRESH_START_MIN when the home opted in.
@@ -89,69 +101,158 @@ fm_fresh_start_in_window() {
   [ "$offset" -lt "$FM_FRESH_START_WINDOW" ]
 }
 
+# _fm_fresh_start_dir_has <dir> <find-predicate...>: 0 when the readable
+# directory holds a match, 1 when it holds none, 2 when it cannot be read.
+_fm_fresh_start_dir_has() {
+  local dir=$1 out
+  shift
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 2
+  out=$(find "$dir" -mindepth 1 -maxdepth 1 "$@" 2>/dev/null) || return 2
+  [ -n "$out" ]
+}
+
 # fm_fresh_start_waiting <state-dir>: print the first reason clearing the
-# conversation now could drop something (THE GATE), or nothing.
+# conversation now could drop something or cannot be proven safe (THE GATE), or
+# nothing. FM_HOME must name this home, for the backlog read.
 fm_fresh_start_waiting() {
-  local state=$1 processed open
+  local state=$1 rc f open out count
   if [ -e "$state/.afk" ]; then printf 'away or quiet mode\n'; return 0; fi
-  if awk -F '\t' 'NF >= 5 { found = 1; exit } END { exit !found }' "$state/.wake-queue" 2>/dev/null; then
-    printf 'a queued wake\n'
-    return 0
-  fi
-  if [ -e "$state/.supervision-handoff-pending" ]; then printf 'a supervision handoff\n'; return 0; fi
-  if [ -d "$state/pending-replies" ] && [ -n "$(find "$state/pending-replies" -mindepth 1 -maxdepth 1 ! -name '.*' 2>/dev/null | head -n 1)" ]; then
-    printf 'a secondmate reply\n'
-    return 0
-  fi
-  if [ -f "$state/branch-outcomes.jsonl" ]; then
-    processed=$(cat "$state/.branch-outcomes-processed" 2>/dev/null || true)
-    case "$processed" in '' | *[!0-9]*) processed=0 ;; esac
-    if jq -e -n --argjson p "$processed" '[inputs | select(.verdict == "captain" and (.seq // 0) > $p)] | length > 0' \
-      "$state/branch-outcomes.jsonl" >/dev/null 2>&1; then
-      printf 'an unprocessed captain outcome\n'
+  if [ -e "$state/.wake-queue" ] || [ -L "$state/.wake-queue" ]; then
+    if [ -L "$state/.wake-queue" ] || [ ! -f "$state/.wake-queue" ] || [ ! -r "$state/.wake-queue" ]; then
+      printf 'an unreadable wake queue\n'
       return 0
     fi
+    rc=0
+    awk -F '\t' 'NF >= 5 { found = 1; exit } END { exit !found }' "$state/.wake-queue" 2>/dev/null || rc=$?
+    case "$rc" in
+    0) printf 'a queued wake\n'; return 0 ;;
+    1) ;;
+    *) printf 'an unreadable wake queue\n'; return 0 ;;
+    esac
   fi
-  if [ -d "$state/inbox" ] && [ -n "$(find "$state/inbox" -maxdepth 1 -name '*.note' 2>/dev/null | head -n 1)" ]; then
-    printf 'a captain inbox note\n'
-    return 0
+  if [ -e "$state/.supervision-handoff-pending" ]; then printf 'a supervision handoff\n'; return 0; fi
+  if [ -e "$state/pending-replies" ]; then
+    rc=0
+    _fm_fresh_start_dir_has "$state/pending-replies" ! -name '.*' || rc=$?
+    case "$rc" in
+    0) printf 'a secondmate reply\n'; return 0 ;;
+    2) printf 'an unreadable pending-reply record\n'; return 0 ;;
+    esac
   fi
-  # The status fold runs in its own shell so the host never loads the classify
-  # library's names; a failed read counts as open, so the step waits.
+  if [ -e "$state/branch-outcomes.jsonl" ] || [ -L "$state/branch-outcomes.jsonl" ]; then
+    if ! out=$(FM_STATE_OVERRIDE="$state" "$FM_FRESH_START_LIB_DIR/fm-branch-outcome.sh" unread 2>/dev/null); then
+      printf 'an unreadable outcome store\n'
+      return 0
+    fi
+    if [ -n "$out" ] && printf '%s\n' "$out" | grep -q '"verdict":"captain"'; then
+      printf 'an unread captain outcome\n'
+      return 0
+    fi
+    if ! out=$(FM_STATE_OVERRIDE="$state" "$FM_FRESH_START_LIB_DIR/fm-branch-outcome.sh" unprocessed 2>/dev/null); then
+      printf 'an unreadable outcome store\n'
+      return 0
+    fi
+    if [ -n "$out" ]; then printf 'an unprocessed captain outcome\n'; return 0; fi
+  fi
+  if [ -e "$state/inbox" ]; then
+    rc=0
+    _fm_fresh_start_dir_has "$state/inbox" -name '*.note' || rc=$?
+    case "$rc" in
+    0) printf 'a captain inbox note\n'; return 0 ;;
+    2) printf 'an unreadable captain inbox\n'; return 0 ;;
+    esac
+  fi
+  # The status fold skips a log it cannot read, so readability is proven here
+  # first: an unreadable, irregular, or linked log is an unknown, not a quiet one.
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then
+      printf 'an unreadable status log (%s)\n' "$(basename "$f" .status)"
+      return 0
+    fi
+  done
+  # The fold runs in its own shell so the host never loads the classify
+  # library's names; a failed run counts as unreadable, so the step waits.
   if ! open=$(bash -c '. "$1/fm-classify-lib.sh" && scan_open_decisions "$2"' _ "$FM_FRESH_START_LIB_DIR" "$state" 2>/dev/null); then
     printf 'unreadable status logs\n'
     return 0
   fi
   open=$(printf '%s\n' "$open" | head -n 1)
   if [ -n "$open" ]; then printf 'an open decision (%s)\n' "${open%%$'\t'*}"; return 0; fi
+  if [ -z "${FM_HOME:-}" ] \
+    || ! out=$(FM_HOME="$FM_HOME" "$FM_FRESH_START_LIB_DIR/fm-tasks-axi.sh" list --state held 2>/dev/null); then
+    printf 'an unreadable captain-held list\n'
+    return 0
+  fi
+  count=$(printf '%s\n' "$out" | sed -n 's/^count: *//p' | head -n 1)
+  case "$count" in
+  '' | *[!0-9]*) printf 'an unreadable captain-held list\n'; return 0 ;;
+  0) ;;
+  *) printf 'a captain-held decision (%s held)\n' "$count"; return 0 ;;
+  esac
   return 0
 }
 
-# fm_fresh_start_record_get <state-dir> <field>
+# fm_fresh_start_record_get <state-dir> <field> [file]
 fm_fresh_start_record_get() {
-  sed -n "s/^$2=//p" "$1/.daily-fresh-start" 2>/dev/null | head -n 1
+  sed -n "s/^$2=//p" "$1/${3:-.daily-fresh-start}" 2>/dev/null | head -n 1
 }
 
-fm_fresh_start_record_put() {  # <state-dir> <date> <step>
+fm_fresh_start_record_put() {  # <state-dir> <date> <step> [nonce] [transcript]
   local tmp
   tmp=$(mktemp "$1/.daily-fresh-start.tmp.XXXXXX") || return 1
-  printf 'date=%s\nstep=%s\nat=%s\n' "$2" "$3" "$(date +%s)" >"$tmp" && mv -f "$tmp" "$1/.daily-fresh-start"
+  printf 'date=%s\nstep=%s\nat=%s\nnonce=%s\ntranscript=%s\n' "$2" "$3" "$(date +%s)" "${4:-}" "${5:-}" >"$tmp" \
+    && mv -f "$tmp" "$1/.daily-fresh-start"
+}
+
+# fm_fresh_start_attest <state-dir> <nonce>: record that the stow skill declared
+# the session safe to reset for this save attempt. Refuses (1) unless today's
+# record is a save waiting on exactly this nonce, so a stale or guessed nonce
+# can never license a clear.
+fm_fresh_start_attest() {
+  local state=$1 nonce=$2 tmp
+  case "$nonce" in '' | *[!0-9a-f]*) return 1 ;; esac
+  [ "$(fm_fresh_start_record_get "$state" step)" = saving ] || return 1
+  [ "$(fm_fresh_start_record_get "$state" date)" = "$(date +%Y-%m-%d)" ] || return 1
+  [ "$(fm_fresh_start_record_get "$state" nonce)" = "$nonce" ] || return 1
+  tmp=$(mktemp "$state/.daily-fresh-start-attest.tmp.XXXXXX") || return 1
+  printf 'nonce=%s\nat=%s\n' "$nonce" "$(date +%s)" >"$tmp" && mv -f "$tmp" "$state/.daily-fresh-start-attest"
+}
+
+# fm_fresh_start_last_prompt <transcript>: print, as one JSON string, the newest
+# human prompt of a Claude Code session transcript (a user line that is not a
+# tool result or injected skill text), or nothing. Fails when a candidate line
+# cannot be parsed, so an unreadable transcript never verifies.
+fm_fresh_start_last_prompt() {
+  local out
+  out=$(grep -F '"type":"user"' "$1" 2>/dev/null | jq -c 'select(.type == "user" and (.isMeta // false) != true)
+      | .message.content
+      | if type == "string" then .
+        elif type == "array" then ([.[] | select(.type == "text") | .text] | if length > 0 then join("\n") else empty end)
+        else empty end') || return 1
+  printf '%s\n' "$out" | tail -n 1
+}
+
+_fm_fresh_start_nonce() {
+  od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
 }
 
 # fm_fresh_start_step <config-dir> <state-dir> <backend> <target> <transcript> <park-start-epoch>
 # Takes at most one step and prints its verdict word:
 #   off | done | window | small | waiting:<reason> | busy | composer | saving |
-#   cleared | skipped | failed
+#   unsaved | cleared | skipped | failed
 # Needs fm-backend.sh and fm-warm-compact-lib.sh sourced.
 fm_fresh_start_step() {
   local config=$1 state=$2 backend=$3 target=$4 transcript=$5 park_start=$6
-  local today hour rec_date rec_step rec_at tokens why state_now
+  local today hour rec_date rec_step rec_at rec_nonce rec_transcript tokens why state_now nonce prompt
   fm_fresh_start_config "$config" || { printf 'off\n'; return 0; }
   today=$(date +%Y-%m-%d)
   hour=$(date +%H)
   rec_date=$(fm_fresh_start_record_get "$state" date)
   rec_step=$(fm_fresh_start_record_get "$state" step)
   rec_at=$(fm_fresh_start_record_get "$state" at)
+  rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
+  rec_transcript=$(fm_fresh_start_record_get "$state" transcript)
   case "$rec_at" in '' | *[!0-9]*) rec_at=0 ;; esac
   if [ "$rec_date" = "$today" ] && [ "$rec_step" != saving ]; then printf 'done\n'; return 0; fi
   if ! fm_fresh_start_in_window "$hour"; then
@@ -170,20 +271,41 @@ fm_fresh_start_step() {
   fi
   why=$(fm_fresh_start_waiting "$state")
   if [ -n "$why" ]; then printf 'waiting:%s\n' "$why"; return 0; fi
-  # The save turn must have ended before this park began: the park that
-  # submitted /stow is not the park that clears.
-  if [ "$rec_date" = "$today" ] && [ "$rec_step" = saving ] && [ "$park_start" -le "$rec_at" ]; then
-    printf 'saving\n'
-    return 0
+  if [ "$rec_date" = "$today" ] && [ "$rec_step" = saving ]; then
+    # The save turn must have ended before this park began: the park that
+    # submitted /stow is not the park that clears.
+    if [ "$park_start" -le "$rec_at" ]; then printf 'saving\n'; return 0; fi
+    if [ -z "$rec_nonce" ] || [ "$(fm_fresh_start_record_get "$state" nonce .daily-fresh-start-attest)" != "$rec_nonce" ]; then
+      printf 'unsaved\n'
+      return 0
+    fi
+    # The save belongs to the session it was submitted to, and nothing may
+    # have been said after it; otherwise its receipt no longer covers what the
+    # conversation holds, and today is skipped rather than cleared.
+    prompt=
+    if [ -z "$rec_transcript" ] || [ "$rec_transcript" != "$transcript" ] \
+      || ! prompt=$(fm_fresh_start_last_prompt "$transcript") \
+      || ! printf '%s\n' "$prompt" | jq -e --arg n "daily-fresh-start $rec_nonce" 'type == "string" and contains("<command-name>/stow</command-name>") and contains("<command-args>" + $n + "</command-args>")' >/dev/null 2>&1; then
+      fm_fresh_start_record_put "$state" "$today" skipped || true
+      rm -f "$state/.daily-fresh-start-attest"
+      printf 'skipped\n'
+      return 0
+    fi
   fi
   if [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != idle ]; then printf 'busy\n'; return 0; fi
   state_now=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$state_now" != empty ]; then printf 'composer\n'; return 0; fi
   if [ "$rec_date" != "$today" ] || [ "$rec_step" != saving ]; then
-    if [ "$(fm_backend_send_text_submit "$backend" "$target" /stow 3 0.4 0.4 2>/dev/null)" = empty ]; then
-      fm_fresh_start_record_put "$state" "$today" saving || true
+    nonce=$(_fm_fresh_start_nonce)
+    case "$nonce" in '' | *[!0-9a-f]*) printf 'failed\n'; return 0 ;; esac
+    rm -f "$state/.daily-fresh-start-attest"
+    # Recorded before the submit, so an attestation from the save turn always
+    # finds the nonce it names.
+    fm_fresh_start_record_put "$state" "$today" saving "$nonce" "$transcript" || { printf 'failed\n'; return 0; }
+    if [ "$(fm_backend_send_text_submit "$backend" "$target" "/stow daily-fresh-start $nonce" 3 0.4 0.4 2>/dev/null)" = empty ]; then
       printf 'saving\n'
     else
+      fm_fresh_start_record_put "$state" "$today" skipped || true
       printf 'failed\n'
     fi
     return 0
@@ -193,6 +315,7 @@ fm_fresh_start_step() {
     return 0
   fi
   fm_fresh_start_record_put "$state" "$today" cleared || true
+  rm -f "$state/.daily-fresh-start-attest"
   # The resume prompt starts the new conversation's first turn, whose Stop
   # hook re-arms supervision. A failed submit still leaves the cleared session
   # with its digest; the next wake or captain message starts that turn.
