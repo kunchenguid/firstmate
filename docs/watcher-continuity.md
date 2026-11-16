@@ -305,7 +305,13 @@ An ordinary presentation drain bounds both its initial queue-lock acquire and it
 | Initial queue lock | One PID-naming advisory, and the whole drain is skipped before any claim or mutation. |
 | Status-presentation lock | One such advisory after raw wake presentation, and status annotations, sections, and cursors are left retriable on the next drain. |
 
-Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
+Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics for contention, so acknowledgement atomicity is unchanged.
+On Git Bash, an ordinary wait refuses a stale real lock directory whose removal keeps failing rather than retrying forever; the refusal names the directory and holder evidence, including hidden nested owners.
+POSIX ordinary waits are unchanged.
+The retry bound and diagnostic are owned by `fm_lock_acquire_wait` in `bin/fm-wake-lib.sh`.
+The origin-metadata wait in `fm-captain-hold.sh complete` also has a deadline and refuses without changing the completion record when acquisition fails; that script's header owns the deadline and freshness allowance.
+The read-only `verify` command takes no metadata lock, because teardown invokes it while already holding that lock.
+`tests/fm-watcher-lock.test.sh` and `tests/fm-captain-hold-lifecycle.test.sh` cover these refusals.
 
 ### Guard counts for branch-held rows
 

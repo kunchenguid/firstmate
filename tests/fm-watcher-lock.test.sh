@@ -1220,15 +1220,16 @@ PY
 }
 
 test_lock_real_directory_named_refusal() {
-  python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "named directory-lock refusal"
+  python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" "$BASH" <<'PY' || fail "named directory-lock refusal"
 import os
 from pathlib import Path
 import subprocess
 import sys
 
-lib, root, dead = sys.argv[1:]
-for suffix in ('', '.steal'):
-    state = Path(root) / ('real-dir-refusal' + suffix)
+lib, root, dead, bash = sys.argv[1:]
+for suffix, mode in ((suffix, mode) for suffix in ('', '.steal')
+                     for mode in ('explicit', 'windows-wait')):
+    state = Path(root) / ('real-dir-refusal-' + mode + suffix)
     state.mkdir()
     lock = state / '.lock.acquire'
     wedged = Path(str(lock) + suffix)
@@ -1239,15 +1240,17 @@ for suffix in ('', '.steal'):
     (wedged / 'unrecognized-record').write_text('preserve me\n')
     os.utime(wedged, (1, 1))
     result = subprocess.run(
-        ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable', '_', lib, str(lock)],
-        env=dict(os.environ, FM_STATE_OVERRIDE=str(state)),
-        capture_output=True, text=True, timeout=10)
+        [bash, '-c', '. "$1"; if [ "$3" = windows-wait ]; then '
+         '_FM_UNAME=MINGW64_NT; fm_lock_acquire_wait "$2"; else '
+         'fm_lock_acquire_wait "$2" --refuse-unreapable; fi', '_', lib, lock.as_posix(), mode],
+        env=dict(os.environ, FM_STATE_OVERRIDE=state.as_posix()),
+        capture_output=True, text=True, timeout=20)
     assert result.returncode != 0, result
-    assert 'cannot reclaim lock directory ' + str(wedged) in result.stderr, result.stderr
+    assert 'cannot reclaim lock directory ' + wedged.as_posix() in result.stderr, result.stderr
     assert (wedged / 'unrecognized-record').read_text() == 'preserve me\n'
     assert not list(state.glob('*.owner.*')), list(state.iterdir())
 PY
-  pass "unreapable real-directory locks refuse promptly naming the wedged path"
+  pass "explicit and ordinary Windows waits refuse unreapable primary and steal directories by name"
 }
 
 test_lock_real_directory_permission_refusal() {
