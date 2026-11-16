@@ -1465,6 +1465,64 @@ test_base_branch_is_rendered_and_bounded() {
   pass "fm-brief.sh: --base-branch records the base, targets the PR at it, and is refused where no PR carries it"
 }
 
+# --closes carries the issue a no-mistakes ship fixes. Set, the brief tells the
+# worker to pass --closes on every run it starts and, when the worker owns the PR
+# body, to write a plain Closes line; unset, the brief carries no trace of it.
+test_closes_is_rendered_only_when_set() {
+  local home out rc brief id
+  home="$TMP_ROOT/closes-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes-nm some-proj --mode no-mistakes --closes 8504 >/dev/null 2>&1 \
+    || fail "no-mistakes --closes should scaffold"
+  brief="$home/data/brief-closes-nm/brief.md"
+  assert_grep 'Delivery contract: mode=no-mistakes closes=8504' "$brief" \
+    "the delivery contract line does not record the linked issue"
+  # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+  assert_grep 'pass `--closes 8504` on every `no-mistakes axi run` that starts a run' "$brief" \
+    "the no-mistakes drive instruction does not pass --closes on every run start"
+  ! grep -q 'Closes #8504' "$brief" || fail "the pipeline-written PR path told the worker to write a Closes line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes-manual some-proj --mode no-mistakes --pr manual --closes 8504 >/dev/null 2>&1 \
+    || fail "pr=manual --closes should scaffold"
+  brief="$home/data/brief-closes-manual/brief.md"
+  assert_grep 'Delivery contract: mode=no-mistakes closes=8504 pr=manual' "$brief" \
+    "the pr=manual contract line does not record the linked issue"
+  # shellcheck disable=SC2016
+  assert_grep 'pass `--closes 8504` on every `no-mistakes axi run` that starts a run' "$brief" \
+    "the pr=manual drive instruction does not pass --closes on every run start"
+  # shellcheck disable=SC2016
+  assert_grep 'put a plain `Closes #8504` line in the PR body you write' "$brief" \
+    "the pr=manual instruction does not name the plain Closes line"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes-none some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes without --closes should scaffold"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes-none-manual some-proj --mode no-mistakes --pr manual >/dev/null 2>&1 \
+    || fail "pr=manual without --closes should scaffold"
+  for id in brief-closes-none brief-closes-none-manual; do
+    ! grep -q -e 'closes=' -e '--closes' -e 'Closes #' "$home/data/$id/brief.md" || fail "$id mentions a linked issue although none was given"
+  done
+
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086 # The row's arguments must split into words.
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes-bad some-proj $args 2>&1); rc=$?
+    expect_code 1 "$rc" "$label must be refused"
+    assert_contains "$out" "$expect" "$label was refused without its reason"
+    [ ! -e "$home/data/brief-closes-bad/brief.md" ] || fail "$label left a brief behind"
+  done <<'ROWS'
+zero|--mode no-mistakes --closes 0|not a positive issue number
+leading zero|--mode no-mistakes --closes 08|not a positive issue number
+hash prefix|--mode no-mistakes --closes #8504|not a positive issue number
+words|--mode no-mistakes --closes fix-it|not a positive issue number
+empty|--mode no-mistakes --closes=|requires a positive issue number
+direct-PR|--mode direct-PR --closes 8504|no-mistakes pipeline only
+local-only|--mode local-only --closes 8504|no-mistakes pipeline only
+scout|--scout --closes 8504|applies only to ship briefs
+ROWS
+  pass "fm-brief.sh: --closes renders only when set, names the Closes line under pr=manual, and refuses everything but a positive number"
+}
+
 # (a) An unregistered/default project - no --branch-prefix passed at all - must
 # keep every generated ship mode's branch on the legacy "fm/<task-id>" name, byte
 # for byte, so every existing firstmate installation is unaffected.
@@ -1726,6 +1784,7 @@ test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
+test_closes_is_rendered_only_when_set
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes
 test_ship_branch_prefix_empty_override_yields_bare_task_id

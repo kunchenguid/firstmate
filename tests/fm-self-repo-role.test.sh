@@ -672,6 +672,34 @@ test_spawn_consent_agreement() {
 
 # --- fm-promote.sh ----------------------------------------------------------
 
+test_spawn_closes_agreement() {
+  local home out rc
+  home=$(make_role_home spawn-closes)
+
+  write_ship_brief "$home" spawn-closes-b1
+  rc=0
+  out=$(run_spawn "$home" spawn-closes-b1 "$ROOT" claude --mode no-mistakes --yolo off --closes 8504) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a flag-without-brief linked issue must refuse"
+  assert_contains "$out" "closes mismatch for spawn-closes-b1" "a flag without a matching brief token must refuse"
+  assert_absent "$home/state/spawn-closes-b1.meta" "a mismatched spawn must write no metadata"
+
+  write_ship_brief "$home" spawn-closes-b2 " closes=8504"
+  rc=0
+  out=$(run_spawn "$home" spawn-closes-b2 "$ROOT" claude --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a brief-without-flag linked issue must refuse"
+  assert_contains "$out" "closes mismatch for spawn-closes-b2" "a brief token without the flag must refuse"
+
+  write_ship_brief "$home" spawn-closes-b3 " closes=8504"
+  out=$(run_spawn "$home" spawn-closes-b3 "$ROOT" claude --mode no-mistakes --yolo off --closes 8504)
+  assert_not_contains "$out" "closes mismatch" "agreeing sides must not be reported as a mismatch"
+
+  rc=0
+  out=$(run_spawn "$home" spawn-closes-b4 "$ROOT" claude --mode direct-PR --yolo off --closes 8504) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--closes on direct-PR must refuse"
+  assert_contains "$out" "no-mistakes pipeline only" "the direct-PR refusal must name the pipeline"
+  pass "fm-spawn.sh: a linked issue must agree between the brief and the flag and ships on no-mistakes only"
+}
+
 test_promote_gate_on_self_repo() {
   local home meta out rc
   home=$(make_role_home promote-user)
@@ -736,6 +764,7 @@ test_brief_consent_flag_bounds
 test_brief_self_repo_pre_gate
 test_spawn_gate_on_self_repo
 test_spawn_consent_agreement
+test_spawn_closes_agreement
 test_promote_gate_on_self_repo
 test_secondmate_spawn_refuses_consent_flag
 
