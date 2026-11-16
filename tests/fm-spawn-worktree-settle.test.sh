@@ -79,6 +79,7 @@ case "${1:-}" in
     for arg in "$@"; do
       case "$arg" in
         'git rev-parse --show-toplevel > '*)
+          [ -z "${FM_FAKE_SEND_COUNTFILE:-}" ] || echo x >> "$FM_FAKE_SEND_COUNTFILE"
           [ "${FM_FAKE_SHELL_SILENT:-0}" != 1 ] || exit 0
           path=$(pane_path)
           (cd "$path" && eval "$arg")
@@ -151,6 +152,7 @@ run_settle_spawn() {
     OSTYPE="${SETTLE_OSTYPE:-$OSTYPE}" \
     FM_FAKE_PARENT_CWD_STUCK="${SETTLE_PARENT_CWD_STUCK:-0}" \
     FM_FAKE_SHELL_SILENT="${SETTLE_SHELL_SILENT:-0}" \
+    FM_FAKE_SEND_COUNTFILE="${SETTLE_SEND_COUNTFILE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -316,7 +318,7 @@ test_windows_shell_primary_is_refused() {
 }
 
 test_windows_missing_reply_never_uses_parent_cwd() {
-  local rec id out status
+  local rec id out status send_count
   id=settle-windows-silent-z8
   rec=$(make_settle_case settle-windows-silent "$id" 0)
   read_settle_record "$rec"
@@ -324,11 +326,19 @@ test_windows_missing_reply_never_uses_parent_cwd() {
   STALE_DIR=$WT_DIR
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
 
-  out=$(SETTLE_OSTYPE=msys SETTLE_PARENT_CWD_STUCK=1 SETTLE_SHELL_SILENT=1 run_settle_spawn "$id")
+  out=$(SETTLE_OSTYPE=msys SETTLE_PARENT_CWD_STUCK=1 SETTLE_SHELL_SILENT=1 \
+    SETTLE_SEND_COUNTFILE="$COUNTFILE.sends" run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "Windows spawn fell back to the parent cwd after no shell reply"$'\n'"$out"
   assert_contains "$out" "did not enter an isolated worktree" "missing shell reply did not explain the refusal"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "silent Windows spawn published metadata"
+  # The advertised 60s settle window must bound the silent-shell probes: each
+  # unanswered probe costs its full 5s shell wait plus the 1s inter-poll sleep,
+  # so only about 10 probes fit inside the window. A loop that ignores the
+  # probe's cost sends 60 and stretches the refusal past six minutes.
+  send_count=0
+  [ ! -f "$COUNTFILE.sends" ] || send_count=$(wc -l < "$COUNTFILE.sends" | tr -d ' ')
+  [ "$send_count" -le 15 ] || fail "silent shell was probed $send_count times, stretching the advertised 60s window past six minutes"
   pass "Windows refuses a missing shell reply instead of trusting a stale process cwd"
 }
 
