@@ -287,6 +287,133 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# OpenCode 2 (verified on 2.3.0) runs every tool shell under its PTY helper,
+# which the server hosting the watch-arm plugin spawns detached:
+# tool shell (default pid) -> opencode-pty daemon (830) -> opencode serve
+# --stdio (840) -> opencode --standalone (850). FM_TEST_OC_HOST=service parents
+# the helper on the shared background service (860) instead, whose own parent is
+# the TUI that first started it (870). The helper is installed under an
+# opencode/bin tree, and FM_TEST_OC_SHAPE picks how each platform reports it:
+# Linux the kernel exec name in comm, macOS the install path.
+OC2_PTY_PATH=/home/u/.cache/opencode/bin/opencode-pty/0.5.2-bc9cb0fa0ebb4e56/opencode-pty
+write_opencode2_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "${FM_TEST_OC_SHAPE:-linux}" in
+  macos) home=/Users/u oc_comm=/Users/u/.opencode/bin/opencode ;;
+  *) home=/home/u oc_comm=opencode ;;
+esac
+pty_path=$home/.cache/opencode/bin/opencode-pty/0.5.2-bc9cb0fa0ebb4e56/opencode-pty
+pty_comm=opencode-pty
+[ "${FM_TEST_OC_SHAPE:-linux}" != macos ] || pty_comm=$pty_path
+pty_parent=840
+[ "${FM_TEST_OC_HOST:-standalone}" != service ] || pty_parent=860
+case "$pid:$field" in
+  830:comm=) printf '%s\n' "$pty_comm" ;;
+  830:args=) printf '%s\n' "$pty_path daemon --runtime-dir $home/.local/state/opencode/pty --name 39f14a0a-cc6e-476f-9bd0-bda3e4b59c80" ;;
+  830:ppid=) printf '%s\n' "$pty_parent" ;;
+  840:comm=|850:comm=|860:comm=|870:comm=) printf '%s\n' "$oc_comm" ;;
+  840:args=) printf '%s\n' 'opencode serve --stdio --port 0' ;;
+  840:ppid=) printf '%s\n' 850 ;;
+  850:args=) printf '%s\n' 'opencode --standalone --auto' ;;
+  850:ppid=|870:ppid=) printf '%s\n' 1 ;;
+  860:args=) printf '%s\n' "$home/.opencode/bin/opencode serve --service" ;;
+  860:ppid=) printf '%s\n' 870 ;;
+  870:args=) printf '%s\n' opencode ;;
+  1:comm=) printf '%s\n' systemd ;;
+  1:args=) printf '%s\n' /sbin/init ;;
+  1:ppid=) printf '%s\n' 0 ;;
+  *:comm=) printf '%s\n' zsh ;;
+  *:args=) printf '%s\n' 'zsh +o nomatch -c bin/fm-session-start.sh' ;;
+  *:ppid=) printf '%s\n' 830 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+test_opencode2_pty_helper_is_never_the_session() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/opencode2-pty-helper"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_opencode2_ps "$fakebin"
+  for shape in linux macos; do
+    got=$(FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+      || fail "$shape: an OpenCode 2 tool shell found no session in its ancestry"
+    [ "$got" = 840 ] \
+      || fail "$shape: the lock anchor is '$got', expected the server the plugin runs in (840), not the PTY helper (830)"
+    printf '840\n' > "$dir/state/.lock"
+    FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the session did not own a lock anchored on its server"
+    # A lock the helper took before it stopped counting as a session is
+    # reclaimed, not refused as another live session's.
+    printf '830\n' > "$dir/state/.lock"
+    if FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 830'; then
+      fail "$shape: the live PTY helper still reads as a harness session"
+    fi
+    if FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" 'fm_session_lock_pid_blocks_reclaim 830'; then
+      fail "$shape: a lock held by the PTY helper still blocks reclaim"
+    fi
+    if FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_foreign_owner_live '$dir/state'"; then
+      fail "$shape: a lock held by the PTY helper reads as another live session's"
+    fi
+  done
+  # The helper's install path alone names the harness, so the path rule would
+  # elect it; either of its own name signals keeps it out.
+  got=$(lib_eval "$fakebin" "fm_harness_path_name '$OC2_PTY_PATH'") || got=
+  [ "$got" = opencode ] || fail "the fixture helper path carries no opencode component (got '$got'), so the cases below prove nothing"
+  if lib_eval "$fakebin" "fm_harness_process_matches opencode-pty 'pty-host daemon --name x'"; then
+    fail "a PTY helper identified only by its command name was accepted as a harness"
+  fi
+  if lib_eval "$fakebin" "fm_harness_process_matches pty-host '$OC2_PTY_PATH daemon --name x'"; then
+    fail "a PTY helper identified only by its argv[0] was accepted as a harness"
+  fi
+  pass "session-lock: OpenCode 2's PTY helper is never the session, so the lock anchors on the server the plugin runs in"
+}
+
+test_opencode2_shared_service_is_never_a_session() {
+  local dir fakebin shape pid got
+  dir="$TMP_ROOT/opencode2-shared-service"
+  fakebin=$(fm_fakebin "$dir")
+  write_opencode2_ps "$fakebin"
+  for shape in linux macos; do
+    # The TUI above the service is a live harness, so a walk that climbed past
+    # the service would elect another session's TUI.
+    FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 870' \
+      || fail "$shape: the fixture TUI above the service is not a harness, so the walk check proves nothing"
+    if got=$(FM_TEST_OC_SHAPE="$shape" FM_TEST_OC_HOST=service lib_eval "$fakebin" 'fm_harness_ancestry_pids'); then
+      fail "$shape: a tool shell under the shared service resolved a session: $got"
+    fi
+    FM_TEST_OC_SHAPE="$shape" FM_TEST_OC_HOST=service lib_eval "$fakebin" \
+      'fm_harness_ancestry_pids >/dev/null; [ "$FM_HARNESS_ANCESTRY_SHARED_SERVICE" = 1 ]' \
+      || fail "$shape: the walk did not report that it stopped at the shared service"
+    for pid in 860 830; do
+      if FM_TEST_OC_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_pid_blocks_reclaim $pid"; then
+        fail "$shape: a lock left by a session under the shared service (pid $pid) still blocks reclaim"
+      fi
+    done
+  done
+  # Only a `serve ... --service` argv is the shared service; the private server
+  # and a plain serve stay sessions.
+  lib_eval "$fakebin" "fm_harness_process_matches opencode 'opencode serve --stdio --port 0'" \
+    || fail "OpenCode 2's private server was not accepted as the session"
+  lib_eval "$fakebin" "fm_harness_process_matches opencode 'opencode serve --hostname 127.0.0.1 --port 4096'" \
+    || fail "a plain opencode serve was not accepted as the session"
+  if lib_eval "$fakebin" "fm_harness_process_matches opencode 'opencode --print-logs serve --port 4096 --service'"; then
+    fail "the shared service was accepted as a session when other flags surround --service"
+  fi
+  pass "session-lock: OpenCode 2's shared background service is never a session and ends the ancestry walk"
+}
+
 # A background Claude session's process table. The hook fires inside
 # `claude bg-spare` (710), whose parent is `claude bg-pty-host` (720). With the
 # transient daemon gone the pty-host is reparented to launchd, so the contiguous
@@ -1018,6 +1145,177 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# --- end-to-end layer: OpenCode 2's PTY helper chain -------------------------
+#
+# The real lock script and the real watch-arm plugin inside a faked OpenCode 2
+# chain whose every link is a real process named the way OpenCode 2.3.0 names
+# it: the TUI (a bash named opencode), its private `serve --stdio` server (a
+# node named opencode that hosts the plugin) or the shared `serve --service`
+# (a bash named opencode), the server's `opencode-pty daemon` installed under an
+# opencode/bin tree, and the tool shell that takes the lock as session start
+# does. Every verdict stops inside the fixture, at the server or at the shared
+# service, so the tree needs no orphaning.
+OC2_FIXTURE_PIDS=()
+make_opencode2_fixture() {  # <dir>
+  local dir=$1 pty_dir
+  pty_dir="$dir/cache/opencode/bin/opencode-pty/0.5.2-fixture"
+  mkdir -p "$dir/repo/bin" "$dir/home/state" "$dir/tui-bin" "$dir/server-bin" "$pty_dir"
+  ln -s "$(command -v bash)" "$dir/tui-bin/opencode"
+  ln -s "$(command -v bash)" "$pty_dir/opencode-pty"
+  # The plugin's primary root, whose arm only records that it ran.
+  git init -q "$dir/repo"
+  : > "$dir/repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/repo/bin/fm-supervision-lib.sh"
+  cat > "$dir/repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/arm.log"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+exit 0
+SH
+  chmod +x "$dir/repo/bin/fm-watch-arm.sh"
+  : > "$dir/home/state/task.meta"
+  # The host command rides the environment, so the TUI's own argv stays a TUI's.
+  cat > "$dir/tui.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$OC2_DIR/tui-pid"
+case "$OC2_HOST" in
+  service) "$OC2_DIR/tui-bin/opencode" "$OC2_DIR/service.sh" serve --service ;;
+  *) "$OC2_DIR/server-bin/opencode" "$OC2_DIR/server.mjs" serve --stdio --port 0 ;;
+esac
+printf '%s\n' "$?" > "$OC2_DIR/host.rc"
+while [ ! -e "$OC2_DIR/stop" ]; do sleep 0.05; done
+exit 0
+SH
+  cat > "$dir/service.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$OC2_DIR/server-pid"
+"$OC2_PTY" "$OC2_DIR/pty.sh" daemon --runtime-dir "$OC2_DIR/pty" --name fixture
+exit 0
+SH
+  cat > "$dir/server.mjs" <<'JS'
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const dir = process.env.OC2_DIR;
+writeFileSync(`${dir}/server-pid`, `${process.pid}\n`);
+const pty = spawn(process.env.OC2_PTY, [`${dir}/pty.sh`, "daemon", "--runtime-dir", `${dir}/pty`, "--name", "fixture"], { stdio: "ignore" });
+await new Promise((resolve) => pty.on("close", resolve));
+const plugin = await import(pathToFileURL(process.env.OC2_PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+await plugin.FmPrimaryWatchArm({ client, directory: process.env.FM_ROOT_OVERRIDE, worktree: process.env.FM_ROOT_OVERRIDE });
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("fixture-session", client);
+writeFileSync(`${dir}/arm-status`, `${status}\n`);
+process.exit(0);
+JS
+  cat > "$dir/pty.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$OC2_DIR/pty-pid"
+"$OC2_BASH" "$OC2_DIR/tool.sh"
+exit 0
+SH
+  cat > "$dir/tool.sh" <<'SH'
+#!/usr/bin/env bash
+"$OC2_LOCK" > "$OC2_DIR/lock.out" 2>&1
+printf '%s\n' "$?" > "$OC2_DIR/lock.rc"
+exit 0
+SH
+  cat > "$dir/leftover.sh" <<'SH'
+#!/usr/bin/env bash
+while [ ! -e "$OC2_DIR/stop" ]; do sleep 0.05; done
+exit 0
+SH
+  chmod +x "$dir/tui.sh" "$dir/service.sh" "$dir/pty.sh" "$dir/tool.sh" "$dir/leftover.sh"
+}
+
+oc2_env() {  # <dir> <command...>
+  local dir=$1
+  shift
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE \
+    OC2_DIR="$dir" OC2_BASH="$(command -v bash)" OC2_LOCK="$ROOT/bin/fm-lock.sh" \
+    OC2_PTY="$dir/cache/opencode/bin/opencode-pty/0.5.2-fixture/opencode-pty" \
+    OC2_PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/repo" NODE_NO_WARNINGS=1 "$@"
+}
+
+# Start the TUI with <tui-args...> over host <standalone|service>, then wait
+# until that host has exited.
+run_opencode2_tui() {  # <dir> <host> [<tui-args>...]
+  local dir=$1 host=$2 i=0
+  shift 2
+  OC2_HOST=$host oc2_env "$dir" "$dir/tui-bin/opencode" "$dir/tui.sh" "$@" &
+  OC2_FIXTURE_PIDS+=("$!")
+  while [ "$i" -lt 600 ] && [ ! -s "$dir/host.rc" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/host.rc" ] || fail "the OpenCode 2 fixture host never finished: $(cat "$dir/lock.out" 2>/dev/null)"
+}
+
+stop_opencode2_fixture() {  # <dir>
+  local pid
+  : > "$1/stop"
+  for pid in ${OC2_FIXTURE_PIDS[@]+"${OC2_FIXTURE_PIDS[@]}"}; do
+    wait "$pid" 2>/dev/null || true
+  done
+  OC2_FIXTURE_PIDS=()
+}
+
+oc2_value() {  # <dir> <file>
+  tr -d '[:space:]' < "$1/$2"
+}
+
+test_e2e_opencode2_standalone_session_anchors_on_the_plugin_server() {
+  local dir node_bin server pty leftover lock
+  node_bin=$(node -p 'process.execPath' 2>/dev/null) || node_bin=
+  if [ -z "$node_bin" ]; then
+    printf 'skip: node not found, so the OpenCode 2 plugin server cannot be faked\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/e2e-opencode2-standalone"
+  make_opencode2_fixture "$dir"
+  ln -s "$node_bin" "$dir/server-bin/opencode"
+  # A lock naming a live PTY helper, the record a session under the shared
+  # service can leave behind, must not hold the home against this session.
+  oc2_env "$dir" "$dir/cache/opencode/bin/opencode-pty/0.5.2-fixture/opencode-pty" "$dir/leftover.sh" \
+    daemon --runtime-dir "$dir/pty-old" --name leftover &
+  leftover=$!
+  OC2_FIXTURE_PIDS+=("$leftover")
+  printf '%s\n' "$leftover" > "$dir/home/state/.lock"
+  run_opencode2_tui "$dir" standalone --standalone --auto
+  server=$(oc2_value "$dir" server-pid)
+  pty=$(oc2_value "$dir" pty-pid)
+  lock=$(sed -n '1p' "$dir/home/state/.lock")
+  stop_opencode2_fixture "$dir"
+  expect_code 0 "$(oc2_value "$dir" host.rc)" "the faked OpenCode 2 server did not complete"
+  expect_code 0 "$(oc2_value "$dir" lock.rc)" "the session under the PTY helper did not take the lock: $(cat "$dir/lock.out")"
+  [ "$lock" = "$server" ] \
+    || fail "the lock records pid $lock, expected the plugin's server $server (PTY helper $pty, leftover helper $leftover)"
+  [ "$(oc2_value "$dir" arm-status)" != read-only ] \
+    || fail "the watch-arm plugin in the server did not recognize the session's lock"
+  assert_present "$dir/home/arm.log" "the watch-arm plugin never armed supervision (status $(oc2_value "$dir" arm-status))"
+  pass "session-lock e2e: an OpenCode 2 session under its PTY helper anchors the lock on the server, whose plugin arms"
+}
+
+test_e2e_opencode2_shared_service_session_is_refused() {
+  local dir tui
+  dir="$TMP_ROOT/e2e-opencode2-service"
+  make_opencode2_fixture "$dir"
+  run_opencode2_tui "$dir" service
+  tui=$(oc2_value "$dir" tui-pid)
+  # The TUI that started the service is still a live harness above it, so the
+  # refusal below is the walk stopping at the service, not running out of
+  # candidates.
+  bash -c '. "$1"; fm_harness_pid_alive "$2"' _ "$LIB" "$tui" \
+    || fail "the fixture TUI above the service is not a live harness, so the refusal proves nothing"
+  stop_opencode2_fixture "$dir"
+  expect_code 1 "$(oc2_value "$dir" lock.rc)" "a session under the shared service took the lock: $(cat "$dir/lock.out")"
+  assert_grep "shared background service" "$dir/lock.out" "the refusal does not name the shared service: $(cat "$dir/lock.out")"
+  assert_grep "opencode --standalone" "$dir/lock.out" "the refusal does not name the standalone launch: $(cat "$dir/lock.out")"
+  assert_absent "$dir/home/state/.lock" "a session under the shared service wrote the lock"
+  pass "session-lock e2e: a session under OpenCode 2's shared service is refused the lock with the cause named"
+}
+
 # --- end-to-end layer: a background session whose helper chain is recycled ---
 #
 # The topology the four issue reports (#3902, #2314, #3398, #4066) recorded with
@@ -1663,6 +1961,8 @@ test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_opencode2_pty_helper_is_never_the_session
+test_opencode2_shared_service_is_never_a_session
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_windows_session_is_identified_from_its_published_pid
@@ -1679,6 +1979,8 @@ test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_e2e_opencode2_standalone_session_anchors_on_the_plugin_server
+test_e2e_opencode2_shared_service_session_is_refused
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
 test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
 test_same_session_confirmation_does_not_steal_after_wait

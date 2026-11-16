@@ -61,6 +61,45 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# OpenCode 2 runs processes that carry OpenCode's name but are never a session
+# (verified on OpenCode 2.3.0; see docs/verification/runtime-backends.md
+# "OpenCode 2 session-lock anchor"):
+#   - The PTY helper every tool shell runs under, spawned detached by the server
+#     as `<cache>/opencode/bin/opencode-pty/<version>/opencode-pty daemon
+#     --runtime-dir <dir> --name <id>`. It is identified by its own executable
+#     name, exactly opencode-pty, in the command name or argv[0]. Its install
+#     path has an `opencode` component, so the name and path rules below would
+#     otherwise elect it as the session, where the watch-arm plugin, walking up
+#     from the server it runs in, never finds it. The walk climbs past it to
+#     the server that spawned it.
+#   - The shared background service: an opencode process whose argv has `serve`
+#     and then `--service`. It hosts every session the default launch attaches
+#     and outlives each of them, and the client that started it stays its
+#     parent until that client exits, so the walk stops there instead of
+#     climbing into another session. A session under it never owns the lock.
+fm_opencode_pty_helper() {  # <comm> <args>
+  local argv0=${2%% *}
+  [ "${1##*/}" = opencode-pty ] || [ "${argv0##*/}" = opencode-pty ]
+}
+
+fm_opencode_shared_service() {  # <comm> <args>
+  local argv0=${2%% *} word serve=0
+  local -a words=()
+  case "${1##*/}/${argv0##*/}" in
+    *opencode*) ;;
+    *) return 1 ;;
+  esac
+  read -r -a words <<< "$2"
+  for word in ${words[@]+"${words[@]}"}; do
+    if [ "$serve" -eq 0 ]; then
+      [ "$word" != serve ] || serve=1
+    elif [ "$word" = --service ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Portable single-pid process introspection.
 #
 # procps/BSD `ps -o comm=/args=/ppid=` custom-format columns are the primary
@@ -99,7 +138,8 @@ fm_ps_ppid() {  # <pid> -> parent pid
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
-# Evidence, in order:
+# OpenCode 2's PTY helper and shared background service (above) are refused
+# before any evidence is read. Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
 #   2. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
@@ -114,6 +154,9 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  if fm_opencode_pty_helper "$comm" "$args" || fm_opencode_shared_service "$comm" "$args"; then
+    return 1
+  fi
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -580,8 +623,14 @@ fm_proc_info() {  # <pid>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# OpenCode 2's shared background service ends the walk: nothing at or above it
+# is this session, so a walk that reaches it before any harness finds none, and
+# sets FM_HARNESS_ANCESTRY_SHARED_SERVICE=1 for a refusal that names the cause.
+FM_HARNESS_ANCESTRY_SHARED_SERVICE=0
 fm_harness_ancestry_pids() {
   local pid=$$ extending=0 printed=0
+  FM_HARNESS_ANCESTRY_SHARED_SERVICE=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     fm_proc_info "$pid" || break
     if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
@@ -590,6 +639,9 @@ fm_harness_ancestry_pids() {
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
     elif [ "$extending" -eq 1 ]; then
+      break
+    elif fm_opencode_shared_service "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+      FM_HARNESS_ANCESTRY_SHARED_SERVICE=1
       break
     fi
     pid=$FM_PROC_PPID

@@ -38,6 +38,7 @@ def run(lab):
     commands = {
         "CASE_CD": "cd ..; printf escaped > cd-escaped",
         "CASE_ARM": "bin/fm-watch-arm.sh --restart; printf bundled > arm-escaped",
+        "CASE_LOCK": "ps -o comm=,args= -p $PPID > shell-parent.txt; bin/fm-lock.sh > lock.out 2>&1",
     }
 
     class Provider(http.server.BaseHTTPRequestHandler):
@@ -168,8 +169,18 @@ def run(lab):
         api(f"/api/session/{sid}/prompt", {"text": "CASE_GUARD"})
         until(lambda: any("TURN WOULD END BLIND" in m.get("text", "") for m in context()), "native turn-end guard follow-up")
         print("ok - native terminal event admits a turn-end guard follow-up")
-        (fmhome / "state/.lock").write_text(str(process.pid) + "\n")
-        api(f"/api/session/{sid}/prompt", {"text": "CASE_WATCH_ARM"})
+        # The session lock comes from the real lock script in a native tool
+        # shell, whose parent is OpenCode's opencode-pty helper; the lock must
+        # name the server the plugins run in, or the watcher below never arms.
+        session_lock = fmhome / "state/.lock"
+        api(f"/api/session/{sid}/prompt", {"text": "CASE_LOCK"})
+        until(lambda: (project / "lock.out").exists() and "lock acquired" in (project / "lock.out").read_text(), "session lock from a native tool shell")
+        shell_parent = (project / "shell-parent.txt").read_text()
+        assert "opencode-pty" in shell_parent, ("the native tool shell no longer runs under opencode-pty", shell_parent)
+        holder = session_lock.read_text().strip()
+        identity = subprocess.run(["ps", "-o", "comm=,args=", "-p", holder], capture_output=True, text=True).stdout
+        assert "opencode-pty" not in identity and " serve" in identity, (holder, identity)
+        print("ok - the session lock taken from a native tool shell under opencode-pty names the server")
         lock = fmhome / "state/.watch.lock/pid"
         until(lock.exists, "watcher arming")
         first_watcher = lock.read_text().strip()

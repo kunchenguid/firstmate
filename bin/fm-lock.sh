@@ -85,7 +85,14 @@ me=$(fm_session_lock_anchor_pid) || {
     # process tree that can never contain the answer.
     echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID); operate read-only until resolved" >&2
   else
-    echo "error: cannot locate harness process in ancestry" >&2
+    # Walked again in this shell only to read why it found nothing; the walk
+    # above ran in a command substitution and already reported any read error.
+    fm_harness_ancestry_pids >/dev/null 2>&1 || true
+    if [ "$FM_HARNESS_ANCESTRY_SHARED_SERVICE" = 1 ]; then
+      echo "error: this session runs under OpenCode's shared background service, which hosts every attached session and is never one; start the OpenCode TUI as \`opencode --standalone\`; operate read-only until resolved" >&2
+    else
+      echo "error: cannot locate harness process in ancestry" >&2
+    fi
   fi
   exit 1
 }
