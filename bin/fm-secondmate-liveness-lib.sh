@@ -286,9 +286,9 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # Acts on a `relaunchable` probe verdict for <id>: takes the per-home relaunch
 # lock, records the attempt, kills a confirmed-dead local endpoint if required
 # (FM_SM_LIVE_KILL), runs the guarded spawn, then records its outcome.
-# On t3code a close that cannot be proven stops there: the thread and its
+# On t3code and hc a close that cannot be proven stops there: the endpoint and its
 # metadata stay as recorded, the verdict becomes skipped, and nothing is
-# spawned, because a second thread beside a live one is the duplicate
+# spawned, because a second endpoint beside a live one is the duplicate
 # supervisor recovery must never create. Other backends keep their existing
 # best-effort kill. FM_SM_LIVE_RESUME instead sends the endpoint's backend
 # resume turn and spawns nothing.
@@ -333,7 +333,7 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
       window=$(fm_meta_get "$meta" window)
       target=$window
     fi
-    if [ "$backend" != t3code ]; then
+    if [ "$backend" != t3code ] && [ "$backend" != hc ]; then
       if [ -n "$target" ]; then
         if [ "$backend" = rex ]; then
           local home
@@ -372,6 +372,19 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   # A remote mate's backend is its host's, so it is never pinned from here.
   local -a respawn_args=("$id" --secondmate)
   [ -n "$(fm_meta_get "$meta" remote_host)" ] || respawn_args+=(--backend "$(fm_backend_of_meta "$meta")")
+  # A fresh hc terminal must stay in the recorded session, not the caller's.
+  local HC_SESSION=${HC_SESSION:-}
+  if [ -z "$(fm_meta_get "$meta" remote_host)" ] && [ "$(fm_backend_of_meta "$meta")" = hc ]; then
+    if ! fm_backend_source hc || ! fm_backend_hc_parse_target "$(fm_backend_target_of_meta "$meta")"; then
+      fm_secondmate_liveness_ledger_add "$id" failed || true
+      fm_lock_release "$relaunch_lock" || true
+      FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_RC=1
+      FM_SM_LIVE_REASON="invalid recorded hc target; refusing replacement in an ambient session"
+      return 1
+    fi
+    HC_SESSION=$FM_BACKEND_HC_SESSION
+    export HC_SESSION
+  fi
   if [ -n "$timeout" ]; then
     FM_SM_LIVE_OUT=$(FM_SPAWN_NO_GUARD=1 fm_run_timed "$timeout" "$FM_ROOT/bin/fm-spawn.sh" "${respawn_args[@]}" 2>&1) || rc=$?
   else

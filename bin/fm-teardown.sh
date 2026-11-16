@@ -3580,9 +3580,9 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
-      elif [ "$child_backend" = zellij ]; then
-        # Zellij titles are scoped by the owning home tag, so forced secondmate
-        # cleanup must verify child tabs as that child home, not the parent.
+      elif [ "$child_backend" = zellij ] || [ "$child_backend" = hc ]; then
+        # Zellij titles and hc labels are scoped by the owning home tag, so forced
+        # secondmate cleanup must verify child endpoints as that child home, not the parent.
         ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       elif [ "$child_backend" = rex ]; then

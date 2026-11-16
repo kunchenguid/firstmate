@@ -32,7 +32,10 @@
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
 # space or tab. create_task sets herdr.space=FM_HC_SPACE (default
 # fm-<hometag>) and herdr.tab=<scoped label>, so a home's tasks group in one
-# space with one tab each. Naming the space needs the app window and is not done.
+# space with one tab each. A --secondmate spawn passes the secondmate home's
+# own fm-<hometag> as the space, so the mate shares the space its own workers
+# use, while its identity labels stay the launching home's: that home's record
+# owns the endpoint. Naming the space needs the app window and is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
@@ -276,9 +279,9 @@ fm_backend_hc_container_ensure() {
 # <window-label>, refusing a live duplicate in this home. Prints the address.
 # --no-parent and --outlive-parent keep the terminal independent of whichever
 # hc terminal firstmate itself runs in; --no-notify keeps hc from typing notes
-# into any parent.
-fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
-  local session=$1 label=$2 cwd=$3 home scoped dup out address
+# into any parent. [space] overrides the herdr.space label.
+fm_backend_hc_create_task() {  # <session> <window-label> <cwd> [space]
+  local session=$1 label=$2 cwd=$3 space=${4:-} home scoped dup out address
   home=$(fm_backend_hometag)
   scoped=$(fm_backend_hc_scoped_label "$label")
   dup=$(fm_backend_hc_cli "$session" ls --json --label "firstmate.task=$label" --label "firstmate.home=$home" 2>/dev/null) \
@@ -290,7 +293,7 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
+    --label "herdr.space=${space:-${FM_HC_SPACE:-fm-$home}}" --label "herdr.tab=$scoped" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
   address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }

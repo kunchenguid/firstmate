@@ -145,8 +145,9 @@
 #   top-level shell into it, because a restart restores that shell's cwd.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
-#   --secondmate spawns.
+#   absent backend= means tmux. Orca, cmux, paseo, and tern do not support
+#   --secondmate spawns. An hc --secondmate terminal is labeled into that
+#   secondmate home's own Herdr.app space (bin/backends/hc.sh owns labels).
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
 #   own Rex session; a --secondmate launch opens its tab in that secondmate
@@ -2407,10 +2408,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = tern ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=tern does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = hc ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=hc does not support --secondmate spawns yet" >&2
     exit 1
   fi
   fm_backend_runtime_check "$BACKEND" || exit 1
@@ -5375,7 +5372,9 @@ EOF
     ;;
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
-    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    HC_SPACE=
+    [ "$KIND" != secondmate ] || HC_SPACE="fm-$(FM_HOME="$PROJ_ABS" FM_ROOT="$PROJ_ABS" fm_backend_hometag)"
+    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS" "$HC_SPACE") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     ;;
   orca)

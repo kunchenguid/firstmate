@@ -55,10 +55,8 @@ Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an expli
 The app is local GUI presentation only; detection reads the terminal's core-side label without requiring a live app window, so a surviving labeled terminal can still select hc after the GUI closes.
 Nothing here changes the remote `herdr` path.
 
-Two limits apply to auto-detection specifically:
-
-- A `--secondmate` spawn under an auto-detected hc fails the existing refusal rather than silently choosing another backend; set `config/backend` explicitly for a home that spawns secondmates.
-- Away-mode supervisor discovery and hc refusal are owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
+Local secondmate spawns use the same automatic selection as other hc tasks.
+Away-mode supervisor discovery and hc refusal are owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
 ## Task shape and metadata
 
@@ -87,6 +85,20 @@ Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherite
 `FM_HC_SOCKET` is the deliberate socket pin tests and labs use instead of an inherited `HC_SOCKET`.
 An input, capture, or close that carries the task label refuses a terminal whose `firstmate.task` or `firstmate.home` label does not match, and a close without a label still refuses a terminal that lacks this home's labels.
 
+## Local secondmates
+
+Local `--secondmate` spawns use persistent hc terminals in the selected core session.
+Each mate appears in its own home's `fm-<hometag>` Herdr.app space, alongside workers that it launches with the default space setting.
+This presentation overrides the parent's `FM_HC_SPACE`; the endpoint's identity labels still belong to the parent that owns its record.
+Steering, capture, interrupt delivery, dead-agent recovery, and retirement use the existing hc adapter.
+Recovery retains the recorded session and refuses replacement when it cannot close a confirmed-dead terminal.
+
+Live-agent exit and in-place relaunch through `fm-control.sh` remain unsupported.
+Instruction updates use the existing re-read nudge rather than stopping the mate.
+These limits differ from the Herdr backend's full restart support; do not use hc when automatic live-agent restart is required.
+Remote secondmates remain limited to the providers in [`remote-secondmates.md`](remote-secondmates.md).
+An existing `hc machine` connection does not enable remote hc secondmate launches.
+
 ## Operations
 
 | Operation | hc command |
@@ -113,7 +125,6 @@ An input, capture, or close that carries the task label refuses a terminal whose
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
-- `--secondmate` spawns are refused.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
 - Naming a Herdr.app space needs the app window and is not done.
   The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden), verified against a real window: [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records the live exercise.
@@ -124,6 +135,8 @@ An input, capture, or close that carries the task label refuses a terminal whose
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
+`tests/fm-backend-hc-secondmate-smoke.test.sh` exercises local mate launch, space labels, steering, interrupt, dead-agent respawn, and child cleanup with stand-in agents.
+It does not prove real-harness exit or in-place relaunch.
 `tests/fm-backend-hc-appdetect-smoke.test.sh` runs a real `bin/fm-spawn.sh` spawn in the same kind of lab for the app-terminal and explicit cases, and checks that a live app window never selects hc for a marker-less process and starts nothing for a session with no running core.
 The smokes skip when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
 For CI coverage, see [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend); the workflow requires `jq` and rejects the `hc not found` skip.

@@ -3727,6 +3727,28 @@ FM_TEST_COMPLETE
 A real Claude Code launch through the user's `claude` wrapper, typed into a task terminal with `fm_backend_hc_send_text_line` and never given a prompt, read `alive` from `fm_backend_agent_state` within three polls, and `fm_backend_kill` returned 0 with no surviving member of its process group.
 Before reading the process group, the same launch read `ambiguous`.
 
+### Local secondmate lifecycle
+
+Verified on 2026-11-16 on macOS arm64 with hc 0.1.14 in an isolated `fm-hclab-*` core:
+
+```sh
+FM_HC_BIN=<pinned-0.1.14-binary> bin/fm-test-run.sh tests/fm-backend-hc-secondmate-smoke.test.sh
+```
+
+```text
+ok - spawn: a --secondmate lands on hc with the primary's identity and the secondmate home's own Herdr.app space
+ok - live mate: liveness reads alive, fm-send records the steer, and interrupt reaches the agent
+ok - dead agent: liveness closes the husk and respawns the mate on hc in a fresh, correctly labeled terminal
+ok - retirement: the child endpoint labeled for the secondmate home and the mate's own terminal are closed
+FM_TEST_COMPLETE
+```
+
+The runner returned zero, including lab teardown, in 33910 ms.
+The same command with the installed hc 0.1.21 also returned zero in 32525 ms.
+Before/after contents of the live default core's `terminals.json` were identical in both runs.
+The test uses stand-in agents and verifies label placement, not a new Herdr.app visual exercise or real-harness live exit.
+The adapter unit suite also verifies presentation overrides without ownership changes, recorded-session recovery, and refusal after an unproved close.
+
 ### Spawn, steer, peek, and teardown
 
 A scout ran end to end in a scratch home with `HOME` and `TREEHOUSE_ROOT` in the scratch root, a private core (`HC_SESSION=fme1`), a local bare-origin project, and a compiled stand-in agent at `<root>/agents/claude/claude` that logs its argv, its `HC_*` and `FM_*` environment, and every input line:

@@ -139,6 +139,59 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   pass "hc: create_task starts an independent labeled terminal and refuses a duplicate"
 }
 
+test_create_task_space_override_keeps_owner_identity() {
+  local out tag
+  setup_case mate-space
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  tag=$(hometag_of)
+  out=$(hc_shell 'FM_HC_SPACE=custom fm_backend_hc_create_task fmtest fm-mate /mate fm-child')
+  assert_equals "$out" t9 "a secondmate space override must create a terminal"
+  out=$(grep $'\x1frun\x1f' "$D/log")
+  for want in "firstmate.home=$tag" "firstmate.task=fm-mate" "herdr.space=fm-child" "herdr.tab=$tag-fm-mate"; do
+    assert_contains "$out" "$want" "presentation override must retain $want"
+  done
+  assert_not_contains "$out" "herdr.space=custom" "the explicit mate space must override FM_HC_SPACE"
+  : > "$D/log"
+  hc_shell 'FM_HC_SPACE=custom fm_backend_hc_create_task fmtest fm-worker /proj' >/dev/null
+  assert_contains "$(cat "$D/log")" "herdr.space=custom" "ordinary tasks must retain FM_HC_SPACE"
+  pass "hc: a mate space overrides presentation without changing endpoint ownership"
+}
+
+# shellcheck disable=SC2016 # Fixture commands expand variables in the child shell.
+test_secondmate_recovery_keeps_session_and_refuses_failed_close() {
+  local tag out
+  setup_case mate-recovery
+  tag=$(hometag_of)
+  mkdir -p "$HOMEDIR/state" "$D/root/bin"
+  printf '#!/bin/sh\nprintf "session=%%s\\n" "$HC_SESSION"\n' > "$D/root/bin/fm-spawn.sh"
+  chmod +x "$D/root/bin/fm-spawn.sh"
+  printf 'window=recorded:t2\nbackend=hc\nhc_session=recorded\nhc_terminal=t2\nharness=codex\nkind=secondmate\n' > "$HOMEDIR/state/mate.meta"
+  out=$(hc_shell '
+    . "'"$FM_TEST_ROOT"'/bin/fm-secondmate-liveness-lib.sh"
+    fm_sm_live_require_locks
+    FM_ROOT="'"$D"'/root" STATE="'"$HOMEDIR"'/state"
+    fm_secondmate_liveness_probe "$STATE/mate.meta" mate poll
+    fm_secondmate_liveness_relaunch "$STATE/mate.meta" mate || { printf "reason=%s output=%s\n" "$FM_SM_LIVE_REASON" "$FM_SM_LIVE_OUT"; exit 1; }
+    printf "%s\nambient=%s\n" "$FM_SM_LIVE_OUT" "$HC_SESSION"
+  ')
+  assert_contains "$out" "session=recorded" "recovery must use the recorded hc session"
+  assert_contains "$out" "ambient=fmtest" "recovery must not change the caller's session"
+  write_terminal "$D" t2 live fm-mate "$tag" zsh /bin/zsh
+  touch "$D/rm-sticks"
+  out=$(hc_shell '
+    . "'"$FM_TEST_ROOT"'/bin/fm-secondmate-liveness-lib.sh"
+    fm_sm_live_require_locks
+    FM_ROOT="'"$D"'/root" STATE="'"$HOMEDIR"'/state"
+    fm_secondmate_liveness_probe "$STATE/mate.meta" mate poll
+    rc=0
+    fm_secondmate_liveness_relaunch "$STATE/mate.meta" mate || rc=$?
+    printf "rc=%s status=%s reason=%s output=%s\n" "$rc" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_REASON" "$FM_SM_LIVE_OUT"
+  ')
+  assert_contains "$out" "rc=1 status=skipped reason=could not prove the old hc endpoint recorded:t2 closed" "a failed close must stop recovery"
+  assert_not_contains "$out" "session=recorded" "a failed close must not spawn a replacement"
+  pass "hc: secondmate recovery keeps its session and stops on an unproved close"
+}
+
 test_control_interrupt_delivers_the_harness_keys() {
   local tag out rc=0 id=hcint1
   setup_case interrupt
@@ -364,6 +417,8 @@ fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_create_task_space_override_keeps_owner_identity \
+  test_secondmate_recovery_keeps_session_and_refuses_failed_close \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \
