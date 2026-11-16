@@ -112,6 +112,7 @@ FM_HOME=$PRIMARY FM_SECONDMATE_CHARTER='hc lab second mate: nothing to do' \
 FM_HOME=$PRIMARY "$ROOT/bin/fm-home-seed.sh" "$ID" "$SM" --no-projects >/dev/null \
   || fail "could not seed the secondmate home"
 SM=$(cd "$SM" && pwd -P)
+# shellcheck disable=SC2016 # the variables intentionally expand in the generated stub, not here
 printf '#!/bin/sh\n[ "${1:-}" = --version ] && { echo 1.0.0; exit 0; }\n[ "${FM_HOME:-}" = %s ] && : > %s\n' \
   "'$SM'" "'$TMP_ROOT/opencode-launched'" >"$FAKEBIN/opencode"
 chmod +x "$FAKEBIN/opencode"
