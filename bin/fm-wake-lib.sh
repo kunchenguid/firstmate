@@ -2161,6 +2161,43 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Record exclusivity for a Treehouse pool slot: the first task record, in any
+# local Firstmate home (fm_local_firstmate_state_dirs), other than <own-meta>
+# whose worktree= or home= resolves to <slot>, an existing directory. Teardown
+# refuses to return a slot another record still names, and spawn refuses to
+# hand one out, so two records never claim one copy.
+# Returns 0 with FM_SLOT_NAMER_ID and FM_SLOT_NAMER_FIELD set when such a
+# record exists, 1 when none does, and 2 with FM_LOCAL_FIRSTMATE_ERROR set when
+# the local homes cannot be enumerated. <own-meta> is skipped by identity, not
+# spelling: the same file reached through a differently resolved state dir is
+# still it, while a differently named hardlink is another task's record.
+# Requires fm_meta_get (bin/fm-backend.sh) and the registry library that
+# fm_local_firstmate_state_dirs needs.
+# shellcheck disable=SC2034 # FM_SLOT_NAMER_* are read by callers.
+fm_slot_other_record_namer() {  # <slot> <own-meta> <first-state>
+  local slot=$1 own=$2 first=$3 state_dir other field other_path other_slot
+  FM_SLOT_NAMER_ID=
+  FM_SLOT_NAMER_FIELD=
+  slot=$(CDPATH='' cd -- "$slot" 2>/dev/null && pwd -P) || return 1
+  fm_local_firstmate_state_dirs "$first" || return 2
+  for state_dir in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      [ "${other##*/}" = "${own##*/}" ] && [ "$other" -ef "$own" ] && continue
+      for field in worktree home; do
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] && [ -d "$other_path" ] || continue
+        other_slot=$(CDPATH='' cd -- "$other_path" 2>/dev/null && pwd -P) || continue
+        [ "$other_slot" = "$slot" ] || continue
+        FM_SLOT_NAMER_ID=$(basename "$other" .meta)
+        FM_SLOT_NAMER_FIELD=$field
+        return 0
+      done
+    done
+  done
+  return 1
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
