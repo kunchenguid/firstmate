@@ -2616,3 +2616,44 @@ awk -F'\t' '$2 == 900 && $7 == 1' "$DIR_AN/samples.log" | grep -q 'restarts@muso
 [ ! -s "$DIR_AN/carried-at-register" ] \
   || fail "a rollout after registration was recorded as already running: $(cat "$DIR_AN/carried-at-register")"
 pass "a pre-merge image still awaits its deploy, and its build answer is remembered"
+
+# An image whose build answer cannot be read is not "awaiting the deploy": the
+# pods stayed on that image, so the gate cannot tell whether the merge is live,
+# and the sample names the read that failed instead of blaming a rollout.
+HOME_AO=$(idp_world ao "$IDP_702")
+rm -f "$HOME_AO/gh/contains-$IDP_BUILT"
+out=$(idp_cw "$HOME_AO" "$IDP_702" 1790000000 register ao1 "$IDP_PR") || fail "register failed: $out"
+DIR_AO="$HOME_AO/state/change-watch/ao1-1839"
+printf '%s\n' "$out" | grep -q 'already running' \
+  && fail "an unreadable build answer was read as carrying the merge: $out"
+idp_cw "$HOME_AO" "$IDP_702" 1790000300 sample ao1-1839 300 >/dev/null || fail "sample failed"
+grep -q 'deploy landing unreadable: whether image 20261115-702 carries the merge could not be read from Muso-AI/industry-data-processing' \
+  "$DIR_AO/read-failures" \
+  || fail "an unreadable build answer did not name the read that failed: $(cat "$DIR_AO/read-failures")"
+grep -q 'awaiting the deploy' "$DIR_AO/read-failures" \
+  && fail "an unreadable build answer was reported as awaiting the deploy: $(cat "$DIR_AO/read-failures")"
+[ "$(awk -F'\t' '$8 == 1' "$DIR_AO/samples.log" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "an unreadable build answer was recorded as awaiting: $(cat "$DIR_AO/samples.log")"
+[ "$(awk -F'\t' '$7 == 1' "$DIR_AO/samples.log" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "a metric was scored though the landing could not be read: $(cat "$DIR_AO/samples.log")"
+[ ! -s "$DIR_AO/builds" ] \
+  || fail "an unreadable build answer was remembered: $(cat "$DIR_AO/builds")"
+pass "an unreadable build answer names the failed read, never the awaiting deploy"
+
+# The build answer is asked once per target per sample: the gate runs once per
+# Kubernetes metric, and an unreadable answer repeated for each of them would
+# spend the sample budget before the later metrics were read.
+HOME_AP=$(idp_world ap "$IDP_702")
+rm -f "$HOME_AP/gh/contains-$IDP_BUILT"
+out=$(idp_cw "$HOME_AP" "$IDP_702" 1790000000 register ap1 "$IDP_PR") || fail "register failed: $out"
+DIR_AP="$HOME_AP/state/change-watch/ap1-1839"
+: > "$HOME_AP/trace"
+idp_cw "$HOME_AP" "$IDP_702" 1790000300 sample ap1-1839 300 >/dev/null || fail "sample failed"
+reads=$(awk -F'\t' '$1 == "prod" && $2 == "build"' "$HOME_AP/trace" | wc -l | tr -d ' ')
+[ "$reads" -eq 1 ] \
+  || fail "one sample read the build answer $reads time(s) for one target: $(cat "$HOME_AP/trace")"
+grep -q 'deploy landing unreadable' "$DIR_AP/read-failures" \
+  || fail "the single build read was not recorded as the sample's reason: $(cat "$DIR_AP/read-failures")"
+grep -q 'sample budget spent before this metric was read' "$DIR_AP/read-failures" \
+  && fail "metrics after the build read were lost to the sample budget: $(cat "$DIR_AP/read-failures")"
+pass "one sample asks the build answer once per target"

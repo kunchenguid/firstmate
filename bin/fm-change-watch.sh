@@ -524,6 +524,9 @@ cw_budget_start() {
   CW_WORKLOADS_CACHE=''
   CW_SELECTOR_CACHE=''
   CW_MERGE_SHA_CACHE=''
+  CW_TARGET_CARRIED_CACHE=''
+  CW_TARGET_CARRIED_EVIDENCE=''
+  CW_TARGET_CARRIED_REASON=''
   [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || : > "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
@@ -862,6 +865,14 @@ CACHE
   [ -n "$sha" ] || return 0
   printf '%s\n' "$sha"
 }
+
+# The build-carries-merge answer for the sample, keyed by target: the gate is
+# asked once per metric, so one target must not spend the sample budget on the
+# same build read six times. An unreadable answer is remembered here too, for
+# this sample only, and asked again at the next one.
+CW_TARGET_CARRIED_CACHE=''
+CW_TARGET_CARRIED_EVIDENCE=''
+CW_TARGET_CARRIED_REASON=''
 
 # --- deployment derivation ----------------------------------------------------
 
@@ -1478,6 +1489,8 @@ cw_beta_await_rollout() {  # <watch-id> <ns> <deploy>
   landed_file=$(cw_beta_landed_path "$id")
   while :; do
     cw_pod_facts_clear
+    CW_TARGET_CARRIED_CACHE=''
+    CW_TARGET_CARRIED_REASON=''
     recorded=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2; exit }' "$landed_file" 2>/dev/null || true)
     if [ -z "$recorded" ]; then
       printf 'deploy landing unreadable: the beta target pod fingerprint could not be read at registration\n'
@@ -1488,7 +1501,7 @@ cw_beta_await_rollout() {  # <watch-id> <ns> <deploy>
     case "$landed" in
       0) return 0 ;;
       2) ;;
-      *) printf 'deploy landing unreadable: the beta target pod fingerprint could not be read\n'
+      *) printf '%s\n' "${CW_TARGET_CARRIED_REASON:-deploy landing unreadable: the beta target pod fingerprint could not be read}"
          return 1 ;;
     esac
     attempt=$((attempt + 1))
@@ -2483,10 +2496,15 @@ cw_target_ids() {  # <watch-id>
 # build commit or its history could not be read. A tag's build commit and its
 # containment never change, so both answers are remembered in the watch's builds
 # file and cost one forge read per tag per watch; an unreadable answer is not
-# remembered, so the next sample asks again.
+# remembered there, so the next sample asks again, and is remembered for the
+# target for the rest of this sample so one sample reads it once.
+CW_TARGET_CARRIED_EVIDENCE=''
+CW_TARGET_CARRIED_REASON=''
 cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
   local id=$1 ns=$2 deploy=$3 repo owner spec build_repo workflow image_name
   local images img ref tag='' number cache row sha state merge
+  CW_TARGET_CARRIED_EVIDENCE=''
+  CW_TARGET_CARRIED_REASON=''
   repo=$(cw_meta_get "$id" repo 2>/dev/null || true)
   owner=$(cw_meta_get "$id" owner 2>/dev/null || true)
   [ -n "$repo" ] && [ -n "$owner" ] || return 1
@@ -2494,7 +2512,10 @@ cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
   build_repo=$(printf '%s' "$spec" | cut -f1)
   workflow=$(printf '%s' "$spec" | cut -f2)
   image_name=$(printf '%s' "$spec" | cut -f3)
-  images=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || return 3
+  images=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || {
+    CW_TARGET_CARRIED_REASON="deploy landing unreadable: the target's pod images could not be read"
+    return 3
+  }
   # Every pod must run one tag of the image: two tags is a rollout still in
   # progress, which proves nothing about the pods that have not moved yet.
   for img in ${images//,/ }; do
@@ -2517,15 +2538,25 @@ cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
     state=${row#*$'\t'}
   else
     merge=$(cw_merge_sha "$id")
-    [ -n "$merge" ] || return 3
-    sha=$(cw_image_build_sha "$build_repo" "$workflow" "$number" "$repo") || return 3
+    # The forge not naming the merge sha yet is a wait, not a failed read: the
+    # watch records it as awaiting the deploy, as the header documents.
+    [ -n "$merge" ] || return 1
+    cw_trace build "$ns/$deploy"
+    if ! sha=$(cw_image_build_sha "$build_repo" "$workflow" "$number" "$repo"); then
+      CW_TARGET_CARRIED_REASON="deploy landing unreadable: the build commit of image $tag could not be read from $build_repo $workflow"
+      return 3
+    fi
     state=$(cw_forge_carries_state "$owner/$repo" "$merge" "$sha")
-    [ "$state" != unreadable ] || return 3
+    if [ "$state" = unreadable ]; then
+      CW_TARGET_CARRIED_REASON="deploy landing unreadable: whether image $tag carries the merge could not be read from $owner/$repo"
+      return 3
+    fi
     [ ! -d "$(cw_watch_dir "$id")" ] \
       || printf '%s\t%s\t%s\n' "$tag" "$sha" "$state" >> "$cache" 2>/dev/null || true
   fi
   [ "$state" = carried ] || return 1
-  printf '%s built from %s\n' "$tag" "$(printf '%s' "$sha" | cut -c1-8)"
+  CW_TARGET_CARRIED_EVIDENCE="$tag built from $(printf '%s' "$sha" | cut -c1-8)"
+  return 0
 }
 
 cw_carried_path() { printf '%s/carried-at-register\n' "$(cw_watch_dir "$1")"; }
@@ -2536,15 +2567,39 @@ cw_carried_path() { printf '%s/carried-at-register\n' "$(cw_watch_dir "$1")"; }
 # per target as "<ns>/<deploy><TAB><tag> built from <sha8>", because the
 # baseline was then read from the released code (cw_take_sample, cw_carried_note).
 cw_target_already_carried() {  # <watch-id> <ns> <deploy>
-  local id=$1 target="$2/$3" file evidence
+  local id=$1 target="$2/$3" file evidence rc
+  while IFS=$'\t' read -r k v m; do
+    [ "$k" = "$target" ] || continue
+    CW_TARGET_CARRIED_EVIDENCE=$m
+    CW_TARGET_CARRIED_REASON=$m
+    return "$v"
+  done <<CACHE
+$CW_TARGET_CARRIED_CACHE
+CACHE
   file=$(cw_carried_path "$id")
   if awk -F'\t' -v t="$target" '$1 == t { found = 1 } END { exit(found ? 0 : 1) }' "$file" 2>/dev/null; then
+    CW_TARGET_CARRIED_EVIDENCE=''
+    CW_TARGET_CARRIED_REASON=''
+    CW_TARGET_CARRIED_CACHE="$CW_TARGET_CARRIED_CACHE$target	0	
+"
     return 0
   fi
-  evidence=$(cw_target_carries_merge "$id" "$2" "$3") || return 1
-  [ ! -d "$(cw_watch_dir "$id")" ] \
-    || printf '%s\t%s\n' "$target" "$evidence" >> "$file" 2>/dev/null || true
-  return 0
+  cw_target_carries_merge "$id" "$2" "$3"; rc=$?
+  evidence=$CW_TARGET_CARRIED_EVIDENCE
+  if [ "$rc" -eq 0 ]; then
+    [ ! -d "$(cw_watch_dir "$id")" ] \
+      || printf '%s\t%s\n' "$target" "$evidence" >> "$file" 2>/dev/null || true
+  elif [ "$rc" -ne 3 ]; then
+    rc=1
+  fi
+  if [ "$rc" -eq 3 ]; then
+    CW_TARGET_CARRIED_CACHE="$CW_TARGET_CARRIED_CACHE$target	3	$CW_TARGET_CARRIED_REASON
+"
+  else
+    CW_TARGET_CARRIED_CACHE="$CW_TARGET_CARRIED_CACHE$target	$rc	$evidence
+"
+  fi
+  return "$rc"
 }
 
 # One sentence naming every target the merge was already running on when the
@@ -2564,10 +2619,11 @@ cw_carried_note() {  # <watch-id>
 # built from the merge already (cw_target_already_carried), so a sample can
 # never report the code the release replaced as healthy and never waits for a
 # deploy that already happened. 0 = landed or nothing to compare, 2 = still
-# awaiting the rollout, 3 = images unreadable.
+# awaiting the rollout, 3 = the landing could not be read, with
+# CW_TARGET_CARRIED_REASON naming the read that failed.
 cw_target_landed() {  # <watch-id> <ns> <deploy> [<landed-file>]
   local id=$1 ns=$2 deploy=$3 landed=${4:-}
-  local row recorded fingerprint current
+  local row recorded fingerprint current rc
   [ -n "$landed" ] || landed=$(cw_landed_path "$id")
   [ -f "$landed" ] || return 0
   row=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2 "|" $3; found = 1 } END { exit(found ? 0 : 1) }' \
@@ -2582,18 +2638,36 @@ cw_target_landed() {  # <watch-id> <ns> <deploy> [<landed-file>]
     # A landing record from this release carries the fingerprint: the rollout is
     # proven by the template hash, so a change that leaves every image identical
     # (an env value, a routing table) still opens the gate.
-    current=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null) || return 3
-    [ -n "$current" ] || return 3
+    current=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null) || {
+      CW_TARGET_CARRIED_REASON="deploy landing unreadable: the target's pod fingerprint could not be read"
+      return 3
+    }
+    if [ -z "$current" ]; then
+      CW_TARGET_CARRIED_REASON="deploy landing unreadable: the target's pod fingerprint could not be read"
+      return 3
+    fi
     [ "$current" = "$fingerprint" ] || return 0
-    ! cw_target_already_carried "$id" "$ns" "$deploy" || return 0
+    rc=0
+    cw_target_already_carried "$id" "$ns" "$deploy" || rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    [ "$rc" -eq 0 ] && return 0
     return 2
   fi
   # A landed record written before the fingerprint existed compares the images,
   # which is all it recorded.
-  current=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || return 3
-  [ -n "$current" ] || return 3
+  current=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || {
+    CW_TARGET_CARRIED_REASON="deploy landing unreadable: the target's pod images could not be read"
+    return 3
+  }
+  if [ -z "$current" ]; then
+    CW_TARGET_CARRIED_REASON="deploy landing unreadable: the target's pod images could not be read"
+    return 3
+  fi
   [ "$current" = "$recorded" ] || return 0
-  ! cw_target_already_carried "$id" "$ns" "$deploy" || return 0
+  rc=0
+  cw_target_already_carried "$id" "$ns" "$deploy" || rc=$?
+  [ "$rc" -eq 3 ] && return 3
+  [ "$rc" -eq 0 ] && return 0
   return 2
 }
 
@@ -2652,19 +2726,26 @@ cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
   return 0
 }
 
-# cw_all_k8s_awaiting <watch-id> succeeds when every k8s target of the watch is
-# still running the images it ran at registration, so no rollout has happened.
+# cw_all_k8s_awaiting <watch-id>: 0 when every k8s target of the watch is still
+# running the images it ran at registration, so no rollout has happened, 1 when
+# at least one has landed, 3 when a landing could not be read, with
+# CW_TARGET_CARRIED_REASON naming the read that failed.
 cw_all_k8s_awaiting() {  # <watch-id>
-  local id=$1 ns deploy landed seen=0
+  local id=$1 ns deploy landed seen=0 rc=1
   [ -f "$(cw_targets_path "$id")" ] || return 1
   while IFS=$'\t' read -r ns deploy; do
     [ -n "$ns" ] || continue
     seen=1
     landed=0
     cw_target_landed "$id" "$ns" "$deploy" || landed=$?
-    [ "$landed" -eq 2 ] || return 1
+    [ "$landed" -eq 2 ] || {
+      [ "$landed" -eq 3 ] && rc=3 || rc=1
+      break
+    }
+    rc=0
   done < "$(cw_targets_path "$id")"
-  [ "$seen" -eq 1 ]
+  [ "$seen" -eq 1 ] || return 1
+  return "$rc"
 }
 
 # cw_unproven_landing <watch-id> prints the k8s targets whose pre-merge pod
@@ -2842,7 +2923,9 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
     target=$(cw_key_target "$key")
     value=''
     reason=''
-    reason=$(cw_sample_blocker "$id" "$metric" "$target" "$cluster") || true
+    CW_SAMPLE_BLOCKER_REASON=''
+    cw_sample_blocker "$id" "$metric" "$target" "$cluster" || true
+    reason=$CW_SAMPLE_BLOCKER_REASON
     baseline=$(cw_baseline_value "$id" "$key" 2>/dev/null || true)
     # A target the merge was already running on at registration had its baseline
     # read from the released code, so the counters that baseline would excuse are
@@ -2904,8 +2987,10 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
 # the read may proceed. A Kubernetes target that has not seen its rollout is
 # awaiting the deploy, and an unreachable cluster is named once instead of being
 # retried per metric.
+CW_SAMPLE_BLOCKER_REASON=''
 cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
-  local id=$1 metric=$2 target=$3 cluster=$4 ns deploy landed since
+  local id=$1 metric=$2 target=$3 cluster=$4 ns deploy landed since out
+  CW_SAMPLE_BLOCKER_REASON=''
   case "$metric" in
     sentry_new_issues)
       # Sentry errors are only the release's once its landing is proven: the
@@ -2918,19 +3003,29 @@ cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
       # sample could not read is unproven (as an unreadable fingerprint already
       # is), never a silent reason to skip a network read.
       if [ -s "$(cw_targets_path "$id")" ]; then
-        if cw_within_budget && cw_all_k8s_awaiting "$id"; then
-          printf 'awaiting the deploy: no watched Deployment has rolled out yet\n'
+        if cw_within_budget; then
+          landed=0
+          cw_all_k8s_awaiting "$id" || landed=$?
+          case "$landed" in
+            0) CW_SAMPLE_BLOCKER_REASON='awaiting the deploy: no watched Deployment has rolled out yet' ;;
+            3) if [ -n "$CW_TARGET_CARRIED_REASON" ]; then
+                 CW_SAMPLE_BLOCKER_REASON=$CW_TARGET_CARRIED_REASON
+               else
+                 CW_SAMPLE_BLOCKER_REASON="deploy landing unreadable: the watched Deployments' rollout could not be read"
+               fi ;;
+          esac
         fi
         return 0
       fi
       since=$(cw_meta_get "$id" t0 || true)
-      cw_runs_awaiting_deploy "$id" "$since" || true
+      out=$(cw_runs_awaiting_deploy "$id" "$since" || true)
+      CW_SAMPLE_BLOCKER_REASON=$out
       return 0
       ;;
     deploy_run) return 0 ;;
   esac
   if [ -n "$cluster" ]; then
-    printf 'cluster read failed: %s\n' "$cluster"
+    CW_SAMPLE_BLOCKER_REASON="cluster read failed: $cluster"
     return 0
   fi
   case "$target" in
@@ -2941,12 +3036,16 @@ cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
   # stops that read only: the Sentry and deploy-workflow reads above go over the
   # network with their own bounds, so a budget cluster reads spent never costs
   # them the sample.
-  cw_within_budget || { printf 'sample budget spent before this metric was read\n'; return 0; }
+  cw_within_budget || { CW_SAMPLE_BLOCKER_REASON='sample budget spent before this metric was read'; return 0; }
   landed=0
   cw_target_landed "$id" "$ns" "$deploy" || landed=$?
   case "$landed" in
-    2) printf 'awaiting the deploy: the pods still run the image they ran at registration\n' ;;
-    3) printf 'deploy landing unreadable: the target\047s pod fingerprint could not be read\n' ;;
+    2) CW_SAMPLE_BLOCKER_REASON='awaiting the deploy: the pods still run the image they ran at registration' ;;
+    3) if [ -n "$CW_TARGET_CARRIED_REASON" ]; then
+         CW_SAMPLE_BLOCKER_REASON=$CW_TARGET_CARRIED_REASON
+       else
+         CW_SAMPLE_BLOCKER_REASON="deploy landing unreadable: the target's pod fingerprint could not be read"
+       fi ;;
   esac
   return 0
 }
