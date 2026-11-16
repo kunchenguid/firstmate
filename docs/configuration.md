@@ -2023,7 +2023,12 @@ A value of any other shape is an actionable configuration error reported like an
 The optional top-level `weekly_guard` object configures a start-only eligibility gate, enabled by default for workers, scouts and pipeline rows, but not shared-quota homes.
 Its `max_used_percent` defaults to 98; a candidate is not eligible when weekly used percent plus committed demand plus one new worker's reserve reaches or exceeds that value.
 The gate reads the account's `seven_day`, `weekly`, or `kind: weekly` window during shared seat evaluation; missing or unreadable weekly evidence retains the existing unknown-quota behavior and never becomes a fabricated reading.
-It never waives itself, changes running work, or changes the existing usage-limit move of a running worker.
+It never changes running work or the existing usage-limit move of a running worker.
+Its one waiver is the reset-horizon exemption: when a seat's weekly window resets within `ranking.reset_horizon_hours` (default 12) and still has at least `ranking.reset_horizon_min_percent` (default 10) percent remaining, the committed-demand term is left out, so the check is weekly used plus one new worker's reserve against the limit.
+That headroom is spent or lost at the reset, so running workers must not keep it idle; a worker that reaches the limit is re-seated by the usage-limit move.
+The refusal line of a waived seat says `committed estimate waived`, and the candidate line shows `0%committed(waived)`.
+A seat with no published weekly reset time is never waived, and every other seat and the limit are unchanged.
+These two `ranking` values are the same ones the `surplus_value` and `reset_first` dump band reads, with no separate knob.
 When no candidate can start and the weekly guard holds a candidate, the resolver prints `status: held`, the `weekly guard: ...` evidence and resets, writes no receipt, and exits 3; the task stays queued for fresh resolution on the next wake or reset rather than asking for a route around the guard.
 
 Demand estimate: count live worker endpoints from this home's `state/*.meta`, keyed by the current `seat` (or legacy `account`, or `home:<provider>`), using the recorded backend's existing endpoint-existence reader.
@@ -2031,7 +2036,10 @@ For a Claude store listed in `config/claude-shaped-store`, also add the committe
 An unreadable census is disclosed as `parked_demand=unreadable`; its independent admission check remains unchanged.
 No calibrated conversion from model, effort, or the census's one-turn `floorInputTokens` into remaining weekly task cost exists, so all workers, including expensive models and high efforts, reserve the same fixed weekly percentage points for their account plan, without age-based decay.
 `reserve_percent` defaults to 2.6 points per worker; `reserve_by_plan` optionally overrides it by exact `provider:plan` label, using the existing account plan source (declared plan first, quota plan second).
-For example, `"weekly_guard": {"max_used_percent": 98, "reserve_percent": 2.6, "reserve_by_plan": {"claude:Max": 1.3}}` reserves 1.3 points per running, parked, or proposed worker on a Claude Max account and 2.6 elsewhere, including unknown plans.
+The resolved figure is the per-worker share for the reference seat `claude1`, and it is scaled per seat by plan size because one worker costs about the same absolute weekly amount on any plan: seat reserve = resolved figure x `plan_value` of `claude1` / `plan_value` of the seat, rounded to hundredths.
+With `claude1` and `claude2` at 200 a worker commits 2.6 points on either, on a `claude3` at 125 it commits 4.16, on `codex1` at 100 it commits 5.2, and on `codex2` at 25 it commits 20.8.
+A seat, or `claude1`, missing from the top-level `plan_value` map keeps the flat figure, and no new setting exists; a scaled refusal line names the arithmetic.
+For example, `"weekly_guard": {"max_used_percent": 98, "reserve_percent": 2.6, "reserve_by_plan": {"claude:Max": 1.3}}` reserves 1.3 points per running, parked, or proposed worker on a Claude Max account and 2.6 elsewhere, including unknown plans, each before the plan-size scaling.
 All numeric values must be greater than zero and at most 100.
 The candidate line shows `weekly_estimate=<used>%used+<committed>%committed+<reserve>%new/<limit>%`, separately from published `spendPriority` and the burst spreader.
 This is a conservative fixed reserve, not a guarantee that any task fits or a forecast against resets; concurrent resolutions can still observe the same census before either launch creates metadata.
@@ -2068,6 +2076,7 @@ Resolutions that run at the same moment read the ledger before either writes, so
 
 Optional top-level `ranking.mode` accepts `spend_priority` (the default, preserving the existing burst-adjusted ranking), `surplus_value`, or `reset_first`.
 The latter requires a positive numeric `plan_value` monthly price for every profile's named account, including pipeline profiles.
+The same map also sizes the per-worker reserve of the [weekly start guard](#crew-dispatch-profiles-configcrew-dispatchjson), whatever the ranking mode.
 For example:
 
 ```json

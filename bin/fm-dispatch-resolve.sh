@@ -1048,19 +1048,43 @@ FM_DR_SEAT_JQ='
   def prov($p; $lane): quota_row(.; $p; $lane);
   def lane_of($c): quota_lane($c.harness; $c.model);
   def rows($p; $lane): (prov($p; $lane).quotaSemantics.effectiveAvailability // []);
+  def clean_reset($t): ($t | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z"));
+  # The committed-demand term is waived for a seat whose weekly window resets
+  # within ranking.reset_horizon_hours and still has at least
+  # ranking.reset_horizon_min_percent left: that headroom is spent or lost at
+  # the reset, so the running-worker estimate must not keep it idle. Used
+  # plus the reserve of the new worker is still held to the limit.
+  def weekly_reset_waiver($w):
+    (($w.resetsAt | type) == "string" and (($w.resetsAt | clean_reset(.) | try fromdateiso8601 catch null) as $reset |
+      $reset != null and $reset >= $now and $reset - $now <= (($cfg.ranking.reset_horizon_hours // 12) * 3600) and
+      $w.percentRemaining >= ($cfg.ranking.reset_horizon_min_percent // 10)));
+  # A worker costs the same absolute weekly amount on every plan, so its share
+  # of the weekly allowance of a seat scales with the plan size. The reserve is the
+  # figure for the reference seat (claude1); a seat with a plan_value gets it
+  # times reference plan_value / seat plan_value. A seat, or the reference,
+  # missing from plan_value keeps the flat figure (null scale).
+  def weekly_reference_seat: "claude1";
+  def weekly_plan_scale($account):
+    ($cfg.plan_value[weekly_reference_seat] // null) as $ref |
+    ($cfg.plan_value[$account // ""] // null) as $size |
+    if ($ref | type) == "number" and $ref > 0 and ($size | type) == "number" and $size > 0 then $ref / $size else null end;
   def weekly_guard:
     map(if .eligible and ((.sq // false) | not) then
       . as $e | (account_quota($e.profile) // {providers: []} |
         [(prov($e.provider; lane_of($e.profile)).windows // [])[] | select(.id == "seven_day" or .id == "weekly" or .kind == "weekly")] | first) as $w |
       ($cfg.weekly_guard.max_used_percent // 98) as $limit |
-      ($cfg.weekly_guard.reserve_by_plan[($e.provider + ":" + $e.plan)] // $cfg.weekly_guard.reserve_percent // 2.6) as $reserve |
+      ($cfg.weekly_guard.reserve_by_plan[($e.provider + ":" + $e.plan)] // $cfg.weekly_guard.reserve_percent // 2.6) as $base |
+      weekly_plan_scale($e.profile.account) as $scale |
+      (if $scale == null then $base else (($base * $scale * 100) | round) / 100 end) as $reserve |
       ($demand[($e.profile.account // ("home:" + $e.provider))] // {}) as $d |
       (($d.running // 0) + ($d.parked // 0)) as $n |
       if ($w.percentRemaining | type) != "number" then .
-      else . + {weekly_estimate: "\(100 - $w.percentRemaining)%used+\($n * $reserve)%committed+\($reserve)%new/\($limit)%", demand_uncertain: ($d.uncertain // false)} |
-      if (100 - $w.percentRemaining + ($n + 1) * $reserve) >= $limit then
+      else weekly_reset_waiver($w) as $waived |
+        (if $waived then 0 else (($n * $reserve * 100) | round) / 100 end) as $committed |
+        . + {weekly_estimate: "\(100 - $w.percentRemaining)%used+\($committed)%committed\(if $waived then "(waived)" else "" end)+\($reserve)%new/\($limit)%", demand_uncertain: ($d.uncertain // false)} |
+      if (100 - $w.percentRemaining + $committed + $reserve) >= $limit then
         del(.unranked) + {eligible:false, weekly_guard:true,
-          reason:"weekly guard: \(100 - $w.percentRemaining)% used + \($n * $reserve)% committed (\($d.running // 0) running, \($d.parked // 0) parked) + \($reserve)% new >= \($limit)%; resets \($w.resetsAt // "unknown")"}
+          reason:"weekly guard: \(100 - $w.percentRemaining)% used + \($committed)% committed (\($d.running // 0) running, \($d.parked // 0) parked\(if $waived then "; committed estimate waived: weekly window resets within \($cfg.ranking.reset_horizon_hours // 12)h with at least \($cfg.ranking.reset_horizon_min_percent // 10)% left, so the headroom is spent before it is lost" else "" end)) + \($reserve)% new\(if $scale != null and $scale != 1 then " (per-worker \($reserve)% = \($base)% x plan_value \($cfg.plan_value[weekly_reference_seat]) / \($cfg.plan_value[$e.profile.account]))" else "" end) >= \($limit)%; resets \($w.resetsAt // "unknown")"}
       else . end end
     else . end);
   def bare($m): ($m | split("/") | last);
@@ -1085,7 +1109,6 @@ FM_DR_SEAT_JQ='
       ($qs != null and .scope == $qs)
     )];
   def provider_windows($p; $lane): (prov($p; $lane).windows // []);
-  def clean_reset($t): ($t | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z"));
   # A five-hour window counts when its used percent and published reset are both
   # known, so a seat at that limit is held until the reset. An idle window (0%
   # used, no reset), an unreadable one, or one with no published reset never

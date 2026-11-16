@@ -543,6 +543,75 @@ jq '.weekly_guard.reserve_percent = -1' "$RULES" > "$TMP_ROOT/rules-next"; mv "$
 weekly_run
 expect_code 2 "$code" 'invalid weekly reserve is a config error'
 jq '.weekly_guard.reserve_percent = 1' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+# A seat whose weekly window resets within the reset horizon with enough left waives the committed-demand term.
+# Nine running workers at a 2.6% reserve commit 23.4%; the used and new-worker terms still count.
+for n in 1 2 3 4 5 6 7 8 9; do printf 'window=@77\nseat=claude2\nharness=claude\n' > "$HOME_DIR/state/weekly-burst-$n.meta"; done
+jq '.weekly_guard.reserve_by_plan["claude:Team"] = 2.6 | .ranking = {reset_horizon_hours:12,reset_horizon_min_percent:10}' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+# Pin the clock to the fixture time 2030-01-01T00:00:00Z so reset distances are exact.
+export FM_DISPATCH_NOW_EPOCH=1893456000
+weekly_reset_quota() {  # <weekly-remaining> <weekly resetsAt, or empty for none>
+  seat_quota "$1" 1 through_reset 90 | jq --arg t "$2" '.providers[0].windows[1] |= (if $t == "" then del(.resetsAt) else .resetsAt = $t end)' > "$TMP_ROOT/claude2-quota.json"
+}
+weekly_reset_quota 25 2030-01-01T08:00:00Z
+weekly_run
+expect_code 0 "$code" "a seat resetting in 8h with 25% left starts despite 9 committed workers: $out"
+assert_equals claude2 "$(jq -r .profile.account "$(latest)")" 'the draining seat is the one selected'
+assert_contains "$out" 'weekly_estimate=75%used+0%committed(waived)+2.6%new/98%' 'the waived estimate names the dropped committed term'
+weekly_reset_quota 25 2030-01-01T20:00:00Z
+weekly_run
+expect_code 3 "$code" 'the same seat resetting in 20h is still refused'
+assert_contains "$out" 'weekly guard: 75% used + 23.4% committed (9 running, 0 parked) + 2.6% new >= 98%' 'outside the horizon the committed estimate still counts'
+assert_not_contains "$out" 'waived' 'outside the horizon nothing is waived'
+weekly_reset_quota 8 2030-01-01T08:00:00Z
+weekly_run
+expect_code 3 "$code" 'a seat with under 10% left is still refused inside the horizon'
+assert_contains "$out" '92% used + 23.4% committed (9 running, 0 parked) + 2.6% new >= 98%' 'under the minimum left the committed estimate still counts'
+assert_not_contains "$out" 'waived' 'under the minimum left nothing is waived'
+weekly_reset_quota 25 ''
+weekly_run
+expect_code 0 "$code" "a seat with no weekly reset time is unchanged, still the unknown-quota start: $out"
+assert_contains "$out" 'quota unknown: windows without known percent or reset: seven_day' 'a window with no reset time is still unknown evidence the guard never reads'
+assert_not_contains "$out" 'waived' 'no reset time never waives the committed estimate'
+weekly_reset_quota 10 2030-01-01T12:00:00Z
+weekly_run
+expect_code 0 "$code" "exactly the minimum left, resetting exactly at the horizon, is waived: $out"
+jq '.weekly_guard.max_used_percent = 77' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_reset_quota 25 2030-01-01T08:00:00Z
+weekly_run
+expect_code 3 "$code" 'a waived seat is still held to used plus the new worker against the limit'
+assert_contains "$out" 'weekly guard: 75% used + 0% committed (9 running, 0 parked; committed estimate waived: weekly window resets within 12h with at least 10% left' 'the refusal of a waived seat says the estimate was waived and why'
+assert_present "$HOME_DIR/state/weekly-burst-1.meta" 'the waiver never stops or moves running work'
+# The per-worker committed percent follows the seat's plan size: the 2.6% reserve is the claude1 figure, scaled by claude1 plan_value / seat plan_value.
+jq 'del(.weekly_guard.max_used_percent) | .plan_value = {claude1:200,claude2:200}' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_reset_quota 25 2030-01-04T00:00:00Z
+weekly_run
+assert_contains "$out" '75% used + 23.4% committed (9 running, 0 parked) + 2.6% new >= 98%' 'a seat the size of the reference keeps the 2.6% per-worker figure'
+assert_not_contains "$out" 'per-worker' 'an unscaled seat carries no scaling note'
+jq '.plan_value.claude2 = 100' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+expect_code 3 "$code" 'a half-size plan counts each worker as double the share'
+assert_contains "$out" '75% used + 46.8% committed (9 running, 0 parked) + 5.2% new (per-worker 5.2% = 2.6% x plan_value 200 / 100) >= 98%' 'the smaller plan commits 5.2% per worker and says why'
+jq '.plan_value.claude2 = 125' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+assert_contains "$out" '75% used + 37.44% committed (9 running, 0 parked) + 4.16% new (per-worker 4.16% = 2.6% x plan_value 200 / 125)' 'a plan of 125 commits 4.16% per worker'
+jq '.plan_value.claude2 = 400' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+expect_code 0 "$code" "a double-size plan counts each worker as half the share and fits: $out"
+assert_contains "$out" 'weekly_estimate=75%used+11.7%committed+1.3%new/98%' 'the larger plan commits 1.3% per worker'
+jq 'del(.plan_value.claude2)' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+expect_code 3 "$code" 'a seat missing from plan_value keeps the flat figure'
+assert_contains "$out" '75% used + 23.4% committed (9 running, 0 parked) + 2.6% new >= 98%' 'a missing plan_value falls back to the flat 2.6%'
+jq '.plan_value = {claude2:100}' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+assert_contains "$out" '75% used + 23.4% committed (9 running, 0 parked) + 2.6% new >= 98%' 'a missing reference plan_value falls back to the flat 2.6%'
+jq 'del(.plan_value)' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+rm -f "$HOME_DIR"/state/weekly-burst-*.meta
+unset FM_DISPATCH_NOW_EPOCH
+# Launches under the pinned clock left burst debits stamped 2030; drop them so later pinned-clock tests start clean.
+rm -f "$HOME_DIR/state/dispatch-burst-ledger"
+jq 'del(.weekly_guard.max_used_percent) | .weekly_guard.reserve_by_plan["claude:Team"] = 1.3 | del(.ranking)' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+seat_quota 4 1 through_reset 90 > "$TMP_ROOT/claude2-quota.json"
 # Missing weekly evidence follows the existing first-gate behavior unchanged.
 jq '.providers[0].windows[1].percentRemaining = null' "$TMP_ROOT/claude2-quota.json" > "$TMP_ROOT/weekly-unreadable"
 mv "$TMP_ROOT/weekly-unreadable" "$TMP_ROOT/claude2-quota.json"
@@ -554,7 +623,7 @@ rm "$HOME_DIR/state/weekly-dead.meta" "$HOME_DIR/state/weekly-other.meta" "$HOME
 unset QUOTA_FIXTURE_MAP
 cp "$TMP_ROOT/original-rules" "$RULES"
 cp "$TMP_ROOT/original-quota" "$QUOTA"
-pass 'weekly guard is start-only, counts live account demand, never waives, and preserves unknown behavior'
+pass 'weekly guard is start-only, counts live account demand, waives the committed estimate only inside the reset horizon, and preserves unknown behavior'
 # Default-only tables still receive a valid Jev Choice, without degrading.
 jq '{default:.default}' "$TMP_ROOT/original-rules" > "$RULES"
 write_response default 1 '{"default":1}' default_1
@@ -888,8 +957,9 @@ rank_quota "$TMP_ROOT/rank-x2" codex 80 10 30 2030-01-05T00:00:00Z
 rank_quota "$TMP_ROOT/rank-g" zai 90 10 40 2030-01-04T00:00:00Z
 QUOTA_FIXTURE_MAP=$(jq -cn --arg r "$TMP_ROOT" '{($r+"/claude1-seat"):($r+"/rank-c1"),($r+"/claude2-seat"):($r+"/rank-c2"),($r+"/codex1-seat"):($r+"/rank-x1"),($r+"/codex1-pi"):($r+"/rank-x1"),($r+"/codex2-seat"):($r+"/rank-x2"),($r+"/codex2-pi"):($r+"/rank-x2"),($r+"/glm-seat"):($r+"/rank-g")}')
 export QUOTA_FIXTURE_MAP
+# A tiny reserve_percent keeps these ranking cases out of the weekly guard, which would otherwise scale the reserve of the small claude2 plan.
 cat > "$RULES" <<'JSON'
-{"rules":[{"when":"Any work","use":[{"harness":"claude","model":"opus","effort":"high","account":"claude1","reasoning_class":5},{"harness":"claude","model":"opus","effort":"high","account":"claude2","reasoning_class":5}]}],"plan_value":{"claude1":200,"claude2":25}}
+{"rules":[{"when":"Any work","use":[{"harness":"claude","model":"opus","effort":"high","account":"claude1","reasoning_class":5},{"harness":"claude","model":"opus","effort":"high","account":"claude2","reasoning_class":5}]}],"plan_value":{"claude1":200,"claude2":25},"weekly_guard":{"reserve_percent":0.01}}
 JSON
 run preview --json
 expect_code 0 "$code" "default ranking preview: $out"
