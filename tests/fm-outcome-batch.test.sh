@@ -66,7 +66,7 @@ the change deletes the old table
 a security finding came back
 prod alerts fired after the deploy
 ROWS
-  for verb in blocked failed needs-decision done; do
+  for verb in blocked failed needs-decision 'done'; do
     new_case "verb-$verb"
     status t1 "$verb [at=2]: see the report"
     outcome 1 t1 'progress note for the captain'
