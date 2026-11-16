@@ -4696,6 +4696,43 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
+# A head with several re-run check sets reports its producers as one large
+# payload. The guard must read it whatever its size, and must still judge the
+# producer identity: only the matching app counts, wherever it sits in the set.
+# Args: none; drives the public entrypoint with a producers read over 128 KiB.
+test_required_producer_identity_survives_a_large_producer_set() {
+  local case_dir head variant app size
+  head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  for variant in correct wrong; do
+    case_dir=$(make_case "required-producer-large-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_required "$case_dir" "classic:ci"
+    jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+      "$case_dir/github-branch.json" > "$case_dir/updated.json"
+    mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+    app=42
+    [ "$variant" != correct ] || app=15368
+    jq -n --arg head "$head" --argjson app "$app" '
+      { check_runs: ([ range(0; 300) | {name: ("job-" + tostring), head_sha: $head,
+            app: {id: 15368}, output: {summary: ("x" * 600)}} ]
+          + [{name: "ci", head_sha: $head, app: {id: $app}}]) }' \
+      > "$case_dir/github-runs.json"
+    size=$(wc -c < "$case_dir/github-runs.json")
+    [ "$size" -gt 131072 ] || fail "large-producer-$variant: fixture is only $size bytes, not over 128 KiB"
+    run_required_case "$case_dir" 111 --attended-override -- --admin
+    if [ "$variant" = correct ]; then
+      expect_code 0 "$RC" "large-producer-$variant: $(cat "$case_dir/stderr")"
+      assert_grep 'pr merge' "$case_dir/gh.log" "large producer set blocked a verified merge"
+    else
+      expect_code 1 "$RC" "large-producer-$variant: $(cat "$case_dir/stderr")"
+      assert_grep "required check 'ci' has not reported" "$case_dir/stderr" "wrong producer in a large set was not refused as missing"
+      assert_no_grep 'check rollup could not be read' "$case_dir/stderr" "large producer set read as an unreadable rollup"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" "wrong producer in a large set reached merge"
+    fi
+  done
+  pass "fm-pr-merge reads a producers set over 128 KiB and still judges producer identity"
+}
+
 # A commit status carries no app id to compare, so an app-bound required context
 # that arrives as a green status matches by name, while the same context left
 # unreported still refuses.
@@ -5245,6 +5282,7 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
+test_required_producer_identity_survives_a_large_producer_set
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo

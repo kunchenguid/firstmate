@@ -1065,9 +1065,16 @@ github_read_required_contexts() {
   [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
 }
 
+# The required set and the head's check-run producers are read by jq from
+# process substitutions, never as --argjson arguments: a head with re-run check
+# sets carries a producers payload past the kernel's 128 KiB limit on a single
+# argument, and jq then cannot start at all.
 github_required_checks_missing() {
   local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+  printf '%s' "$json" | jq -r \
+    --slurpfile required_file <(printf '%s' "$required") \
+    --slurpfile producers_file <(printf '%s' "$producers") '
+    $required_file[0] as $required | $producers_file[0] as $producers |
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
     | .statusCheckRollup as $reported
     | $required
