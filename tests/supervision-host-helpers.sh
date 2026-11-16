@@ -61,6 +61,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   captain-held the same, but record a captain outcome before the turn ends
 #   emptyresult the same as handle, but print {} as its result
 #   noreport    drain and exit cleanly without a report
+#   denied      the same as noreport, but its result lists a refused tool call
+#               in permission_denials (an engine whose commands were refused)
 #   go-away     the captain goes away (the record is written) mid-turn, then
 #               the turn reports verdict captain
 #   fail        exit nonzero at once, with no result and no report (an engine
@@ -89,6 +91,7 @@ case "$mode" in held|captain-held) printf 'ready\n' > "$FM_HOME/stub-ready" ;; e
 # Like Claude, the reported cost is the conversation's running total.
 result() {
   printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":%s,' "$(awk -v n="$n" 'BEGIN { print n * 0.25 }')"
+  [ "$mode" != denied ] || printf '"permission_denials":[{"tool_name":"Bash","tool_use_id":"stub","tool_input":{"command":"bin/fm-wake-drain.sh"}}],'
   printf '"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20},"session_id":"stub"}\n'
 }
 if [ "$mode" = hang ]; then
@@ -172,7 +175,7 @@ case "$mode" in
     fi
     result
     ;;
-  noreport) result ;;
+  noreport|denied) result ;;
 esac
 SH
 chmod +x "$STUB"

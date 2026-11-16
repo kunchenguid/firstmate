@@ -17,6 +17,32 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
 
+# Claude Code reports a refused tool call as a successful turn that lists it
+# in permission_denials; the host must count it as an engine error, say the
+# commands were refused, and latch on the second one rather than handing every
+# wake back unexplained.
+test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch() {
+  local home
+  home=$(make_home away-denied away)
+  echo denied > "$home/stub-mode"
+  start_session "$home"
+  park_again "$home"
+  append_status "$home" 'first'
+  wait_until_deadline 60 host_exited "$home" || fail "denied: the first refused turn did not hand the wake back"
+  assert_re "^supervision-host: the away session could not take this wake: the engine's commands were refused by its permission rules \\(1 refused; a managed-only permission policy is a likely cause\\); this wake is yours$" \
+    "$home/host.out" "a refused turn must hand the wake back saying its commands were refused"
+  assert_re '	failed	turn=.*	error=1 .* denied=1	' "$home/state/.supervision-host.log" "the ledger must record the refused turn as failed"
+  assert_grep 'errors=1' "$home/state/.supervision-host-health" "a refused turn must count as an engine error"
+  main_drain_and_ack "$home"
+  park_again "$home"
+  append_status "$home" 'second'
+  wait_until_deadline 60 host_exited "$home" || fail "denied: the second refused turn did not hand the wake back"
+  assert_re '^supervision-host: the supervision session is paused after repeated engine errors; every wake reaches you for the next 5 minutes' \
+    "$home/host.out" "the second refused turn must trip the latch with one line"
+  assert_grep 'cooldown=300' "$home/state/.supervision-host-health" "refused turns must start the latch's cooldown"
+  pass "host: an engine turn whose commands were refused is an engine error that names the refusal and trips the latch"
+}
+
 test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
   local home
   home=$(make_home away-latch away)
@@ -665,6 +691,7 @@ test_superseded_host_leaves_the_owner_untouched() {
 
 fm_test_run \
   test_latch_trips_after_two_engine_errors_then_probes_and_recovers \
+  test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch \
   test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes \
   test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main \
   test_engine_turn_is_bounded_and_its_descendants_reaped \

@@ -842,6 +842,29 @@ tests/fm-watch-arm.test.sh
 ```
 
 
+### Refused engine commands, 2026-11-15
+
+This supports [supervision-host.md](../supervision-host.md#claude-print-mode-behavior)'s rule that a non-empty `permission_denials` fails the engine turn.
+It was measured on macOS arm64 with Claude Code 2.1.325 on `claude-haiku-5-5`, under remote-managed settings that set `allowManagedPermissionRulesOnly: true` with a managed allow list that includes `Bash(echo *)`, from a disposable directory holding an executable `bin/fm-probe.sh`.
+
+```sh
+claude -p 'Use the Bash tool to run each separately: (1) echo hi (2) bin/fm-probe.sh. Reply with each output or DENIED.' \
+  --safe-mode --system-prompt-file system.txt --tools Bash,Read --permission-mode dontAsk \
+  --allowedTools Bash Read --model claude-haiku-5-5 --output-format json </dev/null
+```
+
+| Variant | `bin/fm-probe.sh` | `/bin/echo hi` | `echo hi` | `git rev-parse --is-inside-work-tree` |
+| --- | --- | --- | --- | --- |
+| The engine's flags, as above | refused | refused | ran | ran |
+| The same without `--safe-mode` | refused | refused | not run | ran |
+| The same without `--safe-mode`, from a temporary directory and from the code root | not run | refused | not run | not run |
+| `--setting-sources ''`, `--strict-mcp-config`, `--disable-slash-commands`, and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` in place of `--safe-mode` | refused | refused | not run | ran |
+| `--allowedTools 'Bash(*)'`, `--allowedTools 'Bash(/bin/echo hi)'`, or `--settings '{"permissions":{"allow":["Bash"]}}'` without `--safe-mode` | not run | refused | not run | not run |
+
+Every refused call returned the tool error `Permission to use Bash has been denied because Claude Code is running in don't ask mode.`, and every result was `"subtype":"success","is_error":false` with the refused calls listed in `permission_denials`, for example `"permission_denials":[{"tool_name":"Bash",...,"tool_input":{"command":"bin/fm-probe.sh",...}}]`.
+Only commands that match a managed allow rule or that Claude classifies as read-only ran, so the managed policy, not `--safe-mode`, refuses the engine's commands.
+`tests/fm-supervision-host-park.test.sh` pins the host's handling of such a result against the stub engine.
+
 ### Non-Pi primaries
 
 This supports the per-primary routing in [supervision-host.md](../supervision-host.md): with `config/supervision-host`, the Cursor, OpenCode, Grok, and Codex arm owners run the host with the Claude engine, and without it nothing changes.
