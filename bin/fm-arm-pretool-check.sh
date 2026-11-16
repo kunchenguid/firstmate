@@ -3,6 +3,8 @@
 #
 # A firstmate primary must arm the watcher or run a Codex checkpoint as a
 # standalone verified harness call.
+# It also refuses machine-wide pattern kills (pkill, killall) from a primary or
+# a Claude crewmate, whose worktree hooks fm-spawn.sh registers here.
 # bin/fm-arm-command-policy.mjs is the sole owner of shell classification,
 # protected execution identity, the blessed setup tree, and deny reason codes.
 # This wrapper only acquires the harness payload, discovers the active roots,
@@ -136,9 +138,10 @@ fi
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
-# fm-watch byte sequence AFTER the classifier's byte normalization, so a command
-# that cannot contain fm-watch even after that normalization can never be a
-# deniable watcher command and is fast-allowed without the Node policy owner.
+# fm-watch byte sequence AFTER the classifier's byte normalization, and every
+# pattern kill to pkill or killall, so a command that cannot contain any of them
+# even after that normalization can never be deniable and is fast-allowed
+# without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
 # continuation and escape backslashes, quotes, and newlines) so obfuscated
 # protected paths such as fm-watc\<newline>h-arm.sh or fm-"watch"-arm.sh still
@@ -167,7 +170,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*) ;;
+      *fm-watch* | *pkill* | *killall*) ;;
       *) exit 0 ;;
     esac
     ;;

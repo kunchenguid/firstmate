@@ -6607,7 +6607,15 @@ BUSY_GEN=
       j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
-    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
+    # A crewmate also gets the pattern-kill seatbelt (docs/arm-pretool-check.md)
+    # so its pkill/killall can never sweep every other agent on the machine.
+    # A secondmate home already registers it in its tracked hooks.
+    pretool_entry=
+    if [ "$KIND" != secondmate ]; then
+      j_pretool=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-arm-pretool-check.sh") --claude")
+      pretool_entry="\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$j_pretool\"}]}],"
+    fi
+    hooks_json="\"hooks\":{${pretool_entry}\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
     if [ "$KIND" = secondmate ]; then
       session_keys='"feedbackDrafts":"off",'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then

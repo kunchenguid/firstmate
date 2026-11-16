@@ -129,6 +129,17 @@ When the command carries such grammar and its raw bytes reference both a `fm-wat
 This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
 It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
 
+## Pattern kills
+
+Any actually executed `pkill` or `killall`, whatever its pattern, is denied with `pattern-kill`; a watcher-targeted `pkill` keeps the more specific `broad-watcher-kill`.
+A pattern kill matches every process on the machine whose name or command line fits, so one agent resetting its own browser bridge with `pkill -f chrome-devtools-axi` can terminate every other agent whose command line carries that word.
+The deny reason points the agent at `pgrep` or `ps` to find the exact process and `kill <pid>` to stop only that one.
+Data mentions, `pgrep`, and `kill <pid>` stay allowed, and unsupported compound grammar whose raw bytes name `pkill` or `killall` fails closed as for broad watcher kills.
+
+`bin/fm-spawn.sh` registers this checker as a Claude crewmate's Bash `PreToolUse` hook in the worktree's `.claude/settings.local.json`, beside its busy hooks, so a delegated Claude worker in any project is covered.
+Agents Firstmate does not launch, such as no-mistakes pipeline agents, run with their own settings and are not covered.
+Give them the same guard on the no-mistakes side, for example by registering `bin/fm-arm-pretool-check.sh --claude` as a Bash `PreToolUse` hook in the settings those agents load, or an equivalent rule in their prompt.
+
 ## Stable reason codes
 
 Every semantic deny includes one stable code in square brackets before its prose reason.
@@ -141,6 +152,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
+| `pattern-kill` | An actual `pkill` or `killall` runs; kill by exact pid instead. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 
