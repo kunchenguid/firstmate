@@ -590,13 +590,18 @@ WARM_COMPACT_PRIMARY_DONE=0
 WARM_COMPACT_VERDICT=
 
 # Daily fresh start (bin/fm-fresh-start-lib.sh owns the setting, the gate, and
-# the steps). Ticks on the warm-compact cadence; a step that types ends this
-# park's ownership the way any new primary turn does.
+# the steps). Ticks on the warm-compact cadence for as long as this park lasts:
+# the save turn's own Stop hook marks the save finished (fm_fresh_start_hook,
+# through bin/fm-host-mirror.sh), so a later tick of this same park can clear.
 FRESH_START_LAST_TICK=-1
 
 fresh_start_tick() {
-  local backend target verdict
-  [ "$PRIMARY" = claude ] && [ -f "$CONFIG/daily-fresh-start" ] && [ -n "${FM_WARM_COMPACT_TRANSCRIPT:-}" ] || return 0
+  local backend target verdict transcript
+  [ "$PRIMARY" = claude ] && [ -f "$CONFIG/daily-fresh-start" ] || return 0
+  # The session this host started for may have been replaced by a fresh
+  # start; the primary's latest Stop names the current one.
+  transcript=$(fm_fresh_start_transcript "$STATE" "${FM_WARM_COMPACT_TRANSCRIPT:-}")
+  [ -n "$transcript" ] || return 0
   park_elapsed
   if [ "$FRESH_START_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - FRESH_START_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
     return 0
@@ -604,9 +609,8 @@ fresh_start_tick() {
   FRESH_START_LAST_TICK=$PARK_ELAPSED
   turn_crosses_boundary && return 0
   target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend) || return 0
-  verdict=$(fm_fresh_start_step "$CONFIG" "$STATE" "$backend" "$target" "$FM_WARM_COMPACT_TRANSCRIPT" \
-    $(($(date +%s) - PARK_ELAPSED)))
-  case "$verdict" in saving | cleared | skipped | failed) log_line "fresh-start	$verdict" ;; esac
+  verdict=$(fm_fresh_start_step "$CONFIG" "$STATE" "$backend" "$target" "$transcript")
+  case "$verdict" in saving | cleared | skipped | cancelled | unknown | failed) log_line "fresh-start	$verdict" ;; esac
 }
 
 # Outcome batching (bin/fm-outcome-batch-lib.sh owns the rule and the hold

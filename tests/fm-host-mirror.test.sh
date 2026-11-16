@@ -515,7 +515,45 @@ test_only_proven_writers_are_verified() {
   pass "only Claude and Cursor, the primaries with proven writers, have a verified dialog mirror"
 }
 
+# The daily fresh start rides the primary's own prompt-submit and Stop hooks
+# through this writer (bin/fm-fresh-start-lib.sh fm_fresh_start_hook): the save
+# turn's Stop marks the save finished, its own /stow prompt changes nothing,
+# and any other prompt cancels that day's clear. Without the setting, or from a
+# session that does not hold the home's lock, nothing changes.
+test_fresh_start_turn_boundaries_ride_the_hook() {
+  local home transcript nonce=0123456789abcdef
+  home=$(make_home fresh-start)
+  : > "$home/config/daily-fresh-start"
+  transcript="$home/transcript.jsonl"
+  jq -cn --arg n "$nonce" '{type: "user", message: {role: "user", content: ("<command-message>stow</command-message>\n<command-name>/stow</command-name>\n<command-args>daily-fresh-start " + $n + "</command-args>")}}' > "$transcript"
+  printf 'date=2030-01-02\nstep=saving\nat=1\nnonce=%s\ntranscript=%s\n' "$nonce" "$transcript" > "$home/state/.daily-fresh-start"
+  HOOK_T="$transcript" HOOK_N="$nonce" as_session "$home" '
+    jq -cn --arg t "$HOOK_T" "{hook_event_name: \"Stop\", transcript_path: \$t, last_assistant_message: \"saved\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    jq -cn --arg p "/stow daily-fresh-start $HOOK_N" "{hook_event_name: \"UserPromptSubmit\", prompt: \$p}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude'
+  assert_equals "$nonce" "$(sed -n 's/^nonce=//p' "$home/state/.daily-fresh-start-ended")" "the save turn's Stop marks the save finished"
+  assert_equals saving "$(sed -n 's/^step=//p' "$home/state/.daily-fresh-start")" "the save's own /stow prompt changes nothing"
+  # An unowned session's prompt is not the primary's and changes nothing.
+  printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"from elsewhere"}' | FM_HOME="$home" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+  assert_equals saving "$(sed -n 's/^step=//p' "$home/state/.daily-fresh-start")" "a session without the lock changes nothing"
+  as_session "$home" '
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"one more thing\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude'
+  assert_equals cancelled "$(sed -n 's/^step=//p' "$home/state/.daily-fresh-start")" "a new message after the save cancels the day's clear"
+  [ ! -e "$home/state/.daily-fresh-start-ended" ] || fail "a cancelled save forgets its finished mark"
+  # Without the setting the hook leaves a saving record alone.
+  printf 'date=2030-01-02\nstep=saving\nat=1\nnonce=%s\ntranscript=%s\n' "$nonce" "$transcript" > "$home/state/.daily-fresh-start"
+  rm -f "$home/config/daily-fresh-start"
+  as_session "$home" '
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hello\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude'
+  assert_equals saving "$(sed -n 's/^step=//p' "$home/state/.daily-fresh-start")" "without the setting nothing changes"
+  pass "the fresh start's turn boundaries ride the primary's mirror hooks: the save turn's Stop finishes it, any other prompt cancels it, and only for the lock-owning primary with the setting on"
+}
+
 test_every_harness_registration_writes_the_mirror
+test_fresh_start_turn_boundaries_ride_the_hook
 test_writers_are_inert_on_a_home_that_opted_out
 test_only_proven_writers_are_verified
 test_home_that_opted_out_is_untouched

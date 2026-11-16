@@ -30,21 +30,32 @@ esac
 SH
 chmod +x "$FAKEBIN/date"
 
-# step <case-dir> [park-start]: run one step in a fresh shell; prints the
+# step <case-dir> [ignored]: run one step in a fresh shell; prints the
 # verdict, and the typed lines land in <case-dir>/typed. TRANSCRIPT names the
-# primary's current session transcript (default the case's own).
+# primary's current session transcript (default the case's own). An executable
+# <case-dir>/on-busy or on-composer runs inside that probe, so a case can make
+# something arrive between the step's first checks and its keystroke.
 step() {
-  local dir=$1 park=${2:-0}
+  local dir=$1
   PATH="$FAKEBIN:$PATH" FM_FRESH_START_SETTLE=0 CASE_DIR="$dir" FM_HOME="$dir" \
     TRANSCRIPT="${TRANSCRIPT:-$dir/transcript.jsonl}" bash -c '
     . "$1/bin/fm-warm-compact-lib.sh"
     . "$1/bin/fm-fresh-start-lib.sh"
-    fm_backend_busy_state() { cat "$CASE_DIR/busy" 2>/dev/null || printf "idle\n"; }
-    fm_backend_composer_state() { cat "$CASE_DIR/composer" 2>/dev/null || printf "empty\n"; }
+    fm_backend_busy_state() { [ ! -x "$CASE_DIR/on-busy" ] || "$CASE_DIR/on-busy" >/dev/null 2>&1; cat "$CASE_DIR/busy" 2>/dev/null || printf "idle\n"; }
+    fm_backend_composer_state() { [ ! -x "$CASE_DIR/on-composer" ] || "$CASE_DIR/on-composer" >/dev/null 2>&1; cat "$CASE_DIR/composer" 2>/dev/null || printf "empty\n"; }
     fm_backend_send_text_submit() { printf "%s\n" "$3" >> "$CASE_DIR/typed"; printf "empty\n"; }
-    fm_fresh_start_step "$CASE_DIR/config" "$CASE_DIR/state" herdr pane-1 "$TRANSCRIPT" "$2"
-  ' _ "$ROOT" "$park"
+    fm_fresh_start_step "$CASE_DIR/config" "$CASE_DIR/state" herdr pane-1 "$TRANSCRIPT"
+  ' _ "$ROOT"
 }
+
+# The primary's own turn boundaries, as its prompt-submit and Stop hooks
+# deliver them (bin/fm-host-mirror.sh hook claude calls fm_fresh_start_hook).
+hook_event() {  # <event> <payload>
+  PATH="$FAKEBIN:$PATH" bash -c '. "$1/bin/fm-fresh-start-lib.sh"; fm_fresh_start_hook "$2" "$3" "$4"' \
+    _ "$ROOT" "$CASE/state" "$1" "$2"
+}
+turn_ends() { hook_event Stop "$(jq -cn --arg t "${TRANSCRIPT:-$CASE/transcript.jsonl}" '{hook_event_name: "Stop", transcript_path: $t}')"; }
+prompted() { hook_event UserPromptSubmit "$(jq -cn --arg p "$1" '{hook_event_name: "UserPromptSubmit", prompt: $p}')"; }
 
 new_case() {  # <name> [context-tokens] -> sets CASE
   CASE="$TMP_ROOT/$1"
@@ -159,6 +170,7 @@ ROWS
   assert_equals saving "$(step "$CASE" 100)" "the save step runs on a quiet home"
   stow_turn "$(record nonce)"
   attest "$(record nonce)" || fail "the save attempt's own nonce must attest"
+  turn_ends
   ask open pick-layout 'which layout, A or B' >/dev/null
   assert_equals 'waiting:an unanswered chat question (pick-layout)' "$(step "$CASE" 99999999999)" "an unanswered chat question must hold the clear step too"
   [ "$(grep -c . "$CASE/typed")" = 1 ] || fail "a held clear step types nothing after the save: $(typed)"
@@ -170,6 +182,7 @@ ROWS
     assert_equals saving "$(step "$CASE" 100)" "$damage: the save step runs on a quiet home"
     stow_turn "$(record nonce)"
     attest "$(record nonce)" || fail "$damage: the save attempt's own nonce must attest"
+    turn_ends
     case "$damage" in
       queue-torn) printf 'torn pending wake\n' >"$CASE/state/.wake-queue" ;;
       store-dangling) ln -s "$CASE/missing.jsonl" "$CASE/state/branch-outcomes.jsonl" ;;
@@ -313,10 +326,13 @@ test_save_then_clear_once() {
   nonce=$(record nonce)
   [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || fail "the save attempt must carry a random nonce, got '$nonce'"
   assert_equals "/stow daily-fresh-start $nonce" "$(typed)" "the save step types /stow with this attempt's nonce and nothing else"
-  assert_equals saving "$(step "$CASE" 100)" "the park that submitted the save must not clear"
+  prompted "/stow daily-fresh-start $nonce"
+  assert_equals saving "$(step "$CASE" 100)" "a save whose turn has not ended does not clear"
   stow_turn "$nonce"
   attest "$nonce" || fail "the stow turn's attestation must be accepted"
-  assert_equals cleared "$(step "$CASE" 99999999999)" "a later park after an attested save clears"
+  assert_equals saving "$(step "$CASE")" "an attested save still waits for its turn to end"
+  turn_ends
+  assert_equals cleared "$(step "$CASE")" "once the save turn ends, the same park clears an attested save"
   assert_equals "/stow daily-fresh-start $nonce
 /clear
 $(bash -c '. "$1/bin/fm-fresh-start-lib.sh"; printf "%s" "$FM_FRESH_START_RESUME_PROMPT"' _ "$ROOT")" "$(typed)" \
@@ -324,7 +340,7 @@ $(bash -c '. "$1/bin/fm-fresh-start-lib.sh"; printf "%s" "$FM_FRESH_START_RESUME
   assert_equals 'done' "$(step "$CASE" 99999999999)" "a cleared day is done"
   assert_equals 'done' "$(FAKE_HOUR=05 step "$CASE" 99999999999)" "the rest of the window stays done"
   assert_equals saving "$(FAKE_DAY=2030-01-03 step "$CASE" 99999999999)" "the next day starts again with a save"
-  pass "one day saves, clears only after the save attests on a later park, then resumes with one prompt, exactly once"
+  pass "one day saves, clears only after the save attests and its turn ends, then resumes with one prompt, exactly once"
 }
 
 test_only_an_attested_save_clears() {
@@ -334,7 +350,9 @@ test_only_an_attested_save_clears() {
   new_case unattested
   assert_equals saving "$(step "$CASE" 100)" "the save is submitted"
   stow_turn "$(record nonce)"
-  assert_equals unsaved "$(step "$CASE" 99999999999)" "a later idle park without an attestation does not clear"
+  assert_equals saving "$(step "$CASE" 99999999999)" "a save turn that has not ended is still saving"
+  turn_ends
+  assert_equals unsaved "$(step "$CASE" 99999999999)" "an ended save turn without an attestation does not clear"
   assert_equals unsaved "$(FAKE_HOUR=06 step "$CASE" 99999999999)" "it keeps waiting while the window is open"
   assert_equals skipped "$(FAKE_HOUR=07 step "$CASE" 99999999999)" "the closing window skips the day"
   assert_equals 1 "$(grep -c . "$CASE/typed")" "nothing but the save was typed"
@@ -351,6 +369,7 @@ test_only_an_attested_save_clears() {
   nonce=$(record nonce)
   stow_turn "$nonce"
   attest "$nonce"
+  turn_ends
   cp "$CASE/transcript.jsonl" "$CASE/new-session.jsonl"
   assert_equals skipped "$(TRANSCRIPT="$CASE/new-session.jsonl" step "$CASE" 99999999999)" "a changed primary session skips the day"
   [ ! -e "$CASE/state/.daily-fresh-start-attest" ] || fail "a skipped save's attestation must be removed"
@@ -360,6 +379,7 @@ test_only_an_attested_save_clears() {
   nonce=$(record nonce)
   stow_turn "$nonce"
   attest "$nonce"
+  turn_ends
   jq -cn '{type: "user", message: {role: "user", content: "one more thing before you go"}}' >>"$CASE/transcript.jsonl"
   assert_equals skipped "$(step "$CASE" 99999999999)" "a human prompt after the save skips the day"
   # A transcript the check cannot parse never verifies.
@@ -368,6 +388,7 @@ test_only_an_attested_save_clears() {
   nonce=$(record nonce)
   stow_turn "$nonce"
   attest "$nonce"
+  turn_ends
   printf '{"type":"user","message":{"content":"tor\n' >>"$CASE/transcript.jsonl"
   assert_equals skipped "$(step "$CASE" 99999999999)" "an unparsable transcript skips the day"
   # Yesterday's save, even attested, never licenses today's clear.
@@ -381,6 +402,131 @@ test_only_an_attested_save_clears() {
     if grep -qx /clear "$TMP_ROOT/$c/typed"; then fail "$c typed /clear"; fi
   done
   pass "only a save that attested for this attempt, in this session, with nothing said after it, ever clears"
+}
+
+# Deep review finding 1: a new captain message after the save always cancels
+# that day's clear, through the primary's own prompt-submit boundary.
+test_new_message_cancels_the_clear() {
+  local nonce
+  new_case cancel
+  step "$CASE" >/dev/null
+  nonce=$(record nonce)
+  prompted "/stow daily-fresh-start $nonce"
+  stow_turn "$nonce"
+  attest "$nonce"
+  turn_ends
+  prompted /clear
+  assert_equals saving "$(record step)" "the save's own /stow and the clear itself cancel nothing"
+  prompted 'one more thing before you go'
+  assert_equals cancelled "$(record step)" "a new message after the save cancels the day"
+  [ ! -e "$CASE/state/.daily-fresh-start-attest" ] && [ ! -e "$CASE/state/.daily-fresh-start-ended" ] \
+    || fail "a cancelled save forgets its attestation and its finished mark"
+  assert_equals cancelled "$(step "$CASE")" "the cancelled day never clears"
+  assert_equals cancelled "$(FAKE_HOUR=06 step "$CASE")" "not later in the window either"
+  if attest "$nonce"; then fail "a cancelled save can no longer attest"; fi
+  if grep -qx /clear "$CASE/typed"; then fail "a cancelled day typed /clear"; fi
+  assert_equals saving "$(FAKE_DAY=2030-01-03 step "$CASE")" "the next day starts again with a save"
+  # Before the save turn ends, too.
+  new_case cancel-early
+  step "$CASE" >/dev/null
+  prompted 'are you still there'
+  assert_equals cancelled "$(record step)" "a message while the save is still running cancels the day as well"
+  pass "a new message after the save, at any point before the clear, cancels that day's clear; the save's own prompt and the clear do not"
+}
+
+# Deep review finding 1: anything that arrives between the step's first checks
+# and its keystroke stops the clear, because everything is read again last.
+test_input_during_the_probes_stops_the_clear() {
+  local kind nonce expect
+  for kind in wake question prompt cancel; do
+    new_case "barrier-$kind"
+    step "$CASE" >/dev/null
+    nonce=$(record nonce)
+    stow_turn "$nonce"
+    attest "$nonce"
+    turn_ends
+    case "$kind" in
+      wake)
+        printf '#!/bin/sh\nFM_STATE_OVERRIDE="%s" bash -c ". \"%s/bin/fm-wake-lib.sh\" && fm_wake_append check arrival \"check: arrives during the idle probe\""\n' "$CASE/state" "$ROOT" >"$CASE/on-busy"
+        expect='waiting:a queued wake' ;;
+      question)
+        printf '#!/bin/sh\nFM_STATE_OVERRIDE="%s" "%s/bin/fm-chat-question.sh" open late "asked during the composer probe"\n' "$CASE/state" "$ROOT" >"$CASE/on-composer"
+        expect='waiting:an unanswered chat question (late)' ;;
+      prompt)
+        printf '#!/bin/sh\nprintf "%%s\\n" "{\\"type\\":\\"user\\",\\"message\\":{\\"content\\":\\"NEW_UNSAVED_CONTEXT\\"}}" >>"%s"\n' "$CASE/transcript.jsonl" >"$CASE/on-composer"
+        expect=skipped ;;
+      cancel)
+        # shellcheck disable=SC2016 # $PATH expands in the generated script
+        printf '#!/bin/sh\nPATH="%s:$PATH" bash -c ". \"%s/bin/fm-fresh-start-lib.sh\"; fm_fresh_start_hook \"%s\" UserPromptSubmit \"{\\\"prompt\\\":\\\"hello\\\"}\""\n' "$FAKEBIN" "$ROOT" "$CASE/state" >"$CASE/on-busy"
+        expect=cancelled ;;
+    esac
+    chmod +x "$CASE/on-busy" "$CASE/on-composer" 2>/dev/null
+    assert_equals "$expect" "$(step "$CASE")" "$kind arriving during the probes stops the clear"
+    if grep -qx /clear "$CASE/typed"; then fail "$kind: /clear was typed"; fi
+  done
+  pass "a wake, a chat question, a prompt, or a cancel that arrives during the idle or composer probe stops the clear before it is typed"
+}
+
+# Deep review finding 2: in the real host the save is typed during a park and
+# the same park keeps ticking; no later park ever begins. The save turn's own
+# Stop is what lets that park clear, and only for the save's own session with
+# the /stow still its newest prompt.
+test_the_same_park_clears_once_the_save_turn_ends() {
+  local nonce
+  new_case same-park
+  step "$CASE" >/dev/null
+  nonce=$(record nonce)
+  stow_turn "$nonce"
+  attest "$nonce"
+  assert_equals saving "$(step "$CASE")" "the attested save waits for its turn to end"
+  assert_equals saving "$(step "$CASE")" "however many ticks pass"
+  TRANSCRIPT="$CASE/other.jsonl" turn_ends
+  [ ! -e "$CASE/state/.daily-fresh-start-ended" ] || fail "another session's turn end does not finish the save"
+  turn_ends
+  assert_equals "$nonce" "$(sed -n 's/^nonce=//p' "$CASE/state/.daily-fresh-start-ended")" "the save turn's end names its nonce"
+  assert_equals cleared "$(step "$CASE")" "the same park now clears"
+  new_case ended-after-prompt
+  step "$CASE" >/dev/null
+  nonce=$(record nonce)
+  stow_turn "$nonce"
+  jq -cn '{type: "user", message: {role: "user", content: "a later prompt"}}' >>"$CASE/transcript.jsonl"
+  turn_ends
+  [ ! -e "$CASE/state/.daily-fresh-start-ended" ] || fail "a turn whose newest prompt is not the /stow does not finish the save"
+  pass "the save turn's own Stop, in its own session with the /stow newest, lets the same park clear; nothing else does"
+}
+
+# The host keeps running across turns, so a fresh start leaves it holding the
+# replaced session's transcript; every Stop records the current one, which the
+# host reads instead, so the next day's save and clear follow the new session.
+test_the_current_session_follows_each_stop() {
+  new_case follows
+  assert_equals /from/host/start "$(bash -c '. "$1/bin/fm-fresh-start-lib.sh"; fm_fresh_start_transcript "$2" /from/host/start' _ "$ROOT" "$CASE/state")" \
+    "with no Stop seen yet the host's own path is used"
+  TRANSCRIPT="$CASE/first.jsonl" turn_ends
+  TRANSCRIPT="$CASE/after-clear.jsonl" turn_ends
+  assert_equals "$CASE/after-clear.jsonl" "$(bash -c '. "$1/bin/fm-fresh-start-lib.sh"; fm_fresh_start_transcript "$2" /from/host/start' _ "$ROOT" "$CASE/state")" \
+    "the latest Stop names the current session"
+  hook_event Stop '{"hook_event_name":"Stop","transcript_path":"relative.jsonl"}'
+  assert_equals "$CASE/after-clear.jsonl" "$(sed -n 's/^transcript=//p' "$CASE/state/.daily-fresh-start-session")" "a path that is not absolute is ignored"
+  pass "every primary Stop records the current session transcript, which the host uses instead of the one it started with"
+}
+
+# Deep review finding 3: a conversation whose size cannot be read is never a
+# successful day, so the two-day note still reaches the captain.
+test_unknown_size_is_not_a_run() {
+  local e=2000000000
+  new_case unknown
+  printf 'unparseable\n' >"$CASE/transcript.jsonl"
+  assert_equals unknown "$(FAKE_EPOCH=$e step "$CASE")" "an unparseable transcript has no known size"
+  assert_equals "$e" "$(sed -n 's/^last=//p' "$CASE/state/.daily-fresh-start-history")" "the count starts"
+  assert_equals unknown "$(FAKE_EPOCH=$((e + 5 * 86400)) step "$CASE")" "five days later it is still unknown"
+  assert_equals "$e" "$(sed -n 's/^last=//p' "$CASE/state/.daily-fresh-start-history")" "an unknown size never moves the count"
+  assert_equals 1 "$(grep -c . "$CASE/state/.wake-queue" 2>/dev/null)" "the two-day note is sent"
+  grep -q 'because the conversation size could not be read' "$CASE/state/.wake-queue" || fail "the note names the unreadable size: $(cat "$CASE/state/.wake-queue")"
+  new_case missing
+  rm -f "$CASE/transcript.jsonl"
+  assert_equals unknown "$(step "$CASE")" "a missing transcript has no known size"
+  pass "a missing or unparseable transcript is reported as unknown, never counted as a run, and the two-day note names it"
 }
 
 test_scale_gate_cost() {
@@ -416,6 +562,11 @@ test_gate_holds_every_step
 test_durable_records_do_not_hold
 test_chat_question_record
 test_stall_note_once
+test_new_message_cancels_the_clear
+test_input_during_the_probes_stops_the_clear
+test_the_same_park_clears_once_the_save_turn_ends
+test_unknown_size_is_not_a_run
+test_the_current_session_follows_each_stop
 test_settled_records_do_not_hold
 test_busy_and_composer
 test_save_then_clear_once
