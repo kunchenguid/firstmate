@@ -351,7 +351,12 @@
 #   out as a transient rather than adopted and then refused, so a home that is
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   naming the last path seen and why it was rejected. On Windows (msys or
+#   cygwin OSTYPE), no backend reads the pane's own cwd at all: every spawn
+#   asks Git inside the endpoint shell for the root, because Treehouse's nested
+#   shell can leave the process cwd in the spawning project, and a shell that
+#   does not answer refuses rather than falling back to a stale process cwd
+#   (bin/fm-spawn-path-lib.sh owns the probe and its wait cost).
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the

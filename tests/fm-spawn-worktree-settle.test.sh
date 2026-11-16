@@ -83,6 +83,19 @@ case "${1:-}" in
           [ "${FM_FAKE_SHELL_SILENT:-0}" != 1 ] || exit 0
           path=$(pane_path)
           (cd "$path" && eval "$arg")
+          # Windows PowerShell 5.1 (herdr's default endpoint shell) redirects
+          # `>` as UTF-16 with a byte-order mark; model that reply shape.
+          case "${FM_FAKE_REPLY_UTF16:-0}" in
+            1)
+              reply=${arg#git rev-parse --show-toplevel > }
+              reply=${reply#\"}; reply=${reply%\"}
+              [ -s "$reply" ] || exit 0
+              utf16_tmp="$reply.u16"
+              printf '\377\376' > "$utf16_tmp" \
+                && iconv -f UTF-8 -t UTF-16LE "$reply" >> "$utf16_tmp" \
+                && mv -f "$utf16_tmp" "$reply" || rm -f "$utf16_tmp"
+              ;;
+          esac
           exit $? ;;
       esac
     done
@@ -153,6 +166,7 @@ run_settle_spawn() {
     FM_FAKE_PARENT_CWD_STUCK="${SETTLE_PARENT_CWD_STUCK:-0}" \
     FM_FAKE_SHELL_SILENT="${SETTLE_SHELL_SILENT:-0}" \
     FM_FAKE_SEND_COUNTFILE="${SETTLE_SEND_COUNTFILE:-}" \
+    FM_FAKE_REPLY_UTF16="${SETTLE_REPLY_UTF16:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -285,6 +299,22 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+test_windows_powershell_utf16_reply_is_accepted() {
+  local rec id out status
+  id=settle-windows-utf16-z9
+  rec=$(make_settle_case settle-windows-utf16 "$id" 0)
+  read_settle_record "$rec"
+  STALE_DIR=$PROJ_DIR
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(SETTLE_OSTYPE=msys SETTLE_PARENT_CWD_STUCK=1 SETTLE_REPLY_UTF16=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "Windows spawn should accept a PowerShell UTF-16 shell reply"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "Windows spawn did not record the worktree from the UTF-16 shell reply"
+  pass "Windows accepts a shell reply redirected as UTF-16 with a byte-order mark"
+}
+
 test_windows_nested_shell_ignores_parent_cwd() {
   local rec id out status
   id=settle-windows-nested-z6
@@ -347,6 +377,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
+test_windows_powershell_utf16_reply_is_accepted
 test_windows_nested_shell_ignores_parent_cwd
 test_windows_shell_primary_is_refused
 test_windows_missing_reply_never_uses_parent_cwd

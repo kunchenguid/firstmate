@@ -42,6 +42,16 @@ fm_spawn_shell_worktree_path() { # <target>
     # read requires a complete line: never publish a partially written path.
     if [ -f "$reply_file" ] && IFS= read -r path < "$reply_file" && [ -n "$path" ]; then
       path=${path%$'\r'}
+      # PowerShell's `>` redirect (Windows PowerShell 5.1, herdr's default
+      # endpoint shell on Windows) writes UTF-16 with a byte-order mark; bash's
+      # read drops the interior NUL bytes, so the mark survives as a prefix and
+      # would make cygpath emit an empty path. Strip any recognized BOM before
+      # conversion; shells without one (cmd.exe, POSIX) are unaffected.
+      case "$path" in
+        $'\357\273\277'*) path=${path:3} ;;
+        $'\376\377'*) path=${path:2} ;;
+        $'\377\376'*) path=${path:2} ;;
+      esac
       rm -rf -- "$reply_dir"
       [ -n "$path" ] || return 1
       case "$OSTYPE" in
