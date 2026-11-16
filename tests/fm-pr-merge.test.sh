@@ -2893,6 +2893,8 @@ test_forgejo_fgj_serves_the_reads_and_binds_the_merge() {
   # the forge refused has to be caught by the confirm read, exactly as on tea.
   case_dir=$(make_fgj_case forgejo-fgj-rejected-merge)
   mirror_path_without "$case_dir/nocli" tea "$case_dir/fakebin"
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fgj] - fixture (added 2026-01-01)\n' \
+    > "$case_dir/home/data/projects.md"
   : > "$case_dir/fgj-merge-fails"
   set +e
   FM_TEST_PATH_OVERRIDE="$case_dir/nocli" run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
