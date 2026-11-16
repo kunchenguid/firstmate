@@ -183,8 +183,6 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -344,12 +342,11 @@ if [ "$KIND" = ship ]; then
     exit 1
   fi
   # A Forgejo project's pull requests are handled with the CLI its registry
-  # binding names (bin/fm-project-mode.sh --forge-cli); a binding that names
-  # none (`auto`) is resolved against the project clone's own host through the
-  # same resolver arming and the merge path use, so the ship brief's forge-CLI
-  # rule and Definition of done name a CLI the project actually uses; an
-  # external review tool has no forge CLI at all; every other forge keeps
-  # gh-axi.
+  # binding names (bin/fm-project-mode.sh --forge-cli). A binding that names
+  # none (`auto`) is tea and only tea - the same value arming and the merge path
+  # resolve it to - so the ship brief's forge-CLI rule and Definition of done
+  # name the CLI the merge path will use. An external review tool has no forge
+  # CLI at all; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
     FORGEJO_CLI=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge-cli "${POS[1]:-}" 2>/dev/null) || {
       echo "error: could not read the registered Forgejo CLI for project '${POS[1]:-}' (bin/fm-project-mode.sh --forge-cli); correct the registry entry in data/projects.md" >&2
