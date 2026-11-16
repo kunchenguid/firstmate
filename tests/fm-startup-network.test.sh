@@ -866,7 +866,7 @@ EOF
 # it (through the wake path and through harvest alike), while a changed report, or
 # a failed or timed-out run, still announces every time.
 test_an_unchanged_finding_is_announced_once() {
-  local rec home root log finding other woke
+  local rec home root log finding other woke record
   rec=$(new_world unchanged-finding-once)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -884,10 +884,15 @@ EOF
   woke || fail "a new finding did not announce"
   stage "$finding"
   woke && fail "an unchanged finding re-announced on an identical republication"
+  record=$(cat "$home/state/.startup-network.delivered" 2>/dev/null)
   stage "$finding"
   woke && fail "an unchanged finding re-announced on a third republication"
   [ -s "$home/state/.startup-network.delivered" ] \
     || fail "the content-bound delivered record was lost across identical runs"
+  [ "$(cat "$home/state/.startup-network.delivered")" = "$record" ] \
+    || fail "the delivered record changed across byte-identical republications"
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "an identical republication queued a row, which would wake a turn and its session-start sweeps"
 
   stage "$other"
   woke || fail "a changed finding was silently swallowed"

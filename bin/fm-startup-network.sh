@@ -448,7 +448,9 @@ EOF
 # published report byte-identical to one already delivered or announced inherits
 # that state, so the unchanged finding stays quiet; every other outcome (a
 # different report, timeout, failure, an unpublished report) clears it exactly as
-# before, so a change or a broken run always announces.
+# before, so a change or a broken run always announces. Suppressing the notice
+# also suppresses the session-start-driven sweep run it would have woken:
+# sweeps are launched per turn, not per publication.
 settle_delivered_record() {  # <state> <report-published> <new-report-file>
   local state=$1 published=$2 out=$3 digest
   if [ "$state" = 'done' ] && [ "$published" = 1 ]; then
