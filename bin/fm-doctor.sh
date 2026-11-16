@@ -59,8 +59,10 @@
 # help. --json prints the underlying model (schema fm-doctor.v1): home, area,
 # verdict, counts, and checks with their fix hints and full evidence details.
 # The TOON-only summary, findings, and help are derived from that model.
-# --area <name> runs only that area's checks; the built-in
-# checks always run. --network adds the network sources above.
+# --area <name> runs only that area's inventory checks; built-in inventory
+# validation always runs, and source and mapping checks cover selected sources.
+# Built-in checks with status ok outside the selected area are omitted except
+# for doctor/inventory. --network adds the network sources above.
 #
 # EXIT. 0 when no check failed (warnings allowed); 1 when a check failed,
 # including a doctor-internal failure; 2 for a usage error, including an

@@ -3,10 +3,10 @@
 #
 # Sourced, never executed.
 #
-# AXI-style commands keep their internal model as JSON (`--json` prints it
-# verbatim) and render TOON only at the output boundary, so TOON and JSON stay
-# parity representations of one model. Every such command renders through this
-# one function rather than carrying its own copy of the rules.
+# Callers keep their internal model as JSON (`--json` prints it verbatim) and
+# render TOON only at the output boundary. A caller may project a compact view
+# from that model before rendering, as bin/fm-doctor.sh does. This function owns
+# rendering rules; each caller owns its projection.
 #
 #   fm_toon_render
 #       Reads one JSON object on stdin and prints its TOON form on stdout.
