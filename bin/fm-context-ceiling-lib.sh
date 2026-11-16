@@ -209,9 +209,11 @@ fm_context_ceiling_resolve() {
   fi
   if [ -n "$recorded" ]; then
     if ! fm_context_ceiling_valid "$recorded"; then
+      # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
       FM_CONTEXT_CEILING_ERROR="the task record's context_ceiling=$recorded is unusable; pass --context-ceiling to choose one"
       return 1
     fi
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     FM_CONTEXT_CEILING_VALUE=$recorded
     return 0
   fi

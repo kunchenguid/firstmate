@@ -40,6 +40,7 @@ fm_custom_check_trust_read() {
   [ "$version" = fm-custom-check-v1 ] || return 1
   [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || return 1
   FM_CUSTOM_CHECK_HASH=$hash
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_CUSTOM_CHECK_AUDIENCE=$audience
 }
 
