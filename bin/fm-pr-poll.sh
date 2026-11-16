@@ -14,7 +14,7 @@
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and a Forgejo CLI for Forgejo, so an upstream
 # checkout needs no extra tooling to follow GitHub or GitLab. The Forgejo CLI
-# is chosen from the sidecar's recorded preference (auto|tea|fgj) and that
+# is chosen from the sidecar's recorded preference (auto|tea|fgj|fj) and that
 # CLI's own login for the host, duplicating bin/fm-pr-lib.sh's
 # fm_pr_forgejo_resolve because this body sources nothing. The Gerrit and
 # Forgejo branches additionally need jq, and so does the GitLab degraded read

@@ -293,11 +293,17 @@ if [ "$PROVIDER" = forgejo ]; then
   }
   fm_pr_forgejo_cli_preference "$META"
   fm_pr_forgejo_resolve "$HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
-    echo "error: watching a Forgejo pull request at $HOST requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth token --hostname <host>'), or fj (see 'fj auth list')" >&2
+    forgejo_action="watching a Forgejo pull request"
+    forgejo_host=$HOST
+    case "$FM_PR_FORGEJO_CLI_PREFERENCE" in
+      ''|auto) forgejo_expected="tea, since the project's registry binding names no CLI" ;;
+      *) forgejo_expected="'$FM_PR_FORGEJO_CLI_PREFERENCE', the CLI the project's registry binding names" ;;
+    esac
+    echo "error: $forgejo_action at $forgejo_host requires a Forgejo CLI holding a login for that host. Expected: $forgejo_expected. Log that CLI in, or change the project's registry binding in data/projects.md (forge=forgejo:tea or forge=forgejo:fgj); forgejo-cli's fj cannot serve this path (docs/forgejo-cli-alternatives.md)" >&2
     exit 1
   }
   if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then
-    echo "error: watching a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough and prints only localized prose, so it cannot report whether this pull request merged, and firstmate will not watch an event it cannot read (docs/forgejo-cli-alternatives.md); install tea or fgj, log one in for $HOST, and re-run" >&2
+    echo "error: watching a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough and prints only localized prose, so it cannot report whether this pull request merged, and firstmate will not watch an event it cannot read (docs/forgejo-cli-alternatives.md); the project's registry binding names forge=forgejo:fj, so change it to forge=forgejo:tea or forge=forgejo:fgj (or drop the CLI to leave the project on tea) in data/projects.md and log that CLI in for $HOST" >&2
     exit 1
   fi
 fi

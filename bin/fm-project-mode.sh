@@ -11,9 +11,10 @@
 # default output stays the same two words for every project, bound or not.
 # With --forge-cli it prints one word: the Forgejo CLI the project registered,
 # auto|tea|fgj|fj. `auto` (the default, and the answer for every non-Forgejo
-# binding) means "whatever is installed and holds a login for the host"; the
-# provider word --forge prints is unchanged either way, so no existing
-# consumer sees a different value.
+# binding) means tea and only tea, so a project that names no CLI keeps the tea
+# it has always had and never adopts fgj's stored login; fgj is reached only by
+# naming it. The provider word --forge prints is unchanged either way, so no
+# existing consumer sees a different value.
 # With --pr it prints one word: the project's registered PR-text posture,
 # auto|manual, "auto" when the project registers none.
 #
@@ -281,8 +282,8 @@ fi
 # project uses is the captain's choice rather than something to infer from
 # PATH alone. --forge still answers the provider word `forgejo` for every
 # spelling, so no existing consumer changes; --forge-cli answers the CLI and
-# every other binding answers `auto`, which keeps a project that names no CLI
-# on the installed-and-logged-in order it has always had.
+# every other binding answers `auto`, which is tea and only tea, keeping a
+# project that names no CLI on the tea it has always had.
 forge_cli=auto
 case "$forge" in
   none|forge=gerrit|forge=external) forge=${forge#forge=} ;;

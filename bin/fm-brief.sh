@@ -75,15 +75,13 @@
 # bin/fm-project-mode.sh's header owns what the binding means, and
 # bin/fm-dod-lib.sh owns what `gerrit`, `forgejo`, and `external` change in the
 # Definition of done. On `forgejo` this script reads the binding's optional CLI
-# annotation (bin/fm-project-mode.sh --forge-cli) and, for `auto`, goes through
-# the same resolver the merge path uses (bin/fm-pr-lib.sh's
-# fm_pr_forgejo_resolve_project) so the ship brief's forge-CLI rule and
-# Definition of done can never name a CLI the merge path would not use. `auto`
-# now resolves to tea and only tea - fgj is opted into by naming it - so this
-# keeps the two in step by construction rather than by duplicated policy, and a
-# clone that cannot name a host still falls back to tea. It refuses a binding
-# that resolves to forgejo-cli (`fj`), which cannot read the pull request record
-# or bind a merge to a verified head. On
+# annotation (bin/fm-project-mode.sh --forge-cli). `auto`, the binding every
+# existing project carries, is tea and only tea - the same value
+# bin/fm-pr-lib.sh's fm_pr_forgejo_resolve produces for it - so the ship brief's
+# forge-CLI rule and Definition of done name the CLI the merge path will use
+# without a second resolution. It refuses a binding that names forgejo-cli
+# (`fj`), which cannot read the pull request record or bind a merge to a
+# verified head. On
 # `external` that rule names no forge CLI, because the home's review tool is the
 # only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.
@@ -361,18 +359,12 @@ if [ "$KIND" = ship ]; then
       tea|fgj|fj) ;;
       *) FORGEJO_CLI=auto ;;
     esac
-    if [ "$FORGEJO_CLI" = auto ]; then
-      if [ "$PROJECT_DIR_SET" -eq 1 ] && [ -n "$PROJECT_DIR" ]; then
-        forgejo_clone=$PROJECT_DIR
-      else
-        forgejo_clone="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/${POS[1]:-}"
-      fi
-      if fm_pr_forgejo_resolve_project "$forgejo_clone" auto; then
-        FORGEJO_CLI=$FM_PR_FORGEJO_CLI
-      else
-        FORGEJO_CLI=tea
-      fi
-    fi
+    # `auto` is tea and only tea: a project that names no CLI ships through
+    # tea exactly as it always has, and never adopts another CLI's stored
+    # login. fgj is reached only by naming it, which is why an fgj-only host
+    # no longer silently changes the brief. Distinct from the refusal below,
+    # which stays for a binding that names fj.
+    [ "$FORGEJO_CLI" != auto ] || FORGEJO_CLI=tea
     case "$FORGEJO_CLI" in
       fj)
         echo "error: project '${POS[1]:-}' resolves to forgejo-cli (fj), but fj exposes no authenticated request passthrough and cannot bind a merge to a verified head, so firstmate cannot ship this task; register forge=forgejo:tea or forge=forgejo:fgj, or install and log in a supported Forgejo CLI for this project's host (docs/forgejo-cli-alternatives.md)" >&2

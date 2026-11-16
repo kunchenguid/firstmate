@@ -9,9 +9,9 @@
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<forge-cli>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
-# contract. The optional eighth argument is the Forgejo CLI the project resolves
-# to (tea|fgj), never `auto`: the callers resolve `auto` the way the merge path
-# does (bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project) before rendering, so
+# contract. The optional eighth argument is the Forgejo CLI the project resolved
+# to (tea|fgj), never `auto`: the callers resolve `auto` to tea, the same value
+# bin/fm-pr-lib.sh's fm_pr_forgejo_resolve produces for it, before rendering, so
 # `tea` renders the tea contract, `fgj` renders the fgj api read-back, and any
 # other value, forgejo-cli's `fj` included, is refused because it cannot read
 # the pull request record the contract needs.
@@ -570,7 +570,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
         draft_check="(\`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host>\` must show \`draft\` as false, where <owner>/<repo>, <number>, and <host> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host> -X PATCH -f title='<title without the prefix>'\`."
         ;;
       *)
-        echo "error: fm_dod_block: unknown Forgejo CLI '$forgejo_cli' (expected tea or fgj; resolve auto with bin/fm-pr-lib.sh's fm_pr_forgejo_resolve_project first, and forgejo-cli's fj cannot read the pull request record and is refused by bin/fm-pr-check.sh and bin/fm-pr-merge.sh)" >&2
+        echo "error: fm_dod_block: unknown Forgejo CLI '$forgejo_cli' (expected tea or fgj; 'auto' resolves to tea, and forgejo-cli's fj cannot read the pull request record and is refused by bin/fm-pr-check.sh and bin/fm-pr-merge.sh)" >&2
         return 1 ;;
     esac
   fi

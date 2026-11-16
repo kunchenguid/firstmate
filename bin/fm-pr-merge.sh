@@ -732,11 +732,17 @@ if [ "$PROVIDER" = forgejo ]; then
   }
   fm_pr_forgejo_cli_preference "$META"
   fm_pr_forgejo_resolve "$PR_HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
-    echo "error: merging a Forgejo pull request at $PR_HOST requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth token --hostname <host>'), or fj (see 'fj auth list')" >&2
+    forgejo_action="merging a Forgejo pull request"
+    forgejo_host=$PR_HOST
+    case "$FM_PR_FORGEJO_CLI_PREFERENCE" in
+      ''|auto) forgejo_expected="tea, since the project's registry binding names no CLI" ;;
+      *) forgejo_expected="'$FM_PR_FORGEJO_CLI_PREFERENCE', the CLI the project's registry binding names" ;;
+    esac
+    echo "error: $forgejo_action at $forgejo_host requires a Forgejo CLI holding a login for that host. Expected: $forgejo_expected. Log that CLI in, or change the project's registry binding in data/projects.md (forge=forgejo:tea or forge=forgejo:fgj); forgejo-cli's fj cannot serve this path (docs/forgejo-cli-alternatives.md)" >&2
     exit 1
   }
   if ! fm_pr_forgejo_cli_api_capable "$FM_PR_FORGEJO_CLI"; then
-    echo "error: merging a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough, its pull request views print no commit id, and its own merge request is built with head_commit_id fixed to null, so it can neither read this pull request's head nor bind a merge to it; install tea or fgj, log one in for $PR_HOST, and re-run (docs/forgejo-cli-alternatives.md)" >&2
+    echo "error: merging a Forgejo pull request through 'fj' is refused: forgejo-cli exposes no authenticated request passthrough, its pull request views print no commit id, and its own merge request is built with head_commit_id fixed to null, so it can neither read this pull request's head nor bind a merge to it; the project's registry binding names forge=forgejo:fj, so change it to forge=forgejo:tea or forge=forgejo:fgj (or drop the CLI to leave the project on tea) in data/projects.md and log that CLI in for $PR_HOST (docs/forgejo-cli-alternatives.md)" >&2
     exit 1
   fi
 fi

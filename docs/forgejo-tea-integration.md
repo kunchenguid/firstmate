@@ -148,7 +148,7 @@ $ PATH="$notea" bin/fm-pr-poll.sh --validated forgejo https://localhost/fixture/
 (nothing)
 
 $ PATH="$notea" bin/fm-pr-check.sh task-x https://localhost/fixture/fixture-repo/pulls/1
-error: watching a Forgejo pull request at localhost requires a Forgejo CLI holding a login for that host: tea (see 'tea login list'), fgj (see 'fgj auth token --hostname <host>'), or fj (see 'fj auth list')
+error: watching a Forgejo pull request at localhost requires a Forgejo CLI holding a login for that host. Expected: tea, since the project's registry binding names no CLI. Log that CLI in, or change the project's registry binding in data/projects.md (forge=forgejo:tea or forge=forgejo:fgj); forgejo-cli's fj cannot serve this path (docs/forgejo-cli-alternatives.md)
 ```
 
 A project that names its Forgejo CLI (`forge=forgejo:fgj`) arms through that CLI instead, whose own login store is read the same way; a bare `forge=forgejo` stays on `tea`, so merely having `fgj` logged in never switches a project to it. [`docs/forgejo-cli-alternatives.md`](forgejo-cli-alternatives.md) owns that selection.

@@ -248,13 +248,9 @@ if [ -n "$PROMOTE_PROJECT" ]; then
       tea|fgj|fj) ;;
       *) PROMOTE_FORGEJO_CLI=auto ;;
     esac
-    if [ "$PROMOTE_FORGEJO_CLI" = auto ]; then
-      if fm_pr_forgejo_resolve_project "$PROMOTE_PROJECT" auto; then
-        PROMOTE_FORGEJO_CLI=$FM_PR_FORGEJO_CLI
-      else
-        PROMOTE_FORGEJO_CLI=tea
-      fi
-    fi
+    # `auto` is tea and only tea, the same value the brief and the merge path
+    # produce for it, so a project that names no CLI is promoted with tea.
+    [ "$PROMOTE_FORGEJO_CLI" != auto ] || PROMOTE_FORGEJO_CLI=tea
   fi
   refuse_impossible_forge_posture || exit 1
   if ! PROMOTE_STANDING_PR=$("$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROMOTE_PROJECT_NAME"); then
