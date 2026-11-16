@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # tests/fm-fresh-start.test.sh - the daily fresh start of a Claude primary
 # (bin/fm-fresh-start-lib.sh): it saves first, clears only after a same-day
-# save, runs only inside the quiet window, and never runs while anything the
-# conversation is in the middle of could be dropped.
+# save, runs only inside the quiet window, never runs while anything that
+# lives only in the conversation could be dropped, ignores durable records that
+# are printed again at session start, and tells the captain once when it has
+# not run for two days.
 #
 # Drives fm_fresh_start_step through its public interface with the backend
 # primitives replaced by recorders, and the clock by a fake `date` on PATH, so
@@ -22,6 +24,7 @@ cat >"$FAKEBIN/date" <<'SH'
 case "${1:-}" in
   +%H) printf '%s\n' "${FAKE_HOUR:?}" ;;
   +%Y-%m-%d) printf '%s\n' "${FAKE_DAY:?}" ;;
+  +%s) if [ -n "${FAKE_EPOCH:-}" ]; then printf '%s\n' "$FAKE_EPOCH"; else exec /bin/date "$@"; fi ;;
   *) exec /bin/date "$@" ;;
 esac
 SH
@@ -55,6 +58,7 @@ new_case() {  # <name> [context-tokens] -> sets CASE
 typed() { cat "$CASE/typed"; }
 record() { sed -n "s/^$1=//p" "$CASE/state/.daily-fresh-start" 2>/dev/null; }
 outcomes() { FM_STATE_OVERRIDE="$CASE/state" "$ROOT/bin/fm-branch-outcome.sh" "$@" >/dev/null </dev/null || fail "outcome store: $*"; }
+ask() { FM_STATE_OVERRIDE="$CASE/state" "$ROOT/bin/fm-chat-question.sh" "$@" </dev/null; }
 attest() { PATH="$FAKEBIN:$PATH" FM_STATE_OVERRIDE="$CASE/state" "$ROOT/bin/fm-fresh-start.sh" attest "$1" >/dev/null 2>&1; }
 hold() {  # <task> <reason>
   FM_HOME="$CASE" "$ROOT/bin/fm-captain-hold.sh" hold "$1" --title "$2" --reason "$2" >"$CASE/hold.out" 2>&1 </dev/null \
@@ -101,24 +105,15 @@ test_gate_holds_every_step() {
       handoff) : >"$CASE/state/.supervision-handoff-pending" ;;
       reply) mkdir -p "$CASE/state/pending-replies" && : >"$CASE/state/pending-replies/corr-1" ;;
       unread) outcomes append --task t1 --verdict captain --summary 'pick A or B' ;;
-      unprocessed) outcomes append --task t1 --verdict captain --summary 'pick A or B'; outcomes mark-read --through 1 ;;
       note) mkdir -p "$CASE/state/inbox" && : >"$CASE/state/inbox/1.note" ;;
-      decision) printf 'needs-decision [at=1] [key=pick]: A or B\n' >"$CASE/state/t1.status" ;;
-      blocked) printf 'blocked [at=1]: need a login\n' >"$CASE/state/t2.status" ;;
-      held) hold t-pick 'choose A or B' ;;
-      transferred)
-        # The standard completion flow: the status question moves to a
-        # captain hold and its status side is closed; the question is still open.
-        printf 'needs-decision [at=1] [key=pick]: A or B\ncaptain-held [at=2] [key=pick]: moved to t-pick\n' >"$CASE/state/t1.status"
-        hold t-pick 'choose A or B' ;;
+      chat) ask open pick-layout 'which layout, A or B' >/dev/null ;;
+      chat-file) printf 'x\n' >"$CASE/state/chat-questions" ;;
+      chat-dangling) ln -s "$CASE/missing-dir" "$CASE/state/chat-questions" ;;
       corrupt) printf 'not-json\n' >"$CASE/state/branch-outcomes.jsonl" ;;
       tail) outcomes append --task t1 --verdict routine --summary 'note'; printf 'not-json\n' >>"$CASE/state/branch-outcomes.jsonl" ;;
-      linked) printf 'working [at=1]: x\n' >"$CASE/elsewhere.status"; ln -s "$CASE/elsewhere.status" "$CASE/state/t3.status" ;;
-      dirlog) mkdir "$CASE/state/t4.status" ;;
       queue-dir) mkdir "$CASE/state/.wake-queue" ;;
       replies-file) printf 'x\n' >"$CASE/state/pending-replies" ;;
       inbox-file) printf 'x\n' >"$CASE/state/inbox" ;;
-      no-backlog) rm -rf "$CASE/data"; printf 'x\n' >"$CASE/data" ;;
       queue-torn) printf 'torn pending wake\n' >"$CASE/state/.wake-queue" ;;
       queue-unterminated) printf '1\t2030\tsignal\tt1\tsignal: t1 do' >"$CASE/state/.wake-queue" ;;
       queue-mixed) printf '1\t2030\tsignal\tt1\tsignal: t1 done\ngarbage\n' >"$CASE/state/.wake-queue" ;;
@@ -139,20 +134,15 @@ queue|a queued wake
 handoff|a supervision handoff
 reply|a secondmate reply
 unread|an unread captain outcome
-unprocessed|an unprocessed captain outcome
 note|a captain inbox note
-decision|an open decision (t1)
-blocked|an open decision (t2)
-held|a captain-held decision (1 held)
-transferred|a captain-held decision (1 held)
+chat|an unanswered chat question (pick-layout)
+chat-file|an unreadable chat-question record
+chat-dangling|an unreadable chat-question record
 corrupt|an unreadable outcome store
 tail|an unreadable outcome store
-linked|an unreadable status log (t3)
-dirlog|an unreadable status log (t4)
 queue-dir|an unreadable wake queue
 replies-file|an unreadable pending-reply record
 inbox-file|an unreadable captain inbox
-no-backlog|an unreadable captain-held list
 queue-torn|an unreadable wake queue
 queue-unterminated|an unreadable wake queue
 queue-mixed|an unreadable wake queue
@@ -169,8 +159,8 @@ ROWS
   assert_equals saving "$(step "$CASE" 100)" "the save step runs on a quiet home"
   stow_turn "$(record nonce)"
   attest "$(record nonce)" || fail "the save attempt's own nonce must attest"
-  printf 'needs-decision [at=1] [key=pick]: A or B\n' >"$CASE/state/t1.status"
-  assert_equals 'waiting:an open decision (t1)' "$(step "$CASE" 99999999999)" "an open decision must hold the clear step too"
+  ask open pick-layout 'which layout, A or B' >/dev/null
+  assert_equals 'waiting:an unanswered chat question (pick-layout)' "$(step "$CASE" 99999999999)" "an unanswered chat question must hold the clear step too"
   [ "$(grep -c . "$CASE/typed")" = 1 ] || fail "a held clear step types nothing after the save: $(typed)"
   # A damaged input that appears between an attested save and the clear holds
   # the clear: an interrupted append or a broken link is not proof of quiet.
@@ -196,6 +186,101 @@ ROWS
   printf '\n\n' >"$CASE/state/.wake-queue"
   assert_equals saving "$(step "$CASE")" "a queue of blank lines is empty"
   pass "every gate reason, and every input the gate cannot read, holds both steps and types or records nothing"
+}
+
+# The captain's rule: durable records that survive a restart and are printed
+# again at session start do not hold a fresh start, however long they stay.
+test_durable_records_do_not_hold() {
+  local name
+  for name in held transferred decision blocked unprocessed linked dirlog no-backlog; do
+    new_case "durable-$name"
+    case "$name" in
+      held) hold t-pick 'choose A or B' ;;
+      transferred)
+        printf 'needs-decision [at=1] [key=pick]: A or B\ncaptain-held [at=2] [key=pick]: moved to t-pick\n' >"$CASE/state/t1.status"
+        hold t-pick 'choose A or B' ;;
+      decision) printf 'needs-decision [at=1] [key=pick]: A or B\n' >"$CASE/state/t1.status" ;;
+      blocked) printf 'blocked [at=1]: need a login\n' >"$CASE/state/t2.status" ;;
+      unprocessed) outcomes append --task t1 --verdict captain --summary 'pick A or B'; outcomes mark-read --through 1 ;;
+      linked) printf 'working [at=1]: x\n' >"$CASE/elsewhere.status"; ln -s "$CASE/elsewhere.status" "$CASE/state/t3.status" ;;
+      dirlog) mkdir "$CASE/state/t4.status" ;;
+      no-backlog) rm -rf "$CASE/data"; printf 'x\n' >"$CASE/data" ;;
+    esac
+    assert_equals saving "$(step "$CASE")" "$name is a durable record printed at session start and must not hold the step"
+  done
+  pass "captain holds, open worker decisions and blockers, presented outcomes, and status logs or a backlog it no longer reads never hold a fresh start"
+}
+
+# A question asked only in chat is known from its record, never from the
+# conversation's words: open while unanswered, closed once answered.
+test_chat_question_record() {
+  local out
+  new_case chat-record
+  assert_equals '' "$(ask list)" "no record lists nothing"
+  out=$(ask open pick-layout 'which layout, A or B') || fail "open must succeed"
+  case "$out" in *pick-layout*) ;; *) fail "open names the key: $out" ;; esac
+  ask open name-it "$(printf 'what\tshould it\nbe called')" >/dev/null || fail "a second question opens"
+  assert_equals "name-it	what should it be called" "$(ask list | awk -F '\t' '$1 == "name-it" { print $1 "\t" $3 }')" \
+    "tabs and newlines in the summary become spaces"
+  [[ "$(ask list | head -n 1 | cut -f2)" =~ ^[0-9]+$ ]] || fail "list prints when the question was asked"
+  assert_equals 'waiting:an unanswered chat question (name-it)' "$(step "$CASE")" "the gate names the first open question"
+  ask close name-it >/dev/null || fail "close succeeds"
+  assert_equals 'waiting:an unanswered chat question (pick-layout)' "$(step "$CASE")" "one open question still holds"
+  ask close pick-layout >/dev/null || fail "close succeeds"
+  if ask close pick-layout >/dev/null 2>&1; then fail "closing a question that is not open must fail"; fi
+  assert_equals saving "$(step "$CASE")" "once every question is answered the step runs"
+  local bad rc
+  for bad in '' .hidden 'a/b' 'sp ace' "$(printf 'x%.0s' $(seq 1 65))"; do
+    rc=0; ask open "$bad" summary >/dev/null 2>&1 || rc=$?
+    assert_equals 2 "$rc" "key '$bad' is a usage error"
+  done
+  rc=0; ask open fine '' >/dev/null 2>&1 || rc=$?
+  assert_equals 2 "$rc" "an empty summary is a usage error"
+  new_case chat-temp
+  mkdir -p "$CASE/state/chat-questions"
+  : >"$CASE/state/chat-questions/.question.abc123"
+  assert_equals saving "$(step "$CASE")" "a half-written temp record is not an open question"
+  pass "a chat question is recorded when asked, holds the fresh start while open, and clears when answered; bad keys and summaries are refused"
+}
+
+# The safety net: two days and one window without a fresh start sends the
+# captain exactly one note naming the reason, then nothing until one runs.
+test_stall_note_once() {
+  local e
+  new_case stall
+  e=2000000000
+  ask open pick-layout 'which layout, A or B' >/dev/null
+  assert_equals 'waiting:an unanswered chat question (pick-layout)' "$(FAKE_EPOCH=$e step "$CASE")" "the step waits"
+  assert_equals "$e" "$(sed -n 's/^last=//p' "$CASE/state/.daily-fresh-start-history")" "the first step starts the count"
+  FAKE_EPOCH=$((e + 2 * 86400 + 3 * 3600 - 1)) step "$CASE" >/dev/null
+  [ ! -e "$CASE/state/.wake-queue" ] || fail "no note before two days and one window: $(cat "$CASE/state/.wake-queue")"
+  FAKE_HOUR=12 FAKE_EPOCH=$((e + 2 * 86400 + 3 * 3600)) step "$CASE" >/dev/null
+  assert_equals 1 "$(grep -c . "$CASE/state/.wake-queue")" "exactly one note once two days and one window passed"
+  assert_equals "check	daily-fresh-start-stalled:$e" "$(cut -f3,4 "$CASE/state/.wake-queue")" "the note is a check wake keyed by the stalled count"
+  grep -q 'has not run for two days because it was waiting on an unanswered chat question (pick-layout); tell the captain once' "$CASE/state/.wake-queue" \
+    || fail "the note names the reason: $(cut -f5 "$CASE/state/.wake-queue")"
+  FAKE_EPOCH=$((e + 5 * 86400)) step "$CASE" >/dev/null
+  FAKE_HOUR=12 FAKE_EPOCH=$((e + 9 * 86400)) step "$CASE" >/dev/null
+  assert_equals 1 "$(grep -c . "$CASE/state/.wake-queue")" "no second note while it still has not run"
+  # It runs again (here: not due, because the conversation is small), which
+  # restarts the count; a later stall sends one new note.
+  : >"$CASE/state/.wake-queue"
+  ask close pick-layout >/dev/null
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":10,"cache_creation_input_tokens":0}}}\n' >>"$CASE/transcript.jsonl"
+  assert_equals small "$(FAKE_EPOCH=$((e + 10 * 86400)) step "$CASE")" "a small conversation is not due"
+  assert_equals "$((e + 10 * 86400))" "$(sed -n 's/^last=//p' "$CASE/state/.daily-fresh-start-history")" "not due counts as run"
+  printf 'busy\n' >"$CASE/busy"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":300000,"cache_creation_input_tokens":0}}}\n' >>"$CASE/transcript.jsonl"
+  assert_equals busy "$(FAKE_EPOCH=$((e + 11 * 86400)) step "$CASE")" "a busy session defers the step"
+  FAKE_HOUR=12 FAKE_EPOCH=$((e + 12 * 86400 + 3 * 3600)) step "$CASE" >/dev/null
+  assert_equals 1 "$(grep -c . "$CASE/state/.wake-queue")" "a new stall sends one new note"
+  grep -q "daily-fresh-start-stalled:$((e + 10 * 86400))	check: the daily fresh start has not run for two days because the session was busy whenever it looked" "$CASE/state/.wake-queue" \
+    || fail "the new note carries the new count and reason: $(cat "$CASE/state/.wake-queue")"
+  # Turning the setting off forgets the count.
+  rm -f "$CASE/config/daily-fresh-start"
+  assert_equals off "$(step "$CASE")" "off"
+  [ ! -e "$CASE/state/.daily-fresh-start-history" ] || fail "off forgets the history"
+  pass "two days and one window without a fresh start queue one note naming the reason, then nothing until it runs again; off resets the count"
 }
 
 test_settled_records_do_not_hold() {
@@ -309,19 +394,28 @@ test_scale_gate_cost() {
     start=$(perl -MTime::HiRes=time -e 'printf "%d", time*1000')
     verdict=$(step "$CASE" 100)
     ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
-    assert_equals saving "$verdict" "$n settled tasks must not hold the step"
-    printf '# scale: %s settled task logs -> fresh-start step in %s ms\n' "$n" "$ms"
-    printf 'needs-decision [at=5] [key=late]: one more\n' >>"$dir/t$n.status"
+    assert_equals saving "$verdict" "$n task logs must not hold the step"
+    printf '# scale: %s task logs -> fresh-start step in %s ms\n' "$n" "$ms"
+    # The same home with an open question for every task: the first holds it.
+    mkdir -p "$dir/chat-questions"
+    for i in $(seq 1 "$n"); do printf 'asked=1\nsummary=q\n' >"$dir/chat-questions/q$(printf '%04d' "$i").question"; done
     rm -f "$dir/.daily-fresh-start"
     : >"$CASE/typed"
-    assert_equals "waiting:an open decision (t$n)" "$(step "$CASE" 100)" "one open decision among $n must still hold the step"
+    start=$(perl -MTime::HiRes=time -e 'printf "%d", time*1000')
+    verdict=$(step "$CASE" 100)
+    ms=$(( $(perl -MTime::HiRes=time -e 'printf "%d", time*1000') - start ))
+    assert_equals "waiting:an unanswered chat question (q0001)" "$verdict" "$n open questions hold the step and name the first"
+    printf '# scale: %s open chat questions -> held in %s ms\n' "$n" "$ms"
     [ ! -s "$CASE/typed" ] || fail "scale $n: a held step typed"
   done
-  pass "the gate's verdict is the same at 5, 100 and 1000 tasks (timings above)"
+  pass "the gate's verdict is the same at 5, 100 and 1000 tasks or questions (timings above)"
 }
 
 test_off_window_small
 test_gate_holds_every_step
+test_durable_records_do_not_hold
+test_chat_question_record
+test_stall_note_once
 test_settled_records_do_not_hold
 test_busy_and_composer
 test_save_then_clear_once

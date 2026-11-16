@@ -45,8 +45,8 @@
 # the day records skipped when its window closes. A save the session moved past
 # (another session, or a later prompt) records skipped at once.
 #
-# THE GATE. Every step re-checks, and a step is held back while anything could
-# still be waiting on the captain or the current conversation, and whenever one
+# THE GATE. Every step re-checks, and a step is held back while something lives
+# only in the current conversation and would be lost with it, and whenever one
 # of these inputs cannot be read (fm_fresh_start_waiting prints the first).
 # A path that exists only as a link, dangling or not, or as the wrong kind of
 # file counts as unreadable, and a wake queue holding anything but whole,
@@ -55,14 +55,27 @@
 #   - a wake is queued and unacknowledged (state/.wake-queue);
 #   - a supervision handoff is pending (state/.supervision-handoff-pending);
 #   - a request to a secondmate still waits for its reply (state/pending-replies);
-#   - a captain outcome is unread or unprocessed, read through the outcome
-#     store's own validating reader (bin/fm-branch-outcome.sh);
+#   - a captain outcome is unread, read through the outcome store's own
+#     validating reader (bin/fm-branch-outcome.sh);
 #   - a captain inbox note waits for firstmate (state/inbox/*.note);
-#   - a needs-decision or blocked line is still open in any status log, and
-#     every status log must be a readable regular file for that to be known;
-#   - a backlog item is held for the captain (bin/fm-tasks-axi.sh list --state
-#     held), which is where an unanswered status question goes when it is
-#     transferred to a captain hold.
+#   - a question firstmate asked the captain in chat is still unanswered: the
+#     record bin/fm-chat-question.sh writes when the question is asked and
+#     removes when it is answered (state/chat-questions/).
+# Durable records that survive a restart and are reprinted at session start do
+# not hold it: backlog items held for the captain, open decisions and blockers
+# in worker status logs, and captain outcomes already presented but not yet
+# acknowledged, which every drain presents again.
+# THE SAFETY NET. state/.daily-fresh-start-history holds
+#   last=<epoch>    when a fresh start last ran or was not due (the conversation
+#                   was below min-context-tokens), or when this home first ran
+#                   a step with the setting on; removed while the setting is off
+#   reason=<word>   the newest reason a step inside the window did not run
+#   noted=<epoch>   the `last` a stall note was already sent for
+# Once two days and one window have passed since `last` with no run, one check
+# wake keyed daily-fresh-start-stalled:<last> asks main to tell the captain,
+# naming that reason; `noted` then equals `last`, so nothing more is sent until
+# a fresh start runs again and moves `last`.
+#
 # Each step also needs the agent idle and the composer provably empty, through
 # the same backend primitives warm-cache compaction uses; nothing is typed
 # otherwise. A held step is retried on the next tick inside the window.
@@ -116,9 +129,9 @@ _fm_fresh_start_dir_has() {
 
 # fm_fresh_start_waiting <state-dir>: print the first reason clearing the
 # conversation now could drop something or cannot be proven safe (THE GATE), or
-# nothing. FM_HOME must name this home, for the backlog read.
+# nothing.
 fm_fresh_start_waiting() {
-  local state=$1 rc f open out count
+  local state=$1 rc f out
   if [ -e "$state/.afk" ] || [ -L "$state/.afk" ]; then printf 'away or quiet mode\n'; return 0; fi
   f=$state/.wake-queue
   if [ -e "$f" ] || [ -L "$f" ]; then
@@ -174,11 +187,6 @@ fm_fresh_start_waiting() {
       printf 'an unread captain outcome\n'
       return 0
     fi
-    if ! out=$(FM_STATE_OVERRIDE="$state" "$FM_FRESH_START_LIB_DIR/fm-branch-outcome.sh" unprocessed 2>/dev/null); then
-      printf 'an unreadable outcome store\n'
-      return 0
-    fi
-    if [ -n "$out" ]; then printf 'an unprocessed captain outcome\n'; return 0; fi
   fi
   if [ -e "$state/inbox" ] || [ -L "$state/inbox" ]; then
     rc=0
@@ -188,34 +196,19 @@ fm_fresh_start_waiting() {
     2) printf 'an unreadable captain inbox\n'; return 0 ;;
     esac
   fi
-  # The status fold skips a log it cannot read, so readability is proven here
-  # first: an unreadable, irregular, or linked log is an unknown, not a quiet one.
-  for f in "$state"/*.status; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    if [ -L "$f" ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then
-      printf 'an unreadable status log (%s)\n' "$(basename "$f" .status)"
-      return 0
-    fi
-  done
-  # The fold runs in its own shell so the host never loads the classify
-  # library's names; a failed run counts as unreadable, so the step waits.
-  if ! open=$(bash -c '. "$1/fm-classify-lib.sh" && scan_open_decisions "$2"' _ "$FM_FRESH_START_LIB_DIR" "$state" 2>/dev/null); then
-    printf 'unreadable status logs\n'
-    return 0
+  f=$state/chat-questions
+  if [ -e "$f" ] || [ -L "$f" ]; then
+    rc=0
+    _fm_fresh_start_dir_has "$f" ! -name '.*' || rc=$?
+    case "$rc" in
+    0)
+      out=$(find "$f" -mindepth 1 -maxdepth 1 ! -name '.*' 2>/dev/null | sort | head -n 1)
+      out=${out##*/}
+      printf 'an unanswered chat question (%s)\n' "${out%.question}"
+      return 0 ;;
+    2) printf 'an unreadable chat-question record\n'; return 0 ;;
+    esac
   fi
-  open=$(printf '%s\n' "$open" | head -n 1)
-  if [ -n "$open" ]; then printf 'an open decision (%s)\n' "${open%%$'\t'*}"; return 0; fi
-  if [ -z "${FM_HOME:-}" ] \
-    || ! out=$(FM_HOME="$FM_HOME" "$FM_FRESH_START_LIB_DIR/fm-tasks-axi.sh" list --state held 2>/dev/null); then
-    printf 'an unreadable captain-held list\n'
-    return 0
-  fi
-  count=$(printf '%s\n' "$out" | sed -n 's/^count: *//p' | head -n 1)
-  case "$count" in
-  '' | *[!0-9]*) printf 'an unreadable captain-held list\n'; return 0 ;;
-  0) ;;
-  *) printf 'a captain-held decision (%s held)\n' "$count"; return 0 ;;
-  esac
   return 0
 }
 
@@ -267,8 +260,61 @@ _fm_fresh_start_nonce() {
 # Takes at most one step and prints its verdict word:
 #   off | done | window | small | waiting:<reason> | busy | composer | saving |
 #   unsaved | cleared | skipped | failed
-# Needs fm-backend.sh and fm-warm-compact-lib.sh sourced.
+# then keeps the safety net's history (THE SAFETY NET). Needs fm-backend.sh and
+# fm-warm-compact-lib.sh sourced.
 fm_fresh_start_step() {
+  local verdict
+  verdict=$(_fm_fresh_start_step_once "$@")
+  # Turning the setting off forgets the history, so turning it on again starts
+  # a new two-day count rather than reporting the time it was off.
+  if [ "$verdict" = off ]; then rm -f "$2/.daily-fresh-start-history"; else _fm_fresh_start_history "$1" "$2" "$verdict"; fi
+  printf '%s\n' "$verdict"
+}
+
+# _fm_fresh_start_reason_words <verdict>: the plain reason a stall note names.
+_fm_fresh_start_reason_words() {
+  case "$1" in
+  waiting:*) printf 'it was waiting on %s' "${1#waiting:}" ;;
+  busy) printf 'the session was busy whenever it looked' ;;
+  composer) printf 'the message box held unsent text' ;;
+  saving) printf 'it was still waiting for /stow to finish' ;;
+  unsaved) printf '/stow never confirmed the session safe to reset' ;;
+  skipped) printf '/stow was not confirmed in time, or the conversation moved on after it' ;;
+  failed) printf 'typing into the session failed' ;;
+  *) printf 'the session was never idle in the quiet window' ;;
+  esac
+}
+
+# _fm_fresh_start_history <config-dir> <state-dir> <verdict>
+_fm_fresh_start_history() {
+  local config=$1 state=$2 verdict=$3 file=$2/.daily-fresh-start-history
+  local now last reason noted tmp
+  fm_fresh_start_config "$config" || return 0
+  now=$(date +%s)
+  last=$(sed -n 's/^last=//p' "$file" 2>/dev/null | head -n 1)
+  reason=$(sed -n 's/^reason=//p' "$file" 2>/dev/null | head -n 1)
+  noted=$(sed -n 's/^noted=//p' "$file" 2>/dev/null | head -n 1)
+  case "$last" in '' | *[!0-9]*) last=$now ;; esac
+  case "$verdict" in
+  cleared | small) last=$now reason= ;;
+  done | window) ;;
+  *) reason=$verdict ;;
+  esac
+  if [ $((now - last)) -ge $((2 * 86400 + FM_FRESH_START_WINDOW * 3600)) ] && [ "$noted" != "$last" ] \
+    && FM_STATE_OVERRIDE="$state" FM_WAKE_QUEUE="$state/.wake-queue" FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock" \
+      bash -c '. "$1/fm-wake-lib.sh" && fm_wake_append check "$2" "$3"' _ "$FM_FRESH_START_LIB_DIR" \
+      "daily-fresh-start-stalled:$last" \
+      "check: the daily fresh start has not run for two days because $(_fm_fresh_start_reason_words "$reason"); tell the captain once, in plain words, and nothing else is needed unless they want that reason cleared" \
+      >/dev/null 2>&1 </dev/null; then
+    noted=$last
+  fi
+  tmp=$(mktemp "$state/.daily-fresh-start-history.tmp.XXXXXX") || return 0
+  if ! { printf 'last=%s\nreason=%s\nnoted=%s\n' "$last" "$reason" "$noted" >"$tmp" && mv -f "$tmp" "$file"; }; then
+    rm -f "$tmp"
+  fi
+}
+
+_fm_fresh_start_step_once() {
   local config=$1 state=$2 backend=$3 target=$4 transcript=$5 park_start=$6
   local today hour rec_date rec_step rec_at rec_nonce rec_transcript tokens why state_now nonce prompt
   fm_fresh_start_config "$config" || { printf 'off\n'; return 0; }

@@ -1697,7 +1697,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-outcome-batch-host.test.sh"
       printf '%s\n' "__script__:fm-supervision-host.test.sh"
       ;;
-    bin/fm-fresh-start-lib.sh|bin/fm-fresh-start.sh)
+    bin/fm-fresh-start-lib.sh|bin/fm-fresh-start.sh|bin/fm-chat-question.sh)
       printf '%s\n' "__script__:fm-fresh-start.test.sh"
       printf '%s\n' "__script__:fm-warm-compact.test.sh"
       ;;
