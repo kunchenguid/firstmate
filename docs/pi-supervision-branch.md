@@ -98,6 +98,7 @@ What is never offered, or falls back to main:
 
 - While attended, a check-kind triggering close is never offered, even when other rows are eligible.
   Check-kind closes are merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class.
+  The one exception is a custom check registered with `bin/fm-check-register.sh --audience supervision`: its hash-bound trust record lets the branch claim that check's close and row while attended, and a finding the captain must see still reaches main as a captain outcome.
 - When a triggering close has no acceptor (extension absent, branch broken), it keeps today's wake-to-main path.
 - Watcher-failure alarms always go to main, because only main can repair the watcher cycle.
 
