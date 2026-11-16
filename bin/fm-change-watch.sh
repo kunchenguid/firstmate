@@ -505,13 +505,25 @@ cw_cluster_probe() {
 }
 
 # Bound one forge read per call and all forge reads of this process together, so
-# a hung CLI or a wide PR can never stall the merge or watcher path.
-cw_forge_run() {
-  local left
+# a hung CLI or a wide PR can never stall the merge or watcher path. A caller
+# that has to leave the rest of a sample's budget for other metrics passes the
+# epoch it must be done by, and no single call runs past it.
+cw_forge_run_until() {  # <deadline-epoch|''> <command...>
+  local deadline=$1 left
+  shift
   left=$(( FORGE_BUDGET_SECONDS - ($(cw_now) - CW_FORGE_START) ))
+  if [ -n "$deadline" ]; then
+    deadline=$(( deadline - $(cw_now) ))
+    [ "$deadline" -gt 0 ] || return 124
+    [ "$deadline" -ge "$left" ] || left=$deadline
+  fi
   [ "$left" -gt 0 ] || return 124
   [ "$left" -lt "$FORGE_TIMEOUT" ] || left=$FORGE_TIMEOUT
   fm_run_timed "$left" "$@" 2>/dev/null
+}
+
+cw_forge_run() {
+  cw_forge_run_until '' "$@"
 }
 
 # Every read-scoped cache and budget starts with the sample, because the armed
@@ -762,8 +774,8 @@ cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha>
 # LIVE QUERY (forge) - the same containment question answered as carried, not,
 # or unreadable, so a tree proven to lack the merge can be remembered while a read
 # that failed is asked again on the next sample.
-cw_forge_carries_state() {  # <owner/repo> <base-sha> <head-sha>
-  local repo=$1 base=$2 head=$3 gh_cmd=${FM_CW_GH:-gh} status
+cw_forge_carries_state() {  # <owner/repo> <base-sha> <head-sha> [<deadline-epoch>]
+  local repo=$1 base=$2 head=$3 deadline=${4:-} gh_cmd=${FM_CW_GH:-gh} status
   if [ -z "$base" ] || [ -z "$head" ]; then
     printf 'unreadable\n'
     return 0
@@ -783,7 +795,7 @@ cw_forge_carries_state() {  # <owner/repo> <base-sha> <head-sha>
     return 0
   fi
   command -v "$gh_cmd" >/dev/null 2>&1 || { printf 'unreadable\n'; return 0; }
-  status=$(cw_forge_run "$gh_cmd" api "repos/$repo/compare/$base...$head" --jq .status) || status=''
+  status=$(cw_forge_run_until "$deadline" "$gh_cmd" api "repos/$repo/compare/$base...$head" --jq .status) || status=''
   case "$status" in
     ahead|identical) printf 'carried\n' ;;
     behind|diverged) printf 'not\n' ;;
@@ -800,8 +812,8 @@ cw_forge_carries_state() {  # <owner/repo> <base-sha> <head-sha>
 # for that line. Prints the full sha, or fails when the run or the line cannot be
 # read. The run list is the workflow's newest 100 runs, so an image older than
 # that is unreadable rather than guessed.
-cw_image_build_sha() {  # <owner/repo> <workflow-path> <run-number> <project-repo-name>
-  local repo=$1 workflow=$2 number=$3 name=$4 gh_cmd=${FM_CW_GH:-gh}
+cw_image_build_sha() {  # <owner/repo> <workflow-path> <run-number> <project-repo-name> [<deadline-epoch>]
+  local repo=$1 workflow=$2 number=$3 name=$4 deadline=${5:-} gh_cmd=${FM_CW_GH:-gh}
   local arrow=$'\xe2\x86\x92' run_id jobs job_id log sha='' tried=0
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
@@ -815,10 +827,10 @@ cw_image_build_sha() {  # <owner/repo> <workflow-path> <run-number> <project-rep
   # A stubbed forge without stubbed runs is a test: never reach the live gh.
   [ -z "${FM_CW_FORGE_DIR:-}" ] || return 1
   command -v "$gh_cmd" >/dev/null 2>&1 || return 1
-  run_id=$(cw_forge_run "$gh_cmd" api "repos/$repo/actions/workflows/${workflow##*/}/runs?per_page=100" \
+  run_id=$(cw_forge_run_until "$deadline" "$gh_cmd" api "repos/$repo/actions/workflows/${workflow##*/}/runs?per_page=100" \
     --jq ".workflow_runs[] | select(.run_number == $number) | .id" | head -1) || return 1
   case "$run_id" in ''|*[!0-9]*) return 1 ;; esac
-  jobs=$(cw_forge_run "$gh_cmd" api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" \
+  jobs=$(cw_forge_run_until "$deadline" "$gh_cmd" api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" \
     --jq '.jobs[] | "\(.id)\t\(.name)"') || return 1
   # The resolving job first, then at most two more, so a run that never logs the
   # line costs three log reads, not one per job.
@@ -828,7 +840,7 @@ cw_image_build_sha() {  # <owner/repo> <workflow-path> <run-number> <project-rep
     case "$job_id" in ''|*[!0-9]*) continue ;; esac
     [ "$tried" -lt 3 ] || break
     tried=$((tried + 1))
-    log=$(cw_forge_run "$gh_cmd" api "repos/$repo/actions/jobs/$job_id/logs") || continue
+    log=$(cw_forge_run_until "$deadline" "$gh_cmd" api "repos/$repo/actions/jobs/$job_id/logs") || continue
     sha=$(printf '%s\n' "$log" \
       | LC_ALL=C grep -oE "Resolved [^ ]*$name [^ ]+ $arrow [0-9a-f]{40}" \
       | head -1 | LC_ALL=C grep -oE '[0-9a-f]{40}$' || true)
@@ -2502,7 +2514,7 @@ CW_TARGET_CARRIED_EVIDENCE=''
 CW_TARGET_CARRIED_REASON=''
 cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
   local id=$1 ns=$2 deploy=$3 repo owner spec build_repo workflow image_name
-  local images img ref tag='' number cache row sha state merge
+  local images img ref tag='' number cache row sha state merge deadline='' cap
   CW_TARGET_CARRIED_EVIDENCE=''
   CW_TARGET_CARRIED_REASON=''
   repo=$(cw_meta_get "$id" repo 2>/dev/null || true)
@@ -2532,6 +2544,14 @@ cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
   [ "$number" != "$tag" ] || return 1
   case "$number" in ''|*[!0-9]*) return 1 ;; esac
   cache="$(cw_watch_dir "$id")/builds"
+  # One build answer must not spend the sample's whole budget: it is bounded by
+  # the sample deadline and by one forge timeout, leaving the rest of the sample
+  # for the target's other metrics.
+  if [ -n "$CW_BUDGET_START" ]; then
+    deadline=$(( CW_BUDGET_START + SAMPLE_DEADLINE_SECONDS ))
+    cap=$(( $(cw_now) + FORGE_TIMEOUT ))
+    if [ "$cap" -lt "$deadline" ]; then deadline=$cap; fi
+  fi
   row=$(awk -F'\t' -v t="$tag" '$1 == t { print $2 "\t" $3; exit }' "$cache" 2>/dev/null || true)
   if [ -n "$row" ]; then
     sha=${row%%$'\t'*}
@@ -2542,11 +2562,11 @@ cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
     # watch records it as awaiting the deploy, as the header documents.
     [ -n "$merge" ] || return 1
     cw_trace build "$ns/$deploy"
-    if ! sha=$(cw_image_build_sha "$build_repo" "$workflow" "$number" "$repo"); then
+    if ! sha=$(cw_image_build_sha "$build_repo" "$workflow" "$number" "$repo" "$deadline"); then
       CW_TARGET_CARRIED_REASON="deploy landing unreadable: the build commit of image $tag could not be read from $build_repo $workflow"
       return 3
     fi
-    state=$(cw_forge_carries_state "$owner/$repo" "$merge" "$sha")
+    state=$(cw_forge_carries_state "$owner/$repo" "$merge" "$sha" "$deadline")
     if [ "$state" = unreadable ]; then
       CW_TARGET_CARRIED_REASON="deploy landing unreadable: whether image $tag carries the merge could not be read from $owner/$repo"
       return 3

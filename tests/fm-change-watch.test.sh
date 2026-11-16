@@ -2657,3 +2657,52 @@ grep -q 'deploy landing unreadable' "$DIR_AP/read-failures" \
 grep -q 'sample budget spent before this metric was read' "$DIR_AP/read-failures" \
   && fail "metrics after the build read were lost to the sample budget: $(cat "$DIR_AP/read-failures")"
 pass "one sample asks the build answer once per target"
+
+# A build read that stalls must not spend the sample's budget: it is cut at its
+# share of the deadline, recorded as the named unreadable read, and the target's
+# other metrics are still read instead of being reported as budget loss.
+HOME_AT=$(idp_world at "$IDP_702")
+rm -f "$HOME_AT/gh/contains-$IDP_BUILT"
+register_now=$(( $(date +%s) - 86400 ))
+out=$(idp_cw "$HOME_AT" "$IDP_702" "$register_now" register at1 "$IDP_PR") || fail "register failed: $out"
+DIR_AT="$HOME_AT/state/change-watch/at1-1839"
+cat > "$HOME_AT/bin/gh" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_CW_SHIM_GH_LOG"
+case "$*" in
+  *"--json mergeCommit"*) printf '%s\n' "$FM_CW_SHIM_MERGE" ;;
+  *"--json mergedAt"*) printf '2026-11-15T00:00:00Z\n' ;;
+  *"--json files"*) : ;;
+  *"--json headRefOid"*) printf 'deadbeef\n' ;;
+  *"pr diff"*) : ;;
+  *"actions/workflows/"*) printf '9001\n' ;;
+  *"actions/runs/"*"/jobs"*) printf '111\tdetermine-env\n222\tbuild\n333\tbuild2\n' ;;
+  *"actions/jobs/"*"/logs"*) sleep 60 ;;
+  *) exit 1 ;;
+esac
+SHIM
+chmod +x "$HOME_AT/bin/gh"
+at_cw() {
+  env FM_HOME="$HOME_AT" FM_STATE_OVERRIDE="$HOME_AT/state" FM_CW_NOW='' \
+    FM_CW_CLUSTER_DIR='' PATH="$HOME_AT/bin:$PATH" FM_CW_SHIM_LOG="$HOME_AT/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$HOME_AT/workloads" FM_CW_SHIM_IMAGE="$IDP_702" \
+    FM_CW_CONFIG_DIR="$HOME_AT/config" FM_CW_SENTRY_DIR="$HOME_AT/sentry" \
+    FM_CW_ARM_CMD="$HOME_AT/arm.sh" FM_CW_ARM_LOG="$HOME_AT/arm.log" \
+    FM_CW_SEND_CMD="$HOME_AT/send.sh" FM_CW_SEND_LOG="$HOME_AT/send.log" \
+    FM_CW_TRACE="$HOME_AT/trace" FM_CW_NO_WIKI=1 FM_CW_SLEEP_CMD=true \
+    FM_CW_FORGE_TIMEOUT=6 FM_CW_SAMPLE_DEADLINE=25 FM_CW_SHIM_GH_LOG="$HOME_AT/gh.log" \
+    FM_CW_SHIM_MERGE="$IDP_MERGE" \
+    "$CW" "$@"
+}
+started=$SECONDS
+at_cw sample at1-1839 300 >/dev/null || fail "a sample with a stalled build read failed"
+elapsed=$((SECONDS - started))
+grep -q 'deploy landing unreadable: the build commit of image 20261115-702 could not be read from Muso-AI/H-DevOps .github/workflows/deploy-idp.yaml' \
+  "$DIR_AT/read-failures" \
+  || fail "a stalled build read was not named as the unreadable read: $(cat "$DIR_AT/read-failures")"
+grep -q 'sample budget spent before this metric was read' "$DIR_AT/read-failures" \
+  && fail "a stalled build read spent the rest of the sample's budget: $(cat "$DIR_AT/read-failures")"
+[ "$elapsed" -lt 15 ] || fail "a stalled build read ran past its bound (${elapsed}s)"
+awk -F'\t' '$2 == 300 && $3 == "oomkilled@muso-prod/industry-proc-catalog-v2"' "$DIR_AT/samples.log" | grep -q . \
+  || fail "the target's other metrics were not read after the build gate: $(cat "$DIR_AT/samples.log")"
+pass "a stalled build read is cut at its share of the sample and later metrics are read"
