@@ -193,6 +193,7 @@ tests/fm-pi-branch-extension.test.sh	107195
 tests/fm-pi-branch-live-e2e.test.sh	168
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh	13080
 tests/fm-pi-codex-native.test.sh	223
+tests/fm-pi-bash-timeout.test.sh	1091
 tests/fm-pi-primary-live-e2e.test.sh	173
 tests/fm-pi-primary-types.test.sh	27723
 tests/fm-pi-seeded-home-trust-live-e2e.test.sh	2218

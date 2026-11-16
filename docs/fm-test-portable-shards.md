@@ -17,6 +17,8 @@ A passing coverage guard does not establish a healthy job duration; refresh the 
 
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains a separate measurement and is skipped by the portable CI shards.
 Measure that script through the focused Git Bash runner rather than a portable skip.
+The `tests/fm-pi-bash-timeout.test.sh` serial hint is provisionally 1091 ms, the slowest of three successful local macOS arm64 samples from `bash bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` on 2026-11-17 with Node v26.13.1.
+Replace this local hint with an Ubuntu timing-artifact maximum at the next CI refresh.
 
 A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
