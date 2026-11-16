@@ -334,6 +334,10 @@ cmd_task_close() {  # <id> <scratch> [project]
     return 0
   fi
   FP_ROOT=$FP_SCRATCH_ROOT
+  # A caller whose temp directory lies inside the area being removed (a
+  # worker's own environment) would lose every later bounded call's temp
+  # files, so later steps run with the system temp instead.
+  case "${TMPDIR:-}/" in "$scratch"/*) export TMPDIR=/tmp ;; esac
   if [ -n "$scratch" ] && { [ -e "$scratch" ] || [ -L "$scratch" ]; }; then
     if fp_scratch_owned "$scratch" "$id"; then
       scratch_kb=$(fp_du_kb "$scratch" 60) || scratch_kb=

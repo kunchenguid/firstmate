@@ -225,6 +225,23 @@ container	plain	" "$(cat "$FB/docker.objects")" "only this task's labelled objec
   pass "task-close removes the scratch area and only the task's labelled Docker material"
 }
 
+test_task_close_with_its_own_temp_inside_scratch() {
+  local s out
+  CASE=close-owntemp
+  new_home "$CASE"
+  fake_docker
+  s=$(scratch_for task-t1)
+  mkdir -p "$H/data/task-t1"
+  printf 'brief\n' > "$H/data/task-t1/brief.md"
+  printf 'container\tc1\tfirstmate.task=%s/task-t1\n' "$(home_key)" >> "$FB/docker.objects"
+  # The bash fallback, like GNU timeout on Linux, needs a usable TMPDIR.
+  out=$(TMPDIR="$s/tmp" FM_TIMEOUT_MECHANISM_OVERRIDE=bash fp task-close task-t1 "$s")
+  assert_absent "$s" "the scratch area must be removed"
+  assert_contains "$out" "Docker: 1 labelled object(s) removed" "Docker cleanup must still run after the caller's temp was removed"
+  case "$(awk -F '\t' '{print $4}' "$H/data/footprint-ledger.tsv")" in ''|*[!0-9]*) fail "the kept size must still be measured" ;; esac
+  pass "task-close still removes Docker material and measures kept size when the caller's temp was inside the area"
+}
+
 test_task_close_refusals_remove_nothing() {
   local s out other
   CASE=close-refuse
@@ -585,6 +602,7 @@ fm_test_run \
   test_task_env_creates_private_area_and_exports \
   test_two_homes_never_share_scratch \
   test_task_close_removes_scratch_and_labelled_docker_only \
+  test_task_close_with_its_own_temp_inside_scratch \
   test_task_close_refusals_remove_nothing \
   test_task_close_docker_absent_or_down \
   test_cache_cap_trims_least_recently_used_first \
