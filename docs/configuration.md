@@ -525,7 +525,7 @@ The startup digest then re-enters through the session-start hook, and the resume
 A save that never attests, because it failed, was interrupted, or was not reset-safe, never clears: the day is skipped when the window closes, and a save the session moved past is skipped at once.
 
 Each step waits while an away or quiet record exists, a wake is queued, a supervision handoff or a secondmate reply is pending, a captain outcome is unread or unprocessed, a captain inbox note is unread, a decision or blocker is open in any status log, or any backlog item is held for the captain.
-It also waits whenever one of those records cannot be read, and nothing is typed unless the agent reads idle and its composer provably empty.
+It also waits whenever one of those records cannot be read, including a path that is only a link, dangling or not, a path of the wrong kind, and a wake queue holding anything but whole, well-formed rows, such as a partly written append; nothing is typed unless the agent reads idle and its composer provably empty.
 A home that keeps long-lived captain holds therefore never starts fresh until they are answered.
 [`bin/fm-fresh-start-lib.sh`](../bin/fm-fresh-start-lib.sh) owns the gate and the steps, with coverage in [`tests/fm-fresh-start.test.sh`](../tests/fm-fresh-start.test.sh).
 
@@ -538,8 +538,10 @@ The feature is off when the file is absent, and every captain outcome then wakes
 With it present, an attended engine turn whose captain outcomes the records prove routine is held: the outcomes stay unread in the outcome store, and main's next drain presents all of them, whatever wakes it.
 The parked host hands them to main once the oldest has waited the window, without starting a model, and also as soon as the setting is removed or the outcome store cannot be read; away, they wait for the captain's return as every captain outcome does.
 
-An outcome is held only when its task's status log is readable, its newest line is `working`, `paused`, `note`, or `resolved`, and no decision or blocker is open in it, and when its text mentions no blocker, failure, error, sign-in, credential, review, merge, pull request, link, decision, deletion, security, production, or alert and asks nothing.
+An outcome is held only when the engine marked it batchable as it reported it (`bin/fm-branch-report.sh --batchable true`, recorded in the outcome store), its explicit claim that the outcome is a finished result asking nothing of anyone; an outcome without that mark always goes at once, whatever its wording.
+A marked outcome must also pass two extra checks: its task's status log is readable, its newest line is `working`, `paused`, `note`, or `resolved`, and no decision or blocker is open in it; and its text mentions no blocker, failure, error, sign-in, credential, review, merge, pull request, link, decision, deletion, security, production, or alert and asks nothing.
 One outcome that is not proven routine sends its whole turn at once, and so does a turn of more than 20 captain outcomes, which is already a batch.
+A turn is held only after its release record (`state/.outcome-batch`) is written and read back, so a held outcome can never miss its release; anything else at that path sends the turn at once.
 [`bin/fm-outcome-batch-lib.sh`](../bin/fm-outcome-batch-lib.sh) owns the rule, with coverage in [`tests/fm-outcome-batch.test.sh`](../tests/fm-outcome-batch.test.sh) and [`tests/fm-outcome-batch-host.test.sh`](../tests/fm-outcome-batch-host.test.sh).
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
