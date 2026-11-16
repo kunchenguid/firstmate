@@ -67,7 +67,12 @@
 #           value, a routing table) still opens the gate, and why a mutable tag or
 #           a digest-pinned image still proves its own rollout. A target whose
 #           fingerprint has not changed is recorded as awaiting the deploy, never
-#           as health. When the fingerprint cannot be read at registration the
+#           as health, unless its running image tag was already built from a
+#           tree carrying the merge (the repository's build: spec): a watch
+#           registered after its deploy is measured from registration, its
+#           restarts and 5xx held to absolute bars because no pre-merge baseline
+#           survives, and the registration, the verdict, and the row say so.
+#           When the fingerprint cannot be read at registration the
 #           target is still measured, and the clean completion, the unmeasurable
 #           verdict, and the status line each say the rollout was never proven
 #           for it.
@@ -312,8 +317,11 @@
 #   FM_CW_GH               gh command used for the deploy-run target (default gh)
 #   FM_CW_GH_DIR           directory of stubbed gh responses:
 #                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json,
-#                          and contains-<head-sha> listing the shas that run's
-#                          tree carries, one per line
+#                          contains-<head-sha> listing the shas that run's
+#                          tree carries, one per line, and
+#                          build-<owner>-<repo>-<workflow-path as above>-<run-number>
+#                          holding the build log line naming the commit that
+#                          run built
 #   FM_CW_FORGE_TIMEOUT    per-call bound on a forge read (default 12s)
 #   FM_CW_FORGE_BUDGET     total bound on forge reads in one register (default 60s)
 #   FM_CW_SAMPLE_DEADLINE  hard budget for one sample or baseline capture (default 25)
@@ -748,6 +756,87 @@ cw_forge_run_carries() {  # <owner/repo> <base-sha> <head-sha>
   return 1
 }
 
+# LIVE QUERY (forge) - the same containment question answered as carried, not,
+# or unreadable, so a tree proven to lack the merge can be remembered while a read
+# that failed is asked again on the next sample.
+cw_forge_carries_state() {  # <owner/repo> <base-sha> <head-sha>
+  local repo=$1 base=$2 head=$3 gh_cmd=${FM_CW_GH:-gh} status
+  if [ -z "$base" ] || [ -z "$head" ]; then
+    printf 'unreadable\n'
+    return 0
+  fi
+  if [ "$base" = "$head" ]; then
+    printf 'carried\n'
+    return 0
+  fi
+  if [ -n "${FM_CW_GH_DIR:-}" ]; then
+    if [ ! -f "$FM_CW_GH_DIR/contains-$head" ]; then
+      printf 'unreadable\n'
+    elif grep -qxF -- "$base" "$FM_CW_GH_DIR/contains-$head"; then
+      printf 'carried\n'
+    else
+      printf 'not\n'
+    fi
+    return 0
+  fi
+  command -v "$gh_cmd" >/dev/null 2>&1 || { printf 'unreadable\n'; return 0; }
+  status=$(cw_forge_run "$gh_cmd" api "repos/$repo/compare/$base...$head" --jq .status) || status=''
+  case "$status" in
+    ahead|identical) printf 'carried\n' ;;
+    behind|diverged) printf 'not\n' ;;
+    *) printf 'unreadable\n' ;;
+  esac
+}
+
+# LIVE QUERY (forge) - the commit an image tag was built from, for a repository
+# whose deploy workflow tags its images <prefix>-<run-number> (the H-DevOps
+# deploy workflows tag YYYYMMDD-<run-number>). The run with that number states
+# the commit it resolved and built in one log line,
+#   Resolved <repository> <branch> -> <40-hex sha>   (the arrow is U+2192),
+# so the job that resolves it (determine-env, else the run's first jobs) is read
+# for that line. Prints the full sha, or fails when the run or the line cannot be
+# read. The run list is the workflow's newest 100 runs, so an image older than
+# that is unreadable rather than guessed.
+cw_image_build_sha() {  # <owner/repo> <workflow-path> <run-number> <project-repo-name>
+  local repo=$1 workflow=$2 number=$3 name=$4 gh_cmd=${FM_CW_GH:-gh}
+  local arrow=$'\xe2\x86\x92' run_id jobs job_id log sha='' tried=0
+  if [ -n "${FM_CW_GH_DIR:-}" ]; then
+    local safe=${workflow//[\/ ]/_}
+    local file="$FM_CW_GH_DIR/build-${repo//\//-}-$safe-$number"
+    [ -f "$file" ] || return 1
+    sha=$(grep -oE '[0-9a-f]{40}' "$file" | head -1)
+    [ -n "$sha" ] || return 1
+    printf '%s\n' "$sha"
+    return 0
+  fi
+  # A stubbed forge without stubbed runs is a test: never reach the live gh.
+  [ -z "${FM_CW_FORGE_DIR:-}" ] || return 1
+  command -v "$gh_cmd" >/dev/null 2>&1 || return 1
+  run_id=$(cw_forge_run "$gh_cmd" api "repos/$repo/actions/workflows/${workflow##*/}/runs?per_page=100" \
+    --jq ".workflow_runs[] | select(.run_number == $number) | .id" | head -1) || return 1
+  case "$run_id" in ''|*[!0-9]*) return 1 ;; esac
+  jobs=$(cw_forge_run "$gh_cmd" api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" \
+    --jq '.jobs[] | "\(.id)\t\(.name)"') || return 1
+  # The resolving job first, then at most two more, so a run that never logs the
+  # line costs three log reads, not one per job.
+  jobs=$(printf '%s\n' "$jobs" | awk -F'\t' '$2 == "determine-env" { print $1 }'
+    printf '%s\n' "$jobs" | awk -F'\t' '$2 != "determine-env" && $1 != "" { print $1 }')
+  while IFS= read -r job_id; do
+    case "$job_id" in ''|*[!0-9]*) continue ;; esac
+    [ "$tried" -lt 3 ] || break
+    tried=$((tried + 1))
+    log=$(cw_forge_run "$gh_cmd" api "repos/$repo/actions/jobs/$job_id/logs") || continue
+    sha=$(printf '%s\n' "$log" \
+      | LC_ALL=C grep -oE "Resolved [^ ]*$name [^ ]+ $arrow [0-9a-f]{40}" \
+      | head -1 | LC_ALL=C grep -oE '[0-9a-f]{40}$' || true)
+    [ -z "$sha" ] || break
+  done <<JOBS
+$jobs
+JOBS
+  [ -n "$sha" ] || return 1
+  printf '%s\n' "$sha"
+}
+
 # The commit a watched merge landed as, or nothing when the forge cannot name it.
 # Memoized for the sample: a watch reads it once and every deploy-workflow read
 # that sample reuses it, so the sha never costs more than one forge call.
@@ -876,6 +965,13 @@ cw_live_workloads() {
 #                                  such as services or apps; a deployable path
 #                                  under it that names no service is shared build
 #                                  input every service of that repository consumes
+#   build:<owner>/<repo>#<workflow-path>   the workflow that builds the
+#                                  repository's images, tagging each
+#                                  <prefix>-<run-number> and logging the commit
+#                                  it built as "Resolved <repo> <branch> -> <sha>";
+#                                  it maps a running image to its commit, so a
+#                                  merge already running at registration is
+#                                  measured instead of awaited (cw_target_landed)
 
 # The home's repository map with comments removed. A `#` starts a comment only at
 # the start of a line or after whitespace, because a `run:` spec carries one
@@ -887,8 +983,8 @@ cw_repo_map_clean() {
 
 cw_repo_map_lines() {
   cat <<'BUILTIN'
-core-backend image:core-backend sentry:core-backend
-industry-data-processing image:industry-data-processing
+core-backend image:core-backend sentry:core-backend build:Muso-AI/H-DevOps#.github/workflows/deploy-core-backend.yaml
+industry-data-processing image:industry-data-processing build:Muso-AI/H-DevOps#.github/workflows/deploy-idp.yaml
 web-credits-next image:web-credits-next sentry:credits-web-next
 muso-messaging messaging/notify-gateway messaging/send-gateway messaging/preferences
 hydra run:Muso-AI/hydra#.github/workflows/deploy.yml
@@ -918,6 +1014,22 @@ MAP
   printf '%s\n' "$(printf '%s' "$specs" | sed -e 's/^ *//' -e 's/ *$//')"
 }
 
+# The image build mapping a repository declares, as
+# "<owner/repo><TAB><workflow-path><TAB><image-name>", where the image name is the
+# repository's first image: spec, else the repository name. Fails when it declares
+# no build: spec.
+cw_repo_build_spec() {  # <repo>
+  local spec image='' build=''
+  for spec in $(cw_repo_specs "$1"); do
+    case "$spec" in
+      build:*) build=${spec#build:} ;;
+      image:*) [ -n "$image" ] || image=${spec#image:} ;;
+    esac
+  done
+  case "$build" in *?'#'?*) ;; *) return 1 ;; esac
+  printf '%s\t%s\t%s\n' "${build%%#*}" "${build#*#}" "${image:-$1}"
+}
+
 # Production-only filter for a Deployment: a dev, test, drill, or staging copy is
 # not the release, and a test copy of a production Deployment is not a target.
 cw_target_eligible() {  # <ns> <name>
@@ -941,7 +1053,7 @@ cw_spec_targets() {  # <spec>
       return 0
       ;;
     image:*) arg=${spec#image:} ;;
-    path:*|'') return 0 ;;
+    path:*|build:*|'') return 0 ;;
     */*) ns=${spec%%/*}; name=${spec#*/}
       cw_target_eligible "$ns" "$name" || return 0
       printf 'target\t%s\t%s\n' "$ns" "$name"
@@ -1096,7 +1208,7 @@ PATHS
 cw_spec_service() {  # <spec>
   local spec=$1
   case "$spec" in
-    sentry:*|run:*|path:*) return 0 ;;
+    sentry:*|run:*|path:*|build:*) return 0 ;;
     image:*) printf '%s\n' "${spec#image:}" ;;
     */*) printf '%s\n' "${spec#*/}" ;;
     *) printf '%s\n' "$spec" ;;
@@ -1210,7 +1322,7 @@ cw_app_targets() {  # <repo> <files>
   prefix=$(cw_repo_prefix "$specs")
   for spec in $specs; do
     case "$spec" in
-      path:*) continue ;;
+      path:*|build:*) continue ;;
       run:*)
         spec=${spec#run:}
         case "$spec" in *'#'*) workflows="$workflows ${spec#*#}" ;; esac
@@ -1230,7 +1342,7 @@ cw_app_targets() {  # <repo> <files>
   # a path that names it, or one every service consumes, reaches it.
   for spec in $specs; do
     case "$spec" in
-      path:*) continue ;;
+      path:*|build:*) continue ;;
       sentry:*|run:*) scoped="$scoped $spec" ;;
       *)
         if [ "$single" -eq 1 ]; then
@@ -1769,7 +1881,11 @@ cw_prime_pod_facts() {  # <watch-id>
 # forge call on the same merge.
 cw_prime_merge_sha() {  # <watch-id>
   local id=$1
-  [ -s "$(cw_runs_path "$id")" ] || return 0
+  # A deploy-workflow read needs the sha, and so does a landing gate that maps a
+  # running image to its commit through a build: spec.
+  [ -s "$(cw_runs_path "$id")" ] \
+    || cw_repo_build_spec "$(cw_meta_get "$id" repo 2>/dev/null || true)" >/dev/null 2>&1 \
+    || return 0
   cw_merge_sha "$id" >/dev/null 2>&1 || true
 }
 
@@ -2361,9 +2477,93 @@ cw_target_ids() {  # <watch-id>
   fi
 }
 
+# Whether the image a target runs right now was already built from a tree that
+# carries the merge, through the repository's build: spec. 0 = carried (prints
+# "<tag> built from <sha8>"), 1 = not carried or nothing maps the image, 3 = the
+# build commit or its history could not be read. A tag's build commit and its
+# containment never change, so both answers are remembered in the watch's builds
+# file and cost one forge read per tag per watch; an unreadable answer is not
+# remembered, so the next sample asks again.
+cw_target_carries_merge() {  # <watch-id> <ns> <deploy>
+  local id=$1 ns=$2 deploy=$3 repo owner spec build_repo workflow image_name
+  local images img ref tag='' number cache row sha state merge
+  repo=$(cw_meta_get "$id" repo 2>/dev/null || true)
+  owner=$(cw_meta_get "$id" owner 2>/dev/null || true)
+  [ -n "$repo" ] && [ -n "$owner" ] || return 1
+  spec=$(cw_repo_build_spec "$repo") || return 1
+  build_repo=$(printf '%s' "$spec" | cut -f1)
+  workflow=$(printf '%s' "$spec" | cut -f2)
+  image_name=$(printf '%s' "$spec" | cut -f3)
+  images=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || return 3
+  # Every pod must run one tag of the image: two tags is a rollout still in
+  # progress, which proves nothing about the pods that have not moved yet.
+  for img in ${images//,/ }; do
+    ref=${img##*/}
+    case "$ref" in *@*) continue ;; *:*) ;; *) continue ;; esac
+    [ "${ref%%:*}" = "$image_name" ] || continue
+    if [ -n "$tag" ] && [ "$tag" != "${ref#*:}" ]; then
+      return 1
+    fi
+    tag=${ref#*:}
+  done
+  [ -n "$tag" ] || return 1
+  number=${tag##*-}
+  [ "$number" != "$tag" ] || return 1
+  case "$number" in ''|*[!0-9]*) return 1 ;; esac
+  cache="$(cw_watch_dir "$id")/builds"
+  row=$(awk -F'\t' -v t="$tag" '$1 == t { print $2 "\t" $3; exit }' "$cache" 2>/dev/null || true)
+  if [ -n "$row" ]; then
+    sha=${row%%$'\t'*}
+    state=${row#*$'\t'}
+  else
+    merge=$(cw_merge_sha "$id")
+    [ -n "$merge" ] || return 3
+    sha=$(cw_image_build_sha "$build_repo" "$workflow" "$number" "$repo") || return 3
+    state=$(cw_forge_carries_state "$owner/$repo" "$merge" "$sha")
+    [ "$state" != unreadable ] || return 3
+    [ ! -d "$(cw_watch_dir "$id")" ] \
+      || printf '%s\t%s\t%s\n' "$tag" "$sha" "$state" >> "$cache" 2>/dev/null || true
+  fi
+  [ "$state" = carried ] || return 1
+  printf '%s built from %s\n' "$tag" "$(printf '%s' "$sha" | cut -c1-8)"
+}
+
+cw_carried_path() { printf '%s/carried-at-register\n' "$(cw_watch_dir "$1")"; }
+
+# A target still on the rollout it ran at registration is landed after all when
+# that rollout was already built from the merge: the watch registered after the
+# deploy, so there is no later rollout to wait for. The evidence is recorded once
+# per target as "<ns>/<deploy><TAB><tag> built from <sha8>", because the
+# baseline was then read from the released code (cw_take_sample, cw_carried_note).
+cw_target_already_carried() {  # <watch-id> <ns> <deploy>
+  local id=$1 target="$2/$3" file evidence
+  file=$(cw_carried_path "$id")
+  if awk -F'\t' -v t="$target" '$1 == t { found = 1 } END { exit(found ? 0 : 1) }' "$file" 2>/dev/null; then
+    return 0
+  fi
+  evidence=$(cw_target_carries_merge "$id" "$2" "$3") || return 1
+  [ ! -d "$(cw_watch_dir "$id")" ] \
+    || printf '%s\t%s\n' "$target" "$evidence" >> "$file" 2>/dev/null || true
+  return 0
+}
+
+# One sentence naming every target the merge was already running on when the
+# watch registered, or nothing. Pod logs and counters before that rollout are
+# gone, so no pre-merge baseline is readable for them: restarts and 5xx are held
+# to absolute bars (zero since the rollout) and p95 to its post-deploy reading.
+cw_carried_note() {  # <watch-id>
+  local file
+  file=$(cw_carried_path "$1")
+  [ -s "$file" ] || return 0
+  printf 'the merge was already running at registration on %s, so no pre-merge baseline was readable: restarts and 5xx were held to absolute bars and p95 to its post-deploy reading\n' \
+    "$(awk -F'\t' '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $1, $2 }' "$file")"
+}
+
 # The landing gate: a Kubernetes target is scored only once the rollout it
-# ran at registration have been replaced, so a sample can never report the code
-# the release replaced as healthy. 0 = landed or nothing to compare, 2 = still
+# ran at registration have been replaced, or once that rollout is proven to be
+# built from the merge already (cw_target_already_carried), so a sample can
+# never report the code the release replaced as healthy and never waits for a
+# deploy that already happened. 0 = landed or nothing to compare, 2 = still
 # awaiting the rollout, 3 = images unreadable.
 cw_target_landed() {  # <watch-id> <ns> <deploy> [<landed-file>]
   local id=$1 ns=$2 deploy=$3 landed=${4:-}
@@ -2385,6 +2585,7 @@ cw_target_landed() {  # <watch-id> <ns> <deploy> [<landed-file>]
     current=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null) || return 3
     [ -n "$current" ] || return 3
     [ "$current" = "$fingerprint" ] || return 0
+    ! cw_target_already_carried "$id" "$ns" "$deploy" || return 0
     return 2
   fi
   # A landed record written before the fingerprint existed compares the images,
@@ -2392,6 +2593,7 @@ cw_target_landed() {  # <watch-id> <ns> <deploy> [<landed-file>]
   current=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || return 3
   [ -n "$current" ] || return 3
   [ "$current" = "$recorded" ] || return 0
+  ! cw_target_already_carried "$id" "$ns" "$deploy" || return 0
   return 2
 }
 
@@ -2642,6 +2844,17 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
     reason=''
     reason=$(cw_sample_blocker "$id" "$metric" "$target" "$cluster") || true
     baseline=$(cw_baseline_value "$id" "$key" 2>/dev/null || true)
+    # A target the merge was already running on at registration had its baseline
+    # read from the released code, so the counters that baseline would excuse are
+    # held to zero since the rollout instead (cw_carried_note states it).
+    case "$metric" in
+      restarts|http_5xx_per_min)
+        if awk -F'\t' -v t="$target" '$1 == t { found = 1 } END { exit(found ? 0 : 1) }' \
+          "$(cw_carried_path "$id")" 2>/dev/null; then
+          baseline=0
+        fi
+        ;;
+    esac
     previous=$(cw_previous_value "$id" "$key" 2>/dev/null || true)
     scored=1
     if [ -z "$reason" ]; then
@@ -2904,7 +3117,7 @@ cw_real_user_check() {  # <watch-id> -> "<state>\t<reason>"
 # contract and a row saying why nothing was measurable is the honest record.
 cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>]
   local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-}
-  local completed r900 r3600 r21600 ru ru_reason gaps unproven beta
+  local completed r900 r3600 r21600 ru ru_reason gaps unproven beta carried
   if cw_watch_exists "$id"; then
     task=$(cw_meta_get "$id" task || true)
     url=$(cw_meta_get "$id" pr_url || true)
@@ -2921,6 +3134,15 @@ cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merg
     case "$reason" in
       *"$beta"*) ;;
       *) reason="$reason; beta: $beta" ;;
+    esac
+  fi
+  # A watch that registered after its deploy says how its baseline was taken, so
+  # the row never reads as a relative verdict it could not have reached.
+  carried=$(cw_carried_note "$id")
+  if [ -n "$carried" ]; then
+    case "$reason" in
+      *"$carried"*) ;;
+      *) reason="$reason; $carried" ;;
     esac
   fi
   case "$state" in
@@ -3081,7 +3303,7 @@ cw_task_note() {  # <task> <url> <line>
 }
 
 cw_record_clean() {  # <watch-id> [<reason>]
-  local id=$1 reason=${2:-} task url gaps unproven
+  local id=$1 reason=${2:-} task url gaps unproven carried
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
   [ -n "$reason" ] || reason='all three readings scored and every target was measured at least once'
@@ -3090,13 +3312,14 @@ cw_record_clean() {  # <watch-id> [<reason>]
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
   gaps=$(cw_measured_gaps "$id")
   unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  carried=$(cw_carried_note "$id")
   if [ -n "$gaps" ] || [ -n "$unproven" ]; then
     cw_task_note "$task" "$url" \
-      "note: change-watch clean for $url on every metric it could read${gaps:+; never measured: $gaps}${unproven:+; the rollout was never proven for: $unproven}"
+      "note: change-watch clean for $url on every metric it could read${gaps:+; never measured: $gaps}${unproven:+; the rollout was never proven for: $unproven}${carried:+; $carried}"
     notice "change-watch: clean for $url on every metric it could read${gaps:+, but these metrics were never measured: $gaps}${unproven:+; the rollout could not be proven for: $unproven}"
     return 0
   fi
-  cw_task_note "$task" "$url" "note: change-watch clean for $url"
+  cw_task_note "$task" "$url" "note: change-watch clean for $url${carried:+; $carried}"
   cw_wiki_note "$id" "$task" "$url"
 }
 
@@ -3326,6 +3549,7 @@ cw_rearm() {  # <watch-id> <url>
 cmd_register() {
   local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
   local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable row_state row_reason
+  local ns deploy carried
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -3481,6 +3705,17 @@ cmd_register() {
   landed_unread=$(awk -F'\t' '$2 == "" { print $1 }' "$(cw_landed_path "$id")" 2>/dev/null | paste -sd ',' - | sed 's/,/, /g')
   [ -z "$landed_unread" ] \
     || notes="$notes${notes:+; }images unread, so the deploy landing cannot be proven for: $landed_unread"
+  # A merge whose deploy already landed before this registration is measured
+  # from now rather than awaited: ask each target's gate once here, so the
+  # registration itself states it.
+  cw_prime_merge_sha "$id"
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    cw_within_budget || break
+    cw_target_landed "$id" "$ns" "$deploy" >/dev/null 2>&1 || true
+  done < <(cat "$(cw_targets_path "$id")" 2>/dev/null)
+  carried=$(cw_carried_note "$id")
+  [ -z "$carried" ] || notes="$notes${notes:+; }$carried"
 
   when_name="cw-$(cw_hash "$id" | cut -c1-40)"
   {
@@ -3720,7 +3955,7 @@ cmd_audit() {  # [<days>]
 # target whose rollout was never proven appended when there are any: a watch is
 # never summarized as clean without saying what it did not measure.
 cw_status_line() {  # <watch-id>
-  local id=$1 gaps unproven line beta
+  local id=$1 gaps unproven line beta carried
   gaps=$(cw_measured_gaps "$id")
   unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
   line=$(cw_verdict_line "$id")
@@ -3728,6 +3963,8 @@ cw_status_line() {  # <watch-id>
   [ -z "$beta" ] || line="$line	beta: $beta"
   [ -z "$gaps" ] || line="$line	unmeasured: $gaps"
   [ -z "$unproven" ] || line="$line	rollout never proven: $unproven"
+  carried=$(cw_carried_note "$id")
+  [ -z "$carried" ] || line="$line	$carried"
   printf '%s\t%s\n' "$id" "$line"
 }
 

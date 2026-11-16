@@ -2532,3 +2532,87 @@ grep -q '"900": {[^}]*"measured": true' "$ROW_IF" \
 grep -q '"terminal_state": "proven"' "$ROW_IF" \
   || fail "a watch whose scheduled deploy landed after +15m was not proven: $(cat "$ROW_IF" 2>/dev/null)"
 pass "a deploy still in flight at +15m waits instead of ending the watch unmeasurable"
+
+# --- a merge already running at registration is measured, not awaited --------
+# credit-removal-i1-1839: the watch registered while the pods already ran an
+# image built from a tree carrying the merge, so the fingerprint it recorded
+# could never change again and every sample waited for a deploy that had
+# already happened. The image tag names the deploy run that built it
+# (YYYYMMDD-<run-number>), and that run's log names the commit it built.
+IDP_PR='https://github.com/Muso-AI/industry-data-processing/pull/1839'
+IDP_MERGE=3295463db3aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+IDP_BUILT=6271d8f5dc070f9f563a415c69858b399b4e9394
+IDP_OLD_BUILT=1111111111111111111111111111111111111111
+IDP_BUILD_STUB='build-Muso-AI-H-DevOps-.github_workflows_deploy-idp.yaml'
+idp_world() {  # <name> <image>
+  local home
+  home=$(cluster_world "$1")
+  seed_app_pr "$home"
+  printf '%s\n' "$IDP_MERGE" > "$home/forge/merge-sha"
+  printf 'muso-prod\tindustry-proc-catalog-v2\t4\t%s\n' "$2" > "$home/workloads"
+  mkdir -p "$home/gh"
+  printf 'Resolved Muso-AI/industry-data-processing main \342\206\222 %s\n' "$IDP_BUILT" \
+    > "$home/gh/$IDP_BUILD_STUB-702"
+  printf '%s\n' "$IDP_MERGE" > "$home/gh/contains-$IDP_BUILT"
+  printf 'Resolved Muso-AI/industry-data-processing main \342\206\222 %s\n' "$IDP_OLD_BUILT" \
+    > "$home/gh/$IDP_BUILD_STUB-700"
+  : > "$home/gh/contains-$IDP_OLD_BUILT"
+  printf '%s\n' "$home"
+}
+idp_cw() {  # <home> <image> <now> <args...>
+  local home=$1 image=$2 now=$3
+  shift 3
+  CW_CLUSTER_DIR='' PATH="$home/bin:$PATH" FM_CW_SHIM_LOG="$home/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$home/workloads" FM_CW_SHIM_IMAGE="$image" \
+    FM_CW_CONFIG_DIR="$home/config" FM_CW_SENTRY_DIR="$home/sentry" FM_CW_GH_DIR="$home/gh" \
+    run_cw "$home" "$now" "$@"
+}
+IDP_702='localhost:30500/muso/industry-data-processing:20261115-702'
+IDP_700='localhost:30500/muso/industry-data-processing:20261113-700'
+
+HOME_AD=$(idp_world ad "$IDP_702")
+out=$(idp_cw "$HOME_AD" "$IDP_702" 1790000000 register ad1 "$IDP_PR") || fail "register failed: $out"
+DIR_AD="$HOME_AD/state/change-watch/ad1-1839"
+printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' > "$DIR_AD/schedule"
+idp_cw "$HOME_AD" "$IDP_702" 1790000900 sample ad1-1839 900 >/dev/null || fail "sample failed"
+awk -F'\t' '$2 == 900 && $7 == 1' "$DIR_AD/samples.log" | grep -q 'restarts@muso-prod/industry-proc-catalog-v2' \
+  || fail "a target already running the merge was not scored: $(cat "$DIR_AD/samples.log")"
+[ "$(awk -F'\t' '$2 == 900 && $8 == 1' "$DIR_AD/samples.log" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "a target already running the merge was recorded as awaiting the deploy: $(cat "$DIR_AD/samples.log")"
+grep -q 'awaiting the deploy' "$DIR_AD/read-failures" 2>/dev/null \
+  && fail "a merge already running was reported as awaiting the deploy: $(cat "$DIR_AD/read-failures")"
+[ "$(awk -F'\t' '$2 == 900 && $3 == "restarts@muso-prod/industry-proc-catalog-v2" { print $5 }' "$DIR_AD/samples.log")" = 0 ] \
+  || fail "the restarts bar of a post-deploy registration was not held absolute: $(cat "$DIR_AD/samples.log")"
+printf '%s\n' "$out" | grep -q 'already running at registration on muso-prod/industry-proc-catalog-v2 (20261115-702 built from 6271d8f5)' \
+  || fail "registration did not state that the merge was already running: $out"
+idp_cw "$HOME_AD" "$IDP_702" 1790021600 drive ad1-1839 >/dev/null || fail "drive failed"
+verdict=$(idp_cw "$HOME_AD" "$IDP_702" 1790021600 verdict ad1-1839 || true)
+case "$verdict" in
+  unmeasurable*) fail "a merge already running at registration ended unmeasurable: $verdict" ;;
+esac
+grep -q '"terminal_state": "proven"' "$HOME_AD/state/change-watch/rows/ad1-1839.json" \
+  || fail "a merge already running at registration was not proven: $(cat "$HOME_AD/state/change-watch/rows/ad1-1839.json")"
+grep -q 'no pre-merge baseline was readable' "$HOME_AD/state/change-watch/rows/ad1-1839.json" \
+  || fail "the row did not say how a post-deploy baseline was taken: $(cat "$HOME_AD/state/change-watch/rows/ad1-1839.json")"
+pass "a merge already running at registration is measured, never awaiting the deploy"
+
+# The same mapping keeps the gate shut when the running image predates the
+# merge, and the answer is remembered so later samples do not read the forge.
+HOME_AN=$(idp_world an "$IDP_700")
+out=$(idp_cw "$HOME_AN" "$IDP_700" 1790000000 register an1 "$IDP_PR") || fail "register failed: $out"
+DIR_AN="$HOME_AN/state/change-watch/an1-1839"
+printf '%s\n' "$out" | grep -q 'already running' && fail "a pre-merge image was read as carrying the merge: $out"
+[ "$(cat "$DIR_AN/builds" 2>/dev/null)" = "$(printf '20261113-700\t%s\tnot' "$IDP_OLD_BUILT")" ] \
+  || fail "the build answer for a pre-merge image was not remembered: $(cat "$DIR_AN/builds" 2>/dev/null)"
+rm -f "$HOME_AN/gh/$IDP_BUILD_STUB-700"
+idp_cw "$HOME_AN" "$IDP_700" 1790000300 sample an1-1839 300 >/dev/null || fail "sample failed"
+[ "$(awk -F'\t' '$7 == 1' "$DIR_AN/samples.log" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "a target on a pre-merge image was scored: $(cat "$DIR_AN/samples.log")"
+grep -q 'awaiting the deploy' "$DIR_AN/read-failures" \
+  || fail "a target on a pre-merge image was not awaiting the deploy"
+idp_cw "$HOME_AN" "$IDP_702" 1790000900 sample an1-1839 900 >/dev/null || fail "sample failed"
+awk -F'\t' '$2 == 900 && $7 == 1' "$DIR_AN/samples.log" | grep -q 'restarts@muso-prod/industry-proc-catalog-v2' \
+  || fail "the rollout that landed after registration was not scored: $(cat "$DIR_AN/samples.log")"
+[ ! -s "$DIR_AN/carried-at-register" ] \
+  || fail "a rollout after registration was recorded as already running: $(cat "$DIR_AN/carried-at-register")"
+pass "a pre-merge image still awaits its deploy, and its build answer is remembered"
