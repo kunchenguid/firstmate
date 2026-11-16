@@ -1528,6 +1528,26 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
   pass "a fresh overdue marker survives reconciliation and closes when the worker resumes"
 }
 
+test_overdue_marker_survives_a_device_renumbering() {
+  local dir state statusf
+  dir=$(paused_until_fixture overdue-marker-dev "" 90000); state="$dir/state"; statusf="$state/overdue-marker-dev.status"
+  arm_pause_ceiling "$dir"
+  printf 'paused: waiting for an external dependency\nblocked [key=paused-overdue-overdue-marker-dev]: overdue\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    marker="$STATE/.paused-overdue-overdue-marker-dev"
+    read -r dev ino <<< "$(stat_devino "$2")"
+    size=$(_fm_status_file_size "$2")
+    printf "%s %s:%s\n" "$((dev + 3))" "$ino" "$size" > "$marker"
+    pause_overdue_reconcile overdue-marker-dev "$2"; [ "$?" -eq 0 ] || exit 1
+    [ -s "$marker" ] || exit 2
+    printf "%s %s:%s\n" "$dev" "$((ino + 1))" "$size" > "$marker"
+    pause_overdue_reconcile overdue-marker-dev "$2"; [ "$?" -eq 1 ] || exit 3
+    [ ! -e "$marker" ] || exit 4
+  ' _ "$WATCH" "$statusf" || fail "the overdue marker did not compare the status file by inode alone (rc=$?)"
+  pass "an overdue marker survives a device renumbering and still clears for a different inode"
+}
+
 test_overdue_terminal_status_ignores_pane_display_churn() {
   local dir state statusf pid
   dir=$(paused_until_fixture overdue-display-churn "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
@@ -2074,6 +2094,7 @@ fm_test_run \
   test_overdue_resume_race_uses_pause_snapshot \
   test_busy_overdue_pause_does_not_enter_wedge_ladder \
   test_overdue_marker_survives_reconcile_and_closes_on_working \
+  test_overdue_marker_survives_a_device_renumbering \
   test_overdue_terminal_status_ignores_pane_display_churn \
   test_reused_task_id_does_not_inherit_overdue_pause \
   test_malformed_dated_pause_is_not_undated_overdue \

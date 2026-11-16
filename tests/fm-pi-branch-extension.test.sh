@@ -5242,7 +5242,7 @@ test_branch_dispatch_routes_secondmate_signal_by_new_span() {
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const { branchOfferForWake, scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
@@ -5302,6 +5302,34 @@ stage("mate", hold, "done: sample-c PR merged\n");
 if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
   throw new Error("the attended-host offer kept a routine second-mate close on main behind an unrelated hold");
 }
+
+// A device renumbering (macOS renumbers a volume across a reboot) keeps the
+// recorded cursor; a different inode or birth time is another file whose whole
+// log is the span again.
+function editCursorIdent(edit) {
+  const path = `${state}/.status-presentation-cursor`;
+  const rows = readFileSync(path, "utf8").split("\n").map((row) => {
+    const fields = row.split("\t");
+    if (fields[0] === "mate") fields[1] = edit(fields[1]);
+    return fields.join("\t");
+  });
+  writeFileSync(path, rows.join("\n"));
+}
+const renumbered = (ident) => ident.replace(/^(strong|weak):([0-9]+):/, (_m, kind, dev) => `${kind}:${dev === "4242" ? "4243" : "4242"}:`);
+stage("mate", hold, "done: sample-f PR merged\n");
+editCursorIdent(renumbered);
+if (!verdicts().every(Boolean)) throw new Error("a device renumbering reset the presentation cursor to the whole log");
+stage("mate", hold, "done: sample-g PR merged\n");
+editCursorIdent((ident) => renumbered(ident).replace(/^((?:strong|weak):[0-9]+:)([0-9]+)/, (_m, head, ino) => `${head}${ino}9`));
+if (verdicts().some(Boolean)) throw new Error("a changed inode kept the earlier file's presentation cursor");
+stage("mate", hold, "done: sample-h PR merged\n");
+let birthChecked = false;
+editCursorIdent((ident) => {
+  if (!ident.startsWith("strong:")) return ident;
+  birthChecked = true;
+  return `${renumbered(ident)}9`;
+});
+if (birthChecked && verdicts().some(Boolean)) throw new Error("a changed birth time kept the earlier file's presentation cursor");
 
 // Without a readable cursor the whole log is the span, so routing falls back
 // toward main rather than guessing.

@@ -357,6 +357,113 @@ test_weak_identity_still_presents_and_advances() {
   pass "fallback identity still presents and advances status state"
 }
 
+# A controllable status identity: the reader prints strong:<dev>:<ino>:<birth>
+# from three files beside it, so one test can renumber the device alone.
+make_ident_reader() {  # <dir> <dev> <ino> <birth>
+  printf '%s' "$2" > "$1/ident-dev"
+  printf '%s' "$3" > "$1/ident-ino"
+  printf '%s' "$4" > "$1/ident-birth"
+  {
+    printf '#!/usr/bin/env bash\nd=%q\n' "$1"
+    cat <<'READER'
+printf 'strong:%s:%s:%s' "$(cat "$d/ident-dev")" "$(cat "$d/ident-ino")" "$(cat "$d/ident-birth")"
+READER
+  } > "$1/identity-reader"
+  chmod +x "$1/identity-reader"
+}
+
+# macOS renumbers the data volume's st_dev across a reboot while every file
+# keeps its inode and birth time. Cursors and markers recorded before the
+# renumbering - in the identity format every earlier release wrote - must keep
+# their position, so a drain does not re-read and replay the whole history.
+test_device_renumbering_keeps_status_cursors() {
+  local dir state out reader status cursor offset
+  dir=$(make_case device-renumber); state="$dir/state"; out="$dir/drain.out"
+  status="$state/task1.status"; cursor="$state/.task1.open-decisions-cursor"
+  make_ident_reader "$dir" 16777231 4242 '1790000000.000000000'
+  reader="$dir/identity-reader"
+  printf 'needs-decision [key=release]: choose target\nnote: handled history line\n' > "$status"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "first drain failed under the controllable identity"
+  grep -F 'task1 note: handled history line' "$out" >/dev/null \
+    || fail "first drain did not present the history: $(cat "$out")"
+  grep -Fx 'ident=strong:16777231:4242:1790000000.000000000' "$cursor" >/dev/null \
+    || fail "the fold cursor did not record the identity in its long-standing form: $(cat "$cursor")"
+
+  printf '16777234' > "$dir/ident-dev"
+  printf 'note: first line after the reboot\n' >> "$status"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed after the device renumbering"
+  grep -F 'task1 note: first line after the reboot' "$out" >/dev/null \
+    || fail "the new line was not presented after the device renumbering: $(cat "$out")"
+  grep -F 'handled history line' "$out" >/dev/null \
+    && fail "a device renumbering replayed already-presented history: $(cat "$out")"
+  grep -F 'task1 [key=release] needs-decision: choose target' "$out" >/dev/null \
+    || fail "the open decision was lost across the device renumbering: $(cat "$out")"
+  offset=$(FM_STATUS_IDENTITY_READER="$reader" bash -c '. "$1/bin/fm-classify-lib.sh"; status_open_decisions_cursor_offset "$2"' _ "$ROOT" "$status")
+  [ "$offset" = "$(wc -c < "$status" | tr -d ' ')" ] \
+    || fail "the fold cursor reset across the device renumbering (offset $offset)"
+  pass "a device renumbering alone keeps the presentation and fold cursors"
+}
+
+# A different inode or birth time is a different file, so the same check must
+# still reset and re-read it, whether or not the device also changed.
+test_replaced_file_identity_still_resets_cursors() {
+  local dir state out reader status field value
+  for field in ino birth; do
+    dir=$(make_case "replaced-$field"); state="$dir/state"; out="$dir/drain.out"
+    status="$state/task1.status"
+    make_ident_reader "$dir" 16777231 4242 '1790000000.000000000'
+    reader="$dir/identity-reader"
+    printf 'note: history of the earlier file\n' > "$status"
+    FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+      || fail "first drain failed before replacing the $field"
+    case "$field" in ino) value=4243 ;; birth) value='1790000500.000000000' ;; esac
+    printf '%s' "$value" > "$dir/ident-$field"
+    printf '16777234' > "$dir/ident-dev"
+    FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+      || fail "drain failed after replacing the $field"
+    grep -F 'task1 note: history of the earlier file' "$out" >/dev/null \
+      || fail "a changed $field did not reset the presentation cursor: $(cat "$out")"
+  done
+  pass "a changed inode or birth time still resets the status cursors"
+}
+
+# The home-appends ledger and the reported-state signature also carry the
+# identity; both must survive a device renumbering and reject another file.
+test_device_renumbering_keeps_ledger_and_reported_signature() {
+  local dir state reader status marker
+  dir=$(make_case device-renumber-ledger); state="$dir/state"
+  status="$state/task1.status"; marker="$dir/reported-marker"
+  make_ident_reader "$dir" 16777231 4242 '1790000000.000000000'
+  reader="$dir/identity-reader"
+  printf 'note: owned line\n' > "$status"
+  printf 'v1\nident=strong:16777231:4242:1790000000.000000000\n0\t17\n' > "$state/.task1.home-appends"
+  FM_STATUS_IDENTITY_READER="$reader" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_presentation_marker_report "$3" "$(status_observed_signature "$2")"
+  ' _ "$ROOT" "$status" "$marker" || fail "could not record the reported signature"
+  printf '16777234' > "$dir/ident-dev"
+  FM_STATUS_IDENTITY_READER="$reader" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_home_appends_covers "$2" 0 17
+  ' _ "$ROOT" "$status" || fail "a device renumbering discarded the home-appends ledger"
+  FM_STATUS_IDENTITY_READER="$reader" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_presentation_marker_reported_matches "$3" "$(status_observed_signature "$2")"
+  ' _ "$ROOT" "$status" "$marker" || fail "a device renumbering changed the reported-state signature"
+  printf '4243' > "$dir/ident-ino"
+  FM_STATUS_IDENTITY_READER="$reader" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_home_appends_covers "$2" 0 17
+  ' _ "$ROOT" "$status" && fail "a replaced file kept the earlier file's home-appends ledger"
+  FM_STATUS_IDENTITY_READER="$reader" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_presentation_marker_reported_matches "$3" "$(status_observed_signature "$2")"
+  ' _ "$ROOT" "$status" "$marker" && fail "a replaced file matched the earlier file's reported signature"
+  pass "the home-appends ledger and reported signature survive only a device renumbering"
+}
+
 test_snapshot_failure_is_visible() {
   local dir state out reader
   dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
@@ -459,6 +566,9 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
+test_device_renumbering_keeps_status_cursors
+test_replaced_file_identity_still_resets_cursors
+test_device_renumbering_keeps_ledger_and_reported_signature
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation

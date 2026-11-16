@@ -1620,6 +1620,28 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
   pass "failed enqueue followed by a worker event closes without an obsolete alert, retaining failed resolutions"
 }
 
+test_overdue_reconcile_survives_a_device_renumbering() {
+  local dir state task statusf dev ino size rc
+  dir=$(make_supercase overdue-reconcile-dev); state="$dir/state"
+  arm_pause_ceiling "$dir"
+  task=overdue-dev; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\nblocked [key=paused-overdue-%s]: overdue\n' "$task" > "$statusf"
+  if [ "$(uname)" = Darwin ]; then read -r dev ino <<< "$(/usr/bin/stat -f '%d %i' "$statusf")"; else read -r dev ino <<< "$(stat -c '%d %i' "$statusf")"; fi
+  size=$(wc -c < "$statusf" | tr -d ' ')
+  printf '%s %s:%s\n' "$((dev + 3))" "$ino" "$size" > "$state/.paused-overdue-$task"
+  (
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" reconcile_overdue_pause "$state" "$task"; rc=$?
+    [ "$rc" -eq 0 ] || fail "a renumbered device cleared the overdue marker (rc=$rc)"
+    [ -s "$state/.paused-overdue-$task" ] || fail "a renumbered device removed the overdue marker"
+    printf '%s %s:%s\n' "$dev" "$((ino + 1))" "$size" > "$state/.paused-overdue-$task"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" reconcile_overdue_pause "$state" "$task"; rc=$?
+    [ "$rc" -eq 1 ] || fail "a different inode kept the overdue marker (rc=$rc)"
+    [ ! -e "$state/.paused-overdue-$task" ] || fail "a different inode left the overdue marker"
+  ) || fail "overdue reconciliation did not compare the status file by inode alone"
+  pass "daemon overdue marker survives a device renumbering and still clears for a different inode"
+}
+
 test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
   local dir state task statusf identity offset event
   for event in blocked repeated prose custom "done" merged configured-resolve; do
@@ -3911,6 +3933,7 @@ test_housekeeping_overdue_queue_failure_leaves_decision_open
 test_housekeeping_overdue_queue_failure_resume_discards
 test_watcher_overdue_marker_does_not_hide_blocker_from_daemon
 test_overdue_open_decision_without_marker_is_not_repeated
+test_overdue_reconcile_survives_a_device_renumbering
 test_overdue_reconcile_ignores_unrelated_and_repeated_pause
 test_housekeeping_overdue_initial_publication_reconciles_resume
 test_housekeeping_overdue_pause_preserves_prior_actionable_event
