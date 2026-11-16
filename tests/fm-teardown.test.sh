@@ -5473,7 +5473,7 @@ test_footprint_cleanup_after_landed_teardown() {
   pid=$!
   disown
   sleep 0.3
-  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT FM_FOOTPRINT_DOCKER="$case_dir/fakebin/docker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "footprint-landed: teardown should succeed: $(cat "$case_dir/stderr")"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
@@ -5495,7 +5495,7 @@ test_footprint_refused_teardown_removes_nothing() {
   footprint_case "$case_dir"
   land_shippable_commit "$case_dir"
   printf '%s\n' "unsaved" > "$case_dir/wt/unsaved.txt"
-  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT FM_FOOTPRINT_DOCKER="$case_dir/fakebin/docker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 1 "$rc" "footprint-refused: a dirty worktree must refuse"
   assert_grep REFUSED "$case_dir/stderr" "footprint-refused: no REFUSED line"
   assert_present "$FOOTPRINT_SCRATCH/tmp/profile.bin" "footprint-refused: a refused cleanup must keep the scratch area"

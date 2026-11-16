@@ -29,7 +29,9 @@
 #     (/tmp/fm-*), and the system temp directories;
 #   - Docker: "not present" when the CLI is absent or the daemon does not
 #     answer, else docker system df by type plus the containers and volumes
-#     labelled for this home, and on macOS the Docker disk image's size on disk;
+#     labelled for this home, and on macOS the Docker disk image's size on disk
+#     (FM_FOOTPRINT_DOCKER names the client for every command here: unset is
+#     `docker` on PATH, empty is absent, which tests/lib.sh sets);
 #   - shared caches against the cap (see caches);
 #   - leftover processes: any process whose working directory is inside this
 #     home's scratch area for a task with no record, or inside a /tmp/fm-<id>
@@ -245,15 +247,20 @@ fp_scratch_owned() {  # <dir> <id>
 
 FP_DOCKER_STATE=
 
+# FM_FOOTPRINT_DOCKER names the Docker client: unset means `docker` on PATH,
+# empty means Docker is absent (the test suites' default, so no test ever
+# reaches a live daemon), and a path selects that client.
+FP_DOCKER_BIN=${FM_FOOTPRINT_DOCKER-docker}
+
 fp_docker() {  # <seconds> <args...>
   local secs=$1
   shift
-  fm_run_timed "$secs" docker "$@" </dev/null 2>/dev/null
+  fm_run_timed "$secs" "$FP_DOCKER_BIN" "$@" </dev/null 2>/dev/null
 }
 
 fp_docker_up() {
   if [ -z "$FP_DOCKER_STATE" ]; then
-    if ! command -v docker >/dev/null 2>&1; then
+    if [ -z "$FP_DOCKER_BIN" ] || ! command -v "$FP_DOCKER_BIN" >/dev/null 2>&1; then
       FP_DOCKER_STATE=absent
     elif fp_docker 15 info --format '{{.ServerVersion}}' >/dev/null; then
       FP_DOCKER_STATE=up

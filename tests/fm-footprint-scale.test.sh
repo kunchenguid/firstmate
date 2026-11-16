@@ -86,6 +86,7 @@ esac
 exit 0
 SH
   chmod +x "$FB/docker"
+  export FM_FOOTPRINT_DOCKER="$FB/docker"
 }
 
 # one_task_cost <n>: spawn-side creation plus close-time cleanup of one task, in ms.

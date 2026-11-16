@@ -462,6 +462,9 @@ if [ -z "${FM_SCRATCH_ROOT_OVERRIDE:-}" ]; then
     FM_TEST_CLEANUP_DIRS+=("$FM_SCRATCH_ROOT_OVERRIDE") &&
     export FM_SCRATCH_ROOT_OVERRIDE
 fi
+# Close-time cleanup and the footprint report talk to Docker; no test may reach a
+# live daemon on the host, so Docker is absent unless a test names a stand-in.
+export FM_FOOTPRINT_DOCKER=
 
 TREEHOUSE_ROOT=$(fm_test_tmproot fm-treehouse-pool)
 export TREEHOUSE_ROOT

@@ -31,6 +31,7 @@ new_home() {
   mkdir -p "$H/data" "$H/state" "$H/config" "$U"
   FB=$(fm_fakebin "$TMP_ROOT/$1")
   ln -sf "$(command -v jq)" "$FB/jq"
+  export FM_FOOTPRINT_DOCKER=
 }
 
 # fp <args...>: run fm-footprint.sh against H with only FB and the base PATH.
@@ -78,6 +79,7 @@ esac
 exit 0
 SH
   chmod +x "$FB/docker"
+  export FM_FOOTPRINT_DOCKER="$FB/docker"
   : > "$FB/docker.objects"
   : > "$FB/docker.log"
 }
@@ -278,6 +280,12 @@ test_task_close_docker_absent_or_down() {
   assert_absent "$s" "scratch must still be removed without Docker"
   assert_contains "$out" "Docker not present" "an absent Docker must be a normal, named case"
   fake_docker
+  # Unset, the client is `docker` on PATH (here the stand-in in FB).
+  s=$(scratch_for task-n3)
+  printf 'container\tc3\tfirstmate.task=%s/task-n3\n' "$(home_key)" >> "$FB/docker.objects"
+  out=$(unset FM_FOOTPRINT_DOCKER; fp task-close task-n3 "$s")
+  assert_contains "$out" "Docker: 1 labelled object(s) removed" "with the seam unset, docker on PATH must be used"
+  : > "$FB/docker.log"
   touch "$FB/docker.down"
   s=$(scratch_for task-n2)
   out=$(fp task-close task-n2 "$s")

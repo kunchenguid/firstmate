@@ -724,6 +724,13 @@ Verified on 2026-11-16 on macOS 27.0.1 (Darwin 27.0.0), each tool launched non-i
 | Claude Code (`claude -p ... --dangerously-skip-permissions`) | 2.1.325 | 0 | inside the redirected directory | none |
 | Codex (`codex exec --dangerously-bypass-approvals-and-sandbox`) | 0.169.0 | 0 | inside the redirected directory | `.tmp*` files and `hook_outputs` |
 
+The same check passed on 2026-11-16 under Linux in WSL2 (kernel 6.18.58.1, bash 5.3.9):
+
+| Tool | Version | Exit | Probe file | Own temp entries in the redirected directory |
+| --- | --- | --- | --- | --- |
+| Claude Code | 2.1.325 | 0 | inside the redirected directory | `claude-1000` |
+| Codex | 0.163.0 | 0 | inside the redirected directory | none |
+
 Finding that shapes the probe: on this macOS release `mktemp(1)` ignores `TMPDIR` and still writes under the per-user `/var/folders/.../T/`, while Python's `tempfile` and Node's `os.tmpdir()` follow it, so the probe writes through `$TMPDIR` directly.
 Every other worker tool is not covered until it passes the same check, and keeps its inherited temp directory.
 
