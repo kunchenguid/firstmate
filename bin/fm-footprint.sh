@@ -478,7 +478,9 @@ fp_set_aside() {  # <dir> <tag>
 #   7. a second snapshot that must equal the first, entry for entry.
 # A copy is removable only when a positive record says every step verified
 # it; a step that fails or cannot write its result keeps it, and a kept copy
-# gets its permissions and its old name back. fp_fs remove then deletes, at
+# gets its permissions and its old name back, as does every copy when a stop
+# signal arrives mid-way (fp_guard_set; the freeze writes each permission to
+# its record before changing it). fp_fs remove then deletes, at
 # once, exactly the entries the verified snapshot lists, each checked against
 # its snapshotted identity in a parent opened by descriptor, giving each
 # directory its write bit back only when its own entries go; anything that
@@ -487,7 +489,11 @@ fp_set_aside() {  # <dir> <tag>
 # that the process check cannot see (another user, such as root or a
 # container writing through a bind mount), and that writes only after the
 # second snapshot can lose that write; the grace window, not the process
-# check, is what protects against such a writer.
+# check, is what protects against such a writer. Between an entry's identity
+# check and its unlink, an atomic save over the same name could still be
+# removed: POSIX has no unlink by identity, so that window is two system
+# calls wide, not zero. The whole boundary costs time linear in the entries
+# (about 14 s for an area of 100,000 files on Mac 16).
 
 # fp_fs <command> <args...>: runs the descriptor-safe filesystem engine
 # (bin/fm-footprint-fs.py, whose header owns each command's contract), bound
@@ -509,6 +515,47 @@ fp_why_all() {  # <work-dir> <reason>
   awk -v r="$2" '{ print $0 "\t" r }' "$1/roots" >> "$1/why"
 }
 
+# fp_engine_failed <work-dir> <status>: an engine run that could not write its
+# record or output (status 3) returns 1, so the caller keeps everything as
+# unrecorded; one that stopped or failed otherwise gives every root the
+# reason "unfinished" and returns 0.
+fp_engine_failed() {  # <work-dir> <status>
+  [ "$2" != 3 ] || return 1
+  fp_why_all "$1" unfinished 2>/dev/null
+}
+
+# fp_guard_set <pairs> <modes> / fp_guard_clear: while set, a stop signal
+# (TERM, INT, HUP, as a timed-out caller sends) gives every set-aside copy
+# in <pairs> ("aside<TAB>dir") its recorded permissions back from <modes>
+# and its old name back, then exits, so an interrupted removal never leaves
+# a frozen copy behind.
+FP_GUARD_PAIRS=
+FP_GUARD_MODES=
+fp_guard_set() {  # <pairs> <modes>
+  FP_GUARD_PAIRS=$1 FP_GUARD_MODES=$2
+  trap 'fp_guard_fire' TERM INT HUP
+}
+
+fp_guard_clear() {
+  FP_GUARD_PAIRS=''
+  FP_GUARD_MODES=''
+  trap - TERM INT HUP
+}
+
+fp_guard_fire() {
+  local aside area
+  trap - TERM INT HUP
+  if [ -n "$FP_GUARD_PAIRS" ] && [ -f "$FP_GUARD_PAIRS" ]; then
+    while IFS='	' read -r aside area; do
+      [ -n "$aside" ] || continue
+      [ -e "$aside" ] || [ -L "$aside" ] || continue
+      [ -z "$FP_GUARD_MODES" ] || [ ! -f "$FP_GUARD_MODES" ] || fp_thaw "$FP_GUARD_MODES" "$aside" || true
+      fp_restore "$aside" "$area" || true
+    done < "$FP_GUARD_PAIRS"
+  fi
+  exit 143
+}
+
 # fp_settle <pairs> <ok-out> <kept-out>: runs the removal boundary over the
 # set-aside copies listed in <pairs> ("aside<TAB>dir"). A copy may be removed
 # only when a positive record says every step verified it; a step that fails,
@@ -518,7 +565,9 @@ fp_why_all() {  # <work-dir> <reason>
 # for fp_fs remove, and each kept one as "reason<TAB>aside<TAB>dir" to
 # <kept-out> after putting it back with its permissions restored. Reasons:
 # notool, frozen, linked, mount, unsafe, unreadable, in-use, unlisted,
-# blocked, changed, unrecorded. Returns 1 when its own records could not be
+# blocked, changed, unfinished, unrecorded. A stop signal meanwhile puts
+# every copy back writable (fp_guard_set); the caller clears that guard once
+# it has removed the verified copies. Returns 1 when its own records could not be
 # written, after putting every copy back.
 fp_settle() {  # <pairs> <ok-out> <kept-out>
   local pairs=$1 ok=$2 kept=$3 w aside area why grace listed=1 bad=0
@@ -540,15 +589,16 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     printf '%s\n' "${roots_all[@]}" > "$w/roots" && : > "$w/why" && : > "$w/modes" &&
       : > "$w/frozen" && : > "$w/s1" && : > "$w/s2" && : > "$w/busy" && : > "$w/blocked"
   } 2>/dev/null || bad=1
+  fp_guard_set "$pairs" "$w/modes"
   if ! command -v python3 >/dev/null 2>&1; then
     fp_why_all "$w" notool 2>/dev/null || bad=1
   else
     # 1. Freeze, by descriptor and never through a link (fp_fs freeze).
-    fp_fs freeze "$w/modes" "${roots_all[@]}" > "$w/frozen" 2>/dev/null || bad=1
+    fp_fs freeze "$w/modes" "${roots_all[@]}" > "$w/frozen" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
     # 2. Flush, so a write through an earlier mapping or descriptor changes
     #    an entry's times. 3. Snapshot.
     fm_run_timed 120 sync </dev/null >/dev/null 2>&1 || fp_why_all "$w" unreadable 2>/dev/null || bad=1
-    fp_fs snapshot "${roots_all[@]}" > "$w/s1" 2>/dev/null || bad=1
+    fp_fs snapshot "${roots_all[@]}" > "$w/s1" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
     # 4. The process check only adds reasons to keep.
     if fp_in_use "$w/busy" "${roots_all[@]}"; then
       awk '{ print $0 "\tin-use" }' "$w/busy" >> "$w/why" 2>/dev/null || bad=1
@@ -560,17 +610,18 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     case "$grace" in ''|*[!0-9]*) grace=5 ;; esac
     [ "$grace" = 0 ] || sleep "$grace"
     fp_blocked "$w/blocked" "${roots_all[@]}" || bad=1
-    fp_fs snapshot "${roots_all[@]}" > "$w/s2" 2>/dev/null || bad=1
+    fp_fs snapshot "${roots_all[@]}" > "$w/s2" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
   fi
   # The positive record: a root is verified only when it was frozen, both
   # snapshots hold it in full with every non-directory singly linked and
-  # are identical for it, the process listing was complete and names
+  # are identical for it (each second-snapshot line is looked up by root and
+  # path in the first, and the counts must match, so the cost is linear), the process listing was complete and names
   # nothing in it, and the content check found nothing. Every other root
   # gets the first reason that applies.
   awk -F '\t' -v listed="$listed" '
     FILENAME == ARGV[1] { fz[$1] = $2; next }
-    FILENAME == ARGV[2] { if ($2 == "!") bad1[$1] = $3; else { a[$1] = a[$1] "\n" $0; if ($11 == ".") top1[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
-    FILENAME == ARGV[3] { if ($2 == "!") bad2[$1] = $3; else { b[$1] = b[$1] "\n" $0; if ($11 == ".") top2[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
+    FILENAME == ARGV[2] { if ($2 == "!") bad1[$1] = $3; else { one[$1 SUBSEP $11] = $0; n1[$1]++; if ($11 == ".") top1[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
+    FILENAME == ARGV[3] { if ($2 == "!") bad2[$1] = $3; else { k = $1 SUBSEP $11; if (!(k in one) || one[k] != $0) diff[$1] = 1; n2[$1]++; if ($11 == ".") top2[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
     FILENAME == ARGV[4] { busy[$0] = 1; next }
     FILENAME == ARGV[5] { blk[$0] = 1; next }
     FILENAME == ARGV[6] { if (!($1 in why)) why[$1] = $2; next }
@@ -585,7 +636,7 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
       else if (listed != 1) w = "unlisted"
       else if (r in blk) w = "blocked"
       else if (r in bad2) w = bad2[r]
-      else if (a[r] != b[r]) w = "changed"
+      else if ((r in diff) || n1[r] != n2[r]) w = "changed"
       else w = "verified"
       print r "\t" w }' "$w/frozen" "$w/s1" "$w/s2" "$w/busy" "$w/blocked" "$w/why" "$w/roots" > "$w/verdict" 2>/dev/null || bad=1
   if [ "$bad" = 0 ]; then
@@ -604,6 +655,9 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     fp_restore "$aside" "$area" || true
     printf '%s\t%s\t%s\n' "${why:-unrecorded}" "$aside" "$area" >> "$kept" 2>/dev/null || bad=1
   done < "$pairs"
+  # Until the caller has removed the verified copies, an interruption still
+  # thaws and restores them from the copied record.
+  fp_guard_set "$pairs" "$ok.modes"
   rm -f "$w/roots" "$w/why" "$w/modes" "$w/frozen" "$w/s1" "$w/s2" "$w/busy" "$w/blocked" "$w/verdict" "$w/verified"
   rmdir "$w" 2>/dev/null || true
   return "$bad"
@@ -809,10 +863,13 @@ fp_settle_one() {  # <aside> <dir>
     return 1
   fi
   if fp_settle "$f" "$f.ok" "$f.kept" && grep -Fqx -- "$(printf '%s\t%s' "$1" "$2")" "$f.ok" 2>/dev/null; then
-    rm -f "$f" "$f.ok" "$f.kept"
+    # The pairs file stays for the interruption guard until the caller is done.
+    rm -f "$f.ok" "$f.kept"
     FP_SETTLED="$f.ok"
+    FP_SETTLED_PAIRS=$f
     return 0
   fi
+  fp_guard_clear
   why=$(cut -f1 "$f.kept" 2>/dev/null | head -n 1)
   rm -f "$f" "$f.ok" "$f.kept" "$f.ok.snap" "$f.ok.modes"
   # Whatever the reason, the copy is not removed; make sure it is back.
@@ -849,6 +906,10 @@ fp_settle_one() {  # <aside> <dir>
     unrecorded)
       FP_BLOCKER="its check could not be recorded (is the temporary directory full?)"
       FP_KEPT_HINT='it stays until it can be'
+      ;;
+    unfinished)
+      FP_BLOCKER="its check did not finish (the removal engine stopped or failed)"
+      FP_KEPT_HINT='it stays until a check finishes'
       ;;
     *)
       FP_BLOCKER="it could not be frozen and checked in full"
@@ -1126,7 +1187,8 @@ cmd_task_close() {  # <id> <scratch> [project]
         scratch_result=partial
         FP_BLOCKER="what is left, including anything that appeared or changed after it was checked, is at $aside"
       fi
-      rm -f "$FP_SETTLED.snap" "$FP_SETTLED.modes" "$FP_SETTLED.rm"
+      fp_guard_clear
+      rm -f "$FP_SETTLED.snap" "$FP_SETTLED.modes" "$FP_SETTLED.rm" "$FP_SETTLED_PAIRS"
     fi
   fi
   kept=$(fp_du_kb "$DATA_DIR/$id" 30) || kept=
@@ -1690,6 +1752,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
       die "an entry changed while it was being set aside or waiting to be removed; nothing removed - run old-tasks again"
     fi
     fp_remove_verified "$tmp.ok" "$tmp.rm" "${asides[@]}" || true
+    fp_guard_clear
     total=0 gone=0 left=0
     while IFS='	' read -r kind kb entry; do
       aside=$(awk -F '\t' -v e="$entry" '$2 == e { print $1; exit }' "$tmp.pairs")
@@ -1839,6 +1902,7 @@ cmd_sweep() {  # [--dry-run]
     # Removed at once after verification; the reclaimed size comes from the
     # verified snapshot, so nothing slow runs in between.
     fp_remove_verified "$work/ok" "$work/rm" "${asides[@]}" || true
+    fp_guard_clear
     for aside in "${asides[@]}"; do
       if kb=$(fp_removed "$work/rm" "$aside"); then
         id=${aside##*/.fm-reclaim-}

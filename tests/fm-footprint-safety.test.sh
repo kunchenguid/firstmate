@@ -238,7 +238,7 @@ test_set_aside_folders_are_never_removed_by_name() {
   # is being removed, so the area cannot be removed whole.
   printf '#!/usr/bin/env bash\n[ "$2" = . ] && : > "$1/appeared-late"\nexit 0\n' > "$FB/remove-hook"
   chmod +x "$FB/remove-hook"
-  out=$(FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook" fp task-close task-q1 "$s")
+  out=$(FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook" fp task-close task-q1 "$s")
   rm -f "$FB/remove-hook"
   assert_contains "$out" "only partly removed" "the interrupted close must say so"
   q=$(find "$base" -maxdepth 1 -name '.fm-closing-task-q1*' | head -n 1)
@@ -554,7 +554,7 @@ fi
 exit 0
 SH
     chmod +x "$FB/remove-hook"
-    export FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook"
+    export FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook" FM_FOOTPRINT_TEST_SEAMS=1
     return 0
   fi
   if [ "$#" -eq 0 ]; then
@@ -586,7 +586,7 @@ SH
 
 unhook() {
   command rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink" "$FB/cat" "$FB/chmod" "$FB/rm" "$FB/python3" "$FB/remove-hook" "$FB/hidden-pids" "$FB/release.part"
-  unset FM_FOOTPRINT_TEST_REMOVE_HOOK
+  unset FM_FOOTPRINT_TEST_REMOVE_HOOK FM_FOOTPRINT_TEST_SEAMS
 }
 
 # writer_in <dir> <go-file> <subdir>: a stray process rooted in <dir> that,
@@ -1025,7 +1025,7 @@ exec "$real_rm" "\$@"
 SH
   chmod +x "$FB/remove-hook" "$FB/rm"
   command rm -f "$TMP_ROOT/during.done"
-  export FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook"
+  export FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook" FM_FOOTPRINT_TEST_SEAMS=1
 }
 
 test_a_directory_swapped_for_a_link_during_removal_removes_nothing_outside() {
@@ -1207,6 +1207,76 @@ test_an_uninspectable_process_is_named_on_linux() {
   out=$(fp task-close task-a1 "$s")
   assert_absent "$s" "with the agent gone, the area is removed"
   pass "on Linux an uninspectable process such as ssh-agent keeps every area and is named"
+}
+
+# all_writable <dir>: 0 when every directory and file under <dir> has its
+# owner write bit, as before any freeze.
+all_writable() { [ -z "$(find "$1" \( -type d -o -type f \) ! -perm -u+w -print 2>/dev/null | head -n 1)" ]; }
+
+test_an_interrupted_freeze_leaves_a_writable_copy() {
+  local mode t out i
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "halt-$mode"
+    t=$(target "$mode" task-z1)
+    mkdir -p "$t/d"
+    i=1
+    while [ "$i" -le 20 ]; do printf 'w\n' > "$t/d/f$i"; i=$((i + 1)); done
+    # The freeze is killed (SIGKILL) part way, after five mode changes.
+    export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_KILL_AFTER=5
+    out=$(run_target "$mode" task-z1 "$t")
+    unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_KILL_AFTER
+    assert_present "$t/d/f20" "$mode must keep the copy under its name after a stopped freeze: $out"
+    all_writable "$t" || fail "$mode must give a copy whose freeze stopped its permissions back: $(find "$t" ! -perm -u+w | head -n 3)"
+    ! claims_removed "$mode" "$out" || fail "$mode must not report removal after a stopped freeze: $out"
+    [ "$mode" != close ] || assert_contains "$out" "its check did not finish" "close must say the check did not finish"
+    out=$(run_target "$mode" task-z1 "$t")
+    assert_absent "$t" "$mode must remove the copy once a check finishes: $out"
+  done
+  # A tree deeper than any recursion limit is frozen, checked and removed.
+  new_home halt-deep
+  t=$(scratch_for task-z2)
+  python3 - "$t" 1100 <<'PY2'
+import os, sys
+d = os.open(sys.argv[1], os.O_RDONLY)
+for _ in range(int(sys.argv[2])):
+    os.mkdir("d", dir_fd=d)
+    n = os.open("d", os.O_RDONLY, dir_fd=d)
+    os.close(d)
+    d = n
+fd = os.open("leaf", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=d)
+os.write(fd, b"x\n")
+os.close(fd)
+PY2
+  out=$(fp task-close task-z2 "$t")
+  assert_contains "$out" "scratch removed" "a 1100-level tree must be removed"
+  assert_absent "$t" "a 1100-level tree must be gone"
+  pass "a freeze stopped part way leaves a writable copy under its name, and a deep tree meets no recursion limit"
+}
+
+test_an_interrupted_close_leaves_its_copy_writable() {
+  local s pids n
+  new_home halt-term
+  printf 'scratch-root %s\nremoval-grace-seconds 3\n' "$SHORT/halt-term" > "$H/config/footprint"
+  s=$(scratch_for task-t1)
+  mkdir -p "$s/d"
+  printf 'w\n' > "$s/d/f1"
+  # A caller that times out stops task close while the copy is frozen and
+  # waiting out its grace window.
+  FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE='' fp task-close task-t1 "$s" > "$TMP_ROOT/halt-term/out" 2>&1 &
+  n=0
+  until [ -n "$(find "${s%/*}" -maxdepth 3 -path '*/.fm-closing-task-t1.*/d/f1' ! -perm -u+w 2>/dev/null | head -n 1)" ] || [ "$n" -ge 200 ]; do
+    sleep .05; n=$((n + 1))
+  done
+  [ "$n" -lt 200 ] || fail "the copy was never frozen"
+  pids=$(pgrep -f "fm-footprint.sh task-close task-t1 $s" || true)
+  [ -n "$pids" ] || fail "the close must still be running"
+  # shellcheck disable=SC2086 # one pid per word
+  kill -TERM $pids
+  wait
+  assert_present "$s/d/f1" "an interrupted close must put the copy back under its name"
+  all_writable "$s" || fail "an interrupted close must give the copy its permissions back"
+  [ -z "$(find "${s%/*}" -maxdepth 1 -name '.fm-closing-task-t1.*' | head -n 1)" ] || fail "no frozen set-aside copy may be left behind"
+  pass "a close stopped while its copy is frozen puts the copy back, writable, under its name"
 }
 
 # --- the Docker retry queue under concurrent closes -------------------------
@@ -1473,6 +1543,8 @@ fm_test_run \
   test_a_check_that_cannot_record_keeps_the_copy \
   test_close_removes_docker_before_scratch_and_the_pass_measures_nothing_after_its_check \
   test_an_uninspectable_process_is_named_on_linux \
+  test_an_interrupted_freeze_leaves_a_writable_copy \
+  test_an_interrupted_close_leaves_its_copy_writable \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
   test_preview_binds_contents_and_identity \

@@ -15,7 +15,9 @@
 #     directories and no record, at a per-folder cost that grows linearly,
 #     and, in one folder, 400 and then 4000 candidates at a per-candidate
 #     cost that grows linearly;
-#   - the report, which must count every area and folder.
+#   - the report, which must count every area and folder;
+#   - the close of one area holding 25,000 and then 100,000 files, which must
+#     grow linearly and stay within 150 seconds.
 # Each measurement prints as a "# scale" line so a run's output is the
 # evidence of timings and sizes.
 # shellcheck disable=SC2016 # snippets are expanded by the child bash that sources the library.
@@ -191,8 +193,54 @@ test_dense_folder() {
   pass "one folder with thousands of candidates is classified in linear time"
 }
 
+# large_close <k>: one closing task whose area holds <k> files in a
+# node_modules-shaped tree; prints the close time in ms after checking the
+# area was removed.
+large_close() {
+  local k=$1 area t0 t1 out
+  N="large-$k"
+  H="$TMP_ROOT/$N/home"
+  U="$TMP_ROOT/$N/user"
+  mkdir -p "$H/data" "$H/state" "$H/config" "$U" "$TMP_ROOT/$N/tmp"
+  FB=$(fm_fakebin "$TMP_ROOT/$N")
+  printf 'scratch-root %s\n' "$SHORT/$N" > "$H/config/footprint"
+  area=$(lib 'fm_footprint_task_env "$H/config" "$H" task-big codex' | sed -n 's/^FM_TASK_SCRATCH=//p')
+  [ -d "$area" ] || fail "large $k: the area must exist"
+  python3 - "$area" "$k" <<'PY2'
+import os, sys
+root, n = sys.argv[1], int(sys.argv[2])
+for i in range(n):
+    d = os.path.join(root, "node_modules", f"pkg{i // 40}", f"lib{(i // 8) % 5}")
+    if i % 8 == 0:
+        os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"f{i}.js"), "w") as f:
+        f.write("module.exports=1\n")
+PY2
+  t0=$(now_ms)
+  out=$(fp task-close task-big "$area")
+  t1=$(now_ms)
+  case "$out" in *"scratch removed"*) ;; *) fail "large $k: close must remove the area: $out" ;; esac
+  [ ! -e "$area" ] || fail "large $k: the area must be gone"
+  printf '%s\n' $((t1 - t0))
+}
+
+# One area with many entries: closing it costs linearly in its entries (the
+# 100,000-file close may not exceed eight times the 25,000-file close plus 20
+# seconds) and stays within 150 seconds, so a caller waiting on teardown is
+# not held for minutes.
+test_one_large_area() {
+  local small large
+  small=$(large_close 25000)
+  large=$(large_close 100000)
+  printf '# scale one area: close %s ms for 25000 files, %s ms for 100000\n' "$small" "$large"
+  [ "$large" -le $((small * 8 + 20000)) ] ||
+    fail "closing one area grew faster than linearly: $small ms for 25000 files, $large ms for 100000"
+  [ "$large" -le 150000 ] || fail "closing a 100000-file area took $large ms, over 150 s"
+  pass "one area with 100,000 files is closed in time linear in its entries"
+}
+
 test_scale_5() { test_scale 5; }
 test_scale_100() { test_scale 100; }
 test_scale_1000() { test_scale 1000; }
 
-fm_test_run test_scale_5 test_scale_100 test_scale_1000 test_dense_folder
+fm_test_run test_scale_5 test_scale_100 test_scale_1000 test_dense_folder test_one_large_area
