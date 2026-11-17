@@ -60,6 +60,11 @@
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
+#   Each ship/scout worktree reserves /.fm-scratch/ for disposable worker
+#   scratch, lab homes and test output. Spawn creates it and installs a rooted
+#   Git info/exclude entry before launch; tracked, linked or non-directory
+#   collisions and an ineffective exclusion refuse the launch.
+#   fm-teardown.sh removes only this ignored root after its safety checks.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -6299,6 +6304,19 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
 }
+if [ "$KIND" != secondmate ]; then
+  scratch_tracked=$(git -C "$WT" ls-files -- .fm-scratch) || exit 1
+  if [ -n "$scratch_tracked" ] || [ -L "$WT/.fm-scratch" ] ||
+    { [ -e "$WT/.fm-scratch" ] && [ ! -d "$WT/.fm-scratch" ]; }; then
+    echo "error: $WT/.fm-scratch is tracked, linked or not a directory; refusing to reserve worker scratch" >&2
+    exit 1
+  fi
+  if ! mkdir -p "$WT/.fm-scratch" || ! exclude_path '/.fm-scratch/' ||
+    ! git -C "$WT" check-ignore -q --no-index -- .fm-scratch/; then
+    echo "error: cannot create and Git-exclude $WT/.fm-scratch; refusing to launch with visible worker scratch" >&2
+    exit 1
+  fi
+fi
 # spawn_t3code_env_install <harness> NAME=VALUE... - the t3code channel for the
 # exports a pane shell would receive before launch. T3 sets environment per
 # provider instance, never per thread, but each harness reads its own

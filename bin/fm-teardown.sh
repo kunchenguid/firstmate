@@ -84,6 +84,9 @@
 # for the common case where there is no remote at all.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
+# After that proof, the reserved ignored /.fm-scratch/ root is removed with
+# a path-limited Git clean, including nested lab repositories. Other ignored
+# files and the landed-work test are unchanged.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -2133,6 +2136,21 @@ report_worktree_dirt() {
   ' >&2
 }
 
+# Remove only the reserved ignored worker root after the safety checks pass.
+teardown_clean_worker_scratch() {
+  local wt=$1 tracked
+  [ -e "$wt/.fm-scratch" ] || [ -L "$wt/.fm-scratch" ] || return 0
+  tracked=$(git -C "$wt" ls-files -- .fm-scratch) || return 1
+  # Older tasks may belong to a project already tracking this path. It was
+  # never ours to reserve, and remains subject to the normal landed-work test.
+  [ -z "$tracked" ] || return 0
+  git -C "$wt" clean -ffdqX -- .fm-scratch || return 1
+  if [ -e "$wt/.fm-scratch" ] || [ -L "$wt/.fm-scratch" ]; then
+    echo "error: could not remove ignored worker scratch in $wt; teardown aborted" >&2
+    return 1
+  fi
+}
+
 # Scratch and --force copies are scrubbed before Treehouse return. See the
 # script header for why `git clean -fd` is not enough and why a dirty return
 # is not reported as clean.
@@ -3610,6 +3628,7 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        teardown_clean_worker_scratch "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
@@ -3629,6 +3648,7 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        teardown_clean_worker_scratch "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -4071,6 +4091,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
+    teardown_clean_worker_scratch "$WT" || exit 1
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -4090,6 +4111,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  teardown_clean_worker_scratch "$WT" || exit 1
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then

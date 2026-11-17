@@ -707,6 +707,13 @@ test_local_only_fork_remote_allows() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
+  # Spawn's reserved scratch may contain nested lab repositories. Teardown
+  # removes that ignored root only, after the normal landed-work proof.
+  printf '/.fm-scratch/\n/cache/\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  mkdir -p "$case_dir/wt/.fm-scratch/lab" "$case_dir/wt/cache"
+  git -C "$case_dir/wt/.fm-scratch/lab" init -q
+  printf 'lab marker\n' > "$case_dir/wt/.fm-scratch/lab/.fm-lab-home"
+  printf 'keep ignored cache\n' > "$case_dir/wt/cache/result"
   # The supervision branch's bounded per-task outcome cache is a footprint of
   # the retired task, not a record anything reads after it is gone.
   printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
@@ -717,6 +724,8 @@ test_local_only_fork_remote_allows() {
   set -e
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
+  assert_absent "$case_dir/wt/.fm-scratch" "fork-allow: ignored worker scratch survived teardown"
+  assert_present "$case_dir/wt/cache/result" "fork-allow: teardown removed unrelated ignored files"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
     || fail "fork-allow: teardown left the task's branch outcome index behind"
@@ -1912,6 +1921,9 @@ test_hidden_untracked_work_refuses_before_return() {
     git -C "$case_dir/wt" config status.showUntrackedFiles no
     head=$(git -C "$case_dir/wt" rev-parse HEAD)
     cp "$case_dir/state/task-x1.meta" "$case_dir/meta-before"
+    printf '/.fm-scratch/\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+    mkdir -p "$case_dir/wt/.fm-scratch"
+    printf 'scratch evidence\n' > "$case_dir/wt/.fm-scratch/output"
     cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = return ]; then
@@ -1934,6 +1946,7 @@ SH
       assert_grep 'uncommitted changes' "$case_dir/stderr" "hidden-untracked: no dirty-state diagnostic"
       assert_grep 'new directory/newfile.txt' "$case_dir/stderr" "hidden-untracked: unadded path not named"
       assert_absent "$case_dir/state/returned" "hidden-untracked: pool return ran before refusal"
+      assert_present "$case_dir/wt/.fm-scratch/output" "hidden-untracked: scratch cleanup ran before safety refusal"
       assert_refusal_retained_task_state "$case_dir" hidden-untracked "$head"
       cmp -s "$case_dir/meta-before" "$case_dir/state/task-x1.meta" \
         || fail "hidden-untracked: refusal changed task metadata"
@@ -1943,6 +1956,7 @@ SH
       expect_code 0 "$rc" "hidden-untracked: clean control should complete teardown"
       assert_grep 'return' "$case_dir/state/returned" "hidden-untracked: clean control never reached pool return"
       assert_absent "$case_dir/state/task-x1.meta" "hidden-untracked: clean control kept task metadata"
+      assert_absent "$case_dir/wt/.fm-scratch" "hidden-untracked: clean control kept worker scratch"
     fi
   done
   pass "hidden untracked work is refused before return while a clean control returns"

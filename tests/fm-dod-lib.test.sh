@@ -657,6 +657,8 @@ EOF
     status=$?
     if [ "$mode" = direct-PR ]; then
       expect_code 0 "$status" "promoting a scout with a recorded base should succeed"$'\n'"$out"
+      assert_grep '.fm-scratch/' "$home/data/$id/ship-instructions.md" \
+        "promotion must retain the excluded worker scratch root"
       # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
       assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
         "promotion did not start the ship from the recorded base"
