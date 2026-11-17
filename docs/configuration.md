@@ -1113,13 +1113,22 @@ While fewer than the floor lanes are working AND at least one startable lane exi
 A lane in a declared external-wait pause is expected idle and a `done` lane is finished work, so neither counts as startable and neither alone raises the alarm: a fleet with nothing but pauses and done lanes has nothing to start, and a fleet at or above the floor is healthy.
 `bin/fm-capacity.sh` and its lane facts keep their own counts unchanged; secondmate metadata records hold no lane.
 
+The floor is goal-aware.
+A lane that is only a page host never counts as working: a live Lavish listener or a parked host (`state/<task>.page-host-parked`) is quiet by design and is neither working nor startable, and a dead host is startable (it needs re-hosting) but never working, whatever its pane reads.
+A host whose round is open keeps its ordinary verdict, because its owner is acting on feedback.
+An active goal item that `bin/fm-goal.sh startable` lists, with no working lane on its `task=`, is work waiting: it keeps the floor alarm armed with no startable lane at all and appears in the wake's idle list as `goal:<goal>/<item>=startable`.
+
+The same tick also raises `check: goal stalled: <goal>: <item> (owner=<owner>) <age>s[, ...] (threshold <n>s)[; ...]` once such an item has sat unstarted for the hold, whether or not the floor is met, so an idle startable item never stays silent.
+The age runs from the watcher's first sight of the item as waiting, repeats once per `FM_PAUSE_RESURFACE_SECS`, and restarts when the item is marked, finishes, or leaves the record; closing the goal or removing the config drops the ledger.
+`bin/fm-goal.sh` owns what startable means, and the supervising firstmate answers the wake by steering the item's owner or starting the item itself.
+
 The condition must hold for `FM_DRIVE_FLOOR_HOLD_SECS` seconds (default `900`) before the first wake, then repeats once per `FM_PAUSE_RESURFACE_SECS` while it stays below the floor.
 Scans run at most once per `FM_DRIVE_FLOOR_SCAN_SECS` seconds (default `300`) and skip the forge read, like the away long-wait scan.
 Recovering to the floor, losing the last startable lane, or removing the config file drops the episode, so the next dip starts a fresh clock.
 The floor must be a canonical integer of at least 1 and at most nine digits, and the hold must be a canonical integer of at most nine digits; a present but invalid file or setting stops the watcher with an error.
 Pass them in the watcher's environment, or export them in `config/watch.env` for watchers started through `bin/fm-watch-arm.sh`.
 The flag is home-local and is not inherited by secondmate homes.
-`bin/fm-watch.sh`'s `drive_floor_tick` owns the scan and its repeats, which persist across watcher restarts.
+`bin/fm-watch.sh`'s `drive_floor_tick` owns the scan and its repeats, which persist across watcher restarts; `tests/fm-watch-drive-floor.test.sh` and `tests/fm-watch-goal-stall.test.sh` are its regressions.
 
 ## Validating-run deferral (config/wedge-defer-validating)
 

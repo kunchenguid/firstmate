@@ -3,6 +3,16 @@
 Captain-level routing and operating decisions whose reasoning the current-behavior docs do not carry.
 Each entry links the page that owns its resulting contract.
 
+## 2026-11-17 - an idle startable goal item wakes the supervisor
+
+**Decision.** In a home with `config/drive-floor`, a startable item of an active goal that no working lane is on raises `check: goal stalled` once it has waited the drive-floor hold, even when the fleet meets the floor.
+The drive floor also stops counting page hosts as working lanes and counts startable goal items as work waiting.
+The wake reuses the drive-floor scan, hold and ledger pattern and the existing check wake kind; no new daemon or watcher loop was added.
+[`configuration.md`](configuration.md#drive-floor-configdrive-floor) owns the resulting contract.
+
+**Why.** S1 made goals visible at every wake, but a wake only happens when something else changes, so an overnight goal with startable items and nothing running stayed silent until the captain returned.
+A busy-looking pane polling a board also read as a working lane and hid exactly that idleness.
+
 ## 2026-11-17 - spawn calls admission and a held start goes into a durable queue
 
 **Decision.** `bin/fm-spawn.sh` asks `bin/fm-capacity.sh --admit` before it creates anything for a fresh ship or scout start, and every deferral (admission, the load guard, project capacity) is recorded in `state/admission-queue` before the exit 75.

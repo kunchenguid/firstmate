@@ -106,8 +106,15 @@
 #   fm-goal.sh show [<id>]
 #   fm-goal.sh brief
 #   fm-goal.sh active
+#   fm-goal.sh startable
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
+#
+# `startable` prints one tab-separated row per startable item of every active
+# goal - goal, item, owner, task (- when none), since (the folded mark epoch, or
+# the goal's started epoch for an item no mark touched) - and nothing when no
+# item is startable; it is the machine read the watcher's goal-stall tick uses
+# (bin/fm-watch.sh), so that tick never invents what startable means.
 #
 # Exit codes: 0 success; 1 operational refusal (unknown goal or item, items
 # still open, unwritable channel, no active goal); 2 usage error (bad flags,
@@ -1810,6 +1817,27 @@ cmd_active() {
   return 0
 }
 
+cmd_startable() {
+  local path id i
+  [ "$#" -eq 0 ] || _fm_goal_usage_error 'startable takes no arguments'
+  while IFS= read -r path; do
+    id=${path##*/}
+    id=${id%.goal}
+    _fm_goal_open_record "$id" >/dev/null 2>&1 || continue
+    fm_goal_fold "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$(date +%s)"
+    i=0
+    while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+      if _fm_goal_item_startable "$i"; then
+        printf '%s\t%s\t%s\t%s\t%s\n' "$FM_GOAL_REC_ID" "${FM_GOAL_ITEMS_IDS[$i]}" \
+          "${FM_GOAL_ITEMS_OWNERS[$i]}" "${FM_GOAL_ITEMS_TASKS[$i]:--}" \
+          "${FM_GOAL_M_ATS[$i]:-$FM_GOAL_REC_STARTED_EPOCH}"
+      fi
+      i=$((i + 1))
+    done
+  done < <(fm_goal_active_records 2>/dev/null)
+  return 0
+}
+
 cmd_exists() {
   [ "$#" -eq 1 ] || _fm_goal_usage_error 'exists needs a goal id'
   fm_goal_id_valid "$1" || _fm_goal_usage_error "unsafe goal id: '$1'"
@@ -2089,7 +2117,7 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|show|brief|active|exists|window|close) ;;
+    start|edit|mark|show|brief|active|startable|exists|window|close) ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
   esac
