@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [completed-result replay](#completed-result-replay-configresult-replay), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
@@ -981,6 +981,23 @@ The flag applies to teardown run by this home, including forced retirement of it
 Each opted-in archival prunes owned logs older than 30 completed days by mtime; housekeeping failures warn and never abort teardown.
 Age-based retention works independently of the selected backlog backend and keeps histories available for a predictable audit period.
 [`architecture.md`](architecture.md#task-status-archives) describes archive locations and isolation from live state; [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the mechanics.
+
+## Completed-result replay (config/result-replay)
+
+The optional local, gitignored `config/result-replay` presence flag opts this home into repeating a completed result until its handling is acknowledged.
+Create it with `touch "$FM_HOME/config/result-replay"`; remove it to restore the default.
+It is off by default: without the flag, a drain presents each status line once, and a completed result whose handling turn was interrupted does not repeat.
+With the flag present, a main drain records each `done:` line it presents, through a signal annotation or the outcome backstop, in the status presentation receipt.
+Every later main drain repeats that line under `UNHANDLED RESULTS` until main runs the `WAKE_ACK_REQUIRED` acknowledgement for the same recovery generation.
+A drain that holds such a result with no queued wake still prints that acknowledgement, with `--ack-through 0`.
+An acknowledgement from an earlier generation retires nothing, and supervision-branch drains neither add nor retire these results.
+The receipt keeps each result's text, so a replaced status log neither changes nor loses it.
+It keeps the four newest results per task, and the drain names the count of any older result it drops.
+A drain repeats at most 4000 bytes of results and names the rest as omitted, and an omitted result stays pending through that acknowledgement.
+Notes, decisions, and other status lines keep their one-shot presentation.
+Removing the flag drops any results the receipt still holds at the next drain.
+The flag takes effect on the next drain and is not inherited by secondmate homes.
+`bin/fm-classify-lib.sh` owns the receipt format, and `bin/fm-wake-drain.sh` owns presentation and acknowledgement.
 
 ## Record hygiene report (config/record-hygiene)
 

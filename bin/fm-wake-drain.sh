@@ -3,7 +3,9 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
+# newer branch outcome, opt-in completed results awaiting main's handling
+# acknowledgement (UNHANDLED RESULTS, config/result-replay), OPEN DECISIONS,
+# captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
@@ -45,6 +47,7 @@ RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
 ACK_REMOVED=0
+RESULTS_ACK_MATCHED=false
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
@@ -403,7 +406,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     fi
     output="$output$line
 "
-    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint
+    STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint$(printf '\t')$event
 "
     used=$((used + bytes))
     shown=$((shown + 1))
@@ -424,6 +427,138 @@ EOF
   if [ "$omitted" -gt 0 ]; then
     printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
+}
+
+RESULT_REPLAY_PER_TASK=4
+STATUS_RESULT_RECEIPT_SET=0
+STATUS_RESULT_RECEIPT=
+result_text_capped() {  # <line> -> FM_LINE_CAP_LINE
+  local line=${1//$'\t'/ }
+  fm_cap_line_var "${line//$'\r'/ }" 219
+}
+
+# config/result-replay: repeat completed results an earlier main drain
+# presented until main's matching acknowledgement, and hand the commit the
+# receipt field for every result this drain presented or repeated.
+# bin/fm-classify-lib.sh's status_result_replay_enabled owns the field format.
+print_unhandled_results_section() {  # <snapshot> <fully-presented-task-ids>
+  local snapshot=$1 fully=$2 nl=$'\n' tab=$'\t' task endpoint _ident offset spans end text verb
+  local pending new='' p_task p_end _p_shown p_text dup i first shown line field
+  local notices='' output='' used=0 omitted=0 bytes global_bytes=4000
+  local -a ends texts now
+  STATUS_RESULT_RECEIPT_SET=0
+  STATUS_RESULT_RECEIPT=
+  [ "$ACTOR" = main ] && status_result_replay_enabled || return 0
+  pending=$(status_presentation_results "$STATE") || return 1
+
+  # Results this drain presents itself: every done line a direct annotation
+  # printed, and the backstop's latest event.
+  while IFS=$tab read -r task endpoint _ident; do
+    [ -n "$task" ] || continue
+    case "$nl$fully$nl" in *"$nl$task$nl"*) ;; *) continue ;; esac
+    offset=$(status_presentation_cursor_offset "$STATE/$task.status") || return 1
+    spans=$(status_result_lines_in_span "$STATE/$task.status" "$offset" "$endpoint") || return 1
+    while IFS=$tab read -r end text; do
+      [ -n "$end" ] || continue
+      result_text_capped "$text"
+      new="$new$task$tab$end$tab$FM_LINE_CAP_LINE$nl"
+    done <<EOF
+$spans
+EOF
+  done <<EOF
+$snapshot
+EOF
+  while IFS=$tab read -r task end text; do
+    [ -n "$task" ] || continue
+    status_line_verb "$text" verb
+    [ "$verb" = "done" ] || continue
+    result_text_capped "$text"
+    new="$new$task$tab$end$tab$FM_LINE_CAP_LINE$nl"
+  done <<EOF
+${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
+EOF
+
+  while IFS=$tab read -r task endpoint _ident; do
+    [ -n "$task" ] || continue
+    ends=() texts=() now=()
+    while IFS=$tab read -r p_task p_end _p_shown p_text; do
+      [ "$p_task" = "$task" ] || continue
+      ends+=("$p_end") texts+=("$p_text") now+=(0)
+    done <<EOF
+$pending
+EOF
+    while IFS=$tab read -r p_task p_end p_text; do
+      [ "$p_task" = "$task" ] || continue
+      dup=
+      for ((i = 0; i < ${#ends[@]}; i++)); do
+        if [ "${ends[i]}" = "$p_end" ] && [ "${texts[i]}" = "$p_text" ]; then now[i]=1; dup=1; fi
+      done
+      [ -n "$dup" ] || { ends+=("$p_end") texts+=("$p_text") now+=(1); }
+    done <<EOF
+$new
+EOF
+    [ "${#ends[@]}" -gt 0 ] || continue
+    first=0
+    if [ "${#ends[@]}" -gt "$RESULT_REPLAY_PER_TASK" ]; then
+      first=$(( ${#ends[@]} - RESULT_REPLAY_PER_TASK ))
+      notices="${notices}UNHANDLED RESULTS: $first older result(s) for $task exceed the replay bound and will not repeat; read its status log.$nl"
+    fi
+    field=
+    for ((i = first; i < ${#ends[@]}; i++)); do
+      shown=s
+      if [ "${now[i]}" = 0 ]; then
+        line="$task ${texts[i]}"
+        bytes=$(( ${#line} + 1 ))
+        if [ $((used + bytes)) -gt "$global_bytes" ]; then
+          shown=o
+          omitted=$((omitted + 1))
+        else
+          output="$output$line$nl"
+          used=$((used + bytes))
+        fi
+      fi
+      field="${field:+$field,}$(status_result_entry "${ends[i]}" "$shown" "${texts[i]}")"
+    done
+    STATUS_RESULT_RECEIPT="$STATUS_RESULT_RECEIPT$task$tab$field$nl"
+  done <<EOF
+$snapshot
+EOF
+  STATUS_RESULT_RECEIPT_SET=1
+
+  if [ -n "$output" ] || [ "$omitted" -gt 0 ]; then
+    printf 'UNHANDLED RESULTS (presented earlier, repeated until the WAKE_ACK_REQUIRED acknowledgement):\n' || return 1
+    printf '%s' "$output" || return 1
+    if [ "$omitted" -gt 0 ]; then
+      printf 'UNHANDLED RESULTS: %d more omitted (byte cap)\n' "$omitted" || return 1
+    fi
+  fi
+  printf '%s' "$notices"
+}
+
+# config/result-replay: a pending result needs its handling acknowledgement
+# even when this drain presented no queue row, so open the same handling
+# episode a queued wake opens and print its acknowledgement.
+print_result_ack_required() {
+  local fields
+  [ "$ACTOR" = main ] && status_result_replay_enabled || return 0
+  fields=$(status_presentation_result_fields "$STATE") || return 1
+  [ -n "$fields" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  DRAIN_LOCK_HELD=true
+  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || return 1
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    pending:*|announced:*) ;;
+    acked:*) fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || return 1 ;;
+    *)
+      if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then return 1; fi
+      fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || return 1
+      ;;
+  esac
+  fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || return 1
+  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  DRAIN_LOCK_HELD=false
+  printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
 }
 
 # Print still-unread informational status lines (note: answers and pending-reply
@@ -771,6 +906,7 @@ print_status_sections() {
   if ! {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
+      && print_unhandled_results_section "$snapshot" "$fully_presented" \
       && print_open_decisions_section "$snapshot" \
       && print_record_divergence_section
   } > "$prepared"; then
@@ -937,6 +1073,14 @@ if [ -n "$ACK_THROUGH" ]; then
     fi
   fi
   ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
+  # Pending results retire only with the episode that presented them, so a
+  # replayed earlier acknowledgement cannot retire a newer result.
+  RESULTS_ACK_MATCHED=false
+  if [ "$ACTOR" = main ] && status_result_replay_enabled \
+    && fm_recovery_marker_snapshot "$RECOVERY_MARKER" \
+    && [ "${FM_RECOVERY_MARKER_TOKEN##*:}" = "$ACK_GENERATION" ]; then
+    RESULTS_ACK_MATCHED=true
+  fi
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
@@ -970,6 +1114,12 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  if [ "$RESULTS_ACK_MATCHED" = true ] \
+    && { [ "$ACK_REMOVED" -gt 0 ] || [ "$PRESENTED_MAX" -le "$ACK_THROUGH" ]; } \
+    && ! status_retire_shown_results "$STATE"; then
+    echo "wake drain: handled results could not be retired safely; they repeat on the next drain" >&2
+    exit 1
+  fi
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
     # Nothing at or below the cutoff was this actor's to consume, while a
     # presented row above it is still waiting: the caller acknowledged an
@@ -1016,6 +1166,8 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
+  elif ! print_result_ack_required; then
+    echo "wake drain: pending results could not open a handling acknowledgement; they repeat on the next drain" >&2
   fi
   assert_watcher_liveness
   exit "$BRANCH_OUTCOMES_RC"
@@ -1036,6 +1188,8 @@ if [ "$ACTOR" = main ]; then
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+    print_result_ack_required \
+      || echo "wake drain: pending results could not open a handling acknowledgement; they repeat on the next drain" >&2
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
   fi
