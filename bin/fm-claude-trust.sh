@@ -14,7 +14,7 @@
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home this spawn launches into
-#   <id>        the secondmate id that home must already be marked for
+#   <id>        the task id; in secondmate mode the home must be marked for it
 #   --inbox-state also trust only <state>/<id>.inbox for a secondmate.
 #   --lab-home  the disposable lab home bin/fm-live-lab.sh launches a lab
 #               primary in
@@ -82,9 +82,8 @@
 # rather than flipping it, because doing so would grant every future
 # interactive session in that checkout silent external-file inclusion the
 # human declined, permanently and without being asked. The worktree entry is
-# left unwritten too: the spawn wedges on the dialog, which is the honest
-# outcome given a standing decline, not registered trust with a stripped
-# consent record. Approved===false with WarningShown false or absent is NOT
+# left unwritten too, and fm-spawn.sh refuses the launch.
+# Approved===false with WarningShown false or absent is NOT
 # that decision: Claude Code's default project entry carries both flags as
 # false before the dialog was ever shown, so that pair means "never asked" and
 # is treated like an absent flag - trust registered, no import consent.
@@ -449,12 +448,6 @@ fi
 # ponytail: fingerprint-and-refuse, not a lock; flock is absent on macOS and
 # cannot stop a vendor session's own rewrite anyway.
 #
-# In worktree mode every flag lands on both the worktree entry and the project
-# entry in the same read-modify-write attempt, so a single rename either
-# records all of it or none of it - there is no state where the worktree entry
-# is fresh and the project entry stale, or the other way round. In
-# secondmate-home mode only the single home entry is written.
-#
 # The two external-imports flags (worktree mode only) are gated separately
 # from the trust flag, because they are a CONSENT grant, not a pre-approval
 # this script is allowed to manufacture. Claude Code only ever writes
@@ -470,9 +463,7 @@ fi
 # are left untouched on both entries: writing them to the worktree entry alone
 # would be a pure no-op (the imports check never reads it) that only obscures
 # the real state, so trust still registers normally but the import dialog is
-# left exactly as undecided as it already was - the worker wedges on it, the
-# same honest outcome as an explicit decline, rather than a spawn spending
-# consent the human was never asked for.
+# left undecided for the operator to answer.
 # Resolve the exact same narrow directories that fm-spawn grants with --add-dir.
 # Refuse symlink escapes instead of registering an unrelated directory, and do
 # not expose a generic arbitrary-directory trust switch.

@@ -462,9 +462,10 @@ Observed output:
 ok - claude 2.1.326 (Claude Code): unregistered channel prompts; registered channels reach composer
 ```
 
-The guard refreshes this version-dependent evidence and fails naming the installed Claude version if either arm diverges.
+The guard expects the unregistered launch to reach the composer on versions before 2.1.326 and to show the trust gate on 2.1.326 and later.
+It names the installed Claude version if either arm diverges.
 Portable scope, atomic-refusal, and spawn integration coverage lives in `tests/fm-claude-trust.test.sh`, with relaunch coverage in `tests/fm-control-relaunch.test.sh`.
-The PTY guard exercises registration and launch against the same configuration store.
+The PTY guard invokes Claude directly from a task worktree with the same configuration store used for registration.
 See the [Claude permission mode reference](../configuration.md#accepted-values-and-refusals) for the launch contract and separate worker stores.
 
 ### Workspace and external-import approval
