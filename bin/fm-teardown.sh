@@ -96,7 +96,7 @@
 # git repository, so the pool slot stays dirty and later checkouts skip it.
 # Before that return, teardown runs `git clean -ffdq` in the copy, and a forced
 # secondmate teardown does the same in each child copy it returns.
-# The second -f removes nested repositories, and -x stays off so ignored files remain.
+# The second -f removes nested repositories, and -x stays off so other ignored files remain.
 # A ship teardown without --force does not run that clean: it refuses untracked
 # entries, except those under the .claude/ allowance, so a nested repository
 # there can still survive the return.
