@@ -11,7 +11,9 @@
 #   - work added to an area after its first check but before its removal is
 #     caught by a second check of the set-aside copy;
 #   - a process left in an orphaned area, or holding a file open there, keeps
-#     the area, and so does a process table that cannot be read; a running
+#     the area, and so does a process table that cannot be read or a listing
+#     that leaves out any live process; work a writer finished just before
+#     the process check is caught by the content check after it; a running
 #     process is never ended to free space;
 #   - a set-aside folder left by an interrupted removal, or any folder with a
 #     set-aside name, is never removed again, only reported;
@@ -519,6 +521,147 @@ test_a_surviving_process_keeps_a_closing_area() {
   pass "close keeps an area a process that survived teardown still uses"
 }
 
+# quiet_hook <writer-pid> <go-file> <dir>: wraps the tools that read the
+# process table (lsof and ps on macOS, find and readlink on /proc on Linux) so
+# that, the first time one runs after <dir> was set aside, the writer is
+# released and the hook waits for it to finish and exit before the real tool
+# runs.
+quiet_hook() {
+  local tool real
+  for tool in lsof ps find readlink; do
+    real=$(command -v "$tool") || continue
+    cat > "$FB/$tool" <<SH
+#!/usr/bin/env bash
+case "$tool \$*" in
+  lsof*|ps*|*/proc/*)
+    if [ ! -e "$2.fired" ] && [ ! -e "$3" ]; then
+      : > "$2.fired"
+      : > "$2"
+      n=0
+      while kill -0 "$1" 2>/dev/null && [ "\$n" -lt 200 ]; do
+        case "\$("$(command -v ps)" -o stat= -p "$1" 2>/dev/null)" in *Z*) break ;; esac
+        sleep .05; n=\$((n + 1))
+      done
+    fi
+    ;;
+esac
+exec "$real" "\$@"
+SH
+    chmod +x "$FB/$tool"
+  done
+}
+
+unhook() { rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink"; }
+
+# writer_in <dir> <go-file> <subdir>: a stray process rooted in <dir> that,
+# once <go-file> appears, commits new work in <subdir> of its working
+# directory (which follows <dir> when it is set aside) and exits.
+writer_in() {
+  stray "$1" "n=0; while [ ! -e '$2' ] && [ \$n -lt 600 ]; do sleep .05; n=\$((n+1)); done
+    mkdir -p '$3' && git -c init.defaultBranch=main init -q '$3' && printf unique > '$3/unique.txt' &&
+    git -C '$3' add unique.txt && exec git -C '$3' -c user.email=t@example.invalid -c user.name=t commit -qm late"
+}
+
+test_work_finished_before_the_process_check_is_caught() {
+  local s out go entry id
+  new_home quiet-writer
+  go="$TMP_ROOT/quiet-writer/go"
+  # The daily pass: the writer commits and exits right as the check starts.
+  s=$(scratch_for task-q1)
+  printf 'cache\n' > "$s/cache"
+  writer_in "$s" "$go" late
+  age 3 "$s"
+  quiet_hook "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
+  out=$(fp sweep)
+  unhook
+  assert_present "$go.fired" "the writer must have been released at the process check"
+  assert_present "$s/late/unique.txt" "work committed just before the process check must survive the daily pass"
+  assert_contains "$out" "Kept 1 orphaned scratch area(s) whole because they hold version-controlled work" "the pass must keep the area for its work"
+  stop_strays
+  # Close: the same interleaving.
+  rm -f "$go" "$go.fired"
+  s=$(scratch_for task-q2)
+  printf 'cache\n' > "$s/cache"
+  writer_in "$s" "$go" late
+  quiet_hook "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
+  out=$(fp task-close task-q2 "$s")
+  unhook
+  assert_present "$go.fired" "the writer must have been released at close's process check"
+  assert_present "$s/late/unique.txt" "work committed just before close's process check must survive"
+  assert_contains "$out" "is version-controlled work" "close must keep the area for its work"
+  stop_strays
+  # Old-folder apply: the writer turns a previewed entry into a repository.
+  rm -f "$go" "$go.fired"
+  finished_folder old-q3
+  entry="$H/data/old-q3/node_modules"
+  mkdir -p "$entry/pkg"
+  printf 'module\n' > "$entry/pkg/index.js"
+  age 40 "$H/data/old-q3"
+  fp old-tasks >/dev/null
+  id=$(preview_id)
+  [ -n "$id" ] || fail "the preview must offer the entry"
+  writer_in "$entry" "$go" late
+  quiet_hook "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$entry"
+  out=$(fp old-tasks --apply "$id")
+  unhook
+  assert_present "$go.fired" "the writer must have been released at apply's process check"
+  assert_present "$entry/late/unique.txt" "work committed just before apply's process check must survive"
+  assert_contains "$out" "nothing removed" "apply must remove nothing"
+  stop_strays
+  # Positive control: an idle area is still removed by the daily pass.
+  s=$(scratch_for task-q4)
+  printf 'cache\n' > "$s/cache"
+  age 3 "$s"
+  out=$(fp sweep)
+  assert_absent "$s" "an idle orphan must still be removed"
+  pass "work a writer finishes just before the process check is caught by the content check after it"
+}
+
+test_a_partial_open_file_listing_keeps_everything() {
+  local s out holder real_lsof real_readlink
+  new_home partial-listing
+  s=$(scratch_for task-p1)
+  mkdir -p "$s/inner"
+  printf 'log\n' > "$s/inner/held.log"
+  stray "$TMP_ROOT" "exec 3>>'$s/inner/held.log'; exec sleep 60"
+  holder=${STRAYS[${#STRAYS[@]}-1]}
+  age 3 "$s"
+  # The listing runs, names the probe, and silently leaves out the process
+  # that holds a file open in the area, as a listing that could not read one
+  # process or one directory would.
+  real_lsof=$(command -v lsof || true)
+  real_readlink=$(command -v readlink)
+  cat > "$FB/lsof" <<SH
+#!/usr/bin/env bash
+"$real_lsof" "\$@" > "$TMP_ROOT/partial-listing/lsof.out"
+rc=\$?
+awk -v drop="$holder" '/^p/ { skip = (substr(\$0, 2) == drop) } !skip' "$TMP_ROOT/partial-listing/lsof.out" |
+  grep -v "inner/held.log\$"
+exit \$rc
+SH
+  cat > "$FB/readlink" <<SH
+#!/usr/bin/env bash
+keep=()
+for a in "\$@"; do
+  case "\$a" in */proc/$holder/fd/*) echo "readlink: \$a: Permission denied" >&2 ;; *) keep+=("\$a") ;; esac
+done
+[ "\${#keep[@]}" -eq 0 ] || exec "$real_readlink" "\${keep[@]}"
+SH
+  chmod +x "$FB/lsof" "$FB/readlink"
+  out=$(fp sweep)
+  rm -f "$FB/lsof" "$FB/readlink"
+  assert_present "$s/inner/held.log" "an area must be kept when the listing left out a process"
+  assert_contains "$out" "because the running processes could not be listed" "the pass must say the listing was incomplete"
+  # Control: the full listing finds the holder and keeps the area for it.
+  out=$(fp sweep)
+  assert_present "$s/inner/held.log" "the full listing must find the open file"
+  assert_contains "$out" "a running process still works in or holds open" "the full listing must name the use"
+  stop_strays
+  out=$(fp sweep)
+  assert_absent "$s" "with the holder gone, the area is removed"
+  pass "an open-file listing that leaves out any live process keeps every area"
+}
+
 # --- the Docker retry queue under concurrent closes -------------------------
 
 test_a_close_during_the_daily_retry_keeps_its_queue_entry() {
@@ -771,6 +914,8 @@ fm_test_run \
   test_a_process_still_using_an_orphan_keeps_it \
   test_an_unreadable_process_table_removes_nothing \
   test_a_surviving_process_keeps_a_closing_area \
+  test_work_finished_before_the_process_check_is_caught \
+  test_a_partial_open_file_listing_keeps_everything \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
   test_preview_binds_contents_and_identity \

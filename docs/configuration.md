@@ -1008,7 +1008,8 @@ Every removal refuses what it cannot prove disposable, so fewer cases are cleane
   The landed-work checks prove the task's own copy, not a repository the worker made inside its scratch area, so such an area is kept whole and named; once that repository is moved or removed, the daily pass removes the area.
 - A tree holding a name with a control character or a backslash, or one that cannot be read in full, is never removed.
 - A directory is renamed aside under the task's spawn lock and that copy is checked again before removal; a copy that now fails the check is put back.
-- Just before removal, a set-aside copy that a running process still works in or holds a file open in is put back and reported, and when the running processes cannot be listed in full, every copy is put back; no process is ever ended to free space.
+- Between the rename and that second check, a set-aside copy that a running process still works in or holds a file open in is put back and reported; once no process uses a copy nothing can write to it again, so the second check sees everything any writer left.
+- That process check lists every open file and working directory of every process of this user, and it counts only when every live process seen before and after it appears in it; otherwise every copy is put back. No process is ever ended to free space.
 - A set-aside folder (`.fm-closing-*`, `.fm-reclaim-*`) left by an interrupted removal is reported, never removed again on the strength of its name.
 - Docker objects are selected only by the generation read from an area proven to be the task's; without one, nothing in Docker is removed.
 

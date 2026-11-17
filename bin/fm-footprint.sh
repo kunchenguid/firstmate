@@ -76,14 +76,16 @@
 #   Before a directory is removed it is renamed aside under the task's spawn
 #   lock and the set-aside copy is checked again, because the directory can
 #   change between the first check and the rename; a copy that fails the
-#   second check is put back. Last comes the quiescence check: a copy that a
-#   running process still works in or holds a file open in is put back,
-#   and when the running processes cannot be listed in full (a probe file
-#   this process holds open must appear in the listing), every copy is put
-#   back. A renamed copy has a name no other process knows, so once none is
-#   rooted in it or holds anything open there, nothing can still write into
-#   it. Firstmate never ends a process to free space; teardown ends only the
-#   closing task's own processes, before task-close runs.
+#   second check is put back. The quiescence check comes between the rename
+#   and that second check: a copy that a running process still works in or
+#   holds a file open in is put back, and when the running processes cannot
+#   be listed in full (every live process of this user must appear in the
+#   listing, and so must a probe file this process holds open), every copy
+#   is put back. A renamed copy has a name no other process knows, so once
+#   none is rooted in it or holds anything open there, nothing can write
+#   into it again, and the second check that follows sees everything any
+#   writer left. Firstmate never ends a process to free space; teardown ends
+#   only the closing task's own processes, before task-close runs.
 #
 # owns-scratch <task-id> <scratch-dir>
 #   Exit 0 only when <scratch-dir> is this home's own area for the task (the
@@ -465,29 +467,28 @@ fp_restore() {  # <aside> <dir>
   [ ! -e "$2" ] && [ ! -L "$2" ] && mv -- "$1" "$2" 2>/dev/null
 }
 
-# fp_in_use <out> <dir>...: the quiescence check made after directories are
-# set aside and checked again, just before they are removed. Writes to <out>
-# each listed directory that a running process still uses: its working
-# directory, or a file it holds open, at or below that directory. A set-aside
-# directory has a name no other process knows, so once no process is rooted
-# in it or holds anything open inside it, nothing can still write there.
-# Returns 1, with <out> empty, when the running processes cannot be listed in
-# full or a used path cannot be matched to one directory; the caller then
-# removes nothing. A process is never ended to free space.
-# macOS reads working directories and open files with lsof; Linux reads each
-# process's cwd and fd links under /proc (FM_PROC_ROOT_OVERRIDE in tests).
+# fp_in_use <out> <dir>...: the quiescence check, made after directories are
+# set aside and before their contents are checked the last time and removed.
+# Writes to <out> each listed directory a running process of this user still
+# uses: its working directory, or any file it holds open, at or below it. A
+# set-aside directory has a name no other process knows, so once no process
+# is rooted in it or holds anything open inside it, nothing can write there
+# again, and the content check that follows sees everything ever written.
+# The listing covers every open file of every process, never a walk of the
+# directories, and it must be shown complete: every live process of this
+# user seen both before and after the listing appears in it, and so does a
+# probe file this process holds open. Otherwise, or on a timeout, it returns
+# 1 with <out> empty and the caller removes nothing. A process is never ended
+# to free space.
+# macOS lists with lsof; Linux reads each process's cwd and fd links under
+# /proc (FM_PROC_ROOT_OVERRIDE in tests), where a readable fd directory is the
+# proof that process was read.
 fp_in_use() {  # <out> <dir>...
-  local out=$1 procs dir parent phys last_parent='' last_phys='' rc=0 lrc probe_dir probe
-  local -a plus=()
+  local out=$1 dir parent phys last_parent='' last_phys='' rc=0 lrc probe_dir probe uid p st proc
+  local -a fds=() cwds=()
   shift
   : > "$out" || return 1
-  procs="$out.procs"
-  # shellcheck source=bin/fm-lane-vitals-lib.sh
-  command -v fm_lane_vitals_processes >/dev/null 2>&1 || . "$SCRIPT_DIR/fm-lane-vitals-lib.sh"
-  if ! fm_lane_vitals_processes "$FP_OS" "$procs" 2>/dev/null; then
-    rm -f "$procs"
-    return 1
-  fi
+  uid=$(id -u 2>/dev/null) || return 1
   # Each directory under its own path and its physical one.
   for dir in "$@"; do
     parent=${dir%/*}
@@ -497,35 +498,55 @@ fp_in_use() {  # <out> <dir>...
     fi
     phys="$last_phys/${dir##*/}"
     printf '%s\t%s\n%s\t%s\n' "$dir" "$dir" "$phys" "$dir"
-    plus+=(+D "$phys")
   done > "$out.dirs"
-  # Working directories: any one at or below a listed directory marks it.
-  awk -F'\t' '$5 != "" { print $5 }' "$procs" > "$out.cwd"
-  # Open files. A probe file this process holds open is listed alongside,
-  # and the listing counts only when it names that probe: lsof's exit status
-  # cannot tell "nothing open" from a refused or partial listing.
-  : > "$out.open"
-  probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-probe.XXXXXX") || { rm -f "$procs" "$out.dirs" "$out.cwd" "$out.open"; return 1; }
+  probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-probe.XXXXXX") || { rm -f "$out.dirs"; return 1; }
   probe_dir=$(fm_footprint_physical_dir "$probe_dir") || probe_dir=
   probe="$probe_dir/open"
+  : > "$out.paths"
   if [ -z "$probe_dir" ] || [ ! -d "$probe_dir" ] || ! exec 9>"$probe"; then
     rc=1
   elif [ "$FP_OS" = Darwin ]; then
-    # lsof walks each directory itself and names only files open inside, so
-    # every name it prints must match a directory.
-    fm_run_timed 120 lsof -w -Fn +D "$probe_dir" "${plus[@]}" </dev/null > "$out.lsof" 2>/dev/null
+    ps -u "$uid" -o pid=,stat= > "$out.ps1" 2>/dev/null || rc=1
+    fm_run_timed 120 lsof -n -P -w -u "$uid" -Fpn </dev/null > "$out.lsof" 2>/dev/null
     lrc=$?
-    sed -n 's/^n//p' "$out.lsof" | grep -Fvx -- "$probe" > "$out.open"
-    [ "$lrc" != 124 ] && grep -Fqx -- "n$probe" "$out.lsof" || rc=1
-    rm -f "$out.lsof"
+    ps -u "$uid" -o pid=,stat= > "$out.ps2" 2>/dev/null || rc=1
+    [ "$lrc" != 124 ] || rc=1
+    # Every process alive and not a zombie at both ends must be listed.
+    if [ "$rc" = 0 ] && ! awk 'FILENAME == ARGV[1] { if ($2 !~ /Z/) a[$1] = 1; next }
+        FILENAME == ARGV[2] { if (($1 in a) && $2 !~ /Z/) need[$1] = 1; next }
+        /^p/ { seen[substr($0, 2)] = 1 }
+        END { for (q in need) if (!(q in seen)) exit 3; exit 0 }' "$out.ps1" "$out.ps2" "$out.lsof"; then
+      rc=1
+    fi
+    grep -Fqx -- "n$probe" "$out.lsof" || rc=1
+    sed -n 's/^n//p' "$out.lsof" > "$out.paths"
+    rm -f "$out.ps1" "$out.ps2" "$out.lsof"
   else
-    # Every fd link of every readable process.
-    fm_run_timed 120 find "$FM_LANE_VITALS_PROC"/[0-9]*/fd -mindepth 1 -maxdepth 1 \
-      -type l -exec readlink -- {} + </dev/null > "$out.fds" 2>/dev/null
-    lrc=$?
-    [ "$lrc" != 124 ] && grep -Fqx -- "$probe" "$out.fds" || rc=1
-    grep -Fvx -- "$probe" "$out.fds" >> "$out.cwd"
-    rm -f "$out.fds"
+    # This user's processes that are not zombies: state is the first field
+    # after the last ")" of stat.
+    proc=${FM_PROC_ROOT_OVERRIDE:-/proc}
+    while IFS= read -r p; do
+      st=
+      read -r st < "$p/stat" 2>/dev/null || continue
+      st=${st##*) }
+      case "${st%% *}" in Z|X|'') continue ;; esac
+      fds+=("$p/fd")
+      cwds+=("$p/cwd")
+    done < <(find "$proc" -mindepth 1 -maxdepth 1 -name '[0-9]*' -user "$uid" 2>/dev/null)
+    if [ "${#fds[@]}" -eq 0 ]; then
+      rc=1
+    else
+      fm_run_timed 120 find "${fds[@]}" -mindepth 1 -maxdepth 1 -type l -exec readlink -- {} + \
+        </dev/null > "$out.paths" 2> "$out.err"
+      lrc=$?
+      [ "$lrc" != 124 ] || rc=1
+      # A process that exited meanwhile is gone; any other error means an fd
+      # directory could not be read, so the listing is incomplete.
+      ! grep -v 'No such file or directory' "$out.err" | grep -q . || rc=1
+      grep -Fqx -- "$probe" "$out.paths" || rc=1
+      readlink -- "${cwds[@]}" >> "$out.paths" 2>/dev/null || true
+      rm -f "$out.err"
+    fi
   fi
   exec 9>&-
   # The probe directory holds only the probe file, so it is emptied and
@@ -535,20 +556,18 @@ fp_in_use() {  # <out> <dir>...
   esac
   if [ "$rc" = 0 ]; then
     # Walk each used path's ancestors; the first that is a listed directory
-    # marks it in use. An open name from lsof that matches none is unknown.
+    # marks it in use.
     awk -F'\t' 'FILENAME == ARGV[1] { dir[$1] = $2; next }
-      { p = $0; hit = 0
+      { p = $0
         while (p != "") {
-          if (p in dir) { hit = 1; if (!(dir[p] in seen)) { seen[dir[p]] = 1; print dir[p] }; break }
+          if (p in dir) { if (!(dir[p] in seen)) { seen[dir[p]] = 1; print dir[p] }; break }
           if (p !~ /\//) break
           sub(/\/[^\/]*$/, "", p)
         }
-        if (!hit && FILENAME == ARGV[3]) bad = 1
-      }
-      END { exit bad ? 3 : 0 }' "$out.dirs" "$out.cwd" "$out.open" > "$out" || rc=1
+      }' "$out.dirs" "$out.paths" > "$out" || rc=1
   fi
   [ "$rc" = 0 ] || : > "$out"
-  rm -f "$procs" "$out.dirs" "$out.cwd" "$out.open"
+  rm -f "$out.dirs" "$out.paths"
   return "$rc"
 }
 
@@ -810,16 +829,17 @@ cmd_task_close() {  # <id> <scratch> [project]
       elif ! aside=$(fp_set_aside "$scratch" closing); then
         scratch_result=partial
         FP_BLOCKER="$scratch could not be set aside"
-      elif ! fp_tree_disposable "$aside"; then
-        fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
-        scratch_result=kept
       elif ! fp_area_idle "$aside"; then
         # Teardown ends the task's processes first; one that survived, or a
-        # process table that cannot be read, keeps the area.
+        # process table that cannot be listed in full, keeps the area.
         fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
         scratch_result=kept
         kept_hint='end that process once its work is safe'
         [ "$FP_IDLE_UNKNOWN" = 0 ] || kept_hint='it stays until the running processes can be listed'
+      elif ! fp_tree_disposable "$aside"; then
+        # Checked once nothing can write there any more.
+        fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
+        scratch_result=kept
       elif fp_remove_tree "$aside"; then
         scratch_result=removed
       else
@@ -1351,19 +1371,20 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     # still hold nothing that blocks removal; otherwise everything goes back.
     local -a asides=()
     while IFS='	' read -r aside entry; do asides+=("$aside"); done < "$tmp.pairs"
+    # Nothing may still be working in or holding open any set-aside copy;
+    # once that holds, nothing can change them, so they are checked last.
+    if ! fp_in_use "$tmp.busy" "${asides[@]+"${asides[@]}"}" || [ -s "$tmp.busy" ]; then
+      fp_restore_all "$tmp.pairs"
+      rm -f "$tmp" "$tmp.print" "$tmp.pairs" "$tmp.map" "$tmp.busy"
+      die "a running process still uses an entry, or the running processes could not be listed in full; nothing removed - end that work, then run old-tasks again"
+    fi
+    rm -f "$tmp.busy"
     if ! fp_tree_print "$tmp.map" > "$tmp.print2" || ! cmp -s "$tmp.print" "$tmp.print2" ||
       ! fp_blocked "$tmp.blocked" "${asides[@]+"${asides[@]}"}" || [ -s "$tmp.blocked" ]; then
       fp_restore_all "$tmp.pairs"
       rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.blocked"
       die "an entry changed while it was being set aside; nothing removed - run old-tasks again"
     fi
-    # Nothing may still be working in or holding open any set-aside copy.
-    if ! fp_in_use "$tmp.busy" "${asides[@]+"${asides[@]}"}" || [ -s "$tmp.busy" ]; then
-      fp_restore_all "$tmp.pairs"
-      rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.blocked" "$tmp.busy"
-      die "a running process still uses an entry, or the running processes could not be listed; nothing removed - end that work, then run old-tasks again"
-    fi
-    rm -f "$tmp.busy"
     total=0 gone=0 left=0
     while IFS='	' read -r kind kb entry; do
       aside=$(awk -F '\t' -v e="$entry" '$2 == e { print $1; exit }' "$tmp.pairs")
@@ -1478,26 +1499,10 @@ cmd_sweep() {  # [--dry-run]
     done
   fi
   if [ "${#asides[@]}" -gt 0 ]; then
-    # Check every set-aside copy again, because an area could change between
-    # the first scan and the rename; a copy that now blocks goes back.
-    fp_blocked "$work/blocked2" "${asides[@]}"
-    asides=()
-    while IFS='	' read -r aside area; do
-      if grep -Fqx -- "$aside" "$work/blocked2"; then
-        kept=$((kept + 1))
-        [ "$kept" -gt 5 ] || kept_ids="$kept_ids${kept_ids:+, }${area##*/}"
-        fp_restore "$aside" "$area" || back=$((back + 1))
-      else
-        asides+=("$aside")
-        printf '%s\t%s\n' "$aside" "$area" >> "$work/pairs2"
-      fi
-    done < "$work/pairs"
-  fi
-  if [ "${#asides[@]}" -gt 0 ]; then
-    # The quiescence boundary: an orphan has no task, but a process left
+    # The quiescence boundary first: an orphan has no task, but a process left
     # behind can still work in it, and a rename does not move it out. Every
     # copy still in use goes back, and if the running processes cannot be
-    # listed, every copy goes back.
+    # listed in full, every copy goes back.
     if fp_in_use "$work/busy" "${asides[@]}"; then
       asides=()
       while IFS='	' read -r aside area; do
@@ -1507,16 +1512,33 @@ cmd_sweep() {  # [--dry-run]
           fp_restore "$aside" "$area" || back=$((back + 1))
         else
           asides+=("$aside")
+          printf '%s\t%s\n' "$aside" "$area" >> "$work/pairs2"
         fi
-      done < "$work/pairs2"
+      done < "$work/pairs"
     else
       asides=()
       while IFS='	' read -r aside area; do
         inuse=$((inuse + 1))
         fp_restore "$aside" "$area" || back=$((back + 1))
-      done < "$work/pairs2"
+      done < "$work/pairs"
       unlisted=1
     fi
+  fi
+  if [ "${#asides[@]}" -gt 0 ]; then
+    # Then check every idle copy's contents again: the area could change
+    # between the first scan and the rename, or before its last writer
+    # stopped, and nothing can change it now. A copy that blocks goes back.
+    fp_blocked "$work/blocked2" "${asides[@]}"
+    asides=()
+    while IFS='	' read -r aside area; do
+      if grep -Fqx -- "$aside" "$work/blocked2"; then
+        kept=$((kept + 1))
+        [ "$kept" -gt 5 ] || kept_ids="$kept_ids${kept_ids:+, }${area##*/}"
+        fp_restore "$aside" "$area" || back=$((back + 1))
+      else
+        asides+=("$aside")
+      fi
+    done < "$work/pairs2"
   fi
   if [ "${#asides[@]}" -gt 0 ]; then
     fp_du_many "$work/du" "${asides[@]}"
