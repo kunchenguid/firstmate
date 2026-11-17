@@ -524,7 +524,7 @@ test_unfinished_work_vetoes_a_stop() {
   reset
   local t s
   declare -A A=()
-  local kept="open-decision last-blocked awaits-review ready-to-merge captain-approval pr-open pr-unreadable pr-gitlab unpushed dirty"
+  local kept="open-decision last-blocked awaits-review ready-to-merge needs-review pending-approval waiting-pr-merge ready-to-be-merged captain-approval pr-open pr-unreadable pr-gitlab unpushed dirty"
   local unreadable=
   local stopped="resolved-decision pr-merged already-merged ready-and-merged pushed"
   for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
@@ -534,6 +534,10 @@ test_unfinished_work_vetoes_a_stop() {
   printf 'blocked: needs a token\n' >"$s/last-blocked.status"
   printf 'done: renders ready, awaiting your review\n' >"$s/awaits-review.status"
   printf 'done: PR ready to merge\n' >"$s/ready-to-merge.status"
+  printf 'done: needs review\n' >"$s/needs-review.status"
+  printf 'done: pending approval\n' >"$s/pending-approval.status"
+  printf 'done: waiting on the PR to merge\n' >"$s/waiting-pr-merge.status"
+  printf 'done: ready to be merged\n' >"$s/ready-to-be-merged.status"
   printf 'done: already merged\n' >"$s/already-merged.status"
   printf "done: waiting for the captain's approval\n" >"$s/captain-approval.status"
   printf 'done: PR ready and merged\n' >"$s/ready-and-merged.status"
