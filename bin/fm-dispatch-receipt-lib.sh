@@ -408,7 +408,7 @@ fm_dr_cmd_rows() {
       ($t[0] // {}) as $cfg |
       {schemaVersion: 1, table: {path: $path, sha256: $sha}, preferredProvider: ($cfg.preferred_provider // null),
        sharedQuota: ($cfg.shared_quota // false), ranking: ($cfg.ranking // {mode:"spend_priority"}), plan_value: ($cfg.plan_value // {}),
-       guards: {weekly:{maxUsedPercent:($cfg.weekly_guard.max_used_percent // 98), reservePercent:($cfg.weekly_guard.reserve_percent // 2.6), reserveByPlan:($cfg.weekly_guard.reserve_by_plan // {})}, fiveHour:$five},
+       guards: {weekly:{maxUsedPercent:($cfg.weekly_guard.max_used_percent // 98), reservePercent:($cfg.weekly_guard.reserve_percent // 1), reserveByPlan:($cfg.weekly_guard.reserve_by_plan // {}), decayHours:($cfg.weekly_guard.decay_hours // 6)}, fiveHour:$five},
        pipelineRows: [($cfg.pipeline_rows // [])[] | {label:(.label // null), steps, never_providers, candidates:.use}],
        rows: [$rows[] | .id as $id |
          (if $id == "default" then ($cfg.default // null) else ($cfg.rules[($id | ltrimstr("rule_") | tonumber) - 1]) end) as $raw |

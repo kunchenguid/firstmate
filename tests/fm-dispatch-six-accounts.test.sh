@@ -738,9 +738,9 @@ set_quota claude1 claude 2 9
 pipe review
 assert_equals claude2 "$(pfield .seat)" '2% weekly left is full for a pipeline start'
 assert_contains "$(pfield '.candidates[] | select(.seat == "claude1") | .reason')" 'weekly guard:' 'pipeline reuses the weekly start gate'
-set_quota claude1 claude 4 9
+set_quota claude1 claude 3 9
 pipe review
-assert_equals claude2 "$(pfield .seat)" '96% used plus the new start reserve reaches the weekly gate'
+assert_equals claude2 "$(pfield .seat)" '97% used plus the new start reserve reaches the weekly gate'
 set_quota claude2 claude 2 8
 pipe review
 assert_equals claude-reserve "$(pfield .seat)" 'both pool 1 seats weekly-full open the next tier'

@@ -465,8 +465,9 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     (.weekly_guard | type) != "object" or
     (.weekly_guard | has("max_used_percent") and ((.max_used_percent | type) != "number" or .max_used_percent <= 0 or .max_used_percent > 100)) or
     (.weekly_guard | has("reserve_percent") and ((.reserve_percent | type) != "number" or .reserve_percent <= 0 or .reserve_percent > 100)) or
-    (.weekly_guard | has("reserve_by_plan") and ((.reserve_by_plan | type) != "object" or any(.reserve_by_plan[]; type != "number" or . <= 0 or . > 100)))
-  ) then "weekly_guard needs max_used_percent, reserve_percent and reserve_by_plan values greater than 0 and at most 100"
+    (.weekly_guard | has("reserve_by_plan") and ((.reserve_by_plan | type) != "object" or any(.reserve_by_plan[]; type != "number" or . <= 0 or . > 100))) or
+    (.weekly_guard | has("decay_hours") and ((.decay_hours | type) != "number" or .decay_hours <= 0))
+  ) then "weekly_guard needs max_used_percent, reserve_percent and reserve_by_plan values greater than 0 and at most 100, and a decay_hours greater than 0"
   elif has("ranking") and ((.ranking | type) != "object") then "ranking must be an object"
   elif ((.ranking.mode // "spend_priority") as $mode | (["spend_priority", "surplus_value", "reset_first"] | index($mode)) == null) then "ranking.mode must be spend_priority, surplus_value or reset_first"
   elif any([.ranking.reset_horizon_hours // 12, .ranking.reset_horizon_min_percent // 10][]; type != "number" or . < 0) then "ranking reset horizon values must be nonnegative numbers"
@@ -980,12 +981,18 @@ fm_dispatch_burst_record() {
   printf '%s %s %s\n' "$NOW_EPOCH" "$seat" "$cost" >> "$BURST_LEDGER" 2>/dev/null || true
 }
 # Weekly demand is a start-only reserve, independent of the fading burst rank.
-# No calibrated model/effort-to-weekly conversion exists; configuration.md owns
-# the fixed per-plan estimate and the conservative parked-session double count.
+# It covers only spend the weekly reading does not show yet: a live endpoint
+# counts while its status log's current declaration is not done, failed,
+# needs-decision, blocked, paused or captain-held, and carries its start time
+# so the guard can fade its share. configuration.md owns the estimate, its
+# calibration and the conservative parked-session double count.
 WEEKLY_DEMAND='{}'
 if [ "$SQ" != true ]; then
   # shellcheck source=bin/fm-backend.sh
   . "$SCRIPT_DIR/fm-backend.sh"
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$SCRIPT_DIR/fm-classify-lib.sh"
+  weekly_census=''
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     backend=$(fm_backend_of_meta "$meta")
@@ -999,8 +1006,23 @@ if [ "$SQ" != true ]; then
       provider=$(jq -r --arg h "$harness" '.[$h] // ""' <<<"$PMAP")
     fi
     [ -n "$seat" ] || seat="home:$provider"
-    WEEKLY_DEMAND=$(jq -c --arg k "$seat" '.[$k].running = ((.[$k].running // 0) + 1)' <<<"$WEEKLY_DEMAND")
+    status_line=$(status_current_line "${meta%.meta}.status" "$(awk -F= '$1 == "kind" {print $2; exit}' "$meta")")
+    if status_is_terminal_verb "$status_line" || status_is_paused_or_captain_held "$status_line"; then
+      weekly_census+="$seat"$'\t'idle$'\n'
+      continue
+    fi
+    # spawn_gen is s<epoch>.<suffix>; an unknown start keeps the full reserve.
+    started=$(awk -F= '$1 == "spawn_gen" {print $2; exit}' "$meta")
+    started=${started#s}; started=${started%%.*}
+    case "$started" in '' | *[!0-9]*) started=unknown ;; esac
+    [ "${#started}" -le 12 ] || started=unknown
+    weekly_census+="$seat"$'\t'"$started"$'\n'
   done
+  WEEKLY_DEMAND=$(jq -cRn '
+    reduce (inputs | select(length > 0) | split("\t")) as [$seat, $v] ({};
+      if $v == "idle" then .[$seat].idle = ((.[$seat].idle // 0) + 1)
+      else .[$seat].running = ((.[$seat].running // 0) + 1) |
+        .[$seat].started = ((.[$seat].started // []) + [$v | tonumber? // null]) end)' <<<"$weekly_census") || WEEKLY_DEMAND='{}'
   if [ -s "$CONFIG/claude-shaped-store" ]; then
     while IFS=$'\t' read -r seat store; do
       [ -n "$store" ] || continue
@@ -1068,23 +1090,33 @@ FM_DR_SEAT_JQ='
     ($cfg.plan_value[weekly_reference_seat] // null) as $ref |
     ($cfg.plan_value[$account // ""] // null) as $size |
     if ($ref | type) == "number" and $ref > 0 and ($size | type) == "number" and $size > 0 then $ref / $size else null end;
+  # A running worker has already put its spend so far into the weekly reading,
+  # so its committed share is only what it still has to spend: the reserve
+  # fades linearly over weekly_guard.decay_hours from its start, down to a
+  # fifth (about one more working hour) for as long as it keeps working. A
+  # worker with no known start keeps the full reserve.
+  def weekly_running_share($d):
+    ($cfg.weekly_guard.decay_hours // 6) as $hours |
+    ([range(0; $d.running // 0) as $i | ($d.started // [])[$i] |
+      if type != "number" then 1
+      else ([1 - (([$now - ., 0] | max) / ($hours * 3600)), 0.2] | max) end] | add // 0);
   def weekly_guard:
     map(if .eligible and ((.sq // false) | not) then
       . as $e | (account_quota($e.profile) // {providers: []} |
         [(prov($e.provider; lane_of($e.profile)).windows // [])[] | select(.id == "seven_day" or .id == "weekly" or .kind == "weekly")] | first) as $w |
       ($cfg.weekly_guard.max_used_percent // 98) as $limit |
-      ($cfg.weekly_guard.reserve_by_plan[($e.provider + ":" + $e.plan)] // $cfg.weekly_guard.reserve_percent // 2.6) as $base |
+      ($cfg.weekly_guard.reserve_by_plan[($e.provider + ":" + $e.plan)] // $cfg.weekly_guard.reserve_percent // 1) as $base |
       weekly_plan_scale($e.profile.account) as $scale |
       (if $scale == null then $base else (($base * $scale * 100) | round) / 100 end) as $reserve |
       ($demand[($e.profile.account // ("home:" + $e.provider))] // {}) as $d |
-      (($d.running // 0) + ($d.parked // 0)) as $n |
+      (weekly_running_share($d) + ($d.parked // 0)) as $n |
       if ($w.percentRemaining | type) != "number" then .
       else weekly_reset_waiver($w) as $waived |
         (if $waived then 0 else (($n * $reserve * 100) | round) / 100 end) as $committed |
         . + {weekly_estimate: "\(100 - $w.percentRemaining)%used+\($committed)%committed\(if $waived then "(waived)" else "" end)+\($reserve)%new/\($limit)%", demand_uncertain: ($d.uncertain // false)} |
       if (100 - $w.percentRemaining + $committed + $reserve) >= $limit then
         del(.unranked) + {eligible:false, weekly_guard:true,
-          reason:"weekly guard: \(100 - $w.percentRemaining)% used + \($committed)% committed (\($d.running // 0) running, \($d.parked // 0) parked\(if $waived then "; committed estimate waived: weekly window resets within \($cfg.ranking.reset_horizon_hours // 12)h with at least \($cfg.ranking.reset_horizon_min_percent // 10)% left, so the headroom is spent before it is lost" else "" end)) + \($reserve)% new\(if $scale != null and $scale != 1 then " (per-worker \($reserve)% = \($base)% x plan_value \($cfg.plan_value[weekly_reference_seat]) / \($cfg.plan_value[$e.profile.account]))" else "" end) >= \($limit)%; resets \($w.resetsAt // "unknown")"}
+          reason:"weekly guard: \(100 - $w.percentRemaining)% used + \($committed)% committed (\($d.running // 0) running, \(if ($d.idle // 0) > 0 then "\($d.idle) idle not counted, " else "" end)\($d.parked // 0) parked\(if $waived then "; committed estimate waived: weekly window resets within \($cfg.ranking.reset_horizon_hours // 12)h with at least \($cfg.ranking.reset_horizon_min_percent // 10)% left, so the headroom is spent before it is lost" else "" end)) + \($reserve)% new\(if $scale != null and $scale != 1 then " (per-worker \($reserve)% = \($base)% x plan_value \($cfg.plan_value[weekly_reference_seat]) / \($cfg.plan_value[$e.profile.account]))" else "" end) >= \($limit)%; resets \($w.resetsAt // "unknown")"}
       else . end end
     else . end);
   def bare($m): ($m | split("/") | last);
@@ -1917,7 +1949,7 @@ if [ "$PREVIEW" = true ]; then
     def measured($seat): ((if $seat == null then $home[0] else $aq[$seat].snapshot end).providers // []) | any(.[]; .quotaSemantics.status == "known") and (all(.[]; .reusedReading == null));
     ($rules[0]) as $cfg | $workers[0] as $workers | $pipeline[0] as $pipeline |
     {schemaVersion:1, at:$at, table:{sha256:$sha},
-     guards:{weekly:{maxUsedPercent:($cfg.weekly_guard.max_used_percent // 98), reservePercent:($cfg.weekly_guard.reserve_percent // 2.6), reserveByPlan:($cfg.weekly_guard.reserve_by_plan // {})}, fiveHour:$guard},
+     guards:{weekly:{maxUsedPercent:($cfg.weekly_guard.max_used_percent // 98), reservePercent:($cfg.weekly_guard.reserve_percent // 1), reserveByPlan:($cfg.weekly_guard.reserve_by_plan // {}), decayHours:($cfg.weekly_guard.decay_hours // 6)}, fiveHour:$guard},
      workers:[$workers[] | .id as $id | .chosen as $chosen | . + {
        measured:(if $chosen then measured($chosen.profile.account) and (($chosen.quota_unknown // false) | not) else false end),
        order:([.candidates[]?] | group_by([.profile.seat_tier // 1e9, -(.profile.reasoning_class // 0)]) | map(map(.profile.account // ("home:" + (.provider // "unknown"))))),
@@ -1933,7 +1965,7 @@ if [ "$PREVIEW" = true ]; then
        ([.windows[]? | select(.kind == "weekly" or .id == "seven_day" or .id == "weekly")] | first) as $w |
        ([.windows[]? | select(.kind == "session" or .id == "five_hour")] | first) as $f |
        {seat:$seat, provider:.provider, measured:measured($seat), weeklyLeft:($w.percentRemaining // null), weeklyResetsAt:($w.resetsAt // null),
-        fiveHourLeft:($f.percentRemaining // null), fiveHourResetsAt:($f.resetsAt // null), committed:($demand[$seat] // {running:0,parked:0})}]}'
+        fiveHourLeft:($f.percentRemaining // null), fiveHourResetsAt:($f.resetsAt // null), committed:({running:0,idle:0,parked:0} + ($demand[$seat] // {}) | del(.started))}]}'
   exit 0
 fi
 RESULT=$(fm_dispatch_resolve_json 1 0) || emit_error "resolution failed"

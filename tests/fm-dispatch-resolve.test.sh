@@ -607,6 +607,54 @@ weekly_run
 assert_contains "$out" '75% used + 23.4% committed (9 running, 0 parked) + 2.6% new >= 98%' 'a missing reference plan_value falls back to the flat 2.6%'
 jq 'del(.plan_value)' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
 rm -f "$HOME_DIR"/state/weekly-burst-*.meta
+# Committed demand is only spend the weekly reading does not show yet.
+# A fleet of 55 live endpoints whose work is finished, parked or waiting commits nothing, at the default reserve.
+jq 'del(.weekly_guard) | del(.ranking)' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_fleet() {  # <count> <status line, or empty for none> <spawn epoch, or empty for none> <name>
+  local n
+  for n in $(seq 1 "$1"); do
+    printf 'window=@77\nseat=claude2\nharness=claude\nkind=ship\n%s' "${3:+spawn_gen=s$3.1.1$'\n'}" > "$HOME_DIR/state/weekly-fleet-$4-$n.meta"
+    [ -z "$2" ] || printf '%s\n' "$2" > "$HOME_DIR/state/weekly-fleet-$4-$n.status"
+  done
+}
+weekly_fleet 30 'done [at=1893450000]: PR https://example.invalid/pr/1' 1893440000 finished
+weekly_fleet 10 'paused [at=1893450000]: waiting on the pipeline run' 1893440000 paused
+weekly_fleet 6 'needs-decision [key=pick] [at=1893450000]: A or B' 1893440000 decision
+weekly_fleet 5 'blocked [at=1893450000]: no access' 1893440000 blocked
+weekly_fleet 4 'captain-held [at=1893450000]: waiting for the captain' 1893440000 held
+weekly_reset_quota 87 2030-01-04T00:00:00Z
+weekly_run
+expect_code 0 "$code" "55 live endpoints with no working worker admit a start at 13% used: $out"
+assert_equals claude2 "$(jq -r .profile.account "$(latest)")" 'the low-use seat with 55 idle endpoints is selected'
+assert_contains "$out" 'weekly_estimate=13%used+0%committed+1%new/98%' 'idle endpoints commit nothing and the default reserve is 1 point'
+# The same fleet near real exhaustion is still refused, and the refusal names the endpoints it left out.
+weekly_reset_quota 3 2030-01-04T00:00:00Z
+weekly_run
+expect_code 3 "$code" "55 idle endpoints at 97% used still refuse a start: $out"
+assert_contains "$out" 'weekly guard: 97% used + 0% committed (0 running, 55 idle not counted, 0 parked) + 1% new >= 98%' 'the refusal near exhaustion names the idle endpoints'
+# Working workers count, each fading with its age: started now 1, 3h ago 0.5, 30h ago the 0.2 floor, no known start 1.
+weekly_fleet 1 'working [at=1893455000]: implementing' 1893456000 fresh
+weekly_fleet 1 'working [at=1893455000]: implementing' 1893445200 mid
+weekly_fleet 1 'working [at=1893455000]: implementing' 1893348000 old
+weekly_fleet 1 '' '' new
+weekly_reset_quota 5 2030-01-04T00:00:00Z
+weekly_run
+expect_code 3 "$code" "working workers tip a seat at 95% used over the limit: $out"
+assert_contains "$out" 'weekly guard: 95% used + 2.7% committed (4 running, 55 idle not counted, 0 parked) + 1% new >= 98%' 'working workers commit their faded shares'
+weekly_reset_quota 8 2030-01-04T00:00:00Z
+weekly_run
+expect_code 0 "$code" "the same working workers fit at 92% used: $out"
+assert_contains "$out" 'weekly_estimate=92%used+2.7%committed+1%new/98%' 'the estimate shows the faded committed demand'
+# A resolved decision returns its worker to the count, and decay_hours sets the fade.
+printf 'resolved [key=pick] [at=1893455900]: go with A\n' >> "$HOME_DIR/state/weekly-fleet-decision-1.status"
+jq '.weekly_guard = {decay_hours:12}' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+assert_contains "$out" 'weekly_estimate=92%used+3.58%committed+1%new/98%' 'a resolved worker counts again and decay_hours 12 fades the 3h and 4.4h workers to 0.75 and 0.63'
+jq '.weekly_guard.decay_hours = 0' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
+weekly_run
+expect_code 2 "$code" 'a decay_hours of zero is a config error'
+rm -f "$HOME_DIR"/state/weekly-fleet-*
+jq '.weekly_guard = {max_used_percent:98,reserve_percent:1,reserve_by_plan:{"claude:Team":2.6}}' "$RULES" > "$TMP_ROOT/rules-next"; mv "$TMP_ROOT/rules-next" "$RULES"
 unset FM_DISPATCH_NOW_EPOCH
 # Launches under the pinned clock left burst debits stamped 2030; drop them so later pinned-clock tests start clean.
 rm -f "$HOME_DIR/state/dispatch-burst-ledger"
@@ -623,7 +671,7 @@ rm "$HOME_DIR/state/weekly-dead.meta" "$HOME_DIR/state/weekly-other.meta" "$HOME
 unset QUOTA_FIXTURE_MAP
 cp "$TMP_ROOT/original-rules" "$RULES"
 cp "$TMP_ROOT/original-quota" "$QUOTA"
-pass 'weekly guard is start-only, counts live account demand, waives the committed estimate only inside the reset horizon, and preserves unknown behavior'
+pass 'weekly guard is start-only, counts only working account demand faded by age, waives the committed estimate only inside the reset horizon, and preserves unknown behavior'
 # Default-only tables still receive a valid Jev Choice, without degrading.
 jq '{default:.default}' "$TMP_ROOT/original-rules" > "$RULES"
 write_response default 1 '{"default":1}' default_1

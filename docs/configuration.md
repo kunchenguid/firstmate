@@ -2082,18 +2082,27 @@ A seat with no published weekly reset time is never waived, and every other seat
 These two `ranking` values are the same ones the `surplus_value` and `reset_first` dump band reads, with no separate knob.
 When no candidate can start and the weekly guard holds a candidate, the resolver prints `status: held`, the `weekly guard: ...` evidence and resets, writes no receipt, and exits 3; the task stays queued for fresh resolution on the next wake or reset rather than asking for a route around the guard.
 
-Demand estimate: count live worker endpoints from this home's `state/*.meta`, keyed by the current `seat` (or legacy `account`, or `home:<provider>`), using the recorded backend's existing endpoint-existence reader.
+Demand estimate: committed demand is only the spend the weekly reading does not show yet, so it counts the workers that are still working, each for what it still has to spend.
+It reads this home's `state/*.meta`, keyed by the current `seat` (or legacy `account`, or `home:<provider>`), and keeps the endpoints the recorded backend's existing endpoint-existence reader finds alive.
+A live endpoint counts only while its status log's current declaration is not `done`, `failed`, `needs-decision`, `blocked`, `paused` or `captain-held`; a worker with no status yet, or one whose decision was resolved, counts.
+The refusal line shows the endpoints left out as `<n> idle not counted`.
+This reads the status log alone, so a worker steered back to work after `done:` without a new status line is not counted until it reports.
+A counted worker has already put its spend so far into the weekly reading, so its share fades linearly from the full reserve at its start (the meta's `spawn_gen` time) to one fifth after `decay_hours` (default 6), and stays at that fifth while it keeps working.
+A worker with no recorded start keeps the full reserve.
 For a Claude store listed in `config/claude-shaped-store`, also add the committed-demand census's `parkedSessions` count, conservatively counting overlap twice rather than assuming parked work has no remaining cost.
 An unreadable census is disclosed as `parked_demand=unreadable`; its independent admission check remains unchanged.
-No calibrated conversion from model, effort, or the census's one-turn `floorInputTokens` into remaining weekly task cost exists, so all workers, including expensive models and high efforts, reserve the same fixed weekly percentage points for their account plan, without age-based decay.
-`reserve_percent` defaults to 2.6 points per worker; `reserve_by_plan` optionally overrides it by exact `provider:plan` label, using the existing account plan source (declared plan first, quota plan second).
+No calibrated conversion from model, effort, or the census's one-turn `floorInputTokens` into remaining weekly task cost exists, so all workers, including expensive models and high efforts, reserve the same weekly percentage points for their account plan; a parked session reserves the full figure without fading.
+`reserve_percent` defaults to 1 point per worker; `reserve_by_plan` optionally overrides it by exact `provider:plan` label, using the existing account plan source (declared plan first, quota plan second).
+The defaults are calibrated on measured Claude worker sessions (2026-11-10 to 2026-11-17, 337 sessions on `claude1` and 139 on `claude2`, priced from transcript token counts at 22.9 and 24.0 USD per weekly point): a whole session cost a mean 0.26 and 0.24 points, 0.62 and 0.59 at the 90th percentile and 0.94 and 0.73 at the 95th, at 0.17 to 0.20 points per working hour, and 90% of sessions ended within 5.3 hours.
+So 1 point covers the 95th percentile session, 6 hours covers the 90th percentile lifetime, and the one-fifth floor is about one more working hour.
+Providers other than Claude have no such measurement and take the same figure through the plan-size scaling.
 The resolved figure is the per-worker share for the reference seat `claude1`, and it is scaled per seat by plan size because one worker costs about the same absolute weekly amount on any plan: seat reserve = resolved figure x `plan_value` of `claude1` / `plan_value` of the seat, rounded to hundredths.
-With `claude1` and `claude2` at 200 a worker commits 2.6 points on either, on a `claude3` at 125 it commits 4.16, on `codex1` at 100 it commits 5.2, and on `codex2` at 25 it commits 20.8.
+With `claude1` and `claude2` at 200 a worker commits 1 point on either, on a `claude3` at 125 it commits 1.6, on `codex1` at 100 it commits 2, and on `codex2` at 25 it commits 8.
 A seat, or `claude1`, missing from the top-level `plan_value` map keeps the flat figure, and no new setting exists; a scaled refusal line names the arithmetic.
-For example, `"weekly_guard": {"max_used_percent": 98, "reserve_percent": 2.6, "reserve_by_plan": {"claude:Max": 1.3}}` reserves 1.3 points per running, parked, or proposed worker on a Claude Max account and 2.6 elsewhere, including unknown plans, each before the plan-size scaling.
-All numeric values must be greater than zero and at most 100.
+For example, `"weekly_guard": {"max_used_percent": 98, "reserve_percent": 2.6, "reserve_by_plan": {"claude:Max": 1.3}, "decay_hours": 12}` reserves 1.3 points per working, parked, or proposed worker on a Claude Max account and 2.6 elsewhere, including unknown plans, each before the plan-size scaling, and fades a working worker's share over 12 hours.
+The percent values must be greater than zero and at most 100, and `decay_hours` greater than zero.
 The candidate line shows `weekly_estimate=<used>%used+<committed>%committed+<reserve>%new/<limit>%`, separately from published `spendPriority` and the burst spreader.
-This is a conservative fixed reserve, not a guarantee that any task fits or a forecast against resets; concurrent resolutions can still observe the same census before either launch creates metadata.
+This is a conservative reserve, not a guarantee that any task fits or a forecast against resets; concurrent resolutions can still observe the same census before either launch creates metadata.
 
 **Heavy-row seat pacing**
 
