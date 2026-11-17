@@ -84,9 +84,9 @@
 # and consume no rotation slots.
 # With any live URL, poll makes one forge search before the first read for the authenticated
 # user's PRs and issues updated since the last completed sweep (stored in
-# state/.contributions-sweep; an hour back when absent) and reads the live
+# state/.contributions-sweep; at most an hour back) and reads the live
 # URLs it returns ahead of the rotation, which orders the rest. The stored time
-# advances only when every returned live URL was read, and a failed or
+# advances to the oldest returned live URL not yet attempted, and a failed or
 # rate-limited search leaves the rotation as the only order.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct supported
@@ -659,16 +659,18 @@ sweep_since() { # last stored sweep time, widened by the clock skew; at most an 
     ((try ($since | fromdateiso8601 | select(. <= $epoch)) // ($epoch - 3600)) | [., $epoch - 3600] | max) - $skew | todateiso8601'
 }
 
-store_sweep() {
-  local staged
+store_sweep() { # updatedAt of the oldest updated URL still unread; the current time when none
+  local staged at=$NOW
   [ ! -L "$SWEEP_FILE" ] || return 0
+  [ -z "${1:-}" ] || at=$(jq -nr --arg at "$1" --arg now "$NOW" --argjson skew "$SWEEP_SKEW" '
+    [($at | fromdateiso8601) + $skew, ($now | fromdateiso8601)] | min | todateiso8601') || return 0
   staged=$(umask 077; mktemp "$STATE/.contributions-sweep.XXXXXX")
-  printf '%s\n' "$NOW" > "$staged"
+  printf '%s\n' "$at" > "$staged"
   mv -f -- "$staged" "$SWEEP_FILE"
 }
 
 poll() {
-  local task url old kind error observed why unreported=$'\n'
+  local task url old kind error observed why unread unreported=$'\n'
   local -a row
   acquire
   get_input
@@ -742,7 +744,7 @@ poll() {
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
-    [ "$observed" -ne 0 ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] || printf '%s\n' "$url" >> "$TMP/attempted.txt"
+    printf '%s\n' "$url" >> "$TMP/attempted.txt"
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     why='no failing step recorded'
     [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
@@ -792,11 +794,9 @@ poll() {
       terminal_hold_event "$task" "$url"
     done
   done < "$TMP/known.tsv"
-  # The next search starts where this one did only when every updated URL it
-  # returned was read; otherwise the unread ones stay inside the next window.
-  if [ "$swept" -eq 1 ] && [ "$(wc -l < "$TMP/updated.txt")" -lt "$SWEEP_LIMIT" ] \
-    && ! grep -vFxf "$TMP/attempted.txt" "$TMP/updated-live.txt" > /dev/null; then
-    store_sweep
+  if [ "$swept" -eq 1 ] && [ "$(wc -l < "$TMP/updated.txt")" -lt "$SWEEP_LIMIT" ]; then
+    unread=$(grep -vFxf "$TMP/attempted.txt" "$TMP/updated-live.txt" | head -n 1 || true)
+    store_sweep "$([ -z "$unread" ] || awk -F'\t' -v url="$unread" '$1 == url { print $2; exit }' "$TMP/updated.txt")"
   fi
 }
 
