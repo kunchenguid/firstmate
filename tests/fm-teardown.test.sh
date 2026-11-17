@@ -6568,30 +6568,41 @@ SH
 }
 
 test_released_branch_safety_and_reassigned_copy() {
-  local case_dir head moved rc
+  local case_dir head moved rc pr=https://github.com/example/repo/pull/7
   case_dir=$(make_case released-safety)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" released
+  wt_commit_file "$case_dir" feature.txt released
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin HEAD:refs/pull/7/head || fail "cannot seed PR-only head"
   git -C "$case_dir/wt" checkout --detach -q
-  printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
-  printf 'branch=fm/task-x1\nhead=%s\nendpoint_closed=1\nreleased_at=1\n' "$head" > "$case_dir/state/task-x1.review-park"
+  printf 'branch=fm/task-x1\npr=%s\n' "$pr" >> "$case_dir/state/task-x1.meta"
+  printf 'branch=fm/task-x1\npr=%s\nhead=%s\nendpoint_closed=1\nreleased_at=1\n' "$pr" "$head" > "$case_dir/state/task-x1.review-park"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+[ "\$1 \$2 \$3" = 'pr view $pr' ] || exit 1
+printf '%s\t%s\t%s\n' OPEN '$head' '$pr'
+SH
   printf 'task=another\nhome=elsewhere\n' > "$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-dir)/fm-slot-owner"
   printf 'do not touch\n' > "$case_dir/wt/other-task-file"
-  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m moved
+  wt_commit_file "$case_dir" follow-up.txt moved
   moved=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/fm/task-x1 "$moved"
   rc=0; run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail "released: a moved unpushed branch was accepted"
-  grep -q 'released branch.*not proven pushed' "$case_dir/out" || fail "released: missing refusal: $(cat "$case_dir/out")"
+  grep -q 'REFUSED: released branch' "$case_dir/out" || fail "released: missing refusal: $(cat "$case_dir/out")"
   [ -f "$case_dir/wt/other-task-file" ] || fail "released: another task's copy was touched"
   git -C "$case_dir/project" update-ref refs/heads/fm/task-x1 "$head"
   rc=0; run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
-  [ "$rc" = 0 ] || fail "released: teardown refused its recorded head: $(cat "$case_dir/out")"
+  [ "$rc" != 0 ] || fail "released: teardown accepted a head reachable only from an open PR ref"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "released: refusal removed the task record"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$head" ] || fail "released: refusal changed the branch"
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  rc=0; run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "released: teardown refused its merged PR head: $(cat "$case_dir/out")"
   [ -f "$case_dir/wt/other-task-file" ] || fail "released: another task's copy was touched"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "released: task record survived"
   ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 || fail "released: branch survived"
-  pass "released teardown preserves a reassigned copy and refuses moved unpushed work"
+  pass "released teardown requires proof that work was pushed or landed and preserves a reassigned copy"
 }
 
 test_stale_release_record_keeps_owned_copy_safety_gate() {

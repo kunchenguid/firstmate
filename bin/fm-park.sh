@@ -683,6 +683,24 @@ cmd_park() {
   printf 'parked %s: PR %s clean at %s; agent stopped\n' "$id" "$pr" "${head:0:12}"
 }
 
+tmux_release_window_identity() {
+  local target=$1
+  tmux display-message -p -t "=${target%%:*}:=${target#*:}" '#{socket_path}|#{pid}|#{window_id}'
+}
+
+tmux_release_server_matches() {
+  local socket=$1 server=$2 birth=$3 observed
+  [ -n "$socket" ] && [ -n "$birth" ] || return 1
+  observed=$(tmux -S "$socket" display-message -p '#{pid}' 2>/dev/null) || return 1
+  [ "$observed" = "$server" ] &&
+    [ "$(fm_pid_start_time "$server" 2>/dev/null || true)" = "$birth" ]
+}
+
+tmux_release_window_valid() {
+  case "${1#@}" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${1#@}" != "$1" ]
+}
+
 # Return a parked lane's lease only after a fresh forge and local safety check.
 # The release journal is written before closing the endpoint or returning the
 # slot, so an interrupted operation cannot be mistaken for an ordinary park.
@@ -726,25 +744,25 @@ cmd_release() {
   fm_task_inbox_lock_acquire "$inbox_lock" || die "cannot lock the steering inbox"
   LOCKS_HELD="$LOCKS_HELD $inbox_lock"
   if find "$STATE/$id.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | grep -q .; then die "an instruction is waiting"; fi
+  socket=; server=; window=; birth=
+  if [ "$backend" = tmux ]; then
+    tmux_identity=$(tmux_release_window_identity "$target") || die "cannot identify the tmux endpoint"
+    IFS='|' read -r socket server window <<< "$tmux_identity"
+    [ -n "$socket" ] && tmux_release_window_valid "$window" || die "cannot identify the tmux endpoint"
+    birth=$(fm_pid_start_time "$server") || die "cannot identify the tmux server process"
+  fi
   state=$(fm_backend_agent_state "$backend" "$target")
   [ "$state" = dead ] || die "the stopped agent cannot be verified ($state)"
   if ! result=$(gate_eval "$id" "$head") || ! gate_print "$result" >/dev/null; then
     die "the release gate changed before closing the endpoint"
   fi
-  socket=; server=; window=; birth=
-  if [ "$backend" = tmux ]; then
-    tmux_identity=$(tmux display-message -p -t "=${target%%:*}:=${target#*:}" '#{socket_path}|#{pid}|#{window_id}') || die "cannot identify the tmux endpoint"
-    IFS='|' read -r socket server window <<< "$tmux_identity"
-    [ -n "$socket" ] && [ -n "$window" ] || die "cannot identify the tmux endpoint"
-    birth=$(fm_pid_start_time "$server") || die "cannot identify the tmux server process"
-  fi
   record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked" "slot_leased=yes" "branch=$branch" "releasing=1" \
     "release_wt=$wt" "release_project=$project" "closed_backend=$backend" "closed_target=$target" \
     "tmux_socket=$socket" "tmux_server=$server" "tmux_window=$window" "tmux_birth=$birth" || die "cannot journal release"
   if [ "$backend" = tmux ]; then
-    # A successful close is the proof for this exact endpoint; a generic
-    # missing-window observation cannot establish which tmux server held it.
-    tmux kill-window -t "=${target%%:*}:=${target#*:}" || die "cannot close the tmux endpoint"
+    [ "$(tmux_release_window_identity "$target")" = "$tmux_identity" ] &&
+      tmux_release_server_matches "$socket" "$server" "$birth" || die "the tmux endpoint changed before closing"
+    tmux -S "$socket" kill-window -t "$window" || die "cannot close the tmux endpoint"
   else
     fm_backend_kill "$backend" "$target" || die "cannot close the endpoint"
     state=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
@@ -760,13 +778,28 @@ cmd_release() {
 }
 
 settle_endpoint_close() {  # <id>
-  local id=$1 meta backend target state result socket server window birth observed windows inbox_lock
+  local id=$1 meta backend target state result socket server window birth windows inbox_lock
   meta="$STATE/$id.meta"; backend=$(fm_backend_of_meta "$meta"); target=$(fm_backend_target_of_meta "$meta")
   [ "$(record_get "$id" closed_backend)" = "$backend" ] && [ "$(record_get "$id" closed_target)" = "$target" ] || return 1
   [ "$(record_get "$id" release_wt)" = "$(fm_meta_get "$meta" worktree)" ] &&
     [ "$(record_get "$id" release_project)" = "$(fm_meta_get "$meta" project)" ] &&
     [ "$(record_get "$id" pr)" = "$(fm_meta_get "$meta" pr)" ] || return 1
-  state=$(fm_backend_agent_state "$backend" "$target")
+  if [ "$backend" = tmux ]; then
+    socket=$(record_get "$id" tmux_socket); server=$(record_get "$id" tmux_server)
+    window=$(record_get "$id" tmux_window); birth=$(record_get "$id" tmux_birth)
+    tmux_release_window_valid "$window" || return 1
+    tmux_release_server_matches "$socket" "$server" "$birth" || return 1
+    windows=$(tmux -S "$socket" list-windows -a -F '#{window_id}' 2>/dev/null) || return 1
+    tmux_release_server_matches "$socket" "$server" "$birth" || return 1
+    state=missing
+    if printf '%s\n' "$windows" | grep -Fxq -- "$window"; then
+      [ "$(tmux_release_window_identity "$target")" = "$socket|$server|$window" ] || return 1
+      state=$(fm_backend_agent_state "$backend" "$target")
+      [ "$state" = dead ] || return 1
+    fi
+  else
+    state=$(fm_backend_agent_state "$backend" "$target")
+  fi
   if [ "$state" = dead ]; then
     inbox_lock=$(fm_task_inbox_delivery_lock_path "$STATE" "$id")
     fm_task_inbox_lock_acquire "$inbox_lock" || return 1
@@ -778,7 +811,9 @@ settle_endpoint_close() {  # <id>
       return 2
     fi
     if [ "$backend" = tmux ]; then
-      tmux kill-window -t "=${target%%:*}:=${target#*:}" || return 1
+      [ "$(tmux_release_window_identity "$target")" = "$socket|$server|$window" ] &&
+        tmux_release_server_matches "$socket" "$server" "$birth" || return 1
+      tmux -S "$socket" kill-window -t "$window" || return 1
     else
       fm_backend_kill "$backend" "$target" || return 1
       state=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
@@ -787,17 +822,6 @@ settle_endpoint_close() {  # <id>
   elif [ "$backend" != tmux ]; then
     state=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
     [ "${state%%$'\t'*}" = gone ] || return 1
-  else
-    # Re-read the exact server and stable window id saved before the close.
-    # The server's process birth guards against socket and PID reuse.
-    socket=$(record_get "$id" tmux_socket); server=$(record_get "$id" tmux_server)
-    window=$(record_get "$id" tmux_window); birth=$(record_get "$id" tmux_birth)
-    [ -n "$socket" ] && [ -n "$window" ] && [ -n "$birth" ] || return 1
-    [ "$(fm_pid_start_time "$server" 2>/dev/null || true)" = "$birth" ] || return 1
-    observed=$(tmux -S "$socket" display-message -p '#{pid}' 2>/dev/null) || return 1
-    [ "$observed" = "$server" ] || return 1
-    windows=$(tmux -S "$socket" list-windows -a -F '#{window_id}' 2>/dev/null) || return 1
-    ! printf '%s\n' "$windows" | grep -Fxq -- "$window" || return 1
   fi
   record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
     "parked_at=$(record_get "$id" parked_at)" "slot_leased=yes" "branch=$(record_get "$id" branch)" \

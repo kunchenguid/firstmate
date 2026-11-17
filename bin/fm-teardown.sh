@@ -1677,8 +1677,8 @@ pr_number_from_target() {
 # GitLab serves a merge request's head as refs/merge-requests/<n>/head; GitHub
 # and Forgejo serve a pull request's as refs/pull/<n>/head.
 ensure_commit_object() {
-  local target=$1 commit=$2 n ref
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  local target=$1 commit=$2 repo=$3 n ref
+  git -C "$repo" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   case "$target" in
     *"/-/merge_requests/"*)
       n=${target##*/-/merge_requests/}
@@ -1691,38 +1691,37 @@ ensure_commit_object() {
       ref="refs/pull/$n/head"
       ;;
   esac
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  git -C "$repo" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$repo" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
+  git -C "$repo" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
 patch_id_for_commit() {
-  local commit=$1
+  local commit=$1 repo=$2
   # Indentation can change semantics. Unsupported --verbatim yields no id,
   # so callers fall back to the content check or refuse, never ignore whitespace.
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+  git -C "$repo" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --verbatim 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
 unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  local pr_head=$1 repo=$2 current=$3 base pr_patch_ids commit patch_id unpushed
+  base=$(git -C "$repo" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+    git -C "$repo" log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
+          patch_id_for_commit "$commit" "$repo"
         done \
       | sed '/^$/d' \
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$repo" log --format=%H "$current" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
+    patch_id=$(patch_id_for_commit "$commit" "$repo") || return 1
     [ -n "$patch_id" ] || return 1
     printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
   done <<EOF
@@ -1748,11 +1747,11 @@ gitlab_mr_landing_opted_in() {
 }
 
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 repo=$2 revision=$3 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
+    target=$(fm_pr_number_from_branch "$repo" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
@@ -1768,7 +1767,7 @@ pr_is_merged() {
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
   else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    view=$(cd "$repo" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
     state=${view%%$'\t'*}
     remainder=${view#*$'\t'}
     [ "$state" != "$view" ] || return 1
@@ -1781,11 +1780,11 @@ pr_is_merged() {
     esac
   fi
   [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+  ensure_commit_object "$target" "$head" "$repo" || return 1
+  current=$(git -C "$repo" rev-parse --verify "$revision" 2>/dev/null) || return 1
+  if git -C "$repo" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif unpushed_patches_are_in_pr_head "$head" "$repo" "$current"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1797,8 +1796,8 @@ pr_is_merged() {
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
+# first, then 3-way merges the default branch with the task's revision. When that revision
+# introduces nothing new (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
 # "added". Returns non-zero when inconclusive (no default ref, a merge conflict,
@@ -1806,20 +1805,20 @@ pr_is_merged() {
 # CONTENT_LANDED_PROOF_ERROR names a merge-tree option or execution failure
 # separately from a conflict or differing tree.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
+  local repo=$1 revision=$2 name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
   CONTENT_LANDED_PROOF_ERROR=
   [ -n "$name" ] || name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    git -C "$repo" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif git -C "$repo" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(git -C "$repo" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
+  merged_tree=$(git -C "$repo" merge-tree --write-tree "$ref" "$revision" 2>/dev/null) || {
     merge_status=$?
     case "$merge_status" in
       1) ;; # Git completed the merge and found conflicts.
@@ -1838,9 +1837,14 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local branch=$1 repo=${2:-$WT} revision=${3:-HEAD} default
+  if [ "$MODE" = local-only ]; then
+    default=$(default_branch) || return 1
+    git -C "$repo" merge-base --is-ancestor "$revision" "$default"
+    return
+  fi
+  pr_is_merged "$branch" "$repo" "$revision" && return 0
+  content_in_default "$repo" "$revision"
 }
 
 # The completion links this teardown already holds locally. A retained scout
@@ -2176,7 +2180,7 @@ refresh_remote_refs() {
   [ "$REMOTE_REFS_REFRESHED" = 0 ] || return 0
   REMOTE_REFS_REFRESHED=1
   FM_DOD_REFRESH_FAILED=
-  fm_dod_refresh_remote_refs "$WT" 30
+  fm_dod_refresh_remote_refs "${1:-$WT}" 30
 }
 
 report_remote_refresh_failure() {
@@ -3726,12 +3730,20 @@ if [ "$TEARDOWN_RELEASED" = 1 ]; then
     exit 1
   fi
   RELEASED_TIP=$(git -C "$PROJ" rev-parse --verify "refs/heads/$RELEASED_BRANCH" 2>/dev/null || true)
-  RELEASED_UNPUSHED=unknown
-  if [ -n "$RELEASED_TIP" ]; then
-    RELEASED_UNPUSHED=$(git -C "$PROJ" log --format=%H "$RELEASED_TIP" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || RELEASED_UNPUSHED=unknown
+  if [ -z "$RELEASED_TIP" ] || ! RELEASED_UNPUSHED=$(git -C "$PROJ" log --format=%H "$RELEASED_TIP" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
+    echo "REFUSED: released branch $RELEASED_BRANCH cannot be inspected" >&2
+    exit 1
   fi
-  if [ -z "$RELEASED_TIP" ] || { [ "$RELEASED_TIP" != "$RELEASED_HEAD" ] && [ -n "$RELEASED_UNPUSHED" ]; }; then
-    echo "REFUSED: released branch $RELEASED_BRANCH has work not proven pushed" >&2
+  if [ -n "$RELEASED_UNPUSHED" ]; then
+    refresh_remote_refs "$PROJ"
+    RELEASED_UNPUSHED=$(git -C "$PROJ" log --format=%H "$RELEASED_TIP" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || {
+      echo "REFUSED: released branch $RELEASED_BRANCH cannot be inspected" >&2
+      exit 1
+    }
+  fi
+  if [ -n "$RELEASED_UNPUSHED" ] && ! work_is_landed "$RELEASED_BRANCH" "$PROJ" "$RELEASED_TIP"; then
+    echo "REFUSED: released branch $RELEASED_BRANCH has work not on any remote and not landed" >&2
+    report_remote_refresh_failure
     exit 1
   fi
 else

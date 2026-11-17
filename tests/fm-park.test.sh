@@ -125,7 +125,14 @@ SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = -S ]; then
   shift 2
-  case "\$1" in display-message) echo "$$" ;; list-windows) echo '@9' ;; *) exit 1 ;; esac
+  case "\$1" in
+    display-message) echo "$$" ;;
+    list-windows) cat "$world/tmux.window" 2>/dev/null || echo '@9' ;;
+    kill-window)
+      [ "\${3:-}" = "\$(cat "$world/tmux.window" 2>/dev/null || echo '@1')" ] || exit 1
+      rm -f "$world/agent.stopped" ;;
+    *) exit 1 ;;
+  esac
   exit 0
 fi
 [ ! -e "$world/tmux.hang" ] || sleep 30
@@ -133,7 +140,12 @@ fi
 [ -e "$world/agent.alive" ] || [ -e "$world/agent.stopped" ] || { echo "no server running on /tmp/tmux-fake/default" >&2; exit 1; }
 case "\$1" in
   list-windows) echo fm-lane ;;
-  display-message) case "\$*" in *socket_path*) printf '/tmp/fake|%s|@1\n' "$$" ;; *pane_current_command*) echo bash ;; *) echo /dev/ttysfake ;; esac ;;
+  display-message)
+    case "\$*" in
+      *socket_path*) printf '/tmp/fake|%s|%s\n' "$$" "\$(cat "$world/tmux.window" 2>/dev/null || echo '@1')" ;;
+      *pane_current_command*) echo bash ;;
+      *) echo /dev/ttysfake ;;
+    esac ;;
   kill-window) rm -f "$world/agent.stopped"; exit 0 ;;
   *) exit 1 ;;
 esac
@@ -1358,8 +1370,12 @@ test_release_opt_in_drives_park_and_release() {
 }
 
 test_interrupted_tmux_release_settles_by_server_identity() {
-  local w wt head birth out
-  w=$(make_world release-interrupted "$GH_URL"); gh_fixture "$w/gh.1.json"
+  local variant=$1 w wt head birth out
+  w=$(make_world "release-interrupted-$variant" "$GH_URL"); gh_fixture "$w/gh.1.json"
+  case "$variant" in
+    original) echo '@1' > "$w/tmux.window"; : > "$w/agent.stopped" ;;
+    replacement) echo '@9' > "$w/tmux.window"; : > "$w/agent.stopped" ;;
+  esac
   wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
   birth=$(FM_HOME="$w" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_start_time "$2"' _ "$ROOT" "$$") || fail "cannot read test process birth"
   printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=yes\nbranch=fm/lane\nreleasing=1\nrelease_wt=%s\nrelease_project=%s\nclosed_backend=tmux\nclosed_target=fm:fm-lane\ntmux_socket=/tmp/fake\ntmux_server=%s\ntmux_window=@1\ntmux_birth=%s\n' "$GH_URL" "$head" "$wt" "$w/project" "$$" "$birth" > "$w/state/lane.review-park"
@@ -1368,7 +1384,17 @@ test_interrupted_tmux_release_settles_by_server_identity() {
   out=$(run_park "$w" release lane 2>&1) || fail "interrupted release: $out"
   grep -q '^released_at=' "$w/state/lane.review-park" || fail "interrupted release was not settled"
   ! grep -q '^releasing=' "$w/state/lane.review-park" || fail "interrupted release journal was retained"
-  pass "an interrupted tmux close is settled against its recorded server and window identity"
+  case "$variant" in
+    original) [ ! -e "$w/agent.stopped" ] || fail "interrupted release left the original idle window open" ;;
+    replacement) [ -e "$w/agent.stopped" ] || fail "interrupted release closed the replacement window" ;;
+  esac
+}
+
+test_interrupted_tmux_release_recovery() {
+  test_interrupted_tmux_release_settles_by_server_identity missing
+  test_interrupted_tmux_release_settles_by_server_identity original
+  test_interrupted_tmux_release_settles_by_server_identity replacement
+  pass "interrupted tmux release settles its recorded window and preserves a same-named replacement"
 }
 
 test_reacquire_refuses_a_moved_branch() {
@@ -1444,7 +1470,7 @@ fm_test_run \
   test_park_claims_an_unclaimed_custom_slot \
   test_real_treehouse_reuses_returned_slots \
   test_reacquire_fast_forwards_a_new_forge_head \
-  test_interrupted_tmux_release_settles_by_server_identity \
+  test_interrupted_tmux_release_recovery \
   test_reacquire_refuses_a_moved_branch \
   test_custom_pool_paths_have_distinct_owner_claims \
   test_release_refuses_unsafe_copies \
