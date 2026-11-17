@@ -5242,7 +5242,7 @@ test_branch_dispatch_routes_secondmate_signal_by_new_span() {
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const { branchOfferForWake, scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
@@ -5308,6 +5308,13 @@ if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).elig
 stage("mate", hold, "done: sample-d PR merged\n");
 rmSync(`${state}/.status-presentation-cursor`);
 if (verdicts().some(Boolean)) throw new Error("a missing presentation cursor did not fall back to the whole log");
+
+// A row carrying pending results (config/result-replay) is still a readable
+// cursor, so the presented span keeps scoping the route.
+stage("mate", hold, "done: sample-f PR merged\n");
+const cursor = `${state}/.status-presentation-cursor`;
+writeFileSync(cursor, readFileSync(cursor, "utf8").replace(/\n$/, "\t31:s:done: pending%2C retained\n"));
+if (!verdicts().every(Boolean)) throw new Error("a presentation cursor row with pending results lost its presented span");
 
 // A stale row stays a whole-log liveness check, and a co-queued signal row for
 // the same second mate keeps its own verdict in either order.

@@ -271,6 +271,9 @@ An acknowledgement carries two separable facts:
 
 A generation mismatch therefore does not block consumption of rows through that sequence.
 It is a non-fatal result that names its own remedy: re-drain, then acknowledge the newer episode.
+By default a drain presents a completed result once, so an interruption before the acknowledgement keeps the queued row and not the result's text.
+Under the opt-in [completed-result replay](configuration.md#completed-result-replay-configresult-replay), a presented completed result repeats under `UNHANDLED RESULTS` until a main acknowledgement retires it.
+That acknowledgement must match the generation and cover every wake row presented to main.
 
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.

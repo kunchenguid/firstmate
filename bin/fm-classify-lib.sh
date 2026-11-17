@@ -1680,7 +1680,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 }
 
 status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
+  local f=$1 state task manifest data row_task offset ident backstop _results extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -1689,7 +1689,7 @@ status_presentation_cursor_offset() {  # <status-file>
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
+    while IFS=$(printf '\t') read -r row_task ident legacy backstop _results extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
       case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
@@ -1724,7 +1724,7 @@ EOF
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  local f=$1 state task manifest data row_task ident presented row_backstop backstop _results extra current size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -1733,7 +1733,7 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
   data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
   backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
+  while IFS=$(printf '\t') read -r row_task ident presented row_backstop _results extra; do
     [ -n "$row_task" ] || continue
     [ -z "$extra" ] || return 1
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
@@ -1890,7 +1890,7 @@ status_presentation_marker_commit() {
 # path selection and retention; publication also checks for unsafe collisions.
 # No status consumer reads that archive.
 status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop results _results extra rc=0 found=0 archive_published=0
   local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1921,7 +1921,7 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
       && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop _results extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
         case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
@@ -1962,13 +1962,13 @@ EOF
     elif ! : > "$tmp"; then
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop results extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
         case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
         [ -n "$offset" ] || { rc=1; break; }
         if [ "$row_task" != "$task" ]; then
-          printf '%s\t%s\t%s\t%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" >> "$tmp" \
+          printf '%s\t%s\t%s\t%s%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" "${results:+$'\t'$results}" >> "$tmp" \
             || { rc=1; break; }
         fi
       done <<EOF
@@ -2028,8 +2028,126 @@ $snapshot
 EOF
 }
 
+# config/result-replay (docs/configuration.md) keeps each completed result that
+# main's drain presented in this receipt until main's matching handling
+# acknowledgement. A task row carries them in an optional fifth field of
+# comma-separated <end>:<shown>:<text> entries, oldest first. <end> is the
+# line's byte endpoint in the log that held it. <shown> is s when main's latest
+# drain printed the entry and o when that drain's byte cap omitted it. <text>
+# is the retained line with % and , percent-encoded, so a replaced log can
+# neither change nor lose what repeats.
+status_result_replay_enabled() {
+  local config=${FM_CONFIG_OVERRIDE:-${FM_HOME:+$FM_HOME/config}}
+  [ -n "$config" ] && [ -e "$config/result-replay" ]
+}
+
+status_result_entry() {  # <end> <shown> <text>
+  local text=${3//%/%25}
+  printf '%s:%s:%s' "$1" "$2" "${text//,/%2C}"
+}
+
+# <task> TAB <fifth-field> for every receipt row that carries pending results.
+status_presentation_result_fields() {  # <state>
+  local manifest="$1/.status-presentation-cursor" data row_task ident offset backstop results extra
+  [ -e "$manifest" ] || [ -L "$manifest" ] || return 0
+  [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+  while IFS=$(printf '\t') read -r row_task ident offset backstop results extra; do
+    [ -n "$row_task" ] && [ -n "$results" ] || continue
+    [ -z "$extra" ] || return 1
+    printf '%s\t%s\n' "$row_task" "$results" || return 1
+  done <<EOF
+$data
+EOF
+}
+
+# <task> TAB <end> TAB <shown> TAB <decoded text> for every pending result.
+status_presentation_results() {  # <state>
+  local fields task field entry end shown text
+  fields=$(status_presentation_result_fields "$1") || return 1
+  while IFS=$(printf '\t') read -r task field; do
+    [ -n "$task" ] || continue
+    while [ -n "$field" ]; do
+      entry=${field%%,*}
+      case "$field" in *,*) field=${field#*,} ;; *) field= ;; esac
+      end=${entry%%:*}
+      entry=${entry#*:}
+      shown=${entry%%:*}
+      text=${entry#*:}
+      case "$end" in ''|*[!0-9]*) return 1 ;; esac
+      case "$shown" in s|o) ;; *) return 1 ;; esac
+      text=${text//%2C/,}
+      printf '%s\t%s\t%s\t%s\n' "$task" "$end" "$shown" "${text//%25/%}" || return 1
+    done
+  done <<EOF
+$fields
+EOF
+}
+
+# <end> TAB <line> for each done line inside the captured byte span.
+status_result_lines_in_span() {  # <status-file> <start> <end>
+  local f=$1 start=$2 end=$3 chunk span line_end line verb
+  [ "$start" -lt "$end" ] || return 0
+  chunk=$(_fm_status_read_span "$f" "$start" $((end - start))) || return 1
+  span=$(printf '%s\n' "$chunk" | LC_ALL=C awk -v pos="$start" -v end="$end" '
+    { pos += length($0) + 1; if (pos > end) pos = end; if ($0 ~ /[^[:space:]]/) print pos "\t" $0 }
+  ') || return 1
+  while IFS=$(printf '\t') read -r line_end line; do
+    [ -n "$line_end" ] || continue
+    status_line_verb "$line" verb
+    [ "$verb" = "done" ] || continue
+    printf '%s\t%s\n' "$line_end" "$line" || return 1
+  done <<EOF
+$span
+EOF
+}
+
+# Main's matching handling acknowledgement retires the results its latest
+# drain printed. A result that drain's byte cap omitted keeps repeating.
+status_retire_shown_results() {  # <state>
+  local state=$1 lock manifest tmp data row_task ident offset backstop results extra kept entry rc=0
+  lock="$state/.status-presentation-lock"
+  manifest="$state/.status-presentation-cursor"
+  [ -n "$(status_presentation_result_fields "$state")" ] || return 0
+  fm_lock_acquire_wait "$lock" || return 1
+  tmp="$manifest.tmp.$$"
+  if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ] \
+    || ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || ! : > "$tmp"; then
+    rc=1
+  else
+    while IFS=$(printf '\t') read -r row_task ident offset backstop results extra; do
+      [ -n "$row_task" ] || continue
+      [ -z "$extra" ] || { rc=1; break; }
+      kept=
+      while [ -n "$results" ]; do
+        entry=${results%%,*}
+        case "$results" in *,*) results=${results#*,} ;; *) results= ;; esac
+        case "${entry#*:}" in s:*) ;; *) kept="${kept:+$kept,}$entry" ;; esac
+      done
+      printf '%s\t%s\t%s\t%s%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" "${kept:+$'\t'$kept}" >> "$tmp" \
+        || { rc=1; break; }
+    done <<EOF
+$data
+EOF
+    if [ "$rc" -eq 0 ]; then mv -f "$tmp" "$manifest" || rc=1; fi
+  fi
+  [ "$rc" -eq 0 ] || rm -f "$tmp"
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
 status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
+  local results receipt_task receipt_results fields=''
+  # Only main's gated drain supplies new pending results; any other presenter
+  # keeps the recorded ones, and a home without the gate drops them.
+  if status_result_replay_enabled; then
+    if [ "${STATUS_RESULT_RECEIPT_SET:-0}" = 1 ]; then
+      fields=${STATUS_RESULT_RECEIPT:-}
+    else
+      fields=$(status_presentation_result_fields "$state") || return 1
+    fi
+  fi
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -2044,14 +2162,20 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
     backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
-    while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
+    while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint _; do
       if [ "$acknowledged_task" = "$task" ]; then backstop=$acknowledged_endpoint; fi
     done <<EOF
 ${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
 EOF
     case "$backstop" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$backstop" -le "$size" ] || { rm -f "$tmp"; return 1; }
-    printf '%s\t%s\t%s\t%s\n' "$task" "$ident" "$endpoint" "$backstop" >> "$tmp" \
+    results=
+    while IFS=$(printf '\t') read -r receipt_task receipt_results; do
+      if [ "$receipt_task" = "$task" ]; then results=$receipt_results; fi
+    done <<EOF
+$fields
+EOF
+    printf '%s\t%s\t%s\t%s%s\n' "$task" "$ident" "$endpoint" "$backstop" "${results:+$'\t'$results}" >> "$tmp" \
       || { rm -f "$tmp"; return 1; }
   done <<EOF
 $snapshot
