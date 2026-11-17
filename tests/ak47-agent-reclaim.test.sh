@@ -46,6 +46,16 @@ exit 0
 EOF
 chmod +x "$BIN/fake-fm-control"
 export AK47_FM_CONTROL=$BIN/fake-fm-control
+# A fake no-mistakes: `runs` prints the worktree's .nm-out and exits with its
+# .nm-rc, so each test repository states its own validation history.
+cat >"$BIN/fake-no-mistakes" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = runs ] || exit 2
+cat .nm-out 2>/dev/null
+exit "$(cat .nm-rc 2>/dev/null || echo 0)"
+EOF
+chmod +x "$BIN/fake-no-mistakes"
+export AK47_NO_MISTAKES=$BIN/fake-no-mistakes
 
 reset() {
   local p
@@ -112,6 +122,15 @@ add_task() {
   echo "working: test" >"$h/state/$id.status"
   touch -d "$age" "$h/state/$id.status"
   mkdir -p "$WT/$id"
+}
+
+# git_task <id> <branch> <runs-output> [rc] -> the task's worktree becomes a
+# repository on <branch> whose no-mistakes runs read prints <runs-output>.
+git_task() {
+  local d=$WT/$1
+  git -C "$d" init -q -b "$2" 2>/dev/null || { git -C "$d" init -q && git -C "$d" checkout -q -b "$2"; }
+  printf '%s\n' "$3" >"$d/.nm-out"
+  echo "${4:-0}" >"$d/.nm-rc"
 }
 
 alive() { kill -0 "$1" 2>/dev/null && [ "$(ps -o stat= -p "$1" 2>/dev/null | cut -c1)" != Z ]; }
@@ -206,6 +225,35 @@ test_busy_state_and_keep_list_veto() {
   alive "$b" || fail "a task on the reclaim-keep list was stopped"
   alive "$c" || fail "a task carrying reclaim=keep was stopped"
   pass "busy-state, the keep list, and reclaim=keep each veto a stop"
+}
+
+test_unread_steering_and_running_validation_veto() {
+  reset
+  local t
+  declare -A A=()
+  for t in steered validating validated unreadable unmanaged; do add_task main "$t" '-30 hours'; done
+  mkdir -p "$FM_HOME/state/steered.inbox"
+  printf 'schema=fm-task-inbox.v1\n--\nplease rebase\n' >"$FM_HOME/state/steered.inbox/001.msg"
+  git_task validating fm/validating '  running      fm/validating 5e9a9c97  2026-11-17 09:15'
+  git_task validated fm/validated "  completed    fm/validated 3532408f  2026-11-17 10:48  https://x/pull/1
+  running      fm/someone-else 1111111  2026-11-17 10:00"
+  git_task unreadable fm/unreadable 'daemon not reachable' 1
+  git_task unmanaged fm/unmanaged "repo not initialized (run 'no-mistakes init' first)" 1
+  for t in steered validating validated unreadable unmanaged; do spawn_agent "$WT/$t"; A[$t]=$AGENT; done
+  run --apply
+  sleep 0.3
+  alive "${A[steered]}" || fail "a task with an unread steering message was stopped"
+  alive "${A[validating]}" || fail "a task whose branch has a running validation was stopped"
+  alive "${A[unreadable]}" || fail "a task whose validation state could not be read was stopped"
+  alive "${A[validated]}" && fail "a task whose own validation finished was kept because another branch's run is active"
+  alive "${A[unmanaged]}" && fail "a task in a repository without no-mistakes was kept as if validating"
+  for t in steered validating unreadable; do
+    grep -q "task=$t " "$AK47_STATE/reap.log" 2>/dev/null && fail "$t has a stop recorded"
+  done
+  [ -f "$FM_HOME/state/steered.inbox/001.msg" ] || fail "the unread steering message was touched"
+  grep -q 'unread steering message' "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the steering veto"
+  grep -q 'validation running' "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the validation veto"
+  pass "an unread steering message or an unfinished validation on the task's own branch vetoes a stop"
 }
 
 test_over_cap_home_stops_oldest_idle_first() {
@@ -438,6 +486,7 @@ test_dry_run_touches_nothing
 test_idle_task_stops_through_fm_control_in_its_home
 test_working_agent_is_never_stopped
 test_busy_state_and_keep_list_veto
+test_unread_steering_and_running_validation_veto
 test_over_cap_home_stops_oldest_idle_first
 test_box_cap_reads_budget
 test_armed_check_vetoes_and_finished_work_goes_first
