@@ -51,6 +51,9 @@ The T3 Code backend suites carry the slowest successful Ubuntu samples from CI r
 
 The new `tests/fm-remote-herdr-identity.test.sh` serial hint is provisionally 6158 ms, from a successful local macOS arm64 `bin/fm-test-run.sh` sample on 2026-11-08. Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
 
+The 2026-11-17 serial hints for `tests/fm-git-push-guard-gate.test.sh` (108134 ms), `tests/fm-git-push-guard.test.sh` (4348 ms), and `tests/fm-assertions.test.sh` (247 ms) are provisional successful local macOS arm64 `bin/fm-test-run.sh` samples.
+Replace them with Ubuntu timing-artifact maxima at the next CI refresh; these are not whole-shard CI timing evidence.
+
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over those hints.
