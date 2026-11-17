@@ -159,6 +159,48 @@ spawn_secondmate_claude() {
     fm_test_run_spawn "$primary" "$home" "$fakebin" "$id" "$home" claude --secondmate
 }
 
+test_task_channels_are_narrow_and_atomic() {
+  local out d before
+  read_case "$(make_case task-channels)"
+  mkdir -p "$CASE_DIR/state/operational-inbox" "$CASE_DIR/state/task.inbox" \
+    "$CASE_DIR/data/task" "$CASE_DIR/code/.agents/skills"
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" "$WT" "$PROJ" \
+    --task-channels "$CASE_DIR/state" "$CASE_DIR/data" "$CASE_DIR/code" task 2>&1)
+  expect_code 0 $? "task channel registration failed: $out"
+  for d in "$CASE_DIR/state/operational-inbox" "$CASE_DIR/state/task.inbox" \
+    "$CASE_DIR/data/task" "$CASE_DIR/code/.agents/skills"; do
+    assert_trust_only_no_import_consent "$CONFIG/.claude.json" "$d" "channel not trusted: $d"
+  done
+  for d in "$CASE_DIR/state" "$CASE_DIR/data" "$CASE_DIR/code"; do
+    assert_not_trusted "$CONFIG/.claude.json" "$d" "registration broadened trust to $d"
+  done
+  before=$(cat "$CONFIG/.claude.json")
+  mkdir -p "$CASE_DIR/state/claude-config.inbox"
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" "$WT" "$PROJ" \
+    --task-channels "$CASE_DIR/state" "$CASE_DIR" "$CASE_DIR/code" claude-config 2>&1)
+  expect_code 1 $? "a channel must not trust the config directory: $out"
+  assert_contains "$out" "Claude config directory" "the protected-channel refusal was unclear"
+  [ "$(cat "$CONFIG/.claude.json")" = "$before" ] || fail "protected-channel refusal changed the store"
+  rmdir "$CASE_DIR/data/task"
+  ln -s "$CASE_DIR/code" "$CASE_DIR/data/task"
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" "$WT" "$PROJ" \
+    --task-channels "$CASE_DIR/state" "$CASE_DIR/data" "$CASE_DIR/code" task 2>&1)
+  expect_code 1 $? "an escaped channel must be refused: $out"
+  [ "$(cat "$CONFIG/.claude.json")" = "$before" ] || fail "refused channels changed the store"
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" "$WT" "$PROJ" \
+    --task-channels "$CASE_DIR/state" "$CASE_DIR/data" "$CASE_DIR/code" ../task 2>&1)
+  expect_code 1 $? "a traversal channel id must be refused: $out"
+  rm "$CASE_DIR/data/task"
+  mkdir "$CASE_DIR/data/task"
+  node -e 'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.projects[process.argv[2]].hasClaudeMdExternalIncludesApproved=false;j.projects[process.argv[2]].hasClaudeMdExternalIncludesWarningShown=true;fs.writeFileSync(p,JSON.stringify(j));' "$CONFIG/.claude.json" "$PROJ"
+  before=$(cat "$CONFIG/.claude.json")
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" "$WT" "$PROJ" \
+    --task-channels "$CASE_DIR/state" "$CASE_DIR/data" "$CASE_DIR/code" task 2>&1)
+  expect_code 1 $? "channel registration must preserve the import-consent refusal: $out"
+  [ "$(cat "$CONFIG/.claude.json")" = "$before" ] || fail "declined consent changed the store"
+  pass "fm-claude-trust.sh: task channels are narrow and escapes refuse atomically"
+}
+
 test_fresh_worktree_is_trusted() {
   local rec out
   rec=$(make_case fresh)
@@ -658,6 +700,12 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   expect_code 0 $? "the claude spawn must succeed: $out"
   assert_trusted "$config/.claude.json" "$wt" \
     "the claude spawn did not pre-register trust for its worktree"
+  local channel
+  for channel in "$home/state/operational-inbox" "$home/state/trustspawn.inbox" \
+    "$home/data/trustspawn" "$ROOT/.agents/skills"; do
+    assert_trusted "$config/.claude.json" "$channel" "spawn did not trust channel $channel"
+  done
+  assert_not_trusted "$config/.claude.json" "$home" "spawn trusted the whole operational home"
   assert_present "$launch_log" "the claude spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
     "the launch command was not the claude worker launch"
@@ -838,6 +886,7 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   pass "fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded"
 }
 
+test_task_channels_are_narrow_and_atomic
 test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
