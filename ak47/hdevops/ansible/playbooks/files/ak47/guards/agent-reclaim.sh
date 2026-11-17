@@ -509,7 +509,7 @@ held_work() {
         for (k in open) { print "open decision " k; exit }
         s = last; sub(/[ :[].*/, "", s)
         if (s ~ /^(needs-decision|blocked|waiting|paused)$/) { print "last status " s; exit }
-        if (tolower(last) ~ /(await|waiting|ready)[a-z]* (for |on )?(a |the |your |captain.s )?(review|approval|decision|merge)/) print "last status awaits review or decision"
+        if (tolower(last) ~ /(await|waiting|ready)[a-z]* (to |for |on )?(a |the |your |captain.s )?(review|approval|decision|merge)/) print "last status awaits review or decision"
       }' "$st" 2>/dev/null)
     [ -n "$out" ] && { HELD=$out; return 0; }
   fi

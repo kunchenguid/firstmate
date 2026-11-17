@@ -522,7 +522,7 @@ test_unfinished_work_vetoes_a_stop() {
   reset
   local t s
   declare -A A=()
-  local kept="open-decision last-blocked awaits-review pr-open pr-unreadable unpushed dirty"
+  local kept="open-decision last-blocked awaits-review ready-to-merge pr-open pr-unreadable unpushed dirty"
   local stopped="resolved-decision pr-merged pushed"
   for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
   s=$FM_HOME/state
@@ -530,6 +530,7 @@ test_unfinished_work_vetoes_a_stop() {
   printf 'needs-decision [key=k2]: which copy\nresolved [key=k2]: copy chosen\ndone: copy shipped\n' >"$s/resolved-decision.status"
   printf 'blocked: needs a token\n' >"$s/last-blocked.status"
   printf 'done: renders ready, awaiting your review\n' >"$s/awaits-review.status"
+  printf 'done: PR ready to merge\n' >"$s/ready-to-merge.status"
   echo 'pr=https://github.com/o/r/pull/1' >>"$s/pr-open.meta"; echo OPEN >"$SANDBOX/gh/1"
   echo 'pr=https://github.com/o/r/pull/2' >>"$s/pr-merged.meta"; echo MERGED >"$SANDBOX/gh/2"
   printf 'done: PR https://github.com/o/r/pull/3\n' >"$s/pr-unreadable.status"
