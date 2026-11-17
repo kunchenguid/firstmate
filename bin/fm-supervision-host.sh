@@ -183,8 +183,9 @@
 # successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
 # 3.2), while durable timestamps still use epoch time. This is not a portable
-# monotonic-clock guarantee. Arm exit probes use ordinary 0.5-second child
-# sleeps within the unchanged POLL-cadence maintenance and boundary checks;
+# monotonic-clock guarantee. Arm exit probes wait 0.5 seconds at a time
+# (probe_interval: no child process on Bash 4.1 and later, a child sleep on
+# Bash 3.2) within the unchanged POLL-cadence maintenance and boundary checks;
 # close observation and a shell-only caught signal may wait that interval plus
 # work/scheduling time. No stop-signal disposition or cleanup bound changes.
 # FM_TEST_SUPERVISION_HOST_CLOCK names a file holding the park's elapsed
@@ -321,17 +322,20 @@ record_process() {  # <role> <pid>
 
 # Re-record a process under its current identity. Safe only for this host's
 # own unreaped child, whose pid cannot be recycled: its first identity may have
-# been read between its fork and its exec.
+# been read between its fork and its exec. Returns 0 when the record now
+# matches the identity just read, 1 when it could not be read or rewritten.
 refresh_process() {  # <pid>
-  local pid=$1 identity tmp
-  [ -n "$pid" ] && [ -f "$HOST_RECORD" ] || return 0
+  local pid=$1 identity tmp rc=1
+  [ -n "$pid" ] && [ -f "$HOST_RECORD" ] || return 1
   identity=$(identity_of "$pid")
-  [ -n "$identity" ] || return 0
-  awk -F '\t' -v pid="$pid" -v id="$identity" '$2 == pid && $3 != id { found = 1 } END { exit !found }' "$HOST_RECORD" 2>/dev/null || return 0
-  tmp=$(mktemp "$HOST_RECORD.tmp.XXXXXX" 2>/dev/null) || return 0
+  [ -n "$identity" ] || return 1
+  awk -F '\t' -v pid="$pid" -v id="$identity" '$2 == pid && $3 != id { found = 1 } END { exit !found }' "$HOST_RECORD" 2>/dev/null
+  case $? in 0) ;; 1) return 0 ;; *) return 1 ;; esac
+  tmp=$(mktemp "$HOST_RECORD.tmp.XXXXXX" 2>/dev/null) || return 1
   awk -F '\t' -v OFS='\t' -v pid="$pid" -v id="$identity" '$2 == pid { $3 = id } { print }' "$HOST_RECORD" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$HOST_RECORD" 2>/dev/null
+    && mv -f "$tmp" "$HOST_RECORD" 2>/dev/null && rc=0
   rm -f "$tmp" 2>/dev/null || true
+  return "$rc"
 }
 
 forget_process() {  # <pid>
@@ -656,20 +660,61 @@ mark_engine_compacted() {  # <ended>
   fi
 }
 
+# Half-second waits for the arm-exit probe. On Bash 4.1 and later a read with a
+# fractional timeout waits on a FIFO that nothing writes, opened read-write so
+# the open never blocks and the read never sees end of file, and starts no
+# process. Bash 3.2 has only whole-second read timeouts and keeps the child
+# sleep, as does any read that returns before its timeout, so the probe never
+# spins.
+PROBE_FD=
+PROBE_OPENED=0
+probe_interval() {
+  if [ "$PROBE_OPENED" -eq 0 ]; then
+    PROBE_OPENED=1
+    open_probe_fd
+  fi
+  if [ -n "$PROBE_FD" ]; then
+    read -r -t 0.5 -u "$PROBE_FD" _ 2>/dev/null
+    [ "$?" -le 128 ] || return 0
+  fi
+  sleep 0.5
+}
+
+open_probe_fd() {
+  local dir
+  [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; } || return 0
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-supervision-host-probe.XXXXXX" 2>/dev/null) || return 0
+  if mkfifo "$dir/probe" 2>/dev/null; then
+    { exec {PROBE_FD}<>"$dir/probe"; } 2>/dev/null || PROBE_FD=
+  fi
+  rm -f "$dir/probe" 2>/dev/null
+  rmdir "$dir" 2>/dev/null || true
+}
+
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
-  local i
+  local i settled=0
   while fm_pid_alive "$ARM_PID"; do
-    refresh_process "$ARM_PID"
+    # The arm's identity changes only when it execs, and its first output comes
+    # after its last exec (a failed exec prints and exits), so the first refresh
+    # that succeeds once output exists is the last one that could change the
+    # record.
+    if [ "$settled" -eq 0 ]; then
+      if [ -s "$ARM_OUT" ]; then
+        refresh_process "$ARM_PID" && settled=1
+      else
+        refresh_process "$ARM_PID"
+      fi
+    fi
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
     warm_compact_tick
     # Probe the arm's exit twice a second between POLL-cadence checks, without
-    # changing the outer identity refresh, readiness, or boundary cadence.
+    # changing the outer readiness or boundary cadence.
     i=$((POLL * 2))
     while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
-      sleep 0.5
+      probe_interval
       i=$((i - 1))
     done
   done
