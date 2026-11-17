@@ -120,7 +120,7 @@ SH
   # Keep the idle composer empty for the shared classifier. Claude's rotating
   # prompt suggestion is ordinary visible composer text on this tmux surface.
   CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false REWAKE_WANTED=mirror-rewake-ok \
-    run_interactive claude claude --model haiku --dangerously-skip-permissions
+    run_interactive claude claude --model haiku --dangerously-skip-permissions "${FM_LIVE_CLAUDE_FLAGS[@]}"
 }
 
 # An interactive session in a private tmux server: answer a trust prompt when

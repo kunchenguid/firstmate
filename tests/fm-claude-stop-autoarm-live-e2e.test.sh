@@ -113,7 +113,7 @@ PROMPT='After reading the complete session-start digest, reply with exactly CYCL
 (
   cd "$PROJECT" || exit 1
   FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 \
-    claude -p "$PROMPT" --dangerously-skip-permissions --settings '{"feedbackDrafts":"off"}' \
+    claude -p "$PROMPT" --dangerously-skip-permissions "${FM_LIVE_CLAUDE_FLAGS[@]}" \
     --effort low --output-format stream-json --verbose
 ) > "$TRANSCRIPT" 2>&1 || fail "Claude credentialed auto-arm session failed: $(tail -20 "$TRANSCRIPT")"
 

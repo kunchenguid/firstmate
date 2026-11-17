@@ -174,7 +174,7 @@ ENV
 set -u
 . '$lab/env'
 printf '%s\n' "\$\$" > "\$FM_HOME/state/.lock"
-exec claude --model $MODEL --effort low --dangerously-skip-permissions
+exec claude --model $MODEL --effort low --dangerously-skip-permissions ${FM_LIVE_CLAUDE_FLAGS[*]}
 ENV
   chmod +x "$lab/launch.sh"
   printf '%s\n' "$lab"

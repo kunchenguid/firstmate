@@ -264,7 +264,7 @@ start_primary() {  # <lab>
   prompt='This is an isolated Firstmate test lab, not a real fleet. Reply with exactly READY now and use no tools. Later, whenever a "Stop hook feedback" message wakes you, do exactly this and nothing else: run `bin/fm-wake-drain.sh` once with the Bash tool, then run the exact `bin/fm-wake-drain.sh --ack-through ...` command that its WAKE_ACK_REQUIRED line prints, then reply with exactly ACKED. Never run any other command, never run bin/fm-watch-arm.sh, and never use any other tool.'
   started=$(date +%s)
   tmux -L "$sock" new-session -d -s primary -x 220 -y 50 -c "$lab/fm" \
-    "sh -c '. \"$lab/env\"; printf \"%s\\n\" \"\$\$\" > state/.lock; exec claude --model $MODEL --effort low --dangerously-skip-permissions'" \
+    "sh -c '. \"$lab/env\"; printf \"%s\\n\" \"\$\$\" > state/.lock; exec claude --model $MODEL --effort low --dangerously-skip-permissions ${FM_LIVE_CLAUDE_FLAGS[*]}'" \
     || fail "$(basename "$lab"): the tmux session did not start"
   i=0
   while [ "$i" -lt 90 ]; do

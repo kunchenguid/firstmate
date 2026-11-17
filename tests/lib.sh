@@ -496,6 +496,16 @@ if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
   fm_test_reap_orphans
 fi
 
+# Flags every live test passes when it starts a fixture Claude session, expanded as
+# "${FM_LIVE_CLAUDE_FLAGS[@]}" (or ${FM_LIVE_CLAUDE_FLAGS[*]} inside a command string).
+# The session loads only the fixture's project and local settings, so the caller's
+# user-scope plugins and hooks never run on fixture prompts; the settings file
+# restores the bypass-mode acceptance that user settings would carry.
+# tests/fm-live-claude-isolation-live.test.sh proves both against the real binary.
+# shortcut: the [*] form assumes a checkout path without spaces, as these tests'
+# other command strings already do; quote with printf %q if that ever changes.
+FM_LIVE_CLAUDE_FLAGS=(--setting-sources "project,local" --settings "$ROOT/tests/fixtures/live-claude-settings.json")
+
 # --- live-capability gate ---------------------------------------------------
 #
 # fm_live_gate <policy> <vars> [tool ...]
