@@ -221,9 +221,14 @@
 #             already treats a lock owned through shared ancestry or a trusted
 #             same-session Claude id as its own, so the re-emit proceeds, while
 #             a lock another live session took meanwhile still produces the
-#             ordinary read-only path. A re-emit prints a short RE-EMIT CUE
-#             first, so a harness that spills a large output and shows only its
-#             head still tells the model to read the saved full output.
+#             ordinary read-only path. A re-emit keeps the lock, wake queue,
+#             away posture, and network checks inline, and prints each bulky
+#             section - the supervision block, backlog, task meta, status tails,
+#             and CONTEXT files - as a one-line pointer to its file or command,
+#             so it fits under a harness's hook output cap (Claude: 10,000
+#             characters) instead of spilling to a saved file whose whole read
+#             would spend the room the compaction just freed. A short RE-EMIT
+#             CUE prints first and says to read pointed files only as needed.
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
@@ -408,6 +413,13 @@ SUBRULE='-----------------------------------------------------------------------
 section() { printf '\n%s\n%s\n%s\n' "$RULE" "$1" "$RULE"; }
 subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
 
+# A context re-emit prints this one line in place of a bulky section, so the
+# whole re-emit stays under a harness's hook output cap (see the RE-EMIT note
+# in this file's header).
+print_reemit_pointer() {  # <path> <what to read it for>
+  printf 'not reprinted in a context re-emit; read %s %s\n' "$1" "$2"
+}
+
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
 # meaningful for every one of these files (captain.md absent = firstmate
@@ -418,7 +430,9 @@ print_file_or_absent() {
   local path=$1 label=$2
   subsection "$label"
   if [ -f "$path" ]; then
-    if [ -s "$path" ]; then
+    if [ -s "$path" ] && [ "$REEMIT" -eq 1 ]; then
+      print_reemit_pointer "$path" "before work it governs"
+    elif [ -s "$path" ]; then
       cat "$path"
     else
       printf '(present, empty)\n'
@@ -549,7 +563,9 @@ print_backlog_compact() {
   local path=$1 label=$2
   subsection "$label"
   if [ -f "$path" ]; then
-    if [ -s "$path" ]; then
+    if [ -s "$path" ] && [ "$REEMIT" -eq 1 ]; then
+      print_reemit_pointer "$path" "(or bin/fm-tasks-axi.sh list) when this turn needs the backlog"
+    elif [ -s "$path" ]; then
       if fm_tasks_axi_backend_available "$CONFIG"; then
         print_backlog_tasks_axi_compact "$path"
       elif fm_backlog_backend_manual "$CONFIG"; then
@@ -568,6 +584,11 @@ print_backlog_compact() {
 
 print_status_tail() {
   local status=$1 line
+  if [ "$REEMIT" -eq 1 ]; then
+    printf 'status log: '
+    print_reemit_pointer "$status" "for wake-EVENT history; bin/fm-crew-state.sh <id> owns current state"
+    return 0
+  fi
   printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
     "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
   # A crewmate writes its own status lines, so their length is unbounded: one
@@ -675,15 +696,15 @@ fi
 
 if [ "$REEMIT" -eq 1 ]; then
   # First in the output on purpose: a harness that spills a large hook output
-  # delivers only a short head inline (Claude: about 2,000 characters), and
-  # CONTEXT prints last, so this cue is the part that must survive the spill.
-  printf 'RE-EMIT CUE: if this output ends with "Output too large ... Full output saved to <path>",\n'
-  printf 'read that whole file now, before acting. Otherwise read data/captain.md, data/captain-shared.md,\n'
-  printf 'and data/learnings.md under %s now if any of them is missing below.\n' "$DATA"
+  # delivers only a short head inline (Claude: about 2,000 characters), so this
+  # cue is the part that must survive a spill the pointers below did not prevent.
+  printf 'RE-EMIT CUE: this re-emit prints each bulky section as a pointer to its file, so it\n'
+  printf 'stays small. Read a pointed file only when this turn needs that section. If the harness\n'
+  printf 'still saved this output to a file, read that file through its WAKE QUEUE section first.\n'
   section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
   printf 'This session already took the helm at its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
-  printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
+  printf 'reprinted or pointed to, but the sweeps startup already reconciled - project clone refresh,\n'
   printf 'secondmate convergence and liveness, pending remote handoff\n'
   printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
@@ -878,12 +899,16 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     fi
   fi
 fi
-"$SCRIPT_DIR/fm-supervision-instructions.sh" \
-  --harness "$PRIMARY_HARNESS" \
-  --read-only "$READ_ONLY" \
-  --afk "$AFK_PRESENT" \
-  --afk-mode "$AFK_MODE" \
-  --x-mode "$X_MODE_PRESENT"
+SUPERVISION_ARGS=(--harness "$PRIMARY_HARNESS" --read-only "$READ_ONLY" --afk "$AFK_PRESENT" \
+  --afk-mode "$AFK_MODE" --x-mode "$X_MODE_PRESENT")
+if [ "$REEMIT" -eq 1 ]; then
+  section "SUPERVISION OPERATING INSTRUCTIONS - primary harness: $PRIMARY_HARNESS"
+  printf 'Not reprinted in a context re-emit; print them before arming, repairing, or ending a\n'
+  printf 'turn with work under way: FM_HOME=%s %s/fm-supervision-instructions.sh %s\n' \
+    "$FM_HOME" "$SCRIPT_DIR" "${SUPERVISION_ARGS[*]}"
+else
+  "$SCRIPT_DIR/fm-supervision-instructions.sh" "${SUPERVISION_ARGS[@]}"
+fi
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
@@ -893,6 +918,15 @@ fi
 # a stage that never ran, which the truncation banner names by stage.
 stage read-once
 section "READ-ONCE CONTRACT"
+if [ "$REEMIT" -eq 1 ]; then
+  cat <<'EOF'
+This context re-emit prints the lock, wake queue, away posture, and network
+checks in full, and every bulky section below as a one-line pointer to its file.
+Read a pointed file only when this turn needs that section, never all of them
+at once, and do NOT bulk-read data/backlog.md or state/*.status.
+If a STARTUP TRUNCATED banner names a stage, that stage never ran: reconcile it.
+EOF
+else
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
@@ -913,10 +947,9 @@ Go to a source directly only when:
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
-    which case that stage's sources were never emitted and must be reconciled,
-  - or a context re-emit opened with a read cue because the
-    harness cut the digest short.
+    which case that stage's sources were never emitted and must be reconciled.
 EOF
+fi
 
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
@@ -932,7 +965,12 @@ for meta in "$STATE"/*.meta; do
   META_FOUND=1
   id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
-  cat "$meta"
+  if [ "$REEMIT" -eq 1 ]; then
+    printf 'meta: '
+    print_reemit_pointer "$meta" "when this task's fields matter"
+  else
+    cat "$meta"
+  fi
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
