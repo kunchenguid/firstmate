@@ -1978,24 +1978,31 @@ test_declared_wait_surfaces_superseding_state() {
 }
 
 # Absent config/paused-wait-supersession the same superseding states keep main's
-# declared-wait handling: no superseded wake, nothing queued, and no crew-state
-# read beyond the one the idle declared-wait recheck already spends (none on the
-# busy paths), counted through the stub's read log.
+# declared-wait handling: no superseded wake and nothing queued. The wait-gate
+# check spends one crew-state read on an idle wait, and the idle declared-wait
+# recheck spends another unless the gate wake ends the round first; no read on
+# the busy paths. Reads are counted through the stub's read log.
 test_superseded_wait_check_is_opt_in() {
-  local c n crew_state busy reads got dir state
+  local c n crew_state busy reads got dir state mode
   for c in "idle-gate|state: parked · source: run-step · ask-user: authority decision · run: R|no|1" \
-           "idle-terminal|state: done · source: run-step · run: R|no|1" \
+           "idle-terminal|state: done · source: run-step · run: R|no|2" \
            "busy-recent|state: parked · source: run-step · ask-user: authority decision · run: R|recent|0" \
            "busy-old|state: parked · source: run-step · ask-user: authority decision · run: R|yes|0"; do
     IFS='|' read -r n crew_state busy reads <<< "$c"
+    mode=absorb; [ "$n" != idle-gate ] || mode="exit"
     dir=$(make_superseded_pause_case "unarmed-$n" 'paused: waiting for validation run R' unarmed)
     state="$dir/state"
     [ "$busy" != yes ] || set_mtime "$(( $(date +%s) - 500 ))" "$state/paused.meta"
-    superseded_pause_round "$dir" "$crew_state" absorb "$busy" \
+    superseded_pause_round "$dir" "$crew_state" "$mode" "$busy" \
       || fail "$n: flag-absent watcher round failed"
     ! grep -F 'paused wait superseded' "$dir/watch.out" >/dev/null \
       || fail "$n: flag-absent watcher surfaced a superseded wait"
-    [ ! -s "$state/.wake-queue" ] || fail "$n: flag-absent watcher queued a wake"
+    if [ "$n" = idle-gate ]; then
+      grep -F 'check: validation gate after paused' "$state/.wake-queue" >/dev/null \
+        || fail "$n: flag-absent watcher did not wake for the validation gate"
+    else
+      [ ! -s "$state/.wake-queue" ] || fail "$n: flag-absent watcher queued a wake"
+    fi
     got=0
     [ ! -f "$dir/crew-state.log" ] || got=$(wc -l < "$dir/crew-state.log" | tr -d ' ')
     [ "$got" = "$reads" ] || fail "$n: flag-absent watcher read crew state $got times, want $reads"
