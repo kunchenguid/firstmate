@@ -2,7 +2,7 @@
 
 Empirical record for the Forgejo CLIs firstmate can drive besides `tea`, alongside [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md), which owns the REST behaviour every one of them shares.
 `tea` remains the documented default and its behaviour is unchanged; this record is about what `forgejo-cli` (`fj`) and `fgj` actually offer, so the resolver can accept them without weakening the merge path's head-binding guarantee.
-All evidence below was collected on 2026-11-12.
+All evidence below was first collected on 2026-11-12.
 
 The findings below were first read from each CLI's own shipped surface and from the exact released source, both named at each finding, and the merge path's REST calls are the same ones the tea record already verified against a real instance.
 Where a finding is inferable only from source rather than from the CLI's own output, it says so.
@@ -33,7 +33,7 @@ The `fj` refusal and the `tea` path were **not** re-verified live in that pass: 
 
 ## Versions
 
-All evidence below was collected on 2026-11-12 against a released build of each CLI on the development machine.
+The interface evidence below was collected on 2026-11-12 against a released build of each CLI on the development machine; the live `fgj` pass described above is the one part collected afterwards.
 This record deliberately embeds no versions, revisions, or installation paths of those builds: they are properties of the machine the evidence was gathered on, not of the interfaces the findings describe, and a reader cannot reproduce them.
 Reproducing the record needs only a released build of each tool whose interface matches the generation named at each finding.
 
@@ -96,7 +96,7 @@ A merge watch runs from the fleet's state directory with no clone of the target 
 
 **What `fj` does offer, and what firstmate therefore uses.** Only a per-host login predicate: `fj whoami --host <host>` exits 0 exactly when the user holds a login for `<host>` and nonzero otherwise, so firstmate reads the login from that exit status alone and parses no display line at all.
 The `whoami` command is listed by the `fj --help` output above; its `--host` flag and this exit-status meaning were taken from that shipped surface and the released source, and were **not** exercised live against a real `forgejo-cli` build in this record's verification pass, unlike the `fgj` path.
-That is why the reader is fail-closed: a generation whose `whoami` does not distinguish a logged-out host from a logged-in one makes the resolver treat the host as unconfigured and refuse, rather than reaching for another CLI or guessing.
+The refusal is what makes a wrong answer safe: a generation whose `whoami` cannot tell a logged-out host from a logged-in one would make the resolver regard that host as configured, and every operation that needs the pull request record still refuses `fj` by name rather than reading a rendered line or merging unbound.
 Its store is a JSON map from host to token (`~/Library/Application Support/forgejo-cli.forgejo-cli/keys.json` on macOS, the platform config directory elsewhere), which firstmate never reads, so the credential stays inside `fj`.
 
 ```
@@ -179,6 +179,7 @@ Both are handed the pull request's parsed host and fail rather than guess when i
 
 `bin/fm-pr-lib.sh` owns the selection in one place.
 `fm_pr_forgejo_cli_api_capable` declares which CLIs can make an authenticated request, `fm_pr_forgejo_resolve` picks a CLI and its own host login, and `fm_pr_forgejo_api` turns that into one request, so the merge watch (`bin/fm-pr-poll.sh`, which duplicates the selection because its body sources nothing), the merge path (`bin/fm-pr-merge.sh`), the terminal read (`bin/fm-crew-state.sh`), teardown's merged proof (`bin/fm-teardown.sh`), arming (`bin/fm-pr-check.sh`), and the ship brief and promotion that render the Definition of done (`bin/fm-brief.sh` and `bin/fm-promote.sh`) all agree. Those last two need no resolution of their own: they read the project's registered CLI, and `auto` is tea and only tea, which is exactly what `fm_pr_forgejo_resolve` produces for it.
+`bin/fm-brief.sh` refuses to scaffold a ship brief on a binding that names `fj`, so a project bound to a CLI that cannot serve this path fails before a worker starts rather than after it opens a pull request; `bin/fm-promote.sh` refuses the same binding when it renders a promoted scout's Definition of done.
 The merge watch is handed the project's recorded preference through the registered poll sidecar, whose optional sixth line names it; a project that named none records no line and the watch resolves `auto`, exactly as before.
 The watch's manual `--validated`/`--baseline` form keeps the six-argument shape `--validated <provider> <url> <host> <path> <number>` (preference `auto`) recorded for the other forges; the watcher's own invocation passes the recorded preference as an optional seventh argument.
 

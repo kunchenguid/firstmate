@@ -1733,12 +1733,11 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
-# the CLI the project registered (fm_pr_forgejo_cli_preference), which is tea
-# when it named none
-# (fm_pr_forgejo_read_record, resolved by bin/fm-pr-lib.sh), a recorded GitLab
-# merge request through glab
+# the CLI the project registered (fm_pr_forgejo_cli_preference) and that CLI's
+# login, which is tea when the binding named none (fm_pr_forgejo_read_record,
+# resolved by bin/fm-pr-lib.sh); a recorded GitLab merge request through glab
 # (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
-# squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
+# squash or merge-train commit main received) when gitlab_mr_landing_opted_in;
 # and everything else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then

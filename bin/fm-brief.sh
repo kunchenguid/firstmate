@@ -70,21 +70,21 @@
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
-# script never infers a forge and never looks the provider binding up, and
-# bin/fm-spawn.sh refuses a brief whose forge disagrees with the registry.
+# script never infers a forge, and bin/fm-spawn.sh refuses a brief whose forge
+# disagrees with the registry.
 # bin/fm-project-mode.sh's header owns what the binding means, and
 # bin/fm-dod-lib.sh owns what `gerrit`, `forgejo`, and `external` change in the
-# Definition of done. On `forgejo` this script reads the binding's optional CLI
-# annotation (bin/fm-project-mode.sh --forge-cli). `auto`, the binding every
-# existing project carries, is tea and only tea - the same value
-# bin/fm-pr-lib.sh's fm_pr_forgejo_resolve produces for it - so the ship brief's
-# forge-CLI rule and Definition of done name the CLI the merge path will use
-# without a second resolution. It refuses a binding that names forgejo-cli
+# Definition of done. On `forgejo` this script also reads the binding's optional
+# CLI annotation from the registry (bin/fm-project-mode.sh --forge-cli). `auto`,
+# the binding every existing project carries, is tea and only tea - the same
+# value bin/fm-pr-lib.sh's fm_pr_forgejo_resolve produces for it - so the ship
+# brief's forge-CLI rule and Definition of done name the CLI the merge path will
+# use without a second resolution. It refuses a binding that names forgejo-cli
 # (`fj`), which cannot read the pull request record or bind a merge to a
-# verified head. On
-# `external` that rule names no forge CLI, because the home's review tool is the
-# only publishing tool. A forge on --mode local-only is refused, because that
-# mode publishes nothing, and `external` also refuses no-mistakes.
+# verified head. On `external` that rule names no forge CLI, because the home's
+# review tool is the only publishing tool. A forge on --mode local-only is
+# refused, because that mode publishes nothing, and `external` also refuses
+# no-mistakes.
 # --pr names who writes the pull request's title and body, defaults to auto, and
 # is the explicit task-side form of the registry's `pr=manual` token exactly as
 # --forge is of `forge=`: read from data/projects.md at intake and passed here,

@@ -45,11 +45,11 @@
 #   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
 #   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
+#   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
+#   legacy "fm/<task-id>".
 #   A Forgejo binding may name its CLI: forge=forgejo:tea, forge=forgejo:fgj, or
 #   forge=forgejo:fj. --forge answers `forgejo` for every spelling, and
 #   --forge-cli answers the named CLI or `auto` when none is named.
-#   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
-#   legacy "fm/<task-id>".
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)

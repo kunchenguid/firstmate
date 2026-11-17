@@ -1346,9 +1346,11 @@ FIELDS
 # all, its pull request views print only localized human prose with no commit
 # id anywhere, and its own merge request is built with head_commit_id fixed to
 # null, so it can neither bind a merge to a verified head nor report one. A
-# resolved `fj` is therefore refused by every operation that needs the record,
-# loudly and by name, rather than reading a rendered line as state or merging
-# unbound; docs/forgejo-cli-alternatives.md holds the empirical record.
+# resolved `fj` is therefore never used for the record: arming and the merge
+# refuse it by name (bin/fm-pr-check.sh, bin/fm-pr-merge.sh), while the silent
+# readers return an honest unknown, rather than any of them reading a rendered
+# line as state or merging unbound; docs/forgejo-cli-alternatives.md holds the
+# empirical record.
 #
 # A CLI is selected by explicit configuration first: a project's registered
 # `forge=forgejo:<cli>` registry binding names the CLI and that CLI is then
@@ -1357,10 +1359,10 @@ FIELDS
 # that walks the installed CLIs - so an unmodified home keeps today's behaviour
 # exactly: nothing starts using a different CLI's stored login because tea
 # happened to have none for this host. fgj is therefore opt-in, reached only
-# when a project names it. The resolved CLI must still hold exactly one login
-# for <host>: zero logins for <host> in that CLI's own store, or several,
-# refuses rather than guesses, mirroring the tea login match this block
-# replaces.
+# when a project names it. The resolved CLI must still hold a login for
+# <host>: no login for <host> in that CLI's own store refuses rather than
+# guesses, and tea additionally refuses when its named-login list holds several
+# for the same host, mirroring the tea login match this block replaces.
 
 # The CLI and host login fm_pr_forgejo_resolve selected: consumed by the
 # fm_pr_forgejo_* helpers below and by every caller's own diagnostics.
