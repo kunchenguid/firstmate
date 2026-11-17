@@ -393,8 +393,12 @@ test_ack_refuses_unknown_token() {
   with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 1' >/dev/null || fail 'a refused ack removed a pending signal'
   token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[0].token')
   with_home "$home" "$ROOT/bin/fm-contributions.sh" ack filed https://github.com/o/r/issues/9 "$token" || fail 'exact ack failed'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack filed https://github.com/o/r/issues/9 "$token" || fail 'repeat ack was not idempotent'
-  pass 'ack refuses a token that matches no pending signal and stays idempotent for a seen one'
+  if with_home "$home" "$ROOT/bin/fm-contributions.sh" ack filed https://github.com/o/r/issues/9 "$token" 2>"$home/ack.err"; then
+    fail 'repeat ack of an acknowledged token exited zero'
+  fi
+  grep -q 'already acknowledged' "$home/ack.err" || fail "repeat ack error did not say already acknowledged: $(cat "$home/ack.err")"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null || fail 'repeat ack changed pending state'
+  pass 'ack refuses a token that matches no pending signal, including an already acknowledged one'
 }
 
 test_verdict_retains_judged_head() {
