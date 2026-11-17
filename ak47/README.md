@@ -289,6 +289,12 @@ A working agent, a chair, a secondmate's own agent, a task whose `*.check.sh` is
 armed, a task with an unread steering message, a task whose branch has an
 unfinished no-mistakes validation, and anything on `~/.config/ak47/reclaim-keep`
 is never stopped.
+Neither is a task that still holds unfinished work for someone: an open
+decision, a last report that is waiting, paused, or awaiting a review, an open
+PR, or commits on no pushed branch or uncommitted changes.
+Every task stop is marked left stopped through `bin/fm-leave-stopped.sh`, so the
+fleet watchdog does not relaunch it; without that mark the box got no lighter,
+because the watchdog relaunched stopped agents within five minutes.
 It never deletes a worktree, tears down a task, or sends `SIGKILL`; every stop
 is one `reap.log` line with its revert, and what it cannot settle is a finding.
 The script's header (`--help`) owns the exact classes, vetoes, knobs, and exit
@@ -572,7 +578,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-136 tests across eight files: the budget, the census, the guards, the agent
+138 tests across eight files: the budget, the census, the guards, the agent
 reclaim, the guarded delete, the big-entry take-down, the tick, and the weekly
 review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as

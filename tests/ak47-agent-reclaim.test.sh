@@ -58,12 +58,34 @@ exit "$(cat .nm-rc 2>/dev/null || echo 0)"
 EOF
 chmod +x "$BIN/fake-no-mistakes"
 export AK47_NO_MISTAKES=$BIN/fake-no-mistakes
+# A fake fm-leave-stopped: `mark` writes the marker the watchdog honours in the
+# home FM_HOME names, as the real script does, and logs the call.
+MARK_LOG=$SANDBOX/mark.log
+cat >"$BIN/fake-leave-stopped" <<EOF
+#!/usr/bin/env bash
+printf '%s %s %s\n' "\$FM_HOME" "\$1" "\$2" >>"$MARK_LOG"
+[ "\$2" = mark ] || exit 2
+printf 'schema=fm-leave-stopped.v1\nreason=%s\n' "\$4" >"\$FM_HOME/state/\$1.stopped"
+EOF
+chmod +x "$BIN/fake-leave-stopped"
+export AK47_LEAVE_STOPPED=$BIN/fake-leave-stopped
+# A fake gh: `pr view <url>` prints the state stored for that PR number under
+# $SANDBOX/gh, and fails when none is stored, as an unreachable gh does.
+cat >"$BIN/fake-gh" <<EOF
+#!/usr/bin/env bash
+n=\${3##*/}
+[ -f "$SANDBOX/gh/\$n" ] || exit 1
+cat "$SANDBOX/gh/\$n"
+EOF
+chmod +x "$BIN/fake-gh"
+export AK47_GH=$BIN/fake-gh
 
 reset() {
   local p
   for p in "${PIDS[@]}"; do { kill -KILL "$p"; wait "$p"; } 2>/dev/null; done
   PIDS=()
-  rm -rf "$AK47_STATE" "$AK47_CONFIG" "$SANDBOX/homes" "$WT" "$CONTROL_LOG"
+  rm -rf "$AK47_STATE" "$AK47_CONFIG" "$SANDBOX/homes" "$WT" "$CONTROL_LOG" "$MARK_LOG" "$SANDBOX/gh"
+  mkdir -p "$SANDBOX/gh"
   mkdir -p "$AK47_STATE" "$AK47_CONFIG" "$WT"
   cat >"$AK47_CONFIG/devops.conf" <<EOF
 reclaim_orphan_min=0
@@ -133,6 +155,18 @@ git_task() {
   git -C "$d" init -q -b "$2" 2>/dev/null || { git -C "$d" init -q && git -C "$d" checkout -q -b "$2"; }
   printf '%s\n' "$3" >"$d/.nm-out"
   echo "${4:-0}" >"$d/.nm-rc"
+}
+
+# commit_task <id> [pushed] -> the task's worktree becomes a repository with one
+# commit, which a remote-tracking ref covers when pushed is given.
+commit_task() {
+  local d=$WT/$1
+  git -C "$d" init -q
+  echo x >"$d/f"
+  git -C "$d" add f
+  git -C "$d" -c user.name=t -c user.email=t@t commit -q -m one
+  [ -n "${2:-}" ] && git -C "$d" update-ref refs/remotes/origin/main HEAD
+  return 0
 }
 
 alive() { kill -0 "$1" 2>/dev/null && [ "$(ps -o stat= -p "$1" 2>/dev/null | cut -c1)" != Z ]; }
@@ -460,6 +494,64 @@ test_health_line_and_children_metric() {
   pass "the run leaves one line in health-latest.md and feeds the home_children budget metric"
 }
 
+test_stops_are_marked_left_stopped() {
+  reset
+  add_task main idle-task '-30 hours'
+  local p
+  spawn_agent "$WT/idle-task"; p=$AGENT
+  run --apply
+  sleep 0.3
+  alive "$p" && fail "idle task agent still running"
+  grep -q "^$FM_HOME idle-task mark\$" "$MARK_LOG" || fail "the stop was not marked left stopped in its own home: $(cat "$MARK_LOG" 2>/dev/null)"
+  [ -f "$FM_HOME/state/idle-task.stopped" ] || fail "no state/<id>.stopped marker for the watchdog to honour"
+  grep -q 'task-stop .*task=idle-task .*marked=yes .*revert: .*idle-task clear; .*idle-task relaunch' "$AK47_STATE/reap.log" \
+    || fail "reap line does not record the mark and its two-step revert: $(tail -n 1 "$AK47_STATE/reap.log")"
+
+  reset
+  add_task main idle-task '-30 hours'
+  spawn_agent "$WT/idle-task"; p=$AGENT
+  AK47_LEAVE_STOPPED=$SANDBOX/missing run --apply
+  sleep 0.3
+  alive "$p" || fail "a task was stopped although it could not be marked left stopped"
+  [ ! -s "$CONTROL_LOG" ] || fail "fm-control was asked to exit a task that could not be marked"
+  grep -q 'reclaim-no-leave-stopped' "$AK47_STATE/findings.log" || fail "the missing mark script is not a finding"
+  pass "every task stop is marked left stopped so the watchdog never relaunches it, and none happens without the mark"
+}
+
+test_unfinished_work_vetoes_a_stop() {
+  reset
+  local t s
+  declare -A A=()
+  local kept="open-decision last-blocked awaits-review pr-open pr-unreadable unpushed dirty"
+  local stopped="resolved-decision pr-merged pushed"
+  for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
+  s=$FM_HOME/state
+  printf 'needs-decision [key=k1]: keep both cards or hide one\nworking: waiting meanwhile\n' >"$s/open-decision.status"
+  printf 'needs-decision [key=k2]: which copy\nresolved [key=k2]: copy chosen\ndone: copy shipped\n' >"$s/resolved-decision.status"
+  printf 'blocked: needs a token\n' >"$s/last-blocked.status"
+  printf 'done: renders ready, awaiting your review\n' >"$s/awaits-review.status"
+  echo 'pr=https://github.com/o/r/pull/1' >>"$s/pr-open.meta"; echo OPEN >"$SANDBOX/gh/1"
+  echo 'pr=https://github.com/o/r/pull/2' >>"$s/pr-merged.meta"; echo MERGED >"$SANDBOX/gh/2"
+  printf 'done: PR https://github.com/o/r/pull/3\n' >"$s/pr-unreadable.status"
+  commit_task unpushed
+  commit_task pushed yes
+  commit_task dirty yes; echo y >>"$WT/dirty/f"
+  for t in $kept $stopped; do touch -d '-30 hours' "$s/$t.status"; spawn_agent "$WT/$t"; A[$t]=$AGENT; done
+  run --apply
+  sleep 0.3
+  for t in $kept; do
+    alive "${A[$t]}" || fail "$t holds unfinished work but was stopped"
+    [ -e "$s/$t.stopped" ] && fail "$t was marked left stopped"
+  done
+  for t in $stopped; do
+    alive "${A[$t]}" && fail "$t holds no unfinished work but was kept: $(grep " $t " "$AK47_STATE/agent-reclaim-latest.md")"
+  done
+  for r in 'open decision k1' 'last status blocked' 'awaits review' 'PR open' 'PR state unreadable' 'commit(s) on no pushed branch' 'uncommitted changes'; do
+    grep -qF "$r" "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the veto '$r'"
+  done
+  pass "an open decision, a waiting or review-bound last status, an open or unreadable PR, and unpushed or uncommitted work each veto a stop"
+}
+
 test_armed_check_vetoes_and_finished_work_goes_first() {
   reset
   register_secondmate capped
@@ -492,6 +584,8 @@ test_idle_task_stops_through_fm_control_in_its_home
 test_working_agent_is_never_stopped
 test_busy_state_and_keep_list_veto
 test_unread_steering_and_running_validation_veto
+test_stops_are_marked_left_stopped
+test_unfinished_work_vetoes_a_stop
 test_over_cap_home_stops_oldest_idle_first
 test_box_cap_reads_budget
 test_armed_check_vetoes_and_finished_work_goes_first

@@ -48,6 +48,14 @@
 # are history. A repository no-mistakes does not manage has no validation, and a
 # read that fails any other way - including no usable no-mistakes binary - keeps
 # every task in that repository, because it cannot prove none is running.
+# A task that still holds unfinished work for someone is kept too, because a
+# stop is now permanent (see Actions): a keyed needs-decision or blocked line
+# with no later resolved line for that key; a last status line that is
+# needs-decision, blocked, waiting, or paused, or that says it awaits a review,
+# approval, decision, or merge; a PR (the record's pr= or a PR URL in the last
+# status line) that `gh pr view` reads as open, or cannot read at all; and a
+# worktree whose HEAD has commits on no pushed branch, or uncommitted changes to
+# tracked files, or whose git state cannot be read.
 # Cap stops take tasks whose last report is done or failed before quiet live
 # ones.
 # A task listed in $AK47_CONFIG/reclaim-keep (one id per line) or whose record
@@ -62,7 +70,13 @@
 #                   the agent and keeps its endpoint, worktree, and every change.
 #                   Orca cannot deliver the exit keys, so an Orca task, or any
 #                   task whose exit does not complete, falls back to SIGTERM of
-#                   the agent's exact pid.
+#                   the agent's exact pid. Every stopped task is then marked
+#                   left stopped through bin/fm-leave-stopped.sh in its home
+#                   (state/<id>.stopped), which the fleet watchdog and watcher
+#                   honour, so it is never relaunched behind the reclaim. No
+#                   task is stopped when that script is missing, and a stop
+#                   whose mark fails is a finding. Revert: fm-leave-stopped.sh
+#                   <id> clear, then fm-control.sh <id> relaunch.
 #   status archive  a home's state/<id>.status with no <id>.meta, older than
 #                   reclaim_orphan_min, moves (never deletes) to that home's
 #                   data/orphan-status-archive-<date>/. Revert: move it back.
@@ -105,7 +119,9 @@
 #   reclaim_worktree_roots   colon list (default ~/.treehouse:~/orca/workspaces)
 # AK47_RECLAIM_SCOPE (tests only) restricts the census to agents working under
 # one directory, so a test never sees the box's real agents.
-# AK47_NO_MISTAKES (tests only) points the validation read at a fake binary.
+# AK47_NO_MISTAKES (tests only) points the validation read at a fake binary;
+# AK47_LEAVE_STOPPED and AK47_GH do the same for the left-stopped mark and the
+# PR state read.
 #
 # Exit: 0 the run completed (a finding or a stop that did not take is not a
 # failure), 1 a step failed, 2 bad usage or a malformed knob.
@@ -122,7 +138,7 @@ while [ $# -gt 0 ]; do
     --apply) APPLY=1; shift ;;
     --print) PRINT=1; shift ;;
     --stop-watcher) STOP_WATCHER=${2:?--stop-watcher needs a home directory}; shift 2 ;;
-    -h|--help) sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "agent-reclaim.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -136,6 +152,8 @@ else
 fi
 FM_CONTROL=${AK47_FM_CONTROL:-$FM_CODE/bin/fm-control.sh}
 FM_LOCK=$FM_CODE/bin/fm-lock.sh
+LEAVE_STOPPED=${AK47_LEAVE_STOPPED:-$FM_CODE/bin/fm-leave-stopped.sh}
+GH=${AK47_GH:-gh}
 FM_WAKE_LIB=$FM_CODE/bin/fm-wake-lib.sh
 
 ORPHAN_MIN=$(ak47_conf reclaim_orphan_min 120)
@@ -472,6 +490,53 @@ validation_state() {
     *) VSTATE=running ;;
   esac
 }
+# held_work <home> <id> <cwd> sets HELD to why a task still holds unfinished
+# work for someone (a decision, a review, unpushed or uncommitted changes), or
+# to nothing. Every unreadable answer keeps the task.
+declare -A PR_STATE=()
+held_work() {
+  local home=$1 id=$2 cwd=$3 st=$1/state/$2.status meta=$1/state/$2.meta wt pr out n
+  HELD=
+  if [ -f "$st" ]; then
+    out=$(awk '
+      { l = $0; sub(/^[0-9][0-9TZ:.+-]* /, "", l) }
+      l ~ /^(needs-decision|blocked|resolved)[ :[]/ && match(l, /\[key=[^]]*\]/) {
+        k = substr(l, RSTART + 5, RLENGTH - 6)
+        if (l ~ /^resolved/) delete open[k]; else open[k] = 1
+      }
+      l ~ /[^[:space:]]/ { last = l }
+      END {
+        for (k in open) { print "open decision " k; exit }
+        s = last; sub(/[ :[].*/, "", s)
+        if (s ~ /^(needs-decision|blocked|waiting|paused)$/) { print "last status " s; exit }
+        if (tolower(last) ~ /(await|waiting|ready)[a-z]* (for |on )?(a |the |your |captain.s )?(review|approval|decision|merge)/) print "last status awaits review or decision"
+      }' "$st" 2>/dev/null)
+    [ -n "$out" ] && { HELD=$out; return 0; }
+  fi
+  pr=$(sed -n 's/^pr=//p' "$meta" 2>/dev/null | head -1)
+  [ -n "$pr" ] || pr=$(tail -n 1 "$st" 2>/dev/null | grep -Eo 'https://github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+' | head -1)
+  if [ -n "$pr" ]; then
+    if [ -z "${PR_STATE[$pr]+x}" ]; then
+      PR_STATE[$pr]=$(timeout 20 "$GH" pr view "$pr" --json state -q .state 2>/dev/null) || PR_STATE[$pr]=
+    fi
+    case "${PR_STATE[$pr]}" in
+      MERGED|CLOSED) ;;
+      OPEN) HELD="PR open, awaiting review"; return 0 ;;
+      *) HELD="PR state unreadable"; return 0 ;;
+    esac
+  fi
+  wt=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -1)
+  [ -d "$wt" ] || wt=$cwd
+  [ -d "$wt" ] || return 0
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || return 0   # no commit yet
+  n=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { HELD="git state unreadable"; return 0; }
+  [ "$n" -gt 0 ] && { HELD="$n commit(s) on no pushed branch"; return 0; }
+  out=$(git -C "$wt" status --porcelain --untracked-files=no 2>/dev/null) || { HELD="git state unreadable"; return 0; }
+  [ -n "$out" ] && HELD="uncommitted changes"
+  return 0
+}
+
 # Sample CPU only for agents an action could reach.
 declare -A WORKING=() T0=() KEEP=()
 if [ -r "$AK47_CONFIG/reclaim-keep" ]; then
@@ -507,6 +572,8 @@ for j in "${cand[@]}"; do
       running) WORKING[$j]="validation running"; continue ;;
       unknown) WORKING[$j]="validation state unreadable"; continue ;;
     esac
+    held_work "${C_HOME[$j]}" "${C_ID[$j]}" "${C_CWD[$j]}"
+    [ -n "$HELD" ] && { WORKING[$j]=$HELD; continue; }
   fi
   T0[$j]=$(cputicks "${C_PID[$j]}" || echo "")
 done
@@ -636,6 +703,13 @@ for j in "${!STOP[@]}"; do
     continue
   fi
   home=${C_HOME[$j]}; id=${C_ID[$j]}; how=""
+  # A stop without the left-stopped mark is undone by the watchdog within
+  # minutes, so no task is stopped when the mark cannot be written.
+  if [ ! -x "$LEAVE_STOPPED" ]; then
+    failures=$((failures + 1))
+    finding reclaim-no-leave-stopped "agent reclaim stopped no task: $LEAVE_STOPPED is missing, and a stop it cannot mark left stopped would be relaunched"
+    continue
+  fi
   if [ "${C_BACKEND[$j]}" != orca ] && [ -x "$FM_CONTROL" ] && \
      FM_HOME=$home timeout 120 "$FM_CONTROL" "$id" exit >/dev/null 2>&1 && \
      [ "$(starttime "$pid")" != "${C_START[$j]}" ]; then
@@ -645,7 +719,13 @@ for j in "${!STOP[@]}"; do
   fi
   if [ -n "$how" ]; then
     stopped=$((stopped + 1))
-    reap "task-stop home=$home task=$id pid=$pid how=$how reason=$why revert: FM_HOME=$home $FM_CODE/bin/fm-control.sh $id relaunch --note 'resumed after agent-reclaim'"
+    marked=yes
+    if ! FM_HOME=$home FM_SUPERVISION_ACTOR=main timeout 60 "$LEAVE_STOPPED" "$id" mark \
+         --reason "ak47 agent reclaim: $why (Aaron 2026-11-17: reclaim agents nobody uses)" >/dev/null 2>&1; then
+      marked=no; failures=$((failures + 1))
+      finding "reclaim-mark-failed-$(key_of "$id")" "task $id in $home was stopped ($why) but could not be marked left stopped, so the watchdog may relaunch it"
+    fi
+    reap "task-stop home=$home task=$id pid=$pid how=$how marked=$marked reason=$why revert: FM_HOME=$home $LEAVE_STOPPED $id clear; FM_HOME=$home $FM_CODE/bin/fm-control.sh $id relaunch --note 'resumed after agent-reclaim'"
   else
     failures=$((failures + 1))
     finding "reclaim-stop-failed-$(key_of "$id")" "task $id in $home ($why) did not stop by fm-control exit or SIGTERM; left running"
