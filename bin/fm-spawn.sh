@@ -25,6 +25,8 @@
 #   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
 #   in the task metadata for bin/fm-dod-lib.sh's ready-report gate. A
+#   mode=no-mistakes ship installs the same pre-push wrapper with the gate
+#   rule (write-gate), also when the home keeps AI trailers. A
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
@@ -7239,6 +7241,9 @@ EOF
 # A forge=external ship always gets this directory, because its pre-push
 # wrapper carries the guard that keeps task branches off the shared origin; a
 # home that keeps trailers gets a commit-msg wrapper that only chains.
+# A mode=no-mistakes ship always gets it too, with the gate rule owned by
+# bin/fm-git-push-guard.sh. This installation precedes the harness/backend split,
+# so every worker receives the same protection through its Git environment.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
 GIT_HOOKS_INSTALLED=0
 if [ "$EXTERNAL_REVIEW" = 1 ]; then
@@ -7251,6 +7256,17 @@ if [ "$EXTERNAL_REVIEW" = 1 ]; then
     && "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${strip_args[@]+"${strip_args[@]}"}" \
       --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$WT"; } || {
     echo "error: could not install the external-review push guard hooks for $ID" >&2
+    exit 1
+  }
+  GIT_HOOKS_INSTALLED=1
+elif [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  PUSH_GUARD_FILE="$STATE_REAL/$ID.push-guard"
+  strip_args=()
+  [ "$KEEP_AI_TRAILERS" = 0 ] || strip_args=(--no-strip)
+  { "$FM_ROOT/bin/fm-git-push-guard.sh" write-gate "$PUSH_GUARD_FILE" "$BRANCH" \
+    && "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${strip_args[@]+"${strip_args[@]}"}" \
+      --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$WT"; } || {
+    echo "error: could not install the no-mistakes gate push guard hooks for $ID" >&2
     exit 1
   }
   GIT_HOOKS_INSTALLED=1
@@ -7771,8 +7787,8 @@ LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 # Pane-scoped override: git in this worker reads our commit-msg strip without
 # rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over
 # config files and is inherited by child git processes. When the home opts in
-# to keeping trailers, leave core.hooksPath alone so the repository's hooks run
-# directly. An export statement inside the pane command carries the override
+# to keeping trailers and no push guard is required, leave core.hooksPath alone
+# so the repository's hooks run directly. An export statement carries the override
 # across every step of a compound raw launch while firstmate's own git is unchanged.
 # The helper appends after the GIT_CONFIG_COUNT entries the worker actually
 # inherits (after any launch environment filtering), so credential.helper and
