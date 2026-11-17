@@ -303,6 +303,7 @@ test_work_economy_in_all_worker_briefs() {
     assert_grep 'Combine related probes into one script run; filter or limit command output' "$brief" "$kind: missing batched-probe rule"
     assert_grep "Keep short notes in \`$home/data/$kind/notes.md\` and update them at each milestone: decisions, open work, and next steps" "$brief" "$kind: missing task-specific durable notes instruction"
     assert_grep 'One task per worker: this session carries only this task' "$brief" "$kind: missing one-task-per-worker rule"
+    assert_grep 'Never poll the GitHub REST API in a loop' "$brief" "$kind: missing GitHub REST polling ban"
   done
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
     "$ROOT/bin/fm-brief.sh" supervisor --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed"
@@ -1356,6 +1357,7 @@ test_every_brief_names_the_lavish_opener() {
       else
         assert_grep "$opener" "$brief" "lavish $version: $kind brief did not name the Lavish opener by absolute path"
         assert_grep "browser-launch: failed <url>" "$brief" "lavish $version: $kind brief did not say what to do when the page did not open"
+        assert_grep "Write the page file only under the persistent \`data/\` directory" "$brief" "lavish $version: $kind brief did not require persistent page artifacts"
       fi
     done
   done

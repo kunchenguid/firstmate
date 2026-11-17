@@ -3550,6 +3550,7 @@ A long-polling external process is registered as a *source* through its adapter,
 Before arming any Lavish source, open its artifact with `bin/fm-lavish-open.sh <artifact.html>` so the saved session identifies the board's server; reply and poll attempts derive their host and port from that session and refuse missing or invalid session evidence before posting or consuming a staged worker reply.
 That command is the one opener for every captain-facing Lavish page, whichever home or harness opens it: a bare `lavish-axi <file>` reports `status: opened` even when the browser launch behind it failed, so the opener ends with a `browser-launch:` line, and a `failed <url>` verdict means the page did not open and whoever opened it hands the captain that URL in its next status line or chat.
 Its header owns the verdicts and the WSL interop retry.
+The opener refuses an artifact whose physical path is under shared temporary directories, an agent scratchpad, a pool worktree, or a `.lavish/` directory, because the page is lost on reboot or slot return; keep pages under the home's persistent `data/` directory, which is always accepted.
 
 **Retry interrupted Lavish polls**
 
@@ -3577,6 +3578,10 @@ After opening the artifact as required above, the worker arms it with `bin/fm-pr
 
 The registration persists as one task-owned source record, while each captured nonterminal round remains open until the worker re-arms and the existing handled marker acknowledges that round.
 Re-arm acknowledges that round and registers the next listener: the board is armed once while no record exists, and a further arm by the same owner is refused unless an unacknowledged nonterminal round is waiting, so an open round is never replaced before its owner acknowledges it.
+Two conflicts heal themselves instead of stranding the board.
+An idle re-arm by the owner whose listener is live and that stages no reply is an idempotent no-op reporting `already-armed`, and one whose listener is dead (no claim) republishes the registration and starts a new listener.
+A different task arming a board whose owner task is gone (no endpoint metadata) with no open round retires that stale owner's claim and registration, reports `healed:`, and adopts the board.
+A live listener with a staged reply, an uncertain or orphaned claim, a live owner task, and any open round still refuse.
 
 **Post an agent reply**
 

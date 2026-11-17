@@ -64,6 +64,10 @@ export FM_QUOTA_SHARED_READ_TTL=0
 # FM_TEST_HARNESS harness pin). Normal primary launches do not arm it, so a
 # leaked harness pin alone stays inert outside a suite.
 export FM_TEST_SEAM=1
+# Fixture pages live in the suite's temp root, which bin/fm-lavish-open.sh
+# otherwise refuses as non-persistent; tests/fm-lavish-open.test.sh unsets this
+# to exercise the refusal itself.
+export FM_LAVISH_ALLOW_EPHEMERAL=1
 
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout

@@ -25,7 +25,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-bridge-intake.sh`    | Apply the Remove and Restore presses from one captured Bridge Lavish result through `fm-forget.sh`, once, with a receipt |
 | `fm-forget.sh`           | Remove tasks from this home's lists into a 90-day restorable copy, restore them, list them, and feed the Bridge's Tasks section |
 | `fm-live-board-prs.sh`   | Read each project's recent pull requests and the runs their merges started, and which listed environments each merge has reached, read-only, for the live board's timelines and environment strips |
-| `fm-lavish-open.sh`      | Open a Lavish page in the captain's browser and report whether the launch failed      |
+| `fm-lavish-open.sh`      | Open a persistent Lavish page in the captain's browser and report whether the launch failed |
+| `fm-ci-zombie-sweep.sh`  | Dry-run first, then cancel this fork's GitHub Actions runs queued or running past 24h, through `gh`, never polling |
 | `fm-lavish-board-lib.sh` | Shared serve, prove-live, bind, and arm sequence for captain-facing Lavish boards     |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |

@@ -115,3 +115,28 @@ assert_equals 0 "$(wc -l < "$LOG" | tr -d ' ')" "a missing artifact must not rea
 run_case -- "$ARTIFACT" --bogus
 expect_code 2 "$RC" "unknown option"
 pass "a missing artifact or unknown option is refused before lavish-axi runs"
+
+# Page artifacts must live under the home's persistent data/ directory: a page
+# in shared /tmp, a scratchpad, a pool worktree or a .lavish/ directory is lost
+# on reboot or slot return.
+HOME_DIR="$TMP_ROOT/home"
+mkdir -p "$HOME_DIR/data/task" "$TMP_ROOT/pool/.treehouse/slot/.lavish" "$TMP_ROOT/agent/scratchpad"
+printf '<!doctype html><title>t</title>\n' > "$HOME_DIR/data/task/page.html"
+printf '<!doctype html><title>t</title>\n' > "$TMP_ROOT/pool/.treehouse/slot/.lavish/page.html"
+printf '<!doctype html><title>t</title>\n' > "$TMP_ROOT/agent/scratchpad/page.html"
+ln -s "$TMP_ROOT/agent/scratchpad/page.html" "$HOME_DIR/data/task/link.html"
+
+run_case FM_LAVISH_ALLOW_EPHEMERAL= FM_HOME="$HOME_DIR" -- "$HOME_DIR/data/task/page.html"
+expect_code 0 "$RC" "an artifact under the home's data/ opens"
+assert_equals "browser-launch: ok" "$(tail -n 1 "$TMP_ROOT/out.$N")" "persistent artifact verdict"
+for bad in "$TMP_ROOT/pool/.treehouse/slot/.lavish/page.html" "$TMP_ROOT/agent/scratchpad/page.html"; do
+  run_case FM_LAVISH_ALLOW_EPHEMERAL= FM_HOME="$HOME_DIR" -- "$bad"
+  expect_code 1 "$RC" "an ephemeral artifact is refused: $bad"
+  assert_equals 0 "$(wc -l < "$LOG" | tr -d ' ')" "a refused artifact must not reach lavish-axi"
+  assert_contains "$ERR" "$HOME_DIR/data/" "the refusal must name the persistent directory"
+done
+run_case FM_LAVISH_ALLOW_EPHEMERAL= FM_HOME="$HOME_DIR/none" -- "$ARTIFACT"
+expect_code 1 "$RC" "an artifact in the shared temp directory is refused"
+run_case FM_LAVISH_ALLOW_EPHEMERAL= FM_HOME="$HOME_DIR" -- "$HOME_DIR/data/task/link.html"
+expect_code 1 "$RC" "a data/ symlink to an ephemeral file is refused by its physical path"
+pass "only persistent data/ artifacts open; temp, scratchpad, pool and .lavish pages are refused"

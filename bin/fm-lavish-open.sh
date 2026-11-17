@@ -21,6 +21,14 @@
 # The exit status is lavish-axi's own. A nonzero exit prints no
 # browser-launch line and is never retried.
 #
+# PERSISTENT ARTIFACTS ONLY. A page whose file lives in shared /tmp, an agent
+# scratchpad, a pool worktree, or a `.lavish/` directory is lost on reboot or
+# when the slot is returned, and the captain's open session then points at
+# nothing. This command refuses such an artifact (exit 1, nothing launched) and
+# names the home's persistent `data/` directory to write it under instead; an
+# artifact already under that `data/` directory is always accepted. Set
+# FM_LAVISH_ALLOW_EPHEMERAL=1 only for tests that open fixture pages.
+#
 # WHY. `lavish-axi <file>` exits 0 and prints `status: opened` even when the
 # browser launch behind it failed; the only trace is a stderr line containing
 # `browser launch failed`, which a truncating pipe or a stderr redirect hides.
@@ -48,6 +56,37 @@ elif [ "$#" -ne 0 ]; then
   usage
 fi
 [ -f "$artifact" ] || { printf 'error: artifact does not exist: %s\n' "$artifact" >&2; exit 1; }
+
+# Resolve to the physical path: Lavish keys a session on it, and a symlink into
+# /tmp must not smuggle an ephemeral file past the check.
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(dirname "$SCRIPT_DIR")}}
+real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  || { printf 'error: cannot resolve the artifact path: %s\n' "$artifact" >&2; exit 1; }
+data_dir=$(CDPATH='' cd -- "$FM_HOME/data" 2>/dev/null && pwd -P || true)
+ephemeral_reason() {  # <real-path>; prints why it is ephemeral, nonzero when it is not
+  local path=$1 root
+  for root in /tmp /var/tmp /dev/shm "${TMPDIR:-}"; do
+    [ -n "$root" ] || continue
+    root=${root%/}
+    case "$path" in "$root"/*) printf 'under temporary directory %s' "$root"; return 0 ;; esac
+  done
+  case "$path" in
+    */.lavish/*) printf 'inside a .lavish/ directory' ; return 0 ;;
+    */scratchpad/*) printf 'inside an agent scratchpad'; return 0 ;;
+    */.treehouse/*) printf 'inside a pool worktree'; return 0 ;;
+  esac
+  return 1
+}
+if [ "${FM_LAVISH_ALLOW_EPHEMERAL:-}" != 1 ]; then
+  if [ -n "$data_dir" ] && case "$real" in "$data_dir"/*) true ;; *) false ;; esac; then
+    :
+  elif reason=$(ephemeral_reason "$real"); then
+    printf 'error: refusing to open %s: it is %s and would be lost on reboot or slot return; write the page under %s/ and open it from there\n' \
+      "$artifact" "$reason" "$FM_HOME/data" >&2
+    exit 1
+  fi
+fi
 command -v lavish-axi >/dev/null 2>&1 || { printf 'error: lavish-axi is not installed\n' >&2; exit 1; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/fm-lavish-open.XXXXXX") || exit 1

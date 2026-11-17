@@ -5208,4 +5208,84 @@ PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$undisp_art" >/dev/null 2>&1 || true
 pass "arm does not launch beside a stale claim whose process group is alive"
 
+# Lavish ownership self-heal. A re-arm conflict that only a stale or dead
+# holder causes heals itself instead of stranding the board; a live holder with
+# something to lose still refuses.
+HEAL="$TMP_ROOT/heal"; new_home "$HEAL"
+HEAL_ROOT="$TMP_ROOT/lavish-heal-root"; mkdir -p "$HEAL_ROOT"; export HEAL_ROOT
+HEAL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-heal-stub")
+cat > "$HEAL_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1-}" != --version ] || { printf '0.1.79\n'; exit 0; }
+while [ ! -e "$HEAL_ROOT/release" ]; do sleep 0.02; done
+printf 'session:\n  status: ended\n'
+SH
+chmod +x "$HEAL_BIN/lavish-axi"
+fm_test_track_procevent_home "$HEAL"
+heal_arm() {  # <artifact> <task> [extra arm args...]
+  local art=$1 task=$2
+  shift 2
+  PATH="$HEAL_BIN:$PATH" FM_HOME="$HEAL" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$art" --for "$task" "$@"
+}
+
+# (1) A stale owner - its task torn down, so no endpoint metadata - is retired
+# and the board adopted by the next task that arms it.
+STALE_ART="$TMP_ROOT/heal-stale-board.html"
+printf '<h1>stale owner</h1>\n' > "$STALE_ART"
+lavish_session "$STALE_ART"
+stale_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STALE_ART")
+new_task_endpoint "$HEAL" worker-stale
+new_task_endpoint "$HEAL" worker-heir
+heal_arm "$STALE_ART" worker-stale >/dev/null || fail "the stale-owner fixture could not be armed"
+if heal_arm "$STALE_ART" worker-heir >/dev/null 2>"$HEAL_ROOT/live-owner.err"; then
+  fail "a sibling took a board whose owner task still exists"
+fi
+assert_contains "$(cat "$HEAL_ROOT/live-owner.err")" "owned by task worker-stale" \
+  "the live-owner refusal did not name the owner"
+rm -f "$HEAL/state/worker-stale.meta"
+heal_out=$(heal_arm "$STALE_ART" worker-heir 2>&1) \
+  || fail "a re-arm over a torn-down owner did not self-heal: $heal_out"
+assert_contains "$heal_out" "healed: retired stale owner worker-stale" \
+  "the stale-owner heal was not reported: $heal_out"
+assert_contains "$heal_out" "armed: $stale_id" "the healed board was not armed: $heal_out"
+assert_contains "$(cat "$HEAL/state/procevent/$stale_id.source")" "owner_task=worker-heir" \
+  "the healed board is not owned by the task that re-armed it"
+pass "a re-arm conflict with a torn-down owner retires its claim and adopts the board"
+
+# (2) The same task re-arming a live listener with no staged reply is an
+# idempotent no-op, not a refusal; with a staged reply it still refuses, so a
+# reply is never dropped.
+heal_out=$(heal_arm "$STALE_ART" worker-heir 2>&1) \
+  || fail "an idle re-arm of a live board was refused instead of being a no-op: $heal_out"
+assert_contains "$heal_out" "already-armed: $stale_id" "the idle live re-arm was not reported idempotent: $heal_out"
+printf 'staged reply\n' > "$HEAL_ROOT/reply"
+if heal_arm "$STALE_ART" worker-heir --agent-reply-file "$HEAL_ROOT/reply" >/dev/null 2>&1; then
+  fail "an idle live re-arm carrying a reply was accepted and would drop the reply"
+fi
+pass "an idle re-arm of a live board is idempotent and never drops a staged reply"
+
+# (3) The same task re-arming a board whose listener is dead (registered, no
+# claim) heals by republishing and starting a listener.
+DEAD_ART="$TMP_ROOT/heal-dead-board.html"
+printf '<h1>dead listener</h1>\n' > "$DEAD_ART"
+lavish_session "$DEAD_ART"
+dead_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$DEAD_ART")
+new_task_endpoint "$HEAL" worker-dead
+pe "$HEAL" register-task lavish "$dead_id" worker-dead -- \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEAD_ART" >/dev/null
+heal_out=$(heal_arm "$DEAD_ART" worker-dead 2>&1) \
+  || fail "a re-arm of a board with a dead listener was refused instead of healing: $heal_out"
+assert_contains "$heal_out" "armed: $dead_id" "the dead-listener board was not re-armed: $heal_out"
+assert_contains "$(pe "$HEAL" list)" "task:worker-dead/listening" \
+  "the dead-listener re-arm did not leave a live listener"
+pass "a re-arm over a dead listener republishes the registration and restarts it"
+
+touch "$HEAL_ROOT/release"
+for art in "$STALE_ART" "$DEAD_ART"; do
+  PATH="$HEAL_BIN:$PATH" FM_HOME="$HEAL" \
+    "$ROOT/bin/fm-procevent-lavish.sh" retire "$art" >/dev/null 2>&1 || true
+done
+
 printf '\nall procevent tests passed\n'

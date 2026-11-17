@@ -33,6 +33,10 @@
 #            staged `--agent-reply-file` is handed to the adapter's
 #            `deliver-reply` under the source lock once the task is eligible,
 #            so a refused arm never posts it and a failed post publishes no registration.
+#            Two conflicts self-heal: a task whose own listener is dead (no claim)
+#            republishes, and a live one with no staged reply is an idempotent
+#            `already-armed`; a board whose owner task is gone (no endpoint
+#            metadata, no open round) is retired and adopted. docs/configuration.md owns it.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -556,7 +560,7 @@ cmd_register() {
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
-  local pending_rounds=0 delivered
+  local pending_rounds=0 delivered claim_state
   local -a argv=() kept=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -582,8 +586,25 @@ cmd_register_task() {
     fi
     if [ "$(source_owner_task "$id")" != "$task" ]; then
       reply_source=$(source_owner_task "$id")
-      fm_procevent_source_lock_release "$id"
-      die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
+      # Self-heal a stale owner: its task is gone (no endpoint metadata) and no
+      # captured round of it is unacknowledged, so nothing it could still read
+      # is lost. Retire its claim and registration, then adopt the board. A
+      # live owner, or any owner with an open round, still refuses.
+      if [ ! -e "$STATE/$reply_source.meta" ] && [ ! -L "$STATE/$reply_source.meta" ] \
+        && [ -z "$(source_pending "$id" | head -1)" ]; then
+        fm_procevent_source_lock_release "$id"
+        cmd_retire "$id" >/dev/null || die "cannot retire the stale owner $reply_source of source $id"
+        fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+        if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+          fm_procevent_source_lock_release "$id"
+          die "cannot replace task-owned source $id: it was re-registered while its stale owner $reply_source was retired"
+        fi
+        printf 'healed: retired stale owner %s of source %s\n' "$reply_source" "$id" >&2
+        adopting=1
+      else
+        fm_procevent_source_lock_release "$id"
+        die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
+      fi
     fi
   else
     adopting=1
@@ -605,8 +626,29 @@ cmd_register_task() {
     fi
   done < <(source_pending "$id")
   if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
-    fm_procevent_source_lock_release "$id"
-    die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
+    # The task already holds this board with nothing to acknowledge. With a
+    # dead listener (claim stale or absent) the re-arm heals the board by
+    # republishing the registration; with a live one and no staged reply it is
+    # an idempotent no-op. A live listener plus a staged reply, or any claim
+    # state that is not plainly live or stale, still refuses so a reply is
+    # never dropped and an uncertain owner is never displaced.
+    fm_procevent_claim_state_locked "$id"
+    claim_state=$?
+    if [ "$claim_state" -eq 0 ]; then
+      reply_source=''
+      for arg in "${argv[@]}"; do
+        [ "$arg" != --agent-reply-file ] || reply_source=1
+      done
+      if [ -z "$reply_source" ]; then
+        fm_procevent_source_lock_release "$id"
+        printf 'already-armed: %s (task=%s)\n' "$id" "$task"
+        return 0
+      fi
+    fi
+    if [ "$claim_state" -ne 1 ]; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
+    fi
   fi
   # Each generation stages its reply under its own path, so nothing a failed
   # re-arm does can reach the reply the prior registration still references.

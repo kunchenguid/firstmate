@@ -798,6 +798,7 @@ tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
 tests/fm-capacity.test.sh 7973
 tests/fm-check-unregister.test.sh 481
 tests/fm-ci-workflow.test.sh 5833
+tests/fm-ci-zombie-sweep.test.sh 1500
 tests/fm-classify-corr-token.test.sh 49294
 tests/fm-classify-decision-key.test.sh 4362
 tests/fm-classify-imposed-hold.test.sh 598

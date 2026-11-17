@@ -538,7 +538,7 @@ fi
 # should see never depends on a worker remembering how a launch fails silently.
 LAVISH_OPEN_RULE=''
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
-  LAVISH_OPEN_RULE="Open every Lavish page you show the captain with \`$FM_ROOT/bin/fm-lavish-open.sh <artifact.html>\`, never with bare or piped \`lavish-axi <file>\`: it opens the page in the captain's browser, and when its last line reads \`browser-launch: failed <url>\` the page did not open, so put that URL in your next status line."
+  LAVISH_OPEN_RULE="Open every Lavish page you show the captain with \`$FM_ROOT/bin/fm-lavish-open.sh <artifact.html>\`, never with bare or piped \`lavish-axi <file>\`: it opens the page in the captain's browser, and when its last line reads \`browser-launch: failed <url>\` the page did not open, so put that URL in your next status line. Write the page file only under the persistent \`data/\` directory (for this task, \`$DATA/$ID/\`), never in /tmp, a scratchpad, a pool worktree or a \`.lavish/\` directory: those are lost on reboot or slot return, and the opener refuses them."
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -712,6 +712,7 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 IFS= read -r -d '' WORK_ECONOMY_SECTION <<'EOF' || true
 # Work economy
 For CI, pipelines, deploys, and long jobs, wait outside the conversation with ONE blocking command per run that loops internally and prints only the final state; never take sleep-then-check turns.
+Never poll the GitHub REST API in a loop (`gh api`, `gh run list`, `gh pr view` or `gh-axi` inside `sleep`/`until`/`while`): 30-second polling exhausted the shared REST budget on 2026-11-11 and stalled merges. Wait for PR checks with one `gh pr checks <pr> --watch --interval 60`, or let firstmate's check wake deliver the state; never script your own poll.
 Search before reading; read files over ~300 lines by range, and never re-read a whole large file.
 Combine related probes into one script run; filter or limit command output.
 One task per worker: this session carries only this task; finish it and stop, and never take on a second unrelated task, because firstmate starts a fresh worker for any other work (a steer or promotion for this same task still arrives in your inbox).
