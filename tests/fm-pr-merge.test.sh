@@ -705,10 +705,10 @@ write_fgj_auth() {
   for host in "$@"; do printf '%s\n' "$host" >> "$file"; done
 }
 
-# The per-instance login store a fake `fj` reads its `auth list` from. Written
+# The per-instance login store a fake `fj` answers `whoami --host` from. Written
 # beside the case's fakebin so the mock can find it without an extra exported
 # variable; forgejo-cli itself keeps a JSON store, whose exact shape firstmate
-# never parses because `fj auth list` prints the hostnames one per line.
+# never parses - it reads the login through `fj whoami`'s exit status instead.
 write_fj_auth() {
   local file=$1 host
   shift
@@ -823,8 +823,19 @@ add_fj_mock() {
 #!/usr/bin/env bash
 set -u
 self_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-if [ "${1:-} ${2:-}" = "auth list" ]; then
-  cat "$self_dir/../fj-auth.txt"
+# `whoami --host <host>` is the structured login predicate firstmate reads:
+# exit 0 exactly when <host> is logged in. No rendered `auth list` line is
+# parsed, matching fx/fj's real interface and the reader in bin/fm-pr-lib.sh.
+if [ "${1:-}" = "whoami" ]; then
+  host=
+  prev=
+  for arg in "$@"; do
+    [ "$prev" = "--host" ] && host=$arg
+    prev=$arg
+  done
+  [ -n "$host" ] || exit 1
+  grep -qx -- "$host" "$self_dir/../fj-auth.txt" 2>/dev/null || exit 1
+  printf '%s\n' "$host"
   exit 0
 fi
 printf 'fj: unexpected invocation: %s\n' "$*" >&2

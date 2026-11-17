@@ -1425,17 +1425,18 @@ fm_pr_forgejo_fgj_login() {  # <host>
   printf '%s' "$1"
 }
 
-# fj keeps one login per instance and prints the bare hostnames one per line
-# with `fj auth list` (its "no logins" message goes to stderr, leaving stdout
-# empty). Zero or several lines naming <host> fails rather than picking one.
-# fj still cannot serve firstmate's contract - see the resolver note above - but
-# its store is read here so a target host can be recognized as fj's and refused
-# by name instead of looking unconfigured.
+# fj keeps one login per instance and answers `fj whoami --host <host>` with
+# exit 0 exactly when <host> is authenticated. fj still cannot serve
+# firstmate's contract - see the resolver note above - but its store is read
+# here so a target host can be recognized as fj's and refused by name instead
+# of looking unconfigured.
 fm_pr_forgejo_fj_login() {  # <host>
   command -v fj >/dev/null 2>&1 || return 1
-  local status
-  status=$(fj auth list 2>/dev/null) || return 1
-  printf '%s\n' "$status" | awk -v h="$1" '$0 == h { matched++ } END { if (matched != 1) exit 1; print h }'
+  [ -n "${1:-}" ] || return 1
+  # Evidence is the exit status, never a parsed display line: a rendered
+  # hostname report would silently break on forgejo-cli's next release.
+  fj whoami --host "$1" >/dev/null 2>&1 || return 1
+  printf '%s' "$1"
 }
 
 # The host login a given CLI would use for <host>, read from that CLI's own
