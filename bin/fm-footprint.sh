@@ -76,7 +76,14 @@
 #   Before a directory is removed it is renamed aside under the task's spawn
 #   lock and the set-aside copy is checked again, because the directory can
 #   change between the first check and the rename; a copy that fails the
-#   second check is put back.
+#   second check is put back. Last comes the quiescence check: a copy that a
+#   running process still works in or holds a file open in is put back,
+#   and when the running processes cannot be listed in full (a probe file
+#   this process holds open must appear in the listing), every copy is put
+#   back. A renamed copy has a name no other process knows, so once none is
+#   rooted in it or holds anything open there, nothing can still write into
+#   it. Firstmate never ends a process to free space; teardown ends only the
+#   closing task's own processes, before task-close runs.
 #
 # owns-scratch <task-id> <scratch-dir>
 #   Exit 0 only when <scratch-dir> is this home's own area for the task (the
@@ -109,7 +116,11 @@
 #   match. Docker absent is a normal case and is skipped. When a listing
 #   fails (unknown), some objects remain (partial), or the daemon does not
 #   answer (down), the task and its generation are queued in
-#   state/footprint-docker-retry for the daily pass. It appends one line to
+#   state/footprint-docker-retry for the daily pass; every change to that
+#   queue holds its own short lock, and the daily pass removes only the
+#   entries it retired from the queue as it is at that moment, so a close
+#   queueing during the pass never loses its entry (when the queue cannot be
+#   written, the summary names the label to remove by hand). It appends one line to
 #   data/footprint-ledger.tsv (mode 0600): epoch, task, project, kept KB
 #   (data/<task-id>/), scratch KB, Docker objects verified removed, Docker
 #   status (removed, partial, unknown, down, absent, unproven), scratch status
@@ -454,6 +465,111 @@ fp_restore() {  # <aside> <dir>
   [ ! -e "$2" ] && [ ! -L "$2" ] && mv -- "$1" "$2" 2>/dev/null
 }
 
+# fp_in_use <out> <dir>...: the quiescence check made after directories are
+# set aside and checked again, just before they are removed. Writes to <out>
+# each listed directory that a running process still uses: its working
+# directory, or a file it holds open, at or below that directory. A set-aside
+# directory has a name no other process knows, so once no process is rooted
+# in it or holds anything open inside it, nothing can still write there.
+# Returns 1, with <out> empty, when the running processes cannot be listed in
+# full or a used path cannot be matched to one directory; the caller then
+# removes nothing. A process is never ended to free space.
+# macOS reads working directories and open files with lsof; Linux reads each
+# process's cwd and fd links under /proc (FM_PROC_ROOT_OVERRIDE in tests).
+fp_in_use() {  # <out> <dir>...
+  local out=$1 procs dir parent phys last_parent='' last_phys='' rc=0 lrc probe_dir probe
+  local -a plus=()
+  shift
+  : > "$out" || return 1
+  procs="$out.procs"
+  # shellcheck source=bin/fm-lane-vitals-lib.sh
+  command -v fm_lane_vitals_processes >/dev/null 2>&1 || . "$SCRIPT_DIR/fm-lane-vitals-lib.sh"
+  if ! fm_lane_vitals_processes "$FP_OS" "$procs" 2>/dev/null; then
+    rm -f "$procs"
+    return 1
+  fi
+  # Each directory under its own path and its physical one.
+  for dir in "$@"; do
+    parent=${dir%/*}
+    if [ "$parent" != "$last_parent" ]; then
+      last_parent=$parent
+      last_phys=$(fm_footprint_physical_dir "$parent") || last_phys=$parent
+    fi
+    phys="$last_phys/${dir##*/}"
+    printf '%s\t%s\n%s\t%s\n' "$dir" "$dir" "$phys" "$dir"
+    plus+=(+D "$phys")
+  done > "$out.dirs"
+  # Working directories: any one at or below a listed directory marks it.
+  awk -F'\t' '$5 != "" { print $5 }' "$procs" > "$out.cwd"
+  # Open files. A probe file this process holds open is listed alongside,
+  # and the listing counts only when it names that probe: lsof's exit status
+  # cannot tell "nothing open" from a refused or partial listing.
+  : > "$out.open"
+  probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-probe.XXXXXX") || { rm -f "$procs" "$out.dirs" "$out.cwd" "$out.open"; return 1; }
+  probe_dir=$(fm_footprint_physical_dir "$probe_dir") || probe_dir=
+  probe="$probe_dir/open"
+  if [ -z "$probe_dir" ] || [ ! -d "$probe_dir" ] || ! exec 9>"$probe"; then
+    rc=1
+  elif [ "$FP_OS" = Darwin ]; then
+    # lsof walks each directory itself and names only files open inside, so
+    # every name it prints must match a directory.
+    fm_run_timed 120 lsof -w -Fn +D "$probe_dir" "${plus[@]}" </dev/null > "$out.lsof" 2>/dev/null
+    lrc=$?
+    sed -n 's/^n//p' "$out.lsof" | grep -Fvx -- "$probe" > "$out.open"
+    [ "$lrc" != 124 ] && grep -Fqx -- "n$probe" "$out.lsof" || rc=1
+    rm -f "$out.lsof"
+  else
+    # Every fd link of every readable process.
+    fm_run_timed 120 find "$FM_LANE_VITALS_PROC"/[0-9]*/fd -mindepth 1 -maxdepth 1 \
+      -type l -exec readlink -- {} + </dev/null > "$out.fds" 2>/dev/null
+    lrc=$?
+    [ "$lrc" != 124 ] && grep -Fqx -- "$probe" "$out.fds" || rc=1
+    grep -Fvx -- "$probe" "$out.fds" >> "$out.cwd"
+    rm -f "$out.fds"
+  fi
+  exec 9>&-
+  # The probe directory holds only the probe file, so it is emptied and
+  # removed without a recursive delete.
+  case "$probe_dir" in
+    */fm-footprint-probe.*) rm -f -- "$probe"; rmdir -- "$probe_dir" 2>/dev/null || true ;;
+  esac
+  if [ "$rc" = 0 ]; then
+    # Walk each used path's ancestors; the first that is a listed directory
+    # marks it in use. An open name from lsof that matches none is unknown.
+    awk -F'\t' 'FILENAME == ARGV[1] { dir[$1] = $2; next }
+      { p = $0; hit = 0
+        while (p != "") {
+          if (p in dir) { hit = 1; if (!(dir[p] in seen)) { seen[dir[p]] = 1; print dir[p] }; break }
+          if (p !~ /\//) break
+          sub(/\/[^\/]*$/, "", p)
+        }
+        if (!hit && FILENAME == ARGV[3]) bad = 1
+      }
+      END { exit bad ? 3 : 0 }' "$out.dirs" "$out.cwd" "$out.open" > "$out" || rc=1
+  fi
+  [ "$rc" = 0 ] || : > "$out"
+  rm -f "$procs" "$out.dirs" "$out.cwd" "$out.open"
+  return "$rc"
+}
+
+# fp_area_idle <dir>: 0 when no running process uses <dir>; otherwise sets
+# FP_BLOCKER to why it is kept.
+fp_area_idle() {  # <dir>
+  local f rc=0
+  FP_IDLE_UNKNOWN=1
+  f=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-busy.XXXXXX") || { FP_BLOCKER="no temporary file to list running processes"; return 1; }
+  if ! fp_in_use "$f" "$1"; then
+    FP_BLOCKER="the running processes could not be listed, so it could not be shown idle"
+    rc=1
+  elif [ -s "$f" ]; then
+    FP_IDLE_UNKNOWN=0
+    FP_BLOCKER="a running process still works in it or holds a file open there"
+    rc=1
+  fi
+  rm -f "$f"
+  return "$rc"
+}
+
 # --- Docker -------------------------------------------------------------
 
 FP_DOCKER_STATE=
@@ -546,35 +662,77 @@ fp_docker_task_remove() {  # <id> <generation>
 # daemon that did not answer): "id<TAB>epoch<TAB>generation" lines the daily
 # pass retries. Each retry removes only that generation's objects, and only
 # while holding the task's spawn lock with no task record present, so a later
-# task reusing the id is never touched.
+# task reusing the id is never touched. Every change to the queue holds its
+# own short lock, and the daily pass removes only the entries it retired
+# from the queue as it is at that moment, so an entry a close appends while
+# the pass runs is never lost; the slow Docker work runs without that lock.
 DOCKER_RETRY="$STATE/footprint-docker-retry"
+DOCKER_RETRY_LOCK="$STATE/.footprint-docker-retry.lock"
+
+fp_docker_retry_lock() {
+  fp_locks
+  fm_lock_acquire_wait_max "$DOCKER_RETRY_LOCK" 30 2>/dev/null
+}
+
+fp_docker_retry_unlock() {
+  fm_lock_release "$DOCKER_RETRY_LOCK" >/dev/null 2>&1 || true
+}
 
 fp_docker_retry_add() {  # <id> <generation>
+  local rc=0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ ! -L "$DOCKER_RETRY" ] || return 1
-  grep -q "^$1	[0-9]*	$2\$" "$DOCKER_RETRY" 2>/dev/null && return 0
-  (umask 077 && printf '%s\t%s\t%s\n' "$1" "$(now_epoch)" "$2" >> "$DOCKER_RETRY")
+  fp_docker_retry_lock || return 1
+  if ! grep -q "^$1	[0-9]*	$2\$" "$DOCKER_RETRY" 2>/dev/null; then
+    (umask 077 && printf '%s\t%s\t%s\n' "$1" "$(now_epoch)" "$2" >> "$DOCKER_RETRY") || rc=1
+  fi
+  fp_docker_retry_unlock
+  return "$rc"
+}
+
+# fp_docker_retry_retire <retired-file>: removes exactly the listed entries
+# from the queue as it is now, under the queue lock, keeping every other
+# line, including any appended since the pass read it.
+fp_docker_retry_retire() {  # <retired-file>
+  local retired=$1 stage
+  [ -s "$retired" ] || return 0
+  fp_docker_retry_lock || return 1
+  if [ -f "$DOCKER_RETRY" ] && [ ! -L "$DOCKER_RETRY" ] &&
+    stage=$(umask 077 && mktemp "$STATE/.footprint-docker-retry.XXXXXX"); then
+    if awk 'FILENAME == ARGV[1] { gone[$0] = 1; next } !($0 in gone)' "$retired" "$DOCKER_RETRY" > "$stage"; then
+      if [ -s "$stage" ]; then
+        mv -f "$stage" "$DOCKER_RETRY" || rm -f "$stage"
+      else
+        rm -f "$stage" "$DOCKER_RETRY"
+      fi
+    else
+      rm -f "$stage"
+    fi
+  fi
+  fp_docker_retry_unlock
 }
 
 # fp_docker_retry_run <dry>: retries each listed closed task's Docker cleanup
 # while Docker answers; sets FP_DOCKER_PENDING to the entries still pending.
 # A malformed entry is kept and counted, never acted on.
 fp_docker_retry_run() {  # <dry>
-  local dry=$1 id at gen keep='' n=0
+  local dry=$1 id at gen n=0 snap retired
   FP_DOCKER_PENDING=0
   [ -f "$DOCKER_RETRY" ] && [ ! -L "$DOCKER_RETRY" ] || return 0
+  snap=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-retry.XXXXXX") || return 0
+  retired="$snap.retired"
+  : > "$retired"
+  fp_docker_retry_lock || { rm -f "$snap" "$retired"; return 0; }
+  cat "$DOCKER_RETRY" > "$snap" 2>/dev/null
+  fp_docker_retry_unlock
   while IFS='	' read -r id at gen; do
     [ -n "$id$at$gen" ] || continue
     if [ "$dry" = 1 ] || ! fm_task_id_path_safe "$id" || ! fm_footprint_generation_valid "$gen" ||
       ! fp_docker_up || ! fp_task_lock "$id"; then
-      keep="$keep$id	$at	$gen
-"
       n=$((n + 1))
       continue
     fi
     if fp_task_live "$id"; then
       fp_task_unlock "$id"
-      keep="$keep$id	$at	$gen
-"
       n=$((n + 1))
       continue
     fi
@@ -582,19 +740,14 @@ fp_docker_retry_run() {  # <dry>
     fp_task_unlock "$id"
     if [ "$FP_DOCKER_RESULT" = removed ]; then
       fp_ledger_append "$(now_epoch)" "$id" - - 0 "$FP_DOCKER_REMOVED" docker-retry removed - || true
+      printf '%s\t%s\t%s\n' "$id" "$at" "$gen" >> "$retired"
     else
-      keep="$keep$id	$at	$gen
-"
       n=$((n + 1))
     fi
-  done < "$DOCKER_RETRY"
+  done < "$snap"
   FP_DOCKER_PENDING=$n
-  [ "$dry" = 1 ] && return 0
-  if [ -n "$keep" ]; then
-    (umask 077 && printf '%s' "$keep" > "$DOCKER_RETRY.tmp" && mv -f "$DOCKER_RETRY.tmp" "$DOCKER_RETRY")
-  else
-    rm -f "$DOCKER_RETRY"
-  fi
+  [ "$dry" = 1 ] || fp_docker_retry_retire "$retired" || true
+  rm -f "$snap" "$retired"
 }
 
 # --- task-close -------------------------------------------------------------
@@ -623,7 +776,7 @@ cmd_owns_scratch() {  # <id> <scratch>
 }
 
 cmd_task_close() {  # <id> <scratch> [project]
-  local id=$1 scratch=$2 project=${3:-} kept scratch_kb=0 scratch_result=none oversized=- aside gen=''
+  local id=$1 scratch=$2 project=${3:-} kept scratch_kb=0 scratch_result=none oversized=- aside gen='' queue_lost=0 kept_hint='move or remove that'
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   if ! fm_footprint_config_read "$CONFIG_DIR"; then
     printf 'footprint: %s; removed nothing for %s\n' "$FP_CONFIG_ERROR" "$id"
@@ -660,6 +813,13 @@ cmd_task_close() {  # <id> <scratch> [project]
       elif ! fp_tree_disposable "$aside"; then
         fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
         scratch_result=kept
+      elif ! fp_area_idle "$aside"; then
+        # Teardown ends the task's processes first; one that survived, or a
+        # process table that cannot be read, keeps the area.
+        fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
+        scratch_result=kept
+        kept_hint='end that process once its work is safe'
+        [ "$FP_IDLE_UNKNOWN" = 0 ] || kept_hint='it stays until the running processes can be listed'
       elif fp_remove_tree "$aside"; then
         scratch_result=removed
       else
@@ -670,7 +830,7 @@ cmd_task_close() {  # <id> <scratch> [project]
   fi
   if [ -n "$gen" ]; then
     fp_docker_task_remove "$id" "$gen"
-    case "$FP_DOCKER_RESULT" in partial|unknown|down) fp_docker_retry_add "$id" "$gen" || true ;; esac
+    case "$FP_DOCKER_RESULT" in partial|unknown|down) fp_docker_retry_add "$id" "$gen" || queue_lost=1 ;; esac
   elif fp_docker_up || [ "$FP_DOCKER_STATE" = down ]; then
     FP_DOCKER_REMOVED=0
     FP_DOCKER_RESULT=unproven
@@ -686,17 +846,26 @@ cmd_task_close() {  # <id> <scratch> [project]
   case "$scratch_result" in
     refused) printf 'footprint: %s scratch path %s is not this home'"'"'s area for the task; left it in place. ' "$id" "$scratch" ;;
     partial) printf 'footprint: %s scratch area %s was only partly removed: %s. ' "$id" "$scratch" "$FP_BLOCKER" ;;
-    kept) printf 'footprint: %s scratch area %s kept whole (%s): %s; move or remove that, and the daily pass removes the area. ' \
-      "$id" "$scratch" "$(fp_human "$scratch_kb")" "$FP_BLOCKER" ;;
+    kept) printf 'footprint: %s scratch area %s kept whole (%s): %s; %s, and the daily pass removes the area. ' \
+      "$id" "$scratch" "$(fp_human "$scratch_kb")" "$FP_BLOCKER" "$kept_hint" ;;
     *) printf 'footprint: %s scratch %s (%s). ' "$id" "$scratch_result" "$(fp_human "$scratch_kb")" ;;
   esac
   case "$FP_DOCKER_RESULT" in
     absent) printf 'Docker not present.' ;;
     unproven) printf 'Docker: no task generation could be read from a proven area, so no Docker object was removed.' ;;
-    down) printf 'Docker did not answer; its cleanup is queued for the daily pass.' ;;
-    unknown) printf 'Docker did not list the task'"'"'s objects; its cleanup is queued for the daily pass.' ;;
-    partial) printf 'Docker: %s labelled object(s) removed, some remain; the rest is queued for the daily pass.' "$FP_DOCKER_REMOVED" ;;
+    down) printf 'Docker did not answer; ' ;;
+    unknown) printf 'Docker did not list the task'"'"'s objects; ' ;;
+    partial) printf 'Docker: %s labelled object(s) removed, some remain; ' "$FP_DOCKER_REMOVED" ;;
     *) printf 'Docker: %s labelled object(s) %s.' "$FP_DOCKER_REMOVED" "$FP_DOCKER_RESULT" ;;
+  esac
+  case "$FP_DOCKER_RESULT" in
+    down|unknown|partial)
+      if [ "$queue_lost" = 1 ]; then
+        printf 'its cleanup could not be queued, so remove what carries label %s by hand.' "$(fm_footprint_docker_label "$FP_KEY" "$id" "$gen")"
+      else
+        printf 'its cleanup is queued for the daily pass.'
+      fi
+      ;;
   esac
   if [ "$oversized" = oversized ]; then
     printf ' Kept folder data/%s is %s, over %s MB; kept whole, review it.\n' "$id" "$(fp_human "$kept")" "$FP_KEEP_WARN_MB"
@@ -1188,6 +1357,13 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
       rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.blocked"
       die "an entry changed while it was being set aside; nothing removed - run old-tasks again"
     fi
+    # Nothing may still be working in or holding open any set-aside copy.
+    if ! fp_in_use "$tmp.busy" "${asides[@]+"${asides[@]}"}" || [ -s "$tmp.busy" ]; then
+      fp_restore_all "$tmp.pairs"
+      rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.blocked" "$tmp.busy"
+      die "a running process still uses an entry, or the running processes could not be listed; nothing removed - end that work, then run old-tasks again"
+    fi
+    rm -f "$tmp.busy"
     total=0 gone=0 left=0
     while IFS='	' read -r kind kb entry; do
       aside=$(awk -F '\t' -v e="$entry" '$2 == e { print $1; exit }' "$tmp.pairs")
@@ -1232,7 +1408,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
 
 cmd_sweep() {  # [--dry-run]
   local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path aside entry
-  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0
+  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0
   local -a cands=() orphans=() asides=()
   [ "${1:-}" = --dry-run ] && dry=1
   fp_config
@@ -1313,8 +1489,34 @@ cmd_sweep() {  # [--dry-run]
         fp_restore "$aside" "$area" || back=$((back + 1))
       else
         asides+=("$aside")
+        printf '%s\t%s\n' "$aside" "$area" >> "$work/pairs2"
       fi
     done < "$work/pairs"
+  fi
+  if [ "${#asides[@]}" -gt 0 ]; then
+    # The quiescence boundary: an orphan has no task, but a process left
+    # behind can still work in it, and a rename does not move it out. Every
+    # copy still in use goes back, and if the running processes cannot be
+    # listed, every copy goes back.
+    if fp_in_use "$work/busy" "${asides[@]}"; then
+      asides=()
+      while IFS='	' read -r aside area; do
+        if grep -Fqx -- "$aside" "$work/busy"; then
+          inuse=$((inuse + 1))
+          [ "$inuse" -gt 5 ] || inuse_ids="$inuse_ids${inuse_ids:+, }${area##*/}"
+          fp_restore "$aside" "$area" || back=$((back + 1))
+        else
+          asides+=("$aside")
+        fi
+      done < "$work/pairs2"
+    else
+      asides=()
+      while IFS='	' read -r aside area; do
+        inuse=$((inuse + 1))
+        fp_restore "$aside" "$area" || back=$((back + 1))
+      done < "$work/pairs2"
+      unlisted=1
+    fi
   fi
   if [ "${#asides[@]}" -gt 0 ]; then
     fp_du_many "$work/du" "${asides[@]}"
@@ -1342,6 +1544,13 @@ cmd_sweep() {  # [--dry-run]
   if [ "$kept" -gt 0 ]; then
     printf 'Kept %s orphaned scratch area(s) whole because they hold version-controlled work, an unsafe name, or something unreadable: %s.\n' "$kept" "$kept_ids"
     findings="${findings:+$findings; }$kept orphaned scratch area(s) kept because they hold version-controlled work or could not be checked ($kept_ids)"
+  fi
+  if [ "$unlisted" = 1 ]; then
+    printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed, so none could be shown idle.\n' "$inuse"
+    findings="${findings:+$findings; }$inuse orphaned scratch area(s) kept because the running processes could not be listed"
+  elif [ "$inuse" -gt 0 ]; then
+    printf 'Kept %s orphaned scratch area(s) a running process still works in or holds open: %s. End that process when its work is safe, and the daily pass removes the area.\n' "$inuse" "$inuse_ids"
+    findings="${findings:+$findings; }$inuse orphaned scratch area(s) kept because a process still uses them ($inuse_ids)"
   fi
   if [ "$leftover" -gt 0 ]; then
     printf 'Left %s set-aside scratch folder(s) in %s untouched: %s. Inspect and remove them by hand.\n' "$leftover" "$base" "$leftover_names"

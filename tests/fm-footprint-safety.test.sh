@@ -10,6 +10,9 @@
 #     removed once that work is gone;
 #   - work added to an area after its first check but before its removal is
 #     caught by a second check of the set-aside copy;
+#   - a process left in an orphaned area, or holding a file open there, keeps
+#     the area, and so does a process table that cannot be read; a running
+#     process is never ended to free space;
 #   - a set-aside folder left by an interrupted removal, or any folder with a
 #     set-aside name, is never removed again, only reported;
 #   - scratch ownership needs the key directory's recorded home identity;
@@ -18,7 +21,8 @@
 #   - Docker objects are selected by the task's random generation, so task
 #     ids that lowercase alike, colliding short hashes, and a later task
 #     reusing an id never share a label or a compose project, and a queued
-#     retry never touches a later task;
+#     retry never touches a later task, and a close that queues a retry
+#     while the daily pass rewrites the queue keeps its entry;
 #   - the old-folder preview offers only rebuildable directories holding no
 #     version-controlled work and no record, nothing from a folder holding an
 #     unsafe name, and its apply removes nothing when an entry changed before
@@ -110,7 +114,8 @@ env_of() {  # <id> <NAME>: creates the task's area as spawn does and prints one 
 
 # docker_standin <dir>: a Docker client over <dir>/objects ("id<TAB>label"
 # lines) that lists by an exact label filter and removes by id, logging each
-# call to <dir>/log. <dir>/on-info, when present, runs before info answers.
+# call to <dir>/log. <dir>/on-info, when present, runs before info answers,
+# and while <dir>/down exists the daemon does not answer.
 docker_standin() {
   mkdir -p "$1"
   : > "$1/objects"
@@ -121,7 +126,7 @@ printf '%s\n' "\$*" >> "\$dir/log"
 filter=
 for a in "\$@"; do case "\$a" in label=*) filter=\${a#label=} ;; esac; done
 case "\$1 \${2:-}" in
-  "info "*) [ ! -x "\$dir/on-info" ] || "\$dir/on-info"; echo 29 ;;
+  "info "*) [ ! -x "\$dir/on-info" ] || "\$dir/on-info"; [ ! -e "\$dir/down" ] || exit 1; echo 29 ;;
   "ps "*|"network ls"|"volume ls"|"image ls") [ "\$1" = ps ] || exit 0; awk -F '\t' -v f="\$filter" '\$2 == f { print \$1 }' "\$dir/objects" ;;
   "rm "*) shift 3; for id in "\$@"; do awk -F '\t' -v i="\$id" '\$1 != i' "\$dir/objects" > "\$dir/objects.new"; mv "\$dir/objects.new" "\$dir/objects"; done ;;
 esac
@@ -382,6 +387,205 @@ SH
   pass "a queued Docker retry runs under the spawn lock and removes only its own generation"
 }
 
+# --- processes still using an orphaned area ----------------------------------
+
+# stray <dir> <cmd>: starts <cmd> in the background with its working directory
+# in <dir>, exiting on its own within a minute, and waits until it runs there;
+# records the pid in STRAYS. <cmd> ends with exec, so that pid is the process
+# holding the directory and stopping it leaves nothing behind.
+STRAYS=()
+stray() {
+  local ready n=0
+  ready=$(mktemp "$TMP_ROOT/stray.XXXXXX") && rm -f "$ready"
+  (cd "$1" && : > "$ready" && exec bash -c "$2") </dev/null >/dev/null 2>&1 &
+  STRAYS+=("$!")
+  until [ -e "$ready" ] || [ "$n" -ge 100 ]; do sleep .05; n=$((n + 1)); done
+  [ -e "$ready" ] || fail "the stray process never started"
+  sleep .2
+}
+
+stop_strays() {
+  local pid
+  for pid in "${STRAYS[@]+"${STRAYS[@]}"}"; do kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; done
+  STRAYS=()
+}
+
+test_a_process_still_using_an_orphan_keeps_it() {
+  local idle busy held writer out n
+  new_home orphan-proc
+  idle=$(scratch_for task-i1)
+  printf 'cache\n' > "$idle/cache"
+  busy=$(scratch_for task-c1)
+  printf 'cache\n' > "$busy/cache"
+  held=$(scratch_for task-f1)
+  printf 'log\n' > "$held/held.log"
+  writer=$(scratch_for task-wr)
+  printf 'cache\n' > "$writer/cache"
+  # A process rooted in one area, one with its working directory elsewhere
+  # holding a file open in another, and a writer that commits new work in
+  # its area once released, exactly as a straggler left by a crash would.
+  stray "$busy" 'exec sleep 60'
+  stray "$TMP_ROOT" "exec 3>>'$held/held.log'; exec sleep 60"
+  stray "$writer" "n=0; while [ ! -e '$TMP_ROOT/orphan-proc/go' ] && [ \$n -lt 600 ]; do sleep .1; n=\$((n+1)); done
+    git -c init.defaultBranch=main init -q late && printf unique > late/unique.txt &&
+    git -C late add unique.txt && git -C late -c user.email=t@example.invalid -c user.name=t commit -qm late"
+  age 3 "$idle" "$busy" "$held" "$writer"
+  out=$(fp sweep)
+  assert_absent "$idle" "an idle orphan must still be removed"
+  assert_contains "$out" "Removed 1 orphaned scratch area(s)" "only the idle orphan may be removed"
+  assert_present "$busy/cache" "an orphan a process works in must be kept"
+  assert_present "$held/held.log" "an orphan holding a file a process has open must be kept"
+  assert_present "$writer/cache" "an orphan whose writer still runs must be kept"
+  assert_contains "$out" "Kept 3 orphaned scratch area(s) a running process still works in or holds open" "the pass must report the kept areas"
+  assert_contains "$out" "finding: 3 orphaned scratch area(s) kept because a process still uses them" "the kept areas must be a finding"
+  : > "$TMP_ROOT/orphan-proc/go"
+  n=0
+  until [ -f "$writer/late/unique.txt" ] && git -C "$writer/late" rev-parse -q --verify HEAD >/dev/null 2>&1 || [ "$n" -ge 100 ]; do
+    sleep .1; n=$((n + 1))
+  done
+  assert_present "$writer/late/unique.txt" "the writer's new work must land in the kept area"
+  git -C "$writer/late" rev-parse -q --verify HEAD >/dev/null || fail "the writer's commit must exist"
+  stop_strays
+  # Once the processes are gone, the daily pass removes what holds no work
+  # and still keeps the writer's repository.
+  age 3 "$busy" "$held" "$writer"
+  out=$(fp sweep)
+  assert_absent "$busy" "an orphan must be removed once its process is gone"
+  assert_absent "$held" "an orphan must be removed once its open file is closed"
+  assert_present "$writer/late/unique.txt" "the writer's repository keeps its area whole"
+  assert_contains "$out" "Removed 2 orphaned scratch area(s)" "the idle areas must now be removed"
+  pass "an orphaned area a running process works in or holds open is kept, and removed once idle"
+}
+
+test_an_unreadable_process_table_removes_nothing() {
+  local s s2 out empty real_lsof real_readlink
+  new_home proc-unknown
+  s=$(scratch_for task-x1)
+  printf 'cache\n' > "$s/cache"
+  age 3 "$s"
+  # macOS lists working directories with lsof; Linux reads /proc. Both are
+  # made unreadable here.
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$FB/lsof"
+  chmod +x "$FB/lsof"
+  empty="$TMP_ROOT/proc-unknown/no-proc"
+  mkdir -p "$empty"
+  out=$(FM_PROC_ROOT_OVERRIDE="$empty" fp sweep)
+  assert_present "$s/cache" "without a process table, an orphan must be kept"
+  assert_contains "$out" "Kept 1 orphaned scratch area(s) because the running processes could not be listed" "the pass must say why"
+  s2=$(scratch_for task-x2)
+  printf 'cache\n' > "$s2/cache"
+  out=$(FM_PROC_ROOT_OVERRIDE="$empty" fp task-close task-x2 "$s2")
+  assert_present "$s2/cache" "without a process table, a closing area must be kept"
+  assert_contains "$out" "the running processes could not be listed" "close must say why"
+  rm -f "$FB/lsof"
+  # Working directories readable, but the open-file listing refused, as an
+  # lsof that rejects its options does: exit 1, which also means "none".
+  real_lsof=$(command -v lsof || true)
+  real_readlink=$(command -v readlink)
+  cat > "$FB/lsof" <<SH
+#!/usr/bin/env bash
+case " \$* " in *" cwd "*) exec "$real_lsof" "\$@" ;; esac
+echo "usage: lsof" >&2
+exit 1
+SH
+  cat > "$FB/readlink" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do case "\$a" in */fd/*) exit 1 ;; esac; done
+exec "$real_readlink" "\$@"
+SH
+  chmod +x "$FB/lsof" "$FB/readlink"
+  out=$(fp sweep)
+  assert_present "$s/cache" "an open-file listing that was refused must keep the orphan"
+  assert_contains "$out" "because the running processes could not be listed" "a refused open-file listing must be reported"
+  rm -f "$FB/lsof" "$FB/readlink"
+  out=$(fp sweep)
+  assert_absent "$s" "with the process table readable again, the orphan is removed"
+  pass "a process table or open-file listing that cannot be read keeps every area"
+}
+
+test_a_surviving_process_keeps_a_closing_area() {
+  local s out
+  new_home close-proc
+  s=$(scratch_for task-k1)
+  printf 'cache\n' > "$s/cache"
+  stray "$s" 'exec sleep 60'
+  out=$(fp task-close task-k1 "$s")
+  assert_present "$s/cache" "an area a surviving process works in must be kept at close"
+  assert_contains "$out" "kept whole" "close must report the kept area"
+  assert_contains "$out" "a running process still works in it" "close must name the reason"
+  stop_strays
+  out=$(fp task-close task-k1 "$s")
+  assert_absent "$s" "with the process gone, close removes the area"
+  pass "close keeps an area a process that survived teardown still uses"
+}
+
+# --- the Docker retry queue under concurrent closes -------------------------
+
+test_a_close_during_the_daily_retry_keeps_its_queue_entry() {
+  local a b c d gen dir out real_mv n
+  new_home retry-append
+  dir="$TMP_ROOT/retry-append/docker"
+  a=$(scratch_for task-a)
+  b=$(scratch_for task-b)
+  c=$(scratch_for task-c)
+  gen=$(lib 'fm_footprint_task_generation '"$a")
+  docker_standin "$dir"
+  # task-a's retry can finish; task-c is live again, so it stays queued and
+  # the pass rewrites the queue rather than deleting it.
+  printf 'worktree=/live/c\n' > "$H/state/task-c.meta"
+  printf 'task-a\t1\t%s\ntask-c\t1\t0123456789abcdef\n' "$gen" > "$H/state/footprint-docker-retry"
+  # Window 1, while the pass does its Docker work without the queue lock:
+  # task-b closes with Docker not answering and queues its cleanup.
+  cat > "$dir/on-info" <<SH
+#!/usr/bin/env bash
+[ -e "$dir/raced" ] && exit 0
+: > "$dir/raced"
+: > "$dir/down"
+HOME="$U" FM_HOME="$H" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE="$H/state" FM_DATA_OVERRIDE="$H/data" FM_CONFIG_OVERRIDE="$H/config" \\
+  "$FOOTPRINT" task-close task-b "$b" > "$dir/close-b.log" 2>&1
+rm -f "$dir/down"
+SH
+  chmod +x "$dir/on-info"
+  # Window 2, while the pass replaces the queue: task-d closes at the same
+  # moment, concurrently, and queues its cleanup too.
+  real_mv=$(command -v mv)
+  d=$(scratch_for task-d)
+  cat > "$FB/mv" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *.lock*) ;;
+  *footprint-docker-retry*)
+    if [ ! -e "$dir/raced2" ]; then
+      : > "$dir/raced2"
+      : > "$dir/down"
+      ( HOME="$U" FM_HOME="$H" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE="$H/state" FM_DATA_OVERRIDE="$H/data" FM_CONFIG_OVERRIDE="$H/config" \\
+        PATH="$BASE_PATH" "$FOOTPRINT" task-close task-d "$d" > "$dir/close-d.log" 2>&1; : > "$dir/close-d.done" ) &
+      sleep 2
+    fi
+    ;;
+esac
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$FB/mv"
+  out=$(fp sweep)
+  n=0
+  until [ -e "$dir/close-d.done" ] || [ "$n" -ge 600 ]; do sleep .1; n=$((n + 1)); done
+  rm -f "$FB/mv" "$dir/down"
+  assert_contains "$(cat "$dir/close-b.log")" "its cleanup is queued for the daily pass" "task-b's close must queue its cleanup"
+  assert_present "$dir/raced2" "the queue replacement must have raced a close"
+  assert_contains "$(cat "$dir/close-d.log")" "its cleanup is queued for the daily pass" "task-d's close must queue its cleanup"
+  grep -Eq "^task-b	[0-9]+	[0-9a-f]{16}\$" "$H/state/footprint-docker-retry" || fail "a close during the Docker work must keep its queue entry"
+  grep -Eq "^task-d	[0-9]+	[0-9a-f]{16}\$" "$H/state/footprint-docker-retry" || fail "a close during the queue replacement must keep its queue entry"
+  grep -Eq "^task-c	1	0123456789abcdef\$" "$H/state/footprint-docker-retry" || fail "a pending entry stays"
+  if grep -q '^task-a	' "$H/state/footprint-docker-retry"; then fail "the finished retry must leave the queue"; fi
+  [ "$(find "$H/state" -name '.footprint-docker-retry.*' ! -name '*.lock' | wc -l | tr -d ' ')" = 0 ] || fail "no staging file may be left"
+  # The next pass retires both closed tasks and keeps the live one.
+  rm -f "$dir/on-info"
+  out=$(fp sweep)
+  assert_equals "task-c	1	0123456789abcdef" "$(cat "$H/state/footprint-docker-retry")" "both closed tasks' retries finish; the live one stays"
+  pass "a close that queues a Docker retry while the daily pass works or rewrites the queue keeps its entry"
+}
+
 # --- the old-folder preview -------------------------------------------
 
 test_control_character_names_hide_the_whole_folder() {
@@ -563,6 +767,10 @@ fm_test_run \
   test_sweep_respects_the_spawn_lock_and_live_records \
   test_docker_identity_is_the_task_generation \
   test_docker_retry_never_touches_a_later_task \
+  test_a_close_during_the_daily_retry_keeps_its_queue_entry \
+  test_a_process_still_using_an_orphan_keeps_it \
+  test_an_unreadable_process_table_removes_nothing \
+  test_a_surviving_process_keeps_a_closing_area \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
   test_preview_binds_contents_and_identity \

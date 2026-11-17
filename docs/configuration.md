@@ -1008,27 +1008,29 @@ Every removal refuses what it cannot prove disposable, so fewer cases are cleane
   The landed-work checks prove the task's own copy, not a repository the worker made inside its scratch area, so such an area is kept whole and named; once that repository is moved or removed, the daily pass removes the area.
 - A tree holding a name with a control character or a backslash, or one that cannot be read in full, is never removed.
 - A directory is renamed aside under the task's spawn lock and that copy is checked again before removal; a copy that now fails the check is put back.
+- Just before removal, a set-aside copy that a running process still works in or holds a file open in is put back and reported, and when the running processes cannot be listed in full, every copy is put back; no process is ever ended to free space.
 - A set-aside folder (`.fm-closing-*`, `.fm-reclaim-*`) left by an interrupted removal is reported, never removed again on the strength of its name.
 - Docker objects are selected only by the generation read from an area proven to be the task's; without one, nothing in Docker is removed.
 
 Docker absent is skipped, Docker is never pruned, and unlabelled Docker material is only reported.
 When Docker does not answer, a listing fails, or some objects remain, the task and its generation are queued in `state/footprint-docker-retry`; the daily pass retries each entry under the task's spawn lock while no task record exists, and only for that generation.
+The queue has its own short lock, and the daily pass removes only the entries it finished from the queue as it is then, so a task closing during the pass keeps its entry.
 Shared caches are never touched at task cleanup.
 
 `bin/fm-footprint.sh arm` registers a daily pass through the watcher's existing check mechanism.
 The check starts the pass as a detached run and returns at once, because one check may run for at most `FM_CHECK_TIMEOUT`, and a later check reports the finished run.
 The pass removes this home's scratch areas whose task has no record once they are older than `orphan-grace-hours` and that hold nothing it may not remove, each under that task's spawn lock with the record rechecked, retries queued Docker cleanups, and with `cache-cap-gb` set trims the shared cache with the oldest modification time first, only through that tool's own command, until the total is under the cap.
-It reports one line only when something needs a person (kept areas, set-aside folders left by an interrupted removal, pending Docker cleanups, caches still over the cap, a failed trim), and only when that finding changes.
+It reports one line only when something needs a person (kept areas, including areas a running process still uses, set-aside folders left by an interrupted removal, pending Docker cleanups, caches still over the cap, a failed trim), and only when that finding changes.
 
 `bin/fm-footprint.sh old-tasks` previews rebuildable directories inside finished task folders older than `old-task-days`; records, reports, decisions, the backlog, evidence files, and anything inside a repository are never offered.
 A rebuildable name only makes a candidate: a directory holding version-controlled work or a record is never offered, nor is anything in a folder holding a name with a control character or a backslash.
-Removal is a captain decision: `old-tasks --apply <preview-id>` removes exactly the previewed list and refuses, removing nothing, when the list or the identity or contents of anything in it changed since the preview, including while it was being set aside.
+Removal is a captain decision: `old-tasks --apply <preview-id>` removes exactly the previewed list and refuses, removing nothing, when the list or the identity or contents of anything in it changed since the preview, including while it was being set aside, or when a running process still uses an entry.
 
 Limits worth knowing:
 
 - Cache order uses the newest modification time of a cache directory and its direct entries; reading a cached item need not change it, so the order approximates least recently used.
 - Scratch removal and Docker removal are independent best-effort steps, not one transaction; a partial removal is recorded and named, not undone.
-- A process that keeps writing into a set-aside copy after its second check can still lose what it writes during the removal itself; teardown ends the task's processes in the area first, and an orphan's area has no live task.
+- The process check sees this user's processes; a process of another user, such as root, that can write into a private scratch area is outside it.
 - On a case-insensitive filesystem, as on macOS by default, two task ids that differ only in case name one task record and one area, so they are one task to Firstmate.
 - Removal stays on one filesystem (`find -xdev`) and never follows links; that is a traversal limit, not the ownership proof, which is the key directory's identity.
 - The home key comes from the home's physical path alone, so separate machines sharing one remote Docker context with the same home path and task id are outside its isolation.
