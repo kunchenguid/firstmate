@@ -275,6 +275,11 @@ fm_backend_detect() {
 # (firstmate's toolchain already relies on it); nc's -U/-z flags are
 # unreliable for this on macOS.
 fm_backend_unix_sock_live() {  # <path>
+  # A Windows device path (`\\.\pipe\...`) is never a POSIX socket, and under
+  # MSYS the `-S` and connect probes against a live named pipe block inside the
+  # OS with no signal relief - an unkillable wedge in every caller, session
+  # start included. Refuse the shape before probing anything.
+  case "$1" in '\\'*) return 1 ;; esac
   command -v python3 >/dev/null 2>&1 || return 1
   [ -S "$1" ] || return 1
   python3 - "$1" <<'PY' >/dev/null 2>&1

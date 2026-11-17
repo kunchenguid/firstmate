@@ -752,6 +752,59 @@ SH
   pass "fm_backend_detect: app-terminal (live spawn core + herdr.space label) selects hc; a live herdr-app.sock or open window is never a signal for a marker-less process; another core, a stopped core, dead/stale/missing evidence, and unusable toolchains never switch"
 }
 
+# The unix-socket liveness probe refuses a Windows device path before probing
+# anything: under MSYS the `-S` test and the python connect against a live
+# named pipe block inside the OS with no signal relief, which wedges the caller
+# (session start included) behind a process no signal can reap. A real POSIX
+# socket whose path merely begins with a backslash is the vehicle that proves
+# it: without the guard the probe reaches the connect, which the fake python3
+# records.
+test_backend_unix_sock_live_refuses_windows_device_paths() {
+  local dir fb marker realpy sockdir relname abs lpid rpid
+  realpy=$(command -v python3 2>/dev/null) || { pass "skip: python3 absent; the live-socket vehicle needs it"; return; }
+  # Windows pythons may ship no AF_UNIX at all; there is then no live-socket
+  # vehicle, and the probe itself could never report live on such a host.
+  "$realpy" -c 'import socket; socket.AF_UNIX' 2>/dev/null \
+    || { pass "skip: this python3 has no AF_UNIX support"; return; }
+  dir="$TMP_ROOT/unix-sock-guard"; fb="$dir/fakebin"; marker="$dir/python-called"
+  mkdir -p "$fb"
+  # A python3 that only records being reached: the refusal must never get here.
+  cat > "$fb/python3" <<SH
+#!/bin/sh
+: > "$marker"
+exit 0
+SH
+  chmod +x "$fb/python3"
+  # AF_UNIX paths cap near 104 bytes, so every bound socket lives in a short
+  # /tmp dir; the refusal shape is relative, because a path is refused by its
+  # own leading characters.
+  sockdir=$(mktemp -d /tmp/fm-usl.XXXXXX) || fail "mktemp for the socket dir failed"
+  relname='\\.\pipe\fm-guard.sock'
+  ( cd "$sockdir" && exec "$realpy" -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(120)' "$relname" ) &
+  lpid=$!
+  sleep 0.4
+  if ( cd "$sockdir" && PATH="$fb:$PATH" fm_backend_unix_sock_live "$relname" ); then
+    fail "a path in the Windows device-path shape must never report a live socket"
+  fi
+  [ ! -e "$marker" ] || fail "the Windows device-path shape must be refused before the probe reaches python3"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+
+  # An ordinary POSIX socket is untouched by the guard: the probe still runs
+  # and still reports the live socket.
+  abs="$sockdir/plain.sock"
+  ( exec "$realpy" -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(120)' "$abs" ) &
+  rpid=$!
+  sleep 0.4
+  rm -f "$marker"
+  PATH="$fb:$PATH" fm_backend_unix_sock_live "$abs" \
+    || fail "a live POSIX unix socket must still report live"
+  [ -e "$marker" ] || fail "a live POSIX unix socket must still reach the connect probe"
+  kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null
+  rm -rf "$sockdir"
+
+  pass "fm_backend_unix_sock_live: a Windows device-path shape is refused before the probe, while a live POSIX socket still probes and reports live"
+}
+
 # fm_backend_name notices and explicit precedence for the Herdr app signal:
 # an auto-selected hc names its signal and the opt-out, while a live app
 # window that cannot identify this process as an app terminal resolves the
@@ -1759,6 +1812,7 @@ test_backend_name_autodetect_notice
 test_backend_paseo_is_never_autodetected
 test_backend_rex_autodetect
 test_backend_detect_herdr_app
+test_backend_unix_sock_live_refuses_windows_device_paths
 test_backend_name_herdr_app
 test_backend_tern_is_never_autodetected
 test_backend_dispatch_tables_include_tern
