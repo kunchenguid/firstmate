@@ -231,9 +231,17 @@ fm_pending_reply_summarize() {  # <text>
 }
 
 fm_pending_reply_get() {  # <record-path> <key>
-  local rec=$1 key=$2
+  local rec=$1 key=$2 line value='' found=''
   [ -f "$rec" ] || return 0
-  grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  # Read in-shell: the tick reads many fields per record every poll, and the
+  # grep | tail -1 | cut -d= -f2- this replaced started three processes per read.
+  # The last line for the key wins, as it did there.
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in "$key="*) value=${line#"$key="} found=1 ;; esac
+    done < "$rec"
+  } 2>/dev/null || return 0
+  [ -z "$found" ] || printf '%s\n' "$value"
 }
 
 fm_pending_reply_sighting_encode() {  # <path> <line-number>
