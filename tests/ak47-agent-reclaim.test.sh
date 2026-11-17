@@ -522,7 +522,7 @@ test_unfinished_work_vetoes_a_stop() {
   reset
   local t s
   declare -A A=()
-  local kept="open-decision last-blocked awaits-review ready-to-merge pr-open pr-unreadable unpushed dirty"
+  local kept="open-decision last-blocked awaits-review ready-to-merge captain-approval pr-open pr-unreadable unpushed dirty"
   local unreadable=
   local stopped="resolved-decision pr-merged already-merged pushed"
   for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
@@ -533,6 +533,7 @@ test_unfinished_work_vetoes_a_stop() {
   printf 'done: renders ready, awaiting your review\n' >"$s/awaits-review.status"
   printf 'done: PR ready to merge\n' >"$s/ready-to-merge.status"
   printf 'done: already merged\n' >"$s/already-merged.status"
+  printf "done: waiting for the captain's approval\n" >"$s/captain-approval.status"
   if [ "$(id -u)" != 0 ]; then
     add_task main status-unreadable '-30 hours'
     printf 'needs-decision [key=secret]: choose\n' >"$s/status-unreadable.status"
