@@ -305,6 +305,21 @@ if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
   exit 1
 fi
 
+if [ "$MODE" = no-mistakes ] && { [ "$FORGE" = none ] || [ "$FORGE" = forgejo ]; }; then
+  GIT_HOOKS_DIR="$STATE/$ID.git-hooks"
+  if [ ! -x "$GIT_HOOKS_DIR/pre-push" ]; then
+    echo "error: promotion to no-mistakes is refused: this scout was launched without the per-task Git hooksPath; spawn a fresh ship task so its gate push guard reaches the worker" >&2
+    exit 1
+  fi
+  PROMOTE_WORKTREE=$(sed -n 's/^worktree=//p' "$META" | head -n 1)
+  PUSH_GUARD_FILE="$STATE/$ID.push-guard"
+  if ! "$FM_ROOT/bin/fm-git-push-guard.sh" write-gate "$PUSH_GUARD_FILE" \
+    || ! "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$PROMOTE_WORKTREE"; then
+    echo "error: could not install the no-mistakes gate push guard hooks for $ID; promotion refused" >&2
+    exit 1
+  fi
+fi
+
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A

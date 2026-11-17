@@ -59,7 +59,7 @@ fixture() {
     "$STRIP" install "$FX_HOOKS" "$FX_WT" || fail "unguarded hook installation failed"
     return
   fi
-  "$GUARD" write-gate "$guard" "$FX_BRANCH" || fail "write-gate failed"
+  "$GUARD" write-gate "$guard" || fail "write-gate failed"
   "$STRIP" install --push-guard "$guard" "$FX_HOOKS" "$FX_WT" || fail "install --push-guard failed"
 }
 
@@ -173,19 +173,23 @@ test_gate_pushes_are_accepted() {
   accepted "a push to the gate by file:// URL" "$FX_GATE" "refs/heads/$FX_BRANCH"
   run_in "$FX_DIR" git -C wt push ../nm-home/repos/abc123.git HEAD:refs/heads/relative
   accepted "a relative gate path" "$FX_GATE" refs/heads/relative
-  run_in "$FX_WT" git push "${FX_GATE%.git}" HEAD:refs/heads/implicit-suffix
-  accepted "a gate path with an implicit .git suffix" "$FX_GATE" refs/heads/implicit-suffix
   pass "gate guard: pushes to the stamped gate pass by name, with options, by URL and by path"
 }
 
 test_a_stamped_sibling_does_not_authorize_the_destination() {
-  local other
+  local other kind
   fixture sibling
-  other="$FX_DIR/other"
-  git init -q --bare "$other"
-  make_gate "$other.git"
-  run_in "$FX_WT" git push "$other" HEAD:refs/heads/sibling
-  refused "an unstamped repo with a stamped .git sibling" "$other" refs/heads/sibling
+  for kind in bare worktree; do
+    other="$FX_DIR/other-$kind"
+    if [ "$kind" = bare ]; then
+      git init -q --bare "$other"
+    else
+      git init -q "$other"
+    fi
+    make_gate "$other.git"
+    run_in "$FX_WT" git push "$other" HEAD:refs/heads/sibling
+    refused "an unstamped $kind repo with a stamped .git sibling" "$other" refs/heads/sibling
+  done
   pass "gate guard: a stamped sibling cannot authorize an unstamped destination"
 }
 
@@ -234,7 +238,7 @@ EOF
 test_direct_guard_calls() {
   local guard out rc
   guard="$TMP_ROOT/direct-guard"
-  "$GUARD" write-gate "$guard" fm/up-t1 || fail "write-gate failed"
+  "$GUARD" write-gate "$guard" || fail "write-gate failed"
   # Network URLs are refused before git would ever connect; the wrapper cases
   # above prove the hook path, these prove the rule for https and ssh forms.
   for url in https://github.com/example/fork.git git@github.com:example/fork.git ssh://git@github.com/example/fork.git; do
@@ -243,23 +247,26 @@ test_direct_guard_calls() {
     [ "$rc" -ne 0 ] || fail "the gate guard accepted $url"
     assert_contains "$out" "not a no-mistakes gate" "$url was refused without naming the gate rule"
   done
-  out=$(printf 'fm-git-push-guard-gate-v1\n' >"$TMP_ROOT/no-branch" && cd "$TMP_ROOT" && "$GUARD" "$TMP_ROOT/no-branch" x https://example.test/x </dev/null 2>&1)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "a gate record with no task branch let a push through"
-  pass "gate guard: https and ssh fork URLs are refused, and a malformed record refuses every push"
+  pass "gate guard: https and ssh fork URLs are refused"
 }
 
 test_spawn_installs_only_the_selected_ship_policy() {
-  local mode keep harness name dir home project pool fakebin id out rc log prefix
-  for name in gated-codex gated-keep-codex gated-claude direct direct-keep local; do
-    mode=no-mistakes keep=0 harness=codex
+  local mode keep harness forge forge_words gated name dir home project pool fakebin id out rc log prefix
+  for name in gated-codex gated-keep-codex gated-claude gated-forgejo gerrit gerrit-keep direct direct-keep local; do
+    mode=no-mistakes keep=0 harness=codex forge=none gated=1
     case "$name" in
       gated-keep-codex) keep=1 ;;
       gated-claude) harness=claude ;;
+      gated-forgejo) forge=forgejo ;;
+      gerrit) forge=gerrit ;;
+      gerrit-keep) forge=gerrit keep=1 ;;
       direct) mode=direct-PR ;;
       direct-keep) mode=direct-PR keep=1 ;;
       local) mode=local-only ;;
     esac
+    [ "$mode" = no-mistakes ] && [ "$forge" != gerrit ] || gated=0
+    forge_words=
+    [ "$forge" = none ] || forge_words=" forge=$forge"
     dir="$TMP_ROOT/spawn-$name"
     home="$dir/home" project="$dir/project" pool="$dir/pool"
     id="gate-$name" log="$dir/launch.log"
@@ -267,7 +274,7 @@ test_spawn_installs_only_the_selected_ship_policy() {
     fm_test_fake_no_mistakes "$fakebin"
     mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
     printf '%s\n' "$harness" >"$home/config/crew-harness"
-    printf -- '- project [%s] - fixture\n' "$mode" >"$home/data/projects.md"
+    printf -- '- project [%s%s] - fixture\n' "$mode" "$forge_words" >"$home/data/projects.md"
     touch "$home/state/.last-watcher-beat"
     [ "$keep" = 0 ] || touch "$home/config/keep-ai-trailers"
     fm_git_worktree "$project" "$pool" "pool-$name"
@@ -280,21 +287,21 @@ Ship a change.
 Exercise the selected push policy.
 
 # Definition of done
-Delivery contract: mode=$mode
+Delivery contract: mode=$mode$forge_words
 Ship branch: fm/$id
 EOF
     out=$(FM_FAKE_LAUNCH_LOG="$log" fm_test_run_spawn "$home" "$pool" "$fakebin" \
       "$id" "$project" --mode "$mode" --yolo off); rc=$?
     expect_code 0 "$rc" "$name spawn failed: $out"
     prefix=
-    if [ "$keep" = 0 ] || [ "$mode" = no-mistakes ]; then
+    if [ "$keep" = 0 ] || [ "$gated" = 1 ]; then
       prefix=$(fm_test_launch_git_prefix "$(cat "$log")") || fail "$name lacks its Git environment"
     fi
     # Execute the actual generated pane prefix, without a harness or real terminal.
     PUSH_OUT=$(eval "$prefix"
       git -C "$pool" push origin "HEAD:refs/heads/fm/$id" 2>&1)
     PUSH_RC=$?
-    if [ "$mode" = no-mistakes ]; then
+    if [ "$gated" = 1 ]; then
       refused "$name fork push" "$project.origin.git" "refs/heads/fm/$id"
       make_gate "$dir/gate.git"
       out=$(eval "$prefix"
@@ -302,9 +309,80 @@ EOF
       expect_code 0 "$rc" "$name gate push failed: $out"
     else
       accepted "$name ordinary push" "$project.origin.git" "refs/heads/fm/$id"
+      if [ "$forge" = gerrit ]; then
+        out=$(eval "$prefix"
+          git -C "$pool" push origin HEAD:refs/for/main 2>&1); rc=$?
+        expect_code 0 "$rc" "$name Gerrit publication failed: $out"
+        git -C "$project.origin.git" rev-parse --verify refs/for/main >/dev/null || fail "$name did not publish the review ref"
+      fi
     fi
   done
   pass "gate guard: spawn protects no-mistakes Claude/Codex ships with either trailer setting and preserves other ship modes"
+}
+
+test_promotion_installs_the_gate_policy_or_refuses() {
+  local forge forge_words keep dir home project pool fakebin id log prefix out rc
+  for forge in none forgejo gerrit; do
+    forge_words=
+    [ "$forge" = none ] || forge_words=" forge=$forge"
+    for keep in 0 1; do
+      dir="$TMP_ROOT/promote-$forge-$keep"
+      home="$dir/home" project="$dir/project" pool="$dir/pool"
+      id="promote-$forge-$keep" log="$dir/launch.log"
+      fakebin=$(make_spawn_fakebin "$dir/fake" codex)
+      fm_test_fake_no_mistakes "$fakebin"
+      mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+      printf 'codex\n' >"$home/config/crew-harness"
+      printf -- '- project [no-mistakes%s] - fixture\n' "$forge_words" >"$home/data/projects.md"
+      touch "$home/state/.last-watcher-beat"
+      [ "$keep" = 0 ] || touch "$home/config/keep-ai-trailers"
+      fm_git_worktree "$project" "$pool" "pool-$id"
+      cat >"$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Investigate the delivery path.
+
+## Firstmate spec
+Report the result.
+EOF
+      out=$(FM_FAKE_LAUNCH_LOG="$log" fm_test_run_spawn "$home" "$pool" "$fakebin" \
+        "$id" "$project" --scout); rc=$?
+      expect_code 0 "$rc" "$id scout spawn failed: $out"
+      prefix=
+      [ "$keep" = 1 ] || prefix=$(fm_test_launch_git_prefix "$(cat "$log")")
+      PUSH_OUT=$(eval "$prefix"
+        git -C "$pool" push origin HEAD:refs/heads/scout-probe 2>&1)
+      PUSH_RC=$?
+      accepted "$id scout push" "$project.origin.git" refs/heads/scout-probe
+      cp "$home/data/$id/brief.md" "$dir/scout-brief"
+      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+        "$ROOT/bin/fm-promote.sh" "$id" --mode no-mistakes --yolo off 2>&1); rc=$?
+      if [ "$keep" = 1 ] && [ "$forge" != gerrit ]; then
+        expect_code 1 "$rc" "$id promotion without a pane hooksPath succeeded"
+        assert_contains "$out" "launched without the per-task Git hooksPath" "$id refusal did not name the missing protection"
+        assert_grep 'kind=scout' "$home/state/$id.meta" "$id refusal promoted the task"
+        cmp -s "$dir/scout-brief" "$home/data/$id/brief.md" || fail "$id refusal changed the brief"
+        assert_absent "$home/data/$id/ship-instructions.md" "$id refusal published ship instructions"
+        continue
+      fi
+      expect_code 0 "$rc" "$id promotion failed: $out"
+      assert_grep 'kind=ship' "$home/state/$id.meta" "$id was not promoted"
+      PUSH_OUT=$(eval "$prefix"
+        git -C "$pool" push origin HEAD:refs/heads/ship-probe 2>&1)
+      PUSH_RC=$?
+      if [ "$forge" = gerrit ]; then
+        accepted "$id Gerrit ship push" "$project.origin.git" refs/heads/ship-probe
+      else
+        refused "$id promoted ship push" "$project.origin.git" refs/heads/ship-probe
+        make_gate "$dir/gate.git"
+        out=$(eval "$prefix"
+          git -C "$pool" push "$dir/gate.git" "HEAD:refs/heads/fm/$id" 2>&1); rc=$?
+        expect_code 0 "$rc" "$id gate submission failed: $out"
+        git -C "$dir/gate.git" rev-parse --verify "refs/heads/fm/$id" >/dev/null || fail "$id gate received no branch"
+      fi
+    done
+  done
+  pass "gate guard: promotion protects existing pane hooks, refuses missing hooks, and preserves Gerrit"
 }
 
 fm_test_run \
@@ -317,4 +395,5 @@ fm_test_run \
   test_gate_publication_passes \
   test_repository_pre_push_still_chains \
   test_direct_guard_calls \
-  test_spawn_installs_only_the_selected_ship_policy
+  test_spawn_installs_only_the_selected_ship_policy \
+  test_promotion_installs_the_gate_policy_or_refuses

@@ -17,7 +17,7 @@
 #       normalized fetch and push URL of <repo>'s origin as a shared URL, the
 #       task branch, the task prefix, and the optional backup remote, its URLs,
 #       and its prefix.
-#   fm-git-push-guard.sh write-gate <guard-file> <task-branch>
+#   fm-git-push-guard.sh write-gate <guard-file>
 #       Write a mode=no-mistakes <guard-file> read-only for a launch.
 #
 # GATE RULE (fm-git-push-guard-gate-v1). A push is allowed only when:
@@ -63,7 +63,7 @@ usage() {
 usage:
   fm-git-push-guard.sh <guard-file> <remote-name> <remote-url>
   fm-git-push-guard.sh write <guard-file> <repo> <task-branch> <task-prefix> [<backup-remote> <backup-prefix>]
-  fm-git-push-guard.sh write-gate <guard-file> <task-branch>
+  fm-git-push-guard.sh write-gate <guard-file>
 EOF
   exit 2
 }
@@ -75,11 +75,11 @@ refuse() {  # <message>
 
 GATE_STAMP=no-mistakes-gate-config
 
-write_gate_guard() {  # <guard-file> <task-branch>
-  local out=$1 branch=$2 tmp
-  [ -n "$out" ] && [ -n "$branch" ] || usage
+write_gate_guard() {  # <guard-file>
+  local out=$1 tmp
+  [ -n "$out" ] || usage
   tmp=$(mktemp "$out.XXXXXX") || return 1
-  printf 'fm-git-push-guard-gate-v1\ntask_branch=%s\n' "$branch" >"$tmp" || { rm -f "$tmp"; return 1; }
+  printf 'fm-git-push-guard-gate-v1\n' >"$tmp" || { rm -f "$tmp"; return 1; }
   if ! chmod 400 "$tmp" || ! mv -f "$tmp" "$out"; then
     rm -f "$tmp"
     return 1
@@ -90,9 +90,8 @@ is_gate_dir() {  # <path>
   [ -n "$1" ] && [ -d "$1" ] && [ -f "$1/$GATE_STAMP" ]
 }
 
-guard_gate_push() {  # <guard-file> <remote-name> <remote-url>
-  local file=$1 url=$3 common dest resolved
-  grep -q '^task_branch=..*' "$file" || refuse "the push guard file $file names no task branch"
+guard_gate_push() {  # <remote-url>
+  local url=$1 common dest resolved
   # A gate may publish from its bare repository or a linked worktree.
   common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
   if is_gate_dir "$common"; then
@@ -106,11 +105,7 @@ guard_gate_push() {  # <guard-file> <remote-name> <remote-url>
     *:*) dest= ;;
   esac
   if [ -n "$dest" ]; then
-    # Follow Git's directory lookup, including a relative path, a .git file,
-    # and the optional .git suffix. A stamped sibling must not authorize a
-    # different existing destination that Git will actually receive into.
     resolved=$(git rev-parse --resolve-git-dir "$dest" 2>/dev/null) \
-      || resolved=$(git rev-parse --resolve-git-dir "$dest.git" 2>/dev/null) \
       || resolved=
     if is_gate_dir "$resolved"; then
       cat >/dev/null
@@ -155,7 +150,7 @@ guard_push() {  # <guard-file> <remote-name> <remote-url>
   [ -f "$file" ] && [ -r "$file" ] || refuse "the push guard file $file is unreadable, so no push can be checked"
   header=$(sed -n '1p' "$file")
   if [ "$header" = fm-git-push-guard-gate-v1 ]; then
-    guard_gate_push "$file" "$name" "$url"
+    guard_gate_push "$url"
     return
   fi
   [ "$header" = fm-git-push-guard-v1 ] || refuse "the push guard file $file is not a guard record"
@@ -225,7 +220,7 @@ case "${1:-}" in
     write_guard "$@"
     ;;
   write-gate)
-    [ "$#" -eq 3 ] || usage
+    [ "$#" -eq 2 ] || usage
     shift
     write_gate_guard "$@"
     ;;

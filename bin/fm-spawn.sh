@@ -25,7 +25,7 @@
 #   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
 #   in the task metadata for bin/fm-dod-lib.sh's ready-report gate. A
-#   mode=no-mistakes ship installs the same pre-push wrapper with the gate
+#   mode=no-mistakes ship with forge=none or forgejo installs the pre-push wrapper with the gate
 #   rule (write-gate), also when the home keeps AI trailers. A
 #   registry entry the parser refuses stops the spawn rather than launching on a
 #   guessed posture. A
@@ -7241,7 +7241,7 @@ EOF
 # A forge=external ship always gets this directory, because its pre-push
 # wrapper carries the guard that keeps task branches off the shared origin; a
 # home that keeps trailers gets a commit-msg wrapper that only chains.
-# A mode=no-mistakes ship always gets it too, with the gate rule owned by
+# A mode=no-mistakes ship with forge=none or forgejo gets it too, with the gate rule owned by
 # bin/fm-git-push-guard.sh. This installation precedes the harness/backend split,
 # so every worker receives the same protection through its Git environment.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
@@ -7259,11 +7259,11 @@ if [ "$EXTERNAL_REVIEW" = 1 ]; then
     exit 1
   }
   GIT_HOOKS_INSTALLED=1
-elif [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+elif [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && { [ "$STANDING_FORGE" = none ] || [ "$STANDING_FORGE" = forgejo ]; }; then
   PUSH_GUARD_FILE="$STATE_REAL/$ID.push-guard"
   strip_args=()
   [ "$KEEP_AI_TRAILERS" = 0 ] || strip_args=(--no-strip)
-  { "$FM_ROOT/bin/fm-git-push-guard.sh" write-gate "$PUSH_GUARD_FILE" "$BRANCH" \
+  { "$FM_ROOT/bin/fm-git-push-guard.sh" write-gate "$PUSH_GUARD_FILE" \
     && "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${strip_args[@]+"${strip_args[@]}"}" \
       --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$WT"; } || {
     echo "error: could not install the no-mistakes gate push guard hooks for $ID" >&2
