@@ -509,7 +509,7 @@ held_work() {
         for (k in open) { print "open decision " k; exit }
         s = last; sub(/[ :[].*/, "", s)
         if (s ~ /^(needs-decision|blocked|waiting|paused)$/) { print "last status " s; exit }
-        if (tolower(last) ~ /(await|waiting|ready)[a-z]* (to |for |on )?(a |the |your |captain.s )?(review|approval|decision|merge)/) print "last status awaits review or decision"
+        if (tolower(last) ~ /(^|[^a-z])(await|waiting|ready)[a-z]* (to |for |on )?(a |the |your |captain.s )?(review|approval|decision|merge)/) print "last status awaits review or decision"
       }' "$st" 2>/dev/null); then
       HELD="status unreadable"
       return 0
@@ -535,7 +535,11 @@ held_work() {
     [ -e "$wt/.git" ] && HELD="git state unreadable"
     return 0
   fi
-  git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || return 0   # no commit yet
+  if ! out=$(git -C "$wt" rev-list --all --max-count=1 2>/dev/null); then
+    HELD="git state unreadable"
+    return 0
+  fi
+  [ -n "$out" ] || return 0
   n=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { HELD="git state unreadable"; return 0; }
   [ "$n" -gt 0 ] && { HELD="$n commit(s) on no pushed branch"; return 0; }
   out=$(git -C "$wt" status --porcelain --untracked-files=no 2>/dev/null) || { HELD="git state unreadable"; return 0; }
