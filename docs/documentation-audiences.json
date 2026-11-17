@@ -754,6 +754,14 @@
       "audience": "public-product"
     },
     {
+      "path": "tools/cockpit/README.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "tools/cockpit/VERVERS-REGELS.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
     },
