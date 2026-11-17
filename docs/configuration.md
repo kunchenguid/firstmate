@@ -874,6 +874,9 @@ reserve-flag /var/run/fm-reserved.flag host reserved by the captain   # repeatab
 captain-idle 300       # opt-in, macOS: the captain counts as present when input was idle under 300 s
 quota-provider claude  # opt-in: publish that provider's quota runway
 max-load1 20           # raw 1-minute load limit; also replaces the spawn load guard's default
+max-ci-queued 6        # opt-in: hold new starts while this many Actions runs are queued for the project
+max-open-prs 15        # opt-in: hold new starts while the project has this many open pull requests
+max-merge-queue 5      # opt-in: hold new starts while the project's merge queue holds this many entries
 ```
 
 `pressure-file` and `reserve-flag` may repeat and take an absolute or `~/` path; a `reserve-flag` path may be followed by the label it is reported by.
@@ -882,16 +885,43 @@ An unknown key, a repeated single key, or a malformed value makes the whole file
 
 A pressure file is any producer of the `lookout.beat` 1.x shape, read by its own file age on this machine; a missing, stale, or unreadable one is skipped with its reason and the host's own probes stand in, so a broken beat never blocks anything.
 `captain-idle` reads input idle time locally and publishes only `present`, `idle`, or `away` (an away record), never the idle time itself.
-`quota-provider` is the only key that makes the script reach the network, through `quota-axi`, bounded to five seconds.
+`quota-provider` makes the script reach the network through `quota-axi`, bounded to five seconds.
+The three GitHub limits make a spawn read the project's GitHub origin through `gh-axi` (see Spawn admission below); `0` turns one of them off.
 
 While the file exists, the watcher runs `bin/fm-capacity.sh --publish` detached at most every 30 seconds, writing this home's lane facts to `state/lane-capacity.json`: its lanes, its cap and limits, its machine's pressure and boots, its watcher's freshness, and its own admission verdict.
-Publishing is best-effort and never changes what the watcher does; no spawn reads the verdict.
-`bin/fm-capacity.sh --admit` is an advisory check of the same verdict: it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
-No Firstmate script calls it.
+Publishing is best-effort and never changes what the watcher does.
+`bin/fm-capacity.sh --admit` is the check of the same verdict that a fresh ship or scout spawn makes (see Spawn admission below): it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
 `bin/fm-worker-table.sh` complements this home-local report with the cross-home worker table: one row per worker in this home and in every registered secondmate home, with harness and model, working / parked / idle, the age of the last meaningful progress, and the PR when there is one.
 This home's rows are read live through `bin/fm-crew-state.sh`; each secondmate's rows come from that home's cached `fm-live-board-input.v1` summary, with the cache age disclosed.
 Only a `working` row counts as busy, so a parked listener is never counted as a running worker.
 The command reads no config file, never spawns work in another home, and `--json` prints the `fm-worker-table.v1` document; the script's header owns the table line and the document.
+
+### Spawn admission
+
+`bin/fm-spawn.sh` asks `bin/fm-capacity.sh --admit --project <clone>` before it creates anything for a fresh ship or scout start, right after the load guard below, and holds the start when the verdict does not admit.
+With no `config/lane-capacity` the verdict admits and reads nothing, so a home without the file spawns exactly as before.
+The verdict is the lane cap and the host limits above, plus three inputs only a spawn reads:
+
+- The fleet-wide working count: workers working right now across this home and every registered secondmate home, from `bin/fm-worker-table.sh --json`, held against the cap.
+  Only a `working` row counts, so a parked listener never holds a start, and the cap is one total across homes rather than one per home.
+  The watcher keeps the secondmate rows under five minutes old by running `bin/fm-worker-table.sh --refresh` detached, which refreshes the cached summaries the table reads at the lowest CPU priority and never more than one at a time.
+- The project's GitHub queue, read through `gh-axi` only for a `github.com` origin and only when `max-ci-queued`, `max-open-prs`, or `max-merge-queue` is set: queued Actions runs, open pull requests, and merge-queue entries.
+  A queued run older than 24 hours is a zombie that never starts and is never counted.
+  A read is bounded to 15 seconds and reused for 60 seconds, so a batch of spawns asks GitHub once.
+- Available memory, which is the AVAILABLE column of `free -m` (`MemAvailable`), never the free one.
+  A low free percentage alone never holds a start while 8 GB or more is available.
+
+An input that cannot be read (no `jq`, no `gh-axi`, a timeout, an unreadable table) warns on stderr and admits, so a broken probe never stops the fleet.
+A hold is a spawn deferral like the load guard's: nothing is created, the backlog item stays queued, one `deferred:` line names every reason, and the exit status is 75.
+
+Every held start is also written to the durable admission queue, `state/admission-queue/<task-id>.start`, with the exact arguments and directory it was given, before the spawn exits.
+That covers the load guard and project capacity holds as well as the admission verdict, so a hold survives the exit and is never forgotten.
+`bin/fm-watch.sh` runs `bin/fm-admission-queue.sh retry` detached at most once a minute while the queue holds anything, so a held start is offered again at every wake and heartbeat with no daemon of its own.
+A retry runs the saved start again, oldest first, and starts at most one task per tick, so a host that has just recovered takes starts one at a time instead of all at once.
+A start that launches is removed and announced with one `check:` wake row, and one that already has a task record is dropped.
+A start that fails for any reason other than a hold stays in the queue as `failed`, is announced the same way, and is never retried until `bin/fm-admission-queue.sh drop <task-id>` forgets it.
+The wake drain and the session-start digest print an `ADMISSION:` section listing what is held, how long, and why.
+The scripts' headers own the queue record, the retry bounds, and the command forms.
 
 ### Spawn load guard
 

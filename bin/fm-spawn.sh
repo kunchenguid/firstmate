@@ -284,6 +284,13 @@
 #   --load-guard holds new starts (its header owns the threshold). A relaunch, a
 #   --secondmate spawn, and a restart of a task that already has a record are not
 #   held.
+#   Admission: the same fresh start then asks bin/fm-capacity.sh --admit (its
+#   header owns the verdict and inputs: the lane cap, memory, disk, the fleet-wide
+#   working count, and the project's GitHub queue depths) and is deferred the
+#   same way, an unreadable verdict warning and admitting. Every deferral above
+#   also records the start, with its exact arguments, in the durable admission
+#   queue (bin/fm-admission-queue.sh owns it) before the exit 75, and the
+#   watcher retries held starts on its poll, so a hold is never forgotten.
 #   Ship overlap: a fresh ship naming the same project files as a queued or
 #   in-flight ship prints an advisory `warning: ship overlap:` line and still
 #   launches (bin/fm-ship-overlap-lib.sh owns the rule).
@@ -830,6 +837,10 @@
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
+
+# The arguments this spawn was given, kept so a start that is held can be
+# recorded in the admission queue exactly as it was asked for.
+SPAWN_ORIG_ARGS=("$@")
 
 # Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
 shopt -u patsub_replacement 2>/dev/null || true
@@ -4419,6 +4430,20 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
+# A held fresh start is recorded in the durable admission queue before the spawn
+# exits 75 (bin/fm-admission-queue.sh owns the queue and its retry), so a hold
+# survives the exit and is never forgotten. Recording is best-effort: a queue
+# that cannot be written is said on stderr and never turns a hold into a launch.
+spawn_hold_start() {  # <hold-line>
+  local queue_out reason
+  # The queue keeps the deferral line alone, not a probe warning printed beside it.
+  reason=$(printf '%s\n' "$1" | grep -m1 '^deferred:') || reason=$1
+  if ! queue_out=$("$SCRIPT_DIR/fm-admission-queue.sh" add "$ID" --reason "$reason" -- ${SPAWN_ORIG_ARGS[@]+"${SPAWN_ORIG_ARGS[@]}"} 2>&1); then
+    echo "warning: task $ID is held but could not be recorded in the admission queue, so dispatch it again by hand: $queue_out" >&2
+  fi
+  echo "$1; task $ID was not launched and its backlog item stays queued - the start is held in the admission queue (bin/fm-admission-queue.sh list), which the watcher retries once the hold clears" >&2
+  exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+}
 # Load guard (bin/fm-capacity.sh --load-guard owns the verdict). It runs before
 # any lock or mutation, so a hold leaves the task exactly as queued as it was. A
 # guard that cannot answer warns and admits, as an unknown probe does.
@@ -4427,10 +4452,23 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ ! -e "$STATE/$ID.meta
   SPAWN_LOAD_HOLD=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-capacity.sh" --load-guard 2>&1) || SPAWN_LOAD_RC=$?
   if [ "$SPAWN_LOAD_RC" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
-    echo "$SPAWN_LOAD_HOLD; task $ID was not launched and its backlog item stays queued - dispatch it again once the load drops" >&2
-    exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+    spawn_hold_start "$SPAWN_LOAD_HOLD"
   elif [ "$SPAWN_LOAD_RC" -ne 0 ]; then
     echo "warning: the load guard could not run (exit $SPAWN_LOAD_RC), so task $ID was not checked against machine load: $SPAWN_LOAD_HOLD" >&2
+  fi
+  # Admission (bin/fm-capacity.sh --admit owns the verdict and its inputs): the
+  # lane cap, memory, disk, the fleet-wide working count, and the project's
+  # GitHub queue depths. With no config/lane-capacity it admits and reads
+  # nothing. A verdict that cannot be read warns and admits, like the guard.
+  SPAWN_ADMIT_RC=0
+  SPAWN_ADMIT_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-capacity.sh" --admit --project "$PROJ_ABS" 2>&1) || SPAWN_ADMIT_RC=$?
+  if [ "$SPAWN_ADMIT_RC" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
+    spawn_hold_start "$SPAWN_ADMIT_OUT"
+  elif [ "$SPAWN_ADMIT_RC" -ne 0 ]; then
+    echo "warning: the admission check could not run (exit $SPAWN_ADMIT_RC), so task $ID was not checked against the lane cap: $SPAWN_ADMIT_OUT" >&2
+  elif [ -n "$SPAWN_ADMIT_OUT" ]; then
+    echo "$SPAWN_ADMIT_OUT" >&2
   fi
 fi
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
@@ -4475,8 +4513,7 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     exit 1
   fi
   if [ "$FM_PROJECT_CAPACITY_OCCUPANTS" -ge "$SPAWN_PROJECT_CAPACITY" ]; then
-    echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
-    exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+    spawn_hold_start "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS)"
   fi
 fi
 [ -f "$BRIEF" ] || {

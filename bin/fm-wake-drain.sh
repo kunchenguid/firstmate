@@ -7,7 +7,8 @@
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, captain
 # calls due to proceed on their deadline default, the GOAL section (every active
 # drive goal's live state and the GOAL DUTY line, read-only from
-# bin/fm-goal.sh brief, which owns its rendering and bounds), and on
+# bin/fm-goal.sh brief, which owns its rendering and bounds), the ADMISSION
+# section (held fresh starts, from bin/fm-admission-queue.sh), and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
@@ -1051,6 +1052,21 @@ print_goal_section() {
   [ -z "$out" ] || printf '%s\n' "$out"
 }
 
+# The ADMISSION section: fresh starts that spawn admission held, from
+# `bin/fm-admission-queue.sh section`, which owns the format. The watcher retries
+# them on its poll; this only shows Firstmate what is waiting and what failed.
+# Read-only, empty when nothing is held, and a fault never hides the wakes.
+print_admission_section() {
+  local out
+  [ -x "$SCRIPT_DIR/fm-admission-queue.sh" ] && [ -d "$STATE/admission-queue" ] || return 0
+  if ! out=$("$SCRIPT_DIR/fm-admission-queue.sh" section 2>&1); then
+    printf 'ADMISSION SKIPPED: bin/fm-admission-queue.sh section failed (%s)\n' \
+      "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" >&2
+    return 0
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -1307,6 +1323,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   (print_status_presentation) || true
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   print_goal_section
+  print_admission_section
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -1330,6 +1347,7 @@ if [ "$ACTOR" = main ]; then
     (print_status_presentation) || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   print_goal_section
+  print_admission_section
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
   fi
@@ -1394,5 +1412,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
 (print_status_presentation "$RAW_ROWS") || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 print_goal_section
+print_admission_section
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

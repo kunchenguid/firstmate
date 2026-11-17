@@ -1119,6 +1119,8 @@ if [ "$READ_ONLY" -eq 1 ]; then
   # drain itself).
   GOAL_OUT=$("$SCRIPT_DIR/fm-goal.sh" brief 2>/dev/null) || GOAL_OUT=
   [ -z "$GOAL_OUT" ] || reemit_emit "$GOAL_OUT"
+  ADMISSION_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-admission-queue.sh" section 2>/dev/null) || ADMISSION_OUT=
+  [ -z "$ADMISSION_OUT" ] || reemit_emit "$ADMISSION_OUT"
 else
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-branch-outcome.sh" seed-tail >/dev/null 2>&1 || true
   # Pi supervision-branch recovery, locked path only: clear leases whose

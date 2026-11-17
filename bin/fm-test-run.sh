@@ -419,7 +419,7 @@ family_for_basename() {
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
     fm-remote-secondmate-dispatch-receipt.test.sh|\
-    fm-project-capacity.test.sh|\
+    fm-project-capacity.test.sh|fm-admission.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -787,6 +787,7 @@ tests/fm-bearings-snapshot.test.sh 186219
 tests/fm-bootstrap-network-parallel.test.sh 30424
 tests/fm-bootstrap.test.sh 95236
 tests/fm-branch-supervision.test.sh 22979
+tests/fm-admission.test.sh 27000
 tests/fm-busy-adapter-wiring.test.sh 49731
 tests/fm-busy-state.test.sh 3274
 tests/fm-calm-claude-mod-live-e2e.test.sh 47
@@ -1738,8 +1739,9 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-account-claude-token.test.sh"
       printf '%s\n' "__script__:fm-quota-intake.test.sh"
       ;;
-    bin/fm-capacity.sh)
+    bin/fm-capacity.sh|bin/fm-admission-lib.sh|bin/fm-admission-queue.sh)
       printf '%s\n' "__script__:fm-capacity.test.sh"
+      printf '%s\n' "__script__:fm-admission.test.sh"
       ;;
     bin/fm-reap.sh)
       printf '%s\n' "__script__:fm-reap.test.sh"

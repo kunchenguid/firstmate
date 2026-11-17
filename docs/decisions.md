@@ -3,6 +3,20 @@
 Captain-level routing and operating decisions whose reasoning the current-behavior docs do not carry.
 Each entry links the page that owns its resulting contract.
 
+## 2026-11-17 - spawn calls admission and a held start goes into a durable queue
+
+**Decision.** `bin/fm-spawn.sh` asks `bin/fm-capacity.sh --admit` before it creates anything for a fresh ship or scout start, and every deferral (admission, the load guard, project capacity) is recorded in `state/admission-queue` before the exit 75.
+The watcher retries the queue on its poll, one start per tick, and the wake drain prints what is held.
+The verdict adds the fleet-wide working count against the cap, the project's GitHub queue with queued runs older than 24 hours ignored, open pull request and merge-queue depth, and treats memory as a limit only below 8 GB available.
+The cross-home worker table is refreshed by the watcher so the fleet count is under five minutes old.
+[`configuration.md`](configuration.md#spawn-admission) owns the resulting contract.
+
+**Why.** Load reached 202 at 30 lanes, and a deferred start only waited if Firstmate remembered to dispatch it again, which an away window does not guarantee.
+The Miko rows of the worker table were eight days old, so main counted a fleet far smaller than the real one.
+Thirty-nine zombie queued runs on one project would have held every start for good had they counted.
+The GitHub limits are keys rather than defaults so a home with no `config/lane-capacity`, and a home that sets only a cap, behave exactly as before and never reach the network.
+One start per tick is the hysteresis: each start raises the load the next verdict reads, and a recovered host must not take the whole queue at once.
+
 ## 2026-11-17 - every active goal drives while the captain is away
 
 **Decision.** While an away record stands, every active goal drives until it is done or closed, whether or not `/afk` named it.

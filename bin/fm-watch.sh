@@ -4228,6 +4228,44 @@ lane_capacity_publish_detached() {
   LANE_CAPACITY_PID=$!
 }
 
+# Spawn admission (docs/configuration.md "Spawn admission"): a held fresh start
+# is recorded in state/admission-queue by bin/fm-spawn.sh, and the watcher offers
+# it again on its poll - so at every wake and heartbeat without a daemon of its
+# own - through bin/fm-admission-queue.sh retry, detached for the same
+# beacon-freshness reason as the summaries above. The cross-home worker count
+# that admission reads is kept fresh the same way (bin/fm-worker-table.sh
+# --refresh owns its cadence and its lock). Both are no-ops without their file.
+ADMISSION_RETRY_INTERVAL=${FM_ADMISSION_RETRY_INTERVAL:-60}
+case "$ADMISSION_RETRY_INTERVAL" in ''|*[!0-9]*) ADMISSION_RETRY_INTERVAL=60 ;; esac
+ADMISSION_RETRY_PID=
+admission_retry_detached() {
+  if [ -n "$ADMISSION_RETRY_PID" ]; then
+    if kill -0 "$ADMISSION_RETRY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$ADMISSION_RETRY_PID" 2>/dev/null || true
+    ADMISSION_RETRY_PID=
+  fi
+  touch "$STATE/.last-admission-retry"
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-admission-queue.sh" retry </dev/null >/dev/null 2>&1 &
+  ADMISSION_RETRY_PID=$!
+}
+WORKER_TABLE_REFRESH_PID=
+worker_table_refresh_detached() {
+  if [ -n "$WORKER_TABLE_REFRESH_PID" ]; then
+    if kill -0 "$WORKER_TABLE_REFRESH_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$WORKER_TABLE_REFRESH_PID" 2>/dev/null || true
+    WORKER_TABLE_REFRESH_PID=
+  fi
+  touch "$STATE/.last-worker-table-refresh"
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-worker-table.sh" --refresh </dev/null >/dev/null 2>&1 &
+  WORKER_TABLE_REFRESH_PID=$!
+}
+
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
 # A merged poll may have queued its terminal wake and then lost the process
@@ -4397,6 +4435,13 @@ while :; do
   # Opt-in lane capacity facts: off costs one file test.
   if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/lane-capacity.json")" -ge 30 ]; then
     lane_capacity_publish_detached
+  fi
+  # Held starts and the fresh cross-home count behind them: off costs a file test.
+  if [ -d "$STATE/admission-queue" ] && [ "$(age_of "$STATE/.last-admission-retry")" -ge "$ADMISSION_RETRY_INTERVAL" ]; then
+    admission_retry_detached
+  fi
+  if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/.last-worker-table-refresh")" -ge 60 ]; then
+    worker_table_refresh_detached
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and

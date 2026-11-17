@@ -43,6 +43,11 @@
 #   fm-worker-table.sh            the table: one key=value line, then per-home
 #                                 worker blocks in plain text
 #   fm-worker-table.sh --json     the fm-worker-table.v1 document on stdout
+#   fm-worker-table.sh --refresh [--max-age SECONDS]
+#                                 refresh the secondmate summary cache the table
+#                                 reads when it is older than SECONDS (default
+#                                 300); prints nothing and exits 0 when it is
+#                                 fresh or no secondmate home is registered
 #
 # Plain text: the first line is machine-readable and fixed-order:
 #   workers: total=<N> working=<W> parked=<P> idle=<I> homes=<H>
@@ -65,7 +70,16 @@
 # or null. The document carries labels and derived states only, never paths
 # beyond the home directories themselves, commands, or tokens.
 #
-# Read-only: the command acquires no lock, drains no wakes, arms nothing and
+# --refresh is the one writing mode: it runs `bin/fm-fleet-snapshot.sh
+# --live-board-input` (the only writer of the cache, which reads each local
+# secondmate home read-only and refreshes its cached copy) at the lowest CPU
+# priority, bounded by FM_WORKER_TABLE_REFRESH_TIMEOUT seconds (default 300),
+# under state/.worker-table-refresh.lock so overlapping runs do not pile up.
+# The cache age is the newest *.board-input.json mtime in the cache directory.
+# bin/fm-watch.sh runs it detached, so the cross-home count that spawn
+# admission reads (bin/fm-admission-lib.sh) stays under five minutes old.
+#
+# Read-only: apart from --refresh, the command acquires no lock, drains no wakes, arms nothing and
 # changes no operational state; it reads this home's state, the registry, the
 # summary cache, and bounded fm-crew-state.sh child reads for this home's
 # workers. Assembly uses a private temporary directory removed on exit.
@@ -92,13 +106,62 @@ CACHE_DIR="${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}"
 REGISTRY="$DATA/secondmates.md"
 
 mode=text
+refresh_max_age=300
+USAGE="usage: fm-worker-table.sh [--json|--refresh [--max-age SECONDS]|--help]"
 case "${1:-}" in
   -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
   "") ;;
   --json) mode=json ;;
-  *) echo "usage: fm-worker-table.sh [--json|--help]" >&2; exit 2 ;;
+  --refresh)
+    mode=refresh
+    if [ "$#" -eq 3 ] && [ "$2" = --max-age ]; then
+      case "$3" in ''|*[!0-9]*) echo "$USAGE" >&2; exit 2 ;; esac
+      refresh_max_age=$3
+      set -- --refresh
+    fi
+    ;;
+  *) echo "$USAGE" >&2; exit 2 ;;
 esac
-[ "$#" -le 1 ] || { echo "usage: fm-worker-table.sh [--json|--help]" >&2; exit 2; }
+[ "$#" -le 1 ] || { echo "$USAGE" >&2; exit 2; }
+
+if [ "$mode" = refresh ]; then
+  refresh_cache_age() {  # prints the newest cache age in seconds, or nothing
+    local f m newest=0 t
+    for f in "$CACHE_DIR"/*.board-input.json; do
+      [ -f "$f" ] || continue
+      m=$(stat -c %Y "$f" 2>/dev/null) || m=$(/usr/bin/stat -f %m "$f" 2>/dev/null) || continue
+      [ "$m" -le "$newest" ] || newest=$m
+    done
+    [ "$newest" -gt 0 ] || return 0
+    t=$(date +%s)
+    [ "$t" -ge "$newest" ] || t=$newest
+    printf '%s\n' $((t - newest))
+  }
+  # Only a registered local secondmate home has rows to refresh.
+  [ -f "$REGISTRY" ] && [ ! -L "$REGISTRY" ] && grep -q '^- ' "$REGISTRY" 2>/dev/null || exit 0
+  cache_age=$(refresh_cache_age)
+  if [ -n "$cache_age" ] && [ "$cache_age" -lt "$refresh_max_age" ]; then
+    exit 0
+  fi
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  refresh_lock="$STATE/.worker-table-refresh.lock"
+  fm_lock_try_acquire "$refresh_lock" || exit 0
+  refresh_timeout=${FM_WORKER_TABLE_REFRESH_TIMEOUT:-300}
+  case "$refresh_timeout" in ''|0|*[!0-9]*) refresh_timeout=300 ;; esac
+  refresh_rc=0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_SNAPSHOT_CACHE_DIR="$CACHE_DIR" \
+    fm_run_timed "$refresh_timeout" nice -n 19 "${FM_WORKER_TABLE_SNAPSHOT:-$SCRIPT_DIR/fm-fleet-snapshot.sh}" --live-board-input \
+    >/dev/null 2>&1 </dev/null || refresh_rc=$?
+  fm_lock_release "$refresh_lock"
+  if [ "$refresh_rc" -ne 0 ]; then
+    echo "fm-worker-table: the cache refresh failed (exit $refresh_rc)" >&2
+    exit 1
+  fi
+  exit 0
+fi
 
 command -v jq >/dev/null 2>&1 || {
   echo "fm-worker-table: needs jq" >&2

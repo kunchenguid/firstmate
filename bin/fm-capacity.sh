@@ -6,7 +6,8 @@
 #   fm-capacity.sh            the report: one key=value line, then a human summary
 #   fm-capacity.sh --json     the fm-lane-capacity.v1 document on stdout
 #   fm-capacity.sh --publish  write that document to state/lane-capacity.json
-#   fm-capacity.sh --admit    this home's own admission verdict as an exit status
+#   fm-capacity.sh --admit [--project DIR]
+#                             the admission verdict as an exit status
 #   fm-capacity.sh --load-guard  whether machine load holds a fresh worker start
 #
 # It reads this home's state/*.meta, the optional config/lane-capacity, the
@@ -108,8 +109,20 @@
 # A malformed config is still published with cap.status invalid. It is
 # best-effort: every failure goes to stderr and it exits 0.
 #
-# --admit exits 0 when config/lane-capacity is absent or the verdict admits,
-# and 75 with one `deferred:` line on stderr when it does not.
+# --admit is the check bin/fm-spawn.sh makes before a fresh ship or scout start.
+# It exits 0 when config/lane-capacity is absent or the verdict admits, and 75
+# with one `deferred:` line on stderr when it does not. Beyond the verdict above
+# it adds three inputs only a spawn reads, each failing open with a warning on
+# stderr when it cannot be read (bin/fm-admission-lib.sh owns the reads and a
+# 60 second cache): constraint `fleet`, the workers working across this home and
+# every registered secondmate home (bin/fm-worker-table.sh) at or over the cap;
+# and, with --project naming a clone whose origin is on github.com and only
+# when the key is set, constraints `ci`, `prs`, and `merge-queue` for queued
+# Actions runs (older than 24 hours are zombies and not counted), open pull
+# requests, and merge-queue entries at or over max-ci-queued, max-open-prs, and
+# max-merge-queue (config/lane-capacity keys, a non-negative integer each, 0
+# turns one off). Memory is never a limit while 8 GB or more is available, the
+# AVAILABLE column of free -m (MemAvailable), whatever the free percentage.
 #
 # --load-guard is the check bin/fm-spawn.sh enforces on a fresh worker start. It
 # exits 75 with one `deferred:` line on stderr while this host's own load1 is
@@ -145,8 +158,11 @@ LANE_FOOTPRINT_GB=1
 QUOTA_TIMEOUT=5
 BOOTS_KEPT=10
 LOAD_GUARD_PER_CORE=2
+ADMIT_RAM_ENOUGH_GB=8
 
 mode=report
+ADMIT_PROJECT=
+USAGE="usage: fm-capacity.sh [--json|--publish|--admit [--project DIR]|--load-guard|--help]"
 case "${1:-}" in
   -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
   "") ;;
@@ -154,9 +170,13 @@ case "${1:-}" in
   --publish) mode=publish ;;
   --admit) mode=admit ;;
   --load-guard) mode=load-guard ;;
-  *) echo "usage: fm-capacity.sh [--json|--publish|--admit|--load-guard|--help]" >&2; exit 2 ;;
+  *) echo "$USAGE" >&2; exit 2 ;;
 esac
-[ "$#" -le 1 ] || { echo "usage: fm-capacity.sh [--json|--publish|--admit|--load-guard|--help]" >&2; exit 2; }
+if [ "$mode" = admit ] && [ "$#" -eq 3 ] && [ "$2" = --project ] && [ -n "$3" ]; then
+  ADMIT_PROJECT=$3
+elif [ "$#" -gt 1 ]; then
+  echo "$USAGE" >&2; exit 2
+fi
 
 is_uint() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
@@ -219,6 +239,9 @@ target_error=
 min_avail_gb=
 min_disk_gb=
 max_load1=
+max_ci_queued=
+max_open_prs=
+max_merge_queue=
 captain_idle=
 quota_provider=
 pressure_files=
@@ -253,7 +276,7 @@ parse_lane_config() {
     [ "$key" = "$line" ] || rest=$(printf '%s' "${line#* }" | sed 's/^ *//')
     value=${rest%% *}
     case "$key" in
-      min-avail-gb|min-disk-gb|max-load1|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
+      min-avail-gb|min-disk-gb|max-load1|max-ci-queued|max-open-prs|max-merge-queue|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
       *) config_error "$lineno" "unknown key" "'$key'"; return 1 ;;
     esac
     case "$key" in
@@ -271,6 +294,14 @@ parse_lane_config() {
           min-avail-gb) min_avail_gb=$value ;;
           min-disk-gb) min_disk_gb=$value ;;
           max-load1) max_load1=$value ;;
+        esac
+        ;;
+      max-ci-queued|max-open-prs|max-merge-queue)
+        is_uint "$value" && [ "${#value}" -le 9 ] || { config_error "$lineno" "$key needs a non-negative integer"; return 1; }
+        case "$key" in
+          max-ci-queued) max_ci_queued=$((10#$value)) ;;
+          max-open-prs) max_open_prs=$((10#$value)) ;;
+          max-merge-queue) max_merge_queue=$((10#$value)) ;;
         esac
         ;;
       captain-idle)
@@ -303,7 +334,7 @@ if [ -e "$LANE_CONFIG" ]; then
     target_error="config/lane-capacity: $target_error"
     target_reason="config/lane-capacity: $target_reason"
     target=invalid
-    min_avail_gb='' min_disk_gb='' max_load1='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
+    min_avail_gb='' min_disk_gb='' max_load1='' max_ci_queued='' max_open_prs='' max_merge_queue='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
   fi
 fi
 
@@ -477,6 +508,12 @@ if [ "$load1" != unknown ] && [ "$cores" != unknown ] &&
   probe_cpu=1
 fi
 [ "$mem_free_pct" != unknown ] && [ "$mem_free_pct" -lt "$MEM_FREE_MIN_PCT" ] && probe_mem=1
+# Memory is not a lane limit while plenty is available: a percentage under the
+# floor on a very large host still leaves ADMIT_RAM_ENOUGH_GB or more available,
+# which is the AVAILABLE column of free -m (MemAvailable), never the free one.
+if [ "$probe_mem" -eq 1 ] && [ -n "$probe_avail_gb" ] && ! num_lt "$probe_avail_gb" "$ADMIT_RAM_ENOUGH_GB"; then
+  probe_mem=0
+fi
 [ "$disk_free_mb" != unknown ] && [ "$disk_free_mb" -lt "$DISK_FREE_MIN_MB" ] && probe_disk=1
 
 if [ "$basis" = beat ]; then
@@ -580,6 +617,45 @@ if [ "$mode" = admit ]; then
   if [ "$target" = invalid ]; then
     echo "fm-capacity: $target_error" >&2
     exit 1
+  fi
+  # The inputs a spawn adds beyond this home's own probes, each failing open
+  # (bin/fm-admission-lib.sh owns the reads): the fleet-wide working count
+  # against the cap, and the project's GitHub queue depths against their keys.
+  # shellcheck source=bin/fm-admission-lib.sh
+  . "$SCRIPT_DIR/fm-admission-lib.sh"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  if [ "$have_jq" -eq 1 ] && is_uint "$target"; then
+    if fleet_working=$(fm_admission_fleet_working "$SCRIPT_DIR" "$STATE"); then
+      if [ "$fleet_working" -ge "$target" ]; then
+        add_constraint fleet "fleet: $fleet_working workers working across homes, at the cap of $target"
+        admit=false
+      fi
+    else
+      echo "fm-capacity: the fleet-wide worker count could not be read; admitting on this home's own lanes" >&2
+    fi
+  fi
+  if [ -n "$ADMIT_PROJECT" ] && is_uint "$target" && [ "$have_jq" -eq 1 ] &&
+    { [ -n "$max_ci_queued" ] || [ -n "$max_open_prs" ] || [ -n "$max_merge_queue" ]; }; then
+    if gh_counts=$(fm_admission_github_counts "$ADMIT_PROJECT" "$STATE"); then
+      read -r gh_queued gh_prs gh_mq <<EOF
+$gh_counts
+EOF
+      if [ -n "$max_ci_queued" ] && [ "$max_ci_queued" -gt 0 ] && [ "$gh_queued" -ge "$max_ci_queued" ]; then
+        add_constraint ci "ci: $gh_queued queued Actions runs (zombies over 24h not counted), at the max-ci-queued $max_ci_queued"
+        admit=false
+      fi
+      if [ -n "$max_open_prs" ] && [ "$max_open_prs" -gt 0 ] && [ "$gh_prs" -ge "$max_open_prs" ]; then
+        add_constraint prs "prs: $gh_prs open pull requests, at the max-open-prs $max_open_prs"
+        admit=false
+      fi
+      if [ -n "$max_merge_queue" ] && [ "$max_merge_queue" -gt 0 ] && [ "$gh_mq" -ge "$max_merge_queue" ]; then
+        add_constraint merge-queue "merge-queue: $gh_mq entries, at the max-merge-queue $max_merge_queue"
+        admit=false
+      fi
+    else
+      echo "fm-capacity: the project's GitHub queue depth could not be read; admitting without it" >&2
+    fi
   fi
   [ "$admit" = true ] && exit 0
   echo "deferred: lane capacity of this home ($LANE_CONFIG) does not admit another lane: $(printf '%s' "$reasons" | paste -sd ';' - | sed 's/;/; /g')" >&2
