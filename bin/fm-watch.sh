@@ -2618,6 +2618,7 @@ wait_gate_check() {  # <window> <task>
   if [ "$(status_line_verb "$(last_status_line "$statusf")")" = "done" ]; then
     wait="done"
   elif status_is_paused "$(status_declared_wait_line "$statusf")"; then
+    [ ! -e "$CONFIG/paused-wait-supersession" ] || return 0
     wait=paused
   else
     rm -f "$gate_file" "$checked_file"
