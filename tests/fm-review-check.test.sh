@@ -7,6 +7,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CHECK="$ROOT/bin/fm-review-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-review-check)
@@ -105,8 +107,28 @@ test_secondmate_home_publishes_the_ready_line() {
   pass "fm-review-check: a secondmate home publishes the child's review-ready line to the parent channel"
 }
 
+# The review lines are appended after every other line of the record, so on a
+# task whose pr= identity already arms a merge poll they land after that
+# identity; the poll must keep authenticating the record.
+test_recording_a_review_keeps_an_armed_merge_poll_authenticating() {
+  local pr=https://github.com/example/repo/pull/5 poll="$ROOT/bin/fm-pr-poll.sh"
+  fixture armed-poll forge=external "pr=$pr"
+  fm_pr_poll_prepare "$HOME_DIR/state" t1 github "$pr" github.com example/repo 5 "$poll" \
+    || fail "could not prepare the merge poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the merge poll fixture"
+  fm_pr_poll_artifacts_valid "$HOME_DIR/state" t1 "$poll" \
+    || fail "the merge poll fixture did not authenticate before the review was recorded"
+  run_check t1 "$URL"
+  expect_code 0 "$RC" "recording a review on a task with an armed merge poll failed: $OUT"
+  assert_grep "review=$URL" "$META" "the review URL was not recorded"
+  fm_pr_poll_artifacts_valid "$HOME_DIR/state" t1 "$poll" \
+    || fail "recording review= after pr= stopped the armed merge poll authenticating"
+  pass "fm-review-check: recording a review keeps an armed merge poll authenticating"
+}
+
 test_records_one_review_and_no_watch
 test_refusals
 test_secondmate_home_publishes_the_ready_line
+test_recording_a_review_keeps_an_armed_merge_poll_authenticating
 
 echo "# all fm-review-check tests passed"

@@ -20,8 +20,8 @@
 # Registered poll generations bind to their original hashes and file objects,
 # so a repository template update does not invalidate an armed poll. The watcher
 # executes the current repository poll with validated data, never the registered
-# state-file copy. Control relaunch metadata may follow the preserved PR identity
-# fields.
+# state-file copy. Any key firstmate itself records (bin/fm-meta-lib.sh) may
+# follow the preserved PR identity fields; any other key there is refused.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -29,6 +29,8 @@
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
 _FM_PR_LIB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-meta-lib.sh
+. "$_FM_PR_LIB_ROOT/bin/fm-meta-lib.sh"
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -486,8 +488,11 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      control_relaunch_tx=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        # Lifecycle and relay fields may be appended after the PR identity.
+      *=*)
+        # Firstmate's own writers record their keys in their own order, so any
+        # key of its vocabulary may follow the PR identity; a key it never
+        # writes there is foreign and refuses the record.
+        [ "$seen_pr" -eq 0 ] || fm_meta_key_known "${line%%=*}" || post_pr_invalid=1
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

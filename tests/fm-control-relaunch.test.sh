@@ -413,10 +413,16 @@ SH
   expect_code 0 "$rc" "the executable merge-poll registration should succeed"$'\n'"$out"
   check="$dir/home/state/rl44.check.sh"
   [ -f "$check" ] || fail "fm-pr-check did not arm the merge poll: $out"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl44 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed merge poll did not authenticate the record before the relaunch"
 
   out=$(run_control "$dir" rl44 relaunch --note "address review"); rc=$?
-  expect_code 0 "$rc" "a relaunch of a lane with a recorded PR should succeed"$'\\n'"$out"
+  expect_code 0 "$rc" "a relaunch of a lane with a recorded PR should succeed"$'\n'"$out"
   [ -n "$(meta_field "$dir" rl44 control_relaunch_tx)" ] || fail "the relaunch transaction id was not recorded"
+  # The watcher authenticates the record before every poll, so this is the
+  # check that decides whether the PR stays watched, not the poll's own output.
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl44 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the relaunched record no longer authenticates the armed merge poll"
   out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash "$check")
   [ "$out" = merged ] || fail "the armed merge poll stopped accepting the relaunched record: '$out'"
   pass "fm-control relaunch: a recorded PR stays valid to the armed merge poll"

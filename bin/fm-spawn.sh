@@ -7432,9 +7432,10 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-  # Preserved lines go last so an armed pr= identity block stays last, as
-  # fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) requires; otherwise the
-  # armed merge poll stops validating relaunched lanes.
+  # Preserved lines go last so the record keeps the shape its other writers
+  # left, with an armed pr= identity block at the tail. The merge poll does not
+  # depend on that order: fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh)
+  # accepts every key firstmate records (bin/fm-meta-lib.sh) after pr=.
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi
