@@ -2510,6 +2510,27 @@ EOF
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
 
+test_reemit_supervision_command_runs_from_a_home_path_with_a_space() {
+  local rec root home fakebin reemit cmd out
+  rec=$(new_world "reemit spaced home")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+  cmd=$(printf '%s\n' "$reemit" | sed -n 's/^turn with work under way: //p' | head -1)
+  [ -n "$cmd" ] || fail "the re-emit did not print the supervision instructions command"
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c "$cmd" 2>&1) \
+    || fail "the re-emit supervision command failed from a home path with a space: $out"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS" \
+    "the re-emit supervision command did not print the supervision instructions"
+
+  pass "--reemit prints a supervision command that runs from a home path with a space"
+}
+
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
   local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
   rec=$(new_world agents-refresh)
@@ -3192,6 +3213,7 @@ test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_fits_the_hook_output_cap_and_points_to_bulky_sections
+test_reemit_supervision_command_runs_from_a_home_path_with_a_space
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

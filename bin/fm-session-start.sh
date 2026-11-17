@@ -900,8 +900,9 @@ SUPERVISION_ARGS=(--harness "$PRIMARY_HARNESS" --read-only "$READ_ONLY" --afk "$
 if [ "$REEMIT" -eq 1 ]; then
   section "SUPERVISION OPERATING INSTRUCTIONS - primary harness: $PRIMARY_HARNESS"
   printf 'Not reprinted in a context re-emit; print them before arming, repairing, or ending a\n'
-  printf 'turn with work under way: FM_HOME=%s %s/fm-supervision-instructions.sh %s\n' \
-    "$FM_HOME" "$SCRIPT_DIR" "${SUPERVISION_ARGS[*]}"
+  printf 'turn with work under way: FM_HOME=%q %q' "$FM_HOME" "$SCRIPT_DIR/fm-supervision-instructions.sh"
+  printf ' %q' "${SUPERVISION_ARGS[@]}"
+  printf '\n'
 else
   "$SCRIPT_DIR/fm-supervision-instructions.sh" "${SUPERVISION_ARGS[@]}"
 fi
