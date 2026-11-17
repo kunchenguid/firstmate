@@ -600,10 +600,10 @@ for harness in claude codex pi; do
   case "$harness" in
     claude)
       probe_process_opens claude "$version" "$lab" resume \
-        claude -p --permission-mode bypassPermissions \
-        -- claude --continue -p --permission-mode bypassPermissions
+        claude -p --permission-mode bypassPermissions "${FM_LIVE_CLAUDE_FLAGS[@]}" \
+        -- claude --continue -p --permission-mode bypassPermissions "${FM_LIVE_CLAUDE_FLAGS[@]}"
       probe_context_reset claude "$version" "$lab" /clear \
-        claude --permission-mode bypassPermissions
+        claude --permission-mode bypassPermissions "${FM_LIVE_CLAUDE_FLAGS[@]}"
       ;;
     codex)
       probe_process_opens codex "$version" "$lab" resume \
