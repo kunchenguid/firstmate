@@ -257,8 +257,8 @@ test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
 }
 
 # A claude worker given a typed envelope would see it with the marker stripped,
-# so a launch-brief record that cannot be published stops the spawn before any
-# launch is sent.
+# so an unusable launch-brief channel stops the spawn before any launch is
+# sent. Channel trust preparation now detects this before record publication.
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish() {
   local rec id out status
   id="brief-doorbell-refused-z3"
@@ -270,8 +270,8 @@ test_claude_spawn_refuses_when_the_brief_record_cannot_publish() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a claude spawn whose launch-brief record cannot publish succeeded"$'\n'"$out"
-  assert_contains "$out" "could not publish the launch brief for $id" \
-    "the refused spawn did not name the record publication failure"
+  assert_contains "$out" "could not resolve the task-channel directories for $id" \
+    "the refused spawn did not name the unusable brief channel"
   [ ! -s "$LAUNCH_LOG" ] || fail "a launch was sent despite the unpublished brief record: $(cat "$LAUNCH_LOG")"
   pass "a claude spawn whose launch-brief record cannot publish stops with a clear error and sends no launch"
 }

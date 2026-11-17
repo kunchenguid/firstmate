@@ -375,6 +375,15 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   assert_contains "$out" "relaunched rl1 harness=claude from=claude" "the outcome should name the transition"
+  node - "$dir/user-home/.claude.json" "$dir/home" "$ROOT" <<'NODE' || fail "relaunch did not register the exact channels"
+const fs = require('fs');
+const [store, home, root] = process.argv.slice(2);
+const p = JSON.parse(fs.readFileSync(store)).projects;
+for (const d of [`${home}/state/operational-inbox`, `${home}/state/rl1.inbox`, `${home}/data/rl1`, `${root}/.agents/skills`]) {
+  if (!p[d]?.hasTrustDialogAccepted) process.exit(1);
+}
+if (p[home]?.hasTrustDialogAccepted) process.exit(1);
+NODE
   [ "$(meta_field "$dir" rl1 window)" = "fmses:fm-rl1" ] \
     || fail "the endpoint must be reused, not recreated"
   [ "$(meta_field "$dir" rl1 worktree)" = "$dir/wt" ] \

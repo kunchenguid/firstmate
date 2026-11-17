@@ -8,16 +8,24 @@
 # block below for why that dialog is otherwise left for the worker to wedge
 # on rather than answered on the human's behalf.
 #
-# Usage: fm-claude-trust.sh <worktree> <project>
-#        fm-claude-trust.sh --secondmate-home <home> <id>
+# Usage: fm-claude-trust.sh <worktree> <project> [--task-channels <state> <data> <code-root> <id>]
+#        fm-claude-trust.sh --secondmate-home <home> <id> [--inbox-state <state>]
 #        fm-claude-trust.sh --lab-home <home>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home this spawn launches into
-#   <id>        the secondmate id that home must already be marked for
+#   <id>        the task id; in secondmate mode the home must be marked for it
+#   --inbox-state also trust only <state>/<id>.inbox for a secondmate.
 #   --lab-home  the disposable lab home bin/fm-live-lab.sh launches a lab
 #               primary in
-# Prints one line naming what it registered; refuses loudly on anything else.
+#   --task-channels  also trust exactly the ship/scout --add-dir channels:
+#                    operational-inbox, <id>.inbox, data/<id>, .agents/skills.
+#                    All must already exist without escaping their supplied
+#                    roots; this option is worktree-only. It never grants trust
+#                    to the home or code checkout root or carries import consent
+#                    onto channel entries. Claude Code 2.1.326 checks these at
+#                    startup independently of the launch directory's trust.
+# Prints one line per registered directory and reports refusals on stderr.
 #
 # WHY THIS EXISTS. Claude Code gates a folder it has never seen behind an
 # interactive workspace-trust dialog, and --dangerously-skip-permissions does
@@ -41,7 +49,7 @@
 # second dialog's flags: a secondmate home has no separate "project" entry to
 # carry consent forward from, so its registration stays trust-only.
 #
-# TWO PROJECT-CONFIG ENTRIES IN WORKTREE MODE, NOT ONE. Registering both flags
+# WORKSPACE CONFIG ENTRIES IN WORKTREE MODE. Registering both flags
 # on the worktree entry alone (the original trust-only design) leaves the
 # external-imports dialog showing. Verified 2026-09-06 by disassembling the
 # installed `claude` binary and reproducing in an isolated three-way tmux
@@ -74,9 +82,8 @@
 # rather than flipping it, because doing so would grant every future
 # interactive session in that checkout silent external-file inclusion the
 # human declined, permanently and without being asked. The worktree entry is
-# left unwritten too: the spawn wedges on the dialog, which is the honest
-# outcome given a standing decline, not registered trust with a stripped
-# consent record. Approved===false with WarningShown false or absent is NOT
+# left unwritten too, and fm-spawn.sh refuses the launch.
+# Approved===false with WarningShown false or absent is NOT
 # that decision: Claude Code's default project entry carries both flags as
 # false before the dialog was ever shown, so that pair means "never asked" and
 # is treated like an absent flag - trust registered, no import consent.
@@ -162,9 +169,9 @@
 # projects entries for the worktree path and the resolved canonical project
 # path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a regular
 # file this uid owns; every unrelated key and project entry is preserved, and
-# both entries land in one atomic replacement. In secondmate-home and lab-home
-# mode: the single projects entry for the registered home path, same store,
-# same atomic replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the
+# both entries and any task-channel trust entries land in one atomic replacement.
+# In secondmate-home and lab-home mode the home entry and any secondmate inbox
+# entry use the same store and atomic replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the
 # claude launch verbatim rather than resolving it, and the pane starts in the
 # registered directory, so only an absolute value names the same store on both sides; a
 # relative one is refused below rather than guessed at.
@@ -186,7 +193,7 @@ unset CDPATH \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
 usage() {
-  echo "usage: fm-claude-trust.sh <worktree> <project>" >&2
+  echo "usage: fm-claude-trust.sh <worktree> <project> [--task-channels <state> <data> <code-root> <id>]" >&2
   echo "       fm-claude-trust.sh --secondmate-home <home> <id>" >&2
   echo "       fm-claude-trust.sh --lab-home <home>" >&2
   exit 2
@@ -195,9 +202,16 @@ usage() {
 # MODE selects which structural scope test decides the argument, and SCOPE_NOUN
 # names what the argument was expected to be so every shared refusal below reads
 # correctly in both modes.
+CHANNEL_ARGS=()
+CHANNELS_REQUESTED=0
 case "${1:-}" in
   --secondmate-home)
-    [ "$#" -eq 3 ] || usage
+    if [ "$#" -eq 5 ] && [ "$4" = --inbox-state ]; then
+      CHANNEL_ARGS=("$5" "" "" "$3")
+      CHANNELS_REQUESTED=2
+    elif [ "$#" -ne 3 ]; then
+      usage
+    fi
     MODE=secondmate-home
     TARGET_ARG=$2
     SUB_ID=$3
@@ -216,7 +230,12 @@ case "${1:-}" in
     usage
     ;;
   *)
-    [ "$#" -eq 2 ] || usage
+    if [ "$#" -eq 7 ] && [ "$3" = --task-channels ]; then
+      CHANNEL_ARGS=("$4" "$5" "$6" "$7")
+      CHANNELS_REQUESTED=1
+    elif [ "$#" -ne 2 ]; then
+      usage
+    fi
     MODE=worktree
     TARGET_ARG=$1
     SUB_ID=
@@ -429,12 +448,6 @@ fi
 # ponytail: fingerprint-and-refuse, not a lock; flock is absent on macOS and
 # cannot stop a vendor session's own rewrite anyway.
 #
-# In worktree mode every flag lands on both the worktree entry and the project
-# entry in the same read-modify-write attempt, so a single rename either
-# records all of it or none of it - there is no state where the worktree entry
-# is fresh and the project entry stale, or the other way round. In
-# secondmate-home mode only the single home entry is written.
-#
 # The two external-imports flags (worktree mode only) are gated separately
 # from the trust flag, because they are a CONSENT grant, not a pre-approval
 # this script is allowed to manufacture. Claude Code only ever writes
@@ -450,9 +463,37 @@ fi
 # are left untouched on both entries: writing them to the worktree entry alone
 # would be a pure no-op (the imports check never reads it) that only obscures
 # the real state, so trust still registers normally but the import dialog is
-# left exactly as undecided as it already was - the worker wedges on it, the
-# same honest outcome as an explicit decline, rather than a spawn spending
-# consent the human was never asked for.
+# left undecided for the operator to answer.
+# Resolve the exact same narrow directories that fm-spawn grants with --add-dir.
+# Refuse symlink escapes instead of registering an unrelated directory, and do
+# not expose a generic arbitrary-directory trust switch.
+CHANNEL_DIRS=()
+if [ "$CHANNELS_REQUESTED" != 0 ]; then
+  channel_id=${CHANNEL_ARGS[3]}
+  case "$channel_id" in
+    '' | *[!a-zA-Z0-9._-]* | . | ..) refuse "invalid task-channel id '$channel_id'" ;;
+  esac
+  channel_state=$(real_dir "${CHANNEL_ARGS[0]}") || refuse "task-channel state root is inaccessible"
+  if [ "$CHANNELS_REQUESTED" = 1 ]; then
+    channel_data=$(real_dir "${CHANNEL_ARGS[1]}") || refuse "task-channel data root is inaccessible"
+    channel_code=$(real_dir "${CHANNEL_ARGS[2]}") || refuse "task-channel code root is inaccessible"
+    for channel_root in "$channel_state" "$channel_data" "$channel_code"; do
+      [ "$channel_root" != / ] || refuse "task-channel root cannot be the filesystem root"
+    done
+    channel_candidates=("$channel_state/operational-inbox" "$channel_state/$channel_id.inbox" "$channel_data/$channel_id" "$channel_code/.agents/skills")
+  else
+    [ "$channel_state" != / ] || refuse "task-channel root cannot be the filesystem root"
+    channel_candidates=("$channel_state/$channel_id.inbox")
+  fi
+  for channel_dir in "${channel_candidates[@]}"; do
+    channel_real=$(real_dir "$channel_dir") || refuse "task channel '$channel_dir' is inaccessible"
+    [ "$channel_real" = "$channel_dir" ] || refuse "task channel '$channel_dir' resolves outside its declared path"
+    [ "$channel_real" != "$CONFIG_DIR_REAL" ] || refuse "task channel '$channel_dir' is the Claude config directory"
+    [ "$channel_real" != "${HOME_REAL:-}" ] || refuse "task channel '$channel_dir' is the home directory"
+    CHANNEL_DIRS+=("$channel_real")
+  done
+fi
+
 TRUST_FLAG='hasTrustDialogAccepted'
 IMPORT_FLAGS='["hasClaudeMdExternalIncludesApproved","hasClaudeMdExternalIncludesWarningShown"]'
 if [ "$MODE" = worktree ]; then
@@ -460,11 +501,11 @@ if [ "$MODE" = worktree ]; then
 else
   WRITE_ARGS=("$STORE" "$MODE" "$TARGET_REAL" "" "$TRUST_FLAG" "$IMPORT_FLAGS")
 fi
-if ! node - "${WRITE_ARGS[@]}" <<'NODE'
+if ! node - "${WRITE_ARGS[@]}" ${CHANNEL_DIRS[@]+"${CHANNEL_DIRS[@]}"} <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, mode, target, project, trustFlag, importFlagsJson] = process.argv.slice(2);
+const [store, mode, target, project, trustFlag, importFlagsJson, ...channels] = process.argv.slice(2);
 const importFlags = JSON.parse(importFlagsJson);
 const readStore = () => {
   try {
@@ -540,6 +581,10 @@ const attempt = () => {
     setFlags(projects, target, [trustFlag]);
     keys = [[target, [trustFlag]]];
   }
+  for (const channel of channels) {
+    setFlags(projects, channel, [trustFlag]);
+    keys.push([channel, [trustFlag]]);
+  }
   // Unpredictable name plus an exclusive create: the config directory may be
   // writable by another local account, and a predictable path could be
   // pre-created there as a symlink that a plain write would follow into some
@@ -592,3 +637,6 @@ echo "trusted: $TARGET_REAL"
 if [ "$MODE" = worktree ]; then
   echo "trusted (project root): $PROJ_CANON"
 fi
+for channel_dir in ${CHANNEL_DIRS[@]+"${CHANNEL_DIRS[@]}"}; do
+  echo "trusted (task channel): $channel_dir"
+done
