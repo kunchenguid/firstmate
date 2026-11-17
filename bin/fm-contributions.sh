@@ -128,7 +128,8 @@
 # with the PR's event and edit history and is bounded only by the record cap.
 # poll appends ordinary durable check wakes through fm-wake-lib and emits only
 # newly durable signals for the authenticated check to surface.
-# ack removes only the named pending token.
+# ack removes only the named pending token. It refuses a token that is neither
+# pending nor already seen for that task and URL, and a repeat ack of a seen token is a no-op.
 # A crash after enqueue can duplicate a wake but cannot consume the pending signal.
 #
 # Re-raising unanswered review threads is opt-in. Unless
@@ -828,6 +829,9 @@ case "${1:-}" in
       || fail 'observe the contribution before recording evidence'
     if [ "$action" = ack ]; then
       [ "$#" -eq 1 ] || fail 'ack needs one exact event token'
+      if ! jq -e --arg token "$1" 'any(.pending[]; .token == $token) or (.seen | index($token) != null)' "$TMP/row.json" >/dev/null; then
+        fail "ack token matches no pending signal for task $task and $url; run 'pending' to list the valid tokens"
+      fi
       jq --arg token "$1" '.pending |= map(select(.token != $token))' "$TMP/row.json" > "$TMP/update.json"
     else
       [ "$#" -eq 4 ] || fail 'verdict needs judged-head, source-url, actor and summary'
