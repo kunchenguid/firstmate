@@ -573,10 +573,14 @@ printf 'invalid\n' > "$JOB_DIR/.claim/group"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
 wait "$WORKER_PID" 2>/dev/null || true
-for _ in $(seq 1 100); do
-  [ -f "$STATE_ROOT/worker.lock/quarantine" ] && break
+# The worker answers TERM from its main loop, so an in-flight foreground
+# operation can defer the trap under CI load. Wait for the failed shutdown to
+# finish instead of assuming a fixed five seconds is enough for it.
+for _ in $(seq 1 600); do
+  kill -0 "$WORKER_PID" 2>/dev/null || break
   sleep 0.05
 done
+kill -0 "$WORKER_PID" 2>/dev/null && fail "the worker did not finish its failed shutdown"
 assert_present "$STATE_ROOT/worker.lock/quarantine" "failed shutdown released worker ownership"
 fm_remote_job_probe "$ACCOUNT_HOME" && fail "quarantined worker ownership still reported ready"
 set +e
