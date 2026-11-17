@@ -37,7 +37,8 @@ must be bound to the objects that were verified rather than to path text:
       "root<TAB>removed<TAB>kb" or "root<TAB>partial<TAB>kb".
 
 Every walk is iterative, so a deep tree meets no recursion limit; it holds one
-descriptor per level. Exit status 0 means every requested line was written;
+descriptor per level, with the soft open-file limit raised towards the hard
+one, and a tree deeper than that allows is kept. Exit status 0 means every requested line was written;
 2 is a usage error and 3 a failed write of <record> or the output, which the
 caller treats as keep; any other status means the engine stopped early.
 
@@ -569,11 +570,34 @@ def cmd_remove(args: list[str]) -> int:
     return 0
 
 
+def raise_open_file_limit() -> None:
+    """Each walk holds one descriptor per level, so a deep tree needs the
+    soft open-file limit raised towards the hard one; when that is not
+    allowed, a tree too deep for it fails to open and is kept."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ImportError, OSError, ValueError):
+        return
+    if soft == resource.RLIM_INFINITY:
+        return
+    ceiling = 1 << 20 if hard == resource.RLIM_INFINITY else min(hard, 1 << 20)
+    for want in (ceiling, 10240):
+        if want <= soft:
+            return
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            return
+        except (OSError, ValueError):
+            continue
+
+
 def main(argv: list[str]) -> int:
     commands = {"freeze": cmd_freeze, "snapshot": cmd_snapshot, "thaw": cmd_thaw, "remove": cmd_remove}
     if len(argv) < 2 or argv[1] not in commands:
         sys.stderr.write("usage: fm-footprint-fs.py freeze|snapshot|thaw|remove ...\n")
         return 2
+    raise_open_file_limit()
     try:
         rc = commands[argv[1]](argv[2:])
         sys.stdout.flush()

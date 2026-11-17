@@ -1685,7 +1685,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-project-capacity.test.sh"
       printf '%s\n' "__script__:fm-lane-capacity-integration.test.sh"
       ;;
-    bin/fm-footprint.sh|bin/fm-footprint-lib.sh)
+    bin/fm-footprint.sh|bin/fm-footprint-lib.sh|bin/fm-footprint-fs.py)
       printf '%s\n' "__script__:fm-footprint.test.sh"
       printf '%s\n' "__script__:fm-footprint-safety.test.sh"
       printf '%s\n' "__script__:fm-footprint-scale.test.sh"

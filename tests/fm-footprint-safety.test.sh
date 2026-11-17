@@ -1250,11 +1250,25 @@ PY2
   out=$(fp task-close task-z2 "$t")
   assert_contains "$out" "scratch removed" "a 1100-level tree must be removed"
   assert_absent "$t" "a 1100-level tree must be gone"
+  # A tree deeper than the open-file limit allows is kept, and left writable.
+  t=$(scratch_for task-z3)
+  python3 - "$t" 120 <<'PY2'
+import os, sys
+d = os.open(sys.argv[1], os.O_RDONLY)
+for _ in range(int(sys.argv[2])):
+    os.mkdir("d", dir_fd=d)
+    n = os.open("d", os.O_RDONLY, dir_fd=d)
+    os.close(d)
+    d = n
+PY2
+  out=$(ulimit -n 64 && fp task-close task-z3 "$t")
+  assert_contains "$out" "kept whole" "a tree deeper than the open-file limit must be kept: $out"
+  all_writable "$t" || fail "a tree too deep to freeze must be left writable"
   pass "a freeze stopped part way leaves a writable copy under its name, and a deep tree meets no recursion limit"
 }
 
 test_an_interrupted_close_leaves_its_copy_writable() {
-  local s pids n
+  local s pids n left out
   new_home halt-term
   printf 'scratch-root %s\nremoval-grace-seconds 3\n' "$SHORT/halt-term" > "$H/config/footprint"
   s=$(scratch_for task-t1)
@@ -1276,7 +1290,32 @@ test_an_interrupted_close_leaves_its_copy_writable() {
   assert_present "$s/d/f1" "an interrupted close must put the copy back under its name"
   all_writable "$s" || fail "an interrupted close must give the copy its permissions back"
   [ -z "$(find "${s%/*}" -maxdepth 1 -name '.fm-closing-task-t1.*' | head -n 1)" ] || fail "no frozen set-aside copy may be left behind"
-  pass "a close stopped while its copy is frozen puts the copy back, writable, under its name"
+  # Killed outright (SIGKILL), the close cannot clean up; the next daily
+  # pass gives the copy it left frozen its permissions back and reports it.
+  new_home halt-kill
+  printf 'scratch-root %s\nremoval-grace-seconds 5\n' "$SHORT/halt-kill" > "$H/config/footprint"
+  s=$(scratch_for task-t2)
+  mkdir -p "$s/d"
+  printf 'w\n' > "$s/d/f1"
+  FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE='' fp task-close task-t2 "$s" > "$TMP_ROOT/halt-kill/out" 2>&1 &
+  n=0
+  until [ -n "$(find "${s%/*}" -maxdepth 3 -path '*/.fm-closing-task-t2.*/d/f1' ! -perm -u+w 2>/dev/null | head -n 1)" ] || [ "$n" -ge 200 ]; do
+    sleep .05; n=$((n + 1))
+  done
+  [ "$n" -lt 200 ] || fail "the copy was never frozen"
+  pids=$(pgrep -f "fm-footprint.sh task-close task-t2 $s" || true)
+  [ -n "$pids" ] || fail "the second close must still be running"
+  # shellcheck disable=SC2086 # one pid per word
+  kill -KILL $pids
+  wait
+  left=$(find "${s%/*}" -maxdepth 1 -name '.fm-closing-task-t2.*' | head -n 1)
+  [ -n "$left" ] || fail "a killed close leaves its copy set aside"
+  ! all_writable "$left" || fail "the killed close's copy must still be frozen before the next pass"
+  out=$(fp sweep)
+  all_writable "$left" || fail "the next pass must give a killed close's copy its permissions back: $(find "$left" ! -perm -u+w | head -n 3)"
+  assert_present "$left/d/f1" "the next pass must not remove a set-aside copy"
+  assert_contains "$out" "${left##*/}" "the next pass must report the set-aside copy"
+  pass "a close stopped while its copy is frozen puts the copy back, writable, under its name; one killed outright is made writable by the next pass"
 }
 
 # --- the Docker retry queue under concurrent closes -------------------------

@@ -479,8 +479,9 @@ fp_set_aside() {  # <dir> <tag>
 # A copy is removable only when a positive record says every step verified
 # it; a step that fails or cannot write its result keeps it, and a kept copy
 # gets its permissions and its old name back, as does every copy when a stop
-# signal arrives mid-way (fp_guard_set; the freeze writes each permission to
-# its record before changing it). fp_fs remove then deletes, at
+# signal arrives mid-way (fp_guard_set). The freeze writes each permission
+# to state/footprint-stopped/ before changing it, so a removal killed
+# outright is undone by the next run (fp_repair_stopped). fp_fs remove then deletes, at
 # once, exactly the entries the verified snapshot lists, each checked against
 # its snapshotted identity in a parent opened by descriptor, giving each
 # directory its write bit back only when its own entries go; anything that
@@ -524,21 +525,47 @@ fp_engine_failed() {  # <work-dir> <status>
   fp_why_all "$1" unfinished 2>/dev/null
 }
 
-# fp_guard_set <pairs> <modes> / fp_guard_clear: while set, a stop signal
-# (TERM, INT, HUP, as a timed-out caller sends) gives every set-aside copy
-# in <pairs> ("aside<TAB>dir") its recorded permissions back from <modes>
-# and its old name back, then exits, so an interrupted removal never leaves
-# a frozen copy behind.
+# A removal run's freeze record lives in the home's state, not in a
+# temporary directory: <stopped-dir>/run.<pid>.<random> lists the run's
+# set-aside copies ("aside<TAB>dir") and <that>.modes holds every
+# permission, written before it changes. While a run is under way a stop
+# signal (TERM, INT, HUP, as a timed-out caller sends) thaws every copy from
+# that record and puts it back under its name (fp_guard_fire); a run killed
+# outright leaves the record, and the next close, old-folder apply or daily
+# pass gives any copy it names that still exists its permissions back once
+# that run's process is gone (fp_repair_stopped). A repaired copy that is
+# still set aside stays where it is and is reported, as before.
+FP_STOPPED_DIR="$STATE/footprint-stopped"
 FP_GUARD_PAIRS=
-FP_GUARD_MODES=
-fp_guard_set() {  # <pairs> <modes>
-  FP_GUARD_PAIRS=$1 FP_GUARD_MODES=$2
+FP_GUARD_REC=
+
+# fp_stopped_record <pairs>: creates a run record listing <pairs> and an
+# empty permission record beside it; prints the run record's path.
+fp_stopped_record() {  # <pairs>
+  local rec
+  (umask 077 && mkdir -p "$FP_STOPPED_DIR") 2>/dev/null || return 1
+  [ -d "$FP_STOPPED_DIR" ] && [ ! -L "$FP_STOPPED_DIR" ] || return 1
+  rec=$(mktemp "$FP_STOPPED_DIR/run.$$.XXXXXX" 2>/dev/null) || return 1
+  { cat "$1" > "$rec" && (umask 077 && : > "$rec.modes"); } 2>/dev/null || { fp_stopped_drop "$rec"; return 1; }
+  printf '%s\n' "$rec"
+}
+
+# fp_stopped_drop <run-record>: removes a run record and its permissions.
+fp_stopped_drop() {  # <run-record>
+  case "$1" in
+    "$FP_STOPPED_DIR"/run.?*) rm -f -- "$1" "$1.modes" 2>/dev/null || true ;;
+  esac
+}
+
+fp_guard_set() {  # <pairs> <run-record>
+  FP_GUARD_PAIRS=$1 FP_GUARD_REC=$2
   trap 'fp_guard_fire' TERM INT HUP
 }
 
 fp_guard_clear() {
+  [ -z "$FP_GUARD_REC" ] || fp_stopped_drop "$FP_GUARD_REC"
   FP_GUARD_PAIRS=''
-  FP_GUARD_MODES=''
+  FP_GUARD_REC=''
   trap - TERM INT HUP
 }
 
@@ -549,11 +576,35 @@ fp_guard_fire() {
     while IFS='	' read -r aside area; do
       [ -n "$aside" ] || continue
       [ -e "$aside" ] || [ -L "$aside" ] || continue
-      [ -z "$FP_GUARD_MODES" ] || [ ! -f "$FP_GUARD_MODES" ] || fp_thaw "$FP_GUARD_MODES" "$aside" || true
+      [ -z "$FP_GUARD_REC" ] || fp_thaw "$FP_GUARD_REC.modes" "$aside" || true
       fp_restore "$aside" "$area" || true
     done < "$FP_GUARD_PAIRS"
   fi
+  [ -z "$FP_GUARD_REC" ] || fp_stopped_drop "$FP_GUARD_REC"
   exit 143
+}
+
+# fp_repair_stopped: for every run record whose process is gone, gives each
+# set-aside copy it names that still exists its recorded permissions back,
+# by identity, then drops the record. Never removes or renames anything.
+fp_repair_stopped() {
+  local rec pid aside area
+  [ -d "$FP_STOPPED_DIR" ] && [ ! -L "$FP_STOPPED_DIR" ] || return 0
+  for rec in "$FP_STOPPED_DIR"/run.*; do
+    case "$rec" in *.modes) continue ;; esac
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    pid=${rec##*/run.}
+    pid=${pid%%.*}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    ! kill -0 "$pid" 2>/dev/null || continue
+    if [ -f "$rec.modes" ] && [ ! -L "$rec.modes" ]; then
+      while IFS='	' read -r aside area; do
+        [ -n "$aside" ] && [ -d "$aside" ] && [ ! -L "$aside" ] || continue
+        fp_thaw "$rec.modes" "$aside" || true
+      done < "$rec"
+    fi
+    fp_stopped_drop "$rec"
+  done
 }
 
 # fp_settle <pairs> <ok-out> <kept-out>: runs the removal boundary over the
@@ -570,7 +621,7 @@ fp_guard_fire() {
 # it has removed the verified copies. Returns 1 when its own records could not be
 # written, after putting every copy back.
 fp_settle() {  # <pairs> <ok-out> <kept-out>
-  local pairs=$1 ok=$2 kept=$3 w aside area why grace listed=1 bad=0
+  local pairs=$1 ok=$2 kept=$3 w aside area why grace listed=1 bad=0 rec modes
   local -a roots_all=()
   FP_UNLISTED_NAMES=
   while IFS='	' read -r aside area; do [ -n "$aside" ] && roots_all+=("$aside"); done < "$pairs"
@@ -589,12 +640,17 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     printf '%s\n' "${roots_all[@]}" > "$w/roots" && : > "$w/why" && : > "$w/modes" &&
       : > "$w/frozen" && : > "$w/s1" && : > "$w/s2" && : > "$w/busy" && : > "$w/blocked"
   } 2>/dev/null || bad=1
-  fp_guard_set "$pairs" "$w/modes"
-  if ! command -v python3 >/dev/null 2>&1; then
+  rec=$(fp_stopped_record "$pairs") || { rec=''; bad=1; }
+  modes=${rec:+$rec.modes}
+  [ -n "$modes" ] || modes="$w/modes"
+  fp_guard_set "$pairs" "$rec"
+  if [ "$bad" = 1 ]; then
+    fp_why_all "$w" unrecorded 2>/dev/null || true
+  elif ! command -v python3 >/dev/null 2>&1; then
     fp_why_all "$w" notool 2>/dev/null || bad=1
   else
     # 1. Freeze, by descriptor and never through a link (fp_fs freeze).
-    fp_fs freeze "$w/modes" "${roots_all[@]}" > "$w/frozen" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
+    fp_fs freeze "$modes" "${roots_all[@]}" > "$w/frozen" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
     # 2. Flush, so a write through an earlier mapping or descriptor changes
     #    an entry's times. 3. Snapshot.
     fm_run_timed 120 sync </dev/null >/dev/null 2>&1 || fp_why_all "$w" unreadable 2>/dev/null || bad=1
@@ -642,7 +698,7 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
   if [ "$bad" = 0 ]; then
     awk -F '\t' '$2 == "verified" { print $1 }' "$w/verdict" > "$w/verified" 2>/dev/null &&
       awk -F '\t' 'FILENAME == ARGV[1] { v[$0] = 1; next } ($1 in v)' "$w/verified" "$w/s2" > "$ok.snap" 2>/dev/null &&
-      cp "$w/modes" "$ok.modes" 2>/dev/null || bad=1
+      cp "$modes" "$ok.modes" 2>/dev/null || bad=1
   fi
   while IFS='	' read -r aside area; do
     [ -n "$aside" ] || continue
@@ -651,13 +707,12 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     if [ "$why" = verified ] && printf '%s\t%s\n' "$aside" "$area" >> "$ok" 2>/dev/null; then
       continue
     fi
-    fp_thaw "$w/modes" "$aside" || true
+    fp_thaw "$modes" "$aside" || true
     fp_restore "$aside" "$area" || true
     printf '%s\t%s\t%s\n' "${why:-unrecorded}" "$aside" "$area" >> "$kept" 2>/dev/null || bad=1
   done < "$pairs"
-  # Until the caller has removed the verified copies, an interruption still
-  # thaws and restores them from the copied record.
-  fp_guard_set "$pairs" "$ok.modes"
+  # Until the caller has removed the verified copies and cleared the guard,
+  # an interruption still thaws and restores them from the run record.
   rm -f "$w/roots" "$w/why" "$w/modes" "$w/frozen" "$w/s1" "$w/s2" "$w/busy" "$w/blocked" "$w/verdict" "$w/verified"
   rmdir "$w" 2>/dev/null || true
   return "$bad"
@@ -1131,6 +1186,7 @@ cmd_task_close() {  # <id> <scratch> [project]
     printf 'footprint: %s; removed nothing for %s\n' "$FP_CONFIG_ERROR" "$id"
     return 0
   fi
+  fp_repair_stopped
   if [ "$FP_TASK_CLEANUP" = off ]; then
     printf 'footprint: task-cleanup is off; kept the scratch area and Docker material of %s\n' "$id"
     return 0
@@ -1680,6 +1736,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
   done
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-old.XXXXXX") || die "cannot create a temporary file"
   if [ -n "$apply" ]; then
+    fp_repair_stopped
     [ -f "$PREVIEW_FILE" ] && [ ! -L "$PREVIEW_FILE" ] || { rm -f "$tmp"; die "no preview to apply; run old-tasks first"; }
     want=$(awk -F '\t' '$1 == "id" {print $2; exit}' "$PREVIEW_FILE")
     days=$(awk -F '\t' '$1 == "days" {print $2; exit}' "$PREVIEW_FILE")
@@ -1735,8 +1792,10 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
         linked) left="an entry holds a file hard-linked from elsewhere, such as a package store" ;;
         notool) left="python3, which removal needs, is not installed" ;;
         unrecorded|'') left="the check could not be recorded (is the temporary directory full?)" ;;
+        unfinished) left="the check did not finish (the removal engine stopped or failed)" ;;
         *) left="an entry changed while it was being set aside or waiting to be removed" ;;
       esac
+      fp_guard_clear
       rm -f "$tmp" "$tmp.print" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.ok.modes" "$tmp.kept"
       die "$left; nothing removed - run old-tasks again"
     fi
@@ -1748,6 +1807,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
         fp_thaw "$tmp.ok.modes" "$aside" || true
         fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
       done < "$tmp.ok"
+      fp_guard_clear
       rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.ok.modes" "$tmp.kept"
       die "an entry changed while it was being set aside or waiting to be removed; nothing removed - run old-tasks again"
     fi
@@ -1805,6 +1865,7 @@ cmd_sweep() {  # [--dry-run]
   age_cut=$((now - FP_ORPHAN_GRACE_HOURS * 3600))
   base="$FP_ROOT/$FP_KEY"
   work=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-sweep.XXXXXX") || die "cannot create a temporary directory"
+  [ "$dry" = 1 ] || fp_repair_stopped
   if [ -d "$base" ] || [ -L "$base" ]; then
     if ! fp_key_dir_ok; then
       findings="scratch directory $base does not carry this home's identity, so nothing in it was removed"
@@ -1920,6 +1981,7 @@ cmd_sweep() {  # [--dry-run]
       (umask 077 && cat "$work/ledger" >> "$LEDGER") || true
     fi
   fi
+  fp_guard_clear
   rm -rf "$work"
   [ "$dry" = 1 ] || printf 'Removed %s orphaned scratch area(s), %s.\n' "$removed" "$(fp_human "$removed_kb")"
   if [ "$kept" -gt 0 ]; then
