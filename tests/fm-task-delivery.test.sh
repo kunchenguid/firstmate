@@ -61,6 +61,18 @@ fill_brief_subsections() {  # <file> <intent> <spec>
   printf '%s\n' "$content" > "$file"
 }
 
+install_scout_hooks() {
+  local home=$1 id=$2 wt meta
+  wt="$home/worktree-$id"
+  meta="$home/state/$id.meta"
+  git init -q "$wt" || fail "could not initialize scout worktree"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$home/state/$id.git-hooks" "$wt" \
+    || fail "could not install scout pane hooks"
+  sed '/^worktree=/d' "$meta" > "$meta.tmp"
+  printf 'worktree=%s\n' "$wt" >> "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -295,6 +307,7 @@ EOF
         write_brief "$home" "$id"
         printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$home/state/$id.meta"
 
+        [ "$mode" != no-mistakes ] || install_scout_hooks "$home" "$id"
         out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1)
         status=$?
         expect_code 0 "$status" "flag $flag, remote $remote, $mode: the promotion should succeed"$'\n'"$out"
@@ -378,6 +391,7 @@ STUB
       || fail "$mode: scout brief generation should succeed"
     fill_brief_subsections "$home/data/$id/brief.md" \
       "Ship the delivery-contract change." "Preserve the selected delivery mode."
+    [ "$mode" != no-mistakes ] || install_scout_hooks "$home" "$id"
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
@@ -766,6 +780,7 @@ STUB
     || fail "scout brief generation should succeed"
   fill_brief_subsections "$home/data/$id/brief.md" "Fix what the investigation found." "Carry over only the fix."
 
+  install_scout_hooks "$home" "$id"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
     || fail "promotion should take the registered pr binding with no flag to remember: $out"
   payload="$TMP_ROOT/pr-manual-promote/payload"
@@ -1068,6 +1083,7 @@ EOF
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Investigate why the identity check is failing." \
     "Ship the identity-check fix without adding a classifier."
+  install_scout_hooks "$home" "$id"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a filled scout brief should succeed"

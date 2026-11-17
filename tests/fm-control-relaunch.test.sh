@@ -1862,6 +1862,10 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     printf '%s\n' "fm-$id" > "$dir/fake/windows"
     printf '%s' "$dir/wt" > "$dir/fake/cwd"
 
+    if [ "$mode" = no-mistakes ]; then
+      "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$home/state/$id.git-hooks" "$dir/wt" \
+        || fail "$mode: could not install scout pane hooks"
+    fi
     out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: scout promotion should succeed: $out"

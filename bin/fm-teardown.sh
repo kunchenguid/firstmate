@@ -4230,9 +4230,9 @@ rm -rf "$STATE/$ID.kiro-home"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
-# state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
-# read-only by its installer, and state/<id>.push-guard is a forge=external
-# task's read-only push guard record (bin/fm-git-push-guard.sh).
+# state/<id>.git-hooks holds the per-task hook wrappers, left read-only by
+# their installer, and state/<id>.push-guard is the task's read-only push
+# guard record (bin/fm-git-push-guard.sh).
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 # A task's polytoken config dir and sessions roots are directory trees (the
 # mirrored worker config and the versioned session tree the launch wrote

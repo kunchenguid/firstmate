@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Promote a scout task to a ship task in place: the crewmate keeps its window,
-# worktree, and loaded context; only the contract changes. Flips kind= to ship in
+# worktree, and loaded context. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. Promotion also writes the crewmate's ship instructions to
 # data/<task-id>/ship-instructions.md, appends that same superseding contract to
@@ -44,6 +44,12 @@
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only. A forge=external project is refused
 # outright, because its push guard is installed only by a ship spawn.
+# For mode=no-mistakes with forge=none or forgejo, promotion installs the gate
+# push guard into the scout's existing per-task hooks directory. Without an
+# executable pre-push wrapper there, promotion refuses before changing the
+# task contract; spawn a fresh ship so its Git environment selects the guard.
+# bin/fm-git-push-guard.sh owns the gate rule. Gerrit retains its worker-side
+# publication path without that rule.
 # The project's pr=manual binding is read the same way and applies to a promoted
 # no-mistakes mode only (bin/fm-project-mode.sh --pr; bin/fm-dod-lib.sh's
 # fm_pr_text_valid owns where it is accepted); the ship's Definition of done then
@@ -303,6 +309,21 @@ fi
 if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
   echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
   exit 1
+fi
+
+if [ "$MODE" = no-mistakes ] && { [ "$FORGE" = none ] || [ "$FORGE" = forgejo ]; }; then
+  GIT_HOOKS_DIR="$STATE/$ID.git-hooks"
+  if [ ! -x "$GIT_HOOKS_DIR/pre-push" ]; then
+    echo "error: promotion to no-mistakes is refused: this scout was launched without the per-task Git hooksPath; spawn a fresh ship task so its gate push guard reaches the worker" >&2
+    exit 1
+  fi
+  PROMOTE_WORKTREE=$(sed -n 's/^worktree=//p' "$META" | head -n 1)
+  PUSH_GUARD_FILE="$STATE/$ID.push-guard"
+  if ! "$FM_ROOT/bin/fm-git-push-guard.sh" write-gate "$PUSH_GUARD_FILE" \
+    || ! "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$PROMOTE_WORKTREE"; then
+    echo "error: could not install the no-mistakes gate push guard hooks for $ID; promotion refused" >&2
+    exit 1
+  fi
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship
