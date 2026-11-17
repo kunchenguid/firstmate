@@ -144,6 +144,9 @@ case "$*" in
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
+  'search issues '*)
+    since="$*"; since=${since#*--updated >=}
+    awk -F'\t' -v since="${since%% *}" '$2 >= since' "$FORGE/updated.txt" 2>/dev/null || true ;;
   *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
@@ -594,7 +597,7 @@ test_legacy_cleanup_preserves_supported_failure() {
   [ -z "$out" ] || fail "an existing GitHub failure episode re-alerted: $out"
   grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'supported ownership was not retried'
   # The transient 502 core read is retried once; unsupported records add no reads.
-  [ "$(wc -l < "$home/forge/calls")" -eq 2 ] || fail 'unsupported mixed records triggered forge reads'
+  [ "$(grep -vc '^search issues ' "$home/forge/calls")" -eq 2 ] || fail 'unsupported mixed records triggered forge reads'
   [ ! -s "$home/state/.wake-queue" ] || fail 'mixed legacy cleanup enqueued a wake'
   jq -e --slurpfile expected "$home/unsupported.expected.json" '.records | length == 4
     and all(.[]; .observation == null)
@@ -844,6 +847,9 @@ clock_bump() {
 case "$fault:$*" in
   # Advance once before the parallel read wave; its readers share this clock.
   reserve:'api repos/o/r/issues/9') clock_bump 6 ;;
+  reserve-pull:'api repos/o/r/pulls/8') clock_bump 6 ;;
+  reserve-each:'api repos/o/r/pulls/8'|reserve-each:'api repos/o/r/pulls/9'|reserve-each:'api repos/o/r/pulls/10') clock_bump 6 ;;
+  search-down:'search issues '*) printf 'gh: Forbidden (HTTP 403)\n' >&2; exit 1 ;;
   slow-wave:'api repos/o/r/pulls/8') sleep 3 ;;
   slow-wave:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   exhaust:'api repos/o/r/issues/8/comments?'*) clock_bump 100 ;;
@@ -1448,6 +1454,79 @@ test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain() {
   pass 'a later URL waits when fewer than fifteen seconds remain for its observation'
 }
 
+test_updated_url_is_read_before_the_rotation() { # search|search-down
+  local mode=$1 home out first
+  home=$(new_home "updated-first-$mode")
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  /bin/date +%s > "$home/forge/clock"
+  printf 'https://github.com/o/r/pull/8\t2026-09-16T07:59:00Z\nhttps://github.com/o/r/pull/404\t2026-09-16T07:59:00Z\n' > "$home/forge/updated.txt"
+  if [ "$mode" = search ]; then printf 'reserve-pull\n' > "$home/forge/fault"; else printf 'search-down\n' > "$home/forge/fault"; fi
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail "poll failed with the updated-URL search in mode $mode"
+  [ -z "$out" ] || fail "the updated-URL search ($mode) printed a wake: $out"
+  [ "$(grep -c '^search issues ' "$home/forge/calls")" = 1 ] || fail 'a sweep did not make exactly one forge search'
+  first=$(grep -E '^api repos/o/r/(pulls/8|issues/9)$' "$home/forge/calls" | head -n 1)
+  if [ "$mode" = search ]; then
+    [ "$first" = 'api repos/o/r/pulls/8' ] || fail "the updated PR was not read before the rotation's first URL: $first"
+    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' "$home/data/delivery/contributions.json" >/dev/null \
+      || fail 'the updated PR was not observed in the sweep that found it'
+    [ ! -e "$home/data/filed/contributions.json" ] || fail 'the rotation URL was read ahead of the updated PR'
+    [ "$(cat "$home/state/.contributions-sweep")" = "$NOW" ] || fail 'the sweep time did not advance after every updated live URL was read'
+  else
+    [ "$first" = 'api repos/o/r/issues/9' ] || fail "a failed search did not leave the rotation order: $first"
+    [ ! -e "$home/state/.contributions-sweep" ] || fail 'a failed search stored a sweep time'
+  fi
+  pass "a URL updated since the last sweep is read ahead of the rotation (search ${mode#search-})"
+}
+
+test_updated_url_reads_first() { test_updated_url_is_read_before_the_rotation search; }
+test_updated_url_reads_first_when_search_fails() { test_updated_url_is_read_before_the_rotation search-down; }
+
+test_sweep_time_advances_once_updated_urls_are_read() {
+  local home
+  home=$(new_home sweep-time)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'https://github.com/o/r/pull/8\t2026-09-16T07:59:00Z\n' > "$home/forge/updated.txt"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'sweep poll failed'
+  [ "$(cat "$home/state/.contributions-sweep")" = "$NOW" ] || fail 'a fully read sweep did not store its start time'
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:05:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'second sweep failed'
+  grep -F -- '--updated >=2026-09-16T07:58:00Z' "$home/forge/calls" >/dev/null \
+    || fail "the second search did not start at the stored sweep time less the skew margin: $(grep '^search' "$home/forge/calls" | tail -n 1)"
+  pass 'the sweep time advances once every updated URL is read and bounds the next search'
+}
+
+test_updated_urls_beyond_one_poll_drain_oldest_first() {
+  local home poll task
+  home=$(new_home sweep-drain)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  record "$home" third 10 open mergeable
+  for task in delivery second third; do mutate_record "$home" "$task" '.records[0].checked_at="2026-09-15T08:00:00Z"'; done
+  printf 'https://github.com/o/r/pull/10\t2026-09-16T07:52:00Z\nhttps://github.com/o/r/pull/9\t2026-09-16T07:51:00Z\nhttps://github.com/o/r/pull/8\t2026-09-16T07:50:00Z\n' > "$home/forge/updated.txt"
+  printf 'reserve-each\n' > "$home/forge/fault"
+  for poll in 1 2 3; do
+    /bin/date +%s > "$home/forge/clock"
+    with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail "drain poll $poll failed"
+    case "$poll" in
+      1) [ "$(grep -cE '^api repos/o/r/pulls/(8|9|10)$' "$home/forge/calls")" = 1 ] || fail 'the first poll did not read exactly one URL'
+         [ "$(cat "$home/state/.contributions-sweep")" = 2026-09-16T07:53:00Z ] || fail 'the sweep time did not stop at the oldest unread update' ;;
+      2) jq -e --arg now "$NOW" '.records[0].checked_at == $now' "$home/data/second/contributions.json" >/dev/null \
+           || fail 'the second poll re-read the first URL instead of the next oldest update'
+         [ "$(cat "$home/state/.contributions-sweep")" = 2026-09-16T07:54:00Z ] || fail 'the sweep time did not stop at the oldest unread update' ;;
+      3) jq -e --arg now "$NOW" '.records[0].checked_at == $now' "$home/data/third/contributions.json" >/dev/null \
+           || fail 'the third poll did not read the last updated URL'
+         [ "$(cat "$home/state/.contributions-sweep")" = "$NOW" ] || fail 'the sweep time did not advance once every updated URL was read' ;;
+    esac
+  done
+  pass 'updated URLs beyond one poll are read across polls, oldest update first'
+}
+
 test_three_second_pr_reads_complete_fresh_in_one_cycle() { # 3-second reads: 8 sequential > 20s budget, parallel waves fit
   local home out
   home=$(new_home three-second-pr)
@@ -1561,6 +1640,54 @@ test_unmeasured_url_does_not_starve_the_tail() {
   done
   [ ! -s "$home/state/.wake-queue" ] || fail 'slow successful reads enqueued a wake'
   pass 'rotation preserves timed-out records and refreshes every slow PR on successive cycles'
+}
+
+test_updated_unmeasured_url_does_not_starve_the_tail() {
+  local home out cycle at task
+  home=$(new_home updated-unmeasured-tail)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  record "$home" third 10 open mergeable
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'https://github.com/o/r/pull/8\t2026-09-16T07:59:00Z\n' > "$home/forge/updated.txt"
+  printf 'slow-wave\n' > "$home/forge/fault"
+  for cycle in 0 1 2; do
+    at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + ($cycle + 1) * 300) | todateiso8601')
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'poll failed after an unmeasured updated URL'
+    [ -z "$out" ] || fail "a poll after an unmeasured updated URL printed a wake: $out"
+  done
+  for task in second third; do
+    jq -e --arg prior "$NOW" '.records[0] | .checked_at != $prior and .error == null' \
+      "$home/data/$task/contributions.json" >/dev/null \
+      || fail "an unreadable updated URL starved $task"
+  done
+  pass 'an updated URL that cannot be measured rejoins the rotation'
+}
+
+test_slow_updated_url_does_not_hide_a_newer_update() {
+  local home cycle at
+  home=$(new_home updated-slow-head)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  mutate_record "$home" second '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'https://github.com/o/r/pull/8\t2026-09-16T07:50:00Z\nhttps://github.com/o/r/pull/9\t2026-09-16T07:51:00Z\n' > "$home/forge/updated.txt"
+  printf 'slow-wave\n' > "$home/forge/fault"
+  for cycle in 0 1; do
+    at=$(jq -nr --arg now "$NOW" --argjson cycle "$cycle" '(($now | fromdateiso8601) + ($cycle + 1) * 300) | todateiso8601')
+    with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+      || fail 'poll failed with a slow updated URL'
+    if [ "$cycle" -eq 0 ]; then
+      jq -e '.records[0].checked_at == "2026-09-15T08:00:00Z"' "$home/data/second/contributions.json" >/dev/null \
+        || fail 'the newer update was read in the poll that the slow update consumed'
+    fi
+  done
+  jq -e '.records[0] | .checked_at != "2026-09-15T08:00:00Z" and .error == null' "$home/data/second/contributions.json" >/dev/null \
+    || fail 'a slow older update kept a newer update from being read'
+  pass 'a slow updated URL does not hold back a newer update'
 }
 
 test_budget_is_cut_down_to_the_watcher_check_bound() {
@@ -2322,7 +2449,7 @@ test_settled_task_gets_no_closed_event_for_its_other_pr() {
 }
 
 failures=0
-for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_updated_url_reads_first test_updated_url_reads_first_when_search_fails test_sweep_time_advances_once_updated_urls_are_read test_updated_urls_beyond_one_poll_drain_oldest_first test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_updated_unmeasured_url_does_not_starve_the_tail test_slow_updated_url_does_not_hide_a_newer_update test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
